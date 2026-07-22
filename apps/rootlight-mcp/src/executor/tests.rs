@@ -5200,3 +5200,1005 @@ fn operating_request(params: Value) -> OperatingRequest {
         params: Some(params),
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum AcceptedFieldOracle {
+    RuntimeDelta,
+    DefaultEquivalent,
+    ExistingFocused,
+}
+
+#[derive(Debug)]
+struct AcceptedFieldEvidence {
+    tool: VerticalTool,
+    fields: &'static [&'static str],
+    oracle: AcceptedFieldOracle,
+    oracle_test: &'static str,
+}
+
+fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
+    let mut evidence = Vec::new();
+    macro_rules! group {
+        ($tool:ident, $oracle:ident, $test:ident, [$($field:literal),+ $(,)?]) => {{
+            let _ = $test;
+            evidence.push(AcceptedFieldEvidence {
+                tool: VerticalTool::$tool,
+                fields: &[$($field),+],
+                oracle: AcceptedFieldOracle::$oracle,
+                oracle_test: stringify!($test),
+            });
+        }};
+    }
+
+    group!(
+        RepoIndex,
+        ExistingFocused,
+        maps_repository_index_without_replacing_stable_identities,
+        ["detached", "mode", "root"]
+    );
+    group!(
+        RepoStatus,
+        ExistingFocused,
+        repo_status_maps_active_generation_and_coverage,
+        ["repository"]
+    );
+    group!(
+        RepoStatus,
+        ExistingFocused,
+        repo_status_explain_attaches_a_plan_to_the_metadata_read,
+        ["explain"]
+    );
+    group!(
+        RepoStatus,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        ["generation", "include_operations", "response_profile"]
+    );
+    group!(
+        RepoList,
+        ExistingFocused,
+        repo_list_paginates_with_authenticated_cursor,
+        ["cursor", "max_results"]
+    );
+    group!(
+        RepoList,
+        ExistingFocused,
+        repo_list_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        RepoList,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        ["response_profile"]
+    );
+    group!(
+        OperationStatus,
+        ExistingFocused,
+        maps_operation_status_action_time_progress_and_resources,
+        ["action", "after_revision", "operation_id", "wait_ms"]
+    );
+    group!(
+        CodeLocate,
+        RuntimeDelta,
+        accepted_effect_code_locate_controls_change_the_normalized_request,
+        ["budget", "max_results", "search_modes"]
+    );
+    group!(
+        CodeLocate,
+        ExistingFocused,
+        maps_code_locate_with_trust_generation_and_deterministic_output,
+        ["generation", "query", "repository"]
+    );
+    group!(
+        CodeLocate,
+        ExistingFocused,
+        code_locate_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        CodeLocate,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        ["response_profile"]
+    );
+    group!(
+        SymbolExplain,
+        ExistingFocused,
+        maps_symbol_explain_with_compact_provenance_and_unresolved_ids,
+        [
+            "generation",
+            "include_provenance",
+            "repository",
+            "symbol_ids"
+        ]
+    );
+    group!(
+        SymbolExplain,
+        ExistingFocused,
+        symbol_explain_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        SymbolExplain,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        ["response_profile"]
+    );
+    group!(
+        SymbolRelationships,
+        ExistingFocused,
+        symbol_relationships_maps_groups_and_totals,
+        [
+            "direction",
+            "generation",
+            "max_results",
+            "min_confidence",
+            "relations",
+            "repository",
+            "symbol_ids"
+        ]
+    );
+    group!(
+        SymbolRelationships,
+        ExistingFocused,
+        symbol_relationships_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        SymbolRelationships,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        ["include_candidates", "response_profile"]
+    );
+    group!(
+        FlowTrace,
+        ExistingFocused,
+        flow_trace_maps_paths_frontier_and_projection,
+        [
+            "direction",
+            "from",
+            "generation",
+            "max_depth",
+            "max_paths",
+            "min_confidence",
+            "relations",
+            "repository",
+            "to"
+        ]
+    );
+    group!(
+        FlowTrace,
+        ExistingFocused,
+        flow_trace_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        FlowTrace,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        ["cross_repository", "response_profile"]
+    );
+    group!(
+        ChangeImpact,
+        ExistingFocused,
+        change_impact_maps_resolved_changes_impact_groups_and_risk,
+        [
+            "change",
+            "generation",
+            "include_tests",
+            "max_depth",
+            "min_confidence",
+            "relation_policy",
+            "repository"
+        ]
+    );
+    group!(
+        ChangeImpact,
+        ExistingFocused,
+        change_impact_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        ChangeImpact,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        ["include_history", "profile"]
+    );
+    group!(
+        TestsSelect,
+        ExistingFocused,
+        tests_select_maps_ranked_tests_strategy_and_gaps,
+        [
+            "generation",
+            "include_commands",
+            "max_tests",
+            "repository",
+            "seeds",
+            "test_kinds"
+        ]
+    );
+    group!(
+        TestsSelect,
+        ExistingFocused,
+        tests_select_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        TestsSelect,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        ["profile"]
+    );
+    group!(
+        ArchitectureOverview,
+        ExistingFocused,
+        architecture_overview_maps_components_connections_and_hotspots,
+        [
+            "generation",
+            "include_edges",
+            "max_components",
+            "min_confidence",
+            "repository",
+            "views"
+        ]
+    );
+    group!(
+        ArchitectureOverview,
+        ExistingFocused,
+        architecture_overview_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        ArchitectureOverview,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        ["response_profile"]
+    );
+    group!(
+        ArchitectureCycles,
+        ExistingFocused,
+        architecture_cycles_maps_components_cycles_and_breaks,
+        [
+            "generation",
+            "include_self_cycles",
+            "max_cycles",
+            "min_size",
+            "projection",
+            "repository"
+        ]
+    );
+    group!(
+        ArchitectureCycles,
+        ExistingFocused,
+        architecture_cycles_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        ArchitectureCycles,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        ["response_profile"]
+    );
+    group!(
+        CodeDead,
+        ExistingFocused,
+        code_dead_maps_candidates_entry_points_and_blind_spots,
+        [
+            "entry_point_policy",
+            "generation",
+            "include_exported",
+            "include_tests",
+            "max_candidates",
+            "min_confidence",
+            "repository"
+        ]
+    );
+    group!(
+        CodeDead,
+        ExistingFocused,
+        code_dead_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        CodeDead,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        ["response_profile"]
+    );
+    group!(
+        HistoryCompare,
+        ExistingFocused,
+        history_compare_maps_changes_breaking_candidates_and_lineage,
+        ["base", "change_kinds", "head", "max_results", "repository"]
+    );
+    group!(
+        HistoryCompare,
+        ExistingFocused,
+        history_compare_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        HistoryCompare,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        ["include_unchanged_context", "profile"]
+    );
+    group!(
+        PlanChange,
+        ExistingFocused,
+        plan_change_maps_steps_impact_summary_decisions_and_context_pack,
+        [
+            "generation",
+            "max_steps",
+            "objective",
+            "objective_text",
+            "repository",
+            "targets"
+        ]
+    );
+    group!(
+        PlanChange,
+        ExistingFocused,
+        plan_change_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        PlanChange,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        ["profile"]
+    );
+    group!(
+        ContextPack,
+        RuntimeDelta,
+        accepted_effect_context_pack_token_budget_changes_selection,
+        ["token_budget"]
+    );
+    group!(
+        ContextPack,
+        ExistingFocused,
+        context_pack_assembles_definition_evidence_under_budget,
+        ["generation", "repository", "seeds", "task"]
+    );
+    group!(
+        ContextPack,
+        ExistingFocused,
+        context_pack_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        SourceRead,
+        ExistingFocused,
+        maps_expanded_source_range_as_the_returned_verified_reference,
+        ["generation", "references", "repository"]
+    );
+    group!(
+        SourceRead,
+        ExistingFocused,
+        source_read_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        SourceRead,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        [
+            "encoding",
+            "include_line_numbers",
+            "merge_overlaps",
+            "response_profile"
+        ]
+    );
+    group!(
+        QueryAdvanced,
+        RuntimeDelta,
+        accepted_effect_query_advanced_controls_change_the_normalized_request,
+        ["cost_limit", "explain", "max_depth", "max_results"]
+    );
+    group!(
+        QueryAdvanced,
+        ExistingFocused,
+        query_advanced_maps_columns_rows_and_completeness,
+        ["generation", "query", "repository"]
+    );
+    group!(
+        QueryBatch,
+        RuntimeDelta,
+        accepted_effect_query_batch_failure_policy_changes_scheduling,
+        ["failure_policy"]
+    );
+    group!(
+        QueryBatch,
+        ExistingFocused,
+        query_batch_composes_locate_subtools_under_one_pinned_generation,
+        ["operations", "repository"]
+    );
+    group!(
+        QueryBatch,
+        ExistingFocused,
+        query_batch_explain_returns_a_plan_without_retrieval,
+        ["explain"]
+    );
+    group!(
+        QueryBatch,
+        DefaultEquivalent,
+        accepted_effect_defaults_match_omitted_values,
+        ["generation", "response_profile"]
+    );
+    evidence
+}
+
+#[test]
+fn accepted_schema_paths_have_effect_evidence() {
+    use rootlight_mcp_contract::capability::{CapabilityStatus, capability_for};
+
+    let is_accepted = |status| {
+        matches!(
+            status,
+            CapabilityStatus::Implemented | CapabilityStatus::FallbackLimited
+        )
+    };
+    let mut registered = Vec::new();
+    for group in accepted_field_evidence() {
+        assert!(!group.oracle_test.is_empty());
+        registered.extend(
+            group
+                .fields
+                .iter()
+                .map(|field| (group.tool.name(), *field, group.oracle)),
+        );
+    }
+    registered.sort_unstable();
+    let duplicate = registered.windows(2).find(|pair| {
+        let [(left_tool, left_field, _), (right_tool, right_field, _)] = pair else {
+            return false;
+        };
+        left_tool == right_tool && left_field == right_field
+    });
+    assert!(
+        duplicate.is_none(),
+        "duplicate field evidence: {duplicate:?}"
+    );
+
+    let mut accepted = Vec::new();
+    for (tool, catalog_tool) in VerticalTool::ALL.into_iter().zip(McpTool::ALL) {
+        let schema: Value =
+            serde_json::from_str(tool.input_schema_json()).expect("built-in schema is valid");
+        let capability = capability_for(catalog_tool);
+        accepted.extend(
+            generated_schema_paths(&schema)
+                .into_iter()
+                .filter_map(|path| {
+                    let path_accepted = is_accepted(capability.disposition(&path, None).status)
+                        || capability.rules.iter().any(|rule| {
+                            rule.path == path && rule.value.is_some() && is_accepted(rule.status)
+                        });
+                    path_accepted.then_some((tool.name(), path))
+                }),
+        );
+    }
+    accepted.sort_unstable();
+    let categorized: Vec<_> = accepted
+        .iter()
+        .map(|(tool, path)| {
+            let matches: Vec<_> = registered
+                .iter()
+                .filter(|(registered_tool, ancestor, _)| {
+                    registered_tool == tool && capability_path_is_within(path, ancestor)
+                })
+                .collect();
+            assert_eq!(
+                matches.len(),
+                1,
+                "{tool}:{path} must have exactly one explicit oracle ancestor, found {matches:?}"
+            );
+            (*tool, path.as_str(), matches[0].2)
+        })
+        .collect();
+
+    let counts = [
+        AcceptedFieldOracle::RuntimeDelta,
+        AcceptedFieldOracle::DefaultEquivalent,
+        AcceptedFieldOracle::ExistingFocused,
+    ]
+    .map(|oracle| {
+        categorized
+            .iter()
+            .filter(|(_, _, registered_oracle)| *registered_oracle == oracle)
+            .count()
+    });
+    println!(
+        "accepted_paths={} runtime_delta={} default_equivalent={} existing_focused={}",
+        categorized.len(),
+        counts[0],
+        counts[1],
+        counts[2]
+    );
+    assert_eq!(counts, [11, 25, 226]);
+    assert_eq!(categorized.len(), 262);
+}
+
+fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
+    path == ancestor
+        || path
+            .strip_prefix(ancestor)
+            .is_some_and(|suffix| suffix.starts_with('.') || suffix.starts_with("[]"))
+}
+
+fn generated_schema_paths(schema: &Value) -> Vec<String> {
+    fn visit(
+        node: &Value,
+        path: &str,
+        definitions: &Map<String, Value>,
+        active_references: &mut std::collections::BTreeSet<String>,
+        paths: &mut std::collections::BTreeSet<String>,
+    ) {
+        if !path.is_empty() {
+            paths.insert(path.to_owned());
+        }
+        if let Some(reference) = node.get("$ref").and_then(Value::as_str) {
+            if active_references.insert(reference.to_owned()) {
+                let name = reference
+                    .strip_prefix("#/$defs/")
+                    .expect("built-in schemas use local definitions")
+                    .replace("~1", "/")
+                    .replace("~0", "~");
+                let resolved = definitions
+                    .get(&name)
+                    .unwrap_or_else(|| panic!("schema definition {name} exists"));
+                visit(resolved, path, definitions, active_references, paths);
+                active_references.remove(reference);
+            }
+            return;
+        }
+        for keyword in ["allOf", "anyOf", "oneOf"] {
+            if let Some(branches) = node.get(keyword).and_then(Value::as_array) {
+                for branch in branches {
+                    visit(branch, path, definitions, active_references, paths);
+                }
+            }
+        }
+        if let Some(properties) = node.get("properties").and_then(Value::as_object) {
+            for (name, property) in properties {
+                let child_path = if path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{path}.{name}")
+                };
+                visit(property, &child_path, definitions, active_references, paths);
+            }
+        }
+        if let Some(items) = node.get("items") {
+            visit(
+                items,
+                &format!("{path}[]"),
+                definitions,
+                active_references,
+                paths,
+            );
+        }
+    }
+
+    let definitions = schema["$defs"]
+        .as_object()
+        .expect("tool input schema has definitions");
+    let mut paths = std::collections::BTreeSet::new();
+    visit(
+        schema,
+        "",
+        definitions,
+        &mut std::collections::BTreeSet::new(),
+        &mut paths,
+    );
+    paths.into_iter().collect()
+}
+
+struct DefaultEquivalentCase {
+    tool: VerticalTool,
+    arguments: Value,
+    field: &'static str,
+    explicit_default: Value,
+}
+
+fn default_equivalent_cases() -> Vec<DefaultEquivalentCase> {
+    let repository_selector = || json!({"repository_id": repository()});
+    let source = wire_source_reference(5, 10, 2, 2);
+    let cases = [
+        (
+            VerticalTool::RepoStatus,
+            json!({"repository": repository_selector(), "explain": true}),
+            &[
+                ("generation", json!("active")),
+                ("include_operations", json!(false)),
+                ("response_profile", json!("compact")),
+            ][..],
+        ),
+        (
+            VerticalTool::RepoList,
+            json!({"explain": true}),
+            &[("response_profile", json!("compact"))][..],
+        ),
+        (
+            VerticalTool::CodeLocate,
+            json!({"repository": repository_selector(), "query": "publish", "explain": true}),
+            &[("response_profile", json!("compact"))][..],
+        ),
+        (
+            VerticalTool::SymbolExplain,
+            json!({"repository": repository_selector(), "symbol_ids": [symbol()], "explain": true}),
+            &[("response_profile", json!("compact"))][..],
+        ),
+        (
+            VerticalTool::SymbolRelationships,
+            json!({"repository": repository_selector(), "symbol_ids": [symbol()], "relations": ["calls"], "explain": true}),
+            &[
+                ("include_candidates", json!(false)),
+                ("response_profile", json!("compact")),
+            ][..],
+        ),
+        (
+            VerticalTool::FlowTrace,
+            json!({"repository": repository_selector(), "from": {"symbol_id": symbol()}, "relations": ["calls"], "explain": true}),
+            &[
+                ("cross_repository", json!(false)),
+                ("response_profile", json!("compact")),
+            ][..],
+        ),
+        (
+            VerticalTool::ChangeImpact,
+            json!({"repository": repository_selector(), "change": {"symbol_ids": [symbol()]}, "explain": true}),
+            &[
+                ("include_history", json!(false)),
+                ("profile", json!("compact")),
+            ][..],
+        ),
+        (
+            VerticalTool::TestsSelect,
+            json!({"repository": repository_selector(), "seeds": {"symbols": [symbol()]}, "explain": true}),
+            &[("profile", json!("compact"))][..],
+        ),
+        (
+            VerticalTool::ArchitectureOverview,
+            json!({"repository": repository_selector(), "explain": true}),
+            &[("response_profile", json!("compact"))][..],
+        ),
+        (
+            VerticalTool::ArchitectureCycles,
+            json!({"repository": repository_selector(), "projection": {"relations": ["calls"], "level": "symbol"}, "explain": true}),
+            &[("response_profile", json!("compact"))][..],
+        ),
+        (
+            VerticalTool::CodeDead,
+            json!({"repository": repository_selector(), "explain": true}),
+            &[("response_profile", json!("compact"))][..],
+        ),
+        (
+            VerticalTool::HistoryCompare,
+            json!({"repository": repository_selector(), "base": parent_generation(), "head": generation(), "explain": true}),
+            &[
+                ("include_unchanged_context", json!(false)),
+                ("profile", json!("compact")),
+            ][..],
+        ),
+        (
+            VerticalTool::PlanChange,
+            json!({"repository": repository_selector(), "objective": "bug_fix", "objective_text": "fix the defect", "targets": [{"symbol_id": symbol()}], "explain": true}),
+            &[("profile", json!("compact"))][..],
+        ),
+        (
+            VerticalTool::SourceRead,
+            json!({"repository": repository_selector(), "references": [{"source_ref": source}], "explain": true}),
+            &[
+                ("encoding", json!("utf8_lossless_when_valid")),
+                ("include_line_numbers", json!(true)),
+                ("merge_overlaps", json!(false)),
+                ("response_profile", json!("compact")),
+            ][..],
+        ),
+        (
+            VerticalTool::QueryBatch,
+            json!({
+                "repository": repository_selector(),
+                "operations": [{"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}}],
+                "explain": true
+            }),
+            &[
+                ("generation", json!("active")),
+                ("response_profile", json!("compact")),
+            ][..],
+        ),
+    ];
+    cases
+        .into_iter()
+        .flat_map(|(tool, arguments, fields)| {
+            fields
+                .iter()
+                .cloned()
+                .map(move |(field, explicit_default)| DefaultEquivalentCase {
+                    tool,
+                    arguments: arguments.clone(),
+                    field,
+                    explicit_default,
+                })
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn accepted_effect_defaults_match_omitted_values() {
+    for case in default_equivalent_cases() {
+        let outcome = if case.tool == VerticalTool::RepoList {
+            FakeOutcome::RepositoryList(Ok(RepositoryList {
+                repositories: vec![RepositoryListEntry {
+                    repository_id: repository(),
+                    active_generation: generation(),
+                    languages: vec!["rust".to_owned()],
+                    structural_freshness: "current".to_owned(),
+                    semantic_freshness: "current".to_owned(),
+                    state: "ready".to_owned(),
+                }],
+            }))
+        } else {
+            FakeOutcome::RepositoryStatus(Ok(repository_status_response()))
+        };
+        let harness = Harness::new(outcome);
+        let omitted = execute(&harness.executor, case.tool, case.arguments.clone())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{} omitted default failed: {error:?}", case.tool.name())
+            });
+        let Value::Object(mut explicit_arguments) = case.arguments else {
+            panic!("default-equivalence arguments are objects");
+        };
+        explicit_arguments.insert(case.field.to_owned(), case.explicit_default);
+        let explicit = execute(
+            &harness.executor,
+            case.tool,
+            Value::Object(explicit_arguments),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "{} explicit default {} failed: {error:?}",
+                case.tool.name(),
+                case.field
+            )
+        });
+        assert_eq!(
+            explicit,
+            omitted,
+            "{} explicit default {} must normalize like omission",
+            case.tool.name(),
+            case.field
+        );
+    }
+}
+
+#[tokio::test]
+async fn accepted_effect_code_locate_controls_change_the_normalized_request() {
+    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate_response())));
+    let base = json!({
+        "repository": {"repository_id": repository()},
+        "query": "publish"
+    });
+    for arguments in [
+        base.clone(),
+        json!({
+            "repository": {"repository_id": repository()},
+            "query": "publish",
+            "search_modes": ["exact"]
+        }),
+        json!({
+            "repository": {"repository_id": repository()},
+            "query": "publish",
+            "max_results": 7
+        }),
+        json!({
+            "repository": {"repository_id": repository()},
+            "query": "publish",
+            "budget": {"max_results": 5}
+        }),
+    ] {
+        execute(&harness.executor, VerticalTool::CodeLocate, arguments)
+            .await
+            .expect("accepted locate controls execute");
+    }
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    let requests: Vec<_> = calls
+        .iter()
+        .map(|call| {
+            let ObservedCall::CodeLocate(request) = call else {
+                panic!("expected only locate requests");
+            };
+            (request.mode(), request.maximum_results())
+        })
+        .collect();
+    assert_eq!(
+        requests,
+        [
+            (LocateMode::Text, 20),
+            (LocateMode::Exact, 20),
+            (LocateMode::Text, 7),
+            (LocateMode::Text, 5),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn accepted_effect_context_pack_token_budget_changes_selection() {
+    let mut response = explain_response(source_reference(4, 12, 2, 2));
+    response.result.symbols[0].signature = Some("x".repeat(2_400));
+    let harness = Harness::new(FakeOutcome::SymbolExplain(Ok(response)));
+    let execute_with_budget = |token_budget| {
+        execute(
+            &harness.executor,
+            VerticalTool::ContextPack,
+            json!({
+                "repository": {"repository_id": repository()},
+                "task": "fix the duplicate payment bug",
+                "seeds": {"symbols": [symbol()]},
+                "token_budget": token_budget
+            }),
+        )
+    };
+    let smaller: ContextPackOutput = decode(
+        execute_with_budget(500)
+            .await
+            .expect("smaller accepted token budget executes"),
+    );
+    let larger: ContextPackOutput = decode(
+        execute_with_budget(4_500)
+            .await
+            .expect("larger accepted token budget executes"),
+    );
+    let ToolResponse::Success(smaller) = smaller else {
+        panic!("expected smaller context pack success");
+    };
+    let ToolResponse::Success(larger) = larger else {
+        panic!("expected larger context pack success");
+    };
+    assert!(smaller.data.items.is_empty());
+    assert_eq!(larger.data.items.len(), 1);
+    assert!(smaller.truncated);
+    assert!(!larger.truncated);
+}
+
+#[tokio::test]
+async fn accepted_effect_query_advanced_controls_change_the_normalized_request() {
+    let response = QueryAdvancedPortResponse::new(
+        ClientAdvancedQuery {
+            context: context(1, 0),
+            columns: vec![ClientAdvancedColumn {
+                name: "id".to_owned(),
+                column_type: "symbol_id".to_owned(),
+            }],
+            rows: vec![json!({"id": "sym"})],
+            plan: None,
+            completeness: "complete".to_owned(),
+        },
+        metadata("query-advanced-controls"),
+    );
+    let harness = Harness::new(FakeOutcome::QueryAdvanced(Ok(response)));
+    let base = json!({
+        "repository": {"repository_id": repository()},
+        "query": {"op": "scan", "entity": "function"}
+    });
+    for arguments in [
+        base,
+        json!({
+            "repository": {"repository_id": repository()},
+            "query": {"op": "scan", "entity": "function"},
+            "max_results": 7
+        }),
+        json!({
+            "repository": {"repository_id": repository()},
+            "query": {"op": "scan", "entity": "function"},
+            "max_depth": 2
+        }),
+        json!({
+            "repository": {"repository_id": repository()},
+            "query": {"op": "scan", "entity": "function"},
+            "cost_limit": 10_000_000
+        }),
+        json!({
+            "repository": {"repository_id": repository()},
+            "query": {"op": "scan", "entity": "function"},
+            "explain": true
+        }),
+    ] {
+        execute(&harness.executor, VerticalTool::QueryAdvanced, arguments)
+            .await
+            .expect("accepted advanced-query control executes");
+    }
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    let requests: Vec<_> = calls
+        .iter()
+        .map(|call| {
+            let ObservedCall::QueryAdvanced(request) = call else {
+                panic!("expected only advanced-query requests");
+            };
+            (
+                request.max_results(),
+                request.max_depth(),
+                request.cost_limit(),
+                request.explain(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        requests,
+        [
+            (None, None, None, None),
+            (Some(7), None, None, None),
+            (None, Some(2), None, None),
+            (None, None, Some(10_000_000), None),
+            (None, None, None, Some(true)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn accepted_effect_query_batch_failure_policy_changes_scheduling() {
+    let arguments = |failure_policy: Option<&str>| {
+        let mut arguments = json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {
+                    "id": "z_independent",
+                    "tool": "code.locate",
+                    "arguments": {"query": "publish"}
+                },
+                {
+                    "id": "a_unavailable",
+                    "tool": "symbol.relationships",
+                    "arguments": {"symbol_ids": [symbol()], "relations": ["calls"]}
+                }
+            ]
+        });
+        if let Some(failure_policy) = failure_policy {
+            arguments["failure_policy"] = json!(failure_policy);
+        }
+        arguments
+    };
+    let default_harness = batch_harness();
+    let default: QueryBatchOutput = decode(
+        execute(
+            &default_harness.executor,
+            VerticalTool::QueryBatch,
+            arguments(None),
+        )
+        .await
+        .expect("default batch policy executes"),
+    );
+    let fail_fast_harness = batch_harness();
+    let fail_fast: QueryBatchOutput = decode(
+        execute(
+            &fail_fast_harness.executor,
+            VerticalTool::QueryBatch,
+            arguments(Some("fail_fast")),
+        )
+        .await
+        .expect("fail-fast batch policy executes"),
+    );
+    let ToolResponse::Success(default) = default else {
+        panic!("expected default batch success envelope");
+    };
+    let ToolResponse::Success(fail_fast) = fail_fast else {
+        panic!("expected fail-fast batch success envelope");
+    };
+    assert_eq!(
+        default.data.operation_results[0].status,
+        BatchOperationStatus::Ok
+    );
+    assert_eq!(
+        fail_fast.data.operation_results[0].status,
+        BatchOperationStatus::NotRunFailFast
+    );
+}
