@@ -3453,6 +3453,45 @@ async fn explain_fingerprint_is_stable_for_identical_requests() {
 }
 
 #[tokio::test]
+async fn repo_list_explain_returns_a_plan_without_retrieval() {
+    let harness = Harness::new(FakeOutcome::RepositoryList(Ok(RepositoryList {
+        repositories: vec![RepositoryListEntry {
+            repository_id: repository(),
+            active_generation: generation(),
+            languages: vec!["rust".to_owned()],
+            structural_freshness: "current".to_owned(),
+            semantic_freshness: "current".to_owned(),
+            state: "ready".to_owned(),
+        }],
+    })));
+    let output: RepoListOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoList,
+            json!({"max_results": 10, "explain": true}),
+        )
+        .await
+        .expect("explain executes"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected explain success");
+    };
+    assert!(
+        output.data.repositories.is_empty(),
+        "explain performs no retrieval"
+    );
+    assert_eq!(output.data.total_count, 1);
+    let explanation = output.data.explanation.expect("explain returns a plan");
+    assert_eq!(explanation.operators, vec!["repository_listing".to_owned()]);
+    assert!(explanation.fingerprint.starts_with("plan1_"));
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        1,
+        "only the metadata catalog call runs"
+    );
+}
+
+#[tokio::test]
 async fn query_batch_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),

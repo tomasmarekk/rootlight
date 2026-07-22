@@ -187,6 +187,9 @@ pub struct RepoListInput {
     /// Requested evidence detail.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_profile: Option<ResponseProfile>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
 }
 
 /// One registered repository entry.
@@ -218,6 +221,9 @@ pub struct RepoListData {
     pub repositories: Vec<RepositoryEntry>,
     /// Total registered repositories matching the filter.
     pub total_count: u64,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
 }
 
 /// Checked success-or-error output for `repo.list`.

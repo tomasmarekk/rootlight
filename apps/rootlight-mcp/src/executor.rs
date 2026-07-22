@@ -2317,6 +2317,7 @@ where
     P: FirstSliceClientPort,
 {
     let input: RepoListInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     // State filtering and non-compact response profiles are not served by this
     // slice; each is rejected by name rather than silently ignored.
     if input.states.is_some() {
@@ -2327,9 +2328,13 @@ where
     }
     let page_size = input.max_results.unwrap_or(DEFAULT_REPO_LIST_RESULTS);
     let context = repo_list_cursor_context(input.query.as_deref(), page_size);
-    let offset = match &input.cursor {
-        Some(cursor) => decode_repo_list_cursor(cursor, &context, &cursor_key, invalid_cursor)?,
-        None => 0,
+    let offset = if explain_only {
+        0
+    } else {
+        match &input.cursor {
+            Some(cursor) => decode_repo_list_cursor(cursor, &context, &cursor_key, invalid_cursor)?,
+            None => 0,
+        }
     };
 
     // The daemon returns the full bounded list; the bridge applies the
@@ -2343,6 +2348,52 @@ where
     };
 
     let total = list.repositories.len();
+    if explain_only {
+        let explanation = rootlight_agent::explain::finalize_plan(
+            rootlight_agent::explain::repo_list_plan(),
+            &first.active_generation.to_string(),
+        );
+        let total_count = u64::try_from(total).unwrap_or(u64::MAX);
+        let data = RepoListData {
+            repositories: Vec::new(),
+            total_count,
+            explanation: Some(explanation),
+        };
+        let envelope = ReadEnvelope {
+            schema_version: SchemaVersion::V1_0,
+            repository: ResolvedRepository {
+                repository_id: first.repository_id,
+                display_name: first.repository_id.to_string(),
+            },
+            generation: GenerationSummary {
+                generation_id: first.active_generation,
+                parent_generation: RequiredNullable(None),
+                structural_freshness: freshness_from_label(&first.structural_freshness),
+                semantic_freshness: freshness_from_label(&first.semantic_freshness),
+            },
+            coverage: CoverageSummary {
+                status: rootlight_ir::CoverageStatus::Complete,
+                languages: Vec::new(),
+                skipped_inputs: 0,
+            },
+            data,
+            truncated: false,
+            next_cursor: RequiredNullable(None),
+            usage: UsageSummary {
+                rows: 0,
+                edges: 0,
+                source_bytes: 0,
+                json_bytes: 0,
+                estimated_tokens: 0,
+                wall_time_ms: 0,
+                cache_status: CacheStatus::Miss,
+                trace_id: "repo-list".to_owned(),
+            },
+            warnings: Vec::new(),
+            trust: TrustClassification::UntrustedRepositoryData,
+        };
+        return serialize_success(envelope);
+    }
     let start = offset.min(total);
     let page_end = start.saturating_add(usize::from(page_size)).min(total);
     let truncated = page_end < total;
@@ -2364,6 +2415,7 @@ where
     let data = RepoListData {
         repositories,
         total_count,
+        explanation: None,
     };
     let next_cursor = if truncated {
         let next = AuthenticatedCursor::create(

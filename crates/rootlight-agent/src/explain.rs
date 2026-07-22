@@ -55,6 +55,9 @@ const CONTEXT_COST_PER_SEED: u64 = 30;
 /// Estimated cost units per planned batched operation for `query.batch`.
 const BATCH_COST_PER_OPERATION: u64 = 100;
 
+/// Fixed estimated cost units for the metadata-only `repo.list` plan.
+const REPO_LIST_COST: u64 = 8;
+
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
@@ -325,6 +328,21 @@ pub fn query_batch_plan(operation_count: usize) -> PlanExplanation {
     }
 }
 
+/// Builds the source-free `repo.list` plan for explain mode.
+///
+/// `repo.list` reads only the registered-repository catalog, so the plan is a
+/// fixed bounded listing with no source retrieval.
+#[must_use]
+pub fn repo_list_plan() -> PlanExplanation {
+    PlanExplanation {
+        estimated_cost: REPO_LIST_COST,
+        operators: vec!["repository_listing".to_owned()],
+        applied_limits: Vec::new(),
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
+    }
+}
+
 /// Binds a stable physical-plan fingerprint to a plan for a pinned generation.
 ///
 /// The fingerprint is a deterministic BLAKE3 digest over the planner version,
@@ -548,5 +566,14 @@ mod tests {
         assert_eq!(plan.operators, vec!["batch_dispatch".to_owned()]);
         assert_eq!(plan.applied_limits, vec!["operations: 3".to_owned()]);
         assert_eq!(plan.estimated_cost, 300);
+    }
+
+    #[test]
+    fn repo_list_plan_is_deterministic_and_bounded() {
+        use super::repo_list_plan;
+        assert_eq!(repo_list_plan(), repo_list_plan());
+        let plan = repo_list_plan();
+        assert_eq!(plan.operators, vec!["repository_listing".to_owned()]);
+        assert!(plan.applied_limits.is_empty());
     }
 }

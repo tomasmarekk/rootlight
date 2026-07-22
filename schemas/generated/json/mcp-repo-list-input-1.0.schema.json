@@ -13,6 +13,10 @@
         }
       ]
     },
+    "explain": {
+      "description": "Return the bounded plan without executing retrieval.",
+      "type": "boolean"
+    },
     "max_results": {
       "description": "Maximum results to return.",
       "type": "integer",
