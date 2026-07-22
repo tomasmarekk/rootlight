@@ -1651,6 +1651,8 @@ fn architecture_cycles(
             families.push(family);
         }
     }
+    #[cfg(feature = "process-test-hooks")]
+    await_process_cancellation(context)?;
     let min_size = u8::try_from(request.min_size.unwrap_or(DEFAULT_CYCLE_MIN_SIZE))
         .map_err(|_| invalid_argument())?;
     let max_cycles = usize::try_from(request.max_cycles.unwrap_or(DEFAULT_CYCLE_MAX_CYCLES))
@@ -1734,6 +1736,68 @@ fn architecture_cycles(
         }),
         completeness: Some(completeness),
     })
+}
+
+#[cfg(feature = "process-test-hooks")]
+fn await_process_cancellation(context: &FirstSliceIpcContext) -> Result<(), PublicError> {
+    const HOOK_ENDPOINT_ENV: &str = "ROOTLIGHT_PROCESS_TEST_CANCELLATION_ENDPOINT";
+    const HOOK_TIMEOUT: Duration = Duration::from_secs(10);
+
+    let Some(endpoint) = std::env::var_os(HOOK_ENDPOINT_ENV) else {
+        return Ok(());
+    };
+    let endpoint = rootlight_ipc::Endpoint::new(endpoint.into()).map_err(|_| internal_error())?;
+    let mut stream = rootlight_ipc::connect(&endpoint).map_err(|_| internal_error())?;
+    write_process_hook_signal(&mut stream, b'E', HOOK_TIMEOUT)?;
+
+    let deadline = Instant::now()
+        .checked_add(HOOK_TIMEOUT)
+        .ok_or_else(internal_error)?;
+    loop {
+        match context.cancellation.reason() {
+            Some(rootlight_operations::CancellationReason::ClientRequest) => {
+                write_process_hook_signal(&mut stream, b'C', HOOK_TIMEOUT)?;
+                return Err(cancelled_error());
+            }
+            Some(_) => return Err(cancelled_error()),
+            None if Instant::now() >= deadline => return Err(internal_error()),
+            // This feature is test-only. Yielding keeps the production
+            // cancellation type unchanged while the transport task records
+            // the peer-disconnect event on the shared token.
+            None => thread::yield_now(),
+        }
+    }
+}
+
+#[cfg(feature = "process-test-hooks")]
+fn write_process_hook_signal(
+    stream: &mut rootlight_ipc::LocalStream,
+    signal: u8,
+    timeout: Duration,
+) -> Result<(), PublicError> {
+    use std::io::Write as _;
+
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(internal_error)?;
+    let bytes = [signal];
+    let mut written = 0;
+    while written < bytes.len() {
+        match stream.write(&bytes[written..]) {
+            Ok(0) => return Err(internal_error()),
+            Ok(count) => written += count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) && Instant::now() < deadline =>
+            {
+                thread::yield_now();
+            }
+            Err(_) => return Err(internal_error()),
+        }
+    }
+    Ok(())
 }
 
 fn code_dead(

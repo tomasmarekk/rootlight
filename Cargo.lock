@@ -2109,6 +2109,7 @@ dependencies = [
  "rootlight-agent",
  "rootlight-client",
  "rootlight-ids",
+ "rootlight-ipc",
  "rootlight-ir",
  "rootlight-mcp-contract",
  "rootlight-runtime",
