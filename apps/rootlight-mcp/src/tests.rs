@@ -674,6 +674,13 @@ fn response_limit_is_inclusive_and_bounds_serialization() {
     let id = RequestId::String("response-boundary".to_owned());
     let encoded = result_response(&id, &EmptyObject {}, StdioLimits::default())
         .expect("default response is encoded");
+    let above = result_response(
+        &id,
+        &EmptyObject {},
+        StdioLimits::default().with_max_response_bytes(encoded.len() + 1),
+    )
+    .expect("one byte above the response length is accepted");
+    assert_eq!(above, encoded);
     let exact = result_response(
         &id,
         &EmptyObject {},
@@ -690,6 +697,51 @@ fn response_limit_is_inclusive_and_bounds_serialization() {
     assert!(matches!(error, SessionError::ResponseTooLarge));
 }
 
+struct CancelOnSerialize {
+    sender: watch::Sender<bool>,
+}
+
+impl Serialize for CancelOnSerialize {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.sender.send_replace(true);
+        serializer.serialize_str("this cancelled response must not be published")
+    }
+}
+
+#[test]
+fn response_encoding_observes_cancellation_without_publication() {
+    let (sender, receiver) = watch::channel(false);
+    let cancellation = RequestCancellation { receiver };
+    let started = std::time::Instant::now();
+
+    let encoded = encode_response_with_cancellation(
+        &CancelOnSerialize { sender },
+        StdioLimits::default(),
+        &cancellation,
+    );
+
+    assert!(matches!(encoded, Err(ResponseEncodingError::Cancelled)));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "cancelled response encoding must terminate promptly"
+    );
+}
+
+#[test]
+fn response_encoding_stops_when_transport_ownership_closes() {
+    let (sender, receiver) = watch::channel(false);
+    drop(sender);
+    let cancellation = RequestCancellation { receiver };
+
+    let encoded =
+        encode_response_with_cancellation(&EmptyObject {}, StdioLimits::default(), &cancellation);
+
+    assert!(matches!(encoded, Err(ResponseEncodingError::Cancelled)));
+}
+
 #[test]
 fn hostile_escaped_identity_uses_logarithmic_response_reservations() {
     let id = RequestId::String("\0".repeat(32 * 1024));
@@ -698,7 +750,7 @@ fn hostile_escaped_identity_uses_logarithmic_response_reservations() {
         id: &id,
         result: &EmptyObject {},
     };
-    let mut writer = BoundedResponseWriter::new(DEFAULT_MAX_RESPONSE_BYTES);
+    let mut writer = BoundedResponseWriter::new(DEFAULT_MAX_RESPONSE_BYTES, None);
     serde_json::to_writer(&mut writer, &response).expect("bounded response is encoded");
 
     let logarithmic_bound = usize::try_from(usize::BITS).expect("usize bit width fits in usize");

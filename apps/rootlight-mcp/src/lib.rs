@@ -681,6 +681,12 @@ impl RequestCancellation {
         *self.receiver.borrow()
     }
 
+    fn encoding_must_stop(&self) -> bool {
+        // A blocking encoder can briefly outlive its async request task. Once
+        // the transport drops every sender, no owner remains for its output.
+        self.is_cancelled() || self.receiver.has_changed().is_err()
+    }
+
     /// Waits until cancellation is requested or the transport closes.
     pub async fn cancelled(&mut self) {
         if self.is_cancelled() {
@@ -915,7 +921,7 @@ where
     let (response_tx, response_rx) = mpsc::channel(limits.response_channel_capacity);
     let mut writer = AbortOnDropTask::new(tokio::spawn(write_responses(output, response_rx)));
     let mut writer_finished = false;
-    let mut requests = JoinSet::<(RequestId, HandlerResponse)>::new();
+    let mut requests = JoinSet::<(RequestId, Result<Option<Vec<u8>>, SessionError>)>::new();
     let mut in_flight = BTreeMap::<RequestId, watch::Sender<bool>>::new();
     let mut invalid_messages = 0usize;
 
@@ -929,11 +935,11 @@ where
                     break flatten_writer_result(writer_result);
                 }
                 completed = requests.join_next(), if !requests.is_empty() => {
-                    let (id, response) = completed
+                    let (id, encoded) = completed
                         .ok_or(SessionError::RequestTaskFailed)?
                         .map_err(|_| SessionError::RequestTaskFailed)?;
                     in_flight.remove(&id);
-                    if let Some(encoded) = encode_handler_response(&id, response, limits)? {
+                    if let Some(encoded) = encoded? {
                         enqueue_response(&response_tx, encoded)?;
                     }
                 }
@@ -1002,15 +1008,25 @@ where
                                 let handler = Arc::clone(&handler);
                                 requests.spawn(async move {
                                     let id = request.id.clone();
+                                    let cancellation = RequestCancellation {
+                                        receiver: cancel_rx,
+                                    };
                                     let response = handler
-                                        .handle(
-                                            request,
-                                            RequestCancellation {
-                                                receiver: cancel_rx,
-                                            },
-                                        )
+                                        .handle(request, cancellation.clone())
                                         .await;
-                                    (id, response)
+                                    let response_id = id.clone();
+                                    let encoded = tokio::task::spawn_blocking(move || {
+                                        encode_handler_response(
+                                            &response_id,
+                                            response,
+                                            limits,
+                                            &cancellation,
+                                        )
+                                    })
+                                    .await
+                                    .map_err(|_| SessionError::RequestTaskFailed)
+                                    .and_then(|encoded| encoded);
+                                    (id, encoded)
                                 });
                                 false
                             }
@@ -1705,11 +1721,37 @@ fn encode_handler_response(
     id: &RequestId,
     response: HandlerResponse,
     limits: StdioLimits,
+    cancellation: &RequestCancellation,
 ) -> Result<Option<Vec<u8>>, SessionError> {
-    match response {
-        HandlerResponse::Success(result) => result_response(id, &result, limits).map(Some),
-        HandlerResponse::Error { code, message } => static_error(Some(id), code, message, limits),
-        HandlerResponse::Cancelled => Ok(None),
+    if cancellation.encoding_must_stop() || matches!(&response, HandlerResponse::Cancelled) {
+        return Ok(None);
+    }
+    let encoded = match response {
+        HandlerResponse::Success(result) => encode_response_with_cancellation(
+            &ResultResponse {
+                jsonrpc: JSON_RPC_VERSION,
+                id,
+                result: &result,
+            },
+            limits,
+            cancellation,
+        ),
+        HandlerResponse::Error { code, message } => encode_response_with_cancellation(
+            &ErrorResponse {
+                jsonrpc: JSON_RPC_VERSION,
+                id: Some(id),
+                error: ErrorObject { code, message },
+            },
+            limits,
+            cancellation,
+        ),
+        HandlerResponse::Cancelled => unreachable!("cancelled responses return before encoding"),
+    };
+    match encoded {
+        Ok(_) if cancellation.encoding_must_stop() => Ok(None),
+        Ok(encoded) => Ok(Some(encoded)),
+        Err(ResponseEncodingError::Cancelled) => Ok(None),
+        Err(ResponseEncodingError::Session(error)) => Err(error),
     }
 }
 
@@ -1717,56 +1759,104 @@ fn encode_response(
     response: &impl Serialize,
     limits: StdioLimits,
 ) -> Result<Vec<u8>, SessionError> {
+    encode_response_inner(response, limits, None).map_err(|error| match error {
+        ResponseEncodingError::Session(error) => error,
+        ResponseEncodingError::Cancelled => SessionError::SerializationInvariant,
+    })
+}
+
+fn encode_response_with_cancellation(
+    response: &impl Serialize,
+    limits: StdioLimits,
+    cancellation: &RequestCancellation,
+) -> Result<Vec<u8>, ResponseEncodingError> {
+    encode_response_inner(response, limits, Some(cancellation))
+}
+
+fn encode_response_inner(
+    response: &impl Serialize,
+    limits: StdioLimits,
+    cancellation: Option<&RequestCancellation>,
+) -> Result<Vec<u8>, ResponseEncodingError> {
+    if cancellation.is_some_and(RequestCancellation::encoding_must_stop) {
+        return Err(ResponseEncodingError::Cancelled);
+    }
     let payload_limit = limits
         .max_response_bytes
         .checked_sub(1)
-        .ok_or(SessionError::ResponseTooLarge)?;
-    let mut writer = BoundedResponseWriter::new(payload_limit);
+        .ok_or(SessionError::ResponseTooLarge)
+        .map_err(ResponseEncodingError::Session)?;
+    let mut writer = BoundedResponseWriter::new(payload_limit, cancellation);
     if let Err(error) = serde_json::to_writer(&mut writer, response) {
         return match writer.failure {
-            Some(ResponseWriteFailure::Limit) => Err(SessionError::ResponseTooLarge),
-            Some(ResponseWriteFailure::Memory) => Err(SessionError::MemoryUnavailable),
-            None => Err(SessionError::Serialization(error)),
+            Some(ResponseWriteFailure::Limit) => Err(ResponseEncodingError::Session(
+                SessionError::ResponseTooLarge,
+            )),
+            Some(ResponseWriteFailure::Memory) => Err(ResponseEncodingError::Session(
+                SessionError::MemoryUnavailable,
+            )),
+            Some(ResponseWriteFailure::Cancelled) => Err(ResponseEncodingError::Cancelled),
+            None => Err(ResponseEncodingError::Session(SessionError::Serialization(
+                error,
+            ))),
         };
     }
+    if cancellation.is_some_and(RequestCancellation::encoding_must_stop) {
+        return Err(ResponseEncodingError::Cancelled);
+    }
     try_reserve_bounded(&mut writer.bytes, 1, limits.max_response_bytes).map_err(|failure| {
-        match failure {
+        ResponseEncodingError::Session(match failure {
             BoundedReserveError::Limit => SessionError::ResponseTooLarge,
             BoundedReserveError::Memory => SessionError::MemoryUnavailable,
-        }
+        })
     })?;
     writer.bytes.push(b'\n');
     Ok(writer.bytes)
+}
+
+enum ResponseEncodingError {
+    Session(SessionError),
+    Cancelled,
 }
 
 #[derive(Clone, Copy)]
 enum ResponseWriteFailure {
     Limit,
     Memory,
+    Cancelled,
 }
 
-struct BoundedResponseWriter {
+struct BoundedResponseWriter<'a> {
     bytes: Vec<u8>,
     maximum: usize,
     failure: Option<ResponseWriteFailure>,
+    cancellation: Option<&'a RequestCancellation>,
     #[cfg(test)]
     reservation_growths: usize,
 }
 
-impl BoundedResponseWriter {
-    const fn new(maximum: usize) -> Self {
+impl<'a> BoundedResponseWriter<'a> {
+    const fn new(maximum: usize, cancellation: Option<&'a RequestCancellation>) -> Self {
         Self {
             bytes: Vec::new(),
             maximum,
             failure: None,
+            cancellation,
             #[cfg(test)]
             reservation_growths: 0,
         }
     }
 }
 
-impl io::Write for BoundedResponseWriter {
+impl io::Write for BoundedResponseWriter<'_> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if self
+            .cancellation
+            .is_some_and(RequestCancellation::encoding_must_stop)
+        {
+            self.failure = Some(ResponseWriteFailure::Cancelled);
+            return Err(io::Error::other("response encoding was cancelled"));
+        }
         let _grew = try_reserve_bounded(&mut self.bytes, buffer.len(), self.maximum).map_err(
             |failure| match failure {
                 BoundedReserveError::Limit => {

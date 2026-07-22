@@ -6720,12 +6720,46 @@ mod tests {
 
     use std::time::{Duration, Instant};
 
-    use rootlight_cancel::Cancellation;
+    use rootlight_cancel::{Cancellation, CancellationReason};
     use rootlight_ids::SymbolId;
     use rootlight_ir::RelationPredicate;
 
     use super::*;
     use crate::model::{FlowTraceFrontier, FlowTracePath, QueryBudget, RelationFamily};
+
+    struct CancelOnSerialize {
+        cancellation: Cancellation,
+    }
+
+    impl Serialize for CancelOnSerialize {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            let _won = self.cancellation.cancel(CancellationReason::ClientRequest);
+            serializer.serialize_str("cancelled query output")
+        }
+    }
+
+    #[test]
+    fn counting_writer_observes_cancellation_during_serialization() {
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(30));
+
+        let error = serialized_size(
+            &CancelOnSerialize {
+                cancellation: cancellation.clone(),
+            },
+            u64::MAX,
+            &control,
+        )
+        .expect_err("mid-serialization cancellation must stop output measurement");
+
+        assert!(matches!(
+            error,
+            QueryError::Cancelled(CancellationReason::ClientRequest)
+        ));
+    }
 
     fn symbol(byte: u8) -> SymbolId {
         SymbolId::from_bytes([byte; 20])
