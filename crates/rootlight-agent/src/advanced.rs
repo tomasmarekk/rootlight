@@ -6,6 +6,8 @@
 //! grammar does not represent them. Every query is statically cost-bounded
 //! before execution.
 
+use rootlight_mcp_contract::context::QueryAstNode;
+
 /// Maximum AST depth accepted by the validator.
 pub const MAX_AST_DEPTH: usize = 5;
 
@@ -133,6 +135,27 @@ pub struct AdvancedQueryPlan {
 }
 
 impl AdvancedQueryPlan {
+    /// Derives and validates a plan directly from the public typed AST.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdvancedQueryError`] when AST depth, resource ceilings, or an
+    /// optional caller cost ceiling reject the derived plan.
+    pub fn from_ast(
+        query: &QueryAstNode,
+        max_rows: usize,
+        max_traversal: usize,
+        cost_limit: Option<u64>,
+    ) -> Result<Self, AdvancedQueryError> {
+        let mut operators = Vec::new();
+        let depth = derive_query_operators(query, &mut operators);
+        let plan = Self::validate(&operators, max_rows, max_traversal, depth)?;
+        if cost_limit.is_some_and(|limit| plan.estimated_cost > limit) {
+            return Err(AdvancedQueryError::CostExceeded);
+        }
+        Ok(plan)
+    }
+
     /// Validates an advanced query from its operator sequence and limits.
     ///
     /// # Errors
@@ -191,12 +214,57 @@ impl AdvancedQueryPlan {
     }
 }
 
+fn derive_query_operators(node: &QueryAstNode, operators: &mut Vec<QueryOperator>) -> usize {
+    match node {
+        QueryAstNode::Scan { .. } => {
+            operators.push(QueryOperator::Scan);
+            1
+        }
+        QueryAstNode::Filter { input, .. } => {
+            let depth = derive_query_operators(input, operators);
+            operators.push(QueryOperator::Filter);
+            depth.saturating_add(1)
+        }
+        QueryAstNode::Project { input, .. } => {
+            let depth = derive_query_operators(input, operators);
+            operators.push(QueryOperator::Project);
+            depth.saturating_add(1)
+        }
+        QueryAstNode::Join { left, right, .. } => {
+            let left_depth = derive_query_operators(left, operators);
+            let right_depth = derive_query_operators(right, operators);
+            operators.push(QueryOperator::Join);
+            left_depth.max(right_depth).saturating_add(1)
+        }
+        QueryAstNode::Aggregate { input, .. } => {
+            let depth = derive_query_operators(input, operators);
+            operators.push(QueryOperator::Aggregate);
+            depth.saturating_add(1)
+        }
+        QueryAstNode::Traverse { .. } => {
+            operators.push(QueryOperator::Traverse);
+            1
+        }
+        QueryAstNode::Sort { input, .. } => {
+            let depth = derive_query_operators(input, operators);
+            operators.push(QueryOperator::Sort);
+            depth.saturating_add(1)
+        }
+        QueryAstNode::Limit { input, .. } => {
+            let depth = derive_query_operators(input, operators);
+            operators.push(QueryOperator::Limit);
+            depth.saturating_add(1)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_ROWS, MAX_ADVANCED_TRAVERSAL,
         MAX_AST_DEPTH, MAX_ESTIMATED_COST, QueryOperator,
     };
+    use rootlight_mcp_contract::{context::QueryAstNode, vertical::EntityKind};
 
     #[test]
     fn simple_scan_with_limit_is_valid() {
@@ -210,6 +278,39 @@ mod tests {
         assert_eq!(plan.operators.len(), 2);
         assert_eq!(plan.max_rows, 100);
         assert!(plan.estimated_cost <= MAX_ESTIMATED_COST);
+    }
+
+    #[test]
+    fn typed_ast_derivation_is_owned_by_the_agent_boundary() {
+        let query = QueryAstNode::Limit {
+            input: Box::new(QueryAstNode::Scan {
+                entity: EntityKind::Function,
+                filter: None,
+            }),
+            max_rows: 20,
+        };
+
+        let plan = AdvancedQueryPlan::from_ast(&query, 20, MAX_ADVANCED_TRAVERSAL, Some(1_000))
+            .expect("bounded typed AST is valid");
+
+        assert_eq!(
+            plan.operators,
+            vec![QueryOperator::Scan, QueryOperator::Limit]
+        );
+        assert_eq!(plan.depth, 2);
+    }
+
+    #[test]
+    fn typed_ast_cost_ceiling_is_enforced_without_the_mcp_binary() {
+        let query = QueryAstNode::Scan {
+            entity: EntityKind::Function,
+            filter: None,
+        };
+
+        assert_eq!(
+            AdvancedQueryPlan::from_ast(&query, 100, MAX_ADVANCED_TRAVERSAL, Some(1)),
+            Err(AdvancedQueryError::CostExceeded)
+        );
     }
 
     #[test]

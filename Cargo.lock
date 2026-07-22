@@ -1861,6 +1861,7 @@ dependencies = [
  "rootlight-mcp-contract",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

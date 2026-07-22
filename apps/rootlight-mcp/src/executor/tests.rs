@@ -1106,6 +1106,67 @@ async fn query_batch_composes_locate_subtools_under_one_pinned_generation() {
 }
 
 #[tokio::test]
+async fn query_batch_enforces_aggregate_budget_across_the_app_boundary() {
+    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate_response())));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "generation": "active",
+            "operations": [
+                {"id": "find_a", "tool": "code.locate", "arguments": {"query": "publish"}},
+                {"id": "find_b", "tool": "code.locate", "arguments": {"query": "stage"}}
+            ],
+            "budget": {"max_tokens": 100}
+        }),
+    )
+    .await
+    .expect_err("aggregate child usage exceeds the parent budget");
+
+    assert_eq!(
+        error.public_error().map(PublicError::code),
+        Some(ErrorCode::BudgetExceeded)
+    );
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn batch_adapter_propagates_cancellation_before_client_dispatch() {
+    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate_response())));
+    let public = PublicError::builder(ErrorCode::InvalidArgument, "invalid batch")
+        .build()
+        .expect("static error is valid");
+    let adapter = McpAgentToolPort {
+        port: Arc::clone(&harness.executor.port),
+        unsupported: public.clone(),
+        invalid_arguments: public,
+    };
+    let (_sender, receiver) = watch::channel(true);
+    let request = AgentToolRequest::new(BatchTool::CodeLocate, Map::new());
+    let context = AgentCallContext::new(
+        RequestCancellation { receiver },
+        ResponseBudget {
+            max_results: None,
+            max_tokens: Some(100),
+            max_source_bytes: None,
+            max_traversal_facts: None,
+            max_depth: None,
+            max_paths: None,
+            timeout_ms: Some(1_000),
+            evidence_level: None,
+        },
+        None,
+    );
+
+    assert_eq!(
+        adapter.execute(request, context).await,
+        Err(AgentPortError::Cancelled)
+    );
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn query_batch_resolves_typed_bindings_between_operations() {
     let harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate_response())));
     let arguments = json!({
@@ -3025,10 +3086,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         ),
         (
             VerticalTool::QueryBatch,
-            json!({"repository": {"repository_id": repository()}, "operations": [{"id": "a", "tool": "code.locate", "arguments": {"query": "x"}}], "budget": {}}),
-        ),
-        (
-            VerticalTool::QueryBatch,
             json!({"repository": {"repository_id": repository()}, "operations": [{"id": "a", "tool": "code.locate", "arguments": {"query": "x"}}], "response_profile": "standard"}),
         ),
         (
@@ -3235,11 +3292,6 @@ async fn unsupported_fields_are_rejected_with_field_specific_actions() {
             VerticalTool::RepoList,
             json!({"response_profile": "standard"}),
             "response_profile",
-        ),
-        (
-            VerticalTool::QueryBatch,
-            json!({"repository": {"repository_id": repository()}, "operations": [{"id": "a", "tool": "code.locate", "arguments": {"query": "x"}}], "budget": {}}),
-            "budget",
         ),
         (
             VerticalTool::ContextPack,

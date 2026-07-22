@@ -13,31 +13,34 @@ use std::{
 
 use rootlight_agent::{
     batch::{
-        BatchPlan, aggregate_status as aggregate_batch_status,
-        aggregate_usage as aggregate_batch_usage, dependency_failed, error_result,
-        mcp_tool_for_batch, resolve_arguments as resolve_batch_arguments,
-        resolve_dependencies as resolve_batch_dependencies, success_result, terminal_result,
+        BatchOrchestrationError, BatchPlan, BatchPublicErrors, BatchService, mcp_tool_for_batch,
+        resolve_dependencies as resolve_batch_dependencies, terminal_result,
+    },
+    change::{
+        PlanChangeError, PlanChangeRequest, PlanChangeResult, PlanImpactResult,
+        explain_plan_change as shape_plan_change_explanation, normalize_plan_change,
+        shape_plan_change,
     },
     context_pack::{
         ContextPackPlanRequest, ContextPackPlanner, DefaultContextPackPlanner, context_pack_id,
     },
     policy::is_compact_profile,
+    port::{AgentCallContext, AgentPortError, AgentPortFuture, AgentToolPort, AgentToolRequest},
 };
 use rootlight_client::{
     self as client, CodeLocate, LocateMode, RepositoryIndex, RepositoryList,
     RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, SourceRead,
     SymbolExplain,
 };
-use rootlight_ids::{FileId, GenerationId, OperationId, RepositoryId, SymbolId};
+use rootlight_ids::{GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{EntityKind as IrEntityKind, LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::change::{
     ArchitectureDelta, BreakingCandidate, ChangeClassification, ChangeImpactData,
     ChangeImpactInput, ChangePlanStep, CompareChangeKind, ContextPackRequest, HistoryCompareData,
     HistoryCompareInput, ImpactEntry, ImpactGroup, ImpactRiskSummary, LineageMatch, MatchedStates,
-    PlanChangeData, PlanChangeInput, PlanDecision, PlanImpactSummary, PlanObjective,
-    PlanTargetSelector, RankedTest, RelationPolicy, ResolvedChange, RevisionSelector, RiskLevel,
-    SemanticChange, SemanticChangeKind, TestCandidate, TestCoverageStrategy, TestGap, TestKind,
-    TestsSelectData, TestsSelectInput,
+    PlanChangeData, PlanChangeInput, PlanDecision, RankedTest, RelationPolicy, ResolvedChange,
+    RevisionSelector, RiskLevel, SemanticChange, SemanticChangeKind, TestCandidate,
+    TestCoverageStrategy, TestGap, TestKind, TestsSelectData, TestsSelectInput,
 };
 use rootlight_mcp_contract::intent::{
     ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesData, ArchitectureCyclesInput,
@@ -53,10 +56,9 @@ use rootlight_mcp_contract::{
     PublicErrorBuildError, RepoIndexInput, RepositorySelector, SafeLabel, SchemaVersion,
     SourceReadInput, SymbolExplainInput, ToolResponse, TrustClassification, VerticalTool,
     context::{
-        BatchOperationResult, BatchOperationStatus, BatchStatus, BatchTool, ColumnSchema,
-        ColumnType, ContextPackData, ContextPackInput, ContextStructure, FailurePolicy,
-        PlanExplanation, QueryAdvancedData, QueryAdvancedInput, QueryAstNode, QueryBatchData,
-        QueryBatchInput, QueryCompleteness, TokenAccounting,
+        BatchOperationStatus, BatchStatus, BatchTool, ColumnSchema, ColumnType, ContextPackData,
+        ContextPackInput, ContextStructure, PlanExplanation, QueryAdvancedData, QueryAdvancedInput,
+        QueryBatchData, QueryBatchInput, QueryCompleteness, TokenAccounting,
     },
     pagination::{AuthenticatedCursor, CursorContext},
     repository::{
@@ -83,7 +85,7 @@ use thiserror::Error;
 use unicode_casefold::UnicodeCaseFold as _;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::advanced::{AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL, QueryOperator};
+use crate::advanced::{AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL};
 use crate::{
     RequestCancellation, ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture,
     ToolExecutor,
@@ -100,6 +102,9 @@ const INVALID_CURSOR_MESSAGE: &str = "pagination cursor is invalid or expired";
 /// Future returned by one injected first-slice client-port operation.
 pub type ClientPortFuture<T> =
     Pin<Box<dyn Future<Output = Result<T, ClientPortError>> + Send + 'static>>;
+
+/// Client-free `plan.change` request admitted by the agent boundary.
+pub type PlanChangePortRequest = PlanChangeRequest;
 
 /// Narrow asynchronous daemon-client boundary used by the production MCP executor.
 ///
@@ -1044,62 +1049,6 @@ impl ChangeImpactPortResponse {
     }
 }
 
-/// Normalized `plan.change` request ready for the daemon client port.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlanChangePortRequest {
-    repository: RepositoryId,
-    generation: client::GenerationSelector,
-    objective: String,
-    objective_text: String,
-    target_symbols: Vec<SymbolId>,
-    target_files: Vec<FileId>,
-    max_steps: Option<u8>,
-}
-
-impl PlanChangePortRequest {
-    /// Returns the selected repository.
-    #[must_use]
-    pub const fn repository(&self) -> RepositoryId {
-        self.repository
-    }
-
-    /// Returns the active or explicit immutable-generation selector.
-    #[must_use]
-    pub const fn generation(&self) -> client::GenerationSelector {
-        self.generation
-    }
-
-    /// Returns the objective wire label.
-    #[must_use]
-    pub fn objective(&self) -> &str {
-        &self.objective
-    }
-
-    /// Returns the concrete objective description.
-    #[must_use]
-    pub fn objective_text(&self) -> &str {
-        &self.objective_text
-    }
-
-    /// Returns the explicit target symbol identifiers.
-    #[must_use]
-    pub fn target_symbols(&self) -> &[SymbolId] {
-        &self.target_symbols
-    }
-
-    /// Returns the explicit target file identifiers.
-    #[must_use]
-    pub fn target_files(&self) -> &[FileId] {
-        &self.target_files
-    }
-
-    /// Returns the optional step cap.
-    #[must_use]
-    pub const fn max_steps(&self) -> Option<u8> {
-        self.max_steps
-    }
-}
-
 /// Detected daemon change-plan data plus mandatory MCP read metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanChangePortResponse {
@@ -1665,11 +1614,6 @@ where
     let input: QueryBatchInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
     let repository = repository_id(input.repository.clone(), unsupported)?;
-    // Shared budgets and aggregate response profiles are not enforced by this
-    // slice; each is rejected by name rather than silently ignored.
-    if input.budget.is_some() {
-        return Err(unsupported_field("budget"));
-    }
     if !is_compact_profile(input.response_profile) {
         return Err(unsupported_field("response_profile"));
     }
@@ -1685,116 +1629,89 @@ where
         .collect();
     let dependencies = resolve_batch_dependencies(&input.operations)
         .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
-    let plan = BatchPlan::validate(&tools, &dependencies)
+    BatchPlan::validate(&tools, &dependencies)
         .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
 
     if explain_only {
         let output = explain_query_batch(port, repository, &input, cancellation).await?;
         return serialize_success(output);
     }
-
-    let fail_fast = matches!(input.failure_policy, Some(FailurePolicy::FailFast));
-    let count = input.operations.len();
-    let mut results: Vec<Option<BatchOperationResult>> = vec![None; count];
-    let mut envelopes: Vec<Option<ReadEnvelope<Value>>> = vec![None; count];
-    let mut stop_scheduling = false;
-
-    for index in plan.execution_order.clone() {
-        let operation = &input.operations[index];
-        if dependency_failed(&dependencies[index], &results) {
-            results[index] = Some(terminal_result(
-                operation,
-                BatchOperationStatus::SkippedDependency,
-            ));
-            continue;
-        }
-        if stop_scheduling {
-            results[index] = Some(terminal_result(
-                operation,
-                BatchOperationStatus::NotRunFailFast,
-            ));
-            continue;
-        }
-        let sub_arguments =
-            resolve_batch_arguments(operation, &envelopes, &input, &dependencies[index]);
-        let sub_arguments = match sub_arguments {
-            Ok(arguments) => arguments,
-            Err(_) => {
-                results[index] = Some(error_result(operation, invalid_arguments));
-                stop_scheduling |= fail_fast;
-                continue;
-            }
-        };
-        match execute_batch_subtool(
-            operation.tool,
-            port.clone(),
-            sub_arguments,
-            cancellation.clone(),
-            unsupported,
-            invalid_arguments,
-        )
+    let budget_exceeded = PublicError::builder(ErrorCode::BudgetExceeded, "batch budget exceeded")
+        .build()
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    let adapter = Arc::new(McpAgentToolPort {
+        port,
+        unsupported: unsupported.clone(),
+        invalid_arguments: invalid_arguments.clone(),
+    });
+    let errors =
+        BatchPublicErrors::new(invalid_arguments.clone(), operation_failed, budget_exceeded);
+    let output = BatchService
+        .execute(adapter, input, repository, cancellation, errors)
         .await
-        {
-            Ok(response) => {
-                let envelope: ReadEnvelope<Value> = serde_json::from_value(Value::Object(response))
-                    .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
-                results[index] = Some(success_result(operation, &envelope));
-                envelopes[index] = Some(envelope);
-            }
-            Err(error) => {
-                let fallback = error
-                    .public_error()
-                    .cloned()
-                    .unwrap_or_else(|| operation_failed.clone());
-                results[index] = Some(error_result(operation, &fallback));
-                stop_scheduling |= fail_fast;
-            }
-        }
-    }
-
-    let operation_results: Vec<BatchOperationResult> = results.into_iter().flatten().collect();
-    let Some(source) = envelopes.iter().flatten().next() else {
-        let first_error = operation_results
-            .iter()
-            .find_map(|result| result.error.clone())
-            .unwrap_or(operation_failed);
-        return Err(ToolExecutionError::new(first_error));
-    };
-
-    let truncated = operation_results.iter().any(|result| result.truncated);
-    let batch_status = aggregate_batch_status(&operation_results);
-    let usage = aggregate_batch_usage(&envelopes);
-    let data = QueryBatchData {
-        batch_status,
-        generation_id: source.generation.generation_id,
-        operation_results,
-        explanation: None,
-    };
-    let envelope = ReadEnvelope {
-        schema_version: SchemaVersion::V1_0,
-        repository: ResolvedRepository {
-            repository_id: repository,
-            display_name: source.repository.display_name.clone(),
-        },
-        generation: source.generation.clone(),
-        coverage: CoverageSummary {
-            status: rootlight_ir::CoverageStatus::Bounded,
-            languages: source.coverage.languages.clone(),
-            skipped_inputs: source.coverage.skipped_inputs,
-        },
-        data,
-        truncated,
-        next_cursor: RequiredNullable(None),
-        usage,
-        warnings: source.warnings.clone(),
-        trust: TrustClassification::UntrustedRepositoryData,
-    };
-    serialize_success(envelope)
+        .map_err(map_batch_orchestration_error)?;
+    serialize_success(output)
 }
 
-/// Dispatches one batch subtool to its production handler, failing with a
-/// checked capability error for subtools that have no engine yet.
-async fn execute_batch_subtool<P>(
+/// MCP adapter for the client-free agent tool port.
+struct McpAgentToolPort<P> {
+    port: Arc<P>,
+    unsupported: PublicError,
+    invalid_arguments: PublicError,
+}
+
+impl<P> AgentToolPort<RequestCancellation> for McpAgentToolPort<P>
+where
+    P: FirstSliceClientPort,
+{
+    fn execute(
+        &self,
+        request: AgentToolRequest,
+        context: AgentCallContext<RequestCancellation>,
+    ) -> AgentPortFuture<Result<ReadEnvelope<Value>, AgentPortError>> {
+        let port = Arc::clone(&self.port);
+        let unsupported = self.unsupported.clone();
+        let invalid_arguments = self.invalid_arguments.clone();
+        let deadline = context.deadline();
+        let cancellation = context.into_cancellation();
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(AgentPortError::Cancelled);
+            }
+            let tool = request.tool();
+            let arguments = request.into_arguments();
+            let operation = execute_agent_child(
+                tool,
+                port,
+                arguments,
+                cancellation.clone(),
+                &unsupported,
+                &invalid_arguments,
+            );
+            let response = if let Some(deadline) = deadline {
+                let mut cancellation_wait = cancellation.clone();
+                tokio::select! {
+                    biased;
+                    _ = cancellation_wait.cancelled() => {
+                        return Err(AgentPortError::Cancelled);
+                    }
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                        return Err(AgentPortError::DeadlineExceeded);
+                    }
+                    response = operation => response,
+                }
+            } else {
+                operation.await
+            };
+            let response = response.map_err(map_agent_child_error)?;
+            serde_json::from_value(Value::Object(response))
+                .map_err(|_| AgentPortError::InvalidResponse)
+        })
+    }
+}
+
+/// Maps one admitted child request to its concrete MCP/daemon adapter.
+async fn execute_agent_child<P>(
     tool: BatchTool,
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -1834,13 +1751,37 @@ where
     }
 }
 
-/// Assembles a bounded `context.pack` from seed-symbol definition evidence.
-///
-/// Retrieval is served through `symbol.explain`; the deterministic pack
-/// optimizer ranks the evidence and enforces minimum representation for the
-/// objective-derived required roles under the requested token budget. Source
-/// snippets are not included in this slice. Repository-derived content is
-/// labeled untrusted and the guidance stays source-free.
+fn map_agent_child_error(error: ToolExecutionError) -> AgentPortError {
+    if let Some(public) = error.public_error() {
+        return AgentPortError::Public(Box::new(public.clone()));
+    }
+    match error.failure() {
+        Some(ToolExecutionFailure::InvalidResponse) => AgentPortError::InvalidResponse,
+        Some(ToolExecutionFailure::Transport | ToolExecutionFailure::Executor) | None => {
+            AgentPortError::Unavailable
+        }
+    }
+}
+
+fn map_batch_orchestration_error(error: BatchOrchestrationError) -> ToolExecutionError {
+    match error {
+        BatchOrchestrationError::InvalidArguments => invalid_input(),
+        BatchOrchestrationError::UnsupportedProfile => unsupported_field("response_profile"),
+        BatchOrchestrationError::BudgetExceeded | BatchOrchestrationError::DeadlineExceeded => {
+            let error = PublicError::builder(ErrorCode::BudgetExceeded, "batch budget exceeded")
+                .build()
+                .expect("static batch budget error is valid");
+            ToolExecutionError::new(error)
+        }
+        BatchOrchestrationError::NoSuccessfulOperation(error) => ToolExecutionError::new(*error),
+        BatchOrchestrationError::Cancelled | BatchOrchestrationError::Internal => {
+            internal(ToolExecutionFailure::Executor)
+        }
+        BatchOrchestrationError::InvalidResponse => internal(ToolExecutionFailure::InvalidResponse),
+        _ => internal(ToolExecutionFailure::Executor),
+    }
+}
+
 /// Builds the source-free `context.pack` plan without executing retrieval.
 ///
 /// Only repository metadata is read (to pin the generation); no evidence
@@ -4042,43 +3983,16 @@ async fn explain_plan_change<P>(
 where
     P: FirstSliceClientPort,
 {
-    let status_request = RepositoryStatusPortRequest::new(request.repository, request.generation);
+    let status_request = RepositoryStatusPortRequest::new(
+        request.repository(),
+        client_generation_ref(request.generation()),
+    );
     let status = await_port(
         port.repository_status(status_request, cancellation.clone()),
         cancellation,
     )
     .await?;
-    let target_count = request
-        .target_symbols
-        .len()
-        .saturating_add(request.target_files.len());
-    let explanation = rootlight_agent::explain::finalize_plan(
-        rootlight_agent::explain::plan_change_plan(request.max_steps, target_count),
-        &status.active_generation.to_string(),
-    );
-    let data = PlanChangeData {
-        plan: vec![ChangePlanStep {
-            step: 1,
-            action: "explain_only_no_change_planning_executed".to_owned(),
-            targets: Vec::new(),
-            depends_on: Vec::new(),
-            risks: Vec::new(),
-            verification: None,
-        }],
-        affected_scope: PlanImpactSummary {
-            affected_symbols: 0,
-            affected_files: 0,
-            risk_level: RiskLevel::None,
-            touches_public_surface: false,
-        },
-        test_plan: Vec::new(),
-        open_decisions: Vec::new(),
-        context_pack_request: ContextPackRequest {
-            symbols: Vec::new(),
-            files: Vec::new(),
-        },
-        explanation: Some(explanation),
-    };
+    let data = shape_plan_change_explanation(&request, status.active_generation);
     explain_envelope_from_status(status, data)
 }
 
@@ -4092,9 +4006,9 @@ where
     P: FirstSliceClientPort,
 {
     let input: PlanChangeInput = decode_input(arguments)?;
-    let explain_only = input.explain == Some(true);
-    let request = normalize_plan_change(input, unsupported)?;
-    if explain_only {
+    let request =
+        normalize_plan_change(input).map_err(|error| map_plan_change_error(error, unsupported))?;
+    if request.explain_only() {
         let output = explain_plan_change(port, request, cancellation).await?;
         return serialize_success(output);
     }
@@ -4105,51 +4019,12 @@ where
     serialize_success(output)
 }
 
-fn normalize_plan_change(
-    input: PlanChangeInput,
-    unsupported: &PublicError,
-) -> Result<PlanChangePortRequest, ToolExecutionError> {
-    let repository = repository_id(input.repository, unsupported)?;
-    // Change context, user constraints, custom budgets, and non-compact profiles
-    // are not served by this slice.
-    if input.change_context.is_some()
-        || input.constraints.is_some()
-        || input.budget.is_some()
-        || !is_compact_profile(input.profile)
-    {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
-    let mut target_symbols = Vec::new();
-    let mut target_files = Vec::new();
-    for target in input.targets {
-        match target {
-            PlanTargetSelector::Symbol(symbol) => target_symbols.push(symbol.symbol_id),
-            PlanTargetSelector::File(file) => target_files.push(file.file_id),
-        }
-    }
-    // An empty target set carries no resolvable target.
-    if target_symbols.is_empty() && target_files.is_empty() {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
-    Ok(PlanChangePortRequest {
-        repository,
-        generation: client_generation(input.generation),
-        objective: plan_objective_label(input.objective).to_owned(),
-        objective_text: input.objective_text,
-        target_symbols,
-        target_files,
-        max_steps: input.max_steps,
-    })
-}
-
-/// Returns the stable wire label for one typed plan objective.
-const fn plan_objective_label(objective: PlanObjective) -> &'static str {
-    match objective {
-        PlanObjective::BugFix => "bug_fix",
-        PlanObjective::Refactor => "refactor",
-        PlanObjective::Explanation => "explanation",
-        PlanObjective::Migration => "migration",
-        PlanObjective::Review => "review",
+fn map_plan_change_error(error: PlanChangeError, unsupported: &PublicError) -> ToolExecutionError {
+    match error {
+        PlanChangeError::UnsupportedRepository
+        | PlanChangeError::UnsupportedOption
+        | PlanChangeError::EmptyTargets => ToolExecutionError::new(unsupported.clone()),
+        PlanChangeError::InvalidRisk => internal(ToolExecutionFailure::InvalidResponse),
     }
 }
 
@@ -4159,8 +4034,8 @@ fn map_plan_change(
 ) -> Result<ReadEnvelope<PlanChangeData>, ToolExecutionError> {
     validate_query_context(
         &response.result.context,
-        request.repository,
-        request.generation,
+        request.repository(),
+        client_generation_ref(request.generation()),
     )?;
     let mut plan = Vec::new();
     plan.try_reserve_exact(response.result.plan.len())
@@ -4199,12 +4074,12 @@ fn map_plan_change(
         });
     }
     let pack = response.result.context_pack_request;
-    let data = PlanChangeData {
+    let data = shape_plan_change(PlanChangeResult {
         plan,
-        affected_scope: PlanImpactSummary {
+        affected_scope: PlanImpactResult {
             affected_symbols: scope.affected_symbols,
             affected_files: scope.affected_files,
-            risk_level: risk_level_from_label(&scope.risk_level)?,
+            risk_level: scope.risk_level,
             touches_public_surface: scope.touches_public_surface,
         },
         test_plan,
@@ -4213,8 +4088,8 @@ fn map_plan_change(
             symbols: pack.symbols,
             files: pack.files,
         },
-        explanation: None,
-    };
+    })
+    .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
     map_read_envelope(response.result.context, response.metadata, data, false)
 }
 
@@ -4443,20 +4318,14 @@ fn normalize_query_advanced(
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
-    // Derive the operator sequence and nesting depth, then validate the static
-    // plan against the resource ceilings before crossing the daemon boundary.
-    let mut operators = Vec::new();
-    let depth = derive_query_operators(&input.query, &mut operators);
     let max_rows = usize::from(input.max_results.unwrap_or(DEFAULT_ADVANCED_RESULTS));
-    let plan = AdvancedQueryPlan::validate(&operators, max_rows, MAX_ADVANCED_TRAVERSAL, depth)
-        .map_err(|_| ToolExecutionError::new(unsupported.clone()))?;
-    // Honor the optional client cost ceiling against the static estimate.
-    if input
-        .cost_limit
-        .is_some_and(|limit| plan.estimated_cost > limit)
-    {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
+    AdvancedQueryPlan::from_ast(
+        &input.query,
+        max_rows,
+        MAX_ADVANCED_TRAVERSAL,
+        input.cost_limit,
+    )
+    .map_err(|_| ToolExecutionError::new(unsupported.clone()))?;
     let query_ast = serde_json::to_string(&input.query)
         .map_err(|_| ToolExecutionError::new(unsupported.clone()))?;
     Ok(QueryAdvancedPortRequest {
@@ -4468,52 +4337,6 @@ fn normalize_query_advanced(
         max_depth: input.max_depth,
         cost_limit: input.cost_limit,
     })
-}
-
-/// Walks a safe typed AST, appending each operator innermost-first and
-/// returning the nesting depth.
-fn derive_query_operators(node: &QueryAstNode, operators: &mut Vec<QueryOperator>) -> usize {
-    match node {
-        QueryAstNode::Scan { .. } => {
-            operators.push(QueryOperator::Scan);
-            1
-        }
-        QueryAstNode::Filter { input, .. } => {
-            let depth = derive_query_operators(input, operators);
-            operators.push(QueryOperator::Filter);
-            depth + 1
-        }
-        QueryAstNode::Project { input, .. } => {
-            let depth = derive_query_operators(input, operators);
-            operators.push(QueryOperator::Project);
-            depth + 1
-        }
-        QueryAstNode::Join { left, right, .. } => {
-            let left_depth = derive_query_operators(left, operators);
-            let right_depth = derive_query_operators(right, operators);
-            operators.push(QueryOperator::Join);
-            left_depth.max(right_depth) + 1
-        }
-        QueryAstNode::Aggregate { input, .. } => {
-            let depth = derive_query_operators(input, operators);
-            operators.push(QueryOperator::Aggregate);
-            depth + 1
-        }
-        QueryAstNode::Traverse { .. } => {
-            operators.push(QueryOperator::Traverse);
-            1
-        }
-        QueryAstNode::Sort { input, .. } => {
-            let depth = derive_query_operators(input, operators);
-            operators.push(QueryOperator::Sort);
-            depth + 1
-        }
-        QueryAstNode::Limit { input, .. } => {
-            let depth = derive_query_operators(input, operators);
-            operators.push(QueryOperator::Limit);
-            depth + 1
-        }
-    }
 }
 
 fn map_query_advanced(
@@ -4825,6 +4648,15 @@ fn client_generation(selector: Option<GenerationSelector>) -> client::Generation
         }
         Some(GenerationSelector::Explicit(generation)) => {
             client::GenerationSelector::Generation(generation)
+        }
+    }
+}
+
+fn client_generation_ref(selector: &GenerationSelector) -> client::GenerationSelector {
+    match selector {
+        GenerationSelector::Active(ActiveGeneration::Active) => client::GenerationSelector::Active,
+        GenerationSelector::Explicit(generation) => {
+            client::GenerationSelector::Generation(*generation)
         }
     }
 }

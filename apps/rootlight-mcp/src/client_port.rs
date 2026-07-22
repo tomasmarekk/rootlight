@@ -1035,7 +1035,14 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
             let result = client
                 .plan_change(
                     request.repository(),
-                    request.generation(),
+                    match request.generation() {
+                        rootlight_mcp_contract::GenerationSelector::Active(_) => {
+                            rootlight_client::GenerationSelector::Active
+                        }
+                        rootlight_mcp_contract::GenerationSelector::Explicit(generation) => {
+                            rootlight_client::GenerationSelector::Generation(*generation)
+                        }
+                    },
                     request.objective().to_owned(),
                     request.objective_text().to_owned(),
                     request.target_symbols().to_vec(),

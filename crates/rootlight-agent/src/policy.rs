@@ -40,7 +40,7 @@ pub enum BudgetResource {
     Depth,
     /// Independently returned paths.
     Paths,
-    /// Cooperative elapsed time in milliseconds.
+    /// Maximum cooperative wall time observed in milliseconds.
     Time,
 }
 
@@ -155,8 +155,8 @@ impl BudgetLedger {
 
     /// Atomically charges resource usage against the admitted limits.
     ///
-    /// Depth is a maximum rather than an additive counter. Every other field
-    /// is accumulated with saturation before limits are checked.
+    /// Depth and wall time are maxima rather than additive counters. Every
+    /// other field is accumulated with saturation before limits are checked.
     ///
     /// # Errors
     ///
@@ -176,7 +176,7 @@ impl BudgetLedger {
                 .saturating_add(charge.traversal_facts),
             depth: self.consumed.depth.max(charge.depth),
             paths: self.consumed.paths.saturating_add(charge.paths),
-            time_ms: self.consumed.time_ms.saturating_add(charge.time_ms),
+            time_ms: self.consumed.time_ms.max(charge.time_ms),
         };
         self.check(proposed)?;
         self.consumed = proposed;
@@ -360,12 +360,13 @@ mod tests {
     }
 
     #[test]
-    fn depth_uses_the_maximum_while_other_resources_accumulate() {
+    fn depth_and_wall_time_use_maxima_while_other_resources_accumulate() {
         let mut ledger = BudgetLedger::new(None);
         ledger
             .charge(BudgetCharge {
                 results: 2,
                 depth: 4,
+                time_ms: 20,
                 ..BudgetCharge::default()
             })
             .expect("unlimited ledger accepts charge");
@@ -373,12 +374,14 @@ mod tests {
             .charge(BudgetCharge {
                 results: 3,
                 depth: 2,
+                time_ms: 10,
                 ..BudgetCharge::default()
             })
             .expect("unlimited ledger accepts charge");
 
         assert_eq!(ledger.consumed().results, 5);
         assert_eq!(ledger.consumed().depth, 4);
+        assert_eq!(ledger.consumed().time_ms, 20);
     }
 
     #[test]

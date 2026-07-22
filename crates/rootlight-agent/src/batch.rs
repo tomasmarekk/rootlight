@@ -1,21 +1,37 @@
 //! Bounded batch query planning and response shaping.
 //!
-//! This module owns the transport-neutral dependency plan, typed binding
-//! resolution, deterministic request-order result shaping, and aggregate usage
-//! accounting. The composing service remains responsible for invoking child
-//! tools and charging their work to a shared [`crate::policy::BudgetLedger`].
+//! This module owns the transport-neutral dependency plan, child dispatch
+//! schedule, typed binding resolution, shared budget and deadline policy,
+//! deterministic request-order result shaping, and aggregate usage accounting.
+//! The composing application implements [`crate::port::AgentToolPort`] to map
+//! admitted child calls onto its concrete client.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+use rootlight_ids::RepositoryId;
 use rootlight_mcp_contract::{
-    McpTool, PublicError,
+    McpTool, PublicError, SchemaVersion, TrustClassification,
     context::{
         BatchOperation as ContractBatchOperation, BatchOperationResult, BatchOperationStatus,
-        BatchStatus, BatchTool, QueryBatchInput,
+        BatchStatus, BatchTool, FailurePolicy, QueryBatchData, QueryBatchInput,
     },
-    vertical::{CacheStatus, ReadEnvelope, RequiredNullable, UsageSummary},
+    vertical::{
+        CacheStatus, CoverageSummary, ReadEnvelope, RequiredNullable, ResolvedRepository,
+        ResponseBudget, UsageSummary,
+    },
 };
 use serde_json::{Map, Value};
+
+use crate::{
+    policy::{
+        BudgetCharge, BudgetLedger, CancellationSignal, ExecutionPolicyError, is_compact_profile,
+    },
+    port::{AgentCallContext, AgentPortError, AgentToolPort, AgentToolRequest},
+};
 
 /// Maximum operations accepted in one public batch request.
 pub const MAX_BATCH_OPERATIONS: usize = 16;
@@ -502,6 +518,413 @@ fn resolve_binding(
             Ok(Value::Array(resolved))
         }
         scalar => Ok(scalar.clone()),
+    }
+}
+
+/// Default aggregate token ceiling for a batch without an explicit budget.
+pub const DEFAULT_BATCH_TOKENS: u16 = 3_000;
+
+/// Checked public failures injected into transport-neutral batch orchestration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchPublicErrors {
+    invalid_arguments: PublicError,
+    operation_failed: PublicError,
+    budget_exceeded: PublicError,
+}
+
+impl BatchPublicErrors {
+    /// Creates the source-free public failures used by batch result shaping.
+    #[must_use]
+    pub const fn new(
+        invalid_arguments: PublicError,
+        operation_failed: PublicError,
+        budget_exceeded: PublicError,
+    ) -> Self {
+        Self {
+            invalid_arguments,
+            operation_failed,
+            budget_exceeded,
+        }
+    }
+}
+
+/// Failure returned by complete transport-neutral batch orchestration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BatchOrchestrationError {
+    /// The request violated a batch invariant.
+    InvalidArguments,
+    /// The requested response profile is not implemented.
+    UnsupportedProfile,
+    /// Cooperative cancellation won.
+    Cancelled,
+    /// The parent deadline elapsed.
+    DeadlineExceeded,
+    /// Aggregate resource usage exceeded the parent budget.
+    BudgetExceeded,
+    /// No operation produced a successful generation-pinned result.
+    NoSuccessfulOperation(Box<PublicError>),
+    /// A child response violated repository or generation invariants.
+    InvalidResponse,
+    /// A bounded allocation or serialization operation failed.
+    Internal,
+}
+
+/// Complete application service for one public `query.batch` request.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BatchService;
+
+impl BatchService {
+    /// Executes a validated batch through a client-free agent tool port.
+    ///
+    /// The service owns dependency scheduling, fail-fast behavior, typed
+    /// bindings, parent and child budget enforcement, cancellation checkpoints,
+    /// deadline propagation, result shaping, and aggregate accounting.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BatchOrchestrationError`] when request admission fails,
+    /// cancellation or a deadline wins, the parent budget is exhausted, no
+    /// operation succeeds, or a child violates the port contract.
+    pub async fn execute<P, C>(
+        &self,
+        port: Arc<P>,
+        input: QueryBatchInput,
+        repository: RepositoryId,
+        cancellation: C,
+        errors: BatchPublicErrors,
+    ) -> Result<ReadEnvelope<QueryBatchData>, BatchOrchestrationError>
+    where
+        P: AgentToolPort<C>,
+        C: CancellationSignal + Clone + Send + Sync + 'static,
+    {
+        checkpoint(&cancellation)?;
+        if !is_compact_profile(input.response_profile) {
+            return Err(BatchOrchestrationError::UnsupportedProfile);
+        }
+
+        let dependencies = resolve_dependencies(&input.operations).map_err(map_execution_error)?;
+        let tools: Vec<McpTool> = input
+            .operations
+            .iter()
+            .map(|operation| mcp_tool_for_batch(operation.tool))
+            .collect();
+        let plan = BatchPlan::validate(&tools, &dependencies)
+            .map_err(|_| BatchOrchestrationError::InvalidArguments)?;
+
+        let parent_budget = admitted_parent_budget(input.budget.as_ref());
+        if parent_budget.evidence_level.is_some() {
+            return Err(BatchOrchestrationError::InvalidArguments);
+        }
+        let mut parent_ledger = BudgetLedger::new(Some(parent_budget.clone()));
+        parent_ledger
+            .charge(BudgetCharge {
+                results: u64::try_from(input.operations.len()).unwrap_or(u64::MAX),
+                ..BudgetCharge::default()
+            })
+            .map_err(map_policy_error)?;
+
+        let started_at = Instant::now();
+        let parent_deadline = deadline_from(started_at, parent_budget.timeout_ms)?;
+        let fail_fast = matches!(input.failure_policy, Some(FailurePolicy::FailFast));
+        let count = input.operations.len();
+        let mut results: Vec<Option<BatchOperationResult>> = vec![None; count];
+        let mut binding_envelopes: Vec<Option<ReadEnvelope<Value>>> = vec![None; count];
+        let mut observed_envelopes: Vec<Option<ReadEnvelope<Value>>> = vec![None; count];
+        let mut stop_scheduling = false;
+
+        for index in plan.execution_order {
+            checkpoint(&cancellation)?;
+            check_deadline(parent_deadline)?;
+            let operation = &input.operations[index];
+            if dependency_failed(&dependencies[index], &results) {
+                results[index] = Some(terminal_result(
+                    operation,
+                    BatchOperationStatus::SkippedDependency,
+                ));
+                continue;
+            }
+            if stop_scheduling {
+                results[index] = Some(terminal_result(
+                    operation,
+                    BatchOperationStatus::NotRunFailFast,
+                ));
+                continue;
+            }
+
+            let arguments = match resolve_arguments(
+                operation,
+                &binding_envelopes,
+                &input,
+                &dependencies[index],
+            ) {
+                Ok(arguments) => arguments,
+                Err(_) => {
+                    results[index] = Some(error_result(operation, &errors.invalid_arguments));
+                    stop_scheduling |= fail_fast;
+                    continue;
+                }
+            };
+            let child_budget =
+                effective_child_budget(&parent_budget, operation.local_budget.as_ref());
+            let child_deadline =
+                effective_child_deadline(parent_deadline, child_budget.timeout_ms)?;
+            let context =
+                AgentCallContext::new(cancellation.clone(), child_budget.clone(), child_deadline);
+            let request = AgentToolRequest::new(operation.tool, arguments);
+
+            match port.execute(request, context).await {
+                Ok(envelope) => {
+                    checkpoint(&cancellation)?;
+                    check_deadline(parent_deadline)?;
+                    validate_child_identity(&envelope, repository, &binding_envelopes)?;
+
+                    let charge = charge_for(&envelope.usage);
+                    parent_ledger.charge(charge).map_err(map_policy_error)?;
+                    observed_envelopes[index] = Some(envelope.clone());
+
+                    let mut child_ledger = BudgetLedger::new(Some(child_budget));
+                    if child_ledger
+                        .charge(BudgetCharge {
+                            results: 1,
+                            ..charge
+                        })
+                        .is_err()
+                    {
+                        results[index] = Some(error_result(operation, &errors.budget_exceeded));
+                        stop_scheduling |= fail_fast;
+                        continue;
+                    }
+                    results[index] = Some(success_result(operation, &envelope));
+                    binding_envelopes[index] = Some(envelope);
+                }
+                Err(AgentPortError::Public(error)) => {
+                    results[index] = Some(error_result(operation, &error));
+                    stop_scheduling |= fail_fast;
+                }
+                Err(AgentPortError::Cancelled) => {
+                    return Err(BatchOrchestrationError::Cancelled);
+                }
+                Err(AgentPortError::DeadlineExceeded) => {
+                    return Err(BatchOrchestrationError::DeadlineExceeded);
+                }
+                Err(AgentPortError::InvalidResponse) => {
+                    return Err(BatchOrchestrationError::InvalidResponse);
+                }
+                Err(AgentPortError::Unavailable) => {
+                    results[index] = Some(error_result(operation, &errors.operation_failed));
+                    stop_scheduling |= fail_fast;
+                }
+            }
+        }
+
+        checkpoint(&cancellation)?;
+        check_deadline(parent_deadline)?;
+        let operation_results: Vec<BatchOperationResult> = results.into_iter().flatten().collect();
+        let Some(source) = binding_envelopes.iter().flatten().next() else {
+            let first_error = operation_results
+                .iter()
+                .find_map(|result| result.error.clone())
+                .unwrap_or(errors.operation_failed);
+            return Err(BatchOrchestrationError::NoSuccessfulOperation(Box::new(
+                first_error,
+            )));
+        };
+
+        let truncated = operation_results.iter().any(|result| result.truncated);
+        let data = QueryBatchData {
+            batch_status: aggregate_status(&operation_results),
+            generation_id: source.generation.generation_id,
+            operation_results,
+            explanation: None,
+        };
+        Ok(ReadEnvelope {
+            schema_version: SchemaVersion::V1_0,
+            repository: ResolvedRepository {
+                repository_id: repository,
+                display_name: source.repository.display_name.clone(),
+            },
+            generation: source.generation.clone(),
+            coverage: CoverageSummary {
+                status: rootlight_ir::CoverageStatus::Bounded,
+                languages: source.coverage.languages.clone(),
+                skipped_inputs: source.coverage.skipped_inputs,
+            },
+            data,
+            truncated,
+            next_cursor: RequiredNullable(None),
+            usage: aggregate_usage(&observed_envelopes),
+            warnings: source.warnings.clone(),
+            trust: TrustClassification::UntrustedRepositoryData,
+        })
+    }
+}
+
+fn admitted_parent_budget(requested: Option<&ResponseBudget>) -> ResponseBudget {
+    let mut admitted = requested.cloned().unwrap_or(ResponseBudget {
+        max_results: None,
+        max_tokens: None,
+        max_source_bytes: None,
+        max_traversal_facts: None,
+        max_depth: None,
+        max_paths: None,
+        timeout_ms: None,
+        evidence_level: None,
+    });
+    admitted.max_tokens = Some(
+        admitted
+            .max_tokens
+            .unwrap_or(DEFAULT_BATCH_TOKENS)
+            .min(16_000),
+    );
+    admitted
+}
+
+fn effective_child_budget(
+    parent: &ResponseBudget,
+    local: Option<&ResponseBudget>,
+) -> ResponseBudget {
+    let Some(local) = local else {
+        return parent.clone();
+    };
+    ResponseBudget {
+        max_results: minimum(parent.max_results, local.max_results),
+        max_tokens: minimum(parent.max_tokens, local.max_tokens),
+        max_source_bytes: minimum(parent.max_source_bytes, local.max_source_bytes),
+        max_traversal_facts: minimum(parent.max_traversal_facts, local.max_traversal_facts),
+        max_depth: minimum(parent.max_depth, local.max_depth),
+        max_paths: minimum(parent.max_paths, local.max_paths),
+        timeout_ms: minimum(parent.timeout_ms, local.timeout_ms),
+        evidence_level: minimum_evidence(parent.evidence_level, local.evidence_level),
+    }
+}
+
+fn minimum<T>(parent: Option<T>, local: Option<T>) -> Option<T>
+where
+    T: Ord + Copy,
+{
+    match (parent, local) {
+        (Some(parent), Some(local)) => Some(parent.min(local)),
+        (Some(parent), None) => Some(parent),
+        (None, Some(local)) => Some(local),
+        (None, None) => None,
+    }
+}
+
+fn minimum_evidence(
+    parent: Option<rootlight_mcp_contract::vertical::ProvenanceLevel>,
+    local: Option<rootlight_mcp_contract::vertical::ProvenanceLevel>,
+) -> Option<rootlight_mcp_contract::vertical::ProvenanceLevel> {
+    use rootlight_mcp_contract::vertical::ProvenanceLevel;
+
+    fn rank(value: ProvenanceLevel) -> u8 {
+        match value {
+            ProvenanceLevel::None => 0,
+            ProvenanceLevel::Compact => 1,
+            ProvenanceLevel::Full => 2,
+        }
+    }
+
+    match (parent, local) {
+        (Some(parent), Some(local)) => Some(if rank(parent) <= rank(local) {
+            parent
+        } else {
+            local
+        }),
+        (Some(parent), None) => Some(parent),
+        (None, Some(local)) => Some(local),
+        (None, None) => None,
+    }
+}
+
+fn deadline_from(
+    started_at: Instant,
+    timeout_ms: Option<u32>,
+) -> Result<Option<Instant>, BatchOrchestrationError> {
+    timeout_ms
+        .map(|timeout_ms| {
+            started_at
+                .checked_add(Duration::from_millis(u64::from(timeout_ms)))
+                .ok_or(BatchOrchestrationError::Internal)
+        })
+        .transpose()
+}
+
+fn effective_child_deadline(
+    parent: Option<Instant>,
+    timeout_ms: Option<u32>,
+) -> Result<Option<Instant>, BatchOrchestrationError> {
+    let local = deadline_from(Instant::now(), timeout_ms)?;
+    Ok(match (parent, local) {
+        (Some(parent), Some(local)) => Some(parent.min(local)),
+        (Some(parent), None) => Some(parent),
+        (None, Some(local)) => Some(local),
+        (None, None) => None,
+    })
+}
+
+fn checkpoint<C>(cancellation: &C) -> Result<(), BatchOrchestrationError>
+where
+    C: CancellationSignal,
+{
+    if cancellation.is_cancelled() {
+        Err(BatchOrchestrationError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn check_deadline(deadline: Option<Instant>) -> Result<(), BatchOrchestrationError> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        Err(BatchOrchestrationError::DeadlineExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+fn charge_for(usage: &UsageSummary) -> BudgetCharge {
+    BudgetCharge {
+        results: 0,
+        tokens: usage.estimated_tokens,
+        source_bytes: usage.source_bytes,
+        traversal_facts: usage.edges,
+        depth: 0,
+        paths: 0,
+        time_ms: usage.wall_time_ms,
+    }
+}
+
+fn validate_child_identity(
+    envelope: &ReadEnvelope<Value>,
+    repository: RepositoryId,
+    completed: &[Option<ReadEnvelope<Value>>],
+) -> Result<(), BatchOrchestrationError> {
+    if envelope.repository.repository_id != repository {
+        return Err(BatchOrchestrationError::InvalidResponse);
+    }
+    if let Some(first) = completed.iter().flatten().next()
+        && envelope.generation.generation_id != first.generation.generation_id
+    {
+        return Err(BatchOrchestrationError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn map_execution_error(error: BatchExecutionError) -> BatchOrchestrationError {
+    match error {
+        BatchExecutionError::DuplicateOperationId
+        | BatchExecutionError::UnknownDependency
+        | BatchExecutionError::InvalidBinding => BatchOrchestrationError::InvalidArguments,
+        BatchExecutionError::Serialization | BatchExecutionError::MemoryUnavailable => {
+            BatchOrchestrationError::Internal
+        }
+    }
+}
+
+fn map_policy_error(error: ExecutionPolicyError) -> BatchOrchestrationError {
+    match error {
+        ExecutionPolicyError::Cancelled => BatchOrchestrationError::Cancelled,
+        ExecutionPolicyError::BudgetExceeded { .. } => BatchOrchestrationError::BudgetExceeded,
     }
 }
 
