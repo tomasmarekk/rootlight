@@ -58,6 +58,19 @@ pub struct CapabilityRule {
     pub summary: &'static str,
 }
 
+impl CapabilityRule {
+    /// Reports whether discovery should expose this rule as a limitation.
+    ///
+    /// Explicit accepted ancestors are review markers for fail-closed
+    /// admission, not user-facing limitations.
+    #[must_use]
+    fn is_public_limitation(self) -> bool {
+        self.status != CapabilityStatus::Implemented
+            && !(self.status == CapabilityStatus::FallbackLimited
+                && self.summary == ACCEPTED_FALLBACK_SUMMARY)
+    }
+}
+
 /// Pagination behavior advertised for one tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaginationSemantics {
@@ -337,6 +350,13 @@ const fn fallback_limited(path: &'static str, summary: &'static str) -> Capabili
     }
 }
 
+const ACCEPTED_FALLBACK_SUMMARY: &str =
+    "accepted with the tool's documented bounded fallback semantics";
+
+const fn accepted_fallback(path: &'static str) -> CapabilityRule {
+    fallback_limited(path, ACCEPTED_FALLBACK_SUMMARY)
+}
+
 const fn blocked(path: &'static str, summary: &'static str) -> CapabilityRule {
     CapabilityRule {
         path,
@@ -348,6 +368,9 @@ const fn blocked(path: &'static str, summary: &'static str) -> CapabilityRule {
 }
 
 const REPO_INDEX_RULES: &[CapabilityRule] = &[
+    accepted_fallback("root"),
+    accepted_fallback("mode"),
+    accepted_fallback("detached"),
     unsupported(
         "repository_id",
         "updating a registered repository is not served",
@@ -367,6 +390,9 @@ const REPO_INDEX_RULES: &[CapabilityRule] = &[
 ];
 
 const REPO_STATUS_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("include_operations"),
+    accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -405,6 +431,8 @@ const REPO_STATUS_RULES: &[CapabilityRule] = &[
 ];
 
 const REPO_LIST_RULES: &[CapabilityRule] = &[
+    accepted_fallback("max_results"),
+    accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     implemented("cursor", "uses an authenticated request-bound continuation"),
     blocked(
@@ -424,7 +452,21 @@ const REPO_LIST_RULES: &[CapabilityRule] = &[
     ),
 ];
 
+const OPERATION_STATUS_RULES: &[CapabilityRule] = &[
+    implemented("operation_id", "selects the repository operation"),
+    implemented("action", "selects status retrieval or cancellation"),
+    implemented("wait_ms", "bounds the operation status wait"),
+    implemented("after_revision", "waits for a newer operation revision"),
+];
+
 const CODE_LOCATE_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("generation"),
+    accepted_fallback("query"),
+    accepted_fallback("search_modes"),
+    accepted_fallback("max_results"),
+    accepted_fallback("budget"),
+    accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -481,6 +523,11 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
 ];
 
 const SYMBOL_EXPLAIN_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("generation"),
+    accepted_fallback("symbol_ids"),
+    accepted_fallback("include_provenance"),
+    accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -514,6 +561,15 @@ const SYMBOL_EXPLAIN_RULES: &[CapabilityRule] = &[
 ];
 
 const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("generation"),
+    accepted_fallback("symbol_ids"),
+    accepted_fallback("relations"),
+    accepted_fallback("direction"),
+    accepted_fallback("min_confidence"),
+    accepted_fallback("include_candidates"),
+    accepted_fallback("max_results"),
+    accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -540,6 +596,17 @@ const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
 ];
 
 const FLOW_TRACE_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("generation"),
+    accepted_fallback("from"),
+    accepted_fallback("to"),
+    accepted_fallback("relations"),
+    accepted_fallback("direction"),
+    accepted_fallback("max_depth"),
+    accepted_fallback("max_paths"),
+    accepted_fallback("min_confidence"),
+    accepted_fallback("cross_repository"),
+    accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -577,6 +644,15 @@ const FLOW_TRACE_RULES: &[CapabilityRule] = &[
 ];
 
 const CHANGE_IMPACT_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("generation"),
+    accepted_fallback("change"),
+    accepted_fallback("relation_policy"),
+    accepted_fallback("max_depth"),
+    accepted_fallback("include_tests"),
+    accepted_fallback("include_history"),
+    accepted_fallback("min_confidence"),
+    accepted_fallback("profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -615,6 +691,13 @@ const CHANGE_IMPACT_RULES: &[CapabilityRule] = &[
 ];
 
 const TESTS_SELECT_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("generation"),
+    accepted_fallback("seeds"),
+    accepted_fallback("test_kinds"),
+    accepted_fallback("max_tests"),
+    accepted_fallback("include_commands"),
+    accepted_fallback("profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -639,6 +722,13 @@ const TESTS_SELECT_RULES: &[CapabilityRule] = &[
 ];
 
 const ARCHITECTURE_OVERVIEW_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("generation"),
+    accepted_fallback("views"),
+    accepted_fallback("max_components"),
+    accepted_fallback("include_edges"),
+    accepted_fallback("min_confidence"),
+    accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -667,6 +757,13 @@ const ARCHITECTURE_OVERVIEW_RULES: &[CapabilityRule] = &[
 ];
 
 const ARCHITECTURE_CYCLES_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("generation"),
+    accepted_fallback("projection"),
+    accepted_fallback("min_size"),
+    accepted_fallback("max_cycles"),
+    accepted_fallback("include_self_cycles"),
+    accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -697,6 +794,14 @@ const ARCHITECTURE_CYCLES_RULES: &[CapabilityRule] = &[
 ];
 
 const CODE_DEAD_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("generation"),
+    accepted_fallback("entry_point_policy"),
+    accepted_fallback("include_exported"),
+    accepted_fallback("include_tests"),
+    accepted_fallback("min_confidence"),
+    accepted_fallback("max_candidates"),
+    accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -717,6 +822,13 @@ const CODE_DEAD_RULES: &[CapabilityRule] = &[
 ];
 
 const HISTORY_COMPARE_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("base"),
+    accepted_fallback("head"),
+    accepted_fallback("change_kinds"),
+    accepted_fallback("max_results"),
+    accepted_fallback("include_unchanged_context"),
+    accepted_fallback("profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -744,6 +856,13 @@ const HISTORY_COMPARE_RULES: &[CapabilityRule] = &[
 ];
 
 const PLAN_CHANGE_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("generation"),
+    accepted_fallback("objective"),
+    accepted_fallback("objective_text"),
+    accepted_fallback("targets"),
+    accepted_fallback("max_steps"),
+    accepted_fallback("profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -765,6 +884,10 @@ const PLAN_CHANGE_RULES: &[CapabilityRule] = &[
 ];
 
 const CONTEXT_PACK_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("generation"),
+    accepted_fallback("task"),
+    accepted_fallback("seeds"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -784,6 +907,13 @@ const CONTEXT_PACK_RULES: &[CapabilityRule] = &[
 ];
 
 const SOURCE_READ_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("generation"),
+    accepted_fallback("references"),
+    accepted_fallback("merge_overlaps"),
+    accepted_fallback("include_line_numbers"),
+    accepted_fallback("encoding"),
+    accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -803,6 +933,14 @@ const SOURCE_READ_RULES: &[CapabilityRule] = &[
     ),
     unsupported(
         "references[].file_id",
+        "file range selectors are not served by source reads",
+    ),
+    unsupported(
+        "references[].start_byte",
+        "file range selectors are not served by source reads",
+    ),
+    unsupported(
+        "references[].end_byte",
         "file range selectors are not served by source reads",
     ),
     unsupported_value("merge_overlaps", "true", "overlap merging is not served"),
@@ -834,6 +972,9 @@ const SOURCE_READ_RULES: &[CapabilityRule] = &[
 ];
 
 const QUERY_ADVANCED_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("generation"),
+    accepted_fallback("query"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -850,6 +991,10 @@ const QUERY_ADVANCED_RULES: &[CapabilityRule] = &[
 ];
 
 const QUERY_BATCH_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("operations"),
+    accepted_fallback("failure_policy"),
+    accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -939,7 +1084,7 @@ pub fn discovery_metadata(tool: McpTool) -> DiscoveryCapabilityMetadata {
     let limitations = capability
         .rules
         .iter()
-        .filter(|rule| rule.status != CapabilityStatus::Implemented)
+        .filter(|rule| rule.is_public_limitation())
         .map(|rule| DiscoveryCapabilityLimit {
             field: rule.path,
             value: rule.value,
@@ -988,7 +1133,7 @@ const fn tool_capability(tool: McpTool) -> ToolCapability {
         explain_supported: !matches!(tool, McpTool::RepoIndex | McpTool::OperationStatus),
         handler_path: Some(handler_path(tool)),
         status: tool_status(tool),
-        default_field_status: tool_status(tool),
+        default_field_status: CapabilityStatus::Blocked,
         rules: tool_rules(tool),
         pagination: pagination_semantics(tool),
         generation: generation_semantics(tool),
@@ -1053,7 +1198,7 @@ const fn tool_rules(tool: McpTool) -> &'static [CapabilityRule] {
         McpTool::RepoIndex => REPO_INDEX_RULES,
         McpTool::RepoStatus => REPO_STATUS_RULES,
         McpTool::RepoList => REPO_LIST_RULES,
-        McpTool::OperationStatus => &[],
+        McpTool::OperationStatus => OPERATION_STATUS_RULES,
         McpTool::CodeLocate => CODE_LOCATE_RULES,
         McpTool::SymbolExplain => SYMBOL_EXPLAIN_RULES,
         McpTool::SymbolRelationships => SYMBOL_RELATIONSHIPS_RULES,
@@ -1218,6 +1363,18 @@ mod tests {
     }
 
     #[test]
+    fn unreviewed_fields_fail_closed_for_every_tool() {
+        for entry in &CAPABILITIES {
+            assert_eq!(
+                entry.default_field_status,
+                CapabilityStatus::Blocked,
+                "{} must reject fields without an explicit rule",
+                entry.tool.name()
+            );
+        }
+    }
+
+    #[test]
     fn batch_metadata_matches_the_canonical_allowlist_and_shared_budget() {
         for entry in &CAPABILITIES {
             assert_eq!(
@@ -1344,6 +1501,8 @@ mod tests {
             "context_lines_after",
             "references[].symbol_id",
             "references[].file_id",
+            "references[].start_byte",
+            "references[].end_byte",
         ] {
             let disposition = source_read.disposition(path, None);
             assert_eq!(
@@ -1361,7 +1520,7 @@ mod tests {
 
     #[test]
     fn discovery_metadata_is_source_free_and_matches_the_registry() {
-        use super::{CapabilityStatus, discovery_metadata};
+        use super::discovery_metadata;
 
         for entry in &CAPABILITIES {
             let metadata = discovery_metadata(entry.tool);
@@ -1383,7 +1542,7 @@ mod tests {
                 entry
                     .rules
                     .iter()
-                    .filter(|rule| rule.status != CapabilityStatus::Implemented)
+                    .filter(|rule| rule.is_public_limitation())
                     .count()
             );
             let encoded = serde_json::to_string(&metadata).expect("capability metadata serializes");
@@ -1397,6 +1556,15 @@ mod tests {
         let operation_status = discovery_metadata(McpTool::OperationStatus);
         assert_eq!(operation_status.status, "implemented");
         assert!(operation_status.limitations.is_empty());
+
+        let repo_index = discovery_metadata(McpTool::RepoIndex);
+        assert!(
+            repo_index
+                .limitations
+                .iter()
+                .all(|limitation| limitation.field != "root"),
+            "accepted allowlist ancestors are not public limitations"
+        );
 
         let batch = discovery_metadata(McpTool::QueryBatch);
         assert_eq!(batch.generation, "batch_inherited");
