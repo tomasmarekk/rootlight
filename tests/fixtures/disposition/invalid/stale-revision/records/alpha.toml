@@ -4,20 +4,20 @@ title = "First synthetic stage"
 implementation_status = "complete"
 acceptance = "pass"
 gate_outcome = "not_applicable"
-source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
+source_revision = "2f905dbd417de429f5927875a8d00fbf6e3f5b99"
 dependencies = []
-dependents = ["bravo"]
+dependents = []
 residual_risks = []
 
 [detail]
 path = "details/alpha.md"
-source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
+source_revision = "2f905dbd417de429f5927875a8d00fbf6e3f5b99"
 sha256 = "f4f26df1aed56fcb8d414e8b900d396615e7b9cd6d309c4f69979670d031f4c7"
 bytes = 87
 
 [completion_report]
 path = "tests/fixtures/disposition/reports/alpha.md"
-source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
+source_revision = "2f905dbd417de429f5927875a8d00fbf6e3f5b99"
 sha256 = "0fb5503b91001c2d8fe522ceadd584b87e686cd041e6f5fb490c82197846b250"
 bytes = 50
 

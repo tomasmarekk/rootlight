@@ -148,11 +148,13 @@ jobs:
           set -o pipefail
           {
             cargo run --locked --quiet --package xtask -- disposition-check --root tests/fixtures/disposition
-            if cargo run --locked --quiet --package xtask -- disposition-check --root tests/fixtures/disposition/invalid/unchecked-without-report; then
-              echo "invalid disposition fixture was unexpectedly accepted"
-              exit 1
-            fi
-            echo "invalid disposition fixture rejected as required"
+            for fixture in tests/fixtures/disposition/invalid/*; do
+              if cargo run --locked --quiet --package xtask -- disposition-check --root "$fixture"; then
+                echo "invalid disposition fixture was unexpectedly accepted: $fixture"
+                exit 1
+              fi
+              echo "invalid disposition fixture rejected as required: $fixture"
+            done
           } 2>&1 | tee target/disposition-validation/report.txt
       - name: Retain disposition validation
         if: always()
