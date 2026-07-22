@@ -13,7 +13,7 @@ use rootlight_agent::explain::{
     plan_change_plan, query_batch_plan, repo_list_plan, repo_status_plan, source_read_plan,
     symbol_explain_plan, symbol_relationships_plan, tests_select_plan,
 };
-use rootlight_mcp_contract::context::PLANNER_VERSION;
+use rootlight_mcp_contract::context::{PLANNER_VERSION, PlanExplanation};
 
 /// A pinned generation used to make golden fingerprints reproducible.
 const PINNED_GENERATION: &str = "gen-golden-000000000000000000000000";
@@ -165,6 +165,31 @@ fn golden_context_pack() {
 }
 
 #[test]
+fn golden_query_advanced() {
+    let plan = PlanExplanation::new(
+        222,
+        vec!["Scan".to_owned(), "Filter".to_owned(), "Limit".to_owned()],
+        vec![
+            "max_results: 20".to_owned(),
+            "max_traversal: 100000".to_owned(),
+        ],
+    );
+    assert_eq!(
+        plan.operators,
+        vec!["Scan".to_owned(), "Filter".to_owned(), "Limit".to_owned()]
+    );
+    assert_eq!(
+        plan.applied_limits,
+        vec![
+            "max_results: 20".to_owned(),
+            "max_traversal: 100000".to_owned()
+        ]
+    );
+    assert_eq!(plan.estimated_cost, 222);
+    assert_eq!(plan.planner_version, PLANNER_VERSION);
+}
+
+#[test]
 fn golden_fingerprints_are_stable_for_a_pinned_generation() {
     // A representative plan per tool, finalized against one pinned generation,
     // yields a reproducible fingerprint across repeated construction.
@@ -185,6 +210,14 @@ fn golden_fingerprints_are_stable_for_a_pinned_generation() {
         context_pack_plan(3, 1000),
         query_batch_plan(2),
         repo_list_plan(),
+        PlanExplanation::new(
+            222,
+            vec!["Scan".to_owned(), "Filter".to_owned(), "Limit".to_owned()],
+            vec![
+                "max_results: 20".to_owned(),
+                "max_traversal: 100000".to_owned(),
+            ],
+        ),
     ];
     for plan in plans {
         let first = finalize_plan(plan.clone(), PINNED_GENERATION);
