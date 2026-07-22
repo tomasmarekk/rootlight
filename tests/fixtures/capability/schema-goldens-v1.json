@@ -1,0 +1,81 @@
+{
+  "schema": "rootlight.mcp-schema-goldens/1",
+  "tools": {
+    "architecture.cycles": {
+      "inputSha256": "ebe508ae4e5d19be3303d74035578cb3a0483945a32502e11ea838857b4893e1",
+      "outputSha256": "77cfefea9e7fd614f81924fdc77f07e966140096e1b4170087870c3c88eddea2"
+    },
+    "architecture.overview": {
+      "inputSha256": "1c3427879f0d2d92db588d115127c34a37a54371e896e52dcc935ad34b1d30b6",
+      "outputSha256": "6c8b25fe56cd3be7cbd25c9dcdcd2c35482bd401244a99851c39811dfe0de350"
+    },
+    "change.impact": {
+      "inputSha256": "ff0657f5f168b9d8e4697e0f2266369859d80dc558cd23ba8084ea825e1c03d9",
+      "outputSha256": "66c4b41513fabb5ab539398febde9e424f5e02dc32502b77d33ffe4f80a2272a"
+    },
+    "code.dead": {
+      "inputSha256": "89d5387117dcd114f45dc6f7d34d6c84d53acec6eba8e8240fce11b08a85cd64",
+      "outputSha256": "1cc825225820bf0006879f8784c60f7fde009da1da4b6f7bb0341581a23fdbd9"
+    },
+    "code.locate": {
+      "inputSha256": "45be57435c343b512a6287d2da333e350841ede1035ecada0e7d783b6dec1419",
+      "outputSha256": "cdea36a1fda74269a065f5ae0b2f7ccc166598541bc765a34c537217df1a9f83"
+    },
+    "context.pack": {
+      "inputSha256": "4f282273b65facee1d640a5589edb9ac8a7d493694fce706221f0bb13568629f",
+      "outputSha256": "4240a3201c5ccdd9d7377cc2c8fa4856413eaa48cf4ea74939a6878c43915ee9"
+    },
+    "flow.trace": {
+      "inputSha256": "674fe4f51b368be31db29ccb9611f0567b9c649e890b0d769e4c91e6ffde428f",
+      "outputSha256": "6a88bc26dd283fdc653398b1c4c8e5d1d646e3add063d63cacb1e9409ecf095b"
+    },
+    "history.compare": {
+      "inputSha256": "0faab3c18fc9d3818e598663bf647cc33f9884bad6cd4d8072a07d8bb6532e67",
+      "outputSha256": "1d1219a584adca2a84154936cc579f028a725dc7c9902e6dfeb4f3e8731b53f6"
+    },
+    "operation.status": {
+      "inputSha256": "94bc57b9b7d80145247576eec5935963a09055231a43a3a0bc7f58af4a2f4e7b",
+      "outputSha256": "2314d4160b8c21d3f304627483481ea2c382ad8092fbb44234cfca18b6a8c10d"
+    },
+    "plan.change": {
+      "inputSha256": "5f44fa58fb9e7e7ee20c9bad540e97e320acd3112059ec6fbd551a02c3b587d9",
+      "outputSha256": "2e9a683b81e9ecd35e44f53e2f7ab303bf74f34ae234af7dcf54337a13b458e0"
+    },
+    "query.advanced": {
+      "inputSha256": "c22fcb4c0e8b3ce55b189de76adf20f4dfac6eb2c35c9fde8cd2010812c818ac",
+      "outputSha256": "d3d889d75ed74c118133cc8475a56a3d00de4f3d2fd8fdfe15a713acc8ddb3d0"
+    },
+    "query.batch": {
+      "inputSha256": "e4acc6dd6901a8ea009053eb4920a1dc7646b8ac463b69b9c9fc5ded6b97b433",
+      "outputSha256": "88379757e611bc3e15282a46c591d107c641dc4deb7e65e743d53fe87acb70c8"
+    },
+    "repo.index": {
+      "inputSha256": "eddf99aecc028e03ad2bb711fd320aa63dcfc02c00a435fdc763654d4ff7b37c",
+      "outputSha256": "780662e64ec6a0822dbd9e3ecec9065c78a1d3359729206393fbe6c28777186b"
+    },
+    "repo.list": {
+      "inputSha256": "97c21aeb21f02869ed48db220809499e9bc3d21685f2597ca06eca38ff1d2985",
+      "outputSha256": "85a647f425aafc14286fd31e0e12763eac431f61195c2a5442b5d87e26a5f23f"
+    },
+    "repo.status": {
+      "inputSha256": "aca1a5111a267a0d07d0a63abd3803da8507194b8e2967fb5d79088b6119aaaa",
+      "outputSha256": "da247c29bcbae1a9c0cdad71fb63e94164c8a2c8aeca43b8a9b2d0cc18d80705"
+    },
+    "source.read": {
+      "inputSha256": "e6ee063d4735f9ff213878ecf5431e237ef25a623050de3c5cc6da75b1b4111e",
+      "outputSha256": "9a1b3d12242faa792739786c766c411b030d1e103a15d0e3f678c2499595d70a"
+    },
+    "symbol.explain": {
+      "inputSha256": "9136d44992dbe4190c60072b5dc59eefb4d68b409e38c6188b84aff136f6cc0e",
+      "outputSha256": "14486118fc9b99d3bfe8c44a02c6850d974f92dbfab8e5e1b060f3d46cf431f3"
+    },
+    "symbol.relationships": {
+      "inputSha256": "88617f68a3e5b20790296c469e114ea413124bb6a95fd422b147c49c73f6de46",
+      "outputSha256": "11d23f1e55a4750b7ff5b398b2c50590065ac029752e57c316cb93bb98f41c64"
+    },
+    "tests.select": {
+      "inputSha256": "357385e04a13f10e36334827b26dada1299b829aac148fb662bc0d49e85121c5",
+      "outputSha256": "90b7d731d4f4c1e4aa7ee26ba66f738e904e7419dea942852205165ccf8467b3"
+    }
+  }
+}

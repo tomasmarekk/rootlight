@@ -27,7 +27,9 @@ pub enum CapabilityStatus {
 }
 
 impl CapabilityStatus {
-    const fn name(self) -> &'static str {
+    /// Returns the stable machine-readable status name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Implemented => "implemented",
             Self::UnsupportedStableError => "unsupported_stable_error",
@@ -68,7 +70,9 @@ pub enum PaginationSemantics {
 }
 
 impl PaginationSemantics {
-    const fn name(self) -> &'static str {
+    /// Returns the stable machine-readable pagination name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::AuthenticatedCursor => "authenticated_cursor",
@@ -98,7 +102,9 @@ pub enum GenerationSemantics {
 }
 
 impl GenerationSemantics {
-    const fn name(self) -> &'static str {
+    /// Returns the stable machine-readable generation name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::CreatesGeneration => "creates_generation",
@@ -124,7 +130,9 @@ pub enum BudgetSemantics {
 }
 
 impl BudgetSemantics {
-    const fn name(self) -> &'static str {
+    /// Returns the stable machine-readable budget name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::PerRequest => "per_request",
