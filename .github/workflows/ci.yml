@@ -49,6 +49,7 @@ jobs:
           cargo run --locked --quiet --package xtask -- generate --check
           cargo run --locked --quiet --package xtask -- compatibility-check
           cargo run --locked --quiet --package xtask -- mcp-compatibility-check
+          cargo run --locked --quiet --package xtask -- budget-conformance-check
           cargo run --locked --quiet --package xtask -- policy-check
           cargo run --locked --quiet --package xtask -- license-check
           cargo run --locked --quiet --package xtask -- markdown-link-check --root tests/fixtures/markdown-links/valid
@@ -867,10 +868,116 @@ jobs:
           overwrite: false
           include-hidden-files: false
 
+  budget-evidence:
+    name: budget runtime evidence / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Build real process boundaries
+        run: cargo build --locked --package rootlight-daemon --package rootlight-mcp --package xtask
+      - name: Generate and validate bounded runtime evidence
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+          ROOTLIGHT_BUDGET_RUNTIME_REPORT: artifacts/budget/budget-runtime.json
+          ROOTLIGHT_CANCELLATION_PROCESS_REPORT: artifacts/budget/cancellation-process.json
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          mkdir -p artifacts/budget
+          cargo test --locked --package rootlight-mcp \
+            --test budget_process -- --ignored --nocapture
+          cargo test --locked --package rootlight-mcp \
+            --test cancellation_process -- --nocapture
+          cargo run --locked --quiet --package xtask -- budget-conformance-check \
+            --runtime-report "$ROOTLIGHT_BUDGET_RUNTIME_REPORT" \
+            --cancellation-report "$ROOTLIGHT_CANCELLATION_PROCESS_REPORT" \
+            --output artifacts/budget/conformance.json
+          cargo run --locked --quiet --package xtask -- budget-conformance-check \
+            --runtime-report "$ROOTLIGHT_BUDGET_RUNTIME_REPORT" \
+            --cancellation-report "$ROOTLIGHT_CANCELLATION_PROCESS_REPORT" \
+            --output artifacts/budget/conformance.second.json
+          cmp artifacts/budget/conformance.json artifacts/budget/conformance.second.json
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("artifacts/budget")
+          runtime = json.loads((root / "budget-runtime.json").read_bytes())
+          cancellation = json.loads((root / "cancellation-process.json").read_bytes())
+          conformance = json.loads((root / "conformance.json").read_bytes())
+          revision = os.environ["SOURCE_REVISION"]
+          expected = {
+              "budget-runtime.json": ("rootlight.mcp-budget-runtime/1", 128 * 1024),
+              "cancellation-process.json": (
+                  "rootlight.mcp-cancellation-process/1",
+                  64 * 1024,
+              ),
+              "conformance.json": (
+                  "rootlight.mcp-budget-conformance/1",
+                  2 * 1024 * 1024,
+              ),
+          }
+          documents = {
+              "budget-runtime.json": runtime,
+              "cancellation-process.json": cancellation,
+              "conformance.json": conformance,
+          }
+          for name, (schema, ceiling) in expected.items():
+              if documents[name].get("schema") != schema:
+                  raise SystemExit(f"{name} schema differs")
+              if documents[name].get("source_revision") != revision:
+                  raise SystemExit(f"{name} revision differs")
+              if (root / name).stat().st_size > ceiling:
+                  raise SystemExit(f"{name} exceeds its byte ceiling")
+          if len(runtime.get("cases", [])) != 14:
+              raise SystemExit("runtime evidence does not cover all 14 budget tools")
+          if len(cancellation.get("cases", [])) != 2:
+              raise SystemExit("cancellation evidence differs")
+          measured = [
+              tool for tool in conformance.get("tools", [])
+              if tool.get("runtime_trigger_coverage") == "covered_real_process"
+          ]
+          if len(measured) != 14:
+              raise SystemExit("conformance report does not accept all runtime cases")
+          if any(
+              tool.get("runtime_trigger_coverage") == "not_measured"
+              for tool in conformance.get("tools", [])
+          ):
+              raise SystemExit("conformance report retains an unmeasured budget tool")
+          encoded = b"".join(
+              (root / name).read_bytes()
+              for name in (
+                  "budget-runtime.json",
+                  "cancellation-process.json",
+                  "conformance.json",
+              )
+          )
+          if str(Path.cwd()).encode() in encoded:
+              raise SystemExit("budget evidence contains the checkout path")
+          PY
+      - name: Upload immutable runtime budget evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-budget-runtime-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/budget/budget-runtime.json
+            artifacts/budget/cancellation-process.json
+            artifacts/budget/conformance.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, commit-hygiene, parser-evidence, semantic-evidence, capability-evidence, adapter-isolation]
+    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, commit-hygiene, parser-evidence, semantic-evidence, capability-evidence, adapter-isolation, budget-evidence]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
