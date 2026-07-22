@@ -97,7 +97,7 @@ jobs:
                   "analysis": 13,
                   "developer": 19,
               },
-              "blockedGaps": 2,
+              "blockedGaps": 3,
           }
           if report != expected_report:
               raise SystemExit(f"capability parity report differs: {report!r}")

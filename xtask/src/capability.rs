@@ -26,6 +26,7 @@ const PARITY_ARTIFACT_SCHEMA: &str = "rootlight.mcp-capability-parity/1";
 const EXECUTION_MATRIX_SCHEMA: &str = "rootlight.mcp-execution-matrix/1";
 const INITIAL_MISMATCH_SCHEMA: &str = "rootlight.mcp-capability-mismatches/1";
 const SCHEMA_GOLDEN_SCHEMA: &str = "rootlight.mcp-schema-goldens/1";
+const MCP_EXECUTOR_SOURCE: &str = include_str!("../../apps/rootlight-mcp/src/executor.rs");
 
 /// Optional source-bound artifact output requested from the parity gate.
 pub(crate) struct Options {
@@ -77,7 +78,7 @@ pub(crate) fn check(options: &Options) -> Result<(), CapabilityError> {
     validate_contract_version(&registry, &mut problems);
     validate_batch_eligibility(&registry, &mut problems);
     validate_profile_membership(&registry, &mut problems);
-    validate_handler_disposition(&registry, &mut problems);
+    validate_handler_disposition(&registry, &registered_handler_names(), &mut problems);
     validate_input_contracts(&registry, &mut problems);
     validate_schema_goldens(&mut problems)?;
 
@@ -173,10 +174,14 @@ fn validate_batch_eligibility(registry: &[ToolCapability], problems: &mut Vec<Pr
                 ProblemKind::BatchNotReadOnly,
             ));
         }
-        if entry.batch_shared_budget {
+        let expected_shared_budget = entry.tool == McpTool::QueryBatch;
+        if entry.batch_shared_budget != expected_shared_budget {
             problems.push(Problem::new(
                 entry.tool.name(),
-                ProblemKind::UnprovenSharedBatchBudget,
+                ProblemKind::SharedBatchBudgetDrift {
+                    expected: expected_shared_budget,
+                    observed: entry.batch_shared_budget,
+                },
             ));
         }
     }
@@ -209,13 +214,62 @@ fn validate_profile_membership(registry: &[ToolCapability], problems: &mut Vec<P
     }
 }
 
-fn validate_handler_disposition(registry: &[ToolCapability], problems: &mut Vec<Problem>) {
+fn registered_handler_names() -> BTreeSet<&'static str> {
+    VerticalTool::ALL
+        .into_iter()
+        .map(VerticalTool::name)
+        .collect()
+}
+
+fn handler_function_exists(path: &str) -> bool {
+    let Some(function) = path.rsplit("::").next() else {
+        return false;
+    };
+    let generic_prefix = format!("async fn {function}<");
+    let plain_prefix = format!("async fn {function}(");
+    MCP_EXECUTOR_SOURCE.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with(&generic_prefix) || line.starts_with(&plain_prefix)
+    })
+}
+
+fn validate_handler_disposition(
+    registry: &[ToolCapability],
+    handlers: &BTreeSet<&str>,
+    problems: &mut Vec<Problem>,
+) {
+    for handler in handlers {
+        if !registry.iter().any(|entry| entry.tool.name() == *handler) {
+            problems.push(Problem::new(*handler, ProblemKind::UnregisteredHandler));
+        }
+    }
     for entry in registry {
+        let registered = handlers.contains(entry.tool.name());
+        let declared = entry.handler_path.is_some();
+        if let Some(path) = entry.handler_path
+            && !handler_function_exists(path)
+        {
+            problems.push(Problem::new(
+                entry.tool.name(),
+                ProblemKind::HandlerPathMissing {
+                    path: path.to_owned(),
+                },
+            ));
+        }
+        if declared != registered {
+            problems.push(Problem::new(
+                entry.tool.name(),
+                ProblemKind::HandlerAvailabilityDrift {
+                    declared,
+                    registered,
+                },
+            ));
+        }
         let has_explicit_disposition = matches!(
             entry.status,
             CapabilityStatus::UnsupportedStableError | CapabilityStatus::Blocked
         );
-        if !entry.handler_available && !has_explicit_disposition {
+        if !registered && !has_explicit_disposition {
             problems.push(Problem::new(
                 entry.tool.name(),
                 ProblemKind::MissingHandlerOrDisposition,
@@ -255,6 +309,51 @@ fn validate_input_contracts(registry: &[ToolCapability], problems: &mut Vec<Prob
         validate_rules(entry, &shape, problems);
         validate_field_dispositions(entry, &shape, problems);
         validate_cross_cutting_metadata(entry, &shape, problems);
+        if entry.tool == McpTool::QueryBatch {
+            validate_batch_tool_values(entry, &shape, problems);
+        }
+    }
+}
+
+fn validate_batch_tool_values(
+    entry: &ToolCapability,
+    shape: &BTreeMap<String, BTreeSet<String>>,
+    problems: &mut Vec<Problem>,
+) {
+    let path = "operations[].tool";
+    let Some(values) = shape.get(path) else {
+        return;
+    };
+    for tool in McpTool::ALL {
+        if is_batch_eligible(tool) && !values.contains(tool.name()) {
+            problems.push(Problem::new(
+                tool.name(),
+                ProblemKind::BatchToolMissingSchemaValue,
+            ));
+        }
+    }
+    for value in values {
+        let Some(tool) = McpTool::ALL
+            .into_iter()
+            .find(|tool| tool.name() == value.as_str())
+        else {
+            continue;
+        };
+        if is_batch_eligible(tool) {
+            continue;
+        }
+        let disposition = entry
+            .rules
+            .iter()
+            .find(|rule| rule.path == path && rule.value == Some(value.as_str()));
+        if !disposition.is_some_and(|rule| {
+            rule.status == CapabilityStatus::UnsupportedStableError && rule.error_code.is_some()
+        }) {
+            problems.push(Problem::new(
+                value,
+                ProblemKind::BatchToolMissingExplicitDisposition,
+            ));
+        }
     }
 }
 
@@ -320,7 +419,7 @@ fn validate_rules(
             ));
         }
         match (rule.status, rule.error_code) {
-            (CapabilityStatus::UnsupportedStableError, Some(ErrorCode::UnsupportedCapability)) => {}
+            (CapabilityStatus::UnsupportedStableError, Some(_)) => {}
             (CapabilityStatus::UnsupportedStableError, observed) => {
                 problems.push(Problem::new(
                     entry.tool.name(),
@@ -372,9 +471,7 @@ fn validate_resolved_rule(
             },
         ));
     }
-    if rule.status == CapabilityStatus::UnsupportedStableError
-        && rule.error_code != Some(ErrorCode::UnsupportedCapability)
-    {
+    if rule.status == CapabilityStatus::UnsupportedStableError && rule.error_code.is_none() {
         problems.push(Problem::new(
             entry.tool.name(),
             ProblemKind::UnsupportedWithoutStableError {
@@ -812,6 +909,23 @@ fn validate_initial_mismatches(value: &Value) -> Result<(), CapabilityError> {
             detail: "findings must be an array",
         },
     )?;
+    let expected_blocked: BTreeSet<String> = CAPABILITIES
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .rules
+                .iter()
+                .filter(|rule| rule.status == CapabilityStatus::Blocked)
+                .map(|rule| {
+                    format!(
+                        "{}::{}",
+                        entry.tool.name(),
+                        rule_identity(rule.path, rule.value)
+                    )
+                })
+        })
+        .collect();
+    let mut reported_blocked = BTreeSet::new();
     for finding in findings {
         let tool_name = finding.get("tool").and_then(Value::as_str).ok_or(
             CapabilityError::FixtureContract {
@@ -834,7 +948,8 @@ fn validate_initial_mismatches(value: &Value) -> Result<(), CapabilityError> {
                 detail: "finding tool is not registered",
             });
         };
-        if entry.disposition(capability, None).status != CapabilityStatus::Blocked
+        let disposition = entry.disposition(capability, None);
+        if disposition.status != CapabilityStatus::Blocked
             || finding
                 .get("currentRegistryDisposition")
                 .and_then(Value::as_str)
@@ -845,6 +960,21 @@ fn validate_initial_mismatches(value: &Value) -> Result<(), CapabilityError> {
                 detail: "finding no longer matches an explicit blocked disposition",
             });
         }
+        if !reported_blocked.insert(format!(
+            "{tool_name}::{}",
+            rule_identity(disposition.path, disposition.value)
+        )) {
+            return Err(CapabilityError::FixtureContract {
+                fixture: "initial-mismatches-v1.json",
+                detail: "findings contain a duplicate blocked disposition",
+            });
+        }
+    }
+    if reported_blocked != expected_blocked {
+        return Err(CapabilityError::FixtureContract {
+            fixture: "initial-mismatches-v1.json",
+            detail: "findings do not cover the complete current blocked set",
+        });
     }
     Ok(())
 }
@@ -869,7 +999,7 @@ fn build_registry_artifact_tools() -> Result<Vec<RegistryArtifactTool>, Capabili
                     .collect(),
                 batch_eligible: entry.batch_eligible,
                 explain_supported: entry.explain_supported,
-                handler_available: entry.handler_available,
+                handler_path: entry.handler_path,
                 pagination: entry.pagination.name(),
                 generation: entry.generation.name(),
                 budget: entry.budget.name(),
@@ -889,7 +1019,7 @@ fn build_execution_matrix_cases() -> Result<Vec<ExecutionMatrixCase>, Capability
             tool: entry.tool.name(),
             capability: "handler".to_owned(),
             value: None,
-            expected_disposition: if entry.handler_available {
+            expected_disposition: if entry.handler_path.is_some() {
                 "handler_available"
             } else {
                 entry.status.name()
@@ -996,7 +1126,8 @@ struct RegistryArtifactTool {
     profiles: Vec<&'static str>,
     batch_eligible: bool,
     explain_supported: bool,
-    handler_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handler_path: Option<&'static str>,
     pagination: &'static str,
     generation: &'static str,
     budget: &'static str,
@@ -1097,10 +1228,21 @@ enum ProblemKind {
     },
     BatchEligibilityDrift,
     BatchNotReadOnly,
-    UnprovenSharedBatchBudget,
+    SharedBatchBudgetDrift {
+        expected: bool,
+        observed: bool,
+    },
     ProfileMembership {
         expected: String,
         observed: String,
+    },
+    UnregisteredHandler,
+    HandlerAvailabilityDrift {
+        declared: bool,
+        registered: bool,
+    },
+    HandlerPathMissing {
+        path: String,
     },
     MissingHandlerOrDisposition,
     EmptySummary,
@@ -1133,6 +1275,8 @@ enum ProblemKind {
         path: String,
         observed: String,
     },
+    BatchToolMissingSchemaValue,
+    BatchToolMissingExplicitDisposition,
     ExplainDrift {
         expected: bool,
         observed: bool,
@@ -1187,13 +1331,30 @@ impl std::fmt::Display for Problem {
             ProblemKind::BatchNotReadOnly => {
                 write!(formatter, "batch-eligible tool must be read-only")
             }
-            ProblemKind::UnprovenSharedBatchBudget => {
-                write!(formatter, "shared batch budget is not mechanically proven")
-            }
+            ProblemKind::SharedBatchBudgetDrift { expected, observed } => write!(
+                formatter,
+                "shared child-execution budget is {observed}, expected {expected}"
+            ),
             ProblemKind::ProfileMembership { expected, observed } => write!(
                 formatter,
                 "profile membership is [{observed}], expected [{expected}]"
             ),
+            ProblemKind::UnregisteredHandler => {
+                write!(
+                    formatter,
+                    "runtime handler has no capability registry entry"
+                )
+            }
+            ProblemKind::HandlerAvailabilityDrift {
+                declared,
+                registered,
+            } => write!(
+                formatter,
+                "handler availability is declared {declared}, runtime registry reports {registered}"
+            ),
+            ProblemKind::HandlerPathMissing { path } => {
+                write!(formatter, "declared process handler does not exist: {path}")
+            }
             ProblemKind::MissingHandlerOrDisposition => {
                 write!(formatter, "no handler and no explicit disposition")
             }
@@ -1230,6 +1391,16 @@ impl std::fmt::Display for Problem {
             ProblemKind::UnexpectedStableError { path, observed } => write!(
                 formatter,
                 "non-error capability {path} unexpectedly declares {observed}"
+            ),
+            ProblemKind::BatchToolMissingSchemaValue => {
+                write!(
+                    formatter,
+                    "batch-eligible tool is absent from the batch schema"
+                )
+            }
+            ProblemKind::BatchToolMissingExplicitDisposition => write!(
+                formatter,
+                "schema-valid ineligible batch tool lacks an explicit stable pre-execution error"
             ),
             ProblemKind::ExplainDrift { expected, observed } => write!(
                 formatter,
@@ -1362,7 +1533,7 @@ mod tests {
         validate_contract_version(&CAPABILITIES, &mut problems);
         validate_batch_eligibility(&CAPABILITIES, &mut problems);
         validate_profile_membership(&CAPABILITIES, &mut problems);
-        validate_handler_disposition(&CAPABILITIES, &mut problems);
+        validate_handler_disposition(&CAPABILITIES, &registered_handler_names(), &mut problems);
         validate_input_contracts(&CAPABILITIES, &mut problems);
         validate_schema_goldens(&mut problems).expect("schema goldens are readable");
         assert!(problems.is_empty(), "unexpected problems: {problems:#?}");
@@ -1404,20 +1575,20 @@ mod tests {
     }
 
     #[test]
-    fn unproven_shared_batch_budget_is_rejected() {
-        let mut entry = entry(McpTool::QueryBatch);
+    fn shared_child_budget_drift_is_rejected() {
+        let mut entry = entry(McpTool::CodeLocate);
         entry.batch_shared_budget = true;
         let mut problems = Vec::new();
         validate_batch_eligibility(&[entry], &mut problems);
         assert!(
             problems
                 .iter()
-                .any(|problem| matches!(problem.kind, ProblemKind::UnprovenSharedBatchBudget))
+                .any(|problem| matches!(problem.kind, ProblemKind::SharedBatchBudgetDrift { .. }))
         );
     }
 
     #[test]
-    fn schema_field_addition_changes_the_reviewed_shape() {
+    fn ignored_schema_field_is_rejected_by_the_parity_gate() {
         let baseline = schema_shape(include_str!(
             "../../tests/fixtures/capability/baseline.schema.json"
         ))
@@ -1426,12 +1597,20 @@ mod tests {
             "../../tests/fixtures/capability/added-field.schema.json"
         ))
         .expect("field fixture is valid");
-        assert_ne!(input_shape_hash(&baseline), input_shape_hash(&added));
+        let mut capability = entry(McpTool::OperationStatus);
+        capability.input_shape_hash = Box::leak(input_shape_hash(&baseline).into_boxed_str());
+        let mut problems = Vec::new();
+        validate_shape_hash(&capability, &added, &mut problems);
         assert!(added.contains_key("ignored"));
+        assert!(
+            problems
+                .iter()
+                .any(|problem| matches!(problem.kind, ProblemKind::InputShapeHash { .. }))
+        );
     }
 
     #[test]
-    fn schema_enum_addition_changes_the_reviewed_shape() {
+    fn schema_only_enum_value_is_rejected_by_the_parity_gate() {
         let baseline = schema_shape(include_str!(
             "../../tests/fixtures/capability/baseline.schema.json"
         ))
@@ -1440,8 +1619,16 @@ mod tests {
             "../../tests/fixtures/capability/added-enum-value.schema.json"
         ))
         .expect("enum fixture is valid");
-        assert_ne!(input_shape_hash(&baseline), input_shape_hash(&added));
+        let mut capability = entry(McpTool::OperationStatus);
+        capability.input_shape_hash = Box::leak(input_shape_hash(&baseline).into_boxed_str());
+        let mut problems = Vec::new();
+        validate_shape_hash(&capability, &added, &mut problems);
         assert!(added["mode"].contains("future"));
+        assert!(
+            problems
+                .iter()
+                .any(|problem| matches!(problem.kind, ProblemKind::InputShapeHash { .. }))
+        );
     }
 
     #[test]
@@ -1465,6 +1652,30 @@ mod tests {
                 .iter()
                 .any(|problem| matches!(problem.kind, ProblemKind::UnknownRuleValue { .. }))
         );
+    }
+
+    #[test]
+    fn schema_valid_ineligible_batch_tool_requires_explicit_disposition() {
+        let mut batch = entry(McpTool::QueryBatch);
+        let rules = batch
+            .rules
+            .iter()
+            .copied()
+            .filter(|rule| !(rule.path == "operations[].tool" && rule.value == Some("plan.change")))
+            .collect::<Vec<_>>();
+        batch.rules = Box::leak(rules.into_boxed_slice());
+        let shape = schema_shape(
+            vertical_tool(McpTool::QueryBatch)
+                .expect("batch has a generated contract")
+                .input_schema_json(),
+        )
+        .expect("batch input schema is valid");
+        let mut problems = Vec::new();
+        validate_batch_tool_values(&batch, &shape, &mut problems);
+        assert!(problems.iter().any(|problem| matches!(
+            problem.kind,
+            ProblemKind::BatchToolMissingExplicitDisposition
+        )));
     }
 
     #[test]
@@ -1498,12 +1709,48 @@ mod tests {
     }
 
     #[test]
-    fn unregistered_handler_without_stable_error_is_rejected() {
+    fn handler_availability_drift_is_rejected() {
         let mut drifted = entry(McpTool::CodeLocate);
-        drifted.handler_available = false;
-        drifted.status = CapabilityStatus::FallbackLimited;
+        drifted.handler_path = None;
         let mut problems = Vec::new();
-        validate_handler_disposition(&[drifted], &mut problems);
+        validate_handler_disposition(&[drifted], &BTreeSet::from(["code.locate"]), &mut problems);
+        assert!(
+            problems.iter().any(|problem| matches!(
+                problem.kind,
+                ProblemKind::HandlerAvailabilityDrift { .. }
+            ))
+        );
+    }
+
+    #[test]
+    fn missing_declared_handler_function_is_rejected() {
+        let mut drifted = entry(McpTool::CodeLocate);
+        drifted.handler_path = Some("rootlight-mcp::executor::missing_handler");
+        let mut problems = Vec::new();
+        validate_handler_disposition(&[drifted], &BTreeSet::from(["code.locate"]), &mut problems);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| matches!(problem.kind, ProblemKind::HandlerPathMissing { .. }))
+        );
+    }
+
+    #[test]
+    fn unregistered_runtime_handler_is_rejected() {
+        let handlers = BTreeSet::from(["future.tool"]);
+        let mut problems = Vec::new();
+        validate_handler_disposition(&CAPABILITIES, &handlers, &mut problems);
+        assert!(problems.iter().any(|problem| {
+            problem.id == "future.tool" && matches!(problem.kind, ProblemKind::UnregisteredHandler)
+        }));
+    }
+
+    #[test]
+    fn missing_handler_without_stable_disposition_is_rejected() {
+        let mut drifted = entry(McpTool::CodeLocate);
+        drifted.handler_path = None;
+        let mut problems = Vec::new();
+        validate_handler_disposition(&[drifted], &BTreeSet::new(), &mut problems);
         assert!(
             problems
                 .iter()
@@ -1530,8 +1777,16 @@ mod tests {
         let first = temporary.path().join("first");
         let second = temporary.path().join("second");
         let revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        write_artifacts(&first, revision, 557, 2).expect("first artifacts are generated");
-        write_artifacts(&second, revision, 557, 2).expect("second artifacts are generated");
+        let reviewed_fields = reviewed_field_count().expect("generated schemas are valid");
+        let blocked_gaps = CAPABILITIES
+            .iter()
+            .flat_map(|entry| entry.rules)
+            .filter(|rule| rule.status == CapabilityStatus::Blocked)
+            .count();
+        write_artifacts(&first, revision, reviewed_fields, blocked_gaps)
+            .expect("first artifacts are generated");
+        write_artifacts(&second, revision, reviewed_fields, blocked_gaps)
+            .expect("second artifacts are generated");
 
         for name in [
             "capability-registry-v1.json",
@@ -1563,7 +1818,16 @@ mod tests {
         let cases = matrix["cases"]
             .as_array()
             .expect("matrix cases are an array");
-        assert!(cases.len() > 557);
+        assert!(cases.len() > reviewed_fields);
+        assert_eq!(
+            cases
+                .iter()
+                .filter_map(|case| case["id"].as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            cases.len(),
+            "matrix case identifiers must be unique"
+        );
         assert!(
             cases
                 .iter()

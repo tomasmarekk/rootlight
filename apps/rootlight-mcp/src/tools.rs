@@ -1550,7 +1550,11 @@ mod tests {
             assert_eq!(tool["execution"]["taskSupport"], "forbidden");
             let metadata = &tool["_meta"][DISCOVERY_METADATA_KEY];
             assert_eq!(metadata["contractVersion"], "1.0");
-            assert_eq!(metadata["status"], "fallback_limited");
+            let capability = CAPABILITIES
+                .iter()
+                .find(|capability| tool["name"] == capability.tool.name())
+                .expect("listed tool has a capability entry");
+            assert_eq!(metadata["status"], capability.status.name());
             assert!(
                 metadata["profiles"]
                     .as_array()
@@ -1582,7 +1586,7 @@ mod tests {
             .expect("query.batch is listed");
         assert_eq!(
             batch["_meta"][DISCOVERY_METADATA_KEY]["batchSharedBudget"],
-            false
+            true
         );
     }
 
@@ -1676,9 +1680,9 @@ mod tests {
         assert_eq!(
             observed,
             [
-                "4e4a8d5124906f957cb4fc17e480604c56c544538d431296cabfc26770617d82",
-                "44d08592780c613d3f954249fbce500bd181cf65827cde33dcbd696ff7eb36eb",
-                "1760188d0cc118519e3233b45ec4ec2a5c620a0d64b0b23df7c6e96b691882da",
+                "4759cecf649d03eca287567f33386003282a7068ce614396fd5ec352134192f2",
+                "94d9c1a2fc6962fea1e6108505bcbc157cfe49a825dee3401c85b88fd554186a",
+                "9d29b86da344f336429f49a85579f8ea154a5cf74f66762e470b724a8fdcb361",
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
         );

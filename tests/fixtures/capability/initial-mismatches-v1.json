@@ -4,6 +4,13 @@
   "findings": [
     {
       "tool": "query.batch",
+      "capability": "budget",
+      "schemaDisposition": "accepted",
+      "runtimeDisposition": "partially_accounted",
+      "currentRegistryDisposition": "blocked"
+    },
+    {
+      "tool": "query.batch",
       "capability": "operations[].local_budget.max_tokens",
       "schemaDisposition": "accepted",
       "runtimeDisposition": "not_propagated",

@@ -241,6 +241,82 @@ fn capability_registry_maps_every_tool_across_the_process_boundary() {
     assert!(stderr.is_empty());
 }
 
+#[test]
+fn scout_process_rejects_hidden_tool_invocation_after_profile_clamping() {
+    let isolated = tempfile::tempdir().expect("isolated MCP runtime root is available");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rootlight-mcp"))
+        .arg("--transport-only")
+        .env("ROOTLIGHT_STATE_DIR", isolated.path().join("state"))
+        .env("ROOTLIGHT_RUNTIME_DIR", isolated.path().join("runtime"))
+        .env("ROOTLIGHT_MCP_PROFILE", "scout")
+        .env("ROOTLIGHT_MCP_PROFILE_CEILING", "scout")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("MCP fixture process starts");
+    let mut input = child.stdin.take().expect("fixture stdin is piped");
+    let output = child.stdout.take().expect("fixture stdout is piped");
+    let mut output = BufReader::new(output);
+
+    write_message(
+        &mut input,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "initialize",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "fixture", "version": "1.0"},
+                "initializationOptions": {"rootlight_exposure_profile": "developer"}
+            }
+        }),
+    );
+    assert_eq!(read_response(&mut output)["id"], "initialize");
+    write_message(
+        &mut input,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+    );
+    write_message(
+        &mut input,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "list",
+            "method": "tools/list",
+            "params": {}
+        }),
+    );
+    let listed = read_response(&mut output);
+    assert_eq!(listed["result"]["tools"].as_array().map(Vec::len), Some(6));
+
+    write_message(
+        &mut input,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "hidden-call",
+            "method": "tools/call",
+            "params": {"name": "query.advanced", "arguments": {}}
+        }),
+    );
+    let hidden = read_response(&mut output);
+    assert_eq!(hidden["id"], "hidden-call");
+    assert_eq!(hidden["error"]["code"], -32_602);
+    assert_eq!(hidden["error"]["message"], "tool is not available");
+
+    drop(input);
+    drop(output);
+    let output = child
+        .wait_with_output()
+        .expect("MCP fixture process terminates");
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+}
+
 fn run_initialized_call(request: Value) -> (Value, Value, Output) {
     let isolated = tempfile::tempdir().expect("isolated MCP runtime root is available");
     let mut child = Command::new(env!("CARGO_BIN_EXE_rootlight-mcp"))
