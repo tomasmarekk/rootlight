@@ -201,6 +201,19 @@
           "description": "Stable pack identifier for the exact generation, request, and planner.",
           "$ref": "#/$defs/ContextPackId"
         },
+        "planner_version": {
+          "description": "Planner version bound into the request digest and pack identity.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 1000,
+          "minimum": 0
+        },
+        "request_digest": {
+          "description": "Full domain-separated digest of the canonical source-free request.",
+          "type": "string",
+          "maxLength": 72,
+          "minLength": 72
+        },
         "structure": {
           "description": "Rootlight-generated reading order and dependency notes.",
           "$ref": "#/$defs/ContextStructure"
@@ -213,6 +226,8 @@
       "additionalProperties": false,
       "required": [
         "pack_id",
+        "request_digest",
+        "planner_version",
         "items",
         "structure",
         "omitted",

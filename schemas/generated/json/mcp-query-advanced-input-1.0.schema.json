@@ -394,7 +394,7 @@
           ]
         },
         {
-          "description": "Traverse graph edges from a seed symbol or bound column.",
+          "description": "Traverse graph edges from a seed symbol.",
           "type": "object",
           "properties": {
             "direction": {
@@ -418,22 +418,13 @@
             },
             "seed": {
               "description": "Seed symbol identifier for the traversal origin.",
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/SymbolId"
-                }
-              ]
-            },
-            "seed_from": {
-              "description": "Column name providing seed identifiers from the input node.",
-              "type": "string",
-              "maxLength": 256,
-              "minLength": 1
+              "$ref": "#/$defs/SymbolId"
             }
           },
           "additionalProperties": false,
           "required": [
             "op",
+            "seed",
             "relation",
             "direction"
           ]
@@ -701,6 +692,31 @@
           "additionalProperties": false,
           "required": [
             "file"
+          ]
+        },
+        {
+          "description": "Reference to a typed scalar in `query.advanced.parameters`.\n\nParameter references are accepted only in value positions and are\nreplaced with their typed value before the query reaches the daemon.",
+          "type": "object",
+          "properties": {
+            "parameter": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "description": "Parameter name using the portable identifier grammar.",
+                  "type": "string",
+                  "maxLength": 64,
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "name"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "parameter"
           ]
         }
       ]

@@ -1015,6 +1015,8 @@
         },
         "data": {
           "pack_id": "pack-1",
+          "request_digest": "ctxreq1_44594c955e4acb72e2557767fd34876879c9e4b240f4f23d5ffee7696e3a9846",
+          "planner_version": 1,
           "items": [],
           "structure": {
             "reading_order": [],
