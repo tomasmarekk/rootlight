@@ -1,10 +1,11 @@
 //! Process-boundary coverage for the Rootlight MCP stdio bridge.
 
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     process::{Command, Output, Stdio},
 };
 
+use rootlight_mcp_contract::capability::{CAPABILITIES, DISCOVERY_METADATA_KEY};
 use serde_json::Value;
 
 #[test]
@@ -115,6 +116,129 @@ fn repo_list_cursor_failures_share_the_public_restart_contract() {
             expected_error
         );
     }
+}
+
+#[test]
+fn capability_registry_maps_every_tool_across_the_process_boundary() {
+    let isolated = tempfile::tempdir().expect("isolated MCP runtime root is available");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rootlight-mcp"))
+        .arg("--transport-only")
+        .env("ROOTLIGHT_STATE_DIR", isolated.path().join("state"))
+        .env("ROOTLIGHT_RUNTIME_DIR", isolated.path().join("runtime"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("MCP fixture process starts");
+    let mut input = child.stdin.take().expect("fixture stdin is piped");
+    let output = child.stdout.take().expect("fixture stdout is piped");
+    let mut output = BufReader::new(output);
+
+    write_message(
+        &mut input,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "initialize",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "fixture", "version": "1.0"}
+            }
+        }),
+    );
+    assert_eq!(read_response(&mut output)["id"], "initialize");
+    write_message(
+        &mut input,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+    );
+    write_message(
+        &mut input,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "list",
+            "method": "tools/list",
+            "params": {}
+        }),
+    );
+    let list_response = read_response(&mut output);
+    let list = list_response["result"]["tools"]
+        .as_array()
+        .expect("tools/list result is an array");
+    assert_eq!(list.len(), CAPABILITIES.len());
+    for (listed, capability) in list.iter().zip(&CAPABILITIES) {
+        assert_eq!(listed["name"], capability.tool.name());
+    }
+    for intent in [
+        "code.locate",
+        "change.impact",
+        "architecture.overview",
+        "history.compare",
+        "context.pack",
+        "query.batch",
+    ] {
+        let metadata = &list
+            .iter()
+            .find(|tool| tool["name"] == intent)
+            .unwrap_or_else(|| panic!("{intent} is discoverable"))["_meta"][DISCOVERY_METADATA_KEY];
+        assert_eq!(metadata["status"], "fallback_limited");
+        assert!(
+            metadata["fallbackSummary"]
+                .as_str()
+                .is_some_and(|summary| summary.starts_with("bounded"))
+        );
+    }
+
+    for capability in &CAPABILITIES {
+        let id = format!("call-{}", capability.tool.name());
+        write_message(
+            &mut input,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id.clone(),
+                "method": "tools/call",
+                "params": {
+                    "name": capability.tool.name(),
+                    "arguments": {}
+                }
+            }),
+        );
+        let response = read_response(&mut output);
+        assert_eq!(response["id"], id);
+        if response["error"]["code"] == -32_603 {
+            assert_eq!(response["error"]["message"], "tool transport failed");
+        } else if response["result"]["isError"] == true {
+            assert!(
+                response["result"]["structuredContent"]["error"]["code"]
+                    .as_str()
+                    .is_some(),
+                "{} must return a stable public error",
+                capability.tool.name()
+            );
+        } else {
+            assert!(
+                response["result"]["structuredContent"].is_object(),
+                "{} must return a checked handler result",
+                capability.tool.name()
+            );
+        }
+    }
+    drop(input);
+    drop(output);
+    let status = child.wait().expect("MCP fixture process terminates");
+    assert!(status.success());
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("fixture stderr is piped")
+        .read_to_string(&mut stderr)
+        .expect("fixture stderr reads");
+    assert!(stderr.is_empty());
 }
 
 fn run_initialized_call(request: Value) -> (Value, Value, Output) {
