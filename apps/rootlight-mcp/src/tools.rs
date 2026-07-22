@@ -14,8 +14,7 @@ use rootlight_mcp_contract::{
     TrustClassification, VerticalTool,
     capability::{DISCOVERY_METADATA_KEY, discovery_metadata},
     context::{
-        BatchOperation, BatchTool, ContextPackInput, QueryAdvancedInput, QueryAstNode,
-        QueryBatchInput,
+        BatchOperation, ContextPackInput, QueryAdvancedInput, QueryAstNode, QueryBatchInput,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -29,7 +28,10 @@ use super::{
     RequestHandler, request_meta_is_valid,
 };
 use crate::advanced::{AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL, QueryOperator};
-use crate::batch::{BatchPlan, is_batch_allowed_under_profile};
+use crate::batch::{BatchPlan, is_batch_allowed_under_profile, mcp_tool_for_batch};
+
+#[cfg(test)]
+use rootlight_mcp_contract::context::BatchTool;
 
 const INTERNAL_ERROR: i32 = -32_603;
 const MAX_TOOL_NAME_BYTES: usize = 128;
@@ -712,24 +714,6 @@ fn collect_ast_operators(
     operators.push(operator);
     for child in children {
         collect_ast_operators(child, operators, depth, current + 1);
-    }
-}
-
-/// Maps a public batch subtool to its catalog counterpart.
-pub(crate) const fn mcp_tool_for_batch(tool: BatchTool) -> McpTool {
-    match tool {
-        BatchTool::CodeLocate => McpTool::CodeLocate,
-        BatchTool::SymbolExplain => McpTool::SymbolExplain,
-        BatchTool::SymbolRelationships => McpTool::SymbolRelationships,
-        BatchTool::FlowTrace => McpTool::FlowTrace,
-        BatchTool::ChangeImpact => McpTool::ChangeImpact,
-        BatchTool::TestsSelect => McpTool::TestsSelect,
-        BatchTool::ArchitectureOverview => McpTool::ArchitectureOverview,
-        BatchTool::ArchitectureCycles => McpTool::ArchitectureCycles,
-        BatchTool::CodeDead => McpTool::CodeDead,
-        BatchTool::PlanChange => McpTool::PlanChange,
-        BatchTool::ContextPack => McpTool::ContextPack,
-        BatchTool::SourceRead => McpTool::SourceRead,
     }
 }
 

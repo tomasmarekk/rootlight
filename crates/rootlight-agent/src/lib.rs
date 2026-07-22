@@ -1,8 +1,8 @@
 //! Transport-neutral agent-domain orchestration for Rootlight.
 //!
-//! This crate owns the planning and shaping behavior that document 07 assigns
-//! to the agent boundary: context-pack optimization, and (in later slices)
-//! batch orchestration, advanced-query normalization, and response shaping.
+//! This crate owns the planning and shaping behavior assigned to the agent
+//! boundary: context-pack optimization, batch orchestration, advanced-query
+//! normalization, response policy, and response shaping.
 //! Application binaries compose these services and stay thin: protocol framing,
 //! schema validation, exposure-profile authorization, and IPC composition.
 //!
@@ -16,3 +16,4 @@ pub mod advanced;
 pub mod batch;
 pub mod context_pack;
 pub mod explain;
+pub mod policy;

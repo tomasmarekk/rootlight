@@ -11,6 +11,18 @@ use std::{
     sync::Arc,
 };
 
+use rootlight_agent::{
+    batch::{
+        BatchPlan, aggregate_status as aggregate_batch_status,
+        aggregate_usage as aggregate_batch_usage, dependency_failed, error_result,
+        mcp_tool_for_batch, resolve_arguments as resolve_batch_arguments,
+        resolve_dependencies as resolve_batch_dependencies, success_result, terminal_result,
+    },
+    context_pack::{
+        ContextPackPlanRequest, ContextPackPlanner, DefaultContextPackPlanner, context_pack_id,
+    },
+    policy::is_compact_profile,
+};
 use rootlight_client::{
     self as client, CodeLocate, LocateMode, RepositoryIndex, RepositoryList,
     RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, SourceRead,
@@ -41,11 +53,10 @@ use rootlight_mcp_contract::{
     PublicErrorBuildError, RepoIndexInput, RepositorySelector, SafeLabel, SchemaVersion,
     SourceReadInput, SymbolExplainInput, ToolResponse, TrustClassification, VerticalTool,
     context::{
-        BatchOperation, BatchOperationResult, BatchOperationStatus, BatchStatus, BatchTool,
-        ColumnSchema, ColumnType, ContextItem, ContextPackData, ContextPackId, ContextPackInput,
-        ContextStructure, EvidenceRole as ContextEvidenceRole, FailurePolicy, OmissionSummary,
+        BatchOperationResult, BatchOperationStatus, BatchStatus, BatchTool, ColumnSchema,
+        ColumnType, ContextPackData, ContextPackInput, ContextStructure, FailurePolicy,
         PlanExplanation, QueryAdvancedData, QueryAdvancedInput, QueryAstNode, QueryBatchData,
-        QueryBatchInput, QueryCompleteness, TokenAccounting, ToolSuggestion,
+        QueryBatchInput, QueryCompleteness, TokenAccounting,
     },
     pagination::{AuthenticatedCursor, CursorContext},
     repository::{
@@ -61,9 +72,9 @@ use rootlight_mcp_contract::{
         OperationStatusInput, OperationStatusSuccess, ProvenanceLevel, ProvenanceSummary,
         QueryInterpretation, ReadEnvelope, RepoIndexData, RepoIndexSuccess, RequiredNullable,
         ResolvedRepository, ResponseBudget, ResponseProfile, ResponseWarning, SearchMode,
-        SourceChunk, SourceElision, SourceEncoding, SourceEncodingRequest, SourceFreeMessage,
-        SourceReadData, SourceReadSelector, StaleSourceReference, SymbolExplainData,
-        SymbolExplanation, UsageSummary,
+        SourceChunk, SourceElision, SourceEncoding, SourceEncodingRequest, SourceReadData,
+        SourceReadSelector, StaleSourceReference, SymbolExplainData, SymbolExplanation,
+        UsageSummary,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -73,12 +84,6 @@ use unicode_casefold::UnicodeCaseFold as _;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::advanced::{AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL, QueryOperator};
-use crate::batch::BatchPlan;
-use crate::context_pack::{
-    EvidenceCandidate as PackEvidenceCandidate, EvidenceRole as PackEvidenceRole, PackObjective,
-    PackResult, optimize_pack,
-};
-use crate::tools::mcp_tool_for_batch;
 use crate::{
     RequestCancellation, ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture,
     ToolExecutor,
@@ -1665,7 +1670,7 @@ where
     if input.budget.is_some() {
         return Err(unsupported_field("budget"));
     }
-    if !compact_profile(input.response_profile) {
+    if !is_compact_profile(input.response_profile) {
         return Err(unsupported_field("response_profile"));
     }
     let operation_failed =
@@ -1679,7 +1684,7 @@ where
         .map(|operation| mcp_tool_for_batch(operation.tool))
         .collect();
     let dependencies = resolve_batch_dependencies(&input.operations)
-        .ok_or_else(|| ToolExecutionError::new(invalid_arguments.clone()))?;
+        .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
     let plan = BatchPlan::validate(&tools, &dependencies)
         .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
 
@@ -1714,7 +1719,7 @@ where
             resolve_batch_arguments(operation, &envelopes, &input, &dependencies[index]);
         let sub_arguments = match sub_arguments {
             Ok(arguments) => arguments,
-            Err(()) => {
+            Err(_) => {
                 results[index] = Some(error_result(operation, invalid_arguments));
                 stop_scheduling |= fail_fast;
                 continue;
@@ -1787,113 +1792,6 @@ where
     serialize_success(envelope)
 }
 
-/// Resolves batch operation dependencies to indices, rejecting duplicate
-/// operation ids and references to unknown operations.
-fn resolve_batch_dependencies(operations: &[BatchOperation]) -> Option<Vec<Vec<usize>>> {
-    let mut seen = BTreeSet::new();
-    for operation in operations {
-        if !seen.insert(operation.id.clone()) {
-            return None;
-        }
-    }
-    let mut dependencies = Vec::with_capacity(operations.len());
-    for operation in operations {
-        let mut resolved = Vec::new();
-        if let Some(declared) = &operation.depends_on {
-            for name in declared {
-                let index = operations.iter().position(|other| other.id == *name)?;
-                resolved.push(index);
-            }
-        }
-        dependencies.push(resolved);
-    }
-    Some(dependencies)
-}
-
-/// Reports whether any declared dependency did not complete successfully.
-fn dependency_failed(dependencies: &[usize], results: &[Option<BatchOperationResult>]) -> bool {
-    dependencies.iter().any(|index| {
-        matches!(
-            results[*index].as_ref().map(|result| result.status),
-            Some(
-                BatchOperationStatus::Error
-                    | BatchOperationStatus::SkippedDependency
-                    | BatchOperationStatus::NotRunFailFast
-            )
-        )
-    })
-}
-
-/// Builds subtool arguments by resolving typed bindings and injecting the
-/// batch-inherited repository and generation.
-fn resolve_batch_arguments(
-    operation: &BatchOperation,
-    envelopes: &[Option<ReadEnvelope<Value>>],
-    input: &QueryBatchInput,
-    declared: &[usize],
-) -> Result<Map<String, Value>, ()> {
-    let mut arguments = Map::new();
-    for (key, value) in &operation.arguments {
-        let resolved = resolve_batch_binding(value, envelopes, &input.operations, declared)?;
-        arguments.insert(key.clone(), resolved);
-    }
-    arguments.insert(
-        "repository".to_owned(),
-        serde_json::to_value(&input.repository).map_err(|_| ())?,
-    );
-    if let Some(generation) = &input.generation {
-        arguments.insert(
-            "generation".to_owned(),
-            serde_json::to_value(generation).map_err(|_| ())?,
-        );
-    }
-    Ok(arguments)
-}
-
-/// Recursively replaces `{"$from", "pointer"}` binding leaves with the value at
-/// the referenced JSON pointer in the completed dependency response.
-fn resolve_batch_binding(
-    value: &Value,
-    envelopes: &[Option<ReadEnvelope<Value>>],
-    operations: &[BatchOperation],
-    declared: &[usize],
-) -> Result<Value, ()> {
-    match value {
-        Value::Object(map) => {
-            if let Some(from) = map.get("$from") {
-                let from_name = from.as_str().ok_or(())?;
-                let pointer = map.get("pointer").and_then(Value::as_str).ok_or(())?;
-                let dependency = declared
-                    .iter()
-                    .find(|&&index| operations[index].id == from_name)
-                    .ok_or(())?;
-                let envelope = envelopes[*dependency].as_ref().ok_or(())?;
-                let encoded = serde_json::to_value(envelope).map_err(|_| ())?;
-                encoded.pointer(pointer).cloned().ok_or(())
-            } else {
-                let mut resolved = Map::new();
-                for (key, inner) in map {
-                    resolved.insert(
-                        key.clone(),
-                        resolve_batch_binding(inner, envelopes, operations, declared)?,
-                    );
-                }
-                Ok(Value::Object(resolved))
-            }
-        }
-        Value::Array(items) => {
-            let mut resolved = Vec::with_capacity(items.len());
-            for inner in items {
-                resolved.push(resolve_batch_binding(
-                    inner, envelopes, operations, declared,
-                )?);
-            }
-            Ok(Value::Array(resolved))
-        }
-        scalar => Ok(scalar.clone()),
-    }
-}
-
 /// Dispatches one batch subtool to its production handler, failing with a
 /// checked capability error for subtools that have no engine yet.
 async fn execute_batch_subtool<P>(
@@ -1936,96 +1834,6 @@ where
     }
 }
 
-fn success_result(
-    operation: &BatchOperation,
-    envelope: &ReadEnvelope<Value>,
-) -> BatchOperationResult {
-    BatchOperationResult {
-        id: operation.id.clone(),
-        tool: operation.tool,
-        status: BatchOperationStatus::Ok,
-        data: Some(envelope.data.clone()),
-        error: None,
-        truncated: envelope.truncated,
-        next_cursor: envelope.next_cursor.clone(),
-        usage: Some(envelope.usage.clone()),
-        warnings: envelope.warnings.clone(),
-    }
-}
-
-fn error_result(operation: &BatchOperation, error: &PublicError) -> BatchOperationResult {
-    BatchOperationResult {
-        id: operation.id.clone(),
-        tool: operation.tool,
-        status: BatchOperationStatus::Error,
-        data: None,
-        error: Some(error.clone()),
-        truncated: false,
-        next_cursor: RequiredNullable(None),
-        usage: None,
-        warnings: Vec::new(),
-    }
-}
-
-fn terminal_result(
-    operation: &BatchOperation,
-    status: BatchOperationStatus,
-) -> BatchOperationResult {
-    BatchOperationResult {
-        id: operation.id.clone(),
-        tool: operation.tool,
-        status,
-        data: None,
-        error: None,
-        truncated: false,
-        next_cursor: RequiredNullable(None),
-        usage: None,
-        warnings: Vec::new(),
-    }
-}
-
-fn aggregate_batch_status(results: &[BatchOperationResult]) -> BatchStatus {
-    let any_ok = results
-        .iter()
-        .any(|result| result.status == BatchOperationStatus::Ok);
-    let all_ok = results
-        .iter()
-        .all(|result| result.status == BatchOperationStatus::Ok);
-    if all_ok {
-        BatchStatus::Ok
-    } else if any_ok {
-        BatchStatus::Partial
-    } else {
-        BatchStatus::Error
-    }
-}
-
-fn aggregate_batch_usage(envelopes: &[Option<ReadEnvelope<Value>>]) -> UsageSummary {
-    let mut usage = UsageSummary {
-        rows: 0,
-        edges: 0,
-        source_bytes: 0,
-        json_bytes: 0,
-        estimated_tokens: 0,
-        wall_time_ms: 0,
-        cache_status: CacheStatus::Miss,
-        trace_id: "batch".to_owned(),
-    };
-    for envelope in envelopes.iter().flatten() {
-        usage.rows = usage.rows.saturating_add(envelope.usage.rows);
-        usage.edges = usage.edges.saturating_add(envelope.usage.edges);
-        usage.source_bytes = usage
-            .source_bytes
-            .saturating_add(envelope.usage.source_bytes);
-        usage.json_bytes = usage.json_bytes.saturating_add(envelope.usage.json_bytes);
-        usage.estimated_tokens = usage
-            .estimated_tokens
-            .saturating_add(envelope.usage.estimated_tokens);
-        usage.wall_time_ms = usage.wall_time_ms.max(envelope.usage.wall_time_ms);
-    }
-    usage
-}
-
 /// Assembles a bounded `context.pack` from seed-symbol definition evidence.
 ///
 /// Retrieval is served through `symbol.explain`; the deterministic pack
@@ -2059,7 +1867,7 @@ where
         &status.active_generation.to_string(),
     );
     let data = ContextPackData {
-        pack_id: pack_id(input, status.active_generation),
+        pack_id: context_pack_id(input, status.active_generation),
         items: Vec::new(),
         structure: ContextStructure {
             reading_order: Vec::new(),
@@ -2158,44 +1966,28 @@ where
     explain_arguments.insert("symbol_ids".to_owned(), serialize_json(&seed_symbols)?);
 
     let explain_output =
-        execute_symbol_explain(port, explain_arguments, cancellation, unsupported).await?;
+        execute_symbol_explain(port, explain_arguments, cancellation.clone(), unsupported).await?;
     let explain_envelope: ReadEnvelope<SymbolExplainData> =
         serde_json::from_value(Value::Object(explain_output))
             .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
 
-    let mut definitions: BTreeMap<String, SourceRef> = BTreeMap::new();
-    let mut candidates: Vec<PackEvidenceCandidate> = Vec::new();
-    for explanation in &explain_envelope.data.symbols {
-        definitions.insert(
-            explanation.symbol_id.to_string(),
-            explanation.definition.clone(),
-        );
-        let signature_bytes = explanation.signature.as_ref().map_or(0, String::len);
-        let estimated_tokens =
-            u32::try_from((signature_bytes + explanation.display_name.len()).div_ceil(4))
-                .unwrap_or(u32::MAX);
-        candidates.push(PackEvidenceCandidate {
-            identity: explanation.symbol_id.to_string(),
-            role: PackEvidenceRole::Definition,
-            relevance: explanation.confidence,
-            confidence: explanation.confidence,
-            estimated_tokens,
-            source_path: explanation.definition.span().file().to_string(),
-        });
-    }
-
-    let objective = objective_for_task(&input.task);
-    let pack = optimize_pack(objective, &mut candidates, u32::from(input.token_budget))
+    let planned = DefaultContextPackPlanner
+        .plan(
+            ContextPackPlanRequest {
+                input: &input,
+                generation: explain_envelope.generation.generation_id,
+                symbols: &explain_envelope.data.symbols,
+            },
+            &cancellation,
+        )
         .map_err(|_| ToolExecutionError::new(unsupported.clone()))?;
-
-    let data = context_pack_data(&input, &pack, &definitions, &explain_envelope);
     let envelope = ReadEnvelope {
         schema_version: SchemaVersion::V1_0,
         repository: explain_envelope.repository.clone(),
         generation: explain_envelope.generation.clone(),
         coverage: explain_envelope.coverage.clone(),
-        data,
-        truncated: pack.truncated,
+        data: planned.data,
+        truncated: planned.truncated,
         next_cursor: RequiredNullable(None),
         usage: explain_envelope.usage.clone(),
         warnings: explain_envelope.warnings.clone(),
@@ -2206,165 +1998,6 @@ where
 
 fn serialize_json<T: Serialize>(value: &T) -> Result<Value, ToolExecutionError> {
     serde_json::to_value(value).map_err(|_| internal(ToolExecutionFailure::Executor))
-}
-
-/// Classifies a free-text task objective into the pack planner's objective set.
-///
-/// The task is user-supplied guidance, not repository content, so keyword
-/// classification stays source-free.
-fn objective_for_task(task: &str) -> PackObjective {
-    let task = task.to_lowercase();
-    if task.contains("fix")
-        || task.contains("bug")
-        || task.contains("error")
-        || task.contains("crash")
-        || task.contains("broken")
-    {
-        PackObjective::BugFix
-    } else if task.contains("refactor")
-        || task.contains("restructure")
-        || task.contains("simplify")
-        || task.contains("clean")
-    {
-        PackObjective::Refactor
-    } else if task.contains("migrat")
-        || task.contains("upgrade")
-        || task.contains("port to")
-        || task.contains("move to")
-    {
-        PackObjective::Migration
-    } else if task.contains("review") || task.contains("audit") || task.contains("security") {
-        PackObjective::Review
-    } else {
-        PackObjective::Explanation
-    }
-}
-
-fn context_pack_data(
-    input: &ContextPackInput,
-    pack: &PackResult,
-    definitions: &BTreeMap<String, SourceRef>,
-    explain_envelope: &ReadEnvelope<SymbolExplainData>,
-) -> ContextPackData {
-    let items: Vec<ContextItem> = pack
-        .items
-        .iter()
-        .map(|item| ContextItem {
-            role: context_role(item.candidate.role),
-            symbol_id: item.candidate.identity.parse::<SymbolId>().ok(),
-            source_ref: definitions.get(&item.candidate.identity).cloned(),
-            score: item.candidate.relevance,
-            tokens: item.candidate.estimated_tokens,
-            trust: TrustClassification::UntrustedRepositoryData,
-            snippet: None,
-        })
-        .collect();
-
-    let reading_order: Vec<SourceFreeMessage> = pack
-        .items
-        .iter()
-        .filter_map(|item| {
-            SourceFreeMessage::parse(&format!(
-                "review {}",
-                context_role_label(context_role(item.candidate.role))
-            ))
-            .ok()
-        })
-        .collect();
-    let structure = ContextStructure {
-        reading_order,
-        dependencies: Vec::new(),
-    };
-
-    let omitted: Vec<OmissionSummary> = pack
-        .omissions
-        .iter()
-        .filter_map(|omission| {
-            Some(OmissionSummary {
-                reason: SafeLabel::parse(context_role_label(context_role(omission.role))).ok()?,
-                count: u32::try_from(omission.count).unwrap_or(u32::MAX),
-                continuation: None,
-            })
-        })
-        .collect();
-
-    let mut followups: Vec<ToolSuggestion> = Vec::new();
-    if let Ok(reason) =
-        SourceFreeMessage::parse("expand callers and callees for the target symbols")
-    {
-        followups.push(ToolSuggestion {
-            tool: "symbol.relationships".to_owned(),
-            reason,
-            continuation: None,
-        });
-    }
-    if !items.is_empty()
-        && let Ok(reason) =
-            SourceFreeMessage::parse("read full definitions for the included evidence")
-    {
-        followups.push(ToolSuggestion {
-            tool: "source.read".to_owned(),
-            reason,
-            continuation: None,
-        });
-    }
-
-    ContextPackData {
-        pack_id: pack_id(input, explain_envelope.generation.generation_id),
-        items,
-        structure,
-        omitted,
-        followups,
-        token_accounting: TokenAccounting {
-            estimated_total: pack.total_tokens,
-            by_section: BTreeMap::new(),
-        },
-        explanation: None,
-    }
-}
-
-/// Derives a deterministic pack identity from the pinned generation, task, and
-/// seeds so an identical request yields the same pack identifier.
-fn pack_id(input: &ContextPackInput, generation: GenerationId) -> ContextPackId {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(generation.to_string().as_bytes());
-    hasher.update(b"\x00");
-    hasher.update(input.task.as_bytes());
-    hasher.update(b"\x00");
-    if let Some(symbols) = &input.seeds.symbols {
-        for symbol in symbols {
-            hasher.update(symbol.to_string().as_bytes());
-            hasher.update(b",");
-        }
-    }
-    hasher.update(b"\x00planner-v1");
-    let hex = hasher.finalize().to_hex();
-    let short: String = hex.chars().take(32).collect();
-    ContextPackId::new(format!("pack1_{short}"))
-}
-
-const fn context_role(role: PackEvidenceRole) -> ContextEvidenceRole {
-    match role {
-        PackEvidenceRole::Definition => ContextEvidenceRole::Definition,
-        PackEvidenceRole::Implementation => ContextEvidenceRole::Implementation,
-        PackEvidenceRole::Caller => ContextEvidenceRole::Caller,
-        PackEvidenceRole::Test => ContextEvidenceRole::Test,
-        PackEvidenceRole::Risk => ContextEvidenceRole::Risk,
-        PackEvidenceRole::Architecture => ContextEvidenceRole::Architecture,
-        PackEvidenceRole::Change => ContextEvidenceRole::Change,
-    }
-}
-
-const fn context_role_label(role: ContextEvidenceRole) -> &'static str {
-    match role {
-        ContextEvidenceRole::Definition => "definition",
-        ContextEvidenceRole::Implementation => "implementation",
-        ContextEvidenceRole::Caller => "caller",
-        ContextEvidenceRole::Test => "test",
-        ContextEvidenceRole::Risk => "risk",
-        ContextEvidenceRole::Architecture => "architecture",
-        ContextEvidenceRole::Change => "change",
-    }
 }
 
 /// Lists the repositories known to the daemon process.
@@ -2389,7 +2022,7 @@ where
     if input.states.is_some() {
         return Err(unsupported_field("states"));
     }
-    if !compact_profile(input.response_profile) {
+    if !is_compact_profile(input.response_profile) {
         return Err(unsupported_field("response_profile"));
     }
     let page_size = input.max_results.unwrap_or(DEFAULT_REPO_LIST_RESULTS);
@@ -2709,7 +2342,7 @@ where
     if input.budget.is_some() {
         return Err(unsupported_field("budget"));
     }
-    if !compact_profile(input.response_profile) {
+    if !is_compact_profile(input.response_profile) {
         return Err(unsupported_field("response_profile"));
     }
     let request = RepositoryStatusPortRequest::new(repository, client_generation(input.generation));
@@ -3180,7 +2813,7 @@ fn normalize_symbol_relationships(
         || input.include_candidates == Some(true)
         || input.budget.is_some()
         || input.cursor.is_some()
-        || !compact_profile(input.response_profile)
+        || !is_compact_profile(input.response_profile)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -3383,7 +3016,7 @@ fn normalize_flow_trace(
     if input.cross_repository == Some(true)
         || input.path_policy.is_some()
         || input.budget.is_some()
-        || !compact_profile(input.response_profile)
+        || !is_compact_profile(input.response_profile)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -3559,7 +3192,7 @@ fn normalize_architecture_cycles(
     if input.scope.is_some()
         || input.rank_by.is_some()
         || input.budget.is_some()
-        || !compact_profile(input.response_profile)
+        || !is_compact_profile(input.response_profile)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -3730,7 +3363,10 @@ fn normalize_code_dead(
     let repository = repository_id(input.repository, unsupported)?;
     // Structural scope, custom budgets, and non-compact profiles are not served
     // by this slice.
-    if input.scope.is_some() || input.budget.is_some() || !compact_profile(input.response_profile) {
+    if input.scope.is_some()
+        || input.budget.is_some()
+        || !is_compact_profile(input.response_profile)
+    {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let entry_point_policy = match input.entry_point_policy {
@@ -3903,7 +3539,7 @@ fn normalize_architecture_overview(
     if input.scope.is_some()
         || input.detail.is_some()
         || input.budget.is_some()
-        || !compact_profile(input.response_profile)
+        || !is_compact_profile(input.response_profile)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -4082,7 +3718,7 @@ fn normalize_tests_select(
     if input.budget.is_some()
         || input.execution_budget.is_some()
         || input.frameworks.is_some()
-        || !compact_profile(input.profile)
+        || !is_compact_profile(input.profile)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -4253,7 +3889,7 @@ fn normalize_change_impact(
     let repository = repository_id(input.repository, unsupported)?;
     // Scope bounding, custom budgets, and non-compact profiles are not served by
     // this slice.
-    if input.scope.is_some() || input.budget.is_some() || !compact_profile(input.profile) {
+    if input.scope.is_some() || input.budget.is_some() || !is_compact_profile(input.profile) {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     // Working-tree and revision-range changes require a git diff this slice does
@@ -4479,7 +4115,7 @@ fn normalize_plan_change(
     if input.change_context.is_some()
         || input.constraints.is_some()
         || input.budget.is_some()
-        || !compact_profile(input.profile)
+        || !is_compact_profile(input.profile)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -4660,7 +4296,7 @@ fn normalize_history_compare(
     if input.scope.is_some()
         || input.include_unchanged_context == Some(true)
         || input.budget.is_some()
-        || !compact_profile(input.profile)
+        || !is_compact_profile(input.profile)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -5058,7 +4694,7 @@ fn normalize_code_locate(
         || input.related_to.is_some()
         || input.min_confidence.is_some()
         || input.cursor.is_some()
-        || !compact_profile(input.response_profile)
+        || !is_compact_profile(input.response_profile)
         || budget_has_unsupported_locate_limits(input.budget.as_ref())
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
@@ -5088,7 +4724,7 @@ fn normalize_symbol_explain(
         || input.relation_sample_limit.is_some()
         || input.source_preview_lines.is_some()
         || input.budget.is_some()
-        || !compact_profile(input.response_profile)
+        || !is_compact_profile(input.response_profile)
         || matches!(input.include_provenance, Some(ProvenanceLevel::Full))
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
@@ -5120,7 +4756,7 @@ fn normalize_source_read(
         || input.include_line_numbers == Some(false)
         || matches!(input.encoding, Some(SourceEncodingRequest::BytesBase64))
         || input.budget.is_some()
-        || !compact_profile(input.response_profile)
+        || !is_compact_profile(input.response_profile)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -5208,10 +4844,6 @@ fn locate_mode(
         }
         Some(_) => Err(ToolExecutionError::new(unsupported.clone())),
     }
-}
-
-const fn compact_profile(profile: Option<ResponseProfile>) -> bool {
-    matches!(profile, None | Some(ResponseProfile::Compact))
 }
 
 fn budget_has_unsupported_locate_limits(budget: Option<&ResponseBudget>) -> bool {

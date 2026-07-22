@@ -1,10 +1,22 @@
 //! Deterministic context-pack optimizer for task-specific evidence assembly.
 //!
-//! The pack planner selects among definitions, signatures, direct relations,
-//! path summaries, tests, architecture context, recent changes, and bounded
-//! source snippets under a token constraint. Selection is deterministic for
-//! a pinned generation, duplication is removed, and omitted evidence is
-//! summarized with continuation handles.
+//! The optimizer accepts typed evidence candidates from bounded providers. The
+//! complete planner currently shapes generation-pinned symbol definitions into
+//! the public context contract. Selection is deterministic, deduplicated, and
+//! constrained by one shared token ledger.
+
+use std::collections::BTreeMap;
+
+use rootlight_mcp_contract::{
+    SafeLabel, SourceFreeMessage, TrustClassification,
+    context::{
+        ContextItem, ContextPackData, ContextPackId, ContextPackInput, ContextStructure,
+        EvidenceRole as ContractEvidenceRole, OmissionSummary, TokenAccounting, ToolSuggestion,
+    },
+    vertical::SymbolExplanation,
+};
+
+use crate::policy::{BudgetCharge, BudgetLedger, CancellationSignal, ExecutionPolicyError};
 
 /// Maximum evidence items in one context pack.
 ///
@@ -185,6 +197,119 @@ pub enum PackError {
     /// Too many target symbols.
     #[error("too many target symbols")]
     TooManyTargets,
+    /// Bounded planner allocation could not be reserved.
+    #[error("context-pack planner memory is unavailable")]
+    MemoryUnavailable,
+}
+
+/// Failure returned by the complete context-pack planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ContextPackPlanningError {
+    /// Evidence selection violated a context-pack invariant.
+    #[error(transparent)]
+    Pack(#[from] PackError),
+    /// Request cancellation or a shared budget stopped planning.
+    #[error(transparent)]
+    Policy(#[from] ExecutionPolicyError),
+}
+
+/// Transport-neutral input for one complete context-pack planning pass.
+#[derive(Debug)]
+pub struct ContextPackPlanRequest<'a> {
+    /// Validated public request.
+    pub input: &'a ContextPackInput,
+    /// Immutable generation that supplied all evidence.
+    pub generation: rootlight_ids::GenerationId,
+    /// Generation-pinned symbol evidence returned by the injected provider.
+    pub symbols: &'a [SymbolExplanation],
+}
+
+/// Context-pack data plus envelope-level truncation state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedContextPack {
+    /// Schema-compatible context-pack data.
+    pub data: ContextPackData,
+    /// Whether planning omitted evidence due to a bound.
+    pub truncated: bool,
+}
+
+/// Planner boundary for complete context-pack shaping.
+pub trait ContextPackPlanner<C>
+where
+    C: CancellationSignal,
+{
+    /// Plans and shapes a context pack from generation-pinned evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContextPackPlanningError`] when planning violates an invariant,
+    /// exceeds its budget, or observes cancellation.
+    fn plan(
+        &self,
+        request: ContextPackPlanRequest<'_>,
+        cancellation: &C,
+    ) -> Result<PlannedContextPack, ContextPackPlanningError>;
+}
+
+/// Deterministic production context-pack planner.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultContextPackPlanner;
+
+impl<C> ContextPackPlanner<C> for DefaultContextPackPlanner
+where
+    C: CancellationSignal,
+{
+    fn plan(
+        &self,
+        request: ContextPackPlanRequest<'_>,
+        cancellation: &C,
+    ) -> Result<PlannedContextPack, ContextPackPlanningError> {
+        checkpoint(cancellation)?;
+
+        let mut definitions = BTreeMap::new();
+        let mut candidates = Vec::new();
+        candidates
+            .try_reserve_exact(request.symbols.len())
+            .map_err(|_| PackError::MemoryUnavailable)?;
+        for explanation in request.symbols {
+            checkpoint(cancellation)?;
+            definitions.insert(
+                explanation.symbol_id.to_string(),
+                explanation.definition.clone(),
+            );
+            let signature_bytes = explanation.signature.as_ref().map_or(0, String::len);
+            let estimated_tokens =
+                u32::try_from((signature_bytes + explanation.display_name.len()).div_ceil(4))
+                    .unwrap_or(u32::MAX);
+            candidates.push(EvidenceCandidate {
+                identity: explanation.symbol_id.to_string(),
+                role: EvidenceRole::Definition,
+                relevance: explanation.confidence,
+                confidence: explanation.confidence,
+                estimated_tokens,
+                source_path: explanation.definition.span().file().to_string(),
+            });
+        }
+
+        let pack = optimize_pack(
+            objective_for_task(&request.input.task),
+            &mut candidates,
+            u32::from(request.input.token_budget),
+        )?;
+        checkpoint(cancellation)?;
+
+        let mut budget = BudgetLedger::with_token_limit(u64::from(request.input.token_budget));
+        budget.charge(BudgetCharge {
+            results: u64::try_from(pack.items.len()).unwrap_or(u64::MAX),
+            tokens: u64::from(pack.total_tokens),
+            ..BudgetCharge::default()
+        })?;
+
+        Ok(PlannedContextPack {
+            data: context_pack_data(request.input, request.generation, &pack, &definitions),
+            truncated: pack.truncated,
+        })
+    }
 }
 
 /// Optimizes a context pack from scored candidates under a token budget.
@@ -207,6 +332,9 @@ pub fn optimize_pack(
 ) -> Result<PackResult, PackError> {
     if !(MIN_PACK_TOKENS..=MAX_PACK_TOKENS).contains(&token_budget) {
         return Err(PackError::InvalidBudget);
+    }
+    if candidates.is_empty() {
+        return Err(PackError::NoTargets);
     }
 
     // Sort candidates by deterministic ranking:
@@ -330,11 +458,189 @@ fn record_omission(omissions: &mut Vec<OmissionEntry>, candidate: &EvidenceCandi
     }
 }
 
+/// Classifies source-free task guidance into the planner's objective set.
+#[must_use]
+pub fn objective_for_task(task: &str) -> PackObjective {
+    let task = task.to_lowercase();
+    if task.contains("fix")
+        || task.contains("bug")
+        || task.contains("error")
+        || task.contains("crash")
+        || task.contains("broken")
+    {
+        PackObjective::BugFix
+    } else if task.contains("refactor")
+        || task.contains("restructure")
+        || task.contains("simplify")
+        || task.contains("clean")
+    {
+        PackObjective::Refactor
+    } else if task.contains("migrat")
+        || task.contains("upgrade")
+        || task.contains("port to")
+        || task.contains("move to")
+    {
+        PackObjective::Migration
+    } else if task.contains("review") || task.contains("audit") || task.contains("security") {
+        PackObjective::Review
+    } else {
+        PackObjective::Explanation
+    }
+}
+
+/// Derives a deterministic identity for one generation-pinned context pack.
+#[must_use]
+pub fn context_pack_id(
+    input: &ContextPackInput,
+    generation: rootlight_ids::GenerationId,
+) -> ContextPackId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(generation.to_string().as_bytes());
+    hasher.update(b"\x00");
+    hasher.update(input.task.as_bytes());
+    hasher.update(b"\x00");
+    if let Some(symbols) = &input.seeds.symbols {
+        for symbol in symbols {
+            hasher.update(symbol.to_string().as_bytes());
+            hasher.update(b",");
+        }
+    }
+    hasher.update(b"\x00planner-v1");
+    let hex = hasher.finalize().to_hex();
+    let short: String = hex.chars().take(32).collect();
+    ContextPackId::new(format!("pack1_{short}"))
+}
+
+fn context_pack_data(
+    input: &ContextPackInput,
+    generation: rootlight_ids::GenerationId,
+    pack: &PackResult,
+    definitions: &BTreeMap<String, rootlight_ir::SourceRef>,
+) -> ContextPackData {
+    let items = pack
+        .items
+        .iter()
+        .map(|item| ContextItem {
+            role: contract_role(item.candidate.role),
+            symbol_id: item.candidate.identity.parse().ok(),
+            source_ref: definitions.get(&item.candidate.identity).cloned(),
+            score: item.candidate.relevance,
+            tokens: item.candidate.estimated_tokens,
+            trust: TrustClassification::UntrustedRepositoryData,
+            snippet: None,
+        })
+        .collect();
+
+    let reading_order = pack
+        .items
+        .iter()
+        .filter_map(|item| {
+            SourceFreeMessage::parse(&format!(
+                "review {}",
+                role_label(contract_role(item.candidate.role))
+            ))
+            .ok()
+        })
+        .collect();
+    let omitted = pack
+        .omissions
+        .iter()
+        .filter_map(|omission| {
+            Some(OmissionSummary {
+                reason: SafeLabel::parse(role_label(contract_role(omission.role))).ok()?,
+                count: u32::try_from(omission.count).unwrap_or(u32::MAX),
+                continuation: None,
+            })
+        })
+        .collect();
+
+    let mut followups = Vec::new();
+    if let Ok(reason) =
+        SourceFreeMessage::parse("expand callers and callees for the target symbols")
+    {
+        followups.push(ToolSuggestion {
+            tool: "symbol.relationships".to_owned(),
+            reason,
+            continuation: None,
+        });
+    }
+    if !pack.items.is_empty()
+        && let Ok(reason) =
+            SourceFreeMessage::parse("read full definitions for the included evidence")
+    {
+        followups.push(ToolSuggestion {
+            tool: "source.read".to_owned(),
+            reason,
+            continuation: None,
+        });
+    }
+
+    ContextPackData {
+        pack_id: context_pack_id(input, generation),
+        items,
+        structure: ContextStructure {
+            reading_order,
+            dependencies: Vec::new(),
+        },
+        omitted,
+        followups,
+        token_accounting: TokenAccounting {
+            estimated_total: pack.total_tokens,
+            by_section: BTreeMap::new(),
+        },
+        explanation: None,
+    }
+}
+
+const fn contract_role(role: EvidenceRole) -> ContractEvidenceRole {
+    match role {
+        EvidenceRole::Definition => ContractEvidenceRole::Definition,
+        EvidenceRole::Implementation => ContractEvidenceRole::Implementation,
+        EvidenceRole::Caller => ContractEvidenceRole::Caller,
+        EvidenceRole::Test => ContractEvidenceRole::Test,
+        EvidenceRole::Risk => ContractEvidenceRole::Risk,
+        EvidenceRole::Architecture => ContractEvidenceRole::Architecture,
+        EvidenceRole::Change => ContractEvidenceRole::Change,
+    }
+}
+
+const fn role_label(role: ContractEvidenceRole) -> &'static str {
+    match role {
+        ContractEvidenceRole::Definition => "definition",
+        ContractEvidenceRole::Implementation => "implementation",
+        ContractEvidenceRole::Caller => "caller",
+        ContractEvidenceRole::Test => "test",
+        ContractEvidenceRole::Risk => "risk",
+        ContractEvidenceRole::Architecture => "architecture",
+        ContractEvidenceRole::Change => "change",
+    }
+}
+
+fn checkpoint<C>(cancellation: &C) -> Result<(), ExecutionPolicyError>
+where
+    C: CancellationSignal,
+{
+    if cancellation.is_cancelled() {
+        Err(ExecutionPolicyError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        EvidenceCandidate, EvidenceRole, MAX_PACK_TOKENS, MIN_PACK_TOKENS, PackError,
-        PackObjective, optimize_pack,
+        ContextPackPlanRequest, ContextPackPlanner, DefaultContextPackPlanner, EvidenceCandidate,
+        EvidenceRole, MAX_PACK_TOKENS, MIN_PACK_TOKENS, PackError, PackObjective, context_pack_id,
+        objective_for_task, optimize_pack,
+    };
+    use crate::policy::NeverCancelled;
+    use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, SymbolId};
+    use rootlight_ir::{LineRange, SourceRef, SourceSpan};
+    use rootlight_mcp_contract::{
+        RepositorySelector, TrustClassification,
+        context::{ContextPackInput, ContextSeedSelector},
+        vertical::{EntityKind, RelationSummary, RepositoryIdSelector, SymbolExplanation},
     };
 
     fn candidate(id: &str, role: EvidenceRole, relevance: u16, tokens: u32) -> EvidenceCandidate {
@@ -348,6 +654,59 @@ mod tests {
         }
     }
 
+    fn context_input(symbol: SymbolId) -> ContextPackInput {
+        ContextPackInput {
+            repository: RepositorySelector::ById(RepositoryIdSelector {
+                repository_id: RepositoryId::from_bytes([1; 16]),
+            }),
+            generation: None,
+            task: "fix parser crash".to_owned(),
+            seeds: ContextSeedSelector {
+                symbols: Some(vec![symbol]),
+                paths: None,
+                routes: None,
+                tests: None,
+                located: None,
+                change: None,
+                plan: None,
+            },
+            token_budget: 500,
+            source_policy: None,
+            sections: None,
+            diversity: None,
+            min_confidence: None,
+            continuation: None,
+            explain: None,
+        }
+    }
+
+    fn explanation(symbol: SymbolId, generation: GenerationId) -> SymbolExplanation {
+        SymbolExplanation {
+            symbol_id: symbol,
+            kind: EntityKind::Function,
+            display_name: "parse_request".to_owned(),
+            signature: Some("fn parse_request(input: &str)".to_owned()),
+            definition: SourceRef::new(
+                RepositoryId::from_bytes([1; 16]),
+                generation,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 10, 40).expect("source span is valid"),
+                ContentHash::from_bytes([4; 32]),
+                Some(LineRange::new(2, 4).expect("line range is valid")),
+            ),
+            relations: RelationSummary {
+                outbound_exact: 0,
+                outbound_candidates: 0,
+                inbound_exact: 0,
+                inbound_candidates: 0,
+                references_exact: 0,
+            },
+            provenance: Vec::new(),
+            confidence: 900,
+            uncertainty: Vec::new(),
+            trust: TrustClassification::UntrustedRepositoryData,
+        }
+    }
+
     #[test]
     fn invalid_budget_is_rejected() {
         let mut candidates = vec![candidate("a", EvidenceRole::Definition, 900, 100)];
@@ -358,6 +717,14 @@ mod tests {
         assert_eq!(
             optimize_pack(PackObjective::BugFix, &mut candidates, MAX_PACK_TOKENS + 1),
             Err(PackError::InvalidBudget)
+        );
+    }
+
+    #[test]
+    fn empty_evidence_is_rejected() {
+        assert_eq!(
+            optimize_pack(PackObjective::BugFix, &mut [], MIN_PACK_TOKENS),
+            Err(PackError::NoTargets)
         );
     }
 
@@ -527,5 +894,51 @@ mod tests {
                 "{objective:?} must require Definition or Change"
             );
         }
+    }
+
+    #[test]
+    fn complete_planner_shapes_schema_compatible_context_data() {
+        let symbol = SymbolId::from_bytes([2; 20]);
+        let generation = GenerationId::from_bytes([5; 20]);
+        let input = context_input(symbol);
+        let symbols = [explanation(symbol, generation)];
+
+        let planned = DefaultContextPackPlanner
+            .plan(
+                ContextPackPlanRequest {
+                    input: &input,
+                    generation,
+                    symbols: &symbols,
+                },
+                &NeverCancelled,
+            )
+            .expect("context pack is planned");
+
+        assert_eq!(planned.data.pack_id, context_pack_id(&input, generation));
+        assert_eq!(planned.data.items.len(), 1);
+        assert_eq!(planned.data.items[0].symbol_id, Some(symbol));
+        assert_eq!(planned.data.token_accounting.estimated_total, 11);
+        assert!(!planned.truncated);
+
+        let encoded = serde_json::to_value(&planned.data).expect("planned data serializes");
+        let decoded =
+            serde_json::from_value(encoded).expect("planned data matches the public schema type");
+        assert_eq!(planned.data, decoded);
+    }
+
+    #[test]
+    fn task_objective_classification_stays_source_free_and_deterministic() {
+        assert_eq!(
+            objective_for_task("fix parser crash"),
+            PackObjective::BugFix
+        );
+        assert_eq!(
+            objective_for_task("perform a security audit"),
+            PackObjective::Review
+        );
+        assert_eq!(
+            objective_for_task("describe the parser"),
+            PackObjective::Explanation
+        );
     }
 }

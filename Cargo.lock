@@ -1856,7 +1856,10 @@ name = "rootlight-agent"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "rootlight-ids",
+ "rootlight-ir",
  "rootlight-mcp-contract",
+ "serde_json",
  "thiserror",
 ]
 

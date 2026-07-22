@@ -693,6 +693,12 @@ impl RequestCancellation {
     }
 }
 
+impl rootlight_agent::policy::CancellationSignal for RequestCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.is_cancelled()
+    }
+}
+
 impl fmt::Debug for RequestCancellation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter

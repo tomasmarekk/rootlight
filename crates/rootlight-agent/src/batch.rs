@@ -1,11 +1,21 @@
-//! Bounded batch query validation and execution orchestration.
+//! Bounded batch query planning and response shaping.
 //!
-//! Enforces the public `query.batch` contract: at most sixteen allow-listed
-//! read operations, one pinned generation, a depth-eight acyclic dependency
-//! graph, restricted typed bindings, shared budgets, deterministic request-order
-//! output, per-operation errors, and optional fail-fast behavior.
+//! This module owns the transport-neutral dependency plan, typed binding
+//! resolution, deterministic request-order result shaping, and aggregate usage
+//! accounting. The composing service remains responsible for invoking child
+//! tools and charging their work to a shared [`crate::policy::BudgetLedger`].
 
-use rootlight_mcp_contract::McpTool;
+use std::collections::BTreeSet;
+
+use rootlight_mcp_contract::{
+    McpTool, PublicError,
+    context::{
+        BatchOperation as ContractBatchOperation, BatchOperationResult, BatchOperationStatus,
+        BatchStatus, BatchTool, QueryBatchInput,
+    },
+    vertical::{CacheStatus, ReadEnvelope, RequiredNullable, UsageSummary},
+};
+use serde_json::{Map, Value};
 
 /// Maximum operations accepted in one public batch request.
 pub const MAX_BATCH_OPERATIONS: usize = 16;
@@ -51,6 +61,26 @@ pub enum BatchValidationError {
     /// The batch attempts to use a nested batch operation.
     #[error("nested batch operations are forbidden")]
     NestedBatch,
+}
+
+/// Failure while resolving a validated batch for execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BatchExecutionError {
+    /// Two operations use the same request-scoped identity.
+    #[error("batch operation identifiers are not unique")]
+    DuplicateOperationId,
+    /// An operation names a dependency that is not present.
+    #[error("batch operation references an unknown dependency")]
+    UnknownDependency,
+    /// A typed binding does not resolve through a declared completed dependency.
+    #[error("batch binding does not resolve through a completed dependency")]
+    InvalidBinding,
+    /// A batch-inherited field could not be represented as JSON.
+    #[error("batch inherited field could not be serialized")]
+    Serialization,
+    /// A bounded orchestration allocation could not be reserved.
+    #[error("batch orchestration memory is unavailable")]
+    MemoryUnavailable,
 }
 
 /// One operation in a validated batch request.
@@ -215,13 +245,295 @@ pub fn is_batch_allowed_under_profile(
     is_batch_allowed(tool) && profile.exposes(tool)
 }
 
+/// Maps a public batch subtool to its catalog counterpart.
+#[must_use]
+pub const fn mcp_tool_for_batch(tool: BatchTool) -> McpTool {
+    match tool {
+        BatchTool::CodeLocate => McpTool::CodeLocate,
+        BatchTool::SymbolExplain => McpTool::SymbolExplain,
+        BatchTool::SymbolRelationships => McpTool::SymbolRelationships,
+        BatchTool::FlowTrace => McpTool::FlowTrace,
+        BatchTool::ChangeImpact => McpTool::ChangeImpact,
+        BatchTool::TestsSelect => McpTool::TestsSelect,
+        BatchTool::ArchitectureOverview => McpTool::ArchitectureOverview,
+        BatchTool::ArchitectureCycles => McpTool::ArchitectureCycles,
+        BatchTool::CodeDead => McpTool::CodeDead,
+        BatchTool::PlanChange => McpTool::PlanChange,
+        BatchTool::ContextPack => McpTool::ContextPack,
+        BatchTool::SourceRead => McpTool::SourceRead,
+    }
+}
+
+/// Resolves declared operation identities to request-order indices.
+///
+/// # Errors
+///
+/// Returns [`BatchExecutionError`] for duplicate operation identities or
+/// references to operations absent from the request.
+pub fn resolve_dependencies(
+    operations: &[ContractBatchOperation],
+) -> Result<Vec<Vec<usize>>, BatchExecutionError> {
+    let mut seen = BTreeSet::new();
+    for operation in operations {
+        if !seen.insert(operation.id.as_str()) {
+            return Err(BatchExecutionError::DuplicateOperationId);
+        }
+    }
+
+    let mut dependencies = Vec::new();
+    dependencies
+        .try_reserve_exact(operations.len())
+        .map_err(|_| BatchExecutionError::MemoryUnavailable)?;
+    for operation in operations {
+        let mut resolved = Vec::new();
+        if let Some(declared) = &operation.depends_on {
+            resolved
+                .try_reserve_exact(declared.len())
+                .map_err(|_| BatchExecutionError::MemoryUnavailable)?;
+            for name in declared {
+                let index = operations
+                    .iter()
+                    .position(|other| other.id == *name)
+                    .ok_or(BatchExecutionError::UnknownDependency)?;
+                resolved.push(index);
+            }
+        }
+        dependencies.push(resolved);
+    }
+    Ok(dependencies)
+}
+
+/// Reports whether any declared dependency failed to complete successfully.
+#[must_use]
+pub fn dependency_failed(dependencies: &[usize], results: &[Option<BatchOperationResult>]) -> bool {
+    dependencies.iter().any(|index| {
+        matches!(
+            results[*index].as_ref().map(|result| result.status),
+            Some(
+                BatchOperationStatus::Error
+                    | BatchOperationStatus::SkippedDependency
+                    | BatchOperationStatus::NotRunFailFast
+            )
+        )
+    })
+}
+
+/// Resolves typed bindings and injects batch-inherited request fields.
+///
+/// # Errors
+///
+/// Returns [`BatchExecutionError::InvalidBinding`] when a binding does not
+/// target a declared completed dependency, or
+/// [`BatchExecutionError::Serialization`] when an inherited field cannot be
+/// encoded.
+pub fn resolve_arguments(
+    operation: &ContractBatchOperation,
+    envelopes: &[Option<ReadEnvelope<Value>>],
+    input: &QueryBatchInput,
+    declared: &[usize],
+) -> Result<Map<String, Value>, BatchExecutionError> {
+    let mut arguments = Map::new();
+    for (key, value) in &operation.arguments {
+        let resolved = resolve_binding(value, envelopes, &input.operations, declared)?;
+        arguments.insert(key.clone(), resolved);
+    }
+    arguments.insert(
+        "repository".to_owned(),
+        serde_json::to_value(&input.repository).map_err(|_| BatchExecutionError::Serialization)?,
+    );
+    if let Some(generation) = &input.generation {
+        arguments.insert(
+            "generation".to_owned(),
+            serde_json::to_value(generation).map_err(|_| BatchExecutionError::Serialization)?,
+        );
+    }
+    Ok(arguments)
+}
+
+/// Shapes one successful child response into a batch operation result.
+#[must_use]
+pub fn success_result(
+    operation: &ContractBatchOperation,
+    envelope: &ReadEnvelope<Value>,
+) -> BatchOperationResult {
+    BatchOperationResult {
+        id: operation.id.clone(),
+        tool: operation.tool,
+        status: BatchOperationStatus::Ok,
+        data: Some(envelope.data.clone()),
+        error: None,
+        truncated: envelope.truncated,
+        next_cursor: envelope.next_cursor.clone(),
+        usage: Some(envelope.usage.clone()),
+        warnings: envelope.warnings.clone(),
+    }
+}
+
+/// Shapes one checked child failure into a batch operation result.
+#[must_use]
+pub fn error_result(
+    operation: &ContractBatchOperation,
+    error: &PublicError,
+) -> BatchOperationResult {
+    BatchOperationResult {
+        id: operation.id.clone(),
+        tool: operation.tool,
+        status: BatchOperationStatus::Error,
+        data: None,
+        error: Some(error.clone()),
+        truncated: false,
+        next_cursor: RequiredNullable(None),
+        usage: None,
+        warnings: Vec::new(),
+    }
+}
+
+/// Shapes a child that was intentionally not executed.
+#[must_use]
+pub fn terminal_result(
+    operation: &ContractBatchOperation,
+    status: BatchOperationStatus,
+) -> BatchOperationResult {
+    BatchOperationResult {
+        id: operation.id.clone(),
+        tool: operation.tool,
+        status,
+        data: None,
+        error: None,
+        truncated: false,
+        next_cursor: RequiredNullable(None),
+        usage: None,
+        warnings: Vec::new(),
+    }
+}
+
+/// Derives the aggregate batch status from request-order child results.
+#[must_use]
+pub fn aggregate_status(results: &[BatchOperationResult]) -> BatchStatus {
+    let any_ok = results
+        .iter()
+        .any(|result| result.status == BatchOperationStatus::Ok);
+    let all_ok = results
+        .iter()
+        .all(|result| result.status == BatchOperationStatus::Ok);
+    if all_ok {
+        BatchStatus::Ok
+    } else if any_ok {
+        BatchStatus::Partial
+    } else {
+        BatchStatus::Error
+    }
+}
+
+/// Aggregates child usage without double-counting parallel wall-clock time.
+#[must_use]
+pub fn aggregate_usage(envelopes: &[Option<ReadEnvelope<Value>>]) -> UsageSummary {
+    let mut usage = UsageSummary {
+        rows: 0,
+        edges: 0,
+        source_bytes: 0,
+        json_bytes: 0,
+        estimated_tokens: 0,
+        wall_time_ms: 0,
+        cache_status: CacheStatus::Miss,
+        trace_id: "batch".to_owned(),
+    };
+    for envelope in envelopes.iter().flatten() {
+        usage.rows = usage.rows.saturating_add(envelope.usage.rows);
+        usage.edges = usage.edges.saturating_add(envelope.usage.edges);
+        usage.source_bytes = usage
+            .source_bytes
+            .saturating_add(envelope.usage.source_bytes);
+        usage.json_bytes = usage.json_bytes.saturating_add(envelope.usage.json_bytes);
+        usage.estimated_tokens = usage
+            .estimated_tokens
+            .saturating_add(envelope.usage.estimated_tokens);
+        usage.wall_time_ms = usage.wall_time_ms.max(envelope.usage.wall_time_ms);
+    }
+    usage
+}
+
+fn resolve_binding(
+    value: &Value,
+    envelopes: &[Option<ReadEnvelope<Value>>],
+    operations: &[ContractBatchOperation],
+    declared: &[usize],
+) -> Result<Value, BatchExecutionError> {
+    match value {
+        Value::Object(map) => {
+            if let Some(from) = map.get("$from") {
+                let from_name = from.as_str().ok_or(BatchExecutionError::InvalidBinding)?;
+                let pointer = map
+                    .get("pointer")
+                    .and_then(Value::as_str)
+                    .ok_or(BatchExecutionError::InvalidBinding)?;
+                let dependency = declared
+                    .iter()
+                    .find(|&&index| operations[index].id == from_name)
+                    .ok_or(BatchExecutionError::InvalidBinding)?;
+                let envelope = envelopes[*dependency]
+                    .as_ref()
+                    .ok_or(BatchExecutionError::InvalidBinding)?;
+                let encoded = serde_json::to_value(envelope)
+                    .map_err(|_| BatchExecutionError::Serialization)?;
+                encoded
+                    .pointer(pointer)
+                    .cloned()
+                    .ok_or(BatchExecutionError::InvalidBinding)
+            } else {
+                let mut resolved = Map::new();
+                for (key, inner) in map {
+                    resolved.insert(
+                        key.clone(),
+                        resolve_binding(inner, envelopes, operations, declared)?,
+                    );
+                }
+                Ok(Value::Object(resolved))
+            }
+        }
+        Value::Array(items) => {
+            let mut resolved = Vec::new();
+            resolved
+                .try_reserve_exact(items.len())
+                .map_err(|_| BatchExecutionError::MemoryUnavailable)?;
+            for inner in items {
+                resolved.push(resolve_binding(inner, envelopes, operations, declared)?);
+            }
+            Ok(Value::Array(resolved))
+        }
+        scalar => Ok(scalar.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BatchPlan, BatchValidationError, MAX_BATCH_DEPTH, MAX_BATCH_OPERATIONS, is_batch_allowed,
-        is_batch_allowed_under_profile,
+        BatchExecutionError, BatchPlan, BatchValidationError, MAX_BATCH_DEPTH,
+        MAX_BATCH_OPERATIONS, aggregate_status, is_batch_allowed, is_batch_allowed_under_profile,
+        resolve_dependencies, terminal_result,
     };
-    use rootlight_mcp_contract::{ExposureProfile, McpTool};
+    use rootlight_mcp_contract::{
+        ExposureProfile, McpTool,
+        context::{
+            BatchOperation as ContractBatchOperation, BatchOperationStatus, BatchStatus, BatchTool,
+        },
+    };
+    use serde_json::Map;
+
+    fn contract_operation(
+        id: &str,
+        tool: BatchTool,
+        depends_on: Option<Vec<&str>>,
+    ) -> ContractBatchOperation {
+        ContractBatchOperation {
+            id: id.to_owned(),
+            tool,
+            depends_on: depends_on
+                .map(|dependencies| dependencies.into_iter().map(str::to_owned).collect()),
+            arguments: Map::new(),
+            local_budget: None,
+        }
+    }
 
     #[test]
     fn batch_allowlist_aliases_the_capability_registry() {
@@ -384,5 +696,48 @@ mod tests {
             BatchPlan::validate(&tools, &deps),
             Err(BatchValidationError::TooManyDependencies)
         );
+    }
+
+    #[test]
+    fn request_identities_resolve_to_request_order_indices() {
+        let operations = [
+            contract_operation("find", BatchTool::CodeLocate, None),
+            contract_operation("explain", BatchTool::SymbolExplain, Some(vec!["find"])),
+        ];
+
+        assert_eq!(resolve_dependencies(&operations), Ok(vec![vec![], vec![0]]));
+    }
+
+    #[test]
+    fn duplicate_and_unknown_dependencies_are_typed_errors() {
+        let duplicate = [
+            contract_operation("same", BatchTool::CodeLocate, None),
+            contract_operation("same", BatchTool::SymbolExplain, None),
+        ];
+        assert_eq!(
+            resolve_dependencies(&duplicate),
+            Err(BatchExecutionError::DuplicateOperationId)
+        );
+
+        let unknown = [contract_operation(
+            "explain",
+            BatchTool::SymbolExplain,
+            Some(vec!["missing"]),
+        )];
+        assert_eq!(
+            resolve_dependencies(&unknown),
+            Err(BatchExecutionError::UnknownDependency)
+        );
+    }
+
+    #[test]
+    fn aggregate_status_is_derived_from_child_terminal_states() {
+        let operation = contract_operation("find", BatchTool::CodeLocate, None);
+        let error = terminal_result(&operation, BatchOperationStatus::Error);
+        assert_eq!(aggregate_status(&[error]), BatchStatus::Error);
+
+        let ok = terminal_result(&operation, BatchOperationStatus::Ok);
+        let skipped = terminal_result(&operation, BatchOperationStatus::SkippedDependency);
+        assert_eq!(aggregate_status(&[ok, skipped]), BatchStatus::Partial);
     }
 }
