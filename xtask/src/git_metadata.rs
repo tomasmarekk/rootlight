@@ -59,7 +59,7 @@ pub(crate) fn check_range(workspace_root: &Path, range: &str) -> Result<(), GitM
     Ok(())
 }
 
-pub(crate) fn check_event(path: &Path) -> Result<(), GitMetadataError> {
+pub(crate) fn check_event(workspace_root: &Path, path: &Path) -> Result<(), GitMetadataError> {
     let text = read_text(path, "event payload")?;
     let value: serde_json::Value =
         serde_json::from_str(&text).map_err(GitMetadataError::EventParse)?;
@@ -75,6 +75,25 @@ pub(crate) fn check_event(path: &Path) -> Result<(), GitMetadataError> {
                 });
             }
         }
+    }
+
+    let before = value.get("before");
+    let after = value.get("after");
+    match (before, after) {
+        (Some(before), Some(after)) => {
+            let before = event_revision(before, "before")?;
+            let after = event_revision(after, "after")?;
+            if !is_zero_revision(after) {
+                let range = if is_zero_revision(before) {
+                    after.to_owned()
+                } else {
+                    format!("{before}..{after}")
+                };
+                check_range(workspace_root, &range)?;
+            }
+        }
+        (None, None) => {}
+        _ => return Err(GitMetadataError::IncompleteEventRange),
     }
 
     if let Some(commits) = value.get("commits").and_then(|item| item.as_array()) {
@@ -95,6 +114,27 @@ pub(crate) fn check_event(path: &Path) -> Result<(), GitMetadataError> {
     }
 
     Ok(())
+}
+
+fn event_revision<'a>(
+    value: &'a serde_json::Value,
+    field: &'static str,
+) -> Result<&'a str, GitMetadataError> {
+    let revision = value
+        .as_str()
+        .ok_or(GitMetadataError::InvalidEventRevision { field })?;
+    if revision.len() != 40
+        || !revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(GitMetadataError::InvalidEventRevision { field });
+    }
+    Ok(revision)
+}
+
+fn is_zero_revision(revision: &str) -> bool {
+    revision.bytes().all(|byte| byte == b'0')
 }
 
 /// Returns the first forbidden rule found in a commit message, ignoring comment
@@ -141,6 +181,10 @@ pub(crate) enum GitMetadataError {
     },
     #[error("failed to parse event payload")]
     EventParse(#[source] serde_json::Error),
+    #[error("event payload must provide both before and after revisions")]
+    IncompleteEventRange,
+    #[error("event payload {field} revision is not canonical")]
+    InvalidEventRevision { field: &'static str },
 }
 
 #[cfg(test)]
@@ -255,7 +299,7 @@ mod tests {
         ]
         .concat();
         fs::write(&path, payload).expect("write");
-        let error = check_event(&path).expect_err("forbidden label in title must fail");
+        let error = check_event(dir.path(), &path).expect_err("forbidden label in title must fail");
         assert!(matches!(error, GitMetadataError::EventPayload { .. }));
     }
 
@@ -265,6 +309,116 @@ mod tests {
         let path = dir.path().join("event.json");
         let payload = r#"{"commits":[{"id":"abc123","message":"fix: correct ordering"}]}"#;
         fs::write(&path, payload).expect("write");
-        assert!(check_event(&path).is_ok());
+        assert!(check_event(dir.path(), &path).is_ok());
+    }
+
+    #[test]
+    fn push_range_scans_commits_omitted_from_event_array() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let root = directory.path();
+        run_git(root, &["init", "--quiet"]);
+        run_git(root, &["config", "user.name", "Fixture Author"]);
+        run_git(root, &["config", "user.email", "fixture@example.invalid"]);
+        run_git(
+            root,
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "chore: initialize",
+            ],
+        );
+        let before = git_revision(root, "HEAD");
+        let forbidden_message = ["fix: close PRO", "TO-17"].concat();
+        run_git(
+            root,
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                &forbidden_message,
+            ],
+        );
+        run_git(
+            root,
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "fix: complete transport validation",
+            ],
+        );
+        let after = git_revision(root, "HEAD");
+        let path = root.join("event.json");
+        let payload = serde_json::json!({
+            "before": before,
+            "after": after,
+            "commits": [{
+                "id": after,
+                "message": "fix: complete transport validation"
+            }]
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec(&payload).expect("serialize event"),
+        )
+        .expect("write event");
+
+        let error = check_event(root, &path)
+            .expect_err("the exact push range must include the omitted middle commit");
+        assert!(matches!(error, GitMetadataError::RangeCommit { .. }));
+    }
+
+    #[test]
+    fn zero_before_scans_all_history_reachable_from_after() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let root = directory.path();
+        run_git(root, &["init", "--quiet"]);
+        run_git(root, &["config", "user.name", "Fixture Author"]);
+        run_git(root, &["config", "user.email", "fixture@example.invalid"]);
+        let forbidden_message = ["docs: record RISK", "-12"].concat();
+        run_git(
+            root,
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                &forbidden_message,
+            ],
+        );
+        let after = git_revision(root, "HEAD");
+        let path = root.join("event.json");
+        let payload = serde_json::json!({
+            "before": "0000000000000000000000000000000000000000",
+            "after": after,
+            "commits": []
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec(&payload).expect("serialize event"),
+        )
+        .expect("write event");
+
+        let error = check_event(root, &path)
+            .expect_err("a new ref must scan every commit reachable from its tip");
+        assert!(matches!(error, GitMetadataError::RangeCommit { .. }));
+    }
+
+    fn git_revision(root: &Path, revision: &str) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", revision])
+            .output()
+            .expect("git command starts");
+        assert!(output.status.success(), "git revision resolves");
+        String::from_utf8(output.stdout)
+            .expect("revision is UTF-8")
+            .trim()
+            .to_owned()
     }
 }

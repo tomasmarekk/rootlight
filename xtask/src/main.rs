@@ -158,7 +158,8 @@ fn git_metadata_command(args: &mut impl Iterator<Item = String>) -> Result<(), X
             git_metadata::check_range(&workspace_root, &value)?;
         }
         "--event" => {
-            git_metadata::check_event(std::path::Path::new(&value))?;
+            let workspace_root = std::env::current_dir().map_err(XtaskError::WorkingDir)?;
+            git_metadata::check_event(&workspace_root, std::path::Path::new(&value))?;
         }
         other => return Err(XtaskError::UnexpectedArgument(other.to_owned())),
     }

@@ -181,6 +181,8 @@ pub(crate) fn forbidden_reference(input: &[u8]) -> Option<ForbiddenRule> {
         (b"FUZZ".as_slice(), b"-".as_slice()),
         (b"TEST".as_slice(), b"-".as_slice()),
         (b"SEC".as_slice(), b"-".as_slice()),
+        (b"RISK".as_slice(), b"-".as_slice()),
+        (b"PROTO".as_slice(), b"-".as_slice()),
     ] {
         if contains_joined_case_sensitive(input, head, tail) {
             return Some(ForbiddenRule::StructuredPlanLabel);
@@ -190,30 +192,36 @@ pub(crate) fn forbidden_reference(input: &[u8]) -> Option<ForbiddenRule> {
 }
 
 fn contains_numbered_verification_label(input: &[u8]) -> bool {
-    [b"bench".as_slice(), b"fuzz", b"test", b"sec"]
-        .into_iter()
-        .any(|head| {
-            input
-                .windows(head.len() + 1)
-                .enumerate()
-                .any(|(index, window)| {
-                    if (index != 0 && is_identifier_byte(input[index - 1]))
-                        || !window[..head.len()].eq_ignore_ascii_case(head)
-                        || !matches!(window[head.len()], b'-' | b'_')
-                    {
-                        return false;
-                    }
-                    let tail = &input[index + head.len() + 1..];
-                    let token_length = tail
-                        .iter()
-                        .position(|byte| !is_identifier_byte(*byte) && *byte != b'-')
-                        .unwrap_or(tail.len());
-                    tail[..token_length].windows(4).any(|number| {
-                        matches!(number[0], b'-' | b'_')
-                            && number[1..].iter().all(u8::is_ascii_digit)
-                    })
+    [
+        b"bench".as_slice(),
+        b"fuzz",
+        b"test",
+        b"sec",
+        b"risk",
+        b"proto",
+    ]
+    .into_iter()
+    .any(|head| {
+        input
+            .windows(head.len() + 1)
+            .enumerate()
+            .any(|(index, window)| {
+                if (index != 0 && is_identifier_byte(input[index - 1]))
+                    || !window[..head.len()].eq_ignore_ascii_case(head)
+                    || !matches!(window[head.len()], b'-' | b'_')
+                {
+                    return false;
+                }
+                let tail = &input[index + head.len() + 1..];
+                let token_length = tail
+                    .iter()
+                    .position(|byte| !is_identifier_byte(*byte) && *byte != b'-')
+                    .unwrap_or(tail.len());
+                tail[..token_length].windows(4).any(|number| {
+                    matches!(number[0], b'-' | b'_') && number[1..].iter().all(u8::is_ascii_digit)
                 })
-        })
+            })
+    })
 }
 
 fn is_internal_support_path(relative_path: &str) -> bool {
@@ -387,6 +395,18 @@ mod tests {
             forbidden_reference(numbered_gate.as_bytes()),
             Some(ForbiddenRule::StructuredPlanLabel)
         );
+        for label in [
+            ["RISK", "-17"].concat(),
+            ["PROTO", "-08"].concat(),
+            ["risk", "_review-017"].concat(),
+            ["proto", "_matrix-008"].concat(),
+        ] {
+            assert_eq!(
+                forbidden_reference(label.as_bytes()),
+                Some(ForbiddenRule::StructuredPlanLabel)
+            );
+        }
+        assert_eq!(forbidden_reference(b"risk-aware protocol adapter"), None);
     }
 
     #[test]
