@@ -32,8 +32,8 @@ use serde_json::{Map, Value};
 
 use crate::{
     policy::{
-        BudgetCharge, BudgetLedger, BudgetLimits, CancellationSignal, ExecutionPolicyError,
-        is_compact_profile,
+        BudgetAllocation, BudgetCharge, BudgetLedger, BudgetLimits, CancellationSignal,
+        ExecutionPolicyError, is_compact_profile,
     },
     port::{
         AgentCallContext, AgentIdentityRequest, AgentPortError, AgentResolutionContext,
@@ -56,7 +56,7 @@ pub const MAX_DEPS_PER_OPERATION: usize = 8;
 /// eligibility. Mutation tools, repository or operation polling, nested
 /// batches, `history.compare`, `query.advanced`, and cross-generation
 /// operations are forbidden.
-pub const BATCH_ALLOWLIST: [McpTool; 11] = rootlight_mcp_contract::capability::BATCH_ELIGIBLE;
+pub const BATCH_ALLOWLIST: [McpTool; 12] = rootlight_mcp_contract::capability::BATCH_ELIGIBLE;
 
 /// Errors returned during batch validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -914,12 +914,41 @@ impl BatchService {
                     BatchExecutionError::Serialization | BatchExecutionError::MemoryUnavailable,
                 ) => return Err(BatchOrchestrationError::Internal),
             };
-            let remaining = remaining_parent_budget(
+            let remaining = match remaining_parent_budget(
                 &parent_budget,
                 parent_ledger.consumed(),
                 started_at.elapsed(),
-            )?;
-            let child_budget = effective_child_budget(&remaining, operation.local_budget.as_ref());
+            ) {
+                Ok(remaining) => remaining,
+                Err(BatchOrchestrationError::BudgetExceeded) => {
+                    results[index] = Some(error_result(operation, &errors.budget_exceeded));
+                    stop_scheduling |= fail_fast;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let tool_limits =
+                BudgetLimits::server_ceiling().constrained_by_response_budget(Some(&remaining));
+            let mut allocation =
+                match parent_ledger.allocate_child(tool_limits, operation.local_budget.as_ref()) {
+                    Ok(allocation) => allocation,
+                    Err(ExecutionPolicyError::BudgetExceeded { .. }) => {
+                        results[index] = Some(error_result(operation, &errors.budget_exceeded));
+                        stop_scheduling |= fail_fast;
+                        continue;
+                    }
+                    Err(error) => return Err(map_policy_error(error)),
+                };
+            let child_budget = response_budget_from_limits(
+                allocation.limits(),
+                minimum_evidence(
+                    remaining.evidence_level,
+                    operation
+                        .local_budget
+                        .as_ref()
+                        .and_then(|budget| budget.evidence_level),
+                ),
+            );
             let effective_deadline = effective_child_deadline(
                 parent_deadline,
                 operation
@@ -945,15 +974,15 @@ impl BatchService {
                     validate_child_identity(&envelope, &identity)?;
 
                     let charge = charge_for(operation.tool, &envelope)?;
-                    parent_ledger.charge(charge).map_err(map_policy_error)?;
                     observed_envelopes[index] = Some(envelope.clone());
 
-                    let mut child_ledger = BudgetLedger::new(Some(child_budget));
-                    if child_ledger.charge(charge).is_err() {
+                    if allocation.ledger_mut().charge(charge).is_err() {
+                        consume_allocation(allocation)?;
                         results[index] = Some(error_result(operation, &errors.budget_exceeded));
                         stop_scheduling |= fail_fast;
                         continue;
                     }
+                    allocation.commit().map_err(map_policy_error)?;
                     results[index] = Some(success_result(operation, &envelope));
                     binding_envelopes[index] = Some(envelope);
                 }
@@ -1133,35 +1162,31 @@ fn remaining_u32(
         .transpose()
 }
 
-fn effective_child_budget(
-    parent: &ResponseBudget,
-    local: Option<&ResponseBudget>,
+fn response_budget_from_limits(
+    limits: BudgetLimits,
+    evidence_level: Option<rootlight_mcp_contract::vertical::ProvenanceLevel>,
 ) -> ResponseBudget {
-    let Some(local) = local else {
-        return parent.clone();
-    };
+    let maximums = limits.maximums();
     ResponseBudget {
-        max_results: minimum(parent.max_results, local.max_results),
-        max_tokens: minimum(parent.max_tokens, local.max_tokens),
-        max_source_bytes: minimum(parent.max_source_bytes, local.max_source_bytes),
-        max_traversal_facts: minimum(parent.max_traversal_facts, local.max_traversal_facts),
-        max_depth: minimum(parent.max_depth, local.max_depth),
-        max_paths: minimum(parent.max_paths, local.max_paths),
-        timeout_ms: minimum(parent.timeout_ms, local.timeout_ms),
-        evidence_level: minimum_evidence(parent.evidence_level, local.evidence_level),
+        max_results: Some(u16::try_from(maximums.results).unwrap_or(u16::MAX)),
+        max_tokens: Some(u16::try_from(maximums.tokens).unwrap_or(u16::MAX)),
+        max_source_bytes: Some(u32::try_from(maximums.source_bytes).unwrap_or(u32::MAX)),
+        max_traversal_facts: Some(u32::try_from(maximums.traversal_facts).unwrap_or(u32::MAX)),
+        max_depth: Some(u8::try_from(maximums.depth).unwrap_or(u8::MAX)),
+        max_paths: Some(u16::try_from(maximums.paths).unwrap_or(u16::MAX)),
+        timeout_ms: Some(u32::try_from(maximums.time_ms).unwrap_or(u32::MAX)),
+        evidence_level,
     }
 }
 
-fn minimum<T>(parent: Option<T>, local: Option<T>) -> Option<T>
-where
-    T: Ord + Copy,
-{
-    match (parent, local) {
-        (Some(parent), Some(local)) => Some(parent.min(local)),
-        (Some(parent), None) => Some(parent),
-        (None, Some(local)) => Some(local),
-        (None, None) => None,
-    }
+fn consume_allocation(mut allocation: BudgetAllocation<'_>) -> Result<(), BatchOrchestrationError> {
+    let admitted = allocation.limits().maximums();
+    allocation
+        .ledger_mut()
+        .charge(admitted)
+        .map_err(map_policy_error)?;
+    allocation.commit().map_err(map_policy_error)?;
+    Ok(())
 }
 
 fn minimum_evidence(

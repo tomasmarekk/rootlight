@@ -607,7 +607,7 @@ async fn explicit_generation_mismatch_stops_before_child_dispatch() {
 }
 
 #[tokio::test]
-async fn max_results_counts_returned_objects_instead_of_operations() {
+async fn max_results_overrun_is_preserved_as_an_operation_result() {
     let mut request = input(
         vec![operation(
             "find",
@@ -625,18 +625,26 @@ async fn max_results_counts_returned_objects_instead_of_operations() {
         json!({"matches": [{}, {}]}),
     ))]));
 
+    let output = BatchService
+        .execute(
+            Arc::clone(&port),
+            request,
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("a child overrun remains in the ordered batch result");
+
+    assert_eq!(output.data.batch_status, BatchStatus::Error);
     assert_eq!(
-        BatchService
-            .execute(
-                port,
-                request,
-                repository(),
-                TestCancellation(false),
-                errors(),
-            )
-            .await,
-        Err(BatchOrchestrationError::BudgetExceeded)
+        output.data.operation_results[0]
+            .error
+            .as_ref()
+            .map(PublicError::code),
+        Some(ErrorCode::BudgetExceeded)
     );
+    assert_eq!(port.calls.lock().expect("call lock").len(), 1);
 }
 
 #[tokio::test]
@@ -857,7 +865,7 @@ async fn local_budget_failure_preserves_independent_success_and_usage() {
 }
 
 #[tokio::test]
-async fn aggregate_budget_is_charged_across_children() {
+async fn child_reservations_release_unused_capacity_and_reconcile_measured_use() {
     let input = input(
         vec![
             operation("first", BatchTool::CodeLocate, Map::new(), None, None),
@@ -870,12 +878,77 @@ async fn aggregate_budget_is_charged_across_children() {
         Ok(response(generation(2), 200, json!({}))),
     ]));
 
+    let output = BatchService
+        .execute(
+            Arc::clone(&port),
+            input,
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("a child overrun remains a structured batch result");
+
+    assert_eq!(output.data.batch_status, BatchStatus::Partial);
     assert_eq!(
-        BatchService
-            .execute(port, input, repository(), TestCancellation(false), errors(),)
-            .await,
-        Err(BatchOrchestrationError::BudgetExceeded)
+        output
+            .data
+            .operation_results
+            .iter()
+            .filter(|result| result.status == BatchOperationStatus::Ok)
+            .count(),
+        1
     );
+    assert_eq!(
+        output
+            .data
+            .operation_results
+            .iter()
+            .filter(|result| result.status == BatchOperationStatus::Error)
+            .count(),
+        1
+    );
+    let calls = port.calls.lock().expect("call lock");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].budget.max_tokens, Some(250));
+    assert_eq!(calls[1].budget.max_tokens, Some(150));
+}
+
+#[tokio::test]
+async fn exhausted_parent_capacity_prevents_later_child_dispatch() {
+    let input = input(
+        vec![
+            operation("later", BatchTool::CodeLocate, Map::new(), None, None),
+            operation("overrun", BatchTool::SourceRead, Map::new(), None, None),
+        ],
+        budget(100),
+    );
+    let port = Arc::new(FakePort::with_responses([Ok(response(
+        generation(2),
+        200,
+        json!({}),
+    ))]));
+
+    let output = BatchService
+        .execute(
+            Arc::clone(&port),
+            input,
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("budget exhaustion remains in the ordered batch result");
+
+    assert_eq!(output.data.batch_status, BatchStatus::Error);
+    assert!(
+        output.data.operation_results.iter().all(|result| result
+            .error
+            .as_ref()
+            .map(PublicError::code)
+            == Some(ErrorCode::BudgetExceeded))
+    );
+    assert_eq!(port.calls.lock().expect("call lock").len(), 1);
 }
 
 #[tokio::test]
