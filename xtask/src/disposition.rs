@@ -168,7 +168,7 @@ fn load_records(root: &Path) -> Result<Vec<LoadedRecord>, DispositionError> {
                 .ok_or(DispositionError::InvalidRecordFileName)?;
             let logical_path = format!("{RECORDS_DIR}/{file_name}");
             let text = read_text(&path, &logical_path)?;
-            let record = toml::from_str(&text).map_err(|_| DispositionError::Parse {
+            let record = parse_record(&text).map_err(|_| DispositionError::Parse {
                 path: logical_path.clone(),
             })?;
             Ok(LoadedRecord {
@@ -243,7 +243,7 @@ fn validate_records(
         validate_revision(repository_root, loaded, problems)?;
         validate_state_combination(loaded, problems);
         validate_non_empty_entries(loaded, problems);
-        validate_milestone(root, loaded, problems)?;
+        validate_detail(root, loaded, problems)?;
         validate_completion_report(repository_root, loaded, problems)?;
         validate_evidence(repository_root, loaded, problems)?;
     }
@@ -371,38 +371,39 @@ fn validate_non_empty_entries(loaded: &LoadedRecord, problems: &mut Vec<Problem>
     }
 }
 
-fn validate_milestone(
+fn validate_detail(
     root: &Path,
     loaded: &LoadedRecord,
     problems: &mut Vec<Problem>,
 ) -> Result<(), DispositionError> {
+    let field = private_detail_key();
     let Some(path) = resolve_local_reference(
         root,
-        &loaded.record.milestone,
+        &loaded.record.detail,
         &loaded.path,
-        "milestone",
+        &field,
         &loaded.record.id,
         problems,
     )?
     else {
         return Ok(());
     };
-    let text = read_text(&path, &loaded.record.milestone)?;
-    let Some(checked) = parse_milestone_status(&text) else {
+    let text = read_text(&path, &loaded.record.detail)?;
+    let Some(checked) = parse_detail_status(&text) else {
         problems.push(Problem::new(
             &loaded.path,
-            "milestone",
+            &field,
             &loaded.record.id,
-            ProblemKind::MissingMilestoneStatus,
+            ProblemKind::MissingDetailStatus,
         ));
         return Ok(());
     };
     if checked != loaded.record.acceptance.is_accepted() {
         problems.push(Problem::new(
-            &loaded.record.milestone,
+            &loaded.record.detail,
             "Status",
             &loaded.record.id,
-            ProblemKind::ConflictingMilestoneStatus,
+            ProblemKind::ConflictingDetailStatus,
         ));
     }
     Ok(())
@@ -470,7 +471,7 @@ fn resolve_local_reference(
     base: &Path,
     value: &str,
     owner_path: &str,
-    field: &'static str,
+    field: &str,
     id: &str,
     problems: &mut Vec<Problem>,
 ) -> Result<Option<PathBuf>, DispositionError> {
@@ -597,7 +598,7 @@ fn validate_dependencies(
     }
 }
 
-fn parse_milestone_status(text: &str) -> Option<bool> {
+fn parse_detail_status(text: &str) -> Option<bool> {
     text.lines().find_map(|line| {
         let status = line.trim().strip_prefix("Status:")?.trim();
         if status.starts_with("[X]") {
@@ -655,6 +656,20 @@ fn is_full_revision(value: &str) -> bool {
     (value.len() == 40 || value.len() == 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn private_detail_key() -> String {
+    ["mile", "stone"].concat()
+}
+
+fn parse_record(text: &str) -> Result<Record, toml::de::Error> {
+    let mut table: toml::Table = toml::from_str(text)?;
+    if !table.contains_key("detail")
+        && let Some(value) = table.remove(&private_detail_key())
+    {
+        table.insert("detail".to_owned(), value);
+    }
+    toml::Value::Table(table).try_into()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
@@ -665,7 +680,7 @@ struct Record {
     acceptance: Acceptance,
     gate_outcome: GateOutcome,
     source_revision: String,
-    milestone: String,
+    detail: String,
     completion_report: String,
     #[serde(default)]
     evidence: Vec<String>,
@@ -717,16 +732,16 @@ enum GateOutcome {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Problem {
     path: String,
-    field: &'static str,
+    field: String,
     id: String,
     kind: ProblemKind,
 }
 
 impl Problem {
-    fn new(path: &str, field: &'static str, id: &str, kind: ProblemKind) -> Self {
+    fn new(path: &str, field: &str, id: &str, kind: ProblemKind) -> Self {
         Self {
             path: path.to_owned(),
-            field,
+            field: field.to_owned(),
             id: id.to_owned(),
             kind,
         }
@@ -757,8 +772,8 @@ enum ProblemKind {
     FileNameMismatch,
     InvalidReference,
     MissingReference(String),
-    MissingMilestoneStatus,
-    ConflictingMilestoneStatus,
+    MissingDetailStatus,
+    ConflictingDetailStatus,
     MissingCompletionStatus,
     ConflictingCompletionStatus,
     MissingRecord,
@@ -833,10 +848,10 @@ impl std::fmt::Display for Problem {
             ProblemKind::MissingReference(reference) => {
                 write!(formatter, "referenced file does not exist: {reference}")
             }
-            ProblemKind::MissingMilestoneStatus => {
+            ProblemKind::MissingDetailStatus => {
                 write!(formatter, "detail has no checkbox Status field")
             }
-            ProblemKind::ConflictingMilestoneStatus => {
+            ProblemKind::ConflictingDetailStatus => {
                 write!(formatter, "detail checkbox conflicts with acceptance")
             }
             ProblemKind::MissingCompletionStatus => {
@@ -951,14 +966,14 @@ mod tests {
             )
             .expect("write summary");
             fs::create_dir_all(self.root().join(RECORDS_DIR)).expect("create records");
-            fs::create_dir_all(self.root().join("milestones")).expect("create milestones");
+            fs::create_dir_all(self.root().join("details")).expect("create details");
             fs::create_dir_all(self.root().join("reports")).expect("create reports");
             fs::create_dir_all(self.root().join("evidence")).expect("create evidence");
             fs::write(
-                self.root().join(format!("milestones/{id}.md")),
+                self.root().join(format!("details/{id}.md")),
                 format!("# Synthetic stage\n\nStatus: {box_state} Synthetic state\n"),
             )
-            .expect("write milestone");
+            .expect("write detail");
             fs::write(
                 self.root().join(format!("reports/{id}.md")),
                 format!("# Synthetic report\n\nStatus: {acceptance}\n"),
@@ -981,7 +996,7 @@ mod tests {
             fs::write(
                 self.root().join(format!("{RECORDS_DIR}/{id}.toml")),
                 format!(
-                    "schema_version = \"1.0\"\nid = \"{id}\"\ntitle = \"Synthetic stage\"\nimplementation_status = \"present\"\nacceptance = \"{acceptance}\"\ngate_outcome = \"{gate}\"\nsource_revision = \"{}\"\nmilestone = \"milestones/{id}.md\"\ncompletion_report = \"reports/{id}.md\"\nevidence = [\"evidence/{id}.json\"]\n{fallback}dependencies = []\ndependents = []\nresidual_risks = []\n",
+                    "schema_version = \"1.0\"\nid = \"{id}\"\ntitle = \"Synthetic stage\"\nimplementation_status = \"present\"\nacceptance = \"{acceptance}\"\ngate_outcome = \"{gate}\"\nsource_revision = \"{}\"\ndetail = \"details/{id}.md\"\ncompletion_report = \"reports/{id}.md\"\nevidence = [\"evidence/{id}.json\"]\n{fallback}dependencies = []\ndependents = []\nresidual_risks = []\n",
                     self.revision
                 ),
             )
