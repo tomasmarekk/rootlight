@@ -868,27 +868,49 @@ fn validate_contract_input(
             |error| MaterializedInputError::Public(Box::new(error)),
         )
     })?;
-    if !typed_input_invariants_are_valid(contract.tool, &typed_input, profile) {
-        return Err(
+    let invariant_error = (!typed_input_invariants_are_valid(contract.tool, &typed_input, profile))
+        .then(|| {
             classify_typed_invariant_error(contract.tool, &typed_input, profile).map_or(
                 MaterializedInputError::Invalid {
                     instance_path: None,
                 },
                 |error| MaterializedInputError::Public(Box::new(error)),
-            ),
-        );
-    }
-    if let Err(error) = validate_capability_input(
+            )
+        });
+    let capability_error = validate_capability_input(
         contract.tool,
         arguments,
         CapabilityBindingPolicy::Materialized,
-    ) {
-        let public_error = error
-            .to_public_error(None)
-            .expect("generated capability paths satisfy public diagnostic bounds");
-        return Err(MaterializedInputError::Public(Box::new(public_error)));
+    )
+    .err();
+
+    // Typed decoding and malformed invariants retain precedence. When both
+    // admission layers select the same domain code, the registry error is more
+    // actionable because it identifies the exact restricted input leaf.
+    if let Some(error) = capability_error.as_ref()
+        && invariant_error.as_ref().is_none_or(|invariant| {
+            matches!(
+                invariant,
+                MaterializedInputError::Public(public) if public.code() == error.code()
+            )
+        })
+    {
+        return Err(materialized_capability_error(error));
+    }
+    if let Some(error) = invariant_error {
+        return Err(error);
+    }
+    if let Some(error) = capability_error.as_ref() {
+        return Err(materialized_capability_error(error));
     }
     Ok(typed_input)
+}
+
+fn materialized_capability_error(error: &CapabilityAdmissionError) -> MaterializedInputError {
+    let public_error = error
+        .to_public_error(None)
+        .expect("generated capability paths satisfy public diagnostic bounds");
+    MaterializedInputError::Public(Box::new(public_error))
 }
 
 fn schema_error_instance_path(error: &jsonschema::ValidationError<'_>) -> Option<String> {
@@ -2432,6 +2454,8 @@ mod tests {
     async fn generated_restricted_rules_reject_direct_calls_without_execution() {
         let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
             .expect("registry compiles");
+        let materialized_validator =
+            MaterializedToolValidator::compile().expect("checked contracts compile once");
         let field_key = DetailKey::parse("field_path").expect("static detail key is valid");
         let reason_key = DetailKey::parse("capability_reason").expect("static detail key is valid");
         let mut declared = 0usize;
@@ -2519,6 +2543,52 @@ mod tests {
                     rule.path,
                     admission.registry_path()
                 );
+                if co_required_source_selector {
+                    let reference = arguments
+                        .get("references")
+                        .and_then(Value::as_array)
+                        .and_then(|references| references.first())
+                        .and_then(Value::as_object)
+                        .expect("generated source selector contains one reference");
+                    assert!(
+                        ["file_id", "start_byte", "end_byte"]
+                            .into_iter()
+                            .all(|field| reference.contains_key(field)),
+                        "{}:{} structural exclusion must exercise the complete source selector",
+                        capability.tool.name(),
+                        rule.path
+                    );
+                    let contract =
+                        ToolContract::compile(tool).expect("generated tool contract compiles");
+                    assert!(
+                        contract
+                            .input_validator
+                            .is_valid(&Value::Object(arguments.clone())),
+                        "{}:{} structural exclusion must remain schema-valid",
+                        capability.tool.name(),
+                        rule.path
+                    );
+                    for required_field in ["file_id", "start_byte", "end_byte"] {
+                        let mut incomplete = arguments.clone();
+                        incomplete
+                            .get_mut("references")
+                            .and_then(Value::as_array_mut)
+                            .and_then(|references| references.first_mut())
+                            .and_then(Value::as_object_mut)
+                            .expect("generated source selector contains one reference")
+                            .remove(required_field);
+                        assert!(
+                            !contract
+                                .input_validator
+                                .is_valid(&Value::Object(incomplete)),
+                            "{}:{} source selector must require {required_field}",
+                            capability.tool.name(),
+                            rule.path
+                        );
+                    }
+                    assert_eq!(admission.registry_path(), "references[].end_byte");
+                    assert_eq!(admission.instance_path(), "references.0.end_byte");
+                }
 
                 let calls_before = router.executor.calls.load(Ordering::Relaxed);
                 let response = router
@@ -2527,7 +2597,7 @@ mod tests {
                             "tools/call",
                             json!({
                                 "name": capability.tool.name(),
-                                "arguments": arguments
+                                "arguments": arguments.clone()
                             }),
                         ),
                         cancellation(),
@@ -2545,25 +2615,6 @@ mod tests {
                     rule.path,
                     rule.value.unwrap_or("*")
                 );
-                if capability.tool == McpTool::QueryBatch
-                    && rule.path == "operations[].tool"
-                    && rule.value == Some("plan.change")
-                {
-                    assert!(
-                        direct.error.details().get(&field_key).is_none()
-                            && direct.error.details().get(&reason_key).is_none(),
-                        "typed batch-plan admission intentionally precedes capability details"
-                    );
-                    assert_eq!(
-                        router.executor.calls.load(Ordering::Relaxed),
-                        calls_before,
-                        "query.batch:operations[].tool reached the executor"
-                    );
-                    exclusions.push(
-                        "query.batch:operations[].tool=plan.change:typed_invariant".to_owned(),
-                    );
-                    continue;
-                }
                 assert_eq!(
                     direct.error.details().get(&field_key),
                     Some(&PublicValue::Label(
@@ -2577,6 +2628,19 @@ mod tests {
                         SafeLabel::parse(expected_reason.public_name())
                             .expect("stable reason is a safe label")
                     ))
+                );
+                let materialized = materialized_validator
+                    .validate(tool, &arguments, ExposureProfile::Developer)
+                    .expect_err("materialized request shares capability admission");
+                let MaterializedInputError::Public(materialized) = materialized else {
+                    panic!("capability rejection must remain a checked public error");
+                };
+                assert_eq!(
+                    *materialized,
+                    direct.error,
+                    "{}:{} materialized admission diverged from the direct router",
+                    capability.tool.name(),
+                    rule.path
                 );
                 assert_eq!(
                     router.executor.calls.load(Ordering::Relaxed),
@@ -2602,11 +2666,10 @@ mod tests {
             [
                 "source.read:references[].file_id=*:co_required_selector",
                 "source.read:references[].start_byte=*:co_required_selector",
-                "query.batch:operations[].tool=plan.change:typed_invariant",
             ],
             "review any new generated-rule exclusion"
         );
-        assert_eq!((declared, covered, exclusions.len()), (157, 154, 3));
+        assert_eq!((declared, covered, exclusions.len()), (157, 155, 2));
     }
 
     #[tokio::test]
@@ -3226,6 +3289,128 @@ mod tests {
             .expect_err("materialized requests share capability admission");
         let MaterializedInputError::Public(materialized) = materialized else {
             panic!("capability rejection must not become a binding type mismatch");
+        };
+        assert_eq!(*materialized, direct.error);
+    }
+
+    #[tokio::test]
+    async fn restricted_batch_tool_has_precise_direct_and_materialized_admission() {
+        let arguments = json!({
+            "repository": selector(),
+            "operations": [{
+                "id": "plan",
+                "tool": "plan.change",
+                "arguments": {}
+            }]
+        })
+        .as_object()
+        .expect("batch arguments are an object")
+        .clone();
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({"name": "query.batch", "arguments": arguments.clone()}),
+                ),
+                cancellation(),
+            )
+            .await;
+        let result = success(response);
+        let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
+            .expect("batch capability rejection uses the checked error contract");
+
+        assert_eq!(direct.error.code(), ErrorCode::OperatorForbidden);
+        assert_eq!(
+            direct
+                .error
+                .details()
+                .get(&DetailKey::parse("field_path").expect("static detail key is valid")),
+            Some(&PublicValue::Label(
+                SafeLabel::parse("operations.0.tool").expect("fixture field path is valid")
+            ))
+        );
+        assert_eq!(
+            direct
+                .error
+                .details()
+                .get(&DetailKey::parse("capability_reason").expect("static detail key is valid")),
+            Some(&PublicValue::Label(
+                SafeLabel::parse("unsupported_value").expect("fixture reason is valid")
+            ))
+        );
+        assert_eq!(
+            direct.error.next_actions(),
+            &[NextAction::CorrectField {
+                field: DetailKey::parse("arguments").expect("static detail key is valid")
+            }]
+        );
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+
+        let validator =
+            MaterializedToolValidator::compile().expect("checked contracts compile once");
+        let MaterializedInputError::Public(materialized) = validator
+            .validate(
+                VerticalTool::QueryBatch,
+                &arguments,
+                ExposureProfile::Developer,
+            )
+            .expect_err("materialized batch shares capability admission")
+        else {
+            panic!("batch capability rejection must remain a checked public error");
+        };
+        assert_eq!(*materialized, direct.error);
+    }
+
+    #[tokio::test]
+    async fn malformed_batch_invariant_precedes_restricted_tool_admission() {
+        let arguments = json!({
+            "repository": selector(),
+            "operations": [
+                {"id": "duplicate", "tool": "plan.change", "arguments": {}},
+                {"id": "duplicate", "tool": "plan.change", "arguments": {}}
+            ]
+        })
+        .as_object()
+        .expect("batch arguments are an object")
+        .clone();
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({"name": "query.batch", "arguments": arguments.clone()}),
+                ),
+                cancellation(),
+            )
+            .await;
+        let result = success(response);
+        let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
+            .expect("typed invariant rejection uses the checked error contract");
+
+        assert_eq!(direct.error.code(), ErrorCode::InvalidArgument);
+        assert!(direct.error.details().is_empty());
+        assert_eq!(
+            direct.error.next_actions(),
+            &[NextAction::CorrectField {
+                field: DetailKey::parse("operations").expect("static detail key is valid")
+            }]
+        );
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+
+        let validator =
+            MaterializedToolValidator::compile().expect("checked contracts compile once");
+        let MaterializedInputError::Public(materialized) = validator
+            .validate(
+                VerticalTool::QueryBatch,
+                &arguments,
+                ExposureProfile::Developer,
+            )
+            .expect_err("materialized batch preserves malformed invariant precedence")
+        else {
+            panic!("typed invariant rejection must remain a checked public error");
         };
         assert_eq!(*materialized, direct.error);
     }
