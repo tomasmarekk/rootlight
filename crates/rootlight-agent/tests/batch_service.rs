@@ -2,13 +2,19 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use rootlight_agent::{
-    batch::{BatchOrchestrationError, BatchPublicErrors, BatchService},
+    batch::{BatchOrchestrationError, BatchPublicErrors, BatchService, resolve_arguments},
     policy::CancellationSignal,
-    port::{AgentCallContext, AgentPortError, AgentPortFuture, AgentToolPort, AgentToolRequest},
+    port::{
+        AgentCallContext, AgentIdentityRequest, AgentPortError, AgentPortFuture,
+        AgentResolutionContext, AgentResolvedIdentity, AgentToolPort, AgentToolRequest,
+    },
 };
 use rootlight_ids::{GenerationId, RepositoryId};
 use rootlight_ir::CoverageStatus;
@@ -43,6 +49,7 @@ struct RecordedCall {
 struct FakePort {
     responses: Mutex<VecDeque<Result<ReadEnvelope<Value>, AgentPortError>>>,
     calls: Mutex<Vec<RecordedCall>>,
+    identity_calls: AtomicUsize,
 }
 
 impl FakePort {
@@ -52,11 +59,40 @@ impl FakePort {
         Self {
             responses: Mutex::new(responses.into_iter().collect()),
             calls: Mutex::new(Vec::new()),
+            identity_calls: AtomicUsize::new(0),
         }
     }
 }
 
 impl AgentToolPort<TestCancellation> for FakePort {
+    fn resolve_identity(
+        &self,
+        _request: AgentIdentityRequest,
+        _context: AgentResolutionContext<TestCancellation>,
+    ) -> AgentPortFuture<Result<AgentResolvedIdentity, AgentPortError>> {
+        self.identity_calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async {
+            Ok(AgentResolvedIdentity {
+                repository: ResolvedRepository {
+                    repository_id: repository(),
+                    display_name: "fixture".to_owned(),
+                },
+                generation: GenerationSummary {
+                    generation_id: generation(2),
+                    parent_generation: RequiredNullable(None),
+                    structural_freshness: Freshness::Current,
+                    semantic_freshness: Freshness::Current,
+                },
+                coverage: CoverageSummary {
+                    status: CoverageStatus::Bounded,
+                    languages: Vec::new(),
+                    skipped_inputs: 0,
+                },
+                warnings: Vec::new(),
+            })
+        })
+    }
+
     fn execute(
         &self,
         request: AgentToolRequest,
@@ -173,9 +209,6 @@ fn errors() -> BatchPublicErrors {
         PublicError::builder(ErrorCode::BindingInvalid, "invalid binding")
             .build()
             .expect("static error is valid"),
-        PublicError::builder(ErrorCode::BindingTypeMismatch, "binding type mismatch")
-            .build()
-            .expect("static error is valid"),
         PublicError::builder(ErrorCode::Internal, "child failed")
             .build()
             .expect("static error is valid"),
@@ -183,6 +216,69 @@ fn errors() -> BatchPublicErrors {
             .build()
             .expect("static error is valid"),
     )
+}
+
+#[test]
+fn many_bindings_resolve_directly_from_data_and_record_exact_destinations() {
+    let mut arguments = Map::new();
+    for index in 0..64 {
+        arguments.insert(
+            format!("field_{index}"),
+            json!({"$from": "find", "pointer": "/data/matches/0/symbol_id"}),
+        );
+    }
+    arguments.insert(
+        "field/slash".to_owned(),
+        json!({"$from": "find", "pointer": "/data/matches/0/symbol_id"}),
+    );
+    arguments.insert(
+        "field~tilde".to_owned(),
+        json!({"$from": "find", "pointer": "/data/matches/0/symbol_id"}),
+    );
+    let request = input(
+        vec![
+            operation("find", BatchTool::CodeLocate, Map::new(), None, None),
+            operation(
+                "refine",
+                BatchTool::CodeLocate,
+                arguments,
+                Some(vec!["find"]),
+                None,
+            ),
+        ],
+        budget(500),
+    );
+    let envelopes = vec![
+        Some(response(
+            generation(2),
+            100,
+            json!({"matches": [{"symbol_id": "symbol"}]}),
+        )),
+        None,
+    ];
+
+    let resolved = resolve_arguments(&request.operations[1], &envelopes, &request, &[0])
+        .expect("bounded bindings resolve from the dependency data value");
+    assert_eq!(resolved.materialized_binding_paths.len(), 66);
+    assert_eq!(resolved.arguments["field_0"], json!("symbol"));
+    assert!(
+        resolved
+            .materialized_binding_paths
+            .iter()
+            .any(|path| path == "/field_63")
+    );
+    assert!(
+        resolved
+            .materialized_binding_paths
+            .iter()
+            .any(|path| path == "/field~1slash")
+    );
+    assert!(
+        resolved
+            .materialized_binding_paths
+            .iter()
+            .any(|path| path == "/field~0tilde")
+    );
 }
 
 #[tokio::test]
@@ -230,7 +326,504 @@ async fn service_materializes_bindings_and_propagates_policy() {
         json!([])
     );
     assert_eq!(calls[0].budget.max_tokens, Some(1_000));
+    assert_eq!(calls[1].budget.max_tokens, Some(900));
     assert!(calls.iter().all(|call| call.has_deadline));
+    assert_eq!(port.identity_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        calls[0].request.clone().into_arguments()["generation"],
+        json!(generation(2))
+    );
+}
+
+#[tokio::test]
+async fn omitted_timeout_receives_a_bounded_default_before_dispatch() {
+    let mut request = input(
+        vec![operation(
+            "find",
+            BatchTool::CodeLocate,
+            Map::new(),
+            None,
+            None,
+        )],
+        budget(500),
+    );
+    request.budget = None;
+    let port = Arc::new(FakePort::with_responses([Ok(response(
+        generation(2),
+        100,
+        json!({"matches": []}),
+    ))]));
+
+    BatchService
+        .execute(
+            Arc::clone(&port),
+            request,
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("default timeout keeps the bounded call admissible");
+
+    let calls = port.calls.lock().expect("call lock is available");
+    let timeout = calls[0]
+        .budget
+        .timeout_ms
+        .expect("default timeout propagates");
+    assert!((1..=rootlight_agent::batch::DEFAULT_BATCH_TIMEOUT_MS).contains(&timeout));
+    assert!(calls[0].has_deadline);
+}
+
+#[tokio::test]
+async fn reserved_child_control_keys_fail_before_identity_resolution() {
+    for key in [
+        "repository",
+        "generation",
+        "budget",
+        "cursor",
+        "response_profile",
+    ] {
+        let mut arguments = Map::new();
+        arguments.insert(key.to_owned(), Value::Null);
+        let port = Arc::new(FakePort::with_responses([]));
+        let result = BatchService
+            .execute(
+                Arc::clone(&port),
+                input(
+                    vec![operation(
+                        "reserved",
+                        BatchTool::CodeLocate,
+                        arguments,
+                        None,
+                        None,
+                    )],
+                    budget(500),
+                ),
+                repository(),
+                TestCancellation(false),
+                errors(),
+            )
+            .await;
+        assert_eq!(result, Err(BatchOrchestrationError::InvalidArguments));
+        assert_eq!(port.identity_calls.load(Ordering::Relaxed), 0);
+        assert!(
+            port.calls
+                .lock()
+                .expect("call lock is available")
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn binding_objects_with_extra_keys_fail_before_identity_resolution() {
+    let mut arguments = Map::new();
+    arguments.insert(
+        "query".to_owned(),
+        json!({
+            "$from": "find",
+            "pointer": "/data/matches/0/symbol_id",
+            "fallback": "publish"
+        }),
+    );
+    let port = Arc::new(FakePort::with_responses([]));
+    let result = BatchService
+        .execute(
+            Arc::clone(&port),
+            input(
+                vec![
+                    operation("find", BatchTool::CodeLocate, Map::new(), None, None),
+                    operation(
+                        "invalid",
+                        BatchTool::CodeLocate,
+                        arguments,
+                        Some(vec!["find"]),
+                        None,
+                    ),
+                ],
+                budget(500),
+            ),
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await;
+    assert_eq!(result, Err(BatchOrchestrationError::InvalidArguments));
+    assert_eq!(port.identity_calls.load(Ordering::Relaxed), 0);
+    assert!(
+        port.calls
+            .lock()
+            .expect("call lock is available")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn malformed_binding_fields_fail_before_identity_resolution() {
+    for binding in [
+        json!({"$from": "x".repeat(33), "pointer": "/data/matches/0/symbol_id"}),
+        json!({"$from": "find!", "pointer": "/data/matches/0/symbol_id"}),
+        json!({"$from": "find", "pointer": format!("/data/{}/symbol_id", "0".repeat(1009))}),
+        json!({"$from": "find", "pointer": "/warnings/0/code"}),
+    ] {
+        let mut arguments = Map::new();
+        arguments.insert("query".to_owned(), binding);
+        let port = Arc::new(FakePort::with_responses([]));
+        let result = BatchService
+            .execute(
+                Arc::clone(&port),
+                input(
+                    vec![
+                        operation("find", BatchTool::CodeLocate, Map::new(), None, None),
+                        operation(
+                            "invalid",
+                            BatchTool::CodeLocate,
+                            arguments,
+                            Some(vec!["find"]),
+                            None,
+                        ),
+                    ],
+                    budget(500),
+                ),
+                repository(),
+                TestCancellation(false),
+                errors(),
+            )
+            .await;
+        assert_eq!(result, Err(BatchOrchestrationError::InvalidArguments));
+        assert_eq!(port.identity_calls.load(Ordering::Relaxed), 0);
+        assert!(
+            port.calls
+                .lock()
+                .expect("call lock is available")
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_operation_and_dependency_ids_fail_before_identity_resolution() {
+    for operations in [
+        vec![operation(
+            "invalid!",
+            BatchTool::CodeLocate,
+            Map::new(),
+            None,
+            None,
+        )],
+        vec![operation(
+            "valid",
+            BatchTool::CodeLocate,
+            Map::new(),
+            Some(vec!["invalid!"]),
+            None,
+        )],
+    ] {
+        let port = Arc::new(FakePort::with_responses([]));
+        let result = BatchService
+            .execute(
+                Arc::clone(&port),
+                input(operations, budget(500)),
+                repository(),
+                TestCancellation(false),
+                errors(),
+            )
+            .await;
+        assert_eq!(result, Err(BatchOrchestrationError::InvalidArguments));
+        assert_eq!(port.identity_calls.load(Ordering::Relaxed), 0);
+        assert!(
+            port.calls
+                .lock()
+                .expect("call lock is available")
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn ordinary_pointer_keys_are_not_treated_as_bindings() {
+    let mut arguments = Map::new();
+    arguments.insert("query".to_owned(), json!({"pointer": "ordinary value"}));
+    let port = Arc::new(FakePort::with_responses([Ok(response(
+        generation(2),
+        100,
+        json!({}),
+    ))]));
+
+    BatchService
+        .execute(
+            Arc::clone(&port),
+            input(
+                vec![operation(
+                    "ordinary",
+                    BatchTool::CodeLocate,
+                    arguments,
+                    None,
+                    None,
+                )],
+                budget(500),
+            ),
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("an ordinary nested pointer field is not binding syntax");
+    assert_eq!(port.identity_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(port.calls.lock().expect("call lock is available").len(), 1);
+}
+
+#[tokio::test]
+async fn explicit_generation_mismatch_stops_before_child_dispatch() {
+    let mut request = input(
+        vec![operation(
+            "find",
+            BatchTool::CodeLocate,
+            Map::new(),
+            None,
+            None,
+        )],
+        budget(500),
+    );
+    request.generation = Some(GenerationSelector::Explicit(generation(9)));
+    let port = Arc::new(FakePort::with_responses([]));
+
+    assert_eq!(
+        BatchService
+            .execute(
+                Arc::clone(&port),
+                request,
+                repository(),
+                TestCancellation(false),
+                errors(),
+            )
+            .await,
+        Err(BatchOrchestrationError::InvalidResponse)
+    );
+    assert_eq!(port.identity_calls.load(Ordering::Relaxed), 1);
+    assert!(
+        port.calls
+            .lock()
+            .expect("call lock is available")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn max_results_counts_returned_objects_instead_of_operations() {
+    let mut request = input(
+        vec![operation(
+            "find",
+            BatchTool::CodeLocate,
+            Map::new(),
+            None,
+            None,
+        )],
+        budget(500),
+    );
+    request.budget.as_mut().expect("test budget").max_results = Some(1);
+    let port = Arc::new(FakePort::with_responses([Ok(response(
+        generation(2),
+        100,
+        json!({"matches": [{}, {}]}),
+    ))]));
+
+    assert_eq!(
+        BatchService
+            .execute(
+                port,
+                request,
+                repository(),
+                TestCancellation(false),
+                errors(),
+            )
+            .await,
+        Err(BatchOrchestrationError::BudgetExceeded)
+    );
+}
+
+#[tokio::test]
+async fn relationship_results_charge_returned_edges_and_propagate_the_remainder() {
+    let mut request = input(
+        vec![
+            operation(
+                "first",
+                BatchTool::SymbolRelationships,
+                Map::new(),
+                None,
+                None,
+            ),
+            operation(
+                "second",
+                BatchTool::SymbolRelationships,
+                Map::new(),
+                None,
+                None,
+            ),
+        ],
+        budget(500),
+    );
+    request.budget.as_mut().expect("test budget").max_results = Some(5);
+    let port = Arc::new(FakePort::with_responses([
+        Ok(response(
+            generation(2),
+            100,
+            json!({"groups": [{}], "totals": {"returned_edges": 4}}),
+        )),
+        Ok(response(
+            generation(2),
+            100,
+            json!({"groups": [{}], "totals": {"returned_edges": 1}}),
+        )),
+    ]));
+
+    BatchService
+        .execute(
+            Arc::clone(&port),
+            request,
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("five returned edges fit the aggregate budget");
+    let calls = port.calls.lock().expect("call lock is available");
+    assert_eq!(calls[0].budget.max_results, Some(5));
+    assert_eq!(calls[1].budget.max_results, Some(1));
+}
+
+#[tokio::test]
+async fn malformed_relationship_accounting_fails_closed() {
+    let port = Arc::new(FakePort::with_responses([Ok(response(
+        generation(2),
+        100,
+        json!({"groups": [{}], "totals": {}}),
+    ))]));
+    assert_eq!(
+        BatchService
+            .execute(
+                port,
+                input(
+                    vec![operation(
+                        "relationships",
+                        BatchTool::SymbolRelationships,
+                        Map::new(),
+                        None,
+                        None,
+                    )],
+                    budget(500),
+                ),
+                repository(),
+                TestCancellation(false),
+                errors(),
+            )
+            .await,
+        Err(BatchOrchestrationError::InvalidResponse)
+    );
+}
+
+#[tokio::test]
+async fn local_timeout_is_a_per_operation_budget_error_after_prior_success() {
+    let local = ResponseBudget {
+        max_results: None,
+        max_tokens: None,
+        max_source_bytes: None,
+        max_traversal_facts: None,
+        max_depth: None,
+        max_paths: None,
+        timeout_ms: Some(100),
+        evidence_level: None,
+    };
+    let port = Arc::new(FakePort::with_responses([
+        Ok(response(
+            generation(2),
+            100,
+            json!({"matches": [{"symbol_id": "first"}]}),
+        )),
+        Err(AgentPortError::LocalDeadlineExceeded),
+    ]));
+    let output = BatchService
+        .execute(
+            Arc::clone(&port),
+            input(
+                vec![
+                    operation("first", BatchTool::CodeLocate, Map::new(), None, None),
+                    operation(
+                        "second",
+                        BatchTool::CodeLocate,
+                        Map::new(),
+                        Some(vec!["first"]),
+                        Some(local),
+                    ),
+                ],
+                budget(500),
+            ),
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("a child-local timeout remains inside the batch envelope");
+    assert_eq!(output.data.batch_status, BatchStatus::Partial);
+    assert_eq!(
+        output.data.operation_results[0].status,
+        BatchOperationStatus::Ok
+    );
+    assert_eq!(
+        output.data.operation_results[1]
+            .error
+            .as_ref()
+            .map(PublicError::code),
+        Some(ErrorCode::BudgetExceeded)
+    );
+    assert_eq!(port.calls.lock().expect("call lock is available").len(), 2);
+}
+
+#[tokio::test]
+async fn bindings_cannot_read_warnings_or_envelope_metadata_before_identity_resolution() {
+    let mut metadata_arguments = Map::new();
+    metadata_arguments.insert(
+        "query".to_owned(),
+        json!({"$from": "find", "pointer": "/warnings/0/code"}),
+    );
+    let mut nested_arguments = Map::new();
+    nested_arguments.insert(
+        "query".to_owned(),
+        json!({"$from": "find", "pointer": "/data/warnings/0/symbol_id"}),
+    );
+    let request = input(
+        vec![
+            operation("find", BatchTool::CodeLocate, Map::new(), None, None),
+            operation(
+                "metadata",
+                BatchTool::CodeLocate,
+                metadata_arguments,
+                Some(vec!["find"]),
+                None,
+            ),
+            operation(
+                "nested",
+                BatchTool::CodeLocate,
+                nested_arguments,
+                Some(vec!["find"]),
+                None,
+            ),
+        ],
+        budget(500),
+    );
+    let port = Arc::new(FakePort::with_responses([]));
+    let result = BatchService
+        .execute(
+            Arc::clone(&port),
+            request,
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await;
+    assert_eq!(result, Err(BatchOrchestrationError::InvalidArguments));
+    assert_eq!(port.identity_calls.load(Ordering::Relaxed), 0);
+    assert!(port.calls.lock().expect("call lock").is_empty());
 }
 
 #[tokio::test]
@@ -366,16 +959,14 @@ async fn all_child_errors_preserve_complete_per_operation_outcome() {
         Box::new(unsupported),
     ))]));
 
-    let error = BatchService
+    let output = BatchService
         .execute(port, input, repository(), TestCancellation(false), errors())
         .await
-        .expect_err("no successful child returns metadata-free operation outcomes");
-    let BatchOrchestrationError::NoSuccessfulOperation(output) = error else {
-        panic!("expected unsuccessful operation payload");
-    };
-    assert_eq!(output.operation_results.len(), 1);
+        .expect("pinned identity permits a complete all-error batch envelope");
+    assert_eq!(output.data.batch_status, BatchStatus::Error);
+    assert_eq!(output.data.operation_results.len(), 1);
     assert_eq!(
-        output.operation_results[0]
+        output.data.operation_results[0]
             .error
             .as_ref()
             .map(PublicError::code),
@@ -384,11 +975,11 @@ async fn all_child_errors_preserve_complete_per_operation_outcome() {
 }
 
 #[tokio::test]
-async fn bound_child_type_error_uses_binding_specific_code() {
+async fn generic_port_type_error_is_not_broadly_reclassified_as_a_binding_error() {
     let mut arguments = Map::new();
     arguments.insert(
-        "query".to_owned(),
-        json!({"$from": "find", "pointer": "/data/matches"}),
+        "search_modes".to_owned(),
+        json!({"$from": "find", "pointer": "/data/matches/0/symbol_id"}),
     );
     let input = input(
         vec![
@@ -425,6 +1016,6 @@ async fn bound_child_type_error_uses_binding_specific_code() {
             .error
             .as_ref()
             .map(PublicError::code),
-        Some(ErrorCode::BindingTypeMismatch)
+        Some(ErrorCode::TypeMismatch)
     );
 }

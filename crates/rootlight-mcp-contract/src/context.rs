@@ -364,7 +364,7 @@ pub enum BatchTool {
     /// Dead-code detection.
     #[serde(rename = "code.dead")]
     CodeDead,
-    /// Ordered change planning.
+    /// Reserved change-planning identifier; not eligible for public batch execution.
     #[serde(rename = "plan.change")]
     PlanChange,
     /// Context pack assembly.

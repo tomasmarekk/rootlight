@@ -4,19 +4,27 @@
 //! module owns request admission, source-free explain shaping, and conversion
 //! of client-independent planning facts into the public contract.
 
+use std::{future::Future, pin::Pin, sync::Arc, time::Instant};
+
 use rootlight_ids::{FileId, GenerationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
-    GenerationSelector, RepositorySelector,
+    GenerationSelector, PublicError, RepositorySelector, SchemaVersion, TrustClassification,
     change::{
         ChangePlanStep, ContextPackRequest, PlanChangeData, PlanChangeInput, PlanDecision,
         PlanImpactSummary, PlanObjective, PlanTargetSelector, RiskLevel, TestCandidate,
     },
     context::PlanExplanation,
+    vertical::{ReadEnvelope, RequiredNullable, ResponseWarning, UsageSummary},
 };
 
 use crate::{
     explain::{finalize_plan, plan_change_plan},
+    policy::CancellationSignal,
     policy::is_compact_profile,
+    port::{
+        AgentCallContext, AgentIdentityRequest, AgentPortError, AgentResolutionContext,
+        AgentResolvedIdentity,
+    },
 };
 
 /// Admitted `plan.change` request independent of a concrete daemon client.
@@ -184,6 +192,210 @@ pub struct PlanImpactResult {
     pub risk_level: String,
     /// Whether the public API surface is affected.
     pub touches_public_surface: bool,
+}
+
+/// Future returned by the transport-neutral plan-change port.
+pub type PlanChangePortFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+/// Typed daemon facts and read metadata adapted for agent-owned shaping.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanChangePortOutput {
+    /// Immutable repository and generation context.
+    pub identity: AgentResolvedIdentity,
+    /// Client-independent planning facts.
+    pub result: PlanChangeResult,
+    /// Measured daemon usage.
+    pub usage: UsageSummary,
+    /// Whether the daemon truncated its bounded result.
+    pub truncated: bool,
+    /// Source-free response warnings.
+    pub warnings: Vec<ResponseWarning>,
+}
+
+/// Client-free boundary for plan-change identity and planning facts.
+pub trait PlanChangePort<C>: Send + Sync + 'static
+where
+    C: CancellationSignal + Clone + Send + Sync + 'static,
+{
+    /// Resolves immutable identity without source retrieval or mutation.
+    fn resolve_identity(
+        &self,
+        request: AgentIdentityRequest,
+        context: AgentResolutionContext<C>,
+    ) -> PlanChangePortFuture<Result<AgentResolvedIdentity, AgentPortError>>;
+
+    /// Fetches typed planning facts under the supplied execution policy.
+    fn plan_change(
+        &self,
+        request: PlanChangeRequest,
+        context: AgentCallContext<C>,
+    ) -> PlanChangePortFuture<Result<PlanChangePortOutput, AgentPortError>>;
+}
+
+/// Failure returned by complete plan-change orchestration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlanChangeServiceError {
+    /// Public request admission failed.
+    Admission(PlanChangeError),
+    /// A checked adapter error occurred.
+    Public(Box<PublicError>),
+    /// Cooperative cancellation won.
+    Cancelled,
+    /// The bounded request deadline elapsed.
+    DeadlineExceeded,
+    /// Adapter facts violated the typed identity contract.
+    InvalidResponse,
+    /// The provider was unavailable.
+    Unavailable,
+}
+
+/// Complete transport-neutral service for `plan.change`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlanChangeService;
+
+impl PlanChangeService {
+    /// Normalizes, orchestrates, and shapes one public change plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlanChangeServiceError`] when admission fails, cancellation or
+    /// the deadline wins, or adapter facts violate the typed contract.
+    pub async fn execute<P, C>(
+        &self,
+        port: Arc<P>,
+        input: PlanChangeInput,
+        cancellation: C,
+        deadline: Instant,
+    ) -> Result<ReadEnvelope<PlanChangeData>, PlanChangeServiceError>
+    where
+        P: PlanChangePort<C>,
+        C: CancellationSignal + Clone + Send + Sync + 'static,
+    {
+        plan_change_checkpoint(&cancellation, deadline)?;
+        let request = normalize_plan_change(input).map_err(PlanChangeServiceError::Admission)?;
+        if request.explain_only() {
+            let identity = port
+                .resolve_identity(
+                    AgentIdentityRequest::new(
+                        RepositorySelector::ById(
+                            rootlight_mcp_contract::vertical::RepositoryIdSelector {
+                                repository_id: request.repository(),
+                            },
+                        ),
+                        Some(request.generation().clone()),
+                    ),
+                    AgentResolutionContext::new(cancellation.clone(), deadline),
+                )
+                .await
+                .map_err(map_plan_port_error)?;
+            plan_change_checkpoint(&cancellation, deadline)?;
+            if identity.repository.repository_id != request.repository() {
+                return Err(PlanChangeServiceError::InvalidResponse);
+            }
+            if matches!(
+                request.generation(),
+                GenerationSelector::Explicit(expected)
+                    if identity.generation.generation_id != *expected
+            ) {
+                return Err(PlanChangeServiceError::InvalidResponse);
+            }
+            let data = explain_plan_change(&request, identity.generation.generation_id);
+            return Ok(ReadEnvelope {
+                schema_version: SchemaVersion::V1_0,
+                repository: identity.repository,
+                generation: identity.generation,
+                coverage: identity.coverage,
+                data,
+                truncated: false,
+                next_cursor: RequiredNullable(None),
+                usage: empty_plan_usage(),
+                warnings: identity.warnings,
+                trust: TrustClassification::UntrustedRepositoryData,
+            });
+        }
+
+        let budget = rootlight_mcp_contract::vertical::ResponseBudget {
+            max_results: request.max_steps().map(u16::from),
+            max_tokens: None,
+            max_source_bytes: None,
+            max_traversal_facts: None,
+            max_depth: None,
+            max_paths: None,
+            timeout_ms: None,
+            evidence_level: None,
+        };
+        let output = port
+            .plan_change(
+                request.clone(),
+                AgentCallContext::new(cancellation.clone(), budget, Some(deadline)),
+            )
+            .await
+            .map_err(map_plan_port_error)?;
+        plan_change_checkpoint(&cancellation, deadline)?;
+        if output.identity.repository.repository_id != request.repository()
+            || matches!(
+                request.generation(),
+                GenerationSelector::Explicit(expected)
+                    if output.identity.generation.generation_id != *expected
+            )
+        {
+            return Err(PlanChangeServiceError::InvalidResponse);
+        }
+        let data = shape_plan_change(output.result).map_err(PlanChangeServiceError::Admission)?;
+        Ok(ReadEnvelope {
+            schema_version: SchemaVersion::V1_0,
+            repository: output.identity.repository,
+            generation: output.identity.generation,
+            coverage: output.identity.coverage,
+            data,
+            truncated: output.truncated,
+            next_cursor: RequiredNullable(None),
+            usage: output.usage,
+            warnings: output.warnings,
+            trust: TrustClassification::UntrustedRepositoryData,
+        })
+    }
+}
+
+fn plan_change_checkpoint<C>(
+    cancellation: &C,
+    deadline: Instant,
+) -> Result<(), PlanChangeServiceError>
+where
+    C: CancellationSignal,
+{
+    if cancellation.is_cancelled() {
+        Err(PlanChangeServiceError::Cancelled)
+    } else if Instant::now() >= deadline {
+        Err(PlanChangeServiceError::DeadlineExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+fn map_plan_port_error(error: AgentPortError) -> PlanChangeServiceError {
+    match error {
+        AgentPortError::Public(error) => PlanChangeServiceError::Public(error),
+        AgentPortError::Cancelled => PlanChangeServiceError::Cancelled,
+        AgentPortError::DeadlineExceeded => PlanChangeServiceError::DeadlineExceeded,
+        AgentPortError::LocalDeadlineExceeded => PlanChangeServiceError::InvalidResponse,
+        AgentPortError::InvalidResponse => PlanChangeServiceError::InvalidResponse,
+        AgentPortError::Unavailable => PlanChangeServiceError::Unavailable,
+    }
+}
+
+fn empty_plan_usage() -> UsageSummary {
+    UsageSummary {
+        rows: 0,
+        edges: 0,
+        source_bytes: 0,
+        json_bytes: 0,
+        estimated_tokens: 0,
+        wall_time_ms: 0,
+        cache_status: rootlight_mcp_contract::vertical::CacheStatus::NotApplicable,
+        trace_id: "plan-change-explain".to_owned(),
+    }
 }
 
 /// Shapes checked planning facts into the public response data contract.

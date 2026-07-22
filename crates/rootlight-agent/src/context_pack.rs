@@ -5,18 +5,34 @@
 //! the public context contract. Selection is deterministic, deduplicated, and
 //! constrained by one shared token ledger.
 
-use std::collections::BTreeMap;
-
-use rootlight_mcp_contract::{
-    SafeLabel, SourceFreeMessage, TrustClassification,
-    context::{
-        ContextItem, ContextPackData, ContextPackId, ContextPackInput, ContextStructure,
-        EvidenceRole as ContractEvidenceRole, OmissionSummary, TokenAccounting, ToolSuggestion,
-    },
-    vertical::SymbolExplanation,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
-use crate::policy::{BudgetCharge, BudgetLedger, CancellationSignal, ExecutionPolicyError};
+use rootlight_ids::{RepositoryId, SymbolId};
+use rootlight_mcp_contract::{
+    PublicError, SafeLabel, SchemaVersion, SourceFreeMessage, TrustClassification,
+    context::{
+        BatchTool, ContextItem, ContextPackData, ContextPackId, ContextPackInput, ContextStructure,
+        EvidenceRole as ContractEvidenceRole, OmissionSummary, TokenAccounting, ToolSuggestion,
+    },
+    vertical::{
+        GenerationSelector, ReadEnvelope, RequiredNullable, ResponseBudget, SymbolExplainData,
+        SymbolExplanation,
+    },
+};
+use serde_json::Map;
+
+use crate::{
+    explain::{context_pack_plan, finalize_plan},
+    policy::{BudgetCharge, BudgetLedger, CancellationSignal, ExecutionPolicyError},
+    port::{
+        AgentCallContext, AgentIdentityRequest, AgentPortError, AgentResolutionContext,
+        AgentToolPort, AgentToolRequest,
+    },
+};
 
 /// Maximum evidence items in one context pack.
 ///
@@ -38,6 +54,9 @@ pub const MAX_PACK_TOKENS: u32 = 20_000;
 ///
 /// Matches the public `context.pack` token budget minimum.
 pub const MIN_PACK_TOKENS: u32 = 500;
+
+/// Bounded wall-clock ceiling for context-pack identity and evidence reads.
+pub const CONTEXT_PACK_TIMEOUT_MS: u32 = 30_000;
 
 /// Evidence role classification for pack items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -309,6 +328,252 @@ where
             data: context_pack_data(request.input, request.generation, &pack, &definitions),
             truncated: pack.truncated,
         })
+    }
+}
+
+/// Failure returned by complete context-pack orchestration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ContextPackServiceError {
+    /// A named public input field is not implemented.
+    UnsupportedField(&'static str),
+    /// No supported seed supplied a symbol identity.
+    EmptySeeds,
+    /// A checked child call failed.
+    Public(Box<PublicError>),
+    /// Cooperative cancellation won.
+    Cancelled,
+    /// The bounded orchestration deadline elapsed.
+    DeadlineExceeded,
+    /// A child response violated the pinned identity or typed contract.
+    InvalidResponse,
+    /// The adapter or planner failed internally.
+    Unavailable,
+}
+
+/// Complete transport-neutral service for `context.pack`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ContextPackService;
+
+impl ContextPackService {
+    /// Resolves identity and evidence, then shapes the complete public envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContextPackServiceError`] when request admission, identity
+    /// resolution, evidence retrieval, or deterministic planning fails.
+    pub async fn execute<P, C>(
+        &self,
+        port: Arc<P>,
+        input: ContextPackInput,
+        repository: RepositoryId,
+        cancellation: C,
+    ) -> Result<ReadEnvelope<ContextPackData>, ContextPackServiceError>
+    where
+        P: AgentToolPort<C>,
+        C: CancellationSignal + Clone + Send + Sync + 'static,
+    {
+        validate_supported_fields(&input)?;
+        let seeds = supported_seed_symbols(&input)?;
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(u64::from(CONTEXT_PACK_TIMEOUT_MS)))
+            .ok_or(ContextPackServiceError::Unavailable)?;
+        context_service_checkpoint(&cancellation, deadline)?;
+        let identity = port
+            .resolve_identity(
+                AgentIdentityRequest::new(input.repository.clone(), input.generation.clone()),
+                AgentResolutionContext::new(cancellation.clone(), deadline),
+            )
+            .await
+            .map_err(map_port_error)?;
+        context_service_checkpoint(&cancellation, deadline)?;
+        if identity.repository.repository_id != repository {
+            return Err(ContextPackServiceError::InvalidResponse);
+        }
+        if matches!(
+            input.generation.as_ref(),
+            Some(GenerationSelector::Explicit(expected))
+                if identity.generation.generation_id != *expected
+        ) {
+            return Err(ContextPackServiceError::InvalidResponse);
+        }
+
+        if input.explain == Some(true) {
+            let explanation = finalize_plan(
+                context_pack_plan(seeds.len(), input.token_budget),
+                &identity.generation.generation_id.to_string(),
+            );
+            let data = ContextPackData {
+                pack_id: context_pack_id(&input, identity.generation.generation_id),
+                items: Vec::new(),
+                structure: ContextStructure {
+                    reading_order: Vec::new(),
+                    dependencies: Vec::new(),
+                },
+                omitted: Vec::new(),
+                followups: Vec::new(),
+                token_accounting: TokenAccounting {
+                    estimated_total: 0,
+                    by_section: BTreeMap::new(),
+                },
+                explanation: Some(explanation),
+            };
+            return Ok(ReadEnvelope {
+                schema_version: SchemaVersion::V1_0,
+                repository: identity.repository,
+                generation: identity.generation,
+                coverage: identity.coverage,
+                data,
+                truncated: false,
+                next_cursor: RequiredNullable(None),
+                usage: empty_usage("context-pack-explain"),
+                warnings: identity.warnings,
+                trust: TrustClassification::UntrustedRepositoryData,
+            });
+        }
+
+        let mut arguments = Map::new();
+        // The public selector is an object, while ResolvedRepository includes a
+        // display name. Preserve only the strict inherited selector shape.
+        arguments.insert(
+            "repository".to_owned(),
+            serde_json::json!({"repository_id": identity.repository.repository_id}),
+        );
+        arguments.insert(
+            "generation".to_owned(),
+            serde_json::to_value(identity.generation.generation_id)
+                .map_err(|_| ContextPackServiceError::Unavailable)?,
+        );
+        arguments.insert(
+            "symbol_ids".to_owned(),
+            serde_json::to_value(&seeds).map_err(|_| ContextPackServiceError::Unavailable)?,
+        );
+        let budget = ResponseBudget {
+            max_results: Some(u16::try_from(seeds.len()).unwrap_or(16)),
+            max_tokens: None,
+            max_source_bytes: None,
+            max_traversal_facts: None,
+            max_depth: None,
+            max_paths: None,
+            timeout_ms: Some(CONTEXT_PACK_TIMEOUT_MS),
+            evidence_level: None,
+        };
+        let envelope = port
+            .execute(
+                AgentToolRequest::new(BatchTool::SymbolExplain, arguments),
+                AgentCallContext::new(cancellation.clone(), budget, Some(deadline)),
+            )
+            .await
+            .map_err(map_port_error)?;
+        context_service_checkpoint(&cancellation, deadline)?;
+        if envelope.repository.repository_id != identity.repository.repository_id
+            || envelope.generation.generation_id != identity.generation.generation_id
+        {
+            return Err(ContextPackServiceError::InvalidResponse);
+        }
+        let symbols: SymbolExplainData = serde_json::from_value(envelope.data.clone())
+            .map_err(|_| ContextPackServiceError::InvalidResponse)?;
+        let planned = DefaultContextPackPlanner
+            .plan(
+                ContextPackPlanRequest {
+                    input: &input,
+                    generation: identity.generation.generation_id,
+                    symbols: &symbols.symbols,
+                },
+                &cancellation,
+            )
+            .map_err(|_| ContextPackServiceError::Unavailable)?;
+        Ok(ReadEnvelope {
+            schema_version: SchemaVersion::V1_0,
+            repository: identity.repository,
+            generation: identity.generation,
+            coverage: identity.coverage,
+            data: planned.data,
+            truncated: planned.truncated,
+            next_cursor: RequiredNullable(None),
+            usage: envelope.usage,
+            warnings: envelope.warnings,
+            trust: TrustClassification::UntrustedRepositoryData,
+        })
+    }
+}
+
+fn context_service_checkpoint<C>(
+    cancellation: &C,
+    deadline: Instant,
+) -> Result<(), ContextPackServiceError>
+where
+    C: CancellationSignal,
+{
+    if cancellation.is_cancelled() {
+        Err(ContextPackServiceError::Cancelled)
+    } else if Instant::now() >= deadline {
+        Err(ContextPackServiceError::DeadlineExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_supported_fields(input: &ContextPackInput) -> Result<(), ContextPackServiceError> {
+    let fields = [
+        (input.seeds.paths.is_some(), "paths"),
+        (input.seeds.routes.is_some(), "routes"),
+        (input.seeds.located.is_some(), "located"),
+        (input.seeds.change.is_some(), "change"),
+        (input.seeds.plan.is_some(), "plan"),
+        (input.source_policy.is_some(), "source_policy"),
+        (input.sections.is_some(), "sections"),
+        (input.diversity.is_some(), "diversity"),
+        (input.min_confidence.is_some(), "min_confidence"),
+        (input.continuation.is_some(), "continuation"),
+    ];
+    if let Some((_, field)) = fields.into_iter().find(|(present, _)| *present) {
+        return Err(ContextPackServiceError::UnsupportedField(field));
+    }
+    Ok(())
+}
+
+fn supported_seed_symbols(
+    input: &ContextPackInput,
+) -> Result<BTreeSet<SymbolId>, ContextPackServiceError> {
+    let mut symbols = BTreeSet::new();
+    if let Some(seeds) = &input.seeds.symbols {
+        symbols.extend(seeds.iter().copied());
+    }
+    if let Some(tests) = &input.seeds.tests {
+        symbols.extend(tests.iter().copied());
+    }
+    while symbols.len() > 16 {
+        symbols.pop_last();
+    }
+    if symbols.is_empty() {
+        Err(ContextPackServiceError::EmptySeeds)
+    } else {
+        Ok(symbols)
+    }
+}
+
+fn map_port_error(error: AgentPortError) -> ContextPackServiceError {
+    match error {
+        AgentPortError::Public(error) => ContextPackServiceError::Public(error),
+        AgentPortError::Cancelled => ContextPackServiceError::Cancelled,
+        AgentPortError::DeadlineExceeded => ContextPackServiceError::DeadlineExceeded,
+        AgentPortError::LocalDeadlineExceeded => ContextPackServiceError::InvalidResponse,
+        AgentPortError::InvalidResponse => ContextPackServiceError::InvalidResponse,
+        AgentPortError::Unavailable => ContextPackServiceError::Unavailable,
+    }
+}
+
+fn empty_usage(trace_id: &str) -> rootlight_mcp_contract::vertical::UsageSummary {
+    rootlight_mcp_contract::vertical::UsageSummary {
+        rows: 0,
+        edges: 0,
+        source_bytes: 0,
+        json_bytes: 0,
+        estimated_tokens: 0,
+        wall_time_ms: 0,
+        cache_status: rootlight_mcp_contract::vertical::CacheStatus::NotApplicable,
+        trace_id: trace_id.to_owned(),
     }
 }
 

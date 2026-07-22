@@ -91,6 +91,7 @@ enum FakeOutcome {
     },
     OperationStatus(Result<RepositoryOperationStatus, ClientPortError>),
     CodeLocate(Result<CodeLocatePortResponse, ClientPortError>),
+    PendingCodeLocate,
     SymbolExplain(Result<SymbolExplainPortResponse, ClientPortError>),
     SourceRead(Result<SourceReadPortResponse, ClientPortError>),
     RepositoryList(Result<RepositoryList, ClientPortError>),
@@ -207,6 +208,7 @@ impl FirstSliceClientPort for FakePort {
         let outcome = match &self.outcome {
             FakeOutcome::CodeLocate(outcome) => outcome.clone(),
             FakeOutcome::Batch { locate, .. } => locate.clone(),
+            FakeOutcome::PendingCodeLocate => return Box::pin(std::future::pending()),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -260,6 +262,7 @@ impl FirstSliceClientPort for FakePort {
         let outcome = match &self.outcome {
             FakeOutcome::RepositoryStatus(outcome) => outcome.clone(),
             FakeOutcome::Batch { status, .. } => status.clone(),
+            FakeOutcome::SymbolExplain(Ok(_)) => Ok(repository_status_response()),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1174,6 +1177,9 @@ async fn batch_adapter_propagates_cancellation_before_client_dispatch() {
         .expect("static error is valid");
     let adapter = McpAgentToolPort {
         port: Arc::clone(&harness.executor.port),
+        validator: Arc::new(
+            MaterializedToolValidator::compile().expect("checked contracts compile"),
+        ),
         unsupported: public.clone(),
         invalid_arguments: public,
     };
@@ -1199,6 +1205,137 @@ async fn batch_adapter_propagates_cancellation_before_client_dispatch() {
         Err(AgentPortError::Cancelled)
     );
     assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn batch_adapter_rejects_unrepresentable_evidence_before_client_dispatch() {
+    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate_response())));
+    let public = PublicError::builder(ErrorCode::InvalidArgument, "invalid batch")
+        .build()
+        .expect("static error is valid");
+    let adapter = McpAgentToolPort {
+        port: Arc::clone(&harness.executor.port),
+        validator: Arc::new(
+            MaterializedToolValidator::compile().expect("checked contracts compile"),
+        ),
+        unsupported: public.clone(),
+        invalid_arguments: public,
+    };
+    let (_sender, receiver) = watch::channel(false);
+    let request = AgentToolRequest::new(
+        BatchTool::CodeLocate,
+        Map::from_iter([
+            (
+                "repository".to_owned(),
+                json!({"repository_id": repository()}),
+            ),
+            ("generation".to_owned(), json!(generation())),
+            ("query".to_owned(), json!("publish")),
+        ]),
+    );
+    let local_budget = ResponseBudget {
+        max_results: None,
+        max_tokens: None,
+        max_source_bytes: None,
+        max_traversal_facts: None,
+        max_depth: None,
+        max_paths: None,
+        timeout_ms: Some(1_000),
+        evidence_level: Some(rootlight_mcp_contract::vertical::ProvenanceLevel::Compact),
+    };
+    let context = AgentCallContext::new(
+        RequestCancellation { receiver },
+        local_budget.clone(),
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(1)),
+    )
+    .with_local_budget(Some(local_budget));
+
+    let error = adapter
+        .execute(request, context)
+        .await
+        .expect_err("unsupported evidence fails before execution");
+    let AgentPortError::Public(error) = error else {
+        panic!("expected checked unsupported-capability error");
+    };
+    assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn batch_adapter_preserves_local_and_parent_deadline_provenance() {
+    for (local, expected) in [
+        (true, AgentPortError::LocalDeadlineExceeded),
+        (false, AgentPortError::DeadlineExceeded),
+    ] {
+        let harness = Harness::new(FakeOutcome::PendingCodeLocate);
+        let public = PublicError::builder(ErrorCode::InvalidArgument, "invalid batch")
+            .build()
+            .expect("static error is valid");
+        let adapter = McpAgentToolPort {
+            port: Arc::clone(&harness.executor.port),
+            validator: Arc::new(
+                MaterializedToolValidator::compile().expect("checked contracts compile"),
+            ),
+            unsupported: public.clone(),
+            invalid_arguments: public,
+        };
+        let request = AgentToolRequest::new(
+            BatchTool::CodeLocate,
+            Map::from_iter([
+                (
+                    "repository".to_owned(),
+                    json!({"repository_id": repository()}),
+                ),
+                ("generation".to_owned(), json!(generation())),
+                ("query".to_owned(), json!("publish")),
+            ]),
+        );
+        let context = AgentCallContext::new(
+            cancellation(),
+            ResponseBudget {
+                max_results: None,
+                max_tokens: None,
+                max_source_bytes: None,
+                max_traversal_facts: None,
+                max_depth: None,
+                max_paths: None,
+                timeout_ms: Some(1),
+                evidence_level: None,
+            },
+            Some(std::time::Instant::now()),
+        )
+        .with_local_deadline(local);
+        assert_eq!(adapter.execute(request, context).await, Err(expected));
+    }
+}
+
+#[test]
+fn production_batch_mapping_covers_every_canonical_eligible_tool() {
+    let mapped = [
+        (McpTool::CodeLocate, BatchTool::CodeLocate),
+        (McpTool::SymbolExplain, BatchTool::SymbolExplain),
+        (McpTool::SymbolRelationships, BatchTool::SymbolRelationships),
+        (McpTool::FlowTrace, BatchTool::FlowTrace),
+        (McpTool::ChangeImpact, BatchTool::ChangeImpact),
+        (McpTool::TestsSelect, BatchTool::TestsSelect),
+        (
+            McpTool::ArchitectureOverview,
+            BatchTool::ArchitectureOverview,
+        ),
+        (McpTool::ArchitectureCycles, BatchTool::ArchitectureCycles),
+        (McpTool::CodeDead, BatchTool::CodeDead),
+        (McpTool::ContextPack, BatchTool::ContextPack),
+        (McpTool::SourceRead, BatchTool::SourceRead),
+    ];
+    assert_eq!(
+        mapped.map(|(tool, _)| tool),
+        rootlight_mcp_contract::capability::BATCH_ELIGIBLE
+    );
+    for (catalog, batch) in mapped {
+        let vertical = vertical_tool_for_batch(batch).expect("eligible tool has a dispatch target");
+        assert_eq!(vertical.name(), catalog.name());
+    }
+    assert_eq!(vertical_tool_for_batch(BatchTool::PlanChange), None);
 }
 
 #[tokio::test]
@@ -1314,7 +1451,8 @@ async fn query_batch_classifies_bound_value_type_before_subtool_execution() {
             "operations": [
                 {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}},
                 {"id": "refine", "tool": "code.locate", "depends_on": ["find"], "arguments": {
-                    "query": {"$from": "find", "pointer": "/data/matches"}
+                    "query": "publish",
+                    "search_modes": {"$from": "find", "pointer": "/data/matches/0/symbol_id"}
                 }}
             ]
         }),
@@ -1347,6 +1485,122 @@ async fn query_batch_classifies_bound_value_type_before_subtool_execution() {
 }
 
 #[tokio::test]
+async fn query_batch_does_not_launder_malformed_limits_through_budget_lowering() {
+    let overflow =
+        serde_json::from_str::<Value>("18446744073709551616").expect("JSON number is valid");
+    for malformed in [json!("bad"), json!(-1), json!(1.5), Value::Null, overflow] {
+        let harness = batch_harness();
+        let output = execute(
+            &harness.executor,
+            VerticalTool::QueryBatch,
+            json!({
+                "repository": {"repository_id": repository()},
+                "operations": [{
+                    "id": "invalid",
+                    "tool": "code.locate",
+                    "arguments": {"query": "publish", "max_results": malformed}
+                }],
+                "budget": {"max_results": 1}
+            }),
+        )
+        .await
+        .expect("a child validation failure remains inside the batch envelope");
+        let ToolResponse::Success(output) = decode::<QueryBatchOutput>(output) else {
+            panic!("expected batch success envelope");
+        };
+        assert_eq!(
+            output.data.operation_results[0]
+                .error
+                .as_ref()
+                .map(PublicError::code),
+            Some(ErrorCode::InvalidArgument)
+        );
+        let calls = harness
+            .calls
+            .lock()
+            .expect("fake call recorder is available");
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| matches!(call, ObservedCall::CodeLocate(_)))
+                .count(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn unrelated_static_validation_error_is_not_reclassified_as_a_binding_error() {
+    let harness = batch_harness();
+    let output = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}},
+                {"id": "mixed", "tool": "code.locate", "depends_on": ["find"], "arguments": {
+                    "query": {"$from": "find", "pointer": "/data/matches/0/symbol_id"},
+                    "search_modes": ["not_a_mode"]
+                }}
+            ]
+        }),
+    )
+    .await
+    .expect("the static validation failure remains inside the batch envelope");
+    let ToolResponse::Success(output) = decode::<QueryBatchOutput>(output) else {
+        panic!("expected batch success envelope");
+    };
+    assert_eq!(
+        output.data.operation_results[1]
+            .error
+            .as_ref()
+            .map(PublicError::code),
+        Some(ErrorCode::InvalidArgument)
+    );
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is available");
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| matches!(call, ObservedCall::CodeLocate(_)))
+            .count(),
+        1,
+        "only the independent dependency may cross the client port"
+    );
+}
+
+#[tokio::test]
+async fn explicit_nonactive_generation_fails_before_child_retrieval() {
+    let harness = batch_harness();
+    let error = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "generation": parent_generation(),
+            "operations": [
+                {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}}
+            ]
+        }),
+    )
+    .await
+    .expect_err("active-only status cannot prove an explicit historical generation");
+    assert_eq!(
+        error.public_error().map(PublicError::code),
+        Some(ErrorCode::StaleGeneration)
+    );
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is available");
+    assert_eq!(calls.len(), 1);
+    assert!(matches!(calls[0], ObservedCall::RepositoryStatus(_)));
+}
+
+#[tokio::test]
 async fn query_batch_keeps_all_subtool_errors_inside_a_pinned_envelope() {
     let harness = batch_harness();
     let output = execute(
@@ -1355,7 +1609,10 @@ async fn query_batch_keeps_all_subtool_errors_inside_a_pinned_envelope() {
         json!({
             "repository": {"repository_id": repository()},
             "operations": [
-                {"id": "rels", "tool": "symbol.relationships", "arguments": {}}
+                {"id": "unsupported", "tool": "code.locate", "arguments": {
+                    "query": "publish",
+                    "kinds": ["function"]
+                }}
             ]
         }),
     )
