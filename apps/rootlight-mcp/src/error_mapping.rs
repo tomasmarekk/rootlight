@@ -6,12 +6,16 @@
 
 use rootlight_agent::{advanced::AdvancedQueryError, batch::BatchValidationError};
 use rootlight_mcp_contract::{
-    DetailKey, ErrorCode, NextAction, PublicError, PublicErrorBuildError, error_definition,
-    pagination::CursorError,
+    DetailKey, ErrorCode, NextAction, PublicError, PublicErrorBuildError, PublicValue,
+    error_definition, pagination::CursorError,
 };
 use serde::Serialize;
 
+#[cfg(test)]
 pub(crate) const ERROR_MAPPING_VERSION: &str = "1.0";
+const NO_DETAILS: &[&str] = &[];
+const CAPABILITY_DETAILS: &[&str] = &["capability_reason", "field_path"];
+const COST_DETAILS: &[&str] = &["cost_limit", "estimated_cost"];
 
 /// Closed failure families currently converted at the MCP boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -31,6 +35,7 @@ pub(crate) enum DomainFailureKind {
 }
 
 impl DomainFailureKind {
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 11] = [
         Self::InvalidArgument,
         Self::TypeMismatch,
@@ -72,6 +77,7 @@ pub(crate) struct ErrorMapping {
     pub(crate) field_policy: FieldPolicy,
     pub(crate) fixed_field: Option<&'static str>,
     pub(crate) next_action: ActionPolicy,
+    pub(crate) allowed_detail_keys: &'static [&'static str],
 }
 
 pub(crate) const ERROR_MAPPINGS: [ErrorMapping; 11] = [
@@ -81,6 +87,7 @@ pub(crate) const ERROR_MAPPINGS: [ErrorMapping; 11] = [
         field_policy: FieldPolicy::Required,
         fixed_field: None,
         next_action: ActionPolicy::CorrectField,
+        allowed_detail_keys: NO_DETAILS,
     },
     ErrorMapping {
         failure: DomainFailureKind::TypeMismatch,
@@ -88,6 +95,7 @@ pub(crate) const ERROR_MAPPINGS: [ErrorMapping; 11] = [
         field_policy: FieldPolicy::Required,
         fixed_field: None,
         next_action: ActionPolicy::CorrectField,
+        allowed_detail_keys: NO_DETAILS,
     },
     ErrorMapping {
         failure: DomainFailureKind::InvalidCursor,
@@ -95,6 +103,7 @@ pub(crate) const ERROR_MAPPINGS: [ErrorMapping; 11] = [
         field_policy: FieldPolicy::None,
         fixed_field: None,
         next_action: ActionPolicy::RestartEnumeration,
+        allowed_detail_keys: NO_DETAILS,
     },
     ErrorMapping {
         failure: DomainFailureKind::UnsupportedCapability,
@@ -102,6 +111,7 @@ pub(crate) const ERROR_MAPPINGS: [ErrorMapping; 11] = [
         field_policy: FieldPolicy::Required,
         fixed_field: None,
         next_action: ActionPolicy::CorrectField,
+        allowed_detail_keys: CAPABILITY_DETAILS,
     },
     ErrorMapping {
         failure: DomainFailureKind::IncompleteCoverage,
@@ -109,6 +119,7 @@ pub(crate) const ERROR_MAPPINGS: [ErrorMapping; 11] = [
         field_policy: FieldPolicy::Fixed,
         fixed_field: Some("scope"),
         next_action: ActionPolicy::CorrectField,
+        allowed_detail_keys: NO_DETAILS,
     },
     ErrorMapping {
         failure: DomainFailureKind::BudgetExceeded,
@@ -116,6 +127,7 @@ pub(crate) const ERROR_MAPPINGS: [ErrorMapping; 11] = [
         field_policy: FieldPolicy::Fixed,
         fixed_field: Some("budget"),
         next_action: ActionPolicy::CorrectField,
+        allowed_detail_keys: NO_DETAILS,
     },
     ErrorMapping {
         failure: DomainFailureKind::ResourceExhausted,
@@ -123,6 +135,7 @@ pub(crate) const ERROR_MAPPINGS: [ErrorMapping; 11] = [
         field_policy: FieldPolicy::None,
         fixed_field: None,
         next_action: ActionPolicy::Retry,
+        allowed_detail_keys: NO_DETAILS,
     },
     ErrorMapping {
         failure: DomainFailureKind::CostLimit,
@@ -130,6 +143,7 @@ pub(crate) const ERROR_MAPPINGS: [ErrorMapping; 11] = [
         field_policy: FieldPolicy::Required,
         fixed_field: None,
         next_action: ActionPolicy::CorrectField,
+        allowed_detail_keys: COST_DETAILS,
     },
     ErrorMapping {
         failure: DomainFailureKind::OperatorForbidden,
@@ -137,6 +151,7 @@ pub(crate) const ERROR_MAPPINGS: [ErrorMapping; 11] = [
         field_policy: FieldPolicy::Required,
         fixed_field: None,
         next_action: ActionPolicy::CorrectField,
+        allowed_detail_keys: CAPABILITY_DETAILS,
     },
     ErrorMapping {
         failure: DomainFailureKind::BindingInvalid,
@@ -144,6 +159,7 @@ pub(crate) const ERROR_MAPPINGS: [ErrorMapping; 11] = [
         field_policy: FieldPolicy::Fixed,
         fixed_field: Some("arguments"),
         next_action: ActionPolicy::CorrectField,
+        allowed_detail_keys: CAPABILITY_DETAILS,
     },
     ErrorMapping {
         failure: DomainFailureKind::BindingTypeMismatch,
@@ -151,6 +167,7 @@ pub(crate) const ERROR_MAPPINGS: [ErrorMapping; 11] = [
         field_policy: FieldPolicy::Fixed,
         fixed_field: Some("arguments"),
         next_action: ActionPolicy::CorrectField,
+        allowed_detail_keys: NO_DETAILS,
     },
 ];
 
@@ -178,6 +195,7 @@ impl MappedDomainFailure {
         Self::with_field(DomainFailureKind::UnsupportedCapability, field)
     }
 
+    #[cfg(test)]
     pub(crate) const fn incomplete_coverage() -> Self {
         Self::without_field(DomainFailureKind::IncompleteCoverage)
     }
@@ -299,6 +317,19 @@ pub(crate) fn mapping_for(kind: DomainFailureKind) -> &'static ErrorMapping {
 pub(crate) fn public_error(
     failure: MappedDomainFailure,
 ) -> Result<PublicError, PublicErrorBuildError> {
+    public_error_with_details(failure, [])
+}
+
+/// Builds the checked public envelope with mapping-approved typed details.
+///
+/// # Errors
+///
+/// Returns a checked public-error construction failure if a supplied detail is
+/// not declared for the failure family or violates the public envelope bounds.
+pub(crate) fn public_error_with_details(
+    failure: MappedDomainFailure,
+    details: impl IntoIterator<Item = (DetailKey, PublicValue)>,
+) -> Result<PublicError, PublicErrorBuildError> {
     let mapping = mapping_for(failure.kind());
     let definition = error_definition(mapping.code);
     let mut builder = PublicError::builder(mapping.code, definition.message);
@@ -323,6 +354,12 @@ pub(crate) fn public_error(
             builder.next_action(NextAction::Retry)
         }
     };
+    for (key, value) in details {
+        if !mapping.allowed_detail_keys.contains(&key.as_str()) {
+            return Err(PublicErrorBuildError::InvalidDetailKey);
+        }
+        builder = builder.detail(key, value);
+    }
     builder.build()
 }
 
@@ -338,7 +375,7 @@ mod tests {
 
     use super::{
         ActionPolicy, DomainFailureKind, ERROR_MAPPING_VERSION, ERROR_MAPPINGS, ErrorMapping,
-        FieldPolicy, MappedDomainFailure, mapping_for, public_error,
+        FieldPolicy, MappedDomainFailure, mapping_for, public_error, public_error_with_details,
     };
 
     #[derive(Serialize)]
@@ -358,6 +395,7 @@ mod tests {
         field_policy: FieldPolicy,
         fixed_field: Option<&'static str>,
         next_action: ActionPolicy,
+        allowed_detail_keys: &'static [&'static str],
     }
 
     fn artifact() -> MappingArtifact {
@@ -377,6 +415,7 @@ mod tests {
                         field_policy: mapping.field_policy,
                         fixed_field: mapping.fixed_field,
                         next_action: mapping.next_action,
+                        allowed_detail_keys: mapping.allowed_detail_keys,
                     }
                 })
                 .collect(),
@@ -463,6 +502,34 @@ mod tests {
                 assert!(!encoded.contains(forbidden));
             }
         }
+    }
+
+    #[test]
+    fn detail_enrichment_is_closed_by_failure_family() {
+        let field_path =
+            rootlight_mcp_contract::DetailKey::parse("field_path").expect("static key is valid");
+        let label = rootlight_mcp_contract::SafeLabel::parse("query")
+            .expect("static detail label is valid");
+        let enriched = public_error_with_details(
+            MappedDomainFailure::unsupported_capability("arguments"),
+            [(
+                field_path.clone(),
+                rootlight_mcp_contract::PublicValue::Label(label),
+            )],
+        )
+        .expect("declared capability detail is accepted");
+        assert!(enriched.details().contains_key(&field_path));
+
+        assert_eq!(
+            public_error_with_details(
+                MappedDomainFailure::budget_exceeded(),
+                [(
+                    field_path,
+                    rootlight_mcp_contract::PublicValue::Boolean(true),
+                )],
+            ),
+            Err(rootlight_mcp_contract::PublicErrorBuildError::InvalidDetailKey)
+        );
     }
 
     #[test]

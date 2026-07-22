@@ -3,7 +3,7 @@
 //! This module validates both sides of the generic daemon executor boundary
 //! and keeps MCP structured content identical to its JSON text mirror.
 
-use std::{fmt, future::Future, io, pin::Pin, sync::Arc, time::Duration};
+use std::{fmt, future::Future, io, pin::Pin, sync::Arc};
 
 use jsonschema::{Validator, error::ValidationErrorKind};
 use rootlight_mcp_contract::{
@@ -34,7 +34,7 @@ use crate::advanced::{AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL};
 use crate::batch::{
     BatchPlan, is_batch_allowed, is_batch_allowed_under_profile, mcp_tool_for_batch,
 };
-use crate::error_mapping::{MappedDomainFailure, public_error};
+use crate::error_mapping::{MappedDomainFailure, public_error, public_error_with_details};
 
 #[cfg(test)]
 use rootlight_mcp_contract::context::{BatchTool, QueryAstNode};
@@ -560,9 +560,8 @@ impl CapabilityAdmissionError {
             ErrorCode::BindingInvalid => MappedDomainFailure::binding_invalid(),
             _ => unreachable!("capability rules emit only mapped capability error families"),
         };
-        let authoritative = public_error(failure)?;
-        extend_public_error(
-            authoritative,
+        public_error_with_details(
+            failure,
             [
                 (
                     DetailKey::parse("field_path").expect("static detail key is valid"),
@@ -578,37 +577,6 @@ impl CapabilityAdmissionError {
             ],
         )
     }
-}
-
-fn extend_public_error(
-    error: PublicError,
-    details: impl IntoIterator<Item = (DetailKey, PublicValue)>,
-) -> Result<PublicError, PublicErrorBuildError> {
-    let mut builder = PublicError::builder_with_message(error.code(), error.message().to_owned());
-    builder = match error.retry_after_ms() {
-        Some(delay) => builder.retry_after(Duration::from_millis(delay)),
-        None if error.retryable() => builder.retryable(),
-        None => builder,
-    };
-    if let Some(repository) = error.repository() {
-        builder = builder.repository(repository);
-    }
-    if let Some(operation) = error.operation() {
-        builder = builder.operation(operation);
-    }
-    if let Some(generation) = error.generation() {
-        builder = builder.generation(generation);
-    }
-    for (key, value) in error.details() {
-        builder = builder.detail(key.clone(), value.clone());
-    }
-    for action in error.next_actions() {
-        builder = builder.next_action(action.clone());
-    }
-    for (key, value) in details {
-        builder = builder.detail(key, value);
-    }
-    builder.build()
 }
 
 #[derive(Debug)]

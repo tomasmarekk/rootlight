@@ -10,7 +10,8 @@
       "remediation": "CorrectInput",
       "field_policy": "required",
       "fixed_field": null,
-      "next_action": "correct_field"
+      "next_action": "correct_field",
+      "allowed_detail_keys": []
     },
     {
       "failure": "type_mismatch",
@@ -21,7 +22,8 @@
       "remediation": "CorrectInput",
       "field_policy": "required",
       "fixed_field": null,
-      "next_action": "correct_field"
+      "next_action": "correct_field",
+      "allowed_detail_keys": []
     },
     {
       "failure": "invalid_cursor",
@@ -32,7 +34,8 @@
       "remediation": "RestartEnumeration",
       "field_policy": "none",
       "fixed_field": null,
-      "next_action": "restart_enumeration"
+      "next_action": "restart_enumeration",
+      "allowed_detail_keys": []
     },
     {
       "failure": "unsupported_capability",
@@ -43,7 +46,11 @@
       "remediation": "ReduceScope",
       "field_policy": "required",
       "fixed_field": null,
-      "next_action": "correct_field"
+      "next_action": "correct_field",
+      "allowed_detail_keys": [
+        "capability_reason",
+        "field_path"
+      ]
     },
     {
       "failure": "incomplete_coverage",
@@ -54,7 +61,8 @@
       "remediation": "ReduceScope",
       "field_policy": "fixed",
       "fixed_field": "scope",
-      "next_action": "correct_field"
+      "next_action": "correct_field",
+      "allowed_detail_keys": []
     },
     {
       "failure": "budget_exceeded",
@@ -65,7 +73,8 @@
       "remediation": "ReduceScope",
       "field_policy": "fixed",
       "fixed_field": "budget",
-      "next_action": "correct_field"
+      "next_action": "correct_field",
+      "allowed_detail_keys": []
     },
     {
       "failure": "resource_exhausted",
@@ -76,7 +85,8 @@
       "remediation": "Retry",
       "field_policy": "none",
       "fixed_field": null,
-      "next_action": "retry"
+      "next_action": "retry",
+      "allowed_detail_keys": []
     },
     {
       "failure": "cost_limit",
@@ -87,7 +97,11 @@
       "remediation": "ReduceScope",
       "field_policy": "required",
       "fixed_field": null,
-      "next_action": "correct_field"
+      "next_action": "correct_field",
+      "allowed_detail_keys": [
+        "cost_limit",
+        "estimated_cost"
+      ]
     },
     {
       "failure": "operator_forbidden",
@@ -98,7 +112,11 @@
       "remediation": "CorrectInput",
       "field_policy": "required",
       "fixed_field": null,
-      "next_action": "correct_field"
+      "next_action": "correct_field",
+      "allowed_detail_keys": [
+        "capability_reason",
+        "field_path"
+      ]
     },
     {
       "failure": "binding_invalid",
@@ -109,7 +127,11 @@
       "remediation": "CorrectInput",
       "field_policy": "fixed",
       "fixed_field": "arguments",
-      "next_action": "correct_field"
+      "next_action": "correct_field",
+      "allowed_detail_keys": [
+        "capability_reason",
+        "field_path"
+      ]
     },
     {
       "failure": "binding_type_mismatch",
@@ -120,7 +142,8 @@
       "remediation": "CorrectInput",
       "field_policy": "fixed",
       "fixed_field": "arguments",
-      "next_action": "correct_field"
+      "next_action": "correct_field",
+      "allowed_detail_keys": []
     }
   ]
 }

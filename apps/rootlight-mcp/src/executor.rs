@@ -92,7 +92,9 @@ use crate::advanced::{AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_TRAVER
 use crate::{
     RequestCancellation, ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture,
     ToolExecutor,
-    error_mapping::{MappedDomainFailure, public_error as mapped_public_error},
+    error_mapping::{
+        MappedDomainFailure, public_error as mapped_public_error, public_error_with_details,
+    },
     tools::{
         CapabilityBindingPolicy, MaterializedInputError, MaterializedToolValidator,
         validate_capability_input,
@@ -4795,30 +4797,19 @@ fn advanced_query_error(error: AdvancedQueryError) -> ToolExecutionError {
 }
 
 fn cost_limit_error(estimated_cost: u64, requested_limit: Option<u64>) -> ToolExecutionError {
-    let mapped = authoritative_error(MappedDomainFailure::cost_limit("cost_limit"));
-    // Runtime cost values belong to this executor boundary; copy the checked
-    // authoritative base so its code and action cannot drift from the mapping.
-    let mut builder = PublicError::builder_with_message(mapped.code(), mapped.message().to_owned());
-    if mapped.retryable() {
-        builder = builder.retryable();
-    }
-    for action in mapped.next_actions() {
-        builder = builder.next_action(action.clone());
-    }
-    builder = builder.detail(
+    let mut details = vec![(
         DetailKey::parse("estimated_cost").expect("static detail key is valid"),
         PublicValue::Unsigned(estimated_cost),
-    );
+    )];
     if let Some(limit) = requested_limit {
-        builder = builder.detail(
+        details.push((
             DetailKey::parse("cost_limit").expect("static detail key is valid"),
             PublicValue::Unsigned(limit),
-        );
+        ));
     }
     ToolExecutionError::new(
-        builder
-            .build()
-            .expect("static cost-limit error satisfies public bounds"),
+        public_error_with_details(MappedDomainFailure::cost_limit("cost_limit"), details)
+            .expect("authoritative cost-limit details satisfy public bounds"),
     )
 }
 
