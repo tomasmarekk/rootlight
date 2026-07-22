@@ -93,7 +93,10 @@ use crate::advanced::{AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_TRAVER
 use crate::{
     RequestCancellation, ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture,
     ToolExecutor,
-    tools::{MaterializedInputError, MaterializedToolValidator},
+    tools::{
+        CapabilityBindingPolicy, MaterializedInputError, MaterializedToolValidator,
+        validate_capability_input,
+    },
 };
 
 const DEFAULT_LOCATE_RESULTS: u16 = 20;
@@ -1629,14 +1632,9 @@ where
 {
     let input: QueryBatchInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
-    let repository = repository_id(input.repository.clone(), unsupported)?;
     if !is_compact_profile(input.response_profile) {
         return Err(unsupported_field("response_profile"));
     }
-    let operation_failed =
-        PublicError::builder(ErrorCode::Internal, BATCH_OPERATION_FAILED_MESSAGE)
-            .build()
-            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
 
     let tools: Vec<McpTool> = input
         .operations
@@ -1646,11 +1644,17 @@ where
     let dependencies =
         resolve_batch_dependencies(&input.operations).map_err(batch_dependency_error)?;
     BatchPlan::validate(&tools, &dependencies).map_err(batch_plan_error)?;
+    preflight_batch_capabilities(&input)?;
 
+    let repository = repository_id(input.repository.clone(), unsupported)?;
     if explain_only {
         let output = explain_query_batch(port, repository, &input, cancellation).await?;
         return serialize_success(output);
     }
+    let operation_failed =
+        PublicError::builder(ErrorCode::Internal, BATCH_OPERATION_FAILED_MESSAGE)
+            .build()
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
     let budget_exceeded = domain_error(ErrorCode::BudgetExceeded, None);
     let adapter = Arc::new(McpAgentToolPort {
         port: Arc::clone(&port),
@@ -1664,6 +1668,27 @@ where
         .await
         .map_err(map_batch_orchestration_error)?;
     serialize_success(output)
+}
+
+fn preflight_batch_capabilities(input: &QueryBatchInput) -> Result<(), ToolExecutionError> {
+    for (index, operation) in input.operations.iter().enumerate() {
+        let Some(tool) = vertical_tool_for_batch(operation.tool) else {
+            return Err(unsupported_field("operations"));
+        };
+        let arguments = Value::Object(operation.arguments.clone());
+        if let Err(error) = validate_capability_input(
+            tool,
+            &arguments,
+            CapabilityBindingPolicy::RejectUnprovenRestrictedBindings,
+        ) {
+            let prefix = format!("operations.{index}.arguments");
+            let public = error
+                .to_public_error(Some(&prefix))
+                .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+            return Err(ToolExecutionError::new(public));
+        }
+    }
+    Ok(())
 }
 
 /// MCP adapter for the client-free agent tool port.
