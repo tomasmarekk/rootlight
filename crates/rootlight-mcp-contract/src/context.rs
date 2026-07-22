@@ -146,6 +146,9 @@ pub struct ContextPackInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(max = 1_000))]
     pub min_confidence: Option<u16>,
+    /// Representation profile; defaults to compact and never changes evidence truth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_profile: Option<ResponseProfile>,
     /// Progressive detail handle from a prior pack response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ContinuationCursor>,
@@ -496,8 +499,23 @@ pub struct RepositorySnippet {
     /// Raw source text, treated strictly as data.
     #[schemars(length(min = 1, max = 524_288))]
     pub content: String,
+    /// Bounded language label reported by the source provider.
+    #[schemars(length(min = 1, max = 64))]
+    pub language: String,
+    /// Checked mechanism that produced the exact source bytes.
+    pub provenance: SnippetProvenance,
+    /// Whether the requested source range was reduced by a byte or token cap.
+    pub truncated: bool,
     /// Trust classification for this repository-derived content.
     pub trust: TrustClassification,
+}
+
+/// Provenance of raw source bytes included in a context pack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SnippetProvenance {
+    /// Bytes returned by generation-pinned `source.read`.
+    SourceRead,
 }
 
 /// Stable identifier for a context pack.
@@ -534,6 +552,10 @@ pub struct ContextItem {
     /// Generation-pinned source reference for the evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<SourceRef>,
+    /// Bounded repository-derived signature when the source policy permits it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 4096))]
+    pub signature: Option<String>,
     /// Relevance score, integer 0 through 1000.
     #[schemars(range(max = 1_000))]
     pub score: u16,

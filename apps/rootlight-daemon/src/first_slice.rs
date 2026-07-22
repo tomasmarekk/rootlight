@@ -46,6 +46,7 @@ use rootlight_service::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
     AdvancedAstNode, FirstSliceBudget, FirstSliceError, FirstSliceGenerationContext,
     FirstSliceIndexReceipt, FirstSliceService, HistoryChangeKind, PlanChangeObjective,
+    SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
         CatalogPageSize, CatalogRepositoryRecord, CatalogRepositoryState, CatalogSnapshotId,
@@ -2528,6 +2529,20 @@ fn source_read(
     let generation = service
         .resolve_generation(repository, selected)
         .map_err(service_error)?;
+    let encoding = match daemon::SourceReadEncoding::try_from(request.encoding) {
+        Ok(daemon::SourceReadEncoding::Utf8) => ServiceSourceEncoding::Utf8,
+        Ok(daemon::SourceReadEncoding::Bytes) => ServiceSourceEncoding::Bytes,
+        Err(_) => return Err(invalid_argument()),
+    };
+    let context_lines_before =
+        u16::try_from(request.context_lines_before).map_err(|_| invalid_argument())?;
+    let context_lines_after =
+        u16::try_from(request.context_lines_after).map_err(|_| invalid_argument())?;
+    let options = SourceReadOptions::new()
+        .with_context_lines_before(context_lines_before)
+        .with_context_lines_after(context_lines_after)
+        .with_encoding(encoding);
+    let include_line_numbers = request.include_line_numbers.unwrap_or(true);
     let mut references = Vec::new();
     references
         .try_reserve_exact(request.references.len())
@@ -2539,10 +2554,14 @@ fn source_read(
         }
         references.push(reference);
     }
+    if request.merge_overlaps {
+        references = merge_source_references(references)?;
+    }
     let response = service
-        .source_read_with_budget(
+        .source_read_with_options_and_budget(
             generation.generation,
             references,
+            options,
             service_budget(context),
             &context.cancellation,
         )
@@ -2559,12 +2578,20 @@ fn source_read(
             path: chunk.path,
             start_byte: chunk.start_byte,
             end_byte: chunk.end_byte,
-            start_line: chunk.start_line,
-            end_line: chunk.end_line,
-            content: chunk.text,
+            start_line: include_line_numbers.then_some(chunk.start_line).flatten(),
+            end_line: include_line_numbers.then_some(chunk.end_line).flatten(),
+            content: chunk.bytes,
             content_hash: Some(content_hash_to_wire(chunk.content_hash)),
             language: chunk.language,
             generated: chunk.generated,
+            encoding: match chunk.encoding {
+                rootlight_query::SourceChunkEncoding::Utf8 => {
+                    daemon::SourceReadEncoding::Utf8 as i32
+                }
+                rootlight_query::SourceChunkEncoding::Bytes => {
+                    daemon::SourceReadEncoding::Bytes as i32
+                }
+            },
         });
     }
     Ok(daemon::SourceReadResponse {
@@ -2580,6 +2607,55 @@ fn source_read(
             daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceSplitRequest,
         )),
     })
+}
+
+fn merge_source_references(mut references: Vec<SourceRef>) -> Result<Vec<SourceRef>, PublicError> {
+    references.sort_by(|left, right| {
+        let left_span = left.span();
+        let right_span = right.span();
+        left.repository()
+            .cmp(&right.repository())
+            .then_with(|| left.generation().cmp(&right.generation()))
+            .then_with(|| left_span.file().cmp(&right_span.file()))
+            .then_with(|| left.content_hash().cmp(&right.content_hash()))
+            .then_with(|| left_span.start_byte().cmp(&right_span.start_byte()))
+            .then_with(|| left_span.end_byte().cmp(&right_span.end_byte()))
+    });
+    let mut merged = Vec::<SourceRef>::new();
+    merged
+        .try_reserve_exact(references.len())
+        .map_err(|_| resource_exhausted())?;
+    for reference in references {
+        let span = reference.span();
+        let merge_with_previous = merged.last().is_some_and(|existing| {
+            let existing_span = existing.span();
+            existing.repository() == reference.repository()
+                && existing.generation() == reference.generation()
+                && existing_span.file() == span.file()
+                && existing.content_hash() == reference.content_hash()
+                && span.start_byte() < existing_span.end_byte()
+        });
+        if merge_with_previous {
+            let existing = merged.last_mut().ok_or_else(resource_exhausted)?;
+            let existing_span = existing.span();
+            let combined = SourceSpan::new(
+                span.file(),
+                existing_span.start_byte().min(span.start_byte()),
+                existing_span.end_byte().max(span.end_byte()),
+            )
+            .map_err(|_| invalid_argument())?;
+            *existing = SourceRef::new(
+                reference.repository(),
+                reference.generation(),
+                combined,
+                reference.content_hash(),
+                None,
+            );
+        } else {
+            merged.push(reference);
+        }
+    }
+    Ok(merged)
 }
 
 fn repository_list(
@@ -3648,6 +3724,35 @@ mod tests {
     use rootlight_operations::{ClientInstanceId, OperationJournal, OperationStage, RecoveryClass};
     use std::{fs, time::Duration};
     use tempfile::TempDir;
+
+    #[test]
+    fn source_reference_merging_is_transitive_and_permutation_invariant() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = ContentHash::from_bytes([4; 32]);
+        let reference = |start, end| {
+            SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, start, end).expect("fixture span is valid"),
+                hash,
+                None,
+            )
+        };
+        let left = reference(0, 5);
+        let right = reference(10, 15);
+        let bridge = reference(4, 11);
+        let first = merge_source_references(vec![left.clone(), right.clone(), bridge.clone()])
+            .expect("bridge ranges merge");
+        let permuted = merge_source_references(vec![right, bridge, left])
+            .expect("permuted bridge ranges merge");
+
+        assert_eq!(first, permuted);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].span().start_byte(), 0);
+        assert_eq!(first[0].span().end_byte(), 15);
+    }
 
     #[test]
     fn every_query_limiting_resource_has_a_stable_wire_mapping() {

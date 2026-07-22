@@ -20,7 +20,7 @@ use rootlight_agent::{
     },
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, SymbolId};
-use rootlight_ir::{CoverageStatus, SourceRef, SourceSpan};
+use rootlight_ir::{CoverageStatus, LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::{
     ErrorCode, PublicError, RepositorySelector, SchemaVersion, TrustClassification,
     context::{BatchOperation, BatchOperationStatus, BatchStatus, BatchTool, QueryBatchInput},
@@ -134,10 +134,22 @@ impl AgentToolPort<TestCancellation> for PendingFirstPort {
             let release = Arc::clone(&self.release_first);
             Box::pin(async move {
                 release.notified().await;
-                Ok(response(generation(2), 10, json!({"matches": []})))
+                Ok(typed_response(
+                    BatchTool::CodeLocate,
+                    generation(2),
+                    10,
+                    json!({"matches": []}),
+                ))
             })
         } else {
-            Box::pin(async { Ok(response(generation(2), 10, json!({"matches": []}))) })
+            Box::pin(async {
+                Ok(typed_response(
+                    BatchTool::CodeLocate,
+                    generation(2),
+                    10,
+                    json!({"matches": []}),
+                ))
+            })
         }
     }
 }
@@ -185,6 +197,16 @@ fn source_ref(generation: GenerationId) -> SourceRef {
     )
 }
 
+fn source_ref_with_line(generation: GenerationId) -> SourceRef {
+    SourceRef::new(
+        repository(),
+        generation,
+        SourceSpan::new(FileId::from_bytes([4; 20]), 0, 32).expect("fixture source span is valid"),
+        ContentHash::from_bytes([5; 32]),
+        Some(LineRange::new(1, 2).expect("fixture line range is valid")),
+    )
+}
+
 fn response(generation: GenerationId, tokens: u64, data: Value) -> ReadEnvelope<Value> {
     ReadEnvelope {
         schema_version: SchemaVersion::V1_0,
@@ -220,6 +242,134 @@ fn response(generation: GenerationId, tokens: u64, data: Value) -> ReadEnvelope<
         warnings: Vec::new(),
         trust: TrustClassification::UntrustedRepositoryData,
     }
+}
+
+fn typed_response(
+    tool: BatchTool,
+    generation: GenerationId,
+    tokens: u64,
+    data: Value,
+) -> ReadEnvelope<Value> {
+    response(generation, tokens, typed_data(tool, data))
+}
+
+fn typed_data(tool: BatchTool, data: Value) -> Value {
+    let mut data = data.as_object().cloned().unwrap_or_default();
+    match tool {
+        BatchTool::CodeLocate => {
+            let matches = data
+                .entry("matches")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .expect("code.locate matches fixture is an array");
+            for (index, item) in matches.iter_mut().enumerate() {
+                let item = item
+                    .as_object_mut()
+                    .expect("code.locate match fixture is an object");
+                item.entry("symbol_id").or_insert(Value::Null);
+                item.entry("file_id").or_insert(Value::Null);
+                item.entry("kind").or_insert_with(|| json!("function"));
+                item.entry("display_name")
+                    .or_insert_with(|| json!(format!("match-{index}")));
+                item.entry("signature").or_insert(Value::Null);
+                item.entry("path")
+                    .or_insert_with(|| json!(format!("src/match_{index}.rs")));
+                item.entry("score").or_insert_with(|| json!(900));
+                item.entry("why")
+                    .or_insert_with(|| json!(["identifier_match"]));
+                item.entry("source_ref").or_insert(Value::Null);
+                item.entry("trust")
+                    .or_insert_with(|| json!("untrusted_repository_data"));
+            }
+            data.entry("query_interpretation").or_insert_with(|| {
+                json!({
+                    "tokens": [],
+                    "modes": ["exact"],
+                    "semantic_available": false
+                })
+            });
+            data.entry("suggested_next").or_insert_with(|| json!([]));
+        }
+        BatchTool::SymbolExplain => {
+            data.entry("symbols").or_insert_with(|| json!([]));
+            data.entry("unresolved_ids").or_insert_with(|| json!([]));
+            data.entry("detail_handles").or_insert_with(|| json!([]));
+        }
+        BatchTool::FlowTrace => {
+            let paths = data
+                .entry("paths")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .expect("flow.trace paths fixture is an array");
+            for path in paths {
+                let path = path
+                    .as_object_mut()
+                    .expect("flow.trace path fixture is an object");
+                path.entry("confidence").or_insert_with(|| json!(900));
+                path.entry("edges").or_insert_with(|| json!([]));
+                path.entry("cyclic").or_insert_with(|| json!(false));
+            }
+            data.entry("frontier").or_insert_with(|| {
+                json!({
+                    "reached_nodes": 0,
+                    "examined_edges": 0,
+                    "truncated": false,
+                    "unresolved_boundaries": 0
+                })
+            });
+            data.entry("projection").or_insert_with(|| {
+                json!({
+                    "relations": ["calls"],
+                    "min_confidence": 0
+                })
+            });
+        }
+        BatchTool::SymbolRelationships => {
+            let returned_edges = data
+                .get("totals")
+                .and_then(|totals| totals.get("returned_edges"))
+                .and_then(Value::as_u64);
+            if let Some(returned_edges) = returned_edges {
+                let groups = data
+                    .entry("groups")
+                    .or_insert_with(|| json!([]))
+                    .as_array_mut()
+                    .expect("relationship groups fixture is an array");
+                for group in groups {
+                    let group = group
+                        .as_object_mut()
+                        .expect("relationship group fixture is an object");
+                    group.entry("seed").or_insert_with(|| json!(symbol(3)));
+                    group.entry("relation").or_insert_with(|| json!("calls"));
+                    group
+                        .entry("direction")
+                        .or_insert_with(|| json!("outbound"));
+                    group.entry("items").or_insert_with(|| json!([]));
+                    group
+                        .entry("total_count")
+                        .or_insert_with(|| json!(returned_edges));
+                }
+                let totals = data
+                    .get_mut("totals")
+                    .and_then(Value::as_object_mut)
+                    .expect("relationship totals fixture is an object");
+                totals
+                    .entry("total_edges")
+                    .or_insert_with(|| json!(returned_edges));
+                totals.entry("exact").or_insert_with(|| json!(true));
+                data.entry("unresolved").or_insert_with(|| json!([]));
+            }
+        }
+        BatchTool::ChangeImpact
+        | BatchTool::TestsSelect
+        | BatchTool::ArchitectureOverview
+        | BatchTool::ArchitectureCycles
+        | BatchTool::CodeDead
+        | BatchTool::PlanChange
+        | BatchTool::ContextPack
+        | BatchTool::SourceRead => {}
+    }
+    Value::Object(data)
 }
 
 fn budget(max_tokens: u16) -> ResponseBudget {
@@ -514,12 +664,18 @@ async fn service_materializes_bindings_and_propagates_policy() {
         budget(1_000),
     );
     let port = Arc::new(FakePort::with_responses([
-        Ok(response(
+        Ok(typed_response(
+            BatchTool::FlowTrace,
             generation(2),
             100,
             json!({"paths": [{"nodes": [symbol(3), symbol(4)]}]}),
         )),
-        Ok(response(generation(2), 100, json!({"symbols": []}))),
+        Ok(typed_response(
+            BatchTool::SymbolExplain,
+            generation(2),
+            100,
+            json!({"symbols": []}),
+        )),
     ]));
 
     let output = BatchService
@@ -566,6 +722,83 @@ async fn service_materializes_bindings_and_propagates_policy() {
 }
 
 #[tokio::test]
+async fn batch_bindings_use_canonical_data_while_public_results_are_compact() {
+    let evidence = source_ref_with_line(generation(2));
+    let Value::Object(arguments) = json!({
+        "references": [{
+            "source_ref": {
+                "$from": "find",
+                "pointer": "/data/matches/0/source_ref"
+            }
+        }]
+    }) else {
+        panic!("fixture arguments are objects");
+    };
+    let port = Arc::new(FakePort::with_responses([
+        Ok(typed_response(
+            BatchTool::CodeLocate,
+            generation(2),
+            100,
+            json!({
+                "matches": [{
+                    "symbol_id": symbol(3),
+                    "signature": "fn profile_target()",
+                    "why": [
+                        "identifier_match",
+                        "lexical_match",
+                        "docs_match"
+                    ],
+                    "source_ref": evidence
+                }]
+            }),
+        )),
+        Ok(response(
+            generation(2),
+            100,
+            json!({"chunks": [], "elisions": [], "stale_references": [], "total_source_bytes": 0}),
+        )),
+    ]));
+
+    let output = BatchService
+        .execute(
+            Arc::clone(&port),
+            input(
+                vec![
+                    operation("find", BatchTool::CodeLocate, Map::new(), None, None),
+                    operation(
+                        "read",
+                        BatchTool::SourceRead,
+                        arguments,
+                        Some(vec!["find"]),
+                        None,
+                    ),
+                ],
+                budget(1_000),
+            ),
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("canonical binding and compact publication both succeed");
+
+    let public_match = &output.data.operation_results[0]
+        .data
+        .as_ref()
+        .expect("public child data")["matches"][0];
+    assert_eq!(public_match["signature"], Value::Null);
+    assert_eq!(public_match["why"], json!(["identifier_match"]));
+    assert_eq!(public_match["source_ref"]["line_hint"], Value::Null);
+
+    let calls = port.calls.lock().expect("call lock is available");
+    let bound_reference = &calls[1].request.clone().into_arguments()["references"][0]["source_ref"];
+    assert_eq!(
+        bound_reference["line_hint"],
+        json!({"start_line": 1, "end_line": 2})
+    );
+}
+
+#[tokio::test]
 async fn omitted_timeout_receives_a_bounded_default_before_dispatch() {
     let mut request = input(
         vec![operation(
@@ -578,7 +811,8 @@ async fn omitted_timeout_receives_a_bounded_default_before_dispatch() {
         budget(500),
     );
     request.budget = None;
-    let port = Arc::new(FakePort::with_responses([Ok(response(
+    let port = Arc::new(FakePort::with_responses([Ok(typed_response(
+        BatchTool::CodeLocate,
         generation(2),
         100,
         json!({"matches": []}),
@@ -770,7 +1004,8 @@ async fn malformed_operation_and_dependency_ids_fail_before_identity_resolution(
 async fn ordinary_pointer_keys_are_not_treated_as_bindings() {
     let mut arguments = Map::new();
     arguments.insert("query".to_owned(), json!({"pointer": "ordinary value"}));
-    let port = Arc::new(FakePort::with_responses([Ok(response(
+    let port = Arc::new(FakePort::with_responses([Ok(typed_response(
+        BatchTool::CodeLocate,
         generation(2),
         100,
         json!({}),
@@ -848,7 +1083,8 @@ async fn max_results_overrun_is_preserved_as_an_operation_result() {
         budget(500),
     );
     request.budget.as_mut().expect("test budget").max_results = Some(1);
-    let port = Arc::new(FakePort::with_responses([Ok(response(
+    let port = Arc::new(FakePort::with_responses([Ok(typed_response(
+        BatchTool::CodeLocate,
         generation(2),
         100,
         json!({"matches": [{}, {}]}),
@@ -899,12 +1135,14 @@ async fn relationship_results_charge_returned_edges_and_propagate_the_remainder(
     );
     request.budget.as_mut().expect("test budget").max_results = Some(5);
     let port = Arc::new(FakePort::with_responses([
-        Ok(response(
+        Ok(typed_response(
+            BatchTool::SymbolRelationships,
             generation(2),
             100,
             json!({"groups": [{}], "totals": {"returned_edges": 4}}),
         )),
-        Ok(response(
+        Ok(typed_response(
+            BatchTool::SymbolRelationships,
             generation(2),
             100,
             json!({"groups": [{}], "totals": {"returned_edges": 1}}),
@@ -969,10 +1207,11 @@ async fn local_timeout_is_a_per_operation_budget_error_after_prior_success() {
         evidence_level: None,
     };
     let port = Arc::new(FakePort::with_responses([
-        Ok(response(
+        Ok(typed_response(
+            BatchTool::CodeLocate,
             generation(2),
             100,
-            json!({"matches": [{"symbol_id": "first"}]}),
+            json!({"matches": [{"symbol_id": symbol(3)}]}),
         )),
         Err(AgentPortError::LocalDeadlineExceeded),
     ]));
@@ -1076,8 +1315,22 @@ async fn local_budget_failure_preserves_independent_success_and_usage() {
         budget(1_000),
     );
     let port = Arc::new(FakePort::with_responses([
-        Ok(response(generation(2), 100, json!({"items": []}))),
-        Ok(response(generation(2), 200, json!({"chunks": []}))),
+        Ok(typed_response(
+            BatchTool::CodeLocate,
+            generation(2),
+            100,
+            json!({"matches": []}),
+        )),
+        Ok(response(
+            generation(2),
+            200,
+            json!({
+                "chunks": [],
+                "elisions": [],
+                "stale_references": [],
+                "total_source_bytes": 0
+            }),
+        )),
     ]));
 
     let output = BatchService
@@ -1098,13 +1351,23 @@ async fn child_reservations_release_unused_capacity_and_reconcile_measured_use()
     let input = input(
         vec![
             operation("first", BatchTool::CodeLocate, Map::new(), None, None),
-            operation("second", BatchTool::SourceRead, Map::new(), None, None),
+            operation("second", BatchTool::CodeLocate, Map::new(), None, None),
         ],
         budget(650),
     );
     let port = Arc::new(FakePort::with_responses([
-        Ok(response(generation(2), 100, json!({}))),
-        Ok(response(generation(2), 200, json!({}))),
+        Ok(typed_response(
+            BatchTool::CodeLocate,
+            generation(2),
+            100,
+            json!({}),
+        )),
+        Ok(typed_response(
+            BatchTool::CodeLocate,
+            generation(2),
+            200,
+            json!({}),
+        )),
     ]));
 
     let output = BatchService
@@ -1158,7 +1421,12 @@ async fn exhausted_parent_capacity_prevents_later_child_dispatch() {
     let port = Arc::new(FakePort::with_responses([Ok(response(
         generation(2),
         200,
-        json!({}),
+        json!({
+            "chunks": [],
+            "elisions": [],
+            "stale_references": [],
+            "total_source_bytes": 0
+        }),
     ))]));
 
     let output = BatchService
@@ -1300,7 +1568,8 @@ async fn selectable_profile_reaches_every_child_call() {
         budget(1_000),
     );
     request.response_profile = Some(ResponseProfile::Standard);
-    let port = Arc::new(FakePort::with_responses([Ok(response(
+    let port = Arc::new(FakePort::with_responses([Ok(typed_response(
+        BatchTool::CodeLocate,
         generation(2),
         10,
         json!({"matches": []}),

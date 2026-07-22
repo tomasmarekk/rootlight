@@ -952,10 +952,23 @@ const CONTEXT_PACK_RULES: &[CapabilityRule] = &[
     unsupported("seeds.located", "located-result seeds are not served"),
     unsupported("seeds.change", "change seeds are not served"),
     unsupported("seeds.plan", "plan seeds are not served"),
-    unsupported("source_policy", "source selection policy is not served"),
-    unsupported("sections", "section selection is not served"),
-    unsupported("diversity", "diversity strategy is not served"),
-    unsupported("min_confidence", "confidence filtering is not served"),
+    implemented(
+        "source_policy",
+        "controls references, signatures, or bounded source snippets",
+    ),
+    implemented("sections", "selects compatible typed evidence roles"),
+    implemented(
+        "diversity",
+        "biases optional evidence without displacing required roles",
+    ),
+    implemented(
+        "min_confidence",
+        "filters evidence below the inclusive confidence threshold",
+    ),
+    implemented(
+        "response_profile",
+        "selects compact, standard, or evidence source representation",
+    ),
     unsupported("continuation", "continuation assembly is not served"),
     implemented("token_budget", "bounds assembled context tokens"),
 ];
@@ -964,22 +977,28 @@ const SOURCE_READ_RULES: &[CapabilityRule] = &[
     accepted_fallback("repository"),
     accepted_fallback("generation"),
     accepted_fallback("references"),
-    accepted_fallback("merge_overlaps"),
-    accepted_fallback("include_line_numbers"),
-    accepted_fallback("encoding"),
+    implemented(
+        "merge_overlaps",
+        "canonically merges overlapping immutable ranges",
+    ),
+    implemented(
+        "include_line_numbers",
+        "selects optional one-based line metadata",
+    ),
+    implemented("encoding", "selects exact UTF-8 or explicit base64 bytes"),
     accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
         "only stable repository identifiers are served",
     ),
-    unsupported(
+    implemented(
         "context_lines_before",
-        "source context expansion is not served",
+        "expands UTF-8 selections by bounded leading lines",
     ),
-    unsupported(
+    implemented(
         "context_lines_after",
-        "source context expansion is not served",
+        "expands UTF-8 selections by bounded trailing lines",
     ),
     unsupported(
         "references[].symbol_id",
@@ -997,18 +1016,7 @@ const SOURCE_READ_RULES: &[CapabilityRule] = &[
         "references[].end_byte",
         "file range selectors are not served by source reads",
     ),
-    unsupported_value("merge_overlaps", "true", "overlap merging is not served"),
     implemented("max_source_bytes", "reduces the common source-byte ceiling"),
-    unsupported_value(
-        "include_line_numbers",
-        "false",
-        "line-number suppression is not served",
-    ),
-    unsupported_value(
-        "encoding",
-        "bytes_base64",
-        "base64 source projection is not served",
-    ),
     implemented("budget", "reduces the common hard execution budget"),
     unsupported("budget.evidence_level", "evidence projection is not served"),
     unsupported_value(
@@ -1250,12 +1258,11 @@ const fn tool_profiles(tool: McpTool) -> &'static [ExposureProfile] {
 
 const fn response_profile_support(tool: McpTool) -> ResponseProfileSupport {
     match tool {
-        McpTool::RepoIndex
-        | McpTool::OperationStatus
-        | McpTool::ContextPack
-        | McpTool::QueryAdvanced => ResponseProfileSupport::Fixed {
-            representation: ResponseProfile::Compact,
-        },
+        McpTool::RepoIndex | McpTool::OperationStatus | McpTool::QueryAdvanced => {
+            ResponseProfileSupport::Fixed {
+                representation: ResponseProfile::Compact,
+            }
+        }
         McpTool::RepoStatus | McpTool::RepoList | McpTool::SourceRead => {
             ResponseProfileSupport::Selectable {
                 wire_field: ResponseProfileField::ResponseProfile,
@@ -1264,6 +1271,11 @@ const fn response_profile_support(tool: McpTool) -> ResponseProfileSupport {
             }
         }
         McpTool::QueryBatch => ResponseProfileSupport::Selectable {
+            wire_field: ResponseProfileField::ResponseProfile,
+            supported: ANALYTICAL_RESPONSE_PROFILES,
+            default: ResponseProfile::Compact,
+        },
+        McpTool::ContextPack => ResponseProfileSupport::Selectable {
             wire_field: ResponseProfileField::ResponseProfile,
             supported: ANALYTICAL_RESPONSE_PROFILES,
             default: ResponseProfile::Compact,
@@ -1441,7 +1453,7 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
         }
         McpTool::PlanChange => "bounded change planning from an explicit objective and targets",
         McpTool::ContextPack => {
-            "bounded evidence assembly from explicit symbol or file identifiers under a token budget"
+            "bounded profiled evidence assembly with generation-pinned references signatures and source snippets under a token budget"
         }
         McpTool::SourceRead => {
             "bounded source ranges from pinned source references as untrusted data"
@@ -1616,8 +1628,10 @@ mod tests {
             ),
             (
                 McpTool::ContextPack,
-                Fixed {
-                    representation: Compact,
+                Selectable {
+                    wire_field: CanonicalResponseProfileField,
+                    supported: ANALYTICAL_RESPONSE_PROFILES,
+                    default: Compact,
                 },
             ),
             (
@@ -1886,8 +1900,6 @@ mod tests {
 
         let source_read = CAPABILITIES[McpTool::SourceRead as usize];
         for path in [
-            "context_lines_before",
-            "context_lines_after",
             "references[].symbol_id",
             "references[].file_id",
             "references[].start_byte",
@@ -1903,6 +1915,12 @@ mod tests {
                 disposition.error_code,
                 Some(ErrorCode::UnsupportedCapability),
                 "{path} must preserve the stable public code"
+            );
+        }
+        for path in ["context_lines_before", "context_lines_after"] {
+            assert_eq!(
+                source_read.disposition(path, None).status,
+                CapabilityStatus::Implemented
             );
         }
     }

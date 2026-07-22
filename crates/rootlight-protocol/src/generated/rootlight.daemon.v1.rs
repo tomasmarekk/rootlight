@@ -951,7 +951,32 @@ pub struct SymbolExplainResponse {
     #[allow(missing_docs)]
     pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
-/// Requests exact generation-bound source references.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SourceReadEncoding {
+    Utf8 = 0,
+    Bytes = 1,
+}
+impl SourceReadEncoding {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Utf8 => "SOURCE_READ_ENCODING_UTF8",
+            Self::Bytes => "SOURCE_READ_ENCODING_BYTES",
+        }
+    }
+
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SOURCE_READ_ENCODING_UTF8" => Some(Self::Utf8),
+            "SOURCE_READ_ENCODING_BYTES" => Some(Self::Bytes),
+            _ => None,
+        }
+    }
+}
+/// Requests exact generation-bound source references and bounded presentation.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SourceReadRequest {
     #[prost(message, optional, tag = "1")]
@@ -968,8 +993,23 @@ pub struct SourceReadRequest {
     #[prost(message, repeated, tag = "4")]
     #[allow(missing_docs)]
     pub references: ::prost::alloc::vec::Vec<FirstSliceSourceRef>,
+    #[prost(uint32, tag = "5")]
+    #[allow(missing_docs)]
+    pub context_lines_before: u32,
+    #[prost(uint32, tag = "6")]
+    #[allow(missing_docs)]
+    pub context_lines_after: u32,
+    #[prost(bool, tag = "7")]
+    #[allow(missing_docs)]
+    pub merge_overlaps: bool,
+    #[prost(bool, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub include_line_numbers: ::core::option::Option<bool>,
+    #[prost(enumeration = "SourceReadEncoding", tag = "9")]
+    #[allow(missing_docs)]
+    pub encoding: i32,
 }
-/// One verified UTF-8 source chunk.
+/// One verified exact-byte source chunk.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FirstSliceSourceChunk {
     #[prost(message, optional, tag = "1")]
@@ -984,15 +1024,15 @@ pub struct FirstSliceSourceChunk {
     #[prost(uint64, tag = "4")]
     #[allow(missing_docs)]
     pub end_byte: u64,
-    #[prost(uint64, tag = "5")]
+    #[prost(uint64, optional, tag = "5")]
     #[allow(missing_docs)]
-    pub start_line: u64,
-    #[prost(uint64, tag = "6")]
+    pub start_line: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "6")]
     #[allow(missing_docs)]
-    pub end_line: u64,
-    #[prost(string, tag = "7")]
+    pub end_line: ::core::option::Option<u64>,
+    #[prost(bytes = "vec", tag = "7")]
     #[allow(missing_docs)]
-    pub content: ::prost::alloc::string::String,
+    pub content: ::prost::alloc::vec::Vec<u8>,
     #[prost(message, optional, tag = "8")]
     #[allow(missing_docs)]
     pub content_hash: ::core::option::Option<super::super::common::v1::ContentHash>,
@@ -1002,8 +1042,11 @@ pub struct FirstSliceSourceChunk {
     #[prost(bool, tag = "10")]
     #[allow(missing_docs)]
     pub generated: bool,
+    #[prost(enumeration = "SourceReadEncoding", tag = "11")]
+    #[allow(missing_docs)]
+    pub encoding: i32,
 }
-/// Returns exact verified UTF-8 source chunks.
+/// Returns exact verified source chunks.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SourceReadResponse {
     #[prost(message, optional, tag = "1")]

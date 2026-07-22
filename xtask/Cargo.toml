@@ -29,6 +29,7 @@ rootlight-mcp-contract = { path = "../crates/rootlight-mcp-contract" }
 rootlight-observability = { path = "../crates/rootlight-observability" }
 rootlight-operations = { path = "../crates/rootlight-operations" }
 rootlight-runtime = { path = "../crates/rootlight-runtime" }
+rootlight-agent = { path = "../crates/rootlight-agent" }
 rootlight-storage = { path = "../crates/rootlight-storage" }
 rootlight-protocol = { path = "../crates/rootlight-protocol" }
 schemars.workspace = true

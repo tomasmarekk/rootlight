@@ -78,6 +78,7 @@ fn context_request() -> CanonicalContextPackRequest {
         sections: None,
         diversity: None,
         min_confidence: None,
+        response_profile: None,
         continuation: None,
         explain: None,
     };

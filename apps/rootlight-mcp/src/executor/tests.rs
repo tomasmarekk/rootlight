@@ -2324,9 +2324,10 @@ fn source_read_response(source: client::SourceReference) -> SourceReadPortRespon
                 path: "src/lib.rs".to_owned(),
                 start_byte: 4,
                 end_byte: 12,
-                start_line: 2,
-                end_line: 2,
-                content: "xxxxxxxx".to_owned(),
+                start_line: Some(2),
+                end_line: Some(2),
+                content: b"xxxxxxxx".to_vec(),
+                encoding: client::SourceEncoding::Utf8,
                 content_hash: content_hash(),
                 language: "rust".to_owned(),
                 generated: false,
@@ -6891,9 +6892,10 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
                 path: "src/lib.rs".to_owned(),
                 start_byte: 0,
                 end_byte: 15,
-                start_line: 1,
-                end_line: 3,
-                content: "0123456789abcde".to_owned(),
+                start_line: Some(1),
+                end_line: Some(3),
+                content: b"0123456789abcde".to_vec(),
+                encoding: client::SourceEncoding::Utf8,
                 content_hash: content_hash(),
                 language: "rust".to_owned(),
                 generated: false,
@@ -6916,6 +6918,8 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
                 "repository": {"repository_id": repository()},
                 "generation": generation(),
                 "references": [{"source_ref": input_ref}],
+                "context_lines_before": 1,
+                "context_lines_after": 1,
                 "merge_overlaps": false,
                 "include_line_numbers": true,
                 "encoding": "utf8_lossless_when_valid",
@@ -6954,6 +6958,59 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
         request.encoding(),
         SourceEncodingRequest::Utf8LosslessWhenValid
     );
+}
+
+#[tokio::test]
+async fn maps_exact_binary_source_as_canonical_base64_without_line_metadata() {
+    let requested = source_reference(4, 6, 2, 2);
+    let response = SourceReadPortResponse::new(
+        client::SourceRead {
+            context: context(1, 2),
+            chunks: vec![ClientSourceChunk {
+                source: requested,
+                path: "assets/raw.bin".to_owned(),
+                start_byte: 4,
+                end_byte: 6,
+                start_line: None,
+                end_line: None,
+                content: vec![0xff, 0xfe],
+                encoding: client::SourceEncoding::Bytes,
+                content_hash: content_hash(),
+                language: "binary".to_owned(),
+                generated: false,
+            }],
+            total_source_bytes: 2,
+            truncated: false,
+            execution_completeness: complete_execution(),
+        },
+        metadata("trace-source-bytes"),
+        Vec::new(),
+        Vec::new(),
+    );
+    let harness = Harness::new(FakeOutcome::SourceRead(Ok(response)));
+    let output: SourceReadOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::SourceRead,
+            json!({
+                "repository": {"repository_id": repository()},
+                "references": [{"source_ref": wire_source_reference(4, 6, 2, 2)}],
+                "include_line_numbers": false,
+                "encoding": "bytes_base64"
+            }),
+        )
+        .await
+        .expect("binary source maps"),
+    );
+
+    let ToolResponse::Success(output) = output else {
+        panic!("expected source read success");
+    };
+    assert_eq!(output.data.chunks[0].content, "//4=");
+    assert_eq!(output.data.chunks[0].encoding, SourceEncoding::Base64);
+    assert_eq!(output.data.chunks[0].start_line, None);
+    assert_eq!(output.data.chunks[0].end_line, None);
+    assert!(output.data.chunks[0].source_ref.line_hint().is_none());
 }
 
 #[tokio::test]
@@ -7116,29 +7173,24 @@ async fn source_read_rejects_explicit_context_fields_before_the_port() {
 }
 
 #[tokio::test]
-async fn source_read_rejects_unimplemented_projection_values_before_the_port() {
+async fn source_read_rejects_line_context_for_raw_bytes_before_the_port() {
     let harness = Harness::new(FakeOutcome::SourceRead(Err(ClientPortError::Executor)));
-    for (field, value) in [
-        ("merge_overlaps", json!(true)),
-        ("include_line_numbers", json!(false)),
-        ("encoding", json!("bytes_base64")),
-    ] {
-        let mut arguments = json!({
+    let error = execute(
+        &harness.executor,
+        VerticalTool::SourceRead,
+        json!({
             "repository": {"repository_id": repository()},
-            "references": [{"source_ref": wire_source_reference(5, 10, 2, 2)}]
-        });
-        arguments
-            .as_object_mut()
-            .expect("fixture arguments are an object")
-            .insert(field.to_owned(), value);
-        let error = execute(&harness.executor, VerticalTool::SourceRead, arguments)
-            .await
-            .expect_err("unsupported source projections fail before retrieval");
-        assert_eq!(
-            error.public_error().map(PublicError::code),
-            Some(ErrorCode::UnsupportedCapability)
-        );
-    }
+            "references": [{"source_ref": wire_source_reference(5, 10, 2, 2)}],
+            "context_lines_before": 1,
+            "encoding": "bytes_base64"
+        }),
+    )
+    .await
+    .expect_err("raw bytes cannot request UTF-8 line expansion");
+    assert_eq!(
+        error.public_error().map(PublicError::code),
+        Some(ErrorCode::UnsupportedCapability)
+    );
     assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
 }
 
@@ -7382,30 +7434,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         (
             VerticalTool::SourceRead,
             json!({"repository": {"repository_id": repository()}, "references": [{"file_id": file(), "start_byte": 0, "end_byte": 1}]}),
-        ),
-        (
-            VerticalTool::SourceRead,
-            json!({"repository": {"repository_id": repository()}, "references": [{"source_ref": source.clone()}], "context_lines_before": 0, "context_lines_after": 0}),
-        ),
-        (
-            VerticalTool::SourceRead,
-            json!({"repository": {"repository_id": repository()}, "references": [{"source_ref": source.clone()}], "context_lines_before": 2}),
-        ),
-        (
-            VerticalTool::SourceRead,
-            json!({"repository": {"repository_id": repository()}, "references": [{"source_ref": source.clone()}], "context_lines_after": 2}),
-        ),
-        (
-            VerticalTool::SourceRead,
-            json!({"repository": {"repository_id": repository()}, "references": [{"source_ref": source.clone()}], "merge_overlaps": true}),
-        ),
-        (
-            VerticalTool::SourceRead,
-            json!({"repository": {"repository_id": repository()}, "references": [{"source_ref": source.clone()}], "include_line_numbers": false}),
-        ),
-        (
-            VerticalTool::SourceRead,
-            json!({"repository": {"repository_id": repository()}, "references": [{"source_ref": source.clone()}], "encoding": "bytes_base64"}),
         ),
         (
             VerticalTool::SourceRead,

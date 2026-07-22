@@ -151,6 +151,8 @@ pub struct SourceReadOptions {
     pub context_lines_before: u16,
     /// Whole lines included after the selected span.
     pub context_lines_after: u16,
+    /// Exact byte representation required by the caller.
+    pub encoding: SourceEncoding,
 }
 
 impl SourceReadOptions {
@@ -160,6 +162,7 @@ impl SourceReadOptions {
         Self {
             context_lines_before: 2,
             context_lines_after: 2,
+            encoding: SourceEncoding::Utf8,
         }
     }
 
@@ -174,6 +177,13 @@ impl SourceReadOptions {
     #[must_use]
     pub const fn with_context_lines_after(mut self, lines: u16) -> Self {
         self.context_lines_after = lines;
+        self
+    }
+
+    /// Returns options with the source representation replaced.
+    #[must_use]
+    pub const fn with_encoding(mut self, encoding: SourceEncoding) -> Self {
+        self.encoding = encoding;
         self
     }
 }
@@ -198,6 +208,8 @@ pub enum SourceTrust {
 pub enum SourceEncoding {
     /// The complete verified file was valid UTF-8 and bytes were not normalized.
     Utf8,
+    /// Return exact bytes without interpreting repository content as text.
+    Bytes,
 }
 
 /// One verified source chunk with immutable identity and trust metadata.
@@ -213,9 +225,9 @@ pub struct SourceChunk {
     /// Expanded chunk end in the verified file.
     pub end_byte: u64,
     /// One-based first line included in the chunk.
-    pub start_line: u64,
+    pub start_line: Option<u64>,
     /// One-based last line included in the chunk.
-    pub end_line: u64,
+    pub end_line: Option<u64>,
     /// Exact unnormalized bytes from the verified file.
     pub bytes: Vec<u8>,
     /// Immutable content identity verified before selection.
@@ -362,6 +374,8 @@ impl<'a> SourceService<'a> {
         }
         if options.context_lines_before > budget.max_context_lines
             || options.context_lines_after > budget.max_context_lines
+            || matches!(options.encoding, SourceEncoding::Bytes)
+                && (options.context_lines_before != 0 || options.context_lines_after != 0)
         {
             return Err(SourceError::ContextLimit);
         }
@@ -373,6 +387,7 @@ impl<'a> SourceService<'a> {
             references,
             metadata.repository(),
             metadata.generation(),
+            options,
             budget,
             &control,
         )?;
@@ -393,7 +408,9 @@ impl<'a> SourceService<'a> {
             {
                 return Err(SourceError::StaleSource);
             }
-            ensure_utf8(file, snapshot_ref.content(), &control)?;
+            if matches!(options.encoding, SourceEncoding::Utf8) {
+                ensure_utf8(file, snapshot_ref.content(), &control)?;
+            }
             push_preallocated(&mut snapshots, snapshot, &control)?;
         }
 
@@ -419,7 +436,26 @@ impl<'a> SourceService<'a> {
                 .get(file_slot)
                 .map(ResolvedSnapshot::as_ref)
                 .ok_or(SourceError::ReadFailed)?;
-            let range = expand_context(snapshot.content(), reference, options, &control)?;
+            let range = match options.encoding {
+                SourceEncoding::Utf8 => {
+                    let expanded =
+                        expand_context(snapshot.content(), reference, options, &control)?;
+                    ExpandedRange {
+                        start: expanded.start,
+                        end: expanded.end,
+                        start_line: expanded.start_line,
+                        end_line: expanded.end_line,
+                    }
+                }
+                SourceEncoding::Bytes => ExpandedRange {
+                    start: usize::try_from(reference.span().start_byte())
+                        .map_err(|_| SourceError::InvalidSourceSpan)?,
+                    end: usize::try_from(reference.span().end_byte())
+                        .map_err(|_| SourceError::InvalidSourceSpan)?,
+                    start_line: None,
+                    end_line: None,
+                },
+            };
             let selected = snapshot
                 .content()
                 .get(range.start..range.end)
@@ -454,7 +490,7 @@ impl<'a> SourceService<'a> {
                     content_hash: file.content_hash,
                     language,
                     generated: file.generated,
-                    encoding: SourceEncoding::Utf8,
+                    encoding: options.encoding,
                     trust: SourceTrust::UntrustedRepositoryData,
                 },
                 &control,
@@ -476,6 +512,7 @@ impl<'a> SourceService<'a> {
         references: &[SourceRef],
         repository: RepositoryId,
         generation: GenerationId,
+        options: SourceReadOptions,
         budget: SourceBudget,
         control: &SourceControl<'_>,
     ) -> Result<PreparedRequest, SourceError> {
@@ -503,7 +540,9 @@ impl<'a> SourceService<'a> {
                 .get(file_index)
                 .ok_or(SourceError::FileNotFound)?;
             validate_file(file, reference)?;
-            validate_encoding(file)?;
+            if matches!(options.encoding, SourceEncoding::Utf8) {
+                validate_encoding(file)?;
+            }
             metadata_bytes = metadata_bytes
                 .checked_add(chunk_metadata_bytes(file)?)
                 .ok_or(SourceError::MetadataBudgetExceeded)?;
@@ -657,8 +696,8 @@ impl ResolvedSnapshot<'_> {
 struct ExpandedRange {
     start: usize,
     end: usize,
-    start_line: u64,
-    end_line: u64,
+    start_line: Option<u64>,
+    end_line: Option<u64>,
 }
 
 struct SourceControl<'a> {
@@ -863,38 +902,44 @@ fn expand_context(
         return Err(SourceError::InvalidSourceSpan);
     }
 
-    let starts_capacity = usize::from(options.context_lines_before) + 1;
-    let mut starts = VecDeque::new();
-    control.controlled(|| {
-        starts
-            .try_reserve_exact(starts_capacity)
-            .map_err(|_| SourceError::MemoryUnavailable)
-    })?;
-    push_back_preallocated(&mut starts, 0usize, control)?;
-    for (index, byte) in content[..selection_start].iter().copied().enumerate() {
-        check_iteration(index, control)?;
-        if byte == b'\n' {
-            if starts.len() == starts_capacity {
-                starts.pop_front();
+    let start = if options.context_lines_before == 0 {
+        selection_start
+    } else {
+        let starts_capacity = usize::from(options.context_lines_before) + 1;
+        let mut starts = VecDeque::new();
+        control.controlled(|| {
+            starts
+                .try_reserve_exact(starts_capacity)
+                .map_err(|_| SourceError::MemoryUnavailable)
+        })?;
+        push_back_preallocated(&mut starts, 0usize, control)?;
+        for (index, byte) in content[..selection_start].iter().copied().enumerate() {
+            check_iteration(index, control)?;
+            if byte == b'\n' {
+                if starts.len() == starts_capacity {
+                    starts.pop_front();
+                }
+                push_back_preallocated(&mut starts, index + 1, control)?;
             }
-            push_back_preallocated(&mut starts, index + 1, control)?;
         }
-    }
-    let start = starts.front().copied().unwrap_or(0);
+        starts.front().copied().unwrap_or(0)
+    };
     let start_line = count_lines_before(content, start, control)?;
 
     let mut end = selection_end;
-    if selection_start == selection_end
-        || end == 0
-        || content.get(end.saturating_sub(1)) != Some(&b'\n')
-    {
-        end = next_line_end(content, end, control)?;
-    }
-    for _ in 0..options.context_lines_after {
-        if end >= content.len() {
-            break;
+    if options.context_lines_after > 0 {
+        if selection_start == selection_end
+            || end == 0
+            || content.get(end.saturating_sub(1)) != Some(&b'\n')
+        {
+            end = next_line_end(content, end, control)?;
         }
-        end = next_line_end(content, end, control)?;
+        for _ in 0..options.context_lines_after {
+            if end >= content.len() {
+                break;
+            }
+            end = next_line_end(content, end, control)?;
+        }
     }
     let newline_count = count_newlines(&content[start..end], control)?;
     let trailing_newline = usize::from(content.get(end.saturating_sub(1)) == Some(&b'\n'));
@@ -908,8 +953,8 @@ fn expand_context(
     Ok(ExpandedRange {
         start,
         end,
-        start_line,
-        end_line,
+        start_line: Some(start_line),
+        end_line: Some(end_line),
     })
 }
 
@@ -1346,6 +1391,7 @@ mod tests {
             SourceReadOptions {
                 context_lines_before: 1,
                 context_lines_after: 1,
+                encoding: SourceEncoding::Utf8,
             },
             SourceBudget::default(),
             &Cancellation::new(),
@@ -1361,7 +1407,7 @@ mod tests {
         let chunk = &result.chunks[0];
         assert_eq!(chunk.path, "src/sample.rs");
         assert_eq!((chunk.start_byte, chunk.end_byte), (6, 20));
-        assert_eq!((chunk.start_line, chunk.end_line), (2, 4));
+        assert_eq!((chunk.start_line, chunk.end_line), (Some(2), Some(4)));
         assert_eq!(chunk.bytes, b"one\nTWO\nthree\n");
         assert_eq!(chunk.encoding, SourceEncoding::Utf8);
         assert_eq!(chunk.trust, SourceTrust::UntrustedRepositoryData);
@@ -1744,13 +1790,14 @@ mod tests {
             SourceReadOptions {
                 context_lines_before: 0,
                 context_lines_after: 0,
+                encoding: SourceEncoding::Utf8,
             },
             SourceBudget::default(),
             &Cancellation::new(),
         )
         .expect("split UTF-8 sequence is validated");
 
-        assert_eq!(result.chunks[0].bytes, content);
+        assert_eq!(result.chunks[0].bytes, "🦀".as_bytes());
     }
 
     #[test]
@@ -1772,7 +1819,30 @@ mod tests {
     }
 
     #[test]
-    fn zero_width_spans_at_line_start_select_the_current_line() {
+    fn byte_reads_preserve_ranges_inside_utf8_scalars() {
+        let content = "a🦀b".as_bytes();
+        let fixture = fixture(content, "utf-8", (2, 4));
+        let result = read(
+            &fixture,
+            std::slice::from_ref(&fixture.reference),
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0)
+                .with_encoding(SourceEncoding::Bytes),
+            SourceBudget::default(),
+            &Cancellation::new(),
+        )
+        .expect("raw byte ranges do not require UTF-8 scalar boundaries");
+
+        let chunk = &result.chunks[0];
+        assert_eq!(chunk.bytes, &content[2..4]);
+        assert_eq!((chunk.start_byte, chunk.end_byte), (2, 4));
+        assert_eq!((chunk.start_line, chunk.end_line), (None, None));
+        assert_eq!(chunk.encoding, SourceEncoding::Bytes);
+    }
+
+    #[test]
+    fn zero_width_spans_remain_exact_without_context() {
         let fixture = fixture(b"a\nb\n", "utf-8", (2, 2));
         let result = read(
             &fixture,
@@ -1786,9 +1856,29 @@ mod tests {
         .expect("zero-width line-start selection resolves");
 
         let chunk = &result.chunks[0];
-        assert_eq!(chunk.bytes, b"b\n");
-        assert_eq!((chunk.start_byte, chunk.end_byte), (2, 4));
-        assert_eq!((chunk.start_line, chunk.end_line), (2, 2));
+        assert_eq!(chunk.bytes, b"");
+        assert_eq!((chunk.start_byte, chunk.end_byte), (2, 2));
+        assert_eq!((chunk.start_line, chunk.end_line), (Some(2), Some(2)));
+    }
+
+    #[test]
+    fn zero_context_preserves_an_exact_partial_utf8_span() {
+        let fixture = fixture(b"alpha\nbeta\n", "utf-8", (7, 9));
+        let result = read(
+            &fixture,
+            std::slice::from_ref(&fixture.reference),
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0),
+            SourceBudget::default(),
+            &Cancellation::new(),
+        )
+        .expect("exact partial UTF-8 selection resolves");
+
+        let chunk = &result.chunks[0];
+        assert_eq!(chunk.bytes, b"et");
+        assert_eq!((chunk.start_byte, chunk.end_byte), (7, 9));
+        assert_eq!((chunk.start_line, chunk.end_line), (Some(2), Some(2)));
     }
 
     #[test]
@@ -1806,7 +1896,7 @@ mod tests {
             Err(SourceError::SnapshotBudgetExceeded)
         );
 
-        let response_budget = SourceBudget::new().with_max_source_bytes(3);
+        let response_budget = SourceBudget::new().with_max_source_bytes(2);
         assert_eq!(
             read(
                 &fixture,
@@ -1877,7 +1967,7 @@ mod tests {
                 options,
                 SourceBudget::new()
                     .with_max_metadata_bytes(all_metadata)
-                    .with_max_response_memory_bytes(all_metadata + 7),
+                    .with_max_response_memory_bytes(all_metadata + 5),
                 &Cancellation::new()
             ),
             Err(SourceError::ResponseMemoryBudgetExceeded)
@@ -1889,13 +1979,13 @@ mod tests {
             options,
             SourceBudget::new()
                 .with_max_metadata_bytes(all_metadata)
-                .with_max_response_memory_bytes(all_metadata + 8),
+                .with_max_response_memory_bytes(all_metadata + 6),
             &Cancellation::new(),
         )
         .expect("exact duplicate response memory is admitted");
         assert_eq!(result.total_metadata_bytes, all_metadata);
-        assert_eq!(result.total_source_bytes, 8);
-        assert_eq!(result.total_response_memory_bytes, all_metadata + 8);
+        assert_eq!(result.total_source_bytes, 6);
+        assert_eq!(result.total_response_memory_bytes, all_metadata + 6);
     }
 
     #[test]
@@ -2008,7 +2098,7 @@ mod tests {
         assert_eq!(result.chunks[0].bytes, content.as_bytes());
         assert_eq!(
             (result.chunks[0].start_line, result.chunks[0].end_line),
-            (1, 101)
+            (Some(1), Some(101))
         );
 
         assert_eq!(

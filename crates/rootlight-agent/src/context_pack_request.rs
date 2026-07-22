@@ -13,6 +13,8 @@ use rootlight_mcp_contract::{
 };
 use unicode_normalization::UnicodeNormalization;
 
+use crate::context_pack::EvidenceRole;
+
 /// Maximum distinct typed seeds admitted by one context-pack request.
 pub const MAX_CONTEXT_PACK_SEEDS: usize = 16;
 
@@ -271,15 +273,42 @@ impl CanonicalContextPackRequest {
         }
 
         let source_policy = input.source_policy.unwrap_or(DEFAULT_SOURCE_POLICY);
+        let explicit_sections = input.sections.is_some();
         let mut sections = input
             .sections
             .clone()
             .unwrap_or_else(|| ALL_CONTEXT_SECTIONS.to_vec());
         sections.sort_unstable_by_key(|section| context_section_tag(*section));
         sections.dedup_by_key(|section| context_section_tag(*section));
+        if sections.is_empty() {
+            return Err(CanonicalContextPackRequestError::InvalidField("sections"));
+        }
+        let requested_roles = roles_for_sections(&sections);
+        if explicit_sections
+            && objective
+                .required_roles()
+                .iter()
+                .any(|required| !requested_roles.contains(required))
+        {
+            return Err(CanonicalContextPackRequestError::InvalidField("sections"));
+        }
+        let source_policy_is_compatible = match source_policy {
+            SourcePolicy::ReferencesOnly => true,
+            SourcePolicy::Signatures => sections.iter().any(|section| {
+                matches!(section, ContextSection::Definitions | ContextSection::Types)
+            }),
+            SourcePolicy::FocusedSnippets | SourcePolicy::EvidenceHeavy => {
+                sections.contains(&ContextSection::Source)
+            }
+        };
+        if !source_policy_is_compatible {
+            return Err(CanonicalContextPackRequestError::InvalidField(
+                "source_policy",
+            ));
+        }
         let diversity = input.diversity.unwrap_or(DEFAULT_DIVERSITY);
         let min_confidence = input.min_confidence.unwrap_or(DEFAULT_MIN_CONFIDENCE);
-        let response_profile = DEFAULT_RESPONSE_PROFILE;
+        let response_profile = input.response_profile.unwrap_or(DEFAULT_RESPONSE_PROFILE);
 
         let mut request = Self {
             repository,
@@ -357,6 +386,18 @@ impl CanonicalContextPackRequest {
     #[must_use]
     pub const fn min_confidence(&self) -> u16 {
         self.min_confidence
+    }
+
+    /// Returns the representation-only response profile.
+    #[must_use]
+    pub const fn response_profile(&self) -> ResponseProfile {
+        self.response_profile
+    }
+
+    /// Returns evidence roles selected by the canonical section set.
+    #[must_use]
+    pub fn requested_roles(&self) -> Vec<EvidenceRole> {
+        roles_for_sections(&self.sections)
     }
 
     /// Returns the complete domain-separated request digest.
@@ -598,6 +639,24 @@ const fn response_profile_tag(profile: ResponseProfile) -> u8 {
     }
 }
 
+fn roles_for_sections(sections: &[ContextSection]) -> Vec<EvidenceRole> {
+    let mut roles = sections
+        .iter()
+        .map(|section| match section {
+            ContextSection::Architecture => EvidenceRole::Architecture,
+            ContextSection::Definitions | ContextSection::Types => EvidenceRole::Definition,
+            ContextSection::Callers | ContextSection::Callees => EvidenceRole::Caller,
+            ContextSection::Tests => EvidenceRole::Test,
+            ContextSection::History => EvidenceRole::Change,
+            ContextSection::Source => EvidenceRole::Implementation,
+            ContextSection::Risks => EvidenceRole::Risk,
+        })
+        .collect::<Vec<_>>();
+    roles.sort_unstable_by_key(|role| role.priority());
+    roles.dedup();
+    roles
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -641,6 +700,7 @@ mod tests {
             sections: None,
             diversity: None,
             min_confidence: None,
+            response_profile: None,
             continuation: None,
             explain: None,
         }
@@ -757,7 +817,11 @@ mod tests {
         digests.push(canonical(&changed).digest_bytes());
 
         let mut changed = input();
-        changed.sections = Some(vec![ContextSection::Definitions]);
+        changed.sections = Some(vec![
+            ContextSection::Definitions,
+            ContextSection::Source,
+            ContextSection::Tests,
+        ]);
         digests.push(canonical(&changed).digest_bytes());
 
         let mut changed = input();
@@ -766,6 +830,11 @@ mod tests {
 
         let mut changed = input();
         changed.min_confidence = Some(701);
+        digests.push(canonical(&changed).digest_bytes());
+
+        let mut changed = input();
+        changed.response_profile =
+            Some(rootlight_mcp_contract::vertical::ResponseProfile::Standard);
         digests.push(canonical(&changed).digest_bytes());
 
         let other_repository = RepositoryId::from_bytes([8; 16]);
@@ -860,6 +929,30 @@ mod tests {
             CanonicalContextPackRequest::new(&continuation, REPOSITORY, GENERATION),
             Err(CanonicalContextPackRequestError::UnsupportedField(
                 "continuation"
+            ))
+        );
+    }
+
+    #[test]
+    fn incompatible_sections_and_source_policies_fail_before_retrieval() {
+        let mut missing_required_role = input();
+        missing_required_role.sections = Some(vec![ContextSection::Definitions]);
+        assert_eq!(
+            CanonicalContextPackRequest::new(&missing_required_role, REPOSITORY, GENERATION),
+            Err(CanonicalContextPackRequestError::InvalidField("sections"))
+        );
+
+        let mut snippets_without_source = input();
+        snippets_without_source.task = "explain parser".to_owned();
+        snippets_without_source.source_policy = Some(SourcePolicy::FocusedSnippets);
+        snippets_without_source.sections = Some(vec![
+            ContextSection::Definitions,
+            ContextSection::Architecture,
+        ]);
+        assert_eq!(
+            CanonicalContextPackRequest::new(&snippets_without_source, REPOSITORY, GENERATION),
+            Err(CanonicalContextPackRequestError::InvalidField(
+                "source_policy"
             ))
         );
     }

@@ -45,6 +45,7 @@ use crate::{
         AgentCallContext, AgentIdentityRequest, AgentPortError, AgentResolutionContext,
         AgentResolvedIdentity, AgentToolPort, AgentToolRequest,
     },
+    response_profile::{BatchProfileProjectionError, shape_batch_child_data},
 };
 
 /// Maximum operations accepted in one public batch request.
@@ -2258,7 +2259,21 @@ impl BatchService {
                     validate_child_identity(&envelope, &identity)?;
 
                     let charge = charge_for(operation.tool, &envelope)?;
-                    observed_envelopes[index] = Some(envelope.clone());
+                    let mut public_envelope = envelope.clone();
+                    public_envelope.data = shape_batch_child_data(
+                        operation.tool,
+                        &envelope.data,
+                        plan.response_profile,
+                    )
+                    .map_err(|error| match error {
+                        BatchProfileProjectionError::UnsupportedProfile => {
+                            BatchOrchestrationError::UnsupportedProfile
+                        }
+                        BatchProfileProjectionError::InvalidData(_) => {
+                            BatchOrchestrationError::InvalidResponse
+                        }
+                    })?;
+                    observed_envelopes[index] = Some(public_envelope.clone());
 
                     if allocation.ledger_mut().charge(charge).is_err() {
                         consume_allocation(allocation)?;
@@ -2268,7 +2283,7 @@ impl BatchService {
                         continue;
                     }
                     allocation.commit().map_err(map_policy_error)?;
-                    results[index] = Some(planned_success_result(operation, &envelope));
+                    results[index] = Some(planned_success_result(operation, &public_envelope));
                     binding_envelopes[index] = Some(envelope);
                 }
                 Err(error) => {

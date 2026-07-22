@@ -795,7 +795,52 @@ pub struct SymbolExplain {
     pub execution_completeness: ResultCompleteness,
 }
 
-/// One verified UTF-8 source chunk.
+/// Requested and returned source representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceEncoding {
+    /// Exact UTF-8 bytes.
+    Utf8,
+    /// Exact uninterpreted bytes.
+    Bytes,
+}
+
+/// Bounded source-read presentation controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceReadOptions {
+    /// Whole lines included before each selected range.
+    pub context_lines_before: u8,
+    /// Whole lines included after each selected range.
+    pub context_lines_after: u8,
+    /// Merge overlapping references to the same immutable file.
+    pub merge_overlaps: bool,
+    /// Include one-based line ranges in returned chunks.
+    pub include_line_numbers: bool,
+    /// Exact source representation.
+    pub encoding: SourceEncoding,
+}
+
+impl SourceReadOptions {
+    /// Creates exact UTF-8 reads with line numbers and no range expansion.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            context_lines_before: 0,
+            context_lines_after: 0,
+            merge_overlaps: false,
+            include_line_numbers: true,
+            encoding: SourceEncoding::Utf8,
+        }
+    }
+}
+
+impl Default for SourceReadOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One verified source chunk.
 #[derive(Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SourceChunk {
     /// Exact immutable source selection.
@@ -807,11 +852,13 @@ pub struct SourceChunk {
     /// Returned half-open byte range end.
     pub end_byte: u64,
     /// Returned first one-based line.
-    pub start_line: u64,
+    pub start_line: Option<u64>,
     /// Returned final one-based line.
-    pub end_line: u64,
-    /// Untrusted repository source text.
-    pub content: String,
+    pub end_line: Option<u64>,
+    /// Untrusted exact repository bytes.
+    pub content: Vec<u8>,
+    /// Exact byte representation.
+    pub encoding: SourceEncoding,
     /// Verified content digest.
     pub content_hash: ContentHash,
     /// Stable normalized language label.
@@ -2954,12 +3001,21 @@ impl Client {
         options: RequestOptions,
     ) -> Result<SourceRead, ClientError> {
         match self.request_with_options(
-            build_source_read_request(repository, generation, references)?,
+            build_source_read_request(
+                repository,
+                generation,
+                references,
+                SourceReadOptions::new(),
+            )?,
             options,
         )? {
-            daemon::response_envelope::Response::SourceRead(response) => {
-                parse_source_read(response, repository, generation, references)
-            }
+            daemon::response_envelope::Response::SourceRead(response) => parse_source_read(
+                response,
+                repository,
+                generation,
+                references,
+                SourceReadOptions::new(),
+            ),
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -3016,13 +3072,50 @@ impl Client {
     ) -> Result<SourceRead, ClientError> {
         match self
             .request_async_with_options(
-                build_source_read_request(repository, generation, references)?,
+                build_source_read_request(
+                    repository,
+                    generation,
+                    references,
+                    SourceReadOptions::new(),
+                )?,
+                options,
+            )
+            .await?
+        {
+            daemon::response_envelope::Response::SourceRead(response) => parse_source_read(
+                response,
+                repository,
+                generation,
+                references,
+                SourceReadOptions::new(),
+            ),
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously reads source with explicit byte and presentation controls.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid references or controls, transport
+    /// failure, or a malformed or uncorrelated response.
+    pub async fn source_read_projected_async_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        references: &[SourceReference],
+        projection: SourceReadOptions,
+        options: RequestOptions,
+    ) -> Result<SourceRead, ClientError> {
+        match self
+            .request_async_with_options(
+                build_source_read_request(repository, generation, references, projection)?,
                 options,
             )
             .await?
         {
             daemon::response_envelope::Response::SourceRead(response) => {
-                parse_source_read(response, repository, generation, references)
+                parse_source_read(response, repository, generation, references, projection)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -6254,6 +6347,7 @@ fn build_source_read_request(
     repository: RepositoryId,
     generation: GenerationSelector,
     references: &[SourceReference],
+    projection: SourceReadOptions,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
     if references.is_empty()
         || references.len() > 32
@@ -6278,6 +6372,14 @@ fn build_source_read_request(
             repository: Some(repository_to_wire(repository)),
             generation: Some(generation_selector_to_wire(generation)),
             references: references.iter().map(source_reference_to_wire).collect(),
+            context_lines_before: u32::from(projection.context_lines_before),
+            context_lines_after: u32::from(projection.context_lines_after),
+            merge_overlaps: projection.merge_overlaps,
+            include_line_numbers: Some(projection.include_line_numbers),
+            encoding: match projection.encoding {
+                SourceEncoding::Utf8 => daemon::SourceReadEncoding::Utf8 as i32,
+                SourceEncoding::Bytes => daemon::SourceReadEncoding::Bytes as i32,
+            },
         },
     ))
 }
@@ -8705,14 +8807,20 @@ fn parse_source_read(
     repository: RepositoryId,
     selector: GenerationSelector,
     requested: &[SourceReference],
+    projection: SourceReadOptions,
 ) -> Result<SourceRead, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let execution_completeness =
         parse_result_completeness(response.completeness, Some(response.truncated), false)?;
     let context = parse_query_context(response.context, repository, selector)?;
+    let expected = if projection.merge_overlaps {
+        merge_client_source_references(requested)?
+    } else {
+        requested.to_vec()
+    };
     if context.generation != requested[0].generation
-        || response.chunks.len() > requested.len()
-        || (!response.truncated && response.chunks.len() != requested.len())
+        || response.chunks.len() > expected.len()
+        || (!response.truncated && response.chunks.len() != expected.len())
     {
         return Err(ClientError::InvalidResponseCorrelation);
     }
@@ -8721,7 +8829,7 @@ fn parse_source_read(
         .try_reserve_exact(response.chunks.len())
         .map_err(|_| ClientError::ResponseAllocationFailed)?;
     let mut source_bytes = 0_u64;
-    for (chunk, expected) in response.chunks.into_iter().zip(requested) {
+    for (chunk, expected) in response.chunks.into_iter().zip(&expected) {
         let source = parse_source_reference(
             chunk
                 .source
@@ -8736,12 +8844,15 @@ fn parse_source_read(
         if &source != expected
             || chunk.start_byte > source.start_byte
             || chunk.end_byte < source.end_byte
-            || chunk.start_line == 0
-            || chunk.start_line > chunk.end_line
-            || source
-                .start_line
-                .is_some_and(|line| chunk.start_line > line)
-            || source.end_line.is_some_and(|line| chunk.end_line < line)
+            || projection.context_lines_before == 0 && chunk.start_byte != source.start_byte
+            || projection.context_lines_after == 0 && chunk.end_byte != source.end_byte
+            || projection.include_line_numbers
+                && (chunk.start_line.is_none()
+                    || chunk.end_line.is_none()
+                    || chunk.start_line > chunk.end_line
+                    || chunk.start_line == Some(0))
+            || !projection.include_line_numbers
+                && (chunk.start_line.is_some() || chunk.end_line.is_some())
             || content_hash != source.content_hash
             || u64::try_from(chunk.content.len())
                 .map_err(|_| ClientError::InvalidResponseCorrelation)?
@@ -8749,6 +8860,19 @@ fn parse_source_read(
         {
             return Err(ClientError::InvalidResponseCorrelation);
         }
+        let encoding = match daemon::SourceReadEncoding::try_from(chunk.encoding) {
+            Ok(daemon::SourceReadEncoding::Utf8) if projection.encoding == SourceEncoding::Utf8 => {
+                std::str::from_utf8(&chunk.content)
+                    .map_err(|_| ClientError::InvalidResponseCorrelation)?;
+                SourceEncoding::Utf8
+            }
+            Ok(daemon::SourceReadEncoding::Bytes)
+                if projection.encoding == SourceEncoding::Bytes =>
+            {
+                SourceEncoding::Bytes
+            }
+            _ => return Err(ClientError::InvalidResponseCorrelation),
+        };
         source_bytes = source_bytes
             .checked_add(length)
             .ok_or(ClientError::InvalidResponseCorrelation)?;
@@ -8760,6 +8884,7 @@ fn parse_source_read(
             start_line: chunk.start_line,
             end_line: chunk.end_line,
             content: chunk.content,
+            encoding,
             content_hash,
             language: chunk.language,
             generated: chunk.generated,
@@ -8779,6 +8904,51 @@ fn parse_source_read(
         truncated: response.truncated,
         execution_completeness,
     })
+}
+
+fn merge_client_source_references(
+    requested: &[SourceReference],
+) -> Result<Vec<SourceReference>, ClientError> {
+    let mut ordered = requested.to_vec();
+    ordered.sort_by(|left, right| {
+        left.repository
+            .cmp(&right.repository)
+            .then_with(|| left.generation.cmp(&right.generation))
+            .then_with(|| left.file.cmp(&right.file))
+            .then_with(|| left.content_hash.cmp(&right.content_hash))
+            .then_with(|| left.start_byte.cmp(&right.start_byte))
+            .then_with(|| left.end_byte.cmp(&right.end_byte))
+    });
+    let mut merged = Vec::<SourceReference>::new();
+    merged
+        .try_reserve_exact(ordered.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for reference in ordered {
+        let merge_with_previous = merged.last().is_some_and(|existing| {
+            existing.repository == reference.repository
+                && existing.generation == reference.generation
+                && existing.file == reference.file
+                && existing.content_hash == reference.content_hash
+                && reference.start_byte < existing.end_byte
+        });
+        if merge_with_previous {
+            let existing = merged
+                .last_mut()
+                .ok_or(ClientError::InvalidResponseCorrelation)?;
+            *existing = SourceReference::new(
+                reference.repository,
+                reference.generation,
+                reference.file,
+                existing.start_byte.min(reference.start_byte)
+                    ..existing.end_byte.max(reference.end_byte),
+                reference.content_hash,
+                None,
+            )?;
+        } else {
+            merged.push(reference);
+        }
+    }
+    Ok(merged)
 }
 
 fn parse_result_completeness(
@@ -9772,6 +9942,22 @@ mod tests {
         .expect("test source reference validates")
     }
 
+    #[test]
+    fn source_reference_merging_is_transitive_and_permutation_invariant() {
+        let left = test_source(4, 0, 5);
+        let right = test_source(4, 10, 15);
+        let bridge = test_source(4, 4, 11);
+        let first = merge_client_source_references(&[left.clone(), right.clone(), bridge.clone()])
+            .expect("bridge ranges merge");
+        let permuted = merge_client_source_references(&[right, bridge, left])
+            .expect("permuted bridge ranges merge");
+
+        assert_eq!(first, permuted);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].byte_range(), 0..15);
+        assert!(first[0].line_range().is_none());
+    }
+
     fn wire_query_context(results: u64, source_bytes: u64) -> daemon::FirstSliceQueryContext {
         daemon::FirstSliceQueryContext {
             repository: Some(repository_to_wire(test_repository())),
@@ -9979,12 +10165,13 @@ mod tests {
                 path: "src/lib.rs".to_owned(),
                 start_byte: source.start_byte,
                 end_byte: source.end_byte,
-                start_line: 1,
-                end_line: 1,
-                content: "abc".to_owned(),
+                start_line: Some(1),
+                end_line: Some(1),
+                content: b"abc".to_vec(),
                 content_hash: Some(content_hash_to_wire(source.content_hash)),
                 language: "rust".to_owned(),
                 generated: false,
+                encoding: daemon::SourceReadEncoding::Utf8 as i32,
             }],
             total_source_bytes: 3,
             truncated: false,
@@ -10248,6 +10435,7 @@ mod tests {
             test_repository(),
             GenerationSelector::Active,
             std::slice::from_ref(&source),
+            SourceReadOptions::new(),
         )
         .expect("source fixture parses");
 
@@ -11717,12 +11905,13 @@ mod tests {
                 path: "src/lib.rs".to_owned(),
                 start_byte,
                 end_byte,
-                start_line: 1,
-                end_line: 1,
-                content: content.to_owned(),
+                start_line: Some(1),
+                end_line: Some(1),
+                content: content.as_bytes().to_vec(),
                 content_hash: Some(content_hash_to_wire(reference.content_hash)),
                 language: "rust".to_owned(),
                 generated: false,
+                encoding: daemon::SourceReadEncoding::Utf8 as i32,
             }
         };
         let source_read = daemon::SourceReadResponse {
@@ -11733,12 +11922,18 @@ mod tests {
             truncated: false,
             completeness: None,
         };
+        let expanded_projection = SourceReadOptions {
+            context_lines_before: 1,
+            context_lines_after: 1,
+            ..SourceReadOptions::new()
+        };
         assert!(
             parse_source_read(
                 source_read.clone(),
                 test_repository(),
                 GenerationSelector::Active,
                 &[first.clone(), second.clone()],
+                expanded_projection,
             )
             .is_ok()
         );
@@ -11750,6 +11945,7 @@ mod tests {
                 test_repository(),
                 GenerationSelector::Active,
                 &[first.clone(), second.clone()],
+                expanded_projection,
             ),
             Err(ClientError::InvalidResponseCorrelation)
         ));
@@ -11761,6 +11957,7 @@ mod tests {
                 test_repository(),
                 GenerationSelector::Active,
                 &[first, second],
+                expanded_projection,
             ),
             Err(ClientError::InvalidResponseCorrelation)
         ));

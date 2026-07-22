@@ -1336,6 +1336,8 @@ pub struct SourceReadPortRequest {
     repository: RepositoryId,
     generation: client::GenerationSelector,
     references: Vec<client::SourceReference>,
+    context_lines_before: u8,
+    context_lines_after: u8,
     merge_overlaps: bool,
     include_line_numbers: bool,
     encoding: SourceEncodingRequest,
@@ -1358,6 +1360,18 @@ impl SourceReadPortRequest {
     #[must_use]
     pub fn references(&self) -> &[client::SourceReference] {
         &self.references
+    }
+
+    /// Returns the leading line-context expansion.
+    #[must_use]
+    pub const fn context_lines_before(&self) -> u8 {
+        self.context_lines_before
+    }
+
+    /// Returns the trailing line-context expansion.
+    #[must_use]
+    pub const fn context_lines_after(&self) -> u8 {
+        self.context_lines_after
     }
 
     /// Reports whether overlapping ranges are merged.
@@ -6195,12 +6209,16 @@ fn normalize_source_read(
     invalid_arguments: &PublicError,
 ) -> Result<SourceReadPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    if input.context_lines_before.is_some()
-        || input.context_lines_after.is_some()
-        || input.merge_overlaps == Some(true)
-        || input.include_line_numbers == Some(false)
-        || matches!(input.encoding, Some(SourceEncodingRequest::BytesBase64))
-        || !is_compact_profile(input.response_profile)
+    if !is_compact_profile(input.response_profile) {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    let encoding = input
+        .encoding
+        .unwrap_or(SourceEncodingRequest::Utf8LosslessWhenValid);
+    let context_lines_before = input.context_lines_before.unwrap_or(0);
+    let context_lines_after = input.context_lines_after.unwrap_or(0);
+    if matches!(encoding, SourceEncodingRequest::BytesBase64)
+        && (context_lines_before != 0 || context_lines_after != 0)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -6249,11 +6267,11 @@ fn normalize_source_read(
         repository,
         generation,
         references,
+        context_lines_before,
+        context_lines_after,
         merge_overlaps: input.merge_overlaps.unwrap_or(false),
         include_line_numbers: input.include_line_numbers.unwrap_or(true),
-        encoding: input
-            .encoding
-            .unwrap_or(SourceEncodingRequest::Utf8LosslessWhenValid),
+        encoding,
     })
 }
 
@@ -6606,7 +6624,8 @@ fn map_source_read(
     )?;
     if response.result.chunks.len() > request.references.len()
         || (!response.result.truncated
-            && (response.result.chunks.len() != request.references.len()
+            && (!request.merge_overlaps
+                && response.result.chunks.len() != request.references.len()
                 || !response.stale_references.is_empty()
                 || !response.elisions.is_empty()))
         || (response.result.truncated
@@ -6630,19 +6649,39 @@ fn map_source_read(
         .map_err(|_| internal(ToolExecutionFailure::Executor))?;
     let resolved_generation = response.result.context.generation;
     let mut measured_source_bytes = 0_u64;
-    for (chunk, requested) in response.result.chunks.into_iter().zip(&request.references) {
+    for (index, chunk) in response.result.chunks.into_iter().enumerate() {
+        let requested = &chunk.source;
         let requested_bytes = requested.byte_range();
+        let selector_correlates = if request.merge_overlaps {
+            request.references.iter().any(|selector| {
+                selector.repository() == requested.repository()
+                    && selector.generation() == requested.generation()
+                    && selector.file() == requested.file()
+                    && selector.content_hash() == requested.content_hash()
+                    && selector.byte_range().start < requested_bytes.end
+                    && selector.byte_range().end > requested_bytes.start
+            })
+        } else {
+            request.references.get(index) == Some(requested)
+        };
         let returned_bytes = chunk
             .end_byte
             .checked_sub(chunk.start_byte)
             .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
-        if chunk.source != *requested
+        if !selector_correlates
             || chunk.source.repository() != request.repository
             || chunk.source.generation() != resolved_generation
             || chunk.start_byte > requested_bytes.start
             || chunk.end_byte < requested_bytes.end
-            || chunk.start_line == 0
-            || chunk.start_line > chunk.end_line
+            || request.context_lines_before == 0 && chunk.start_byte != requested_bytes.start
+            || request.context_lines_after == 0 && chunk.end_byte != requested_bytes.end
+            || request.include_line_numbers
+                && (chunk.start_line.is_none()
+                    || chunk.end_line.is_none()
+                    || chunk.start_line == Some(0)
+                    || chunk.start_line > chunk.end_line)
+            || !request.include_line_numbers
+                && (chunk.start_line.is_some() || chunk.end_line.is_some())
             || chunk.content_hash != requested.content_hash()
             || u64::try_from(chunk.content.len())
                 .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?
@@ -6657,20 +6696,31 @@ fn map_source_read(
             .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
         let span = SourceSpan::new(requested.file(), chunk.start_byte, chunk.end_byte)
             .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
-        let lines = LineRange::new(chunk.start_line, chunk.end_line)
-            .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+        let lines = match (chunk.start_line, chunk.end_line) {
+            (Some(start), Some(end)) => Some(
+                LineRange::new(start, end)
+                    .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
+            ),
+            (None, None) => None,
+            _ => return Err(internal(ToolExecutionFailure::InvalidResponse)),
+        };
         let source_ref = SourceRef::new(
             requested.repository(),
             requested.generation(),
             span,
             requested.content_hash(),
-            Some(lines),
+            lines,
         );
-        let encoding = match request.encoding {
-            SourceEncodingRequest::Utf8LosslessWhenValid => SourceEncoding::Utf8,
-            SourceEncodingRequest::BytesBase64 => {
-                return Err(internal(ToolExecutionFailure::InvalidResponse));
+        let (content, encoding) = match (request.encoding, chunk.encoding) {
+            (SourceEncodingRequest::Utf8LosslessWhenValid, client::SourceEncoding::Utf8) => (
+                String::from_utf8(chunk.content)
+                    .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
+                SourceEncoding::Utf8,
+            ),
+            (SourceEncodingRequest::BytesBase64, client::SourceEncoding::Bytes) => {
+                (base64_encode(&chunk.content), SourceEncoding::Base64)
             }
+            _ => return Err(internal(ToolExecutionFailure::InvalidResponse)),
         };
         chunks.push(SourceChunk {
             source_ref,
@@ -6679,7 +6729,7 @@ fn map_source_read(
             end_byte: chunk.end_byte,
             start_line: chunk.start_line,
             end_line: chunk.end_line,
-            content: chunk.content,
+            content,
             encoding,
             content_hash: chunk.content_hash,
             language: chunk.language,
@@ -7147,6 +7197,30 @@ fn safe_repository_relative_path(value: &str) -> bool {
         && value
             .split('/')
             .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3).saturating_mul(4));
+    for chunk in bytes.chunks(3) {
+        let first = u32::from(chunk[0]);
+        let second = u32::from(*chunk.get(1).unwrap_or(&0));
+        let third = u32::from(*chunk.get(2).unwrap_or(&0));
+        let value = (first << 16) | (second << 8) | third;
+        encoded.push(char::from(ALPHABET[((value >> 18) & 0x3f) as usize]));
+        encoded.push(char::from(ALPHABET[((value >> 12) & 0x3f) as usize]));
+        encoded.push(if chunk.len() > 1 {
+            char::from(ALPHABET[((value >> 6) & 0x3f) as usize])
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            char::from(ALPHABET[(value & 0x3f) as usize])
+        } else {
+            '='
+        });
+    }
+    encoded
 }
 
 fn has_adjacent_duplicates(values: &[String]) -> bool {

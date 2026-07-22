@@ -1,6 +1,9 @@
 //! Production adapters for typed context-pack evidence providers.
 
 use super::*;
+use rootlight_agent::context_evidence::{
+    ContextSourceMaterial, ContextSourceOutput, ContextSourceRequest, ContextSourceSnippet,
+};
 
 impl<P> ContextEvidencePort<RequestCancellation> for McpAgentToolPort<P>
 where
@@ -41,6 +44,187 @@ where
             }
         })
     }
+
+    fn materialize_source(
+        &self,
+        request: ContextSourceRequest,
+        context: ContextEvidenceCallContext<RequestCancellation>,
+    ) -> AgentPortFuture<Result<ContextSourceOutput, ContextEvidencePortError>> {
+        let port = Arc::clone(&self.port);
+        let deadline = context.deadline();
+        let reservation = context.reservation();
+        let cancellation = context.cancellation().clone();
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(context_evidence_error(
+                    ContextEvidencePortErrorKind::Cancelled,
+                    BudgetCharge::default(),
+                ));
+            }
+            let operation =
+                materialize_context_source(port, request, reservation, cancellation.clone());
+            let mut cancellation_wait = cancellation.clone();
+            tokio::select! {
+                biased;
+                _ = cancellation_wait.cancelled() => Err(context_evidence_error(
+                    ContextEvidencePortErrorKind::Cancelled,
+                    BudgetCharge::default(),
+                )),
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    Err(context_evidence_error(
+                        ContextEvidencePortErrorKind::DeadlineExceeded,
+                        BudgetCharge::default(),
+                    ))
+                }
+                response = operation => response,
+            }
+        })
+    }
+}
+
+async fn materialize_context_source<P>(
+    port: Arc<P>,
+    request: ContextSourceRequest,
+    reservation: BudgetCharge,
+    cancellation: RequestCancellation,
+) -> Result<ContextSourceOutput, ContextEvidencePortError>
+where
+    P: FirstSliceClientPort,
+{
+    if request.targets.is_empty() || request.max_bytes_per_snippet == 0 {
+        return Err(invalid_context_evidence_response());
+    }
+    let options = context_evidence_options(reservation)?;
+    let mut references = Vec::with_capacity(request.targets.len());
+    for target in &request.targets {
+        let source = &target.source_ref;
+        if source.repository() != request.repository || source.generation() != request.generation {
+            return Err(invalid_context_evidence_response());
+        }
+        let span = source.span();
+        let lines = source
+            .line_hint()
+            .map(|lines| lines.start_line()..=lines.end_line());
+        let reference = client::SourceReference::new(
+            source.repository(),
+            source.generation(),
+            span.file(),
+            span.start_byte()..span.end_byte(),
+            source.content_hash(),
+            lines,
+        )
+        .map_err(|_| invalid_context_evidence_response())?;
+        references.push(reference);
+    }
+    let response = port
+        .source_read(
+            SourceReadPortRequest {
+                repository: request.repository,
+                generation: client::GenerationSelector::Generation(request.generation),
+                references,
+                context_lines_before: 0,
+                context_lines_after: 0,
+                merge_overlaps: false,
+                include_line_numbers: false,
+                encoding: SourceEncodingRequest::Utf8LosslessWhenValid,
+            },
+            options,
+            cancellation,
+        )
+        .await
+        .map_err(map_context_evidence_client_error)?;
+    if response.result.context.repository != request.repository
+        || response.result.context.generation != request.generation
+        || response.result.context.parent_generation == Some(request.generation)
+    {
+        return Err(invalid_context_evidence_response());
+    }
+    let usage = context_evidence_usage(&response.result.context);
+    let completeness =
+        context_evidence_completeness(response.result.execution_completeness.clone())?;
+    if response.result.chunks.len() > request.targets.len() {
+        return Err(context_evidence_error(
+            ContextEvidencePortErrorKind::InvalidResponse,
+            usage,
+        ));
+    }
+    let mut materials = Vec::with_capacity(response.result.chunks.len());
+    for (target, chunk) in request.targets.iter().zip(response.result.chunks) {
+        let source_ref =
+            client_source_ref(&chunk.source).map_err(|_| invalid_context_evidence_response())?;
+        if source_ref != target.source_ref {
+            return Err(context_evidence_error(
+                ContextEvidencePortErrorKind::InvalidResponse,
+                usage,
+            ));
+        }
+        let content = exact_context_utf8(chunk.content, chunk.encoding, usage)?;
+        let signature = bounded_context_signature(
+            &content,
+            usize::try_from(request.max_bytes_per_snippet).unwrap_or(usize::MAX),
+        );
+        let snippet = request.include_snippets.then(|| {
+            let (content, reduced) = truncate_context_source(
+                content,
+                usize::try_from(request.max_bytes_per_snippet).unwrap_or(usize::MAX),
+            );
+            ContextSourceSnippet {
+                content,
+                language: chunk.language,
+                truncated: reduced || response.result.truncated,
+            }
+        });
+        materials.push(ContextSourceMaterial {
+            candidate_id: target.candidate_id.clone(),
+            source_ref,
+            signature,
+            snippet,
+        });
+    }
+    Ok(ContextSourceOutput {
+        repository: request.repository,
+        generation: request.generation,
+        materials,
+        completeness,
+        usage,
+    })
+}
+
+fn exact_context_utf8(
+    content: Vec<u8>,
+    encoding: client::SourceEncoding,
+    usage: BudgetCharge,
+) -> Result<String, ContextEvidencePortError> {
+    if encoding != client::SourceEncoding::Utf8 {
+        return Err(context_evidence_error(
+            ContextEvidencePortErrorKind::InvalidResponse,
+            usage,
+        ));
+    }
+    String::from_utf8(content)
+        .map_err(|_| context_evidence_error(ContextEvidencePortErrorKind::InvalidResponse, usage))
+}
+
+fn bounded_context_signature(content: &str, maximum_bytes: usize) -> Option<String> {
+    let declaration = content.lines().find(|line| !line.trim().is_empty())?.trim();
+    let boundary = declaration
+        .find(['{', ';'])
+        .map_or(declaration.len(), |index| index.saturating_add(1));
+    let (signature, _) =
+        truncate_context_source(declaration[..boundary].to_owned(), maximum_bytes.min(4_096));
+    (!signature.is_empty()).then_some(signature)
+}
+
+fn truncate_context_source(mut content: String, maximum_bytes: usize) -> (String, bool) {
+    if content.len() <= maximum_bytes {
+        return (content, false);
+    }
+    let mut boundary = maximum_bytes;
+    while boundary > 0 && !content.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    content.truncate(boundary);
+    (content, true)
 }
 
 async fn retrieve_context_evidence<P>(
@@ -535,6 +719,8 @@ where
                 repository: invocation.repository(),
                 generation: client::GenerationSelector::Generation(invocation.generation()),
                 references,
+                context_lines_before: 0,
+                context_lines_after: 0,
                 merge_overlaps: false,
                 include_line_numbers: true,
                 encoding: SourceEncodingRequest::Utf8LosslessWhenValid,
@@ -1085,4 +1271,30 @@ where
         });
     }
     make_context_evidence_output(&invocation, candidates, completeness, usage)
+}
+
+#[cfg(test)]
+mod context_source_tests {
+    use super::*;
+
+    #[test]
+    fn context_source_requires_exact_utf8_bytes() {
+        assert_eq!(
+            exact_context_utf8(
+                b"fn parse() {}".to_vec(),
+                client::SourceEncoding::Utf8,
+                BudgetCharge::default(),
+            )
+            .expect("valid UTF-8 is retained"),
+            "fn parse() {}"
+        );
+        for (bytes, encoding) in [
+            (vec![0xff], client::SourceEncoding::Utf8),
+            (b"fn parse() {}".to_vec(), client::SourceEncoding::Bytes),
+        ] {
+            let error = exact_context_utf8(bytes, encoding, BudgetCharge::default())
+                .expect_err("non-UTF-8 representations fail closed");
+            assert_eq!(error.kind, ContextEvidencePortErrorKind::InvalidResponse);
+        }
+    }
 }

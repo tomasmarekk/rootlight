@@ -74,6 +74,7 @@ enum Call {
         repository: RepositoryId,
         generation: GenerationSelector,
         references: Vec<SourceReference>,
+        projection: rootlight_client::SourceReadOptions,
         options: RequestOptions,
     },
     RepositoryCatalogPage {
@@ -343,12 +344,14 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         repository: RepositoryId,
         generation: GenerationSelector,
         references: Vec<SourceReference>,
+        projection: rootlight_client::SourceReadOptions,
         options: RequestOptions,
     ) -> AsyncClientFuture<SourceRead> {
         self.record(Call::SourceRead {
             repository,
             generation,
             references: references.clone(),
+            projection,
             options,
         });
         Box::pin(async move {
@@ -359,9 +362,10 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     path: "src/lib.rs".to_owned(),
                     start_byte: 0,
                     end_byte: 0,
-                    start_line: 1,
-                    end_line: 1,
-                    content: String::new(),
+                    start_line: projection.include_line_numbers.then_some(1),
+                    end_line: projection.include_line_numbers.then_some(1),
+                    content: Vec::new(),
+                    encoding: projection.encoding,
                     content_hash: content_hash(),
                     language: "rust".to_owned(),
                     generated: false,

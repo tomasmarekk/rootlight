@@ -72,7 +72,8 @@ use rootlight_resolve::{
     RESOLVER_PROVIDER_VERSION, ResolutionEngine, ResolutionError, ResolverFactContext,
 };
 use rootlight_search::{BuildBudget, LexicalIndex, SearchBudget, SearchError};
-use rootlight_source::{SourceBudget, SourceError, SourceReadOptions, SourceService};
+use rootlight_source::{SourceBudget, SourceError, SourceService};
+pub use rootlight_source::{SourceEncoding, SourceReadOptions};
 use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationControlError,
     GenerationManifestRecipe, GenerationMetadata, IdentityVerificationError,
@@ -3081,6 +3082,29 @@ impl FirstSliceService {
         budget: FirstSliceBudget,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<SourceReadQueryResult>, FirstSliceError> {
+        self.source_read_with_options_and_budget(
+            generation,
+            references,
+            SourceReadOptions::new(),
+            budget,
+            cancellation,
+        )
+    }
+
+    /// Executes `source.read` with explicit presentation controls and policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, stale source,
+    /// invalid options, or bounded execution failure.
+    pub fn source_read_with_options_and_budget(
+        &self,
+        generation: GenerationId,
+        references: Vec<SourceRef>,
+        options: SourceReadOptions,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<SourceReadQueryResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
@@ -3097,12 +3121,7 @@ impl FirstSliceService {
         let source = SourceService::from_snapshots(source_snapshots, snapshot)
             .map_err(|error| map_source_error(error, cancellation))?;
         let plan = service
-            .plan_source_read(
-                references,
-                SourceReadOptions::new(),
-                budget.source(),
-                budget.query(),
-            )
+            .plan_source_read(references, options, budget.source(), budget.query())
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_source_read(&plan, &source, cancellation)
@@ -5242,7 +5261,7 @@ mod tests {
         let first_source = service
             .source_read(first.generation, vec![first_reference.clone()], &deadline())
             .expect("published first snapshot remains readable");
-        assert_eq!(first_source.data.chunks[0].text, FIRST);
+        assert_eq!(first_source.data.chunks[0].bytes, FIRST.as_bytes());
         assert_eq!(
             first_source.data.chunks[0].content_hash,
             first_reference.content_hash()
@@ -5254,7 +5273,7 @@ mod tests {
                 &deadline(),
             )
             .expect("published second snapshot remains readable");
-        assert_eq!(second_source.data.chunks[0].text, SECOND);
+        assert_eq!(second_source.data.chunks[0].bytes, SECOND.as_bytes());
         assert_eq!(
             second_source.data.chunks[0].content_hash,
             second_reference.content_hash()
@@ -5300,7 +5319,7 @@ mod tests {
             .source_read(first.generation, vec![first_answer.clone()], &cancellation)
             .expect("v1 answer source reads");
         assert_eq!(cached_v1_source.data.chunks.len(), 1);
-        let cached_v1_text = &cached_v1_source.data.chunks[0].text;
+        let cached_v1_text = String::from_utf8_lossy(&cached_v1_source.data.chunks[0].bytes);
         assert!(cached_v1_text.contains("ROOTLIGHT_PROMPT_SENTINEL"));
         assert!(cached_v1_text.contains("42"));
         assert!(!cached_v1_text.contains("43"));
@@ -5331,11 +5350,12 @@ mod tests {
             )
             .expect("kept source reads");
         assert!(
-            kept_source.data.chunks[0]
-                .text
+            String::from_utf8_lossy(&kept_source.data.chunks[0].bytes)
                 .contains("kept_after_negation")
         );
-        assert!(!kept_source.data.chunks[0].text.contains(IGNORED_SENTINEL));
+        assert!(
+            !String::from_utf8_lossy(&kept_source.data.chunks[0].bytes).contains(IGNORED_SENTINEL)
+        );
 
         assert_no_exact_hits(
             &service,
@@ -5387,7 +5407,7 @@ mod tests {
             )
             .expect("v2 answer source reads");
         assert_eq!(active_source.data.chunks.len(), 1);
-        let active_text = &active_source.data.chunks[0].text;
+        let active_text = String::from_utf8_lossy(&active_source.data.chunks[0].bytes);
         assert!(active_text.contains("43"));
         assert!(!active_text.contains("42"));
         assert!(!active_text.contains(IGNORED_SENTINEL));
@@ -5414,7 +5434,7 @@ mod tests {
             .source_read(first.generation, vec![prior_reference], &cancellation)
             .expect("prior source snapshot remains readable");
         assert_eq!(prior_source.data.chunks.len(), 1);
-        assert_eq!(prior_source.data.chunks[0].text, *cached_v1_text);
+        assert_eq!(prior_source.data.chunks[0].bytes, cached_v1_text.as_bytes());
         assert_eq!(
             prior_source.data.chunks[0].content_hash,
             first_answer.content_hash()

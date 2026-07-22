@@ -2025,7 +2025,17 @@ pub struct CodeDeadResult {
     pub trust: RepositoryDataTrust,
 }
 
-/// One verified UTF-8 source chunk.
+/// Encoding of exact source bytes returned by a source-read plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceChunkEncoding {
+    /// Exact bytes are valid UTF-8.
+    Utf8,
+    /// Exact bytes are intentionally uninterpreted.
+    Bytes,
+}
+
+/// One verified source chunk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceChunkResult {
     /// Exact indexed selector.
@@ -2037,11 +2047,13 @@ pub struct SourceChunkResult {
     /// Expanded byte end.
     pub end_byte: u64,
     /// One-based first included line.
-    pub start_line: u64,
+    pub start_line: Option<u64>,
     /// One-based last included line.
-    pub end_line: u64,
-    /// Exact verified UTF-8 text without normalization.
-    pub text: String,
+    pub end_line: Option<u64>,
+    /// Exact verified bytes without normalization.
+    pub bytes: Vec<u8>,
+    /// Interpretation requested by the caller.
+    pub encoding: SourceChunkEncoding,
     /// Immutable content identity.
     pub content_hash: ContentHash,
     /// Indexed language identity.

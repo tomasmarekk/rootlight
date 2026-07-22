@@ -1473,10 +1473,10 @@ pub struct SourceChunk {
     pub start_byte: u64,
     /// Exclusive byte end.
     pub end_byte: u64,
-    /// One-based first included line.
-    pub start_line: u64,
-    /// One-based last included line.
-    pub end_line: u64,
+    /// One-based first included line when line projection is enabled.
+    pub start_line: Option<u64>,
+    /// One-based last included line when line projection is enabled.
+    pub end_line: Option<u64>,
     /// Exact UTF-8 or base64 text.
     #[schemars(length(max = 699_052))]
     pub content: String,
@@ -1512,8 +1512,8 @@ impl<'de> Deserialize<'de> for SourceChunk {
             path: String,
             start_byte: u64,
             end_byte: u64,
-            start_line: u64,
-            end_line: u64,
+            start_line: Option<u64>,
+            end_line: Option<u64>,
             content: String,
             encoding: SourceEncoding,
             content_hash: ContentHash,
@@ -1530,11 +1530,19 @@ impl<'de> Deserialize<'de> for SourceChunk {
             .end_byte
             .checked_sub(wire.start_byte)
             .ok_or_else(|| serde::de::Error::custom(McpContractError::InvalidSourceChunk))?;
-        let line_hint_matches = wire.source_ref.line_hint().is_none_or(|line_hint| {
-            line_hint.start_line() == wire.start_line && line_hint.end_line() == wire.end_line
-        });
-        if wire.start_line == 0
-            || wire.start_line > wire.end_line
+        let lines_are_valid = match (wire.start_line, wire.end_line) {
+            (Some(start), Some(end)) => start > 0 && start <= end,
+            (None, None) => true,
+            _ => false,
+        };
+        let line_hint_matches = match wire.source_ref.line_hint() {
+            Some(line_hint) => {
+                wire.start_line == Some(line_hint.start_line())
+                    && wire.end_line == Some(line_hint.end_line())
+            }
+            None => wire.start_line.is_none() && wire.end_line.is_none(),
+        };
+        if !lines_are_valid
             || represented_bytes != span_bytes
             || span.start_byte() != wire.start_byte
             || span.end_byte() != wire.end_byte

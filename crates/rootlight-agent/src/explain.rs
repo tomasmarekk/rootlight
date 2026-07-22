@@ -673,6 +673,7 @@ mod tests {
             sections: None,
             diversity: None,
             min_confidence: None,
+            response_profile: None,
             continuation: None,
             explain: None,
         };

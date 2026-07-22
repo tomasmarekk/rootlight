@@ -843,8 +843,8 @@ fn source_plan_reads_only_verified_generation_bound_bytes() {
     let result = query
         .execute_source_read(&plan, &source, &Cancellation::new())
         .expect("source query succeeds");
-    assert_eq!(result.data.chunks[0].text, "beta\n");
-    assert_eq!(result.usage.source_bytes, 5);
+    assert_eq!(result.data.chunks[0].bytes, b"beta");
+    assert_eq!(result.usage.source_bytes, 4);
     assert_eq!(
         result.data.chunks[0].trust,
         RepositoryDataTrust::UntrustedRepositoryData

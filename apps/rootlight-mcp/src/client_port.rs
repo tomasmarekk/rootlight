@@ -11,7 +11,9 @@ use rootlight_client::{
     GenerationSelector, HistoryCompare, LocateMode, PlanChange, RepositoryCatalogPage,
     RepositoryCatalogPageRequest, RepositoryIndex, RepositoryOperationAction,
     RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
-    RequestTimeout, SourceRead, SourceReference, SymbolExplain, SymbolRelationships, TestsSelect,
+    RequestTimeout, SourceEncoding as ClientSourceEncoding, SourceRead,
+    SourceReadOptions as ClientSourceReadOptions, SourceReference, SymbolExplain,
+    SymbolRelationships, TestsSelect,
 };
 use rootlight_ids::{FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::CoverageStatus as IrCoverageStatus;
@@ -88,6 +90,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         repository: RepositoryId,
         generation: GenerationSelector,
         references: Vec<SourceReference>,
+        projection: ClientSourceReadOptions,
         options: RequestOptions,
     ) -> AsyncClientFuture<SourceRead>;
 
@@ -348,12 +351,19 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         repository: RepositoryId,
         generation: GenerationSelector,
         references: Vec<SourceReference>,
+        projection: ClientSourceReadOptions,
         options: RequestOptions,
     ) -> AsyncClientFuture<SourceRead> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .source_read_async_with_options(repository, generation, &references, options)
+                .source_read_projected_async_with_options(
+                    repository,
+                    generation,
+                    &references,
+                    projection,
+                    options,
+                )
                 .await
         })
     }
@@ -820,6 +830,20 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.repository(),
                     request.generation(),
                     request.references().to_vec(),
+                    ClientSourceReadOptions {
+                        context_lines_before: request.context_lines_before(),
+                        context_lines_after: request.context_lines_after(),
+                        merge_overlaps: request.merge_overlaps(),
+                        include_line_numbers: request.include_line_numbers(),
+                        encoding: match request.encoding() {
+                            rootlight_mcp_contract::vertical::SourceEncodingRequest::Utf8LosslessWhenValid => {
+                                ClientSourceEncoding::Utf8
+                            }
+                            rootlight_mcp_contract::vertical::SourceEncodingRequest::BytesBase64 => {
+                                ClientSourceEncoding::Bytes
+                            }
+                        },
+                    },
                     options,
                 )
                 .await

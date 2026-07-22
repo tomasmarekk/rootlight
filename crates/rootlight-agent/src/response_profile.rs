@@ -8,14 +8,21 @@ use crate::policy::{BudgetCharge, CancellationSignal, ExecutionContext, Executio
 use rootlight_ir::SourceRef;
 use rootlight_mcp_contract::{
     TrustClassification,
+    capability::{ResponseProfileSupport, capability_for},
+    catalog::McpTool,
     change::{ChangeImpactData, PlanChangeData, TestCandidate, TestsSelectData},
     completeness::ResultCompleteness,
+    context::{BatchTool, ContextPackData},
     intent::{
         ArchitectureCyclesData, ArchitectureOverviewData, CodeDeadData, FlowTraceData,
         SymbolRelationshipsData,
     },
-    vertical::{CodeLocateData, ReadEnvelope, ResponseProfile, ResponseWarning, SymbolExplainData},
+    vertical::{
+        CodeLocateData, ReadEnvelope, ResponseProfile, ResponseWarning, SourceReadData,
+        SymbolExplainData,
+    },
 };
+use serde_json::Value;
 
 /// Largest rationale prefix accepted by the shared analytical shaper.
 pub const MAX_PROFILE_RATIONALE_ITEMS: u16 = 16;
@@ -25,6 +32,7 @@ pub const MAX_PROFILE_EVIDENCE_REFERENCES: u16 = 16;
 pub const MAX_PROFILE_SOURCE_PREVIEW_BYTES: u32 = 524_288;
 /// Largest candidate set accepted by the bounded representation selector.
 pub const MAX_PROFILE_CANDIDATES: usize = 4_096;
+const STANDARD_CONTEXT_SNIPPET_BYTES: usize = 4_096;
 
 /// Source-bearing detail a tool permits its profile shaper to retain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -694,6 +702,80 @@ pub enum ProfileInvariantError {
     RecoveryChanged,
 }
 
+/// Failure while projecting one canonical batch child into its public profile.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum BatchProfileProjectionError {
+    /// A fixed-profile child cannot satisfy the aggregate profile.
+    #[error("batch child does not support the requested response profile")]
+    UnsupportedProfile,
+    /// Canonical child data did not satisfy its advertised typed contract.
+    #[error("batch child returned invalid canonical data")]
+    InvalidData(#[source] serde_json::Error),
+}
+
+/// Projects canonical typed batch-child data into its public representation.
+///
+/// Callers retain the original value for typed binding resolution and publish
+/// only the returned copy. Fixed compact children are passed through after the
+/// aggregate profile is validated.
+///
+/// # Errors
+///
+/// Returns [`BatchProfileProjectionError::UnsupportedProfile`] when a
+/// fixed-profile child receives a non-compact aggregate profile, or
+/// [`BatchProfileProjectionError::InvalidData`] when canonical data violates
+/// the child's typed response contract.
+pub fn shape_batch_child_data(
+    tool: BatchTool,
+    canonical: &Value,
+    profile: ResponseProfile,
+) -> Result<Value, BatchProfileProjectionError> {
+    macro_rules! project {
+        ($data_type:ty) => {{
+            let mut typed: $data_type = serde_json::from_value(canonical.clone())
+                .map_err(BatchProfileProjectionError::InvalidData)?;
+            typed.shape(profile);
+            serde_json::to_value(typed).map_err(BatchProfileProjectionError::InvalidData)
+        }};
+    }
+    macro_rules! validate {
+        ($data_type:ty) => {{
+            let typed: $data_type = serde_json::from_value(canonical.clone())
+                .map_err(BatchProfileProjectionError::InvalidData)?;
+            serde_json::to_value(typed).map_err(BatchProfileProjectionError::InvalidData)
+        }};
+    }
+
+    match tool {
+        BatchTool::CodeLocate => project!(CodeLocateData),
+        BatchTool::SymbolExplain => project!(SymbolExplainData),
+        BatchTool::SymbolRelationships => project!(SymbolRelationshipsData),
+        BatchTool::FlowTrace => project!(FlowTraceData),
+        BatchTool::ChangeImpact => project!(ChangeImpactData),
+        BatchTool::TestsSelect => project!(TestsSelectData),
+        BatchTool::ArchitectureOverview => project!(ArchitectureOverviewData),
+        BatchTool::ArchitectureCycles => project!(ArchitectureCyclesData),
+        BatchTool::CodeDead => project!(CodeDeadData),
+        BatchTool::PlanChange => project!(PlanChangeData),
+        BatchTool::ContextPack => project!(ContextPackData),
+        BatchTool::SourceRead => {
+            if supports_profile(McpTool::SourceRead, profile) {
+                validate!(SourceReadData)
+            } else {
+                Err(BatchProfileProjectionError::UnsupportedProfile)
+            }
+        }
+    }
+}
+
+fn supports_profile(tool: McpTool, profile: ResponseProfile) -> bool {
+    match capability_for(tool).response_profiles {
+        ResponseProfileSupport::Fixed { representation } => representation == profile,
+        ResponseProfileSupport::Selectable { supported, .. } => supported.contains(&profile),
+    }
+}
+
 /// Shapes only tool data inside a read envelope.
 ///
 /// Repository/generation identity, completeness, continuation, usage, warnings,
@@ -725,6 +807,24 @@ impl ProfileShape for CodeLocateData {
                 item.source_ref = None;
             } else if let Some(source_ref) = &mut item.source_ref {
                 shape_source_ref(source_ref, profile);
+            }
+        }
+    }
+}
+
+impl ProfileShape for ContextPackData {
+    fn shape_with_limits(&mut self, profile: ResponseProfile, _limits: ProfileLimits) {
+        for item in &mut self.items {
+            match profile {
+                ResponseProfile::Compact => item.snippet = None,
+                ResponseProfile::Standard => {
+                    if let Some(snippet) = &mut item.snippet
+                        && truncate_utf8(&mut snippet.content, STANDARD_CONTEXT_SNIPPET_BYTES)
+                    {
+                        snippet.truncated = true;
+                    }
+                }
+                ResponseProfile::Evidence => {}
             }
         }
     }
@@ -877,6 +977,18 @@ fn shape_source_ref(source_ref: &mut SourceRef, profile: ResponseProfile) {
             None,
         );
     }
+}
+
+fn truncate_utf8(value: &mut String, maximum_bytes: usize) -> bool {
+    if value.len() <= maximum_bytes {
+        return false;
+    }
+    let mut boundary = maximum_bytes;
+    while !value.is_char_boundary(boundary) {
+        boundary = boundary.saturating_sub(1);
+    }
+    value.truncate(boundary);
+    true
 }
 
 const fn source_access_rank(access: ProfileSourceAccess) -> u8 {
@@ -1034,6 +1146,37 @@ mod tests {
         assert_profile_shape::<ArchitectureCyclesData>();
         assert_profile_shape::<CodeDeadData>();
         assert_profile_shape::<PlanChangeData>();
+        assert_profile_shape::<ContextPackData>();
+    }
+
+    #[test]
+    fn batch_projection_shapes_a_copy_and_rejects_unsupported_profile() {
+        let canonical = serde_json::to_value(test_selection_data(4, true))
+            .expect("canonical test data should serialize");
+
+        let projected =
+            shape_batch_child_data(BatchTool::TestsSelect, &canonical, ResponseProfile::Compact)
+                .expect("compact test selection should project");
+        let projected: TestsSelectData =
+            serde_json::from_value(projected).expect("projected data should remain typed");
+
+        assert_eq!(projected.tests[0].why, ["reason-0"]);
+        assert_eq!(projected.tests[0].path, None);
+        assert_eq!(projected.tests[0].estimated_cost_ms, None);
+        assert_eq!(projected.tests[0].command_hint, None);
+        assert!(
+            canonical["tests"][0]["path"].is_string(),
+            "canonical binding data must remain unchanged"
+        );
+
+        assert!(matches!(
+            shape_batch_child_data(
+                BatchTool::SourceRead,
+                &serde_json::json!({}),
+                ResponseProfile::Standard,
+            ),
+            Err(BatchProfileProjectionError::UnsupportedProfile)
+        ));
     }
 
     #[test]

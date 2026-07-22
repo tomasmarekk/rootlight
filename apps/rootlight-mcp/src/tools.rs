@@ -4504,6 +4504,7 @@ mod tests {
             sections: None,
             diversity: None,
             min_confidence: None,
+            response_profile: None,
             continuation: None,
             explain: None,
         }
@@ -4536,5 +4537,23 @@ mod tests {
             plan: None,
         };
         assert!(context_pack_invariants_are_valid(&pack_input(symbol)));
+    }
+
+    #[test]
+    fn context_pack_profiles_and_source_controls_are_publicly_reachable() {
+        for response_profile in ["compact", "standard", "evidence"] {
+            validate_capability_input(
+                VerticalTool::ContextPack,
+                &json!({
+                    "response_profile": response_profile,
+                    "source_policy": "evidence_heavy",
+                    "sections": ["definitions", "architecture"],
+                    "diversity": "architecture",
+                    "min_confidence": 700
+                }),
+                CapabilityBindingPolicy::Materialized,
+            )
+            .expect("advertised context controls pass capability preflight");
+        }
     }
 }

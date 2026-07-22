@@ -120,7 +120,7 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
         .source_read(first.generation, vec![reference.clone()], &cancellation)
         .expect("source query succeeds");
     assert_eq!(source.data.chunks.len(), 1);
-    assert!(source.data.chunks[0].text.contains("answer"));
+    assert!(String::from_utf8_lossy(&source.data.chunks[0].bytes).contains("answer"));
     assert_eq!(
         source.data.chunks[0].trust,
         RepositoryDataTrust::UntrustedRepositoryData
@@ -192,7 +192,7 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
             &cancellation,
         )
         .expect("active source snapshot remains readable");
-    assert_eq!(active_source.data.chunks[0].text, AFTER);
+    assert_eq!(active_source.data.chunks[0].bytes, AFTER.as_bytes());
     assert_eq!(
         active_source.data.chunks[0].content_hash,
         active_reference.content_hash()
@@ -201,7 +201,7 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
     let pinned_source = service
         .source_read(first.generation, vec![reference.clone()], &cancellation)
         .expect("superseded source snapshot remains readable");
-    assert_eq!(pinned_source.data.chunks[0].text, BEFORE);
+    assert_eq!(pinned_source.data.chunks[0].bytes, BEFORE.as_bytes());
     assert_eq!(
         pinned_source.data.chunks[0].content_hash,
         reference.content_hash()
@@ -449,8 +449,9 @@ fn rust_repository_indexes_only_extension_sources_and_preserves_lineage() {
     let pinned_source = service
         .source_read(first.generation, vec![first_answer], &cancellation)
         .expect("first generation source is queryable");
-    assert!(pinned_source.data.chunks[0].text.contains("42"));
-    assert!(!pinned_source.data.chunks[0].text.contains("43"));
+    let pinned_text = String::from_utf8_lossy(&pinned_source.data.chunks[0].bytes);
+    assert!(pinned_text.contains("42"));
+    assert!(!pinned_text.contains("43"));
 
     let kept = service
         .code_locate(
@@ -518,8 +519,9 @@ fn rust_repository_indexes_only_extension_sources_and_preserves_lineage() {
     let active_source = service
         .source_read(second.generation, vec![second_answer], &cancellation)
         .expect("active generation source is queryable");
-    assert!(active_source.data.chunks[0].text.contains("43"));
-    assert!(!active_source.data.chunks[0].text.contains("42"));
+    let active_text = String::from_utf8_lossy(&active_source.data.chunks[0].bytes);
+    assert!(active_text.contains("43"));
+    assert!(!active_text.contains("42"));
 
     let prior = service
         .resolve_generation(first.repository, Some(first.generation))

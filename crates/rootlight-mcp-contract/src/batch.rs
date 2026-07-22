@@ -725,7 +725,7 @@ pub const BATCH_TOOL_REGISTRY: [BatchToolDescriptor; 12] = [
         McpTool::ContextPack,
         VerticalTool::ContextPack,
         ExposureProfile::Scout,
-        BatchResponseProfilePolicy::Fixed(ResponseProfile::Compact),
+        selectable("response_profile", ANALYTICAL),
         CONTEXT_BUDGET_POLICY,
         binding_policy(CONTEXT_PACK_SOURCES, CONTEXT_PACK_TARGETS),
     ),

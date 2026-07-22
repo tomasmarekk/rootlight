@@ -34,10 +34,10 @@ pub use model::{
     PlanChangeResult, PlanChangeStepRecord, PlanEstimate, PlanExplanation, PlanKind, QueryBudget,
     QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage, RankedTestSelection,
     RelationDirection, RelationFamily, RelationshipEdgeTarget, RelationshipGroup,
-    RepositoryDataTrust, ResolvedChangeRecord, SemanticChangeRecord, SourceChunkResult,
-    SourceReadPlan, SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult,
-    SymbolRelationshipsPlan, SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap,
-    TestsSelectKind, TestsSelectPlan, TestsSelectResult, TokenAccountingProfile,
+    RepositoryDataTrust, ResolvedChangeRecord, SemanticChangeRecord, SourceChunkEncoding,
+    SourceChunkResult, SourceReadPlan, SourceReadQueryResult, SymbolExplainPlan,
+    SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult, TestsSelectCoverage,
+    TestsSelectGap, TestsSelectKind, TestsSelectPlan, TestsSelectResult, TokenAccountingProfile,
 };
 pub use projection::project_lexical_documents;
 pub use service::QueryService;

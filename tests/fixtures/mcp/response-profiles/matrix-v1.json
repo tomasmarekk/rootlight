@@ -1,0 +1,228 @@
+{
+  "schema": "rootlight.response-profile-matrix/1",
+  "source": "canonical capability registry",
+  "tool_count": 19,
+  "tools": [
+    {
+      "tool": "repo.index",
+      "support": {
+        "mode": "fixed",
+        "representation": "compact"
+      }
+    },
+    {
+      "tool": "repo.status",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "response_profile",
+        "supported": [
+          "compact"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "repo.list",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "response_profile",
+        "supported": [
+          "compact"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "operation.status",
+      "support": {
+        "mode": "fixed",
+        "representation": "compact"
+      }
+    },
+    {
+      "tool": "code.locate",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "response_profile",
+        "supported": [
+          "compact",
+          "standard",
+          "evidence"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "symbol.explain",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "response_profile",
+        "supported": [
+          "compact",
+          "standard",
+          "evidence"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "symbol.relationships",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "response_profile",
+        "supported": [
+          "compact",
+          "standard",
+          "evidence"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "flow.trace",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "response_profile",
+        "supported": [
+          "compact",
+          "standard",
+          "evidence"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "change.impact",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "profile",
+        "supported": [
+          "compact",
+          "standard",
+          "evidence"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "tests.select",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "profile",
+        "supported": [
+          "compact",
+          "standard",
+          "evidence"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "architecture.overview",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "response_profile",
+        "supported": [
+          "compact",
+          "standard",
+          "evidence"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "architecture.cycles",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "response_profile",
+        "supported": [
+          "compact",
+          "standard",
+          "evidence"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "code.dead",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "response_profile",
+        "supported": [
+          "compact",
+          "standard",
+          "evidence"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "history.compare",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "profile",
+        "supported": [
+          "compact"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "plan.change",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "profile",
+        "supported": [
+          "compact",
+          "standard",
+          "evidence"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "context.pack",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "response_profile",
+        "supported": [
+          "compact",
+          "standard",
+          "evidence"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "source.read",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "response_profile",
+        "supported": [
+          "compact"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "query.advanced",
+      "support": {
+        "mode": "fixed",
+        "representation": "compact"
+      }
+    },
+    {
+      "tool": "query.batch",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "response_profile",
+        "supported": [
+          "compact",
+          "standard",
+          "evidence"
+        ],
+        "default": "compact"
+      }
+    }
+  ]
+}

@@ -6124,32 +6124,49 @@ fn first_slice_response_correlates(
                     request.generation.as_ref(),
                 )
                 && response.chunks.len() <= request.references.len()
-                && (response.truncated || response.chunks.len() == request.references.len())
-                && response
-                    .chunks
-                    .iter()
-                    .zip(&request.references)
-                    .all(|(chunk, requested)| {
-                        let Some(source) = chunk.source.as_ref() else {
-                            return false;
-                        };
-                        source_ref_correlates(source, context)
-                            && source == requested
-                            && chunk.start_byte <= source.start_byte
-                            && chunk.end_byte >= source.end_byte
-                            && chunk.start_line > 0
-                            && chunk.start_line <= chunk.end_line
-                            && source
-                                .start_line
-                                .is_none_or(|line| chunk.start_line <= line)
-                            && source.end_line.is_none_or(|line| chunk.end_line >= line)
-                            && wire_id_equals(
-                                chunk.content_hash.as_ref().map(|hash| &hash.value),
-                                source.content_hash.as_ref().map(|hash| &hash.value),
-                            )
-                            && u64::try_from(chunk.content.len()).ok()
-                                == chunk.end_byte.checked_sub(chunk.start_byte)
-                    })
+                && (response.truncated
+                    || request.merge_overlaps
+                    || response.chunks.len() == request.references.len())
+                && response.chunks.iter().enumerate().all(|(index, chunk)| {
+                    let Some(source) = chunk.source.as_ref() else {
+                        return false;
+                    };
+                    let selector_correlates = if request.merge_overlaps {
+                        request.references.iter().any(|requested| {
+                            requested.repository == source.repository
+                                && requested.generation == source.generation
+                                && requested.file == source.file
+                                && requested.content_hash == source.content_hash
+                                && requested.start_byte < source.end_byte
+                                && requested.end_byte > source.start_byte
+                        })
+                    } else {
+                        request.references.get(index) == Some(source)
+                    };
+                    source_ref_correlates(source, context)
+                        && selector_correlates
+                        && chunk.start_byte <= source.start_byte
+                        && chunk.end_byte >= source.end_byte
+                        && if request.include_line_numbers.unwrap_or(true) {
+                            chunk.start_line.is_some_and(|line| line > 0)
+                                && chunk.start_line <= chunk.end_line
+                                && source.start_line.is_none_or(|line| {
+                                    chunk.start_line.is_some_and(|start| start <= line)
+                                })
+                                && source.end_line.is_none_or(|line| {
+                                    chunk.end_line.is_some_and(|end| end >= line)
+                                })
+                        } else {
+                            chunk.start_line.is_none() && chunk.end_line.is_none()
+                        }
+                        && chunk.encoding == request.encoding
+                        && wire_id_equals(
+                            chunk.content_hash.as_ref().map(|hash| &hash.value),
+                            source.content_hash.as_ref().map(|hash| &hash.value),
+                        )
+                        && u64::try_from(chunk.content.len()).ok()
+                            == chunk.end_byte.checked_sub(chunk.start_byte)
+                })
                 && response.chunks.iter().try_fold(0_u64, |total, chunk| {
                     total.checked_add(u64::try_from(chunk.content.len()).ok()?)
                 }) == Some(response.total_source_bytes)
@@ -14505,6 +14522,11 @@ mod tests {
                     )),
                 }),
                 references,
+                context_lines_before: 0,
+                context_lines_after: 0,
+                merge_overlaps: false,
+                include_line_numbers: Some(true),
+                encoding: daemon::SourceReadEncoding::Utf8 as i32,
             })
         };
         assert!(validate_first_slice_request(&request(vec![reference.clone()])).is_ok());
@@ -15235,6 +15257,11 @@ mod tests {
                 selector: Some(daemon::generation_selector::Selector::Active(true)),
             }),
             references: vec![first_source.clone(), second_source.clone()],
+            context_lines_before: 0,
+            context_lines_after: 0,
+            merge_overlaps: false,
+            include_line_numbers: Some(true),
+            encoding: daemon::SourceReadEncoding::Utf8 as i32,
         });
         let source_chunk =
             |source: &daemon::FirstSliceSourceRef,
@@ -15245,12 +15272,13 @@ mod tests {
                 path: "src/lib.rs".to_owned(),
                 start_byte,
                 end_byte,
-                start_line: 1,
-                end_line: 1,
-                content: content.to_owned(),
+                start_line: Some(1),
+                end_line: Some(1),
+                content: content.as_bytes().to_vec(),
                 content_hash: source.content_hash.clone(),
                 language: "rust".to_owned(),
                 generated: false,
+                encoding: daemon::SourceReadEncoding::Utf8 as i32,
             };
         let source_response = daemon::SourceReadResponse {
             schema_version: schema,

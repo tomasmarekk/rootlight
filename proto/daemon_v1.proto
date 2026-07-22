@@ -574,29 +574,40 @@ message SymbolExplainResponse {
   FirstSliceCompleteness completeness = 6;
 }
 
-// Requests exact generation-bound source references.
+enum SourceReadEncoding {
+  SOURCE_READ_ENCODING_UTF8 = 0;
+  SOURCE_READ_ENCODING_BYTES = 1;
+}
+
+// Requests exact generation-bound source references and bounded presentation.
 message SourceReadRequest {
   rootlight.common.v1.ContractVersion schema_version = 1;
   rootlight.common.v1.RepositoryId repository = 2;
   GenerationSelector generation = 3;
   repeated FirstSliceSourceRef references = 4;
+  uint32 context_lines_before = 5;
+  uint32 context_lines_after = 6;
+  bool merge_overlaps = 7;
+  optional bool include_line_numbers = 8;
+  SourceReadEncoding encoding = 9;
 }
 
-// One verified UTF-8 source chunk.
+// One verified exact-byte source chunk.
 message FirstSliceSourceChunk {
   FirstSliceSourceRef source = 1;
   string path = 2;
   uint64 start_byte = 3;
   uint64 end_byte = 4;
-  uint64 start_line = 5;
-  uint64 end_line = 6;
-  string content = 7;
+  optional uint64 start_line = 5;
+  optional uint64 end_line = 6;
+  bytes content = 7;
   rootlight.common.v1.ContentHash content_hash = 8;
   string language = 9;
   bool generated = 10;
+  SourceReadEncoding encoding = 11;
 }
 
-// Returns exact verified UTF-8 source chunks.
+// Returns exact verified source chunks.
 message SourceReadResponse {
   rootlight.common.v1.ContractVersion schema_version = 1;
   FirstSliceQueryContext context = 2;

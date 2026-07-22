@@ -4,7 +4,7 @@
 //! for repository-derived evidence. Concrete adapters remain outside the agent
 //! domain and cannot influence provider order or candidate identity.
 
-use std::{collections::BTreeMap, time::Instant};
+use std::time::Instant;
 
 use rootlight_ids::{GenerationId, RepositoryId, SymbolId};
 use rootlight_ir::SourceRef;
@@ -24,7 +24,7 @@ use crate::{
 };
 
 /// Maximum provider invocations admitted for one canonical request.
-pub const MAX_CONTEXT_PROVIDER_CALLS: usize = 48;
+pub const MAX_CONTEXT_PROVIDER_CALLS: usize = 64;
 
 /// Maximum candidates retained from one provider invocation.
 pub const MAX_CANDIDATES_PER_PROVIDER: u16 = 32;
@@ -351,7 +351,7 @@ impl ContextEvidenceProviderRegistry {
             return Err(EvidenceProviderPlanError::NoAnchors);
         }
 
-        let roles = requested_roles(request.objective());
+        let roles = request.requested_roles();
         let mut invocations = Vec::new();
         for (kind, grouped) in anchors {
             for role in &roles {
@@ -380,17 +380,6 @@ impl ContextEvidenceProviderRegistry {
                     request,
                     EvidenceProvider::Planning,
                     EvidenceRole::Change,
-                    &grouped,
-                    &mut invocations,
-                )?;
-            }
-            if request.source_policy() != SourcePolicy::ReferencesOnly
-                && request.sections().contains(&ContextSection::Source)
-            {
-                push_invocation(
-                    request,
-                    EvidenceProvider::Source,
-                    EvidenceRole::Implementation,
                     &grouped,
                     &mut invocations,
                 )?;
@@ -682,6 +671,71 @@ pub struct EvidenceProviderOutput {
     pub usage: BudgetCharge,
 }
 
+/// One selected candidate whose generation-pinned source may be materialized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextSourceTarget {
+    /// Stable candidate identity selected by the optimizer.
+    pub candidate_id: EvidenceCandidateId,
+    /// Exact source range approved by evidence collection.
+    pub source_ref: SourceRef,
+}
+
+/// Bounded second-stage source request for already selected evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextSourceRequest {
+    /// Authoritative repository identity.
+    pub repository: RepositoryId,
+    /// Authoritative immutable generation identity.
+    pub generation: GenerationId,
+    /// Canonical source inclusion mode.
+    pub source_policy: SourcePolicy,
+    /// Whether response shaping permits repository source bodies.
+    pub include_snippets: bool,
+    /// Per-snippet UTF-8 byte ceiling.
+    pub max_bytes_per_snippet: u32,
+    /// Deterministically ordered selected source targets.
+    pub targets: Vec<ContextSourceTarget>,
+}
+
+/// Repository-derived source body returned strictly as untrusted data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextSourceSnippet {
+    /// Exact UTF-8 source bytes.
+    pub content: String,
+    /// Bounded language identifier supplied by the source adapter.
+    pub language: String,
+    /// Whether the approved source range was reduced by a hard bound.
+    pub truncated: bool,
+}
+
+/// Materialized representation for one selected context candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextSourceMaterial {
+    /// Selected candidate identity echoed by the adapter.
+    pub candidate_id: EvidenceCandidateId,
+    /// Exact generation-pinned source range that produced this material.
+    pub source_ref: SourceRef,
+    /// Bounded declaration or type signature when requested.
+    pub signature: Option<String>,
+    /// Bounded source body when requested.
+    pub snippet: Option<ContextSourceSnippet>,
+}
+
+/// Checked result of second-stage source materialization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextSourceOutput {
+    /// Authoritative repository identity observed by the adapter.
+    pub repository: RepositoryId,
+    /// Authoritative generation identity observed by the adapter.
+    pub generation: GenerationId,
+    /// Material returned for a subset of selected targets.
+    pub materials: Vec<ContextSourceMaterial>,
+    /// Truthful completeness of source materialization.
+    pub completeness: ResultCompleteness,
+    /// Measured work charged to the shared parent ledger.
+    pub usage: BudgetCharge,
+}
+
 /// Request-scoped controls supplied to one context-evidence adapter.
 #[derive(Debug, Clone)]
 pub struct ContextEvidenceCallContext<C> {
@@ -758,6 +812,23 @@ where
         invocation: EvidenceProviderInvocation,
         context: ContextEvidenceCallContext<C>,
     ) -> AgentPortFuture<Result<EvidenceProviderOutput, ContextEvidencePortError>>;
+
+    /// Materializes generation-pinned source only for optimizer-selected items.
+    ///
+    /// Implementations that have not wired the second-stage source boundary
+    /// remain truthful by reporting the capability as unsupported.
+    fn materialize_source(
+        &self,
+        _request: ContextSourceRequest,
+        _context: ContextEvidenceCallContext<C>,
+    ) -> AgentPortFuture<Result<ContextSourceOutput, ContextEvidencePortError>> {
+        Box::pin(async {
+            Err(ContextEvidencePortError {
+                kind: ContextEvidencePortErrorKind::Unsupported,
+                usage: BudgetCharge::default(),
+            })
+        })
+    }
 }
 
 /// Source-free reason one provider did not contribute a complete candidate set.
@@ -870,7 +941,7 @@ impl ContextEvidenceCollector {
         }
 
         let mut ledger = BudgetLedger::with_token_limit(u64::from(request.token_budget()));
-        let mut candidates = BTreeMap::<EvidenceDedupKey, TypedEvidenceCandidate>::new();
+        let mut candidates = Vec::<TypedEvidenceCandidate>::new();
         let mut omissions = Vec::new();
 
         for invocation in plan.invocations() {
@@ -999,11 +1070,11 @@ impl ContextEvidenceCollector {
                     );
                     continue;
                 }
-                merge_candidate(&mut candidates, candidate);
+                candidates.push(candidate);
             }
         }
 
-        let mut candidates = candidates.into_values().collect::<Vec<_>>();
+        let mut candidates = deduplicate_candidates(candidates);
         candidates.sort_by(candidate_order);
         Ok(ContextEvidenceCorpus {
             candidates,
@@ -1039,21 +1110,26 @@ fn validate_provider_output(
     Ok(())
 }
 
-fn merge_candidate(
-    candidates: &mut BTreeMap<EvidenceDedupKey, TypedEvidenceCandidate>,
-    candidate: TypedEvidenceCandidate,
-) {
-    let key = candidate.dedup_key().clone();
-    match candidates.entry(key) {
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert(candidate);
+fn deduplicate_candidates(
+    mut candidates: Vec<TypedEvidenceCandidate>,
+) -> Vec<TypedEvidenceCandidate> {
+    candidates.sort_by(|left, right| {
+        candidate_is_better(left, right)
+            .cmp(&candidate_is_better(right, left))
+            .reverse()
+            .then_with(|| left.id().cmp(right.id()))
+    });
+    let mut retained = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if retained
+            .iter()
+            .any(|existing| candidates_are_equivalent(existing, &candidate))
+        {
+            continue;
         }
-        std::collections::btree_map::Entry::Occupied(mut entry) => {
-            if candidate_is_better(&candidate, entry.get()) {
-                entry.insert(candidate);
-            }
-        }
+        retained.push(candidate);
     }
+    retained
 }
 
 fn candidate_is_better(
@@ -1066,6 +1142,30 @@ fn candidate_is_better(
         .then_with(|| candidate.relevance().cmp(&current.relevance()))
         .then_with(|| current.id().cmp(candidate.id()))
         .is_gt()
+}
+
+fn candidates_are_equivalent(
+    left: &TypedEvidenceCandidate,
+    right: &TypedEvidenceCandidate,
+) -> bool {
+    if left.role() != right.role() {
+        return false;
+    }
+    if left.symbol_id().is_some() && left.symbol_id() == right.symbol_id() {
+        return true;
+    }
+    if left.identity() == right.identity() {
+        return true;
+    }
+    left.source_refs().iter().any(|left_ref| {
+        right.source_refs().iter().any(|right_ref| {
+            left_ref.repository() == right_ref.repository()
+                && left_ref.generation() == right_ref.generation()
+                && left_ref.span().file() == right_ref.span().file()
+                && left_ref.span().start_byte() < right_ref.span().end_byte()
+                && right_ref.span().start_byte() < left_ref.span().end_byte()
+        })
+    })
 }
 
 fn candidate_order(
@@ -1142,10 +1242,6 @@ const fn limiting_resource_kind(resource: BudgetResource) -> LimitingResourceKin
         BudgetResource::MemoryBytes => LimitingResourceKind::MemoryBytes,
         BudgetResource::Time => LimitingResourceKind::Deadline,
     }
-}
-
-fn requested_roles(objective: ContextPackObjective) -> Vec<EvidenceRole> {
-    objective.required_roles().to_vec()
 }
 
 fn grouped_anchors(
@@ -1436,7 +1532,7 @@ mod tests {
     };
 
     use rootlight_ids::{ContentHash, FileId};
-    use rootlight_ir::{LineRange, SourceSpan};
+    use rootlight_ir::SourceSpan;
     use rootlight_mcp_contract::{
         RepositorySelector,
         completeness::{ContinuationAvailability, ContinuationGuidance},
@@ -1485,6 +1581,7 @@ mod tests {
             sections: None,
             diversity: None,
             min_confidence: None,
+            response_profile: None,
             continuation: None,
             explain: None,
         };
@@ -1493,12 +1590,21 @@ mod tests {
     }
 
     fn source_ref(repository: RepositoryId, generation: GenerationId) -> SourceRef {
+        ranged_source_ref(repository, generation, 10, 30)
+    }
+
+    fn ranged_source_ref(
+        repository: RepositoryId,
+        generation: GenerationId,
+        start: u64,
+        end: u64,
+    ) -> SourceRef {
         SourceRef::new(
             repository,
             generation,
-            SourceSpan::new(FileId::from_bytes([5; 20]), 10, 30).expect("valid source span"),
+            SourceSpan::new(FileId::from_bytes([5; 20]), start, end).expect("valid source span"),
             ContentHash::from_bytes([6; 32]),
-            Some(LineRange::new(2, 3).expect("valid line range")),
+            None,
         )
     }
 
@@ -1523,6 +1629,7 @@ mod tests {
             sections: None,
             diversity: None,
             min_confidence: None,
+            response_profile: None,
             continuation: None,
             explain: None,
         };
@@ -1656,6 +1763,72 @@ mod tests {
     }
 
     #[test]
+    fn sections_select_roles_while_response_profile_is_representation_only() {
+        let make_request = |profile| {
+            let public = ContextPackInput {
+                repository: RepositorySelector::ById(RepositoryIdSelector {
+                    repository_id: REPOSITORY,
+                }),
+                generation: None,
+                task: "explain parser".to_owned(),
+                seeds: ContextSeedSelector {
+                    symbols: Some(vec![SymbolId::from_bytes([3; 20])]),
+                    paths: None,
+                    routes: None,
+                    tests: None,
+                    located: None,
+                    change: None,
+                    plan: None,
+                },
+                token_budget: 4_500,
+                source_policy: None,
+                sections: Some(vec![
+                    ContextSection::Definitions,
+                    ContextSection::Architecture,
+                    ContextSection::Tests,
+                ]),
+                diversity: None,
+                min_confidence: None,
+                response_profile: profile,
+                continuation: None,
+                explain: None,
+            };
+            CanonicalContextPackRequest::new(&public, REPOSITORY, GENERATION)
+                .expect("sectioned request canonicalizes")
+        };
+        let compact = make_request(Some(
+            rootlight_mcp_contract::vertical::ResponseProfile::Compact,
+        ));
+        let evidence = make_request(Some(
+            rootlight_mcp_contract::vertical::ResponseProfile::Evidence,
+        ));
+        assert_eq!(
+            compact.requested_roles(),
+            vec![
+                EvidenceRole::Definition,
+                EvidenceRole::Test,
+                EvidenceRole::Architecture,
+            ]
+        );
+        let plan_projection = |request: &CanonicalContextPackRequest| {
+            ContextEvidenceProviderRegistry
+                .plan(request)
+                .expect("profile plan")
+                .invocations()
+                .iter()
+                .map(|invocation| {
+                    (
+                        invocation.provider(),
+                        invocation.role(),
+                        invocation.anchors().to_vec(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(plan_projection(&compact), plan_projection(&evidence));
+    }
+
+    #[test]
     fn all_objectives_have_deterministic_bounded_plans() {
         let mut observed_providers = BTreeSet::new();
         for task in [
@@ -1707,13 +1880,15 @@ mod tests {
 
         let source_request =
             request_with_source_policy("migrate parser", Some(SourcePolicy::FocusedSnippets));
-        observed_providers.extend(
-            ContextEvidenceProviderRegistry
-                .plan(&source_request)
-                .expect("source provider plan")
+        let source_plan = ContextEvidenceProviderRegistry
+            .plan(&source_request)
+            .expect("source-aware provider plan");
+        assert!(
+            source_plan
                 .invocations()
                 .iter()
-                .map(EvidenceProviderInvocation::provider),
+                .all(|invocation| invocation.provider() != EvidenceProvider::Source),
+            "raw source is a second-stage operation after evidence selection"
         );
         assert_eq!(
             observed_providers,
@@ -1727,7 +1902,6 @@ mod tests {
                 EvidenceProvider::ChangeImpact,
                 EvidenceProvider::History,
                 EvidenceProvider::Planning,
-                EvidenceProvider::Source,
             ])
         );
     }
@@ -1767,6 +1941,149 @@ mod tests {
         assert_eq!(left.id(), right.id());
         assert_eq!(left.dedup_key(), right.dedup_key());
         assert_eq!(left.trust(), TrustClassification::UntrustedRepositoryData);
+    }
+
+    #[test]
+    fn semantic_aliases_and_overlapping_ranges_deduplicate_deterministically() {
+        let invocation = one_invocation_plan(&request("fix crash"))
+            .invocations()
+            .first()
+            .expect("fixture invocation")
+            .clone();
+        let draft = |identity: &str,
+                     symbol_id: Option<SymbolId>,
+                     source_ref: SourceRef,
+                     confidence: u16| {
+            TypedEvidenceCandidate::from_draft(
+                REPOSITORY,
+                GENERATION,
+                EvidenceCandidateDraft {
+                    repository: REPOSITORY,
+                    generation: GENERATION,
+                    invocation: invocation.id().clone(),
+                    provider: invocation.provider(),
+                    role: invocation.role(),
+                    provenance: EvidenceProvenance::Graph,
+                    symbol_id,
+                    identity: identity.to_owned(),
+                    relevance: confidence,
+                    confidence,
+                    cost: BudgetCharge {
+                        results: 1,
+                        tokens: 16,
+                        ..BudgetCharge::default()
+                    },
+                    source_refs: vec![source_ref],
+                    dependencies: Vec::new(),
+                },
+            )
+            .expect("candidate validates")
+        };
+        let symbol = SymbolId::from_bytes([8; 20]);
+        let alias_low = draft(
+            "qualified alias",
+            Some(symbol),
+            ranged_source_ref(REPOSITORY, GENERATION, 0, 8),
+            800,
+        );
+        let alias_high = draft(
+            "display alias",
+            Some(symbol),
+            ranged_source_ref(REPOSITORY, GENERATION, 40, 48),
+            900,
+        );
+        let overlap = draft(
+            "overlap",
+            None,
+            ranged_source_ref(REPOSITORY, GENERATION, 44, 60),
+            850,
+        );
+        let adjacent = draft(
+            "adjacent",
+            None,
+            ranged_source_ref(REPOSITORY, GENERATION, 60, 70),
+            700,
+        );
+
+        let retained = deduplicate_candidates(vec![
+            adjacent.clone(),
+            alias_low,
+            overlap,
+            alias_high.clone(),
+        ]);
+        assert_eq!(retained.len(), 2);
+        assert!(
+            retained
+                .iter()
+                .any(|candidate| candidate.id() == alias_high.id())
+        );
+        assert!(
+            retained
+                .iter()
+                .any(|candidate| candidate.id() == adjacent.id())
+        );
+    }
+
+    #[tokio::test]
+    async fn confidence_boundary_is_inclusive_and_low_confidence_is_truthful() {
+        let mut public = ContextPackInput {
+            repository: RepositorySelector::ById(RepositoryIdSelector {
+                repository_id: REPOSITORY,
+            }),
+            generation: None,
+            task: "fix crash".to_owned(),
+            seeds: ContextSeedSelector {
+                symbols: Some(vec![SymbolId::from_bytes([3; 20])]),
+                paths: None,
+                routes: None,
+                tests: None,
+                located: None,
+                change: None,
+                plan: None,
+            },
+            token_budget: 4_500,
+            source_policy: None,
+            sections: None,
+            diversity: None,
+            min_confidence: Some(700),
+            response_profile: None,
+            continuation: None,
+            explain: None,
+        };
+        let request = CanonicalContextPackRequest::new(&public, REPOSITORY, GENERATION)
+            .expect("request canonicalizes");
+        let plan = one_invocation_plan(&request);
+        let invocation = &plan.invocations()[0];
+        let mut output = complete_output(invocation, "threshold");
+        output.candidates[0].confidence = 700;
+        let mut below = output.candidates[0].clone();
+        below.identity = "below".to_owned();
+        below.symbol_id = Some(SymbolId::from_bytes([9; 20]));
+        below.source_refs = vec![ranged_source_ref(REPOSITORY, GENERATION, 100, 120)];
+        below.confidence = 699;
+        output.candidates.push(below);
+        output.usage.results = 2;
+        let corpus = ContextEvidenceCollector
+            .collect(
+                &FakeEvidencePort::with_responses([Ok(output)]),
+                &request,
+                &plan,
+                NeverCancelled,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("boundary collection succeeds");
+        assert_eq!(corpus.candidates.len(), 1);
+        assert_eq!(corpus.candidates[0].confidence(), 700);
+        assert!(corpus.omissions.iter().any(|omission| {
+            omission.reason == EvidenceProviderOmissionReason::LowConfidence && omission.count == 1
+        }));
+
+        public.min_confidence = Some(701);
+        assert!(
+            CanonicalContextPackRequest::new(&public, REPOSITORY, GENERATION).is_ok(),
+            "confidence threshold remains a canonical request dimension"
+        );
     }
 
     #[test]

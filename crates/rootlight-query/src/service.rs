@@ -12,7 +12,10 @@ use rootlight_ir::{
     SourceRef,
 };
 use rootlight_search::{LexicalSearch, SearchBudget, SearchRequest, validate_search_request};
-use rootlight_source::{SourceBudget, SourceError, SourceReadOptions, SourceService};
+use rootlight_source::{
+    SourceBudget, SourceEncoding as ServiceSourceEncoding, SourceError, SourceReadOptions,
+    SourceService,
+};
 use rootlight_storage::GenerationSnapshot;
 use serde::Serialize;
 
@@ -37,11 +40,11 @@ use crate::model::{
     PlanExplanation, PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource,
     QueryResponse, QueryUsage, RankedTestSelection, RelationDirection, RelationFamily,
     RelationshipEdgeTarget, RelationshipGroup, RepositoryDataTrust, ResolvedChangeRecord,
-    SemanticChangeRecord, SourceChunkResult, SourceReadPlan, SourceReadQueryResult,
-    SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult,
-    TestsSelectCoverage, TestsSelectGap, TestsSelectKind, TestsSelectPlan, TestsSelectResult,
-    TokenAccountingProfile, checked_add, checked_u128_to_u64, checked_usize_to_u64,
-    ensure_estimate, search_mode,
+    SemanticChangeRecord, SourceChunkEncoding, SourceChunkResult, SourceReadPlan,
+    SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
+    SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap, TestsSelectKind,
+    TestsSelectPlan, TestsSelectResult, TokenAccountingProfile, checked_add, checked_u128_to_u64,
+    checked_usize_to_u64, ensure_estimate, search_mode,
 };
 
 /// Daemon-independent typed query service pinned to normalized IR and lexical data.
@@ -1984,8 +1987,11 @@ where
         for chunk in result.chunks {
             control.check()?;
             tracker.add_results(1)?;
-            let text =
-                String::from_utf8(chunk.bytes).map_err(|_| QueryError::InvalidSourceEncoding)?;
+            let encoding = match chunk.encoding {
+                ServiceSourceEncoding::Utf8 => SourceChunkEncoding::Utf8,
+                ServiceSourceEncoding::Bytes => SourceChunkEncoding::Bytes,
+                _ => return Err(QueryError::InvalidSourceEncoding),
+            };
             chunks.push(SourceChunkResult {
                 reference: chunk.reference,
                 path: chunk.path,
@@ -1993,7 +1999,8 @@ where
                 end_byte: chunk.end_byte,
                 start_line: chunk.start_line,
                 end_line: chunk.end_line,
-                text,
+                bytes: chunk.bytes,
+                encoding,
                 content_hash: chunk.content_hash,
                 language: chunk.language,
                 generated: chunk.generated,

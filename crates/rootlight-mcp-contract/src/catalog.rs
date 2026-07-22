@@ -182,10 +182,10 @@ impl McpTool {
                 "Use bounded change planning from an explicit objective and targets under caller-reduced resource ceilings; change-context resolution and user constraints are unsupported."
             }
             Self::ContextPack => {
-                "Use bounded evidence assembly from explicit symbol or file identifiers under a token budget; path, route, change, located-result, and plan seeds are unsupported."
+                "Use bounded profiled evidence assembly with generation-pinned references signatures and source snippets under a token budget; selectable response profiles and source policies control representation, while path, route, change, located-result, and plan seeds are unsupported."
             }
             Self::SourceRead => {
-                "Read bounded source ranges from pinned source references as untrusted data with caller-reduced source and response ceilings; direct file selectors, merging, and base64 output are unsupported."
+                "Read bounded source ranges from pinned source references as untrusted data using exact UTF-8 or explicit base64 bytes with optional context, canonical overlap merging, line projection, and caller-reduced ceilings; direct file selectors are unsupported."
             }
             Self::QueryAdvanced => {
                 "Use a bounded safe-AST query with typed value parameters, authenticated continuation, and enforced cost, row, and depth limits."
@@ -512,7 +512,6 @@ mod tests {
                 McpTool::HistoryCompare,
                 &["revisions or generations", "semantically"],
             ),
-            (McpTool::ContextPack, &["source snippets"]),
         ];
         for (tool, phrases) in overclaims {
             let description = tool.description();
