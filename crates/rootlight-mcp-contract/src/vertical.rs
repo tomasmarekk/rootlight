@@ -131,7 +131,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-repo-status-input-1.0.schema.json"
             ),
             Self::RepoList => {
-                include_str!("../../../schemas/generated/json/mcp-repo-list-input-1.0.schema.json")
+                include_str!("../../../schemas/generated/json/mcp-repo-list-input-2.0.schema.json")
             }
             Self::OperationStatus => include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-input-1.0.schema.json"
@@ -195,7 +195,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-repo-status-output-1.0.schema.json"
             ),
             Self::RepoList => {
-                include_str!("../../../schemas/generated/json/mcp-repo-list-output-1.0.schema.json")
+                include_str!("../../../schemas/generated/json/mcp-repo-list-output-2.0.schema.json")
             }
             Self::OperationStatus => include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-output-1.0.schema.json"
@@ -1866,9 +1866,13 @@ mod tests {
                 }
                 "repo.list" => {
                     assert_round_trip::<RepoListInput>(VerticalTool::RepoList, &input, true);
-                    // TODO(schema-integration): Restore the typed RepoListOutput 2.0 round-trip
-                    // after the generated schema and retained fixture are updated together.
-                    assert_generated_schema(VerticalTool::RepoList, &output, false);
+                    assert_schema_fixture(
+                        include_str!(
+                            "../../../schemas/generated/json/mcp-repo-list-output-1.0.schema.json"
+                        ),
+                        &output,
+                        "repo.list 1.0",
+                    );
                 }
                 "operation.status" => {
                     assert_round_trip::<OperationStatusInput>(
@@ -2017,6 +2021,22 @@ mod tests {
                 .collect(),
             "retained examples must match the complete public catalog"
         );
+
+        let current_repo_list: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/mcp/2.0/repo-list-contract.json"
+        ))
+        .expect("current repo.list contract is valid JSON");
+        assert_eq!(current_repo_list["tool"], "repo.list");
+        assert_round_trip::<RepoListInput>(
+            VerticalTool::RepoList,
+            &current_repo_list["input"],
+            true,
+        );
+        assert_round_trip::<RepoListOutput>(
+            VerticalTool::RepoList,
+            &current_repo_list["output"],
+            false,
+        );
     }
 
     fn assert_round_trip<T>(tool: VerticalTool, fixture: &Value, input: bool)
@@ -2049,18 +2069,12 @@ mod tests {
         assert_eq!(round_tripped, decoded);
     }
 
-    fn assert_generated_schema(tool: VerticalTool, fixture: &Value, input: bool) {
-        let schema_text = if input {
-            tool.input_schema_json()
-        } else {
-            tool.output_schema_json()
-        };
+    fn assert_schema_fixture(schema_text: &str, fixture: &Value, label: &str) {
         let schema: Value = serde_json::from_str(schema_text).expect("tool schema is valid JSON");
         let validator = jsonschema::draft202012::new(&schema).expect("tool schema compiles");
         assert!(
             validator.is_valid(fixture),
-            "{} fixture passes its generated schema",
-            tool.name()
+            "{label} fixture passes its generated schema"
         );
     }
 

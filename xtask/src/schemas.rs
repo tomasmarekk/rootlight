@@ -88,7 +88,7 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 5] = [
     ("1.4", "protobuf/1.4/rootlight.desc"),
     ("1.5", "protobuf/1.5/rootlight.desc"),
 ];
-const SCHEMA_PROVENANCE_INPUTS: [&str; 19] = [
+const SCHEMA_PROVENANCE_INPUTS: [&str; 22] = [
     "Cargo.lock",
     "crates/rootlight-config/src/lib.rs",
     "crates/rootlight-error/src/lib.rs",
@@ -103,8 +103,11 @@ const SCHEMA_PROVENANCE_INPUTS: [&str; 19] = [
     "crates/rootlight-mcp-contract/src/intent.rs",
     "crates/rootlight-mcp-contract/src/repository.rs",
     "crates/rootlight-mcp-contract/src/vertical.rs",
+    "tests/fixtures/mcp/1.0/schemas/mcp-repo-list-input-1.0.schema.json",
+    "tests/fixtures/mcp/1.0/schemas/mcp-repo-list-output-1.0.schema.json",
     "tests/fixtures/mcp/1.0/tool-contracts.json",
     "tests/fixtures/mcp/1.0/tool-transcript.jsonl",
+    "tests/fixtures/mcp/2.0/repo-list-contract.json",
     "xtask/Cargo.toml",
     "xtask/src/main.rs",
     "xtask/src/schemas.rs",
@@ -122,7 +125,7 @@ pub(crate) fn generate(mode: GenerateMode) -> Result<(), SchemaError> {
     let staged_root = temporary.path();
 
     generate_protobuf(&workspace_root, staged_root)?;
-    generate_json_schemas(staged_root)?;
+    generate_json_schemas(&workspace_root, staged_root)?;
     validate_generated_json_schemas(&workspace_root, staged_root)?;
     generate_manifest(&workspace_root, staged_root)?;
 
@@ -803,8 +806,17 @@ fn rewrite_legacy_lease_rustdoc(output_root: &Path) -> Result<(), SchemaError> {
     write_bytes(&path, rewritten.as_bytes())
 }
 
-fn generate_json_schemas(staged_root: &Path) -> Result<(), SchemaError> {
+fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<(), SchemaError> {
     let schema_root = staged_root.join(SCHEMA_ROOT).join("json");
+    for name in [
+        "mcp-repo-list-input-1.0.schema.json",
+        "mcp-repo-list-output-1.0.schema.json",
+    ] {
+        let fixture = workspace_root
+            .join("tests/fixtures/mcp/1.0/schemas")
+            .join(name);
+        write_bytes(&schema_root.join(name), &read_bytes(&fixture)?)?;
+    }
     write_schema::<ConfigDocumentSchema>(&schema_root.join("config-1.0.schema.json"))?;
     write_schema::<ConfigDocumentSchemaV1_1>(&schema_root.join("config-1.1.schema.json"))?;
     write_schema::<IrDocumentSchema>(&schema_root.join("ir-1.0.schema.json"))?;
@@ -826,8 +838,8 @@ fn generate_json_schemas(staged_root: &Path) -> Result<(), SchemaError> {
     write_mcp_tool_schema::<SourceReadOutput>(&schema_root, "source.read", "output")?;
     write_mcp_tool_schema::<RepoStatusInput>(&schema_root, "repo.status", "input")?;
     write_mcp_tool_schema::<RepoStatusOutput>(&schema_root, "repo.status", "output")?;
-    write_mcp_tool_schema::<RepoListInput>(&schema_root, "repo.list", "input")?;
-    write_mcp_tool_schema::<RepoListOutput>(&schema_root, "repo.list", "output")?;
+    write_mcp_tool_schema_version::<RepoListInput>(&schema_root, "repo.list", "input", "2.0")?;
+    write_mcp_tool_schema_version::<RepoListOutput>(&schema_root, "repo.list", "output", "2.0")?;
     write_mcp_tool_schema::<SymbolRelationshipsInput>(
         &schema_root,
         "symbol.relationships",
@@ -888,6 +900,15 @@ fn write_mcp_tool_schema<T: JsonSchema>(
     tool: &str,
     direction: &str,
 ) -> Result<(), SchemaError> {
+    write_mcp_tool_schema_version::<T>(schema_root, tool, direction, "1.0")
+}
+
+fn write_mcp_tool_schema_version<T: JsonSchema>(
+    schema_root: &Path,
+    tool: &str,
+    direction: &str,
+    version: &str,
+) -> Result<(), SchemaError> {
     let mut schema = SchemaSettings::draft2020_12()
         .for_deserialize()
         .into_generator()
@@ -910,11 +931,11 @@ fn write_mcp_tool_schema<T: JsonSchema>(
     close_mcp_object_schemas(&mut schema);
     schema.insert(
         "$id".to_owned(),
-        format!("https://rootlight.local/schema/mcp/{tool}/{direction}/1.0").into(),
+        format!("https://rootlight.local/schema/mcp/{tool}/{direction}/{version}").into(),
     );
     let file_tool = tool.replace('.', "-");
     write_schema_value(
-        &schema_root.join(format!("mcp-{file_tool}-{direction}-1.0.schema.json")),
+        &schema_root.join(format!("mcp-{file_tool}-{direction}-{version}.schema.json")),
         schema,
     )
 }
@@ -1972,6 +1993,8 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-repo-status-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-list-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-list-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-repo-list-input-2.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-repo-list-output-2.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-relationships-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-relationships-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-flow-trace-input-1.0.schema.json"),
