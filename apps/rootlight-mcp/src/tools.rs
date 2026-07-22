@@ -2168,29 +2168,37 @@ mod tests {
     #[test]
     fn capability_traversal_reports_the_first_path_deterministically() {
         let mut query_first = Map::new();
-        query_first.insert("query".to_owned(), json!("needle"));
-        query_first.insert("states".to_owned(), json!(["ready"]));
+        query_first.insert("coverage_detail".to_owned(), json!("summary"));
+        query_first.insert("require_freshness".to_owned(), json!("structural"));
+        query_first.insert(
+            "repository".to_owned(),
+            serde_json::to_value(selector()).expect("fixture selector serializes"),
+        );
         let mut states_first = Map::new();
-        states_first.insert("states".to_owned(), json!(["ready"]));
-        states_first.insert("query".to_owned(), json!("needle"));
+        states_first.insert("require_freshness".to_owned(), json!("structural"));
+        states_first.insert(
+            "repository".to_owned(),
+            serde_json::to_value(selector()).expect("fixture selector serializes"),
+        );
+        states_first.insert("coverage_detail".to_owned(), json!("summary"));
 
         let first = validate_capability_input(
-            VerticalTool::RepoList,
+            VerticalTool::RepoStatus,
             &Value::Object(query_first),
             CapabilityBindingPolicy::Materialized,
         )
-        .expect_err("blocked query is rejected");
+        .expect_err("unsupported coverage projection is rejected");
         let second = validate_capability_input(
-            VerticalTool::RepoList,
+            VerticalTool::RepoStatus,
             &Value::Object(states_first),
             CapabilityBindingPolicy::Materialized,
         )
-        .expect_err("blocked query is rejected regardless of insertion order");
+        .expect_err("unsupported projection is rejected regardless of insertion order");
 
         assert_eq!(first, second);
-        assert_eq!(first.registry_path(), "query");
-        assert_eq!(first.instance_path(), "query");
-        assert_eq!(first.reason(), CapabilityRejectionReason::BlockedField);
+        assert_eq!(first.registry_path(), "coverage_detail");
+        assert_eq!(first.instance_path(), "coverage_detail");
+        assert_eq!(first.reason(), CapabilityRejectionReason::UnsupportedField);
         assert_eq!(first.code(), ErrorCode::UnsupportedCapability);
     }
 
@@ -2619,7 +2627,7 @@ mod tests {
             ],
             "review any new generated-rule exclusion"
         );
-        assert_eq!((declared, covered, exclusions.len()), (157, 155, 2));
+        assert_eq!((declared, covered, exclusions.len()), (155, 153, 2));
     }
 
     #[tokio::test]
@@ -2791,11 +2799,14 @@ mod tests {
             assert_eq!(tool["annotations"]["destructiveHint"], false);
             assert_eq!(tool["execution"]["taskSupport"], "forbidden");
             let metadata = &tool["_meta"][DISCOVERY_METADATA_KEY];
-            assert_eq!(metadata["contractVersion"], "1.0");
             let capability = CAPABILITIES
                 .iter()
                 .find(|capability| tool["name"] == capability.tool.name())
                 .expect("listed tool has a capability entry");
+            assert_eq!(
+                metadata["contractVersion"],
+                capability.tool.contract_version()
+            );
             assert_eq!(tool["title"], capability.tool.title());
             assert_eq!(tool["description"], capability.tool.description());
             assert_eq!(
@@ -2953,8 +2964,8 @@ mod tests {
                     "5e2ba8f249c06c25da27a07f75c286816f77cb46208d5ae5ab96cdce20979ac7".to_owned(),
                 ),
                 (
-                    579_961,
-                    "0b94b9e3185c963ef3633f07befed3f8ee129322a2aaf64abf0afd002739cff1".to_owned(),
+                    580_881,
+                    "a7895ddff1fec2924ce5f50d8f8465797346fb21e79dee8af7bfb777ad4a3c05".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -3235,7 +3246,7 @@ mod tests {
                     "tools/call",
                     json!({
                         "name": "repo.list",
-                        "arguments": {"query": "needle"}
+                        "arguments": {"response_profile": "evidence"}
                     }),
                 ),
                 cancellation(),
@@ -3257,7 +3268,7 @@ mod tests {
                 .details()
                 .get(&DetailKey::parse("field_path").expect("static detail key is valid")),
             Some(&PublicValue::Label(
-                SafeLabel::parse("query").expect("fixture path is valid")
+                SafeLabel::parse("response_profile").expect("fixture path is valid")
             ))
         );
         assert_eq!(
@@ -3266,7 +3277,7 @@ mod tests {
                 .details()
                 .get(&DetailKey::parse("capability_reason").expect("static detail key is valid")),
             Some(&PublicValue::Label(
-                SafeLabel::parse("blocked_field").expect("fixture reason is valid")
+                SafeLabel::parse("unsupported_value").expect("fixture reason is valid")
             ))
         );
         assert_eq!(
@@ -3279,7 +3290,7 @@ mod tests {
 
         let validator =
             MaterializedToolValidator::compile().expect("checked contracts compile once");
-        let arguments = Map::from_iter([("query".to_owned(), json!("needle"))]);
+        let arguments = Map::from_iter([("response_profile".to_owned(), json!("evidence"))]);
         let materialized = validator
             .validate(
                 VerticalTool::RepoList,
