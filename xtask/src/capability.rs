@@ -335,7 +335,7 @@ fn validate_input_contracts(registry: &[ToolCapability], problems: &mut Vec<Prob
 
 fn validate_batch_tool_values(
     entry: &ToolCapability,
-    shape: &BTreeMap<String, BTreeSet<String>>,
+    shape: &SchemaShape,
     problems: &mut Vec<Problem>,
 ) {
     let path = "operations[].tool";
@@ -343,14 +343,14 @@ fn validate_batch_tool_values(
         return;
     };
     for tool in McpTool::ALL {
-        if is_batch_eligible(tool) && !values.contains(tool.name()) {
+        if is_batch_eligible(tool) && !values.closed_values.contains(tool.name()) {
             problems.push(Problem::new(
                 tool.name(),
                 ProblemKind::BatchToolMissingSchemaValue,
             ));
         }
     }
-    for value in values {
+    for value in &values.closed_values {
         let Some(tool) = McpTool::ALL
             .into_iter()
             .find(|tool| tool.name() == value.as_str())
@@ -375,11 +375,7 @@ fn validate_batch_tool_values(
     }
 }
 
-fn validate_shape_hash(
-    entry: &ToolCapability,
-    shape: &BTreeMap<String, BTreeSet<String>>,
-    problems: &mut Vec<Problem>,
-) {
+fn validate_shape_hash(entry: &ToolCapability, shape: &SchemaShape, problems: &mut Vec<Problem>) {
     let observed = input_shape_hash(shape);
     if entry.input_shape_hash != observed {
         problems.push(Problem::new(
@@ -392,11 +388,7 @@ fn validate_shape_hash(
     }
 }
 
-fn validate_rules(
-    entry: &ToolCapability,
-    shape: &BTreeMap<String, BTreeSet<String>>,
-    problems: &mut Vec<Problem>,
-) {
+fn validate_rules(entry: &ToolCapability, shape: &SchemaShape, problems: &mut Vec<Problem>) {
     let mut seen = BTreeSet::new();
     for rule in entry.rules {
         let identity = (rule.path, rule.value);
@@ -418,7 +410,8 @@ fn validate_rules(
             continue;
         };
         if let Some(value) = rule.value
-            && !values.contains(value)
+            && !values.closed_values.contains(value)
+            && !values.accepts_open_string_value(value)
         {
             problems.push(Problem::new(
                 entry.tool.name(),
@@ -463,12 +456,12 @@ fn validate_rules(
 
 fn validate_field_dispositions(
     entry: &ToolCapability,
-    shape: &BTreeMap<String, BTreeSet<String>>,
+    shape: &SchemaShape,
     problems: &mut Vec<Problem>,
 ) {
     for (path, values) in shape {
         validate_resolved_rule(entry, path, None, problems);
-        for value in values {
+        for value in &values.closed_values {
             validate_resolved_rule(entry, path, Some(value), problems);
         }
     }
@@ -502,7 +495,7 @@ fn validate_resolved_rule(
 
 fn validate_cross_cutting_metadata(
     entry: &ToolCapability,
-    shape: &BTreeMap<String, BTreeSet<String>>,
+    shape: &SchemaShape,
     problems: &mut Vec<Problem>,
 ) {
     let has_explain = shape.contains_key("explain");
@@ -592,7 +585,25 @@ fn reviewed_field_count() -> Result<usize, SchemaError> {
         .sum()
 }
 
-fn schema_shape(schema_text: &str) -> Result<BTreeMap<String, BTreeSet<String>>, SchemaError> {
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SchemaField {
+    closed_values: BTreeSet<String>,
+    open_string_schemas: Vec<Value>,
+}
+
+impl SchemaField {
+    fn accepts_open_string_value(&self, value: &str) -> bool {
+        let instance = Value::String(value.to_owned());
+        self.open_string_schemas.iter().any(|schema| {
+            jsonschema::draft202012::new(schema)
+                .is_ok_and(|validator| validator.is_valid(&instance))
+        })
+    }
+}
+
+type SchemaShape = BTreeMap<String, SchemaField>;
+
+fn schema_shape(schema_text: &str) -> Result<SchemaShape, SchemaError> {
     let schema: Value =
         serde_json::from_str(schema_text).map_err(|source| SchemaError::InvalidJson { source })?;
     let definitions = schema
@@ -610,11 +621,17 @@ fn visit_schema(
     path: &str,
     definitions: &serde_json::Map<String, Value>,
     active_refs: &mut BTreeSet<String>,
-    fields: &mut BTreeMap<String, BTreeSet<String>>,
+    fields: &mut SchemaShape,
 ) -> Result<(), SchemaError> {
     if !path.is_empty() {
-        let values = fields.entry(path.to_owned()).or_default();
-        collect_closed_values(node, definitions, &mut BTreeSet::new(), values)?;
+        let field = fields.entry(path.to_owned()).or_default();
+        collect_value_shape(
+            node,
+            definitions,
+            &mut BTreeSet::new(),
+            &mut field.closed_values,
+            &mut field.open_string_schemas,
+        )?;
     }
     if let Some(reference) = node.get("$ref").and_then(Value::as_str) {
         if active_refs.insert(reference.to_owned()) {
@@ -653,16 +670,23 @@ fn visit_schema(
     Ok(())
 }
 
-fn collect_closed_values(
+fn collect_value_shape(
     node: &Value,
     definitions: &serde_json::Map<String, Value>,
     active_refs: &mut BTreeSet<String>,
     values: &mut BTreeSet<String>,
+    open_string_schemas: &mut Vec<Value>,
 ) -> Result<(), SchemaError> {
     if let Some(reference) = node.get("$ref").and_then(Value::as_str) {
         if active_refs.insert(reference.to_owned()) {
             let resolved = resolve_reference(reference, definitions)?;
-            collect_closed_values(resolved, definitions, active_refs, values)?;
+            collect_value_shape(
+                resolved,
+                definitions,
+                active_refs,
+                values,
+                open_string_schemas,
+            )?;
             active_refs.remove(reference);
         }
         return Ok(());
@@ -675,6 +699,9 @@ fn collect_closed_values(
     if let Some(constant) = node.get("const") {
         values.insert(canonical_value(constant)?);
     }
+    if schema_allows_string(node) && node.get("enum").is_none() && node.get("const").is_none() {
+        open_string_schemas.push(node.clone());
+    }
     if schema_allows_boolean(node) {
         values.insert("false".to_owned());
         values.insert("true".to_owned());
@@ -682,11 +709,25 @@ fn collect_closed_values(
     for keyword in ["allOf", "anyOf", "oneOf"] {
         if let Some(branches) = node.get(keyword).and_then(Value::as_array) {
             for branch in branches {
-                collect_closed_values(branch, definitions, active_refs, values)?;
+                collect_value_shape(
+                    branch,
+                    definitions,
+                    active_refs,
+                    values,
+                    open_string_schemas,
+                )?;
             }
         }
     }
     Ok(())
+}
+
+fn schema_allows_string(node: &Value) -> bool {
+    match node.get("type") {
+        Some(Value::String(kind)) => kind == "string",
+        Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind == "string"),
+        _ => false,
+    }
 }
 
 fn schema_allows_boolean(node: &Value) -> bool {
@@ -723,13 +764,17 @@ fn resolve_reference<'a>(
         .ok_or(SchemaError::MissingDefinition { name })
 }
 
-fn input_shape_hash(shape: &BTreeMap<String, BTreeSet<String>>) -> String {
+fn input_shape_hash(shape: &SchemaShape) -> String {
     let canonical: Vec<(&str, Vec<&str>)> = shape
         .iter()
-        .map(|(path, values)| {
+        .map(|(path, field)| {
             (
                 path.as_str(),
-                values.iter().map(String::as_str).collect::<Vec<_>>(),
+                field
+                    .closed_values
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
             )
         })
         .collect();
@@ -1072,17 +1117,37 @@ fn artifact_field_dispositions(
 ) -> Result<Vec<ArtifactFieldDisposition>, CapabilityError> {
     let shape = schema_shape(vertical.input_schema_json()).map_err(CapabilityError::Schema)?;
     let mut fields = Vec::new();
-    for (path, values) in shape {
+    for (path, field) in shape {
         fields.push(artifact_field(
             entry.disposition(&path, None),
             path.clone(),
             None,
         ));
-        for value in values {
+        for value in &field.closed_values {
             fields.push(artifact_field(
-                entry.disposition(&path, Some(&value)),
+                entry.disposition(&path, Some(value)),
                 path.clone(),
-                Some(value),
+                Some(value.clone()),
+            ));
+        }
+        let open_values: BTreeSet<&str> = entry
+            .rules
+            .iter()
+            .filter(|rule| {
+                !field.open_string_schemas.is_empty()
+                    && rule.path == path
+                    && rule.value.is_some_and(|value| {
+                        !field.closed_values.contains(value)
+                            && field.accepts_open_string_value(value)
+                    })
+            })
+            .filter_map(|rule| rule.value)
+            .collect();
+        for value in open_values {
+            fields.push(artifact_field(
+                entry.disposition(&path, Some(value)),
+                path.clone(),
+                Some(value.to_owned()),
             ));
         }
     }
@@ -1663,7 +1728,7 @@ mod tests {
         capability.input_shape_hash = Box::leak(input_shape_hash(&baseline).into_boxed_str());
         let mut problems = Vec::new();
         validate_shape_hash(&capability, &added, &mut problems);
-        assert!(added["mode"].contains("future"));
+        assert!(added["mode"].closed_values.contains("future"));
         assert!(
             problems
                 .iter()
@@ -1687,6 +1752,69 @@ mod tests {
         }];
         let mut problems = Vec::new();
         validate_rules(&capability, &shape, &mut problems);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| matches!(problem.kind, ProblemKind::UnknownRuleValue { .. }))
+        );
+    }
+
+    #[test]
+    fn exact_rule_for_open_string_value_is_accepted_and_emitted() {
+        let cycles = entry(McpTool::ArchitectureCycles);
+        let vertical =
+            vertical_tool(McpTool::ArchitectureCycles).expect("cycles has a generated contract");
+        let shape =
+            schema_shape(vertical.input_schema_json()).expect("cycles input schema is valid");
+        assert!(
+            shape["projection.level"].accepts_open_string_value("symbol"),
+            "the exact supported projection must remain schema-valid"
+        );
+
+        let mut problems = Vec::new();
+        validate_rules(&cycles, &shape, &mut problems);
+        assert!(
+            !problems
+                .iter()
+                .any(|problem| matches!(problem.kind, ProblemKind::UnknownRuleValue { .. })),
+            "open-string exact values must be valid registry rules: {problems:#?}"
+        );
+
+        let fields = artifact_field_dispositions(&cycles, vertical)
+            .expect("cycles dispositions are generated");
+        assert!(fields.iter().any(|field| {
+            field.path == "projection.level"
+                && field.value.as_deref() == Some("symbol")
+                && field.status == "implemented"
+        }));
+        assert!(fields.iter().any(|field| {
+            field.path == "projection.level"
+                && field.value.is_none()
+                && field.status == "unsupported_stable_error"
+        }));
+    }
+
+    #[test]
+    fn schema_invalid_open_string_rule_is_rejected() {
+        let vertical =
+            vertical_tool(McpTool::ArchitectureCycles).expect("cycles has a generated contract");
+        let shape =
+            schema_shape(vertical.input_schema_json()).expect("cycles input schema is valid");
+        let invalid_level = Box::leak("x".repeat(65).into_boxed_str());
+        let mut cycles = entry(McpTool::ArchitectureCycles);
+        cycles.rules = Box::leak(
+            vec![rootlight_mcp_contract::capability::CapabilityRule {
+                path: "projection.level",
+                value: Some(invalid_level),
+                status: CapabilityStatus::Blocked,
+                error_code: None,
+                summary: "not schema-valid",
+            }]
+            .into_boxed_slice(),
+        );
+
+        let mut problems = Vec::new();
+        validate_rules(&cycles, &shape, &mut problems);
         assert!(
             problems
                 .iter()

@@ -372,6 +372,15 @@ const REPO_STATUS_RULES: &[CapabilityRule] = &[
         "only stable repository identifiers are served",
     ),
     unsupported(
+        "generation",
+        "explicit historical generation selection is not served by repository status",
+    ),
+    implemented_value(
+        "generation",
+        "active",
+        "returns status for the active repository generation",
+    ),
+    unsupported(
         "coverage_detail",
         "granular coverage projection is not served",
     ),
@@ -663,6 +672,15 @@ const ARCHITECTURE_CYCLES_RULES: &[CapabilityRule] = &[
         "only stable repository identifiers are served",
     ),
     unsupported("scope", "structural scope filtering is not served"),
+    unsupported(
+        "projection.level",
+        "only symbol-level cycle projection is served",
+    ),
+    implemented_value(
+        "projection.level",
+        "symbol",
+        "detects cycles between symbols",
+    ),
     unsupported("rank_by", "cycle ranking strategy is not served"),
     unsupported("budget", "custom response budgets are not served"),
     unsupported_value(
@@ -1218,7 +1236,23 @@ mod tests {
     }
 
     #[test]
-    fn known_silent_fields_are_explicitly_blocked() {
+    fn known_silent_fields_have_explicit_dispositions() {
+        let repo_status = CAPABILITIES[McpTool::RepoStatus as usize];
+        let explicit_generation =
+            repo_status.disposition("generation", Some("gen1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert_eq!(
+            explicit_generation.status,
+            CapabilityStatus::UnsupportedStableError
+        );
+        assert_eq!(
+            explicit_generation.error_code,
+            Some(ErrorCode::UnsupportedCapability)
+        );
+        assert_eq!(
+            repo_status.disposition("generation", Some("active")).status,
+            CapabilityStatus::Implemented
+        );
+
         let repo_list = CAPABILITIES[McpTool::RepoList as usize];
         assert_eq!(
             repo_list.disposition("query", None).status,
@@ -1257,6 +1291,23 @@ mod tests {
         assert_eq!(
             forbidden_plan.error_code,
             Some(ErrorCode::OperatorForbidden)
+        );
+
+        let cycles = CAPABILITIES[McpTool::ArchitectureCycles as usize];
+        assert_eq!(
+            cycles
+                .disposition("projection.level", Some("symbol"))
+                .status,
+            CapabilityStatus::Implemented
+        );
+        let unsupported_level = cycles.disposition("projection.level", Some("module"));
+        assert_eq!(
+            unsupported_level.status,
+            CapabilityStatus::UnsupportedStableError
+        );
+        assert_eq!(
+            unsupported_level.error_code,
+            Some(ErrorCode::UnsupportedCapability)
         );
     }
 
