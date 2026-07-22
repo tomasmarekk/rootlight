@@ -299,9 +299,20 @@
         },
         "references": [
           {
-            "file_id": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
-            "start_byte": 0,
-            "end_byte": 10
+            "source_ref": {
+              "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+              "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+              "span": {
+                "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                "start_byte": 0,
+                "end_byte": 10
+              },
+              "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+              "line_hint": {
+                "start_line": 1,
+                "end_line": 1
+              }
+            }
           }
         ]
       },
@@ -648,7 +659,9 @@
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
         "change": {
-          "revision_range": "main"
+          "symbol_ids": [
+            "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+          ]
         }
       },
       "output": {
@@ -671,9 +684,9 @@
         "data": {
           "resolved_changes": [
             {
-              "symbol_id": null,
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
               "file_id": null,
-              "classification": "added"
+              "classification": "body"
             }
           ],
           "impacted": [],
@@ -765,12 +778,8 @@
         "repository": {
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "base": {
-          "git": "v1"
-        },
-        "head": {
-          "git": "v2"
-        }
+        "base": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+        "head": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by"
       },
       "output": {
         "schema_version": "1.0",
@@ -1019,7 +1028,9 @@
           {
             "id": "op_1",
             "tool": "code.locate",
-            "arguments": {}
+            "arguments": {
+              "query": "publish"
+            }
           }
         ]
       },

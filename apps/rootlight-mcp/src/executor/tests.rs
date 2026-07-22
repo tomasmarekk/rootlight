@@ -738,6 +738,44 @@ fn batch_harness() -> Harness {
     })
 }
 
+fn executor_failure<T>() -> Result<T, ClientPortError> {
+    Err(ClientPortError::Executor)
+}
+
+fn admission_harness(tool: VerticalTool) -> Harness {
+    match tool {
+        VerticalTool::RepoIndex => Harness::new(FakeOutcome::RepositoryIndex(executor_failure())),
+        VerticalTool::RepoStatus => Harness::new(FakeOutcome::RepositoryStatus(executor_failure())),
+        VerticalTool::RepoList => Harness::new(FakeOutcome::RepositoryList(executor_failure())),
+        VerticalTool::OperationStatus => {
+            Harness::new(FakeOutcome::OperationStatus(executor_failure()))
+        }
+        VerticalTool::CodeLocate => Harness::new(FakeOutcome::CodeLocate(executor_failure())),
+        VerticalTool::SymbolExplain => Harness::new(FakeOutcome::SymbolExplain(executor_failure())),
+        VerticalTool::SymbolRelationships => {
+            Harness::new(FakeOutcome::SymbolRelationships(executor_failure()))
+        }
+        VerticalTool::FlowTrace => Harness::new(FakeOutcome::FlowTrace(executor_failure())),
+        VerticalTool::ChangeImpact => Harness::new(FakeOutcome::ChangeImpact(executor_failure())),
+        VerticalTool::TestsSelect => Harness::new(FakeOutcome::TestsSelect(executor_failure())),
+        VerticalTool::ArchitectureOverview => {
+            Harness::new(FakeOutcome::ArchitectureOverview(executor_failure()))
+        }
+        VerticalTool::ArchitectureCycles => {
+            Harness::new(FakeOutcome::ArchitectureCycles(executor_failure()))
+        }
+        VerticalTool::CodeDead => Harness::new(FakeOutcome::CodeDead(executor_failure())),
+        VerticalTool::HistoryCompare => {
+            Harness::new(FakeOutcome::HistoryCompare(executor_failure()))
+        }
+        VerticalTool::PlanChange => Harness::new(FakeOutcome::PlanChange(executor_failure())),
+        VerticalTool::ContextPack => Harness::new(FakeOutcome::SymbolExplain(executor_failure())),
+        VerticalTool::SourceRead => Harness::new(FakeOutcome::SourceRead(executor_failure())),
+        VerticalTool::QueryAdvanced => Harness::new(FakeOutcome::QueryAdvanced(executor_failure())),
+        VerticalTool::QueryBatch => batch_harness(),
+    }
+}
+
 fn explain_response(definition: client::SourceReference) -> SymbolExplainPortResponse {
     SymbolExplainPortResponse::new(
         client::SymbolExplain {
@@ -1137,6 +1175,45 @@ async fn query_batch_composes_locate_subtools_under_one_pinned_generation() {
             .all(|result| result.status == BatchOperationStatus::Ok)
     );
     assert_eq!(harness.call_count.load(Ordering::Relaxed), 3);
+}
+
+#[tokio::test]
+async fn every_retained_example_reaches_runtime_without_capability_rejection() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/mcp/1.0/tool-contracts.json"
+    ))
+    .expect("retained tool contracts are valid JSON");
+    let examples = fixture["tools"]
+        .as_array()
+        .expect("retained tool contracts contain an array");
+    assert_eq!(examples.len(), VerticalTool::ALL.len());
+
+    for example in examples {
+        let name = example["tool"].as_str().expect("tool name is a string");
+        let tool = VerticalTool::ALL
+            .into_iter()
+            .find(|tool| tool.name() == name)
+            .unwrap_or_else(|| panic!("retained tool is registered: {name}"));
+        let harness = admission_harness(tool);
+        let result = execute(&harness.executor, tool, example["input"].clone()).await;
+        if let Err(error) = &result
+            && let Some(public) = error.public_error()
+        {
+            assert!(
+                !matches!(
+                    public.code(),
+                    ErrorCode::UnsupportedCapability
+                        | ErrorCode::InvalidArgument
+                        | ErrorCode::OperatorForbidden
+                ),
+                "{name} retained example failed admission: {public:?}"
+            );
+        }
+        assert!(
+            harness.call_count.load(Ordering::Relaxed) > 0,
+            "{name} retained example did not reach the client port"
+        );
+    }
 }
 
 #[tokio::test]

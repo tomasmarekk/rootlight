@@ -5,7 +5,11 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
-use rootlight_mcp_contract::capability::{CAPABILITIES, DISCOVERY_METADATA_KEY};
+use rootlight_mcp_contract::{
+    ExposureProfile,
+    accounting::tool_list_payload,
+    capability::{CAPABILITIES, DISCOVERY_METADATA_KEY},
+};
 use serde_json::Value;
 
 #[test]
@@ -239,6 +243,95 @@ fn capability_registry_maps_every_tool_across_the_process_boundary() {
         .read_to_string(&mut stderr)
         .expect("fixture stderr reads");
     assert!(stderr.is_empty());
+}
+
+#[test]
+fn tools_list_payloads_match_all_profile_goldens_across_the_process_boundary() {
+    let expected = [
+        (
+            ExposureProfile::Scout,
+            193_362,
+            "82eeca17c486228a72588fe3fa6889e13d8dea125eceb7cdf580817ceda6df2f",
+        ),
+        (
+            ExposureProfile::Analysis,
+            424_905,
+            "68c1600528e13a07b0425408ef9db7ee5795354b6a605230b8df9577a03591fd",
+        ),
+        (
+            ExposureProfile::Developer,
+            578_475,
+            "74f5823b6bf98024108057b423dcad8153f80aa996ead64ad413c03afd599039",
+        ),
+    ];
+    for (profile, expected_bytes, expected_hash) in expected {
+        let isolated = tempfile::tempdir().expect("isolated MCP runtime root is available");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rootlight-mcp"))
+            .arg("--transport-only")
+            .env("ROOTLIGHT_STATE_DIR", isolated.path().join("state"))
+            .env("ROOTLIGHT_RUNTIME_DIR", isolated.path().join("runtime"))
+            .env("ROOTLIGHT_MCP_PROFILE", "developer")
+            .env("ROOTLIGHT_MCP_PROFILE_CEILING", "developer")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("MCP fixture process starts");
+        let mut input = child.stdin.take().expect("fixture stdin is piped");
+        let output = child.stdout.take().expect("fixture stdout is piped");
+        let mut output = BufReader::new(output);
+        write_message(
+            &mut input,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "initialize",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "fixture", "version": "1.0"},
+                    "initializationOptions": {
+                        "rootlight_exposure_profile": profile.name()
+                    }
+                }
+            }),
+        );
+        assert_eq!(read_response(&mut output)["id"], "initialize");
+        write_message(
+            &mut input,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {}
+            }),
+        );
+        write_message(
+            &mut input,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "list",
+                "method": "tools/list",
+                "params": {}
+            }),
+        );
+        let payload = read_response(&mut output)["result"].clone();
+        assert_eq!(
+            payload,
+            tool_list_payload(profile),
+            "{} process payload drifted from canonical accounting",
+            profile.name()
+        );
+        let encoded = serde_json::to_vec(&payload).expect("tools/list payload serializes");
+        assert_eq!(encoded.len(), expected_bytes);
+        assert_eq!(blake3::hash(&encoded).to_hex().as_str(), expected_hash);
+        drop(input);
+        drop(output);
+        let output = child
+            .wait_with_output()
+            .expect("MCP fixture process terminates");
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+    }
 }
 
 #[test]

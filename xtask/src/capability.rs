@@ -76,6 +76,7 @@ pub(crate) fn check(options: &Options) -> Result<(), CapabilityError> {
     let mut problems: Vec<Problem> = Vec::new();
     validate_catalog_parity(&registry, &mut problems);
     validate_contract_version(&registry, &mut problems);
+    validate_discovery_descriptions(&registry, &mut problems);
     validate_batch_eligibility(&registry, &mut problems);
     validate_profile_membership(&registry, &mut problems);
     validate_handler_disposition(&registry, &registered_handler_names(), &mut problems);
@@ -154,6 +155,23 @@ fn validate_contract_version(registry: &[ToolCapability], problems: &mut Vec<Pro
                 entry.tool.name(),
                 ProblemKind::ContractVersion {
                     version: entry.contract_version.to_owned(),
+                },
+            ));
+        }
+    }
+}
+
+fn validate_discovery_descriptions(registry: &[ToolCapability], problems: &mut Vec<Problem>) {
+    for entry in registry {
+        if entry.status == CapabilityStatus::Implemented {
+            continue;
+        }
+        let description = entry.tool.description().to_ascii_lowercase();
+        if !description.contains(entry.fallback_summary) {
+            problems.push(Problem::new(
+                entry.tool.name(),
+                ProblemKind::DiscoveryDescriptionDrift {
+                    summary: entry.fallback_summary.to_owned(),
                 },
             ));
         }
@@ -1226,6 +1244,9 @@ enum ProblemKind {
     ContractVersion {
         version: String,
     },
+    DiscoveryDescriptionDrift {
+        summary: String,
+    },
     BatchEligibilityDrift,
     BatchNotReadOnly,
     SharedBatchBudgetDrift {
@@ -1324,6 +1345,10 @@ impl std::fmt::Display for Problem {
             ProblemKind::ContractVersion { version } => write!(
                 formatter,
                 "contract_version {version} does not match {MCP_SCHEMA_VERSION}"
+            ),
+            ProblemKind::DiscoveryDescriptionDrift { summary } => write!(
+                formatter,
+                "discovery description does not contain its reviewed fallback summary: {summary}"
             ),
             ProblemKind::BatchEligibilityDrift => {
                 write!(formatter, "batch flag drifted from the allowlist")
@@ -1531,12 +1556,27 @@ mod tests {
         let mut problems = Vec::new();
         validate_catalog_parity(&CAPABILITIES, &mut problems);
         validate_contract_version(&CAPABILITIES, &mut problems);
+        validate_discovery_descriptions(&CAPABILITIES, &mut problems);
         validate_batch_eligibility(&CAPABILITIES, &mut problems);
         validate_profile_membership(&CAPABILITIES, &mut problems);
         validate_handler_disposition(&CAPABILITIES, &registered_handler_names(), &mut problems);
         validate_input_contracts(&CAPABILITIES, &mut problems);
         validate_schema_goldens(&mut problems).expect("schema goldens are readable");
         assert!(problems.is_empty(), "unexpected problems: {problems:#?}");
+    }
+
+    #[test]
+    fn broader_description_than_registry_summary_is_rejected() {
+        let mut capability = entry(McpTool::CodeLocate);
+        capability.fallback_summary = "unreviewed semantic repository search";
+        let mut problems = Vec::new();
+        validate_discovery_descriptions(&[capability], &mut problems);
+        assert!(
+            problems.iter().any(|problem| matches!(
+                problem.kind,
+                ProblemKind::DiscoveryDescriptionDrift { .. }
+            ))
+        );
     }
 
     #[test]

@@ -1834,17 +1834,16 @@ mod tests {
         let tools = fixture["tools"]
             .as_array()
             .expect("retained tool contracts contain a tool array");
-        assert!(
-            tools.len() >= 7,
-            "fixture must retain at least the original seven tools"
+        assert_eq!(
+            tools.len(),
+            VerticalTool::ALL.len(),
+            "fixture must retain one example for every public tool"
         );
-        assert!(
-            tools.len() <= VerticalTool::ALL.len(),
-            "fixture cannot exceed the catalog"
-        );
+        let mut retained = BTreeSet::new();
 
         for fixture in tools {
             let name = fixture["tool"].as_str().expect("tool name is a string");
+            assert!(retained.insert(name), "duplicate retained example: {name}");
             let input = fixture["input"].clone();
             let output = fixture["output"].clone();
             match name {
@@ -1999,6 +1998,14 @@ mod tests {
                 other => panic!("unexpected retained tool contract {other}"),
             }
         }
+        assert_eq!(
+            retained,
+            VerticalTool::ALL
+                .into_iter()
+                .map(VerticalTool::name)
+                .collect(),
+            "retained examples must match the complete public catalog"
+        );
     }
 
     fn assert_round_trip<T>(tool: VerticalTool, fixture: &Value, input: bool)

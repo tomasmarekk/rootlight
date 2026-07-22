@@ -19,6 +19,7 @@ mod policy;
 mod protobuf_compatibility;
 mod schemas;
 mod source_hygiene;
+mod tool_discovery;
 
 use std::{env, error::Error as _, process::ExitCode};
 
@@ -75,6 +76,10 @@ fn run() -> Result<(), XtaskError> {
         Some("capability-check") => {
             let options = capability::Options::parse(&mut args)?;
             capability::check(&options)?;
+        }
+        Some("tool-discovery-evidence") => {
+            let options = tool_discovery::Options::parse(&mut args)?;
+            tool_discovery::emit(&options)?;
         }
         Some("unsafe-check") => {
             let fixture_root = parse_required_fixture_root(&mut args)?;
@@ -163,7 +168,7 @@ fn git_metadata_command(args: &mut impl Iterator<Item = String>) -> Result<(), X
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -202,6 +207,8 @@ enum XtaskError {
     McpVertical(#[from] mcp_vertical::VerticalError),
     #[error(transparent)]
     Policy(#[from] policy::PolicyError),
+    #[error(transparent)]
+    ToolDiscovery(#[from] tool_discovery::DiscoveryError),
     #[error(transparent)]
     Schemas(#[from] schemas::SchemaError),
 }
