@@ -301,6 +301,7 @@ fn validate_handler_disposition(
 
 fn validate_input_contracts(registry: &[ToolCapability], problems: &mut Vec<Problem>) {
     for entry in registry {
+        validate_fail_closed_default(entry, problems);
         let Some(vertical) = VerticalTool::ALL
             .into_iter()
             .find(|tool| tool.name() == entry.tool.name())
@@ -330,6 +331,17 @@ fn validate_input_contracts(registry: &[ToolCapability], problems: &mut Vec<Prob
         if entry.tool == McpTool::QueryBatch {
             validate_batch_tool_values(entry, &shape, problems);
         }
+    }
+}
+
+fn validate_fail_closed_default(entry: &ToolCapability, problems: &mut Vec<Problem>) {
+    if entry.default_field_status != CapabilityStatus::Blocked {
+        problems.push(Problem::new(
+            entry.tool.name(),
+            ProblemKind::NonFailClosedFieldDefault {
+                observed: entry.default_field_status.name().to_owned(),
+            },
+        ));
     }
 }
 
@@ -474,6 +486,16 @@ fn validate_resolved_rule(
     problems: &mut Vec<Problem>,
 ) {
     let rule = entry.disposition(path, value);
+    let is_explicit = entry.rules.contains(&rule);
+    if rule.path.is_empty() || !is_explicit {
+        problems.push(Problem::new(
+            entry.tool.name(),
+            ProblemKind::ImplicitFieldDisposition {
+                path: rule_identity(path, value),
+                observed: rule.status.name().to_owned(),
+            },
+        ));
+    }
     if rule.summary.trim().is_empty() {
         problems.push(Problem::new(
             entry.tool.name(),
@@ -1340,6 +1362,13 @@ enum ProblemKind {
         expected: String,
         observed: String,
     },
+    NonFailClosedFieldDefault {
+        observed: String,
+    },
+    ImplicitFieldDisposition {
+        path: String,
+        observed: String,
+    },
     DuplicateRule {
         path: String,
     },
@@ -1458,6 +1487,14 @@ impl std::fmt::Display for Problem {
             ProblemKind::InputShapeHash { expected, observed } => write!(
                 formatter,
                 "input field/value shape changed; expected {expected}, observed {observed}"
+            ),
+            ProblemKind::NonFailClosedFieldDefault { observed } => write!(
+                formatter,
+                "unreviewed input fields default to {observed}, expected blocked"
+            ),
+            ProblemKind::ImplicitFieldDisposition { path, observed } => write!(
+                formatter,
+                "schema field or value {path} resolves implicitly to {observed}"
             ),
             ProblemKind::DuplicateRule { path } => {
                 write!(formatter, "duplicate capability rule for {path}")
@@ -1712,6 +1749,86 @@ mod tests {
                 .iter()
                 .any(|problem| matches!(problem.kind, ProblemKind::InputShapeHash { .. }))
         );
+    }
+
+    #[test]
+    fn non_blocked_field_default_is_rejected() {
+        let mut capability = entry(McpTool::OperationStatus);
+        capability.default_field_status = CapabilityStatus::Implemented;
+        let mut problems = Vec::new();
+
+        validate_fail_closed_default(&capability, &mut problems);
+
+        assert!(
+            problems.iter().any(|problem| matches!(
+                problem.kind,
+                ProblemKind::NonFailClosedFieldDefault { .. }
+            ))
+        );
+    }
+
+    #[test]
+    fn explicit_ancestors_cover_fields_and_closed_values() {
+        let shape = schema_shape(include_str!(
+            "../../tests/fixtures/capability/baseline.schema.json"
+        ))
+        .expect("baseline fixture is valid");
+        let mut capability = entry(McpTool::OperationStatus);
+        capability.rules = &[
+            CapabilityRule {
+                path: "enabled",
+                value: None,
+                status: CapabilityStatus::Implemented,
+                error_code: None,
+                summary: "reviewed boolean",
+            },
+            CapabilityRule {
+                path: "mode",
+                value: None,
+                status: CapabilityStatus::FallbackLimited,
+                error_code: None,
+                summary: "reviewed mode",
+            },
+        ];
+        let mut problems = Vec::new();
+
+        validate_field_dispositions(&capability, &shape, &mut problems);
+
+        assert!(problems.is_empty(), "unexpected problems: {problems:#?}");
+    }
+
+    #[test]
+    fn added_schema_field_requires_an_explicit_rule() {
+        let shape = schema_shape(include_str!(
+            "../../tests/fixtures/capability/added-field.schema.json"
+        ))
+        .expect("field fixture is valid");
+        let mut capability = entry(McpTool::OperationStatus);
+        capability.rules = &[
+            CapabilityRule {
+                path: "enabled",
+                value: None,
+                status: CapabilityStatus::Implemented,
+                error_code: None,
+                summary: "reviewed boolean",
+            },
+            CapabilityRule {
+                path: "mode",
+                value: None,
+                status: CapabilityStatus::FallbackLimited,
+                error_code: None,
+                summary: "reviewed mode",
+            },
+        ];
+        let mut problems = Vec::new();
+
+        validate_field_dispositions(&capability, &shape, &mut problems);
+
+        assert!(problems.iter().any(|problem| matches!(
+            &problem.kind,
+            ProblemKind::ImplicitFieldDisposition { path, observed }
+                if path == "ignored" && observed == "blocked"
+        )));
     }
 
     #[test]
