@@ -1,0 +1,13 @@
+schema_version = "1.0"
+id = "delta"
+title = "Incorrectly accepted stage"
+implementation_status = "present"
+acceptance = "pass"
+gate_outcome = "not_applicable"
+source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
+milestone = "milestones/delta.md"
+completion_report = "tests/fixtures/disposition/invalid/unchecked-without-report/reports/delta.md"
+evidence = ["tests/fixtures/disposition/invalid/unchecked-without-report/evidence/delta.json"]
+dependencies = []
+dependents = []
+residual_risks = []

@@ -1,0 +1,3 @@
+[X] alpha, First synthetic stage
+[X] bravo, Blocking gate stage. Accepted fallback: Bounded synthetic fallback used only to exercise the validator.
+[ ] charlie, Pending dependent stage. Acceptance: pending
