@@ -130,24 +130,44 @@ enum FakeOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ObservedAnalyticCall<T> {
+    request: T,
+    options: client::RequestOptions,
+}
+
+impl<T> ObservedAnalyticCall<T> {
+    fn new(request: T, options: client::RequestOptions) -> Self {
+        Self { request, options }
+    }
+}
+
+impl<T> std::ops::Deref for ObservedAnalyticCall<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ObservedCall {
     RepositoryIndex(RepositoryIndexPortRequest),
     OperationStatus(OperationStatusPortRequest),
-    CodeLocate(CodeLocatePortRequest),
-    SymbolExplain(SymbolExplainPortRequest),
-    SourceRead(SourceReadPortRequest),
+    CodeLocate(ObservedAnalyticCall<CodeLocatePortRequest>),
+    SymbolExplain(ObservedAnalyticCall<SymbolExplainPortRequest>),
+    SourceRead(ObservedAnalyticCall<SourceReadPortRequest>),
     RepositoryList(RepositoryCatalogPagePortRequest),
     RepositoryStatus(RepositoryStatusPortRequest),
-    SymbolRelationships(SymbolRelationshipsPortRequest),
-    FlowTrace(FlowTracePortRequest),
-    ArchitectureCycles(ArchitectureCyclesPortRequest),
-    CodeDead(CodeDeadPortRequest),
-    ArchitectureOverview(ArchitectureOverviewPortRequest),
-    TestsSelect(TestsSelectPortRequest),
-    ChangeImpact(ChangeImpactPortRequest),
-    PlanChange(PlanChangePortRequest),
-    HistoryCompare(HistoryComparePortRequest),
-    QueryAdvanced(QueryAdvancedPortRequest),
+    SymbolRelationships(ObservedAnalyticCall<SymbolRelationshipsPortRequest>),
+    FlowTrace(ObservedAnalyticCall<FlowTracePortRequest>),
+    ArchitectureCycles(ObservedAnalyticCall<ArchitectureCyclesPortRequest>),
+    CodeDead(ObservedAnalyticCall<CodeDeadPortRequest>),
+    ArchitectureOverview(ObservedAnalyticCall<ArchitectureOverviewPortRequest>),
+    TestsSelect(ObservedAnalyticCall<TestsSelectPortRequest>),
+    ChangeImpact(ObservedAnalyticCall<ChangeImpactPortRequest>),
+    PlanChange(ObservedAnalyticCall<PlanChangePortRequest>),
+    HistoryCompare(ObservedAnalyticCall<HistoryComparePortRequest>),
+    QueryAdvanced(ObservedAnalyticCall<QueryAdvancedPortRequest>),
 }
 
 #[derive(Debug, Clone)]
@@ -401,9 +421,12 @@ impl FirstSliceClientPort for FakePort {
     fn code_locate(
         &self,
         request: CodeLocatePortRequest,
+        options: client::RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<CodeLocatePortResponse> {
-        self.record(ObservedCall::CodeLocate(request));
+        self.record(ObservedCall::CodeLocate(ObservedAnalyticCall::new(
+            request, options,
+        )));
         let outcome = match &self.outcome {
             FakeOutcome::CodeLocate(outcome) => outcome.clone(),
             FakeOutcome::CodeLocateSequence(outcomes) => outcomes
@@ -424,9 +447,12 @@ impl FirstSliceClientPort for FakePort {
     fn symbol_explain(
         &self,
         request: SymbolExplainPortRequest,
+        options: client::RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<SymbolExplainPortResponse> {
-        self.record(ObservedCall::SymbolExplain(request));
+        self.record(ObservedCall::SymbolExplain(ObservedAnalyticCall::new(
+            request, options,
+        )));
         let outcome = match &self.outcome {
             FakeOutcome::SymbolExplain(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
@@ -437,9 +463,12 @@ impl FirstSliceClientPort for FakePort {
     fn source_read(
         &self,
         request: SourceReadPortRequest,
+        options: client::RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<SourceReadPortResponse> {
-        self.record(ObservedCall::SourceRead(request));
+        self.record(ObservedCall::SourceRead(ObservedAnalyticCall::new(
+            request, options,
+        )));
         let outcome = match &self.outcome {
             FakeOutcome::SourceRead(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
@@ -487,9 +516,12 @@ impl FirstSliceClientPort for FakePort {
     fn symbol_relationships(
         &self,
         request: SymbolRelationshipsPortRequest,
+        options: client::RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<SymbolRelationshipsPortResponse> {
-        self.record(ObservedCall::SymbolRelationships(request));
+        self.record(ObservedCall::SymbolRelationships(
+            ObservedAnalyticCall::new(request, options),
+        ));
         let outcome = match &self.outcome {
             FakeOutcome::SymbolRelationships(outcome) => outcome.clone(),
             FakeOutcome::SymbolRelationshipsSequence(outcomes) => outcomes
@@ -505,9 +537,12 @@ impl FirstSliceClientPort for FakePort {
     fn flow_trace(
         &self,
         request: FlowTracePortRequest,
+        options: client::RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<FlowTracePortResponse> {
-        self.record(ObservedCall::FlowTrace(request));
+        self.record(ObservedCall::FlowTrace(ObservedAnalyticCall::new(
+            request, options,
+        )));
         let outcome = match &self.outcome {
             FakeOutcome::FlowTrace(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
@@ -518,9 +553,12 @@ impl FirstSliceClientPort for FakePort {
     fn architecture_cycles(
         &self,
         request: ArchitectureCyclesPortRequest,
+        options: client::RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<ArchitectureCyclesPortResponse> {
-        self.record(ObservedCall::ArchitectureCycles(request));
+        self.record(ObservedCall::ArchitectureCycles(ObservedAnalyticCall::new(
+            request, options,
+        )));
         let outcome = match &self.outcome {
             FakeOutcome::ArchitectureCycles(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
@@ -531,9 +569,12 @@ impl FirstSliceClientPort for FakePort {
     fn code_dead(
         &self,
         request: CodeDeadPortRequest,
+        options: client::RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<CodeDeadPortResponse> {
-        self.record(ObservedCall::CodeDead(request));
+        self.record(ObservedCall::CodeDead(ObservedAnalyticCall::new(
+            request, options,
+        )));
         let outcome = match &self.outcome {
             FakeOutcome::CodeDead(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
@@ -544,9 +585,12 @@ impl FirstSliceClientPort for FakePort {
     fn architecture_overview(
         &self,
         request: ArchitectureOverviewPortRequest,
+        options: client::RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<ArchitectureOverviewPortResponse> {
-        self.record(ObservedCall::ArchitectureOverview(request));
+        self.record(ObservedCall::ArchitectureOverview(
+            ObservedAnalyticCall::new(request, options),
+        ));
         let outcome = match &self.outcome {
             FakeOutcome::ArchitectureOverview(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
@@ -557,9 +601,12 @@ impl FirstSliceClientPort for FakePort {
     fn tests_select(
         &self,
         request: TestsSelectPortRequest,
+        options: client::RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<TestsSelectPortResponse> {
-        self.record(ObservedCall::TestsSelect(request));
+        self.record(ObservedCall::TestsSelect(ObservedAnalyticCall::new(
+            request, options,
+        )));
         let outcome = match &self.outcome {
             FakeOutcome::TestsSelect(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
@@ -570,9 +617,12 @@ impl FirstSliceClientPort for FakePort {
     fn change_impact(
         &self,
         request: ChangeImpactPortRequest,
+        options: client::RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<ChangeImpactPortResponse> {
-        self.record(ObservedCall::ChangeImpact(request));
+        self.record(ObservedCall::ChangeImpact(ObservedAnalyticCall::new(
+            request, options,
+        )));
         let outcome = match &self.outcome {
             FakeOutcome::ChangeImpact(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
@@ -583,9 +633,12 @@ impl FirstSliceClientPort for FakePort {
     fn plan_change(
         &self,
         request: PlanChangePortRequest,
+        options: client::RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<PlanChangePortResponse> {
-        self.record(ObservedCall::PlanChange(request));
+        self.record(ObservedCall::PlanChange(ObservedAnalyticCall::new(
+            request, options,
+        )));
         let outcome = match &self.outcome {
             FakeOutcome::PlanChange(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
@@ -596,9 +649,12 @@ impl FirstSliceClientPort for FakePort {
     fn history_compare(
         &self,
         request: HistoryComparePortRequest,
+        options: client::RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<HistoryComparePortResponse> {
-        self.record(ObservedCall::HistoryCompare(request));
+        self.record(ObservedCall::HistoryCompare(ObservedAnalyticCall::new(
+            request, options,
+        )));
         let outcome = match &self.outcome {
             FakeOutcome::HistoryCompare(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
@@ -609,9 +665,12 @@ impl FirstSliceClientPort for FakePort {
     fn query_advanced(
         &self,
         request: QueryAdvancedPortRequest,
+        options: client::RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<QueryAdvancedPortResponse> {
-        self.record(ObservedCall::QueryAdvanced(request));
+        self.record(ObservedCall::QueryAdvanced(ObservedAnalyticCall::new(
+            request, options,
+        )));
         let outcome = match &self.outcome {
             FakeOutcome::QueryAdvanced(outcome) => outcome.clone(),
             FakeOutcome::QueryAdvancedSequence(outcomes) => outcomes
@@ -679,6 +738,36 @@ fn cancellation() -> RequestCancellation {
     RequestCancellation {
         receiver: sender.subscribe(),
     }
+}
+
+#[tokio::test]
+async fn analytic_request_options_reach_the_port_unchanged() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let port = FakePort {
+        outcome: FakeOutcome::CodeLocate(Err(ClientPortError::Executor)),
+        calls: Arc::clone(&calls),
+        call_count: Arc::new(AtomicUsize::new(0)),
+    };
+    let options = client::RequestOptions::new().with_timeout(
+        client::RequestTimeout::new(std::time::Duration::from_secs(7))
+            .expect("fixture timeout is strictly positive"),
+    );
+    let request = CodeLocatePortRequest {
+        repository: repository(),
+        generation: ClientGenerationSelector::Active,
+        query: "transport options".to_owned(),
+        mode: LocateMode::Text,
+        maximum_results: 3,
+        page_offset: 0,
+    };
+
+    let _ = port.code_locate(request, options, cancellation()).await;
+
+    let calls = calls.lock().expect("fake call recorder is not poisoned");
+    let [ObservedCall::CodeLocate(call)] = calls.as_slice() else {
+        panic!("code locate reaches the fake port exactly once");
+    };
+    assert_eq!(call.options, options);
 }
 
 async fn execute(
@@ -882,6 +971,8 @@ fn usage(results: u64, source_bytes: u64) -> QueryUsage {
         source_bytes,
         json_bytes: 512,
         estimated_tokens: 64,
+        token_accounting: None,
+        memory_bytes: None,
         elapsed_micros: 1_001,
     }
 }

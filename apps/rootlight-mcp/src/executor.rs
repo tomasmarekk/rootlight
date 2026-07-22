@@ -152,6 +152,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
     fn code_locate(
         &self,
         request: CodeLocatePortRequest,
+        options: client::RequestOptions,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<CodeLocatePortResponse>;
 
@@ -159,6 +160,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
     fn symbol_explain(
         &self,
         request: SymbolExplainPortRequest,
+        options: client::RequestOptions,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<SymbolExplainPortResponse>;
 
@@ -166,6 +168,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
     fn source_read(
         &self,
         request: SourceReadPortRequest,
+        options: client::RequestOptions,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<SourceReadPortResponse>;
 
@@ -187,6 +190,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
     fn symbol_relationships(
         &self,
         request: SymbolRelationshipsPortRequest,
+        options: client::RequestOptions,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<SymbolRelationshipsPortResponse>;
 
@@ -194,6 +198,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
     fn flow_trace(
         &self,
         request: FlowTracePortRequest,
+        options: client::RequestOptions,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<FlowTracePortResponse>;
 
@@ -201,6 +206,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
     fn architecture_cycles(
         &self,
         request: ArchitectureCyclesPortRequest,
+        options: client::RequestOptions,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<ArchitectureCyclesPortResponse>;
 
@@ -208,6 +214,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
     fn code_dead(
         &self,
         request: CodeDeadPortRequest,
+        options: client::RequestOptions,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<CodeDeadPortResponse>;
 
@@ -216,6 +223,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
     fn architecture_overview(
         &self,
         request: ArchitectureOverviewPortRequest,
+        options: client::RequestOptions,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<ArchitectureOverviewPortResponse>;
 
@@ -223,6 +231,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
     fn tests_select(
         &self,
         request: TestsSelectPortRequest,
+        options: client::RequestOptions,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<TestsSelectPortResponse>;
 
@@ -231,6 +240,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
     fn change_impact(
         &self,
         request: ChangeImpactPortRequest,
+        options: client::RequestOptions,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<ChangeImpactPortResponse>;
 
@@ -239,6 +249,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
     fn plan_change(
         &self,
         request: PlanChangePortRequest,
+        options: client::RequestOptions,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<PlanChangePortResponse>;
 
@@ -246,6 +257,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
     fn history_compare(
         &self,
         request: HistoryComparePortRequest,
+        options: client::RequestOptions,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<HistoryComparePortResponse>;
 
@@ -253,6 +265,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
     fn query_advanced(
         &self,
         request: QueryAdvancedPortRequest,
+        options: client::RequestOptions,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<QueryAdvancedPortResponse>;
 }
@@ -1997,7 +2010,8 @@ where
                 return Err(AgentPortError::Cancelled);
             }
             let expected = request.clone();
-            let operation = port.plan_change(request, cancellation.clone());
+            let operation =
+                port.plan_change(request, client::RequestOptions::new(), cancellation.clone());
             let response = if let Some(deadline) = deadline {
                 let mut cancellation_wait = cancellation.clone();
                 tokio::select! {
@@ -3434,7 +3448,7 @@ where
         );
     }
     let expected = request.clone();
-    let future = port.code_locate(request, cancellation.clone());
+    let future = port.code_locate(request, client::RequestOptions::new(), cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let generation = response.result.context.generation;
     let next_cursor = create_page_cursor(
@@ -3530,6 +3544,8 @@ fn explain_envelope_from_status<T>(
             source_bytes: 0,
             json_bytes: 0,
             estimated_tokens: 0,
+            token_accounting: None,
+            memory_bytes: None,
             elapsed_micros: 0,
         },
     };
@@ -3697,7 +3713,7 @@ where
         return serialize_profiled_read_success(output, response_profile, started_at, shaping);
     }
     let expected = request.clone();
-    let future = port.symbol_explain(request, cancellation.clone());
+    let future = port.symbol_explain(request, client::RequestOptions::new(), cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_symbol_explain(response, &expected)?;
     serialize_profiled_read_success(output, response_profile, started_at, shaping)
@@ -3746,7 +3762,8 @@ where
         );
     }
     let expected = request.clone();
-    let future = port.symbol_relationships(request, cancellation.clone());
+    let future =
+        port.symbol_relationships(request, client::RequestOptions::new(), cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let generation = response.result.context.generation;
     let next_cursor = create_page_cursor(
@@ -3992,7 +4009,7 @@ where
         return serialize_profiled_read_success(output, response_profile, started_at, shaping);
     }
     let expected = request.clone();
-    let future = port.flow_trace(request, cancellation.clone());
+    let future = port.flow_trace(request, client::RequestOptions::new(), cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_flow_trace(response, &expected)?;
     serialize_profiled_read_success(output, response_profile, started_at, shaping)
@@ -4168,7 +4185,8 @@ where
         return serialize_profiled_read_success(output, response_profile, started_at, shaping);
     }
     let expected = request.clone();
-    let future = port.architecture_cycles(request, cancellation.clone());
+    let future =
+        port.architecture_cycles(request, client::RequestOptions::new(), cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_architecture_cycles(response, &expected)?;
     serialize_profiled_read_success(output, response_profile, started_at, shaping)
@@ -4348,7 +4366,7 @@ where
         return serialize_profiled_read_success(output, response_profile, started_at, shaping);
     }
     let expected = request.clone();
-    let future = port.code_dead(request, cancellation.clone());
+    let future = port.code_dead(request, client::RequestOptions::new(), cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_code_dead(response, &expected)?;
     serialize_profiled_read_success(output, response_profile, started_at, shaping)
@@ -4525,7 +4543,8 @@ where
         return serialize_profiled_read_success(output, response_profile, started_at, shaping);
     }
     let expected = request.clone();
-    let future = port.architecture_overview(request, cancellation.clone());
+    let future =
+        port.architecture_overview(request, client::RequestOptions::new(), cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_architecture_overview(response, &expected)?;
     serialize_profiled_read_success(output, response_profile, started_at, shaping)
@@ -4710,7 +4729,7 @@ where
         return serialize_profiled_read_success(output, response_profile, started_at, shaping);
     }
     let expected = request.clone();
-    let future = port.tests_select(request, cancellation.clone());
+    let future = port.tests_select(request, client::RequestOptions::new(), cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_tests_select(response, &expected)?;
     serialize_profiled_read_success(output, response_profile, started_at, shaping)
@@ -4889,7 +4908,7 @@ where
         return serialize_profiled_read_success(output, response_profile, started_at, shaping);
     }
     let expected = request.clone();
-    let future = port.change_impact(request, cancellation.clone());
+    let future = port.change_impact(request, client::RequestOptions::new(), cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_change_impact(response, &expected)?;
     serialize_profiled_read_success(output, response_profile, started_at, shaping)
@@ -5263,7 +5282,7 @@ where
         return serialize_success(output);
     }
     let expected = request.clone();
-    let future = port.history_compare(request, cancellation.clone());
+    let future = port.history_compare(request, client::RequestOptions::new(), cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_history_compare(response, &expected)?;
     serialize_success(output)
@@ -5430,7 +5449,7 @@ where
         validate_repository_cursor(&parsed, &context, invalid_cursor, cursor_key)?;
     }
     let expected = request.clone();
-    let future = port.query_advanced(request, cancellation.clone());
+    let future = port.query_advanced(request, client::RequestOptions::new(), cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let generation = response.result.context.generation;
     let next_cursor = create_page_cursor(
@@ -5582,7 +5601,7 @@ where
         return serialize_success(output);
     }
     let expected = request.clone();
-    let future = port.source_read(request, cancellation.clone());
+    let future = port.source_read(request, client::RequestOptions::new(), cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_source_read(response, &expected)?;
     serialize_success(output)

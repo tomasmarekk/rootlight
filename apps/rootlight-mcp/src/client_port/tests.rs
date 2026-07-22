@@ -15,9 +15,9 @@ use rootlight_client::{
     QueryContext, QueryUsage, RecoveryClass, RepositoryCatalogEntry, RepositoryCatalogFreshness,
     RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryCatalogSnapshotId,
     RepositoryCatalogState, RepositoryCoverageEntry, RepositoryIndex, RepositoryOperationAction,
-    RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestTimeout,
-    ResultCompleteness, ResultCompletenessState, SourceChunk, SourceRead, SourceReference,
-    SymbolExplain, SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
+    RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
+    RequestTimeout, ResultCompleteness, ResultCompletenessState, SourceChunk, SourceRead,
+    SourceReference, SymbolExplain, SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -62,19 +62,19 @@ enum Call {
         mode: LocateMode,
         maximum_results: u32,
         page_offset: u64,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     },
     SymbolExplain {
         repository: RepositoryId,
         generation: GenerationSelector,
         symbols: Vec<SymbolId>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     },
     SourceRead {
         repository: RepositoryId,
         generation: GenerationSelector,
         references: Vec<SourceReference>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     },
     RepositoryCatalogPage {
         request: RepositoryCatalogPageRequest,
@@ -94,7 +94,7 @@ enum Call {
         min_confidence: Option<u16>,
         max_results: Option<u16>,
         page_offset: u64,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     },
     FlowTrace {
         repository: RepositoryId,
@@ -106,7 +106,7 @@ enum Call {
         max_depth: Option<u8>,
         max_paths: Option<u16>,
         min_confidence: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     },
     ArchitectureCycles {
         repository: RepositoryId,
@@ -115,7 +115,7 @@ enum Call {
         min_size: Option<u8>,
         max_cycles: Option<u16>,
         include_self_cycles: Option<bool>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     },
     CodeDead {
         repository: RepositoryId,
@@ -125,7 +125,7 @@ enum Call {
         include_tests: Option<bool>,
         min_confidence: Option<u16>,
         max_candidates: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     },
     ArchitectureOverview {
         repository: RepositoryId,
@@ -134,7 +134,7 @@ enum Call {
         max_components: Option<u16>,
         include_edges: Option<bool>,
         min_confidence: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     },
     TestsSelect {
         repository: RepositoryId,
@@ -143,7 +143,7 @@ enum Call {
         test_kinds: Vec<String>,
         max_tests: Option<u16>,
         include_commands: Option<bool>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     },
     ChangeImpact {
         repository: RepositoryId,
@@ -154,7 +154,7 @@ enum Call {
         min_confidence: Option<u16>,
         include_tests: Option<bool>,
         max_dependents: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     },
     PlanChange {
         repository: RepositoryId,
@@ -164,7 +164,7 @@ enum Call {
         target_symbols: Vec<SymbolId>,
         target_files: Vec<FileId>,
         max_steps: Option<u8>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     },
     HistoryCompare {
         repository: RepositoryId,
@@ -172,7 +172,7 @@ enum Call {
         head: GenerationId,
         change_kinds: Vec<String>,
         max_results: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     },
     QueryAdvanced {
         repository: RepositoryId,
@@ -183,7 +183,7 @@ enum Call {
         max_depth: Option<u8>,
         cost_limit: Option<u64>,
         page_offset: u64,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     },
 }
 
@@ -291,7 +291,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         mode: LocateMode,
         maximum_results: u32,
         page_offset: u64,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<CodeLocate> {
         self.record(Call::CodeLocate {
             repository,
@@ -300,7 +300,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             mode,
             maximum_results,
             page_offset,
-            timeout,
+            options,
         });
         Box::pin(async move {
             Ok(CodeLocate {
@@ -319,13 +319,13 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         repository: RepositoryId,
         generation: GenerationSelector,
         symbols: Vec<SymbolId>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<SymbolExplain> {
         self.record(Call::SymbolExplain {
             repository,
             generation,
             symbols: symbols.clone(),
-            timeout,
+            options,
         });
         Box::pin(async move {
             Ok(SymbolExplain {
@@ -343,13 +343,13 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         repository: RepositoryId,
         generation: GenerationSelector,
         references: Vec<SourceReference>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<SourceRead> {
         self.record(Call::SourceRead {
             repository,
             generation,
             references: references.clone(),
-            timeout,
+            options,
         });
         Box::pin(async move {
             let chunks = references
@@ -456,7 +456,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         min_confidence: Option<u16>,
         max_results: Option<u16>,
         page_offset: u64,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<SymbolRelationships> {
         self.record(Call::SymbolRelationships {
             repository,
@@ -467,7 +467,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             min_confidence,
             max_results,
             page_offset,
-            timeout,
+            options,
         });
         Box::pin(async move {
             Ok(SymbolRelationships {
@@ -494,7 +494,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         max_depth: Option<u8>,
         max_paths: Option<u16>,
         min_confidence: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<FlowTrace> {
         self.record(Call::FlowTrace {
             repository,
@@ -506,7 +506,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             max_depth,
             max_paths,
             min_confidence,
-            timeout,
+            options,
         });
         Box::pin(async move {
             Ok(FlowTrace {
@@ -535,7 +535,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         min_size: Option<u8>,
         max_cycles: Option<u16>,
         include_self_cycles: Option<bool>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<ArchitectureCycles> {
         self.record(Call::ArchitectureCycles {
             repository,
@@ -544,7 +544,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             min_size,
             max_cycles,
             include_self_cycles,
-            timeout,
+            options,
         });
         Box::pin(async move {
             Ok(ArchitectureCycles {
@@ -570,7 +570,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         include_tests: Option<bool>,
         min_confidence: Option<u16>,
         max_candidates: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<CodeDead> {
         self.record(Call::CodeDead {
             repository,
@@ -580,7 +580,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             include_tests,
             min_confidence,
             max_candidates,
-            timeout,
+            options,
         });
         Box::pin(async move {
             Ok(CodeDead {
@@ -606,7 +606,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         max_components: Option<u16>,
         include_edges: Option<bool>,
         min_confidence: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<ArchitectureOverview> {
         self.record(Call::ArchitectureOverview {
             repository,
@@ -615,7 +615,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             max_components,
             include_edges,
             min_confidence,
-            timeout,
+            options,
         });
         Box::pin(async move {
             Ok(ArchitectureOverview {
@@ -637,7 +637,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         test_kinds: Vec<String>,
         max_tests: Option<u16>,
         include_commands: Option<bool>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<TestsSelect> {
         self.record(Call::TestsSelect {
             repository,
@@ -646,7 +646,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             test_kinds,
             max_tests,
             include_commands,
-            timeout,
+            options,
         });
         Box::pin(async move {
             Ok(TestsSelect {
@@ -674,7 +674,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         min_confidence: Option<u16>,
         include_tests: Option<bool>,
         max_dependents: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<ChangeImpact> {
         self.record(Call::ChangeImpact {
             repository,
@@ -685,7 +685,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             min_confidence,
             include_tests,
             max_dependents,
-            timeout,
+            options,
         });
         Box::pin(async move {
             Ok(ChangeImpact {
@@ -715,7 +715,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         target_symbols: Vec<SymbolId>,
         target_files: Vec<FileId>,
         max_steps: Option<u8>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<PlanChange> {
         self.record(Call::PlanChange {
             repository,
@@ -725,7 +725,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             target_symbols,
             target_files,
             max_steps,
-            timeout,
+            options,
         });
         Box::pin(async move {
             Ok(PlanChange {
@@ -755,7 +755,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         head: GenerationId,
         change_kinds: Vec<String>,
         max_results: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<HistoryCompare> {
         self.record(Call::HistoryCompare {
             repository,
@@ -763,7 +763,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             head,
             change_kinds,
             max_results,
-            timeout,
+            options,
         });
         Box::pin(async move {
             Ok(HistoryCompare {
@@ -797,7 +797,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         max_depth: Option<u8>,
         cost_limit: Option<u64>,
         page_offset: u64,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<AdvancedQuery> {
         self.record(Call::QueryAdvanced {
             repository,
@@ -808,7 +808,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             max_depth,
             cost_limit,
             page_offset,
-            timeout,
+            options,
         });
         Box::pin(async move {
             Ok(AdvancedQuery {
@@ -972,24 +972,33 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
             query,
             mode: LocateMode::Exact,
             maximum_results: 7,
+            options,
             ..
-        } if *observed == repository() && query == "answer"
+        } if *observed == repository()
+            && query == "answer"
+            && *options == RequestOptions::new()
     ));
     assert!(matches!(
         &calls[3],
         Call::SymbolExplain {
             generation: GenerationSelector::Generation(observed),
             symbols,
+            options,
             ..
-        } if *observed == parent_generation() && symbols == &[symbol()]
+        } if *observed == parent_generation()
+            && symbols == &[symbol()]
+            && *options == RequestOptions::new()
     ));
     assert!(matches!(
         &calls[4],
         Call::SourceRead {
             generation: GenerationSelector::Generation(observed),
             references,
+            options,
             ..
-        } if *observed == generation() && references.len() == 1
+        } if *observed == generation()
+            && references.len() == 1
+            && *options == RequestOptions::new()
     ));
 }
 
@@ -1193,6 +1202,8 @@ fn query_context(
             source_bytes: 0,
             json_bytes: 0,
             estimated_tokens: 0,
+            token_accounting: None,
+            memory_bytes: None,
             elapsed_micros: 1,
         },
     }

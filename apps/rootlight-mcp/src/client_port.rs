@@ -10,8 +10,8 @@ use rootlight_client::{
     ChangeImpact, Client, ClientError, CodeDead, CodeLocate, CoverageStatus, FlowTrace,
     GenerationSelector, HistoryCompare, LocateMode, PlanChange, RepositoryCatalogPage,
     RepositoryCatalogPageRequest, RepositoryIndex, RepositoryOperationAction,
-    RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestTimeout,
-    SourceRead, SourceReference, SymbolExplain, SymbolRelationships, TestsSelect,
+    RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
+    RequestTimeout, SourceRead, SourceReference, SymbolExplain, SymbolRelationships, TestsSelect,
 };
 use rootlight_ids::{FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::CoverageStatus as IrCoverageStatus;
@@ -72,7 +72,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         mode: LocateMode,
         maximum_results: u32,
         page_offset: u64,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<CodeLocate>;
 
     fn symbol_explain(
@@ -80,7 +80,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         repository: RepositoryId,
         generation: GenerationSelector,
         symbols: Vec<SymbolId>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<SymbolExplain>;
 
     fn source_read(
@@ -88,7 +88,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         repository: RepositoryId,
         generation: GenerationSelector,
         references: Vec<SourceReference>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<SourceRead>;
 
     fn repository_catalog_page(
@@ -117,7 +117,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         min_confidence: Option<u16>,
         max_results: Option<u16>,
         page_offset: u64,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<SymbolRelationships>;
 
     #[expect(
@@ -135,7 +135,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         max_depth: Option<u8>,
         max_paths: Option<u16>,
         min_confidence: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<FlowTrace>;
 
     #[expect(
@@ -150,7 +150,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         min_size: Option<u8>,
         max_cycles: Option<u16>,
         include_self_cycles: Option<bool>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<ArchitectureCycles>;
 
     #[expect(
@@ -166,7 +166,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         include_tests: Option<bool>,
         min_confidence: Option<u16>,
         max_candidates: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<CodeDead>;
 
     #[expect(
@@ -181,7 +181,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         max_components: Option<u16>,
         include_edges: Option<bool>,
         min_confidence: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<ArchitectureOverview>;
 
     #[expect(
@@ -196,7 +196,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         test_kinds: Vec<String>,
         max_tests: Option<u16>,
         include_commands: Option<bool>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<TestsSelect>;
 
     #[expect(
@@ -213,7 +213,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         min_confidence: Option<u16>,
         include_tests: Option<bool>,
         max_dependents: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<ChangeImpact>;
 
     #[expect(
@@ -229,7 +229,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         target_symbols: Vec<SymbolId>,
         target_files: Vec<FileId>,
         max_steps: Option<u8>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<PlanChange>;
 
     fn history_compare(
@@ -239,7 +239,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         head: GenerationId,
         change_kinds: Vec<String>,
         max_results: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<HistoryCompare>;
 
     #[expect(
@@ -256,7 +256,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         max_depth: Option<u8>,
         cost_limit: Option<u64>,
         page_offset: u64,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<AdvancedQuery>;
 }
 
@@ -310,19 +310,19 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         mode: LocateMode,
         maximum_results: u32,
         page_offset: u64,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<CodeLocate> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .code_locate_async(
+                .code_locate_async_with_options(
                     repository,
                     generation,
                     &query,
                     mode,
                     maximum_results,
                     page_offset,
-                    timeout,
+                    options,
                 )
                 .await
         })
@@ -333,12 +333,12 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         repository: RepositoryId,
         generation: GenerationSelector,
         symbols: Vec<SymbolId>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<SymbolExplain> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .symbol_explain_async(repository, generation, &symbols, timeout)
+                .symbol_explain_async_with_options(repository, generation, &symbols, options)
                 .await
         })
     }
@@ -348,12 +348,12 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         repository: RepositoryId,
         generation: GenerationSelector,
         references: Vec<SourceReference>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<SourceRead> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .source_read_async(repository, generation, &references, timeout)
+                .source_read_async_with_options(repository, generation, &references, options)
                 .await
         })
     }
@@ -394,12 +394,12 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         min_confidence: Option<u16>,
         max_results: Option<u16>,
         page_offset: u64,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<SymbolRelationships> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .symbol_relationships_async(
+                .symbol_relationships_async_with_options(
                     repository,
                     generation,
                     &seeds,
@@ -408,7 +408,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     min_confidence,
                     max_results,
                     page_offset,
-                    timeout,
+                    options,
                 )
                 .await
         })
@@ -425,12 +425,12 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         max_depth: Option<u8>,
         max_paths: Option<u16>,
         min_confidence: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<FlowTrace> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .flow_trace_async(
+                .flow_trace_async_with_options(
                     repository,
                     generation,
                     from,
@@ -440,7 +440,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     max_depth,
                     max_paths,
                     min_confidence,
-                    timeout,
+                    options,
                 )
                 .await
         })
@@ -454,19 +454,19 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         min_size: Option<u8>,
         max_cycles: Option<u16>,
         include_self_cycles: Option<bool>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<ArchitectureCycles> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .architecture_cycles_async(
+                .architecture_cycles_async_with_options(
                     repository,
                     generation,
                     &relations,
                     min_size,
                     max_cycles,
                     include_self_cycles,
-                    timeout,
+                    options,
                 )
                 .await
         })
@@ -481,12 +481,12 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         include_tests: Option<bool>,
         min_confidence: Option<u16>,
         max_candidates: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<CodeDead> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .code_dead_async(
+                .code_dead_async_with_options(
                     repository,
                     generation,
                     entry_point_policy.as_deref(),
@@ -494,7 +494,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     include_tests,
                     min_confidence,
                     max_candidates,
-                    timeout,
+                    options,
                 )
                 .await
         })
@@ -508,19 +508,19 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         max_components: Option<u16>,
         include_edges: Option<bool>,
         min_confidence: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<ArchitectureOverview> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .architecture_overview_async(
+                .architecture_overview_async_with_options(
                     repository,
                     generation,
                     &views,
                     max_components,
                     include_edges,
                     min_confidence,
-                    timeout,
+                    options,
                 )
                 .await
         })
@@ -534,19 +534,19 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         test_kinds: Vec<String>,
         max_tests: Option<u16>,
         include_commands: Option<bool>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<TestsSelect> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .tests_select_async(
+                .tests_select_async_with_options(
                     repository,
                     generation,
                     &seeds,
                     &test_kinds,
                     max_tests,
                     include_commands,
-                    timeout,
+                    options,
                 )
                 .await
         })
@@ -562,12 +562,12 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         min_confidence: Option<u16>,
         include_tests: Option<bool>,
         max_dependents: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<ChangeImpact> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .change_impact_async(
+                .change_impact_async_with_options(
                     repository,
                     generation,
                     &changed_symbols,
@@ -576,7 +576,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     min_confidence,
                     include_tests,
                     max_dependents,
-                    timeout,
+                    options,
                 )
                 .await
         })
@@ -591,12 +591,12 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         target_symbols: Vec<SymbolId>,
         target_files: Vec<FileId>,
         max_steps: Option<u8>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<PlanChange> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .plan_change_async(
+                .plan_change_async_with_options(
                     repository,
                     generation,
                     &objective,
@@ -604,7 +604,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     &target_symbols,
                     &target_files,
                     max_steps,
-                    timeout,
+                    options,
                 )
                 .await
         })
@@ -617,13 +617,20 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         head: GenerationId,
         change_kinds: Vec<String>,
         max_results: Option<u16>,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<HistoryCompare> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             let kind_labels: Vec<&str> = change_kinds.iter().map(String::as_str).collect();
             client
-                .history_compare_async(repository, base, head, &kind_labels, max_results, timeout)
+                .history_compare_async_with_options(
+                    repository,
+                    base,
+                    head,
+                    &kind_labels,
+                    max_results,
+                    options,
+                )
                 .await
         })
     }
@@ -638,12 +645,12 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         max_depth: Option<u8>,
         cost_limit: Option<u64>,
         page_offset: u64,
-        timeout: RequestTimeout,
+        options: RequestOptions,
     ) -> AsyncClientFuture<AdvancedQuery> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .advanced_query_async(
+                .advanced_query_async_with_options(
                     repository,
                     generation,
                     &query_ast,
@@ -652,7 +659,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     max_depth,
                     cost_limit,
                     page_offset,
-                    timeout,
+                    options,
                 )
                 .await
         })
@@ -753,6 +760,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     fn code_locate(
         &self,
         request: CodeLocatePortRequest,
+        options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<CodeLocatePortResponse> {
         let client = Arc::clone(&self.client);
@@ -765,7 +773,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.mode(),
                     request.maximum_results(),
                     request.page_offset(),
-                    request_timeout()?,
+                    options,
                 )
                 .await
                 .map_err(map_client_error)?;
@@ -780,6 +788,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     fn symbol_explain(
         &self,
         request: SymbolExplainPortRequest,
+        options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<SymbolExplainPortResponse> {
         let client = Arc::clone(&self.client);
@@ -789,7 +798,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.repository(),
                     request.generation(),
                     request.symbols().to_vec(),
-                    request_timeout()?,
+                    options,
                 )
                 .await
                 .map_err(map_client_error)?;
@@ -801,6 +810,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     fn source_read(
         &self,
         request: SourceReadPortRequest,
+        options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<SourceReadPortResponse> {
         let client = Arc::clone(&self.client);
@@ -810,7 +820,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.repository(),
                     request.generation(),
                     request.references().to_vec(),
-                    request_timeout()?,
+                    options,
                 )
                 .await
                 .map_err(map_client_error)?;
@@ -863,6 +873,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     fn symbol_relationships(
         &self,
         request: SymbolRelationshipsPortRequest,
+        options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<SymbolRelationshipsPortResponse> {
         let client = Arc::clone(&self.client);
@@ -877,7 +888,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.min_confidence(),
                     request.max_results(),
                     request.page_offset(),
-                    request_timeout()?,
+                    options,
                 )
                 .await
                 .map_err(map_client_error)?;
@@ -889,6 +900,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     fn flow_trace(
         &self,
         request: FlowTracePortRequest,
+        options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<FlowTracePortResponse> {
         let client = Arc::clone(&self.client);
@@ -904,7 +916,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.max_depth(),
                     request.max_paths(),
                     request.min_confidence(),
-                    request_timeout()?,
+                    options,
                 )
                 .await
                 .map_err(map_client_error)?;
@@ -916,6 +928,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     fn architecture_cycles(
         &self,
         request: ArchitectureCyclesPortRequest,
+        options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<ArchitectureCyclesPortResponse> {
         let client = Arc::clone(&self.client);
@@ -928,7 +941,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.min_size(),
                     request.max_cycles(),
                     request.include_self_cycles(),
-                    request_timeout()?,
+                    options,
                 )
                 .await
                 .map_err(map_client_error)?;
@@ -940,6 +953,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     fn code_dead(
         &self,
         request: CodeDeadPortRequest,
+        options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<CodeDeadPortResponse> {
         let client = Arc::clone(&self.client);
@@ -953,7 +967,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.include_tests(),
                     request.min_confidence(),
                     request.max_candidates(),
-                    request_timeout()?,
+                    options,
                 )
                 .await
                 .map_err(map_client_error)?;
@@ -965,6 +979,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     fn architecture_overview(
         &self,
         request: ArchitectureOverviewPortRequest,
+        options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<ArchitectureOverviewPortResponse> {
         let client = Arc::clone(&self.client);
@@ -977,7 +992,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.max_components(),
                     request.include_edges(),
                     request.min_confidence(),
-                    request_timeout()?,
+                    options,
                 )
                 .await
                 .map_err(map_client_error)?;
@@ -989,6 +1004,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     fn tests_select(
         &self,
         request: TestsSelectPortRequest,
+        options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<TestsSelectPortResponse> {
         let client = Arc::clone(&self.client);
@@ -1001,7 +1017,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.test_kinds().to_vec(),
                     request.max_tests(),
                     request.include_commands(),
-                    request_timeout()?,
+                    options,
                 )
                 .await
                 .map_err(map_client_error)?;
@@ -1013,6 +1029,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     fn change_impact(
         &self,
         request: ChangeImpactPortRequest,
+        options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<ChangeImpactPortResponse> {
         let client = Arc::clone(&self.client);
@@ -1027,7 +1044,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.min_confidence(),
                     request.include_tests(),
                     request.max_dependents(),
-                    request_timeout()?,
+                    options,
                 )
                 .await
                 .map_err(map_client_error)?;
@@ -1039,6 +1056,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     fn plan_change(
         &self,
         request: PlanChangePortRequest,
+        options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<PlanChangePortResponse> {
         let client = Arc::clone(&self.client);
@@ -1059,7 +1077,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.target_symbols().to_vec(),
                     request.target_files().to_vec(),
                     request.max_steps(),
-                    request_timeout()?,
+                    options,
                 )
                 .await
                 .map_err(map_client_error)?;
@@ -1071,6 +1089,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     fn history_compare(
         &self,
         request: HistoryComparePortRequest,
+        options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<HistoryComparePortResponse> {
         let client = Arc::clone(&self.client);
@@ -1082,7 +1101,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.head(),
                     request.change_kinds().to_vec(),
                     request.max_results(),
-                    request_timeout()?,
+                    options,
                 )
                 .await
                 .map_err(map_client_error)?;
@@ -1094,6 +1113,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     fn query_advanced(
         &self,
         request: QueryAdvancedPortRequest,
+        options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<QueryAdvancedPortResponse> {
         let client = Arc::clone(&self.client);
@@ -1108,7 +1128,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.max_depth(),
                     request.cost_limit(),
                     request.page_offset(),
-                    request_timeout()?,
+                    options,
                 )
                 .await
                 .map_err(map_client_error)?;
@@ -1142,6 +1162,7 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
     fn code_locate(
         &self,
         _request: CodeLocatePortRequest,
+        _options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<CodeLocatePortResponse> {
         unavailable()
@@ -1150,6 +1171,7 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
     fn symbol_explain(
         &self,
         _request: SymbolExplainPortRequest,
+        _options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<SymbolExplainPortResponse> {
         unavailable()
@@ -1158,6 +1180,7 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
     fn source_read(
         &self,
         _request: SourceReadPortRequest,
+        _options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<SourceReadPortResponse> {
         unavailable()
@@ -1182,6 +1205,7 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
     fn symbol_relationships(
         &self,
         _request: SymbolRelationshipsPortRequest,
+        _options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<SymbolRelationshipsPortResponse> {
         unavailable()
@@ -1190,6 +1214,7 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
     fn flow_trace(
         &self,
         _request: FlowTracePortRequest,
+        _options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<FlowTracePortResponse> {
         unavailable()
@@ -1198,6 +1223,7 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
     fn architecture_cycles(
         &self,
         _request: ArchitectureCyclesPortRequest,
+        _options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<ArchitectureCyclesPortResponse> {
         unavailable()
@@ -1206,6 +1232,7 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
     fn code_dead(
         &self,
         _request: CodeDeadPortRequest,
+        _options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<CodeDeadPortResponse> {
         unavailable()
@@ -1214,6 +1241,7 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
     fn architecture_overview(
         &self,
         _request: ArchitectureOverviewPortRequest,
+        _options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<ArchitectureOverviewPortResponse> {
         unavailable()
@@ -1222,6 +1250,7 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
     fn tests_select(
         &self,
         _request: TestsSelectPortRequest,
+        _options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<TestsSelectPortResponse> {
         unavailable()
@@ -1230,6 +1259,7 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
     fn change_impact(
         &self,
         _request: ChangeImpactPortRequest,
+        _options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<ChangeImpactPortResponse> {
         unavailable()
@@ -1238,6 +1268,7 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
     fn plan_change(
         &self,
         _request: PlanChangePortRequest,
+        _options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<PlanChangePortResponse> {
         unavailable()
@@ -1246,6 +1277,7 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
     fn history_compare(
         &self,
         _request: HistoryComparePortRequest,
+        _options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<HistoryComparePortResponse> {
         unavailable()
@@ -1254,6 +1286,7 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
     fn query_advanced(
         &self,
         _request: QueryAdvancedPortRequest,
+        _options: RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<QueryAdvancedPortResponse> {
         unavailable()
@@ -1416,6 +1449,7 @@ fn map_client_error(error: ClientError) -> ClientPortError {
         | ClientError::InvalidRepositoryCatalogRequest
         | ClientError::InvalidSourceReference
         | ClientError::InvalidRequestTimeout
+        | ClientError::InvalidEffectiveBudget
         | ClientError::InvalidOperationTiming
         | ClientError::InvalidOperationLease
         | ClientError::InvalidSystemClock
