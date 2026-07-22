@@ -1,6 +1,6 @@
 //! End-to-end fixtures for the daemon-independent first query slice.
 
-use std::{fs, path::Path, time::Duration};
+use std::{collections::BTreeSet, fs, path::Path, time::Duration};
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{
@@ -14,8 +14,8 @@ use rootlight_ir::{
 };
 use rootlight_query::{
     ExecutionCompletenessState, GenerationSet, LocateMode, PlanKind, QueryBudget, QueryError,
-    QueryResource, QueryResponse, QueryService, RepositoryDataTrust, TokenAccountingProfile,
-    project_lexical_documents,
+    QueryResource, QueryResponse, QueryService, RelationFamily, RepositoryDataTrust,
+    TokenAccountingProfile, project_lexical_documents,
 };
 use rootlight_search::{
     BuildBudget, LexicalSearch, QueryViolation, SearchBudget, SearchError, SearchHit,
@@ -704,6 +704,48 @@ fn plans_and_execution_enforce_all_query_resource_families() {
     assert!(matches!(
         service.execute_code_locate(&deadline_limited, &Cancellation::new()),
         Err(QueryError::Cancelled(CancellationReason::DeadlineExceeded))
+    ));
+}
+
+#[test]
+fn symbol_relationships_enforces_plan_and_serialization_limits() {
+    let snapshot = fixture_snapshot();
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
+    let seeds = BTreeSet::from([search.hits[0].symbol_id]);
+
+    assert!(matches!(
+        service.plan_symbol_relationships(
+            seeds.clone(),
+            vec![RelationFamily::Calls],
+            None,
+            0,
+            2,
+            0,
+            QueryBudget::new().with_max_results(1),
+        ),
+        Err(QueryError::PlanRejected {
+            resource: QueryResource::Results,
+        })
+    ));
+
+    let token_limited = service
+        .plan_symbol_relationships(
+            seeds,
+            vec![RelationFamily::Calls],
+            None,
+            0,
+            1,
+            0,
+            QueryBudget::new().with_max_results(1).with_max_tokens(1),
+        )
+        .expect("the bounded relationships plan is admitted");
+    assert!(matches!(
+        service.execute_symbol_relationships(&token_limited, &Cancellation::new()),
+        Err(QueryError::BudgetExceeded {
+            resource: QueryResource::Tokens,
+            limit: 1,
+        })
     ));
 }
 

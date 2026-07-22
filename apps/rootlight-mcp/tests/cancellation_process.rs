@@ -12,8 +12,12 @@ use std::{
 };
 
 use rootlight_ipc::{Endpoint, LocalListener, LocalStream};
+use serde::Serialize;
 use serde_json::{Value, json};
 
+const REPORT_SCHEMA: &str = "rootlight.mcp-cancellation-process/1";
+const REPORT_ENV: &str = "ROOTLIGHT_CANCELLATION_PROCESS_REPORT";
+const MAX_REPORT_BYTES: usize = 64 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const CANCELLATION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -61,7 +65,7 @@ fn cancellation_reaches_active_daemon_analyses_without_emitting_responses() {
         .to_owned();
     wait_for_publication(&mut mcp, &index, &operation_id);
 
-    assert_cancelled_request(
+    let cycles = assert_cancelled_request(
         &listener,
         &mut daemon,
         &mut mcp,
@@ -80,7 +84,7 @@ fn cancellation_reaches_active_daemon_analyses_without_emitting_responses() {
             }
         }),
     );
-    assert_cancelled_request(
+    let advanced = assert_cancelled_request(
         &listener,
         &mut daemon,
         &mut mcp,
@@ -102,6 +106,7 @@ fn cancellation_reaches_active_daemon_analyses_without_emitting_responses() {
 
     mcp.finish();
     daemon.finish();
+    write_report(&[cycles, advanced]);
 }
 
 fn assert_cancelled_request(
@@ -110,9 +115,9 @@ fn assert_cancelled_request(
     mcp: &mut McpProcess,
     request_id: &str,
     follow_up_id: &str,
-    tool: &str,
+    tool: &'static str,
     arguments: Value,
-) {
+) -> CancellationObservation {
     let repository_id = arguments["repository"]["repository_id"]
         .as_str()
         .expect("cancelled analytical request has a repository selector")
@@ -189,6 +194,105 @@ fn assert_cancelled_request(
         follow_up_latency.as_micros(),
         LATE_RESPONSE_WINDOW.as_millis()
     );
+    CancellationObservation {
+        tool,
+        cancellation_reason: "client_request",
+        hook_entry_observed: true,
+        cancellation_observed: true,
+        cancellation_latency_us: checked_micros(cancellation_latency),
+        cancellation_bound_us: checked_micros(CANCELLATION_TIMEOUT),
+        follow_up_latency_us: checked_micros(follow_up_latency),
+        follow_up_bound_us: checked_micros(FOLLOW_UP_TIMEOUT),
+        late_response_window_ms: u64::try_from(LATE_RESPONSE_WINDOW.as_millis())
+            .expect("late-response window fits u64"),
+        no_json_rpc_response_published: true,
+        lane_reusable: true,
+        work_after_cancel: "none_observed",
+    }
+}
+
+fn checked_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).expect("bounded process duration fits u64")
+}
+
+fn write_report(cases: &[CancellationObservation]) {
+    let Some(path) = std::env::var_os(REPORT_ENV) else {
+        return;
+    };
+    let report = CancellationReport {
+        schema: REPORT_SCHEMA,
+        source_revision: source_revision(),
+        process_boundary: CancellationProcessBoundary {
+            daemon: "rootlight-daemon supervised stdio",
+            mcp: "rootlight-mcp JSON-RPC stdio",
+        },
+        cases,
+    };
+    let mut encoded = serde_json::to_vec_pretty(&report).expect("report serializes");
+    encoded.push(b'\n');
+    assert!(
+        encoded.len() <= MAX_REPORT_BYTES,
+        "cancellation report exceeds its fixed output ceiling"
+    );
+    fs::write(PathBuf::from(path), encoded).expect("cancellation report writes");
+}
+
+fn source_revision() -> String {
+    if let Ok(revision) = std::env::var("SOURCE_REVISION") {
+        validate_revision(&revision);
+        return revision;
+    }
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git revision lookup starts");
+    assert!(output.status.success(), "git revision lookup succeeds");
+    let revision = String::from_utf8(output.stdout)
+        .expect("git revision is UTF-8")
+        .trim()
+        .to_owned();
+    validate_revision(&revision);
+    revision
+}
+
+fn validate_revision(revision: &str) {
+    assert!(
+        revision.len() == 40
+            && revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "source revision must be a lowercase SHA-1 object identifier"
+    );
+}
+
+#[derive(Serialize)]
+struct CancellationReport<'a> {
+    schema: &'static str,
+    source_revision: String,
+    process_boundary: CancellationProcessBoundary,
+    cases: &'a [CancellationObservation],
+}
+
+#[derive(Serialize)]
+struct CancellationProcessBoundary {
+    daemon: &'static str,
+    mcp: &'static str,
+}
+
+#[derive(Serialize)]
+struct CancellationObservation {
+    tool: &'static str,
+    cancellation_reason: &'static str,
+    hook_entry_observed: bool,
+    cancellation_observed: bool,
+    cancellation_latency_us: u64,
+    cancellation_bound_us: u64,
+    follow_up_latency_us: u64,
+    follow_up_bound_us: u64,
+    late_response_window_ms: u64,
+    no_json_rpc_response_published: bool,
+    lane_reusable: bool,
+    work_after_cancel: &'static str,
 }
 
 fn write_large_repository(root: &Path) {
