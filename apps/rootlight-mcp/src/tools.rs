@@ -2168,7 +2168,7 @@ mod tests {
     #[test]
     fn capability_traversal_reports_the_first_path_deterministically() {
         let mut query_first = Map::new();
-        query_first.insert("coverage_detail".to_owned(), json!("summary"));
+        query_first.insert("coverage_detail".to_owned(), json!("project"));
         query_first.insert("require_freshness".to_owned(), json!("structural"));
         query_first.insert(
             "repository".to_owned(),
@@ -2180,14 +2180,14 @@ mod tests {
             "repository".to_owned(),
             serde_json::to_value(selector()).expect("fixture selector serializes"),
         );
-        states_first.insert("coverage_detail".to_owned(), json!("summary"));
+        states_first.insert("coverage_detail".to_owned(), json!("project"));
 
         let first = validate_capability_input(
             VerticalTool::RepoStatus,
             &Value::Object(query_first),
             CapabilityBindingPolicy::Materialized,
         )
-        .expect_err("unsupported coverage projection is rejected");
+        .expect_err("unsupported project coverage projection is rejected");
         let second = validate_capability_input(
             VerticalTool::RepoStatus,
             &Value::Object(states_first),
@@ -2198,7 +2198,7 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.registry_path(), "coverage_detail");
         assert_eq!(first.instance_path(), "coverage_detail");
-        assert_eq!(first.reason(), CapabilityRejectionReason::UnsupportedField);
+        assert_eq!(first.reason(), CapabilityRejectionReason::UnsupportedValue);
         assert_eq!(first.code(), ErrorCode::UnsupportedCapability);
     }
 
@@ -2627,7 +2627,7 @@ mod tests {
             ],
             "review any new generated-rule exclusion"
         );
-        assert_eq!((declared, covered, exclusions.len()), (155, 153, 2));
+        assert_eq!((declared, covered, exclusions.len()), (154, 152, 2));
     }
 
     #[tokio::test]
@@ -2973,16 +2973,16 @@ mod tests {
             observed,
             [
                 (
-                    194_349,
-                    "7aa29f2cbd09105cc75786a5f54bbde85d6e276bd8957b7259c4ae9de7ec5d68".to_owned(),
+                    195_358,
+                    "3955d91953b5e2c26d61644ad1f490f3b9314b64946d42a449f658dc4434f3a4".to_owned(),
                 ),
                 (
-                    426_051,
-                    "375f053b0e398da62f8ce55202363f913691c352d38e6ee066faab8043326857".to_owned(),
+                    427_060,
+                    "93e5b6dc23d24a27050be6351544adf854d73a97e7ad455e7418adf606c8d70b".to_owned(),
                 ),
                 (
-                    581_615,
-                    "71dd8dd79f3e5ad78a3c2fa16f5a9614460e60ebee65ad7549a9fdd9f7da5609".to_owned(),
+                    582_696,
+                    "cc4e58fd3ee57357ebc5c55a251de6862fbba68cb34870c7b744bf4d04739dd3".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"

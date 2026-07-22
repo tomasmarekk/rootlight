@@ -66,7 +66,8 @@ use rootlight_mcp_contract::{
     error_definition,
     pagination::{AuthenticatedCursor, CursorContext},
     repository::{
-        CatalogEnvelope, CatalogSnapshotId, CoverageReport, LanguageCoverageReport, RepoListData,
+        CatalogEnvelope, CatalogSnapshotId, CoverageDetail, CoverageReport, FreshnessRequirement,
+        GenerationPublicationState, LanguageCoverageReport, OperationSummary, RepoListData,
         RepoListInput, RepoListSchemaVersion, RepoStatusData, RepoStatusInput, RepositoryEntry,
         RepositoryState,
     },
@@ -79,8 +80,9 @@ use rootlight_mcp_contract::{
         OperationStatusSuccess, ProvenanceLevel, ProvenanceSummary, QueryInterpretation,
         ReadEnvelope, RepoIndexData, RepoIndexSuccess, RequiredNullable, ResolvedRepository,
         ResponseBudget, ResponseProfile, ResponseWarning, SearchMode, SourceChunk, SourceElision,
-        SourceEncoding, SourceEncodingRequest, SourceReadData, SourceReadSelector,
-        StaleSourceReference, SymbolExplainData, SymbolExplanation, UsageSummary,
+        SourceEncoding, SourceEncodingRequest, SourceFreeMessage, SourceReadData,
+        SourceReadSelector, StaleSourceReference, SymbolExplainData, SymbolExplanation,
+        UsageSummary,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -273,16 +275,36 @@ pub type RepositoryCatalogPagePortRequest = client::RepositoryCatalogPageRequest
 pub struct RepositoryStatusPortRequest {
     repository: RepositoryId,
     generation: client::GenerationSelector,
+    coverage_detail: client::RepositoryStatusCoverageDetail,
+    include_operations: bool,
+    require_freshness: client::RepositoryStatusFreshnessRequirement,
 }
 
 impl RepositoryStatusPortRequest {
-    /// Creates a repository status request for one resolved repository.
+    /// Creates an aggregate status request without operation details or a freshness gate.
     #[must_use]
     pub const fn new(repository: RepositoryId, generation: client::GenerationSelector) -> Self {
         Self {
             repository,
             generation,
+            coverage_detail: client::RepositoryStatusCoverageDetail::Summary,
+            include_operations: false,
+            require_freshness: client::RepositoryStatusFreshnessRequirement::None,
         }
+    }
+
+    /// Applies the supported detail controls after MCP capability preflight.
+    #[must_use]
+    pub const fn with_controls(
+        mut self,
+        coverage_detail: client::RepositoryStatusCoverageDetail,
+        include_operations: bool,
+        require_freshness: client::RepositoryStatusFreshnessRequirement,
+    ) -> Self {
+        self.coverage_detail = coverage_detail;
+        self.include_operations = include_operations;
+        self.require_freshness = require_freshness;
+        self
     }
 
     /// Returns the resolved repository identity.
@@ -295,6 +317,24 @@ impl RepositoryStatusPortRequest {
     #[must_use]
     pub const fn generation(&self) -> client::GenerationSelector {
         self.generation
+    }
+
+    /// Returns the requested supported coverage projection.
+    #[must_use]
+    pub const fn coverage_detail(&self) -> client::RepositoryStatusCoverageDetail {
+        self.coverage_detail
+    }
+
+    /// Reports whether bounded operation summaries were requested.
+    #[must_use]
+    pub const fn include_operations(&self) -> bool {
+        self.include_operations
+    }
+
+    /// Returns the minimum acceptable freshness.
+    #[must_use]
+    pub const fn freshness_requirement(&self) -> client::RepositoryStatusFreshnessRequirement {
+        self.require_freshness
     }
 }
 
@@ -1708,7 +1748,7 @@ where
             if matches!(
                 requested_generation,
                 Some(GenerationSelector::Explicit(expected))
-                    if response.active_generation != expected
+                    if response.resolved_generation != expected
             ) {
                 return Err(AgentPortError::Public(Box::new(stale_generation_error())));
             }
@@ -2566,25 +2606,39 @@ where
     let input: RepoStatusInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
     let repository = repository_id(input.repository.clone(), unsupported)?;
-    // Granular coverage, operation lists, freshness gates, custom budgets, and
-    // non-compact profiles are not served by this slice; each is rejected by
-    // name so a client can correct the request.
-    if input.coverage_detail.is_some() {
-        return Err(unsupported_field("coverage_detail"));
-    }
-    if input.require_freshness.is_some() {
-        return Err(unsupported_field("require_freshness"));
-    }
-    if input.include_operations == Some(true) {
-        return Err(unsupported_field("include_operations"));
-    }
+    let coverage_detail = match input.coverage_detail.unwrap_or(CoverageDetail::Summary) {
+        CoverageDetail::Summary => client::RepositoryStatusCoverageDetail::Summary,
+        CoverageDetail::Language => client::RepositoryStatusCoverageDetail::Language,
+        CoverageDetail::Project | CoverageDetail::File => {
+            return Err(unsupported_field("coverage_detail"));
+        }
+    };
+    let require_freshness = match input
+        .require_freshness
+        .unwrap_or(FreshnessRequirement::None)
+    {
+        FreshnessRequirement::None => client::RepositoryStatusFreshnessRequirement::None,
+        FreshnessRequirement::Structural => {
+            client::RepositoryStatusFreshnessRequirement::Structural
+        }
+        FreshnessRequirement::Semantic => client::RepositoryStatusFreshnessRequirement::Semantic,
+    };
     if input.budget.is_some() {
         return Err(unsupported_field("budget"));
     }
     if !is_compact_profile(input.response_profile) {
         return Err(unsupported_field("response_profile"));
     }
-    let request = RepositoryStatusPortRequest::new(repository, client_generation(input.generation));
+    let requested_generation = match input.generation.as_ref() {
+        Some(GenerationSelector::Explicit(generation)) => Some(*generation),
+        Some(GenerationSelector::Active(_)) | None => None,
+    };
+    let request = RepositoryStatusPortRequest::new(repository, client_generation(input.generation))
+        .with_controls(
+            coverage_detail,
+            input.include_operations.unwrap_or(false),
+            require_freshness,
+        );
     let future = port.repository_status(request, cancellation.clone());
     let status = await_port(future, cancellation).await?;
 
@@ -2600,8 +2654,8 @@ where
         GenerationSummary {
             generation_id: status.active_generation,
             parent_generation: RequiredNullable(status.active_parent_generation),
-            structural_freshness: Freshness::Current,
-            semantic_freshness: Freshness::Current,
+            structural_freshness: freshness_from_label(&status.active_structural_freshness),
+            semantic_freshness: freshness_from_label(&status.active_semantic_freshness),
         }
     };
     let summary_languages: Vec<LanguageCoverage> = status
@@ -2613,12 +2667,79 @@ where
             status: coverage_status_from_label(&entry.status),
         })
         .collect();
+    let detailed_coverage = status_coverage_report(&status.coverage);
+    let operations = status
+        .operations
+        .iter()
+        .map(|operation| OperationSummary {
+            operation_id: operation.operation,
+            kind: "repository_index".to_owned(),
+            state: operation_state(operation.state),
+            progress_permille: operation_progress_permille(
+                operation.state,
+                operation.completed_units,
+                operation.total_units,
+            ),
+            owned_by_session: operation.owned_by_client,
+        })
+        .collect::<Vec<_>>();
+    let publication_state = match status.publication_state.as_str() {
+        "published" => GenerationPublicationState::Published,
+        "retained" => GenerationPublicationState::Retained,
+        _ => return Err(internal(ToolExecutionFailure::InvalidResponse)),
+    };
+    let mut recommended_actions = Vec::new();
+    let mut warnings = Vec::new();
+    if !matches!(
+        freshness_from_label(&status.structural_freshness),
+        Freshness::Current
+    ) || !matches!(
+        freshness_from_label(&status.semantic_freshness),
+        Freshness::Current
+    ) {
+        recommended_actions.push(source_free_message("index repository")?);
+        warnings.push(ResponseWarning {
+            code: SafeLabel::parse("stale_generation")
+                .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
+            message: source_free_message("selected generation is not current")?,
+        });
+    }
+    if operations.iter().any(|operation| {
+        matches!(
+            operation.state,
+            OperationState::Queued | OperationState::Running
+        )
+    }) {
+        recommended_actions.push(source_free_message("inspect operation")?);
+    }
+    let repository_state = repository_state(&status.state)
+        .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
+    if matches!(
+        repository_state,
+        RepositoryState::Corrupt | RepositoryState::RebuildRequired
+    ) {
+        recommended_actions.push(source_free_message("rebuild repository")?);
+    }
     let data = RepoStatusData {
-        repository_state: repository_state(&status.state),
+        repository_state,
+        requested_generation: RequiredNullable(requested_generation),
+        resolved_generation: status.resolved_generation,
         active_generation: RequiredNullable(Some(active_generation_summary)),
-        coverage: status_coverage_report(&status.coverage),
-        operations: Vec::new(),
-        recommended_actions: Vec::new(),
+        publication_state,
+        alias: RequiredNullable(status.alias.clone()),
+        coverage: CoverageReport {
+            languages: if matches!(
+                coverage_detail,
+                client::RepositoryStatusCoverageDetail::Language
+            ) {
+                detailed_coverage.languages
+            } else {
+                Vec::new()
+            },
+            ..detailed_coverage
+        },
+        operations,
+        recommended_actions,
         explanation: explain_only.then(|| {
             rootlight_agent::explain::finalize_plan(
                 rootlight_agent::explain::repo_status_plan(),
@@ -2630,7 +2751,7 @@ where
         schema_version: SchemaVersion::V1_0,
         repository: ResolvedRepository {
             repository_id: status.repository_id,
-            display_name: status.repository_id.to_string(),
+            display_name: status.display_name,
         },
         generation: generation_summary,
         coverage: CoverageSummary {
@@ -2642,7 +2763,9 @@ where
         truncated: false,
         next_cursor: RequiredNullable(None),
         usage: UsageSummary {
-            rows: 1,
+            rows: 1_u64
+                .saturating_add(u64::try_from(status.coverage.len()).unwrap_or(u64::MAX))
+                .saturating_add(u64::try_from(status.operations.len()).unwrap_or(u64::MAX)),
             edges: 0,
             source_bytes: 0,
             json_bytes: 0,
@@ -2651,7 +2774,7 @@ where
             cache_status: CacheStatus::Miss,
             trace_id: "repo-status".to_owned(),
         },
-        warnings: Vec::new(),
+        warnings,
         trust: TrustClassification::UntrustedRepositoryData,
     };
     serialize_measured_read_success(envelope, started_at)
@@ -2695,16 +2818,36 @@ fn aggregate_coverage_status(
     }
 }
 
-fn repository_state(label: &str) -> RepositoryState {
+fn repository_state(label: &str) -> Option<RepositoryState> {
     match label {
-        "ready" => RepositoryState::Ready,
-        "indexing" => RepositoryState::Indexing,
-        "degraded" => RepositoryState::Degraded,
-        "corrupt" => RepositoryState::Corrupt,
-        "migration_required" => RepositoryState::MigrationRequired,
-        "rebuild_required" => RepositoryState::RebuildRequired,
-        _ => RepositoryState::Degraded,
+        "ready" => Some(RepositoryState::Ready),
+        "indexing" => Some(RepositoryState::Indexing),
+        "degraded" => Some(RepositoryState::Degraded),
+        "corrupt" => Some(RepositoryState::Corrupt),
+        "migration_required" => Some(RepositoryState::MigrationRequired),
+        "rebuild_required" => Some(RepositoryState::RebuildRequired),
+        _ => None,
     }
+}
+
+fn operation_progress_permille(state: client::OperationState, completed: u32, total: u32) -> u16 {
+    if total == 0 {
+        return if state == client::OperationState::Succeeded {
+            1_000
+        } else {
+            0
+        };
+    }
+    let scaled = u64::from(completed)
+        .saturating_mul(1_000)
+        .checked_div(u64::from(total))
+        .unwrap_or(0)
+        .min(1_000);
+    u16::try_from(scaled).unwrap_or(1_000)
+}
+
+fn source_free_message(value: &str) -> Result<SourceFreeMessage, ToolExecutionError> {
+    SourceFreeMessage::parse(value).map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
 
 fn freshness_from_label(label: &str) -> Freshness {
@@ -2916,10 +3059,10 @@ fn agent_identity_from_status(status: client::RepositoryStatus) -> AgentResolved
     AgentResolvedIdentity {
         repository: ResolvedRepository {
             repository_id: status.repository_id,
-            display_name: status.repository_id.to_string(),
+            display_name: status.display_name,
         },
         generation: GenerationSummary {
-            generation_id: status.active_generation,
+            generation_id: status.resolved_generation,
             parent_generation: RequiredNullable(status.parent_generation),
             structural_freshness: freshness_from_label(&status.structural_freshness),
             semantic_freshness: freshness_from_label(&status.semantic_freshness),

@@ -1025,6 +1025,10 @@ pub struct RepositoryCoverageEntry {
 pub struct RepositoryStatus {
     /// Process-local repository identity.
     pub repository_id: RepositoryId,
+    /// Sanitized Rootlight-owned display label.
+    pub display_name: String,
+    /// Optional sanitized registered alias.
+    pub alias: Option<String>,
     /// Immutable generation selected by the request.
     pub resolved_generation: GenerationId,
     /// Active immutable generation for the repository.
@@ -1033,14 +1037,163 @@ pub struct RepositoryStatus {
     pub parent_generation: Option<GenerationId>,
     /// Optional predecessor of the active generation.
     pub active_parent_generation: Option<GenerationId>,
+    /// Structural freshness of the active generation.
+    pub active_structural_freshness: String,
+    /// Semantic freshness of the active generation.
+    pub active_semantic_freshness: String,
     /// Structural freshness label, such as `current`.
     pub structural_freshness: String,
     /// Semantic freshness label, such as `current`.
     pub semantic_freshness: String,
     /// Repository state label, such as `ready`.
     pub state: String,
+    /// Publication relationship label, such as `published` or `retained`.
+    pub publication_state: String,
     /// Language-scoped coverage entries.
     pub coverage: Vec<RepositoryCoverageEntry>,
+    /// Bounded current and recent repository-index operations.
+    pub operations: Vec<RepositoryStatusOperation>,
+}
+
+/// Coverage projection supported by repository status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryStatusCoverageDetail {
+    /// Aggregate counts only.
+    Summary,
+    /// Aggregate counts plus bounded per-language coverage.
+    Language,
+}
+
+impl RepositoryStatusCoverageDetail {
+    const fn as_wire_label(self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::Language => "language",
+        }
+    }
+}
+
+/// Minimum freshness required from repository status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryStatusFreshnessRequirement {
+    /// Accept any retained queryable generation.
+    None,
+    /// Require current structural facts.
+    Structural,
+    /// Require current semantic facts.
+    Semantic,
+}
+
+impl RepositoryStatusFreshnessRequirement {
+    const fn as_wire_label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Structural => "structural",
+            Self::Semantic => "semantic",
+        }
+    }
+}
+
+/// Checked repository status request including supported detail controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepositoryStatusRequest {
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    coverage_detail: RepositoryStatusCoverageDetail,
+    include_operations: bool,
+    require_freshness: RepositoryStatusFreshnessRequirement,
+}
+
+impl RepositoryStatusRequest {
+    /// Creates an aggregate status request without operation details or a freshness gate.
+    #[must_use]
+    pub const fn new(repository: RepositoryId, generation: GenerationSelector) -> Self {
+        Self {
+            repository,
+            generation,
+            coverage_detail: RepositoryStatusCoverageDetail::Summary,
+            include_operations: false,
+            require_freshness: RepositoryStatusFreshnessRequirement::None,
+        }
+    }
+
+    /// Selects the supported coverage projection.
+    #[must_use]
+    pub const fn with_coverage_detail(
+        mut self,
+        coverage_detail: RepositoryStatusCoverageDetail,
+    ) -> Self {
+        self.coverage_detail = coverage_detail;
+        self
+    }
+
+    /// Selects whether bounded operation summaries are returned.
+    #[must_use]
+    pub const fn with_operations(mut self, include_operations: bool) -> Self {
+        self.include_operations = include_operations;
+        self
+    }
+
+    /// Selects the minimum acceptable freshness.
+    #[must_use]
+    pub const fn with_freshness_requirement(
+        mut self,
+        require_freshness: RepositoryStatusFreshnessRequirement,
+    ) -> Self {
+        self.require_freshness = require_freshness;
+        self
+    }
+
+    /// Returns the selected repository.
+    #[must_use]
+    pub const fn repository(self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the active or exact generation selector.
+    #[must_use]
+    pub const fn generation(self) -> GenerationSelector {
+        self.generation
+    }
+
+    /// Returns the requested coverage projection.
+    #[must_use]
+    pub const fn coverage_detail(self) -> RepositoryStatusCoverageDetail {
+        self.coverage_detail
+    }
+
+    /// Reports whether operation summaries were requested.
+    #[must_use]
+    pub const fn include_operations(self) -> bool {
+        self.include_operations
+    }
+
+    /// Returns the minimum acceptable freshness.
+    #[must_use]
+    pub const fn freshness_requirement(self) -> RepositoryStatusFreshnessRequirement {
+        self.require_freshness
+    }
+}
+
+/// One bounded source-free repository-index operation summary.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryStatusOperation {
+    /// Stable operation identity.
+    pub operation: OperationId,
+    /// Stable operation kind.
+    pub kind: OperationKind,
+    /// Durable operation state.
+    pub state: OperationState,
+    /// Completed work units.
+    pub completed_units: u32,
+    /// Total work units, or zero while unknown.
+    pub total_units: u32,
+    /// Whether the authenticated client submitted the operation.
+    pub owned_by_client: bool,
+    /// Best-effort operation start time.
+    pub started_unix_ms: u64,
 }
 
 /// One typed relationship target within a seed-relation group.
@@ -2523,9 +2676,22 @@ impl Client {
         repository: RepositoryId,
         generation: GenerationSelector,
     ) -> Result<RepositoryStatus, ClientError> {
-        match self.request(build_repository_status_request(repository, generation)?)? {
+        self.repository_status_with_options(RepositoryStatusRequest::new(repository, generation))
+    }
+
+    /// Reads repository status with supported coverage, operation, and freshness controls.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for unavailable protocol support, transport
+    /// failure, or a malformed or uncorrelated response.
+    pub fn repository_status_with_options(
+        &self,
+        request: RepositoryStatusRequest,
+    ) -> Result<RepositoryStatus, ClientError> {
+        match self.request(build_repository_status_request(request))? {
             daemon::response_envelope::Response::RepositoryStatus(response) => {
-                parse_repository_status(response, repository, generation)
+                parse_repository_status(response, request)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -2549,15 +2715,36 @@ impl Client {
         generation: GenerationSelector,
         timeout: RequestTimeout,
     ) -> Result<RepositoryStatus, ClientError> {
+        self.repository_status_with_options_async(
+            RepositoryStatusRequest::new(repository, generation),
+            timeout,
+        )
+        .await
+    }
+
+    /// Asynchronously reads repository status with supported detail controls.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for unavailable protocol support, transport
+    /// failure, timeout, or a malformed or uncorrelated response.
+    pub async fn repository_status_with_options_async(
+        &self,
+        request: RepositoryStatusRequest,
+        timeout: RequestTimeout,
+    ) -> Result<RepositoryStatus, ClientError> {
         match self
-            .request_async(
-                build_repository_status_request(repository, generation)?,
-                timeout,
-            )
+            .request_async(build_repository_status_request(request), timeout)
             .await?
         {
             daemon::response_envelope::Response::RepositoryStatus(response) => {
-                parse_repository_status(response, repository, generation)
+                parse_repository_status(response, request)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -4826,15 +5013,15 @@ fn build_repository_catalog_page_request(
 }
 
 fn build_repository_status_request(
-    repository: RepositoryId,
-    generation: GenerationSelector,
-) -> Result<daemon::request_envelope::Request, ClientError> {
-    Ok(daemon::request_envelope::Request::RepositoryStatus(
-        daemon::RepositoryStatusRequest {
-            repository: Some(repository_to_wire(repository)),
-            generation: Some(generation_selector_to_wire(generation)),
-        },
-    ))
+    request: RepositoryStatusRequest,
+) -> daemon::request_envelope::Request {
+    daemon::request_envelope::Request::RepositoryStatus(daemon::RepositoryStatusRequest {
+        repository: Some(repository_to_wire(request.repository)),
+        generation: Some(generation_selector_to_wire(request.generation)),
+        coverage_detail: request.coverage_detail.as_wire_label().to_owned(),
+        include_operations: request.include_operations,
+        require_freshness: request.require_freshness.as_wire_label().to_owned(),
+    })
 }
 
 fn build_symbol_relationships_request(
@@ -5381,12 +5568,21 @@ fn repository_catalog_sort_key_parts(bytes: &[u8]) -> Result<(&str, &[u8]), Clie
 
 fn parse_repository_status(
     response: daemon::RepositoryStatusResponse,
-    expected_repository: RepositoryId,
-    selector: GenerationSelector,
+    request: RepositoryStatusRequest,
 ) -> Result<RepositoryStatus, ClientError> {
     let repository_id =
         parse_repository(response.repository.ok_or(ClientError::InvalidIdentifier)?)?;
-    if repository_id != expected_repository {
+    if repository_id != request.repository
+        || response.coverage_detail != request.coverage_detail.as_wire_label()
+        || (!request.include_operations && !response.operations.is_empty())
+        || response.operations.len() > 100
+        || response.display_name.is_empty()
+        || response.display_name.len() > 256
+        || !safe_repository_label(&response.display_name)
+        || response.alias.as_deref().is_some_and(|alias| {
+            alias.is_empty() || alias.len() > 256 || !safe_repository_label(alias)
+        })
+    {
         return Err(ClientError::InvalidResponseCorrelation);
     }
     let active_generation = parse_generation(
@@ -5396,10 +5592,10 @@ fn parse_repository_status(
     )?;
     let resolved_generation = match response.resolved_generation {
         Some(generation) => parse_generation(generation)?,
-        None if selector == GenerationSelector::Active => active_generation,
+        None if request.generation == GenerationSelector::Active => active_generation,
         None => return Err(ClientError::InvalidResponseCorrelation),
     };
-    let selector_matches = match selector {
+    let selector_matches = match request.generation {
         GenerationSelector::Active => resolved_generation == active_generation,
         GenerationSelector::Generation(selected) => resolved_generation == selected,
     };
@@ -5430,17 +5626,62 @@ fn parse_repository_status(
             indexed_files: entry.indexed_files,
         })
         .collect();
+    let publication_state = match response.publication_state.as_str() {
+        "published" if resolved_generation == active_generation => "published",
+        "retained" if resolved_generation != active_generation => "retained",
+        _ => return Err(ClientError::InvalidResponseCorrelation),
+    };
+    let operations = response
+        .operations
+        .into_iter()
+        .map(|operation| {
+            let operation_id = parse_operation(operation.operation)?;
+            let kind = match daemon::OperationKind::try_from(operation.kind)
+                .map_err(|_| ClientError::InvalidOperationKind)?
+            {
+                daemon::OperationKind::RepositoryIndex => OperationKind::RepositoryIndex,
+                daemon::OperationKind::ControlProbe | daemon::OperationKind::Unspecified => {
+                    return Err(ClientError::InvalidResponseCorrelation);
+                }
+            };
+            let state = parse_operation_state(operation.state)?;
+            if operation.total_units != 0 && operation.completed_units > operation.total_units {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+            Ok(RepositoryStatusOperation {
+                operation: operation_id,
+                kind,
+                state,
+                completed_units: operation.completed_units,
+                total_units: operation.total_units,
+                owned_by_client: operation.owned_by_client,
+                started_unix_ms: operation.started_unix_ms,
+            })
+        })
+        .collect::<Result<Vec<_>, ClientError>>()?;
     Ok(RepositoryStatus {
         repository_id,
+        display_name: response.display_name,
+        alias: response.alias,
         resolved_generation,
         active_generation,
         parent_generation,
         active_parent_generation,
+        active_structural_freshness: response.active_structural_freshness,
+        active_semantic_freshness: response.active_semantic_freshness,
         structural_freshness: response.structural_freshness,
         semantic_freshness: response.semantic_freshness,
         state: response.state,
+        publication_state: publication_state.to_owned(),
         coverage,
+        operations,
     })
+}
+
+fn safe_repository_label(value: &str) -> bool {
+    !value
+        .chars()
+        .any(|character| character.is_control() || matches!(character, '/' | '\\'))
 }
 
 fn parse_symbol_relationships(
@@ -7739,6 +7980,17 @@ mod tests {
             coverage: Vec::new(),
             resolved_generation: resolved.map(generation_to_wire),
             active_parent_generation: None,
+            display_name: "fixture".to_owned(),
+            alias: None,
+            publication_state: if resolved.is_some_and(|resolved| resolved != active) {
+                "retained".to_owned()
+            } else {
+                "published".to_owned()
+            },
+            operations: Vec::new(),
+            coverage_detail: "summary".to_owned(),
+            active_structural_freshness: "current".to_owned(),
+            active_semantic_freshness: "current".to_owned(),
         }
     }
 
@@ -7749,8 +8001,7 @@ mod tests {
 
         let active_status = parse_repository_status(
             wire_repository_status_response(Some(active), active),
-            test_repository(),
-            GenerationSelector::Active,
+            RepositoryStatusRequest::new(test_repository(), GenerationSelector::Active),
         )
         .expect("active status correlates");
         assert_eq!(active_status.resolved_generation, active);
@@ -7758,8 +8009,7 @@ mod tests {
 
         let exact_status = parse_repository_status(
             wire_repository_status_response(Some(exact), active),
-            test_repository(),
-            GenerationSelector::Generation(exact),
+            RepositoryStatusRequest::new(test_repository(), GenerationSelector::Generation(exact)),
         )
         .expect("exact status remains distinct from active");
         assert_eq!(exact_status.resolved_generation, exact);
@@ -7768,24 +8018,27 @@ mod tests {
         assert!(matches!(
             parse_repository_status(
                 wire_repository_status_response(Some(active), active),
-                test_repository(),
-                GenerationSelector::Generation(exact),
+                RepositoryStatusRequest::new(
+                    test_repository(),
+                    GenerationSelector::Generation(exact),
+                ),
             ),
             Err(ClientError::InvalidResponseCorrelation)
         ));
         assert!(matches!(
             parse_repository_status(
                 wire_repository_status_response(None, active),
-                test_repository(),
-                GenerationSelector::Generation(exact),
+                RepositoryStatusRequest::new(
+                    test_repository(),
+                    GenerationSelector::Generation(exact),
+                ),
             ),
             Err(ClientError::InvalidResponseCorrelation)
         ));
         assert!(
             parse_repository_status(
                 wire_repository_status_response(None, active),
-                test_repository(),
-                GenerationSelector::Active,
+                RepositoryStatusRequest::new(test_repository(), GenerationSelector::Active),
             )
             .is_ok(),
             "an older active-only daemon response remains compatible"

@@ -56,12 +56,16 @@
         },
         "data": {
           "repository_state": "ready",
+          "requested_generation": null,
+          "resolved_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
           "active_generation": {
             "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
             "parent_generation": null,
             "structural_freshness": "current",
             "semantic_freshness": "current"
           },
+          "publication_state": "published",
+          "alias": null,
           "coverage": {
             "status": "complete",
             "languages": [

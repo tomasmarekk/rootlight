@@ -399,6 +399,10 @@ pub struct RepositoryListEntryDto {
 pub struct RepositoryStatusDto {
     /// Process-local repository identity.
     pub repository: RepositoryId,
+    /// Sanitized Rootlight-owned display label.
+    pub display_name: String,
+    /// Optional sanitized registered alias.
+    pub alias: Option<String>,
     /// Immutable generation selected by the request.
     pub resolved_generation: GenerationId,
     /// Active immutable generation for the repository.
@@ -407,12 +411,18 @@ pub struct RepositoryStatusDto {
     pub parent_generation: Option<GenerationId>,
     /// Optional predecessor of the active generation.
     pub active_parent_generation: Option<GenerationId>,
+    /// Structural freshness of the active generation.
+    pub active_structural_freshness: String,
+    /// Semantic freshness of the active generation.
+    pub active_semantic_freshness: String,
     /// Structural freshness label, such as `current`.
     pub structural_freshness: String,
     /// Semantic freshness label, such as `current`.
     pub semantic_freshness: String,
     /// Repository state label, such as `ready`.
     pub state: String,
+    /// Publication relationship of the selected generation.
+    pub publication_state: String,
     /// Language-scoped coverage entries.
     pub coverage: Vec<RepositoryCoverageEntryDto>,
 }
@@ -1116,6 +1126,25 @@ impl FirstSliceService {
     /// source-retention state cannot initialize.
     pub fn new(maximum_generations: usize) -> Result<Self, FirstSliceError> {
         Self::new_with_source_limit(maximum_generations, MAX_RETAINED_SOURCE_BYTES)
+    }
+
+    /// Resolves an already registered repository from its canonical root.
+    ///
+    /// This lookup never registers a new repository. It allows operation
+    /// metadata to retain the identity of an update that fails before staging.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] when canonicalization, cancellation, or
+    /// root-identity hashing fails.
+    pub fn registered_repository_for_root(
+        &self,
+        path: &Path,
+        cancellation: &Cancellation,
+    ) -> Result<Option<RepositoryId>, FirstSliceError> {
+        let canonical = canonical_repository_root(path, cancellation)?;
+        let root_identity = repository_path_hash(&canonical)?;
+        Ok(self.repositories.get(&root_identity).copied())
     }
 
     fn new_with_source_limit(
@@ -2513,6 +2542,11 @@ impl FirstSliceService {
         generation: Option<GenerationId>,
     ) -> Result<RepositoryStatusDto, FirstSliceError> {
         let context = self.resolve_generation(repository, generation)?;
+        let display_name = self
+            .repository_display_names
+            .get(&repository)
+            .ok_or(FirstSliceError::RepositoryNotFound)?
+            .clone();
         let freshness = if context.active {
             FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan
         } else {
@@ -2520,13 +2554,28 @@ impl FirstSliceService {
         };
         Ok(RepositoryStatusDto {
             repository: context.repository,
+            display_name,
+            alias: None,
             resolved_generation: context.generation,
             active_generation: context.active_generation,
             parent_generation: context.parent,
             active_parent_generation: context.active_parent,
+            active_structural_freshness: freshness_label(
+                FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
+            )
+            .to_owned(),
+            active_semantic_freshness: freshness_label(
+                FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
+            )
+            .to_owned(),
             structural_freshness: freshness_label(freshness).to_owned(),
             semantic_freshness: freshness_label(freshness).to_owned(),
             state: REPOSITORY_STATE_READY.to_owned(),
+            publication_state: if context.active {
+                "published".to_owned()
+            } else {
+                "retained".to_owned()
+            },
             coverage: coverage_from_receipt(&context.receipt),
         })
     }

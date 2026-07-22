@@ -74,6 +74,16 @@ pub enum FreshnessRequirement {
     Semantic,
 }
 
+/// Publication relationship of the selected generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationPublicationState {
+    /// The selected generation is the active published generation.
+    Published,
+    /// The selected generation is retained but no longer active.
+    Retained,
+}
+
 /// Overall repository health state.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
@@ -168,8 +178,16 @@ pub struct CoverageReport {
 pub struct RepoStatusData {
     /// Overall repository health.
     pub repository_state: RepositoryState,
+    /// Explicit generation requested by the caller, null for the active selector.
+    pub requested_generation: RequiredNullable<GenerationId>,
+    /// Exact immutable generation resolved for this response.
+    pub resolved_generation: GenerationId,
     /// Active generation summary, null when no generation is published.
     pub active_generation: RequiredNullable<GenerationSummary>,
+    /// Publication relationship of the selected generation.
+    pub publication_state: GenerationPublicationState,
+    /// Registered repository alias, when configured.
+    pub alias: RequiredNullable<String>,
     /// Coverage at the requested granularity.
     pub coverage: CoverageReport,
     /// Bounded operation list, most recent first.

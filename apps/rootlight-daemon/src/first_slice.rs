@@ -342,8 +342,10 @@ pub(crate) enum FirstSliceHostError {
 #[derive(Debug, Clone, Copy)]
 struct OperationMetadata {
     started_unix_ms: u64,
+    repository: Option<RepositoryId>,
     receipt: Option<FirstSliceIndexReceipt>,
     publication: PublicationState,
+    terminal: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,19 +370,39 @@ impl OperationMetadataSet {
         }
     }
 
-    fn reserve(&mut self, operation: OperationId, started_unix_ms: u64) -> Result<(), PublicError> {
+    fn reserve(
+        &mut self,
+        operation: OperationId,
+        started_unix_ms: u64,
+        repository: Option<RepositoryId>,
+    ) -> Result<(), PublicError> {
         if self.records.contains_key(&operation) {
             return Ok(());
         }
         if self.records.len() >= self.maximum {
-            return Err(resource_exhausted());
+            let oldest_terminal = self
+                .records
+                .iter()
+                .filter(|(_, metadata)| metadata.terminal)
+                .min_by(|(left_id, left), (right_id, right)| {
+                    left.started_unix_ms
+                        .cmp(&right.started_unix_ms)
+                        .then_with(|| left_id.cmp(right_id))
+                })
+                .map(|(operation, _)| *operation);
+            let Some(oldest_terminal) = oldest_terminal else {
+                return Err(resource_exhausted());
+            };
+            self.records.remove(&oldest_terminal);
         }
         self.records.insert(
             operation,
             OperationMetadata {
                 started_unix_ms,
+                repository,
                 receipt: None,
                 publication: PublicationState::None,
+                terminal: false,
             },
         );
         Ok(())
@@ -388,6 +410,7 @@ impl OperationMetadataSet {
 
     fn stage(&mut self, operation: OperationId, receipt: FirstSliceIndexReceipt) {
         if let Some(metadata) = self.records.get_mut(&operation) {
+            metadata.repository = Some(receipt.repository);
             metadata.receipt = Some(receipt);
             metadata.publication = PublicationState::Staged;
         }
@@ -402,6 +425,7 @@ impl OperationMetadataSet {
             return Err(internal_error());
         }
         metadata.publication = PublicationState::Committed;
+        metadata.terminal = true;
         Ok(())
     }
 
@@ -421,6 +445,13 @@ impl OperationMetadataSet {
     fn fail_closed(&mut self, operation: OperationId) {
         if let Some(metadata) = self.records.get_mut(&operation) {
             metadata.publication = PublicationState::FailedClosed;
+            metadata.terminal = true;
+        }
+    }
+
+    fn mark_terminal(&mut self, operation: OperationId) {
+        if let Some(metadata) = self.records.get_mut(&operation) {
+            metadata.terminal = true;
         }
     }
 
@@ -432,6 +463,27 @@ impl OperationMetadataSet {
         {
             self.records.remove(&operation);
         }
+    }
+
+    fn repository_operations(
+        &self,
+        repository: RepositoryId,
+    ) -> Vec<(OperationId, OperationMetadata)> {
+        let mut operations: Vec<_> = self
+            .records
+            .iter()
+            .filter_map(|(operation, metadata)| {
+                (metadata.repository == Some(repository)).then_some((*operation, *metadata))
+            })
+            .collect();
+        operations.sort_by(|(left_id, left), (right_id, right)| {
+            right
+                .started_unix_ms
+                .cmp(&left.started_unix_ms)
+                .then_with(|| right_id.cmp(left_id))
+        });
+        operations.truncate(100);
+        operations
     }
 }
 
@@ -552,9 +604,15 @@ fn execute_service_request(
             repository_catalog_page(service, request, resources.catalog_epoch)
                 .map(FirstSliceIpcResponse::RepositoryCatalogPage)
         }
-        FirstSliceIpcRequest::RepositoryStatus(request) => {
-            repository_status(service, request).map(FirstSliceIpcResponse::RepositoryStatus)
-        }
+        FirstSliceIpcRequest::RepositoryStatus(request) => repository_status(
+            service,
+            resources.journal,
+            resources.metadata,
+            resources.runtime,
+            request,
+            &context,
+        )
+        .map(FirstSliceIpcResponse::RepositoryStatus),
         FirstSliceIpcRequest::SymbolRelationships(request) => {
             symbol_relationships(service, request, &context)
                 .map(FirstSliceIpcResponse::SymbolRelationships)
@@ -602,6 +660,10 @@ fn repository_index(
     publication_hook: Option<&PublicationBoundaryHook>,
 ) -> Result<daemon::RepositoryIndexResponse, PublicError> {
     let operation = parse_operation(request.operation.as_ref())?;
+    let root = PathBuf::from(&request.root);
+    let requested_repository = service
+        .registered_repository_for_root(&root, &context.cancellation)
+        .map_err(service_error)?;
     let lifecycle_deadline = lifecycle_deadline(context.deadline)?;
     let deadline_unix_ms = deadline_unix_ms(context.deadline)?;
     let detached = request.detached;
@@ -637,7 +699,7 @@ fn repository_index(
         Err(error) => return Err(error),
     }
     let started_unix_ms = unix_time_ms()?;
-    lock_metadata(metadata)?.reserve(operation, started_unix_ms)?;
+    lock_metadata(metadata)?.reserve(operation, started_unix_ms, requested_repository)?;
     let submitted =
         match journal_lifecycle_call(runtime, journal.submit_until(submission, context.deadline)) {
             Ok(submitted) => submitted,
@@ -655,9 +717,19 @@ fn repository_index(
     if let Some(hook) = publication_hook
         && let Err(error) = hook.pause(PublicationBoundary::AfterAdmission)
     {
+        finish_failed_index(
+            runtime,
+            lifecycle_deadline,
+            journal,
+            metadata,
+            operation,
+            &context.cancellation,
+            &error,
+        )?;
         return Err(error);
     }
     if propagate_peer_cancellation(runtime, journal, operation, context, lifecycle_deadline)? {
+        lock_metadata(metadata)?.mark_terminal(operation);
         return Err(cancelled_error());
     }
     let (_, cancellation) = journal_lifecycle_call(
@@ -672,6 +744,7 @@ fn repository_index(
             runtime,
             lifecycle_deadline,
             journal,
+            metadata,
             operation,
             &cancellation,
             &error,
@@ -685,13 +758,14 @@ fn repository_index(
             runtime,
             lifecycle_deadline,
             journal,
+            metadata,
             operation,
             &cancellation,
             &error,
         )?;
         return Err(error);
     }
-    match service.prepare_rust_fixture(&PathBuf::from(request.root), &cancellation) {
+    match service.prepare_rust_fixture(&root, &cancellation) {
         Ok(prepared) => {
             if propagate_peer_cancellation(
                 runtime,
@@ -704,6 +778,7 @@ fn repository_index(
                     runtime,
                     lifecycle_deadline,
                     journal,
+                    metadata,
                     operation,
                     &cancellation,
                     &cancelled_error(),
@@ -718,6 +793,7 @@ fn repository_index(
                         runtime,
                         lifecycle_deadline,
                         journal,
+                        metadata,
                         operation,
                         &cancellation,
                         &public,
@@ -730,8 +806,19 @@ fn repository_index(
             if let Some(hook) = publication_hook
                 && let Err(error) = hook.pause(PublicationBoundary::BeforeCompletion)
             {
-                service.discard_staged(staged).map_err(service_error)?;
+                let discard = service.discard_staged(staged).map_err(service_error);
+                let terminal = finish_failed_index(
+                    runtime,
+                    lifecycle_deadline,
+                    journal,
+                    metadata,
+                    operation,
+                    &cancellation,
+                    &error,
+                );
                 lock_metadata(metadata)?.fail_closed(operation);
+                discard?;
+                terminal?;
                 return Err(error);
             }
             propagate_peer_cancellation(runtime, journal, operation, context, lifecycle_deadline)?;
@@ -759,13 +846,18 @@ fn repository_index(
                     if error.code() != ErrorCode::Cancelled {
                         lock_metadata(metadata)?.fail_closed(operation);
                     } else {
-                        lock_metadata(metadata)?.discard(operation)?;
+                        let mut metadata = lock_metadata(metadata)?;
+                        metadata.discard(operation)?;
+                        metadata.mark_terminal(operation);
                     }
                     return Err(error);
                 }
             };
             if operation_record.state != OperationState::Succeeded {
                 service.discard_staged(staged).map_err(service_error)?;
+                let mut metadata = lock_metadata(metadata)?;
+                metadata.discard(operation)?;
+                metadata.mark_terminal(operation);
                 return Err(cancelled_error());
             }
             if let Some(hook) = publication_hook
@@ -799,6 +891,7 @@ fn repository_index(
                 runtime,
                 lifecycle_deadline,
                 journal,
+                metadata,
                 operation,
                 &cancellation,
                 &public,
@@ -843,6 +936,7 @@ fn finish_failed_index(
     runtime: &tokio::runtime::Runtime,
     deadline: Instant,
     journal: &JournalActorHandle,
+    metadata: &Mutex<OperationMetadataSet>,
     operation: OperationId,
     cancellation: &Cancellation,
     error: &PublicError,
@@ -858,6 +952,7 @@ fn finish_failed_index(
             journal.fail_operation_until(operation, error.clone(), deadline),
         )?;
     }
+    lock_metadata(metadata)?.mark_terminal(operation);
     Ok(())
 }
 
@@ -2290,13 +2385,85 @@ fn catalog_now(epoch: Instant) -> Result<CatalogInstant, PublicError> {
 
 fn repository_status(
     service: &FirstSliceService,
+    journal: &JournalActorHandle,
+    metadata: &Mutex<OperationMetadataSet>,
+    runtime: &tokio::runtime::Runtime,
     request: daemon::RepositoryStatusRequest,
+    context: &FirstSliceIpcContext,
 ) -> Result<daemon::RepositoryStatusResponse, PublicError> {
     let repository = parse_repository(request.repository.as_ref())?;
     let selected = parse_generation_selector(request.generation.as_ref())?;
+    let coverage_detail = match request.coverage_detail.as_str() {
+        "" | "summary" => "summary",
+        "language" => "language",
+        _ => return Err(unsupported_capability()),
+    };
+    let freshness_requirement = match request.require_freshness.as_str() {
+        "" | "none" => None,
+        "structural" => Some("structural"),
+        "semantic" => Some("semantic"),
+        _ => return Err(invalid_argument()),
+    };
     let status = service
         .repository_status(repository, selected)
         .map_err(|error| repository_status_error(error, repository, selected))?;
+    let selected_freshness = match freshness_requirement {
+        Some("structural") => &status.structural_freshness,
+        Some("semantic") => &status.semantic_freshness,
+        Some(_) => return Err(internal_error()),
+        None => "current",
+    };
+    if selected_freshness != "current" {
+        let mut builder =
+            PublicError::builder(ErrorCode::StaleGeneration, "generation is not fresh")
+                .repository(repository)
+                .generation(status.resolved_generation)
+                .next_action(NextAction::RebuildRepository);
+        if selected.is_none() {
+            builder = builder.next_action(NextAction::Retry);
+        }
+        return Err(builder
+            .build()
+            .unwrap_or_else(|_| unreachable!("freshness errors are statically bounded")));
+    }
+    let operation_candidates = lock_metadata(metadata)?.repository_operations(repository);
+    let mut operations = Vec::new();
+    operations
+        .try_reserve_exact(operation_candidates.len())
+        .map_err(|_| resource_exhausted())?;
+    let mut repository_state = status.state.clone();
+    for (operation, operation_metadata) in operation_candidates {
+        let response = journal_call(
+            runtime,
+            context.deadline,
+            journal.control(ControlRequest::OperationStatus(operation)),
+        );
+        let record = match response {
+            Ok(ControlResponse::OperationStatus(record)) => record,
+            Err(error) if error.code() == ErrorCode::NotFound => continue,
+            Ok(_) => return Err(internal_error()),
+            Err(error) => return Err(error),
+        };
+        let visible_state = if operation_metadata.publication == PublicationState::FailedClosed {
+            OperationState::Failed
+        } else {
+            record.state
+        };
+        if !visible_state.is_terminal() {
+            repository_state = "indexing".to_owned();
+        }
+        if request.include_operations {
+            operations.push(daemon::RepositoryStatusOperation {
+                operation: Some(operation_to_wire(record.operation)),
+                kind: operation_kind_to_wire(record.kind) as i32,
+                state: operation_state_to_wire(visible_state) as i32,
+                completed_units: record.progress.completed,
+                total_units: record.progress.total,
+                owned_by_client: record.owner == context.client_instance_id,
+                started_unix_ms: operation_metadata.started_unix_ms,
+            });
+        }
+    }
     let coverage = status
         .coverage
         .into_iter()
@@ -2314,10 +2481,17 @@ fn repository_status(
         parent_generation: status.parent_generation.map(generation_to_wire),
         structural_freshness: status.structural_freshness,
         semantic_freshness: status.semantic_freshness,
-        state: status.state,
+        state: repository_state,
         coverage,
         resolved_generation: Some(generation_to_wire(status.resolved_generation)),
         active_parent_generation: status.active_parent_generation.map(generation_to_wire),
+        display_name: status.display_name,
+        alias: status.alias,
+        publication_state: status.publication_state,
+        operations,
+        coverage_detail: coverage_detail.to_owned(),
+        active_structural_freshness: status.active_structural_freshness,
+        active_semantic_freshness: status.active_semantic_freshness,
     })
 }
 
@@ -2642,6 +2816,13 @@ fn operation_state_to_wire(state: OperationState) -> daemon::OperationState {
         OperationState::Failed => daemon::OperationState::Failed,
         OperationState::Interrupted => daemon::OperationState::Interrupted,
         OperationState::Cancelled => daemon::OperationState::Cancelled,
+    }
+}
+
+const fn operation_kind_to_wire(kind: OperationKind) -> daemon::OperationKind {
+    match kind {
+        OperationKind::ControlProbe => daemon::OperationKind::ControlProbe,
+        OperationKind::RepositoryIndex => daemon::OperationKind::RepositoryIndex,
     }
 }
 
@@ -3052,7 +3233,36 @@ mod tests {
             generation: Some(daemon::GenerationSelector {
                 selector: Some(selector),
             }),
+            coverage_detail: "summary".to_owned(),
+            include_operations: false,
+            require_freshness: "none".to_owned(),
         }
+    }
+
+    fn status_response(
+        service: &FirstSliceService,
+        request: daemon::RepositoryStatusRequest,
+    ) -> Result<daemon::RepositoryStatusResponse, PublicError> {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(journal, 4, 4).expect("journal actor starts");
+        let handle = actor.handle();
+        let metadata = Mutex::new(OperationMetadataSet::new(4));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::from_bytes([7; 16]),
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation: Cancellation::with_deadline(deadline),
+            deadline,
+            index_admission: None,
+        };
+        let response = repository_status(service, &handle, &metadata, &runtime, request, &context);
+        drop(handle);
+        actor.join().expect("journal actor joins");
+        response
     }
 
     #[test]
@@ -3062,7 +3272,7 @@ mod tests {
         let alpha = &repositories[0];
         let beta = &repositories[1];
 
-        let exact = repository_status(
+        let exact = status_response(
             &service,
             status_request(alpha.repository, Some(alpha.active_generation)),
         )
@@ -3076,7 +3286,7 @@ mod tests {
             alpha.active_generation
         );
 
-        let wrong_repository = repository_status(
+        let wrong_repository = status_response(
             &service,
             status_request(alpha.repository, Some(beta.active_generation)),
         )
@@ -3084,7 +3294,7 @@ mod tests {
         assert_eq!(wrong_repository.code(), ErrorCode::Conflict);
 
         let missing_generation = GenerationId::from_bytes([0x7f; 20]);
-        let missing = repository_status(
+        let missing = status_response(
             &service,
             status_request(alpha.repository, Some(missing_generation)),
         )
@@ -3093,6 +3303,305 @@ mod tests {
         assert_eq!(missing.repository(), Some(alpha.repository));
         assert_eq!(missing.generation(), Some(missing_generation));
         assert_eq!(missing.next_actions(), &[NextAction::RestartEnumeration]);
+    }
+
+    #[test]
+    fn repository_status_enforces_requested_freshness() {
+        let root = TempDir::new().expect("fixture root exists");
+        let repository_root = root.path().join("alpha");
+        fs::create_dir_all(repository_root.join("src"))
+            .expect("repository source directory exists");
+        fs::write(
+            repository_root.join("src/lib.rs"),
+            "pub fn answer() -> u32 { 1 }\n",
+        )
+        .expect("initial source writes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut service =
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
+        let first = service
+            .index_rust_fixture(&repository_root, &cancellation)
+            .expect("initial generation publishes");
+        fs::write(
+            repository_root.join("src/lib.rs"),
+            "pub fn answer() -> u32 { 2 }\n",
+        )
+        .expect("updated source writes");
+        let second = service
+            .index_rust_fixture(&repository_root, &cancellation)
+            .expect("successor generation publishes");
+
+        let mut stale_request = status_request(first.repository, Some(first.generation));
+        stale_request.require_freshness = "structural".to_owned();
+        let stale = status_response(&service, stale_request)
+            .expect_err("retained generation does not satisfy structural freshness");
+        assert_eq!(stale.code(), ErrorCode::StaleGeneration);
+        assert_eq!(stale.repository(), Some(first.repository));
+        assert_eq!(stale.generation(), Some(first.generation));
+        assert_eq!(stale.next_actions(), &[NextAction::RebuildRepository]);
+
+        let mut active_request = status_request(first.repository, None);
+        active_request.require_freshness = "semantic".to_owned();
+        let active =
+            status_response(&service, active_request).expect("active generation remains fresh");
+        assert_eq!(
+            parse_generation(active.resolved_generation.as_ref())
+                .expect("resolved active generation maps"),
+            second.generation
+        );
+        assert_eq!(active.semantic_freshness, "current");
+    }
+
+    #[test]
+    fn repository_status_projects_bound_current_and_recent_operations() {
+        let (service, _root) = indexed_catalog(&["alpha"]);
+        let repository = service.list_repositories()[0].repository;
+        let owner = ClientInstanceId::from_bytes([7; 16]);
+        let running = OperationId::from_bytes([70; 16]);
+        let failed = OperationId::from_bytes([71; 16]);
+        let cancelled = OperationId::from_bytes([72; 16]);
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+
+        journal
+            .submit(repository_submission(running, 7))
+            .expect("running operation submits");
+        journal
+            .start_execution(running)
+            .expect("running operation starts");
+        journal
+            .submit(repository_submission(failed, 7))
+            .expect("failed operation submits");
+        journal
+            .start_execution(failed)
+            .expect("failed operation starts");
+        journal
+            .update_stage(failed, OperationStage::Cleanup)
+            .expect("failed operation enters cleanup");
+        let stored_error =
+            PublicError::builder(ErrorCode::AdapterFailed, "repository analysis failed")
+                .operation(failed)
+                .build()
+                .expect("failure is valid");
+        journal
+            .transition(failed, OperationState::Failed, Some(&stored_error))
+            .expect("failed operation terminates");
+        journal
+            .submit(repository_submission(cancelled, 7))
+            .expect("cancelled operation submits");
+        journal
+            .request_cancellation(cancelled, CancellationAuthority::Client(owner))
+            .expect("queued operation cancels");
+
+        let mut metadata = OperationMetadataSet::new(8);
+        metadata
+            .reserve(running, 10, Some(repository))
+            .expect("running metadata reserves");
+        metadata
+            .reserve(failed, 20, Some(repository))
+            .expect("failed metadata reserves");
+        metadata.mark_terminal(failed);
+        metadata
+            .reserve(cancelled, 30, Some(repository))
+            .expect("cancelled metadata reserves");
+        metadata.mark_terminal(cancelled);
+        let metadata = Mutex::new(metadata);
+        let actor = JournalActor::start(Arc::clone(&journal), 8, 8).expect("journal actor starts");
+        let handle = actor.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let context = FirstSliceIpcContext {
+            client_instance_id: owner,
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation: Cancellation::with_deadline(deadline),
+            deadline,
+            index_admission: None,
+        };
+        let mut request = status_request(repository, None);
+        request.include_operations = true;
+        let response = repository_status(&service, &handle, &metadata, &runtime, request, &context)
+            .expect("status projects operations");
+
+        assert_eq!(response.state, "indexing");
+        assert_eq!(response.operations.len(), 3);
+        assert_eq!(
+            parse_operation(response.operations[0].operation.as_ref())
+                .expect("cancelled operation identity maps"),
+            cancelled
+        );
+        assert_eq!(
+            daemon::OperationState::try_from(response.operations[0].state)
+                .expect("cancelled operation state maps"),
+            daemon::OperationState::Cancelled
+        );
+        assert_eq!(
+            daemon::OperationState::try_from(response.operations[1].state)
+                .expect("failed operation state maps"),
+            daemon::OperationState::Failed
+        );
+        assert_eq!(
+            daemon::OperationState::try_from(response.operations[2].state)
+                .expect("running operation state maps"),
+            daemon::OperationState::Running
+        );
+        assert!(
+            response
+                .operations
+                .iter()
+                .all(|operation| operation.owned_by_client)
+        );
+
+        drop(handle);
+        actor.join().expect("journal actor joins");
+    }
+
+    #[test]
+    fn failed_publication_keeps_a_verified_active_generation_ready() {
+        let (service, _root) = indexed_catalog(&["alpha"]);
+        let repository = service.list_repositories()[0].repository;
+        let operation = OperationId::from_bytes([73; 16]);
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        journal
+            .submit(repository_submission(operation, 7))
+            .expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        journal
+            .complete_repository_publication(operation)
+            .expect("journal publication completes");
+        let mut metadata = OperationMetadataSet::new(4);
+        metadata
+            .reserve(operation, 10, Some(repository))
+            .expect("metadata reserves");
+        metadata.fail_closed(operation);
+        let metadata = Mutex::new(metadata);
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("journal actor starts");
+        let handle = actor.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::from_bytes([7; 16]),
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation: Cancellation::with_deadline(deadline),
+            deadline,
+            index_admission: None,
+        };
+        let mut request = status_request(repository, None);
+        request.include_operations = true;
+        let response = repository_status(&service, &handle, &metadata, &runtime, request, &context)
+            .expect("healthy active generation remains reportable");
+
+        assert_eq!(response.state, "ready");
+        assert_eq!(response.operations.len(), 1);
+        assert_eq!(
+            daemon::OperationState::try_from(response.operations[0].state)
+                .expect("visible operation state maps"),
+            daemon::OperationState::Failed
+        );
+
+        drop(handle);
+        actor.join().expect("journal actor joins");
+    }
+
+    #[test]
+    fn pre_completion_failure_is_terminal_and_keeps_active_generation_ready() {
+        let root = TempDir::new().expect("fixture root exists");
+        let repository_root = root.path().join("alpha");
+        fs::create_dir_all(repository_root.join("src"))
+            .expect("repository source directory exists");
+        fs::write(
+            repository_root.join("src/lib.rs"),
+            "pub fn answer() -> u32 { 1 }\n",
+        )
+        .expect("initial source writes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut service =
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
+        let active = service
+            .index_rust_fixture(&repository_root, &cancellation)
+            .expect("active generation publishes");
+        fs::write(
+            repository_root.join("src/lib.rs"),
+            "pub fn answer() -> u32 { 2 }\n",
+        )
+        .expect("updated source writes");
+
+        let operation = OperationId::from_bytes([74; 16]);
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("journal actor starts");
+        let handle = actor.handle();
+        let metadata = Mutex::new(OperationMetadataSet::new(4));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::from_bytes([7; 16]),
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation: Cancellation::with_deadline(deadline),
+            deadline,
+            index_admission: None,
+        };
+        let (reached_sender, _reached_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        drop(release_sender);
+        let hook = PublicationBoundaryHook {
+            boundary: PublicationBoundary::BeforeCompletion,
+            fail_commit: AtomicBool::new(false),
+            armed: AtomicBool::new(true),
+            reached: reached_sender,
+            release: release_receiver,
+        };
+        let error = repository_index(
+            &mut service,
+            &handle,
+            &metadata,
+            &runtime,
+            daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root: repository_root.to_string_lossy().into_owned(),
+                operation: Some(operation_to_wire(operation)),
+                detached: true,
+            },
+            &context,
+            Some(&hook),
+        )
+        .expect_err("closed publication boundary fails the update");
+        assert_eq!(error.code(), ErrorCode::Internal);
+        assert_eq!(
+            journal
+                .status(operation)
+                .expect("durable operation remains inspectable")
+                .state,
+            OperationState::Failed
+        );
+
+        let mut request = status_request(active.repository, None);
+        request.include_operations = true;
+        let response = repository_status(&service, &handle, &metadata, &runtime, request, &context)
+            .expect("healthy active generation remains reportable");
+        assert_eq!(response.state, "ready");
+        assert_eq!(response.operations.len(), 1);
+        assert_eq!(
+            daemon::OperationState::try_from(response.operations[0].state)
+                .expect("visible operation state maps"),
+            daemon::OperationState::Failed
+        );
+        assert_eq!(
+            parse_generation(response.resolved_generation.as_ref())
+                .expect("active generation maps"),
+            active.generation
+        );
+
+        drop(handle);
+        actor.join().expect("journal actor joins");
     }
 
     #[test]
@@ -3334,6 +3843,30 @@ mod tests {
 
         assert!(second >= first);
         assert!(second.as_millis() < 60_000);
+    }
+
+    #[test]
+    fn operation_metadata_reuses_capacity_only_after_terminalization() {
+        let first = OperationId::from_bytes([60; 16]);
+        let second = OperationId::from_bytes([61; 16]);
+        let mut metadata = OperationMetadataSet::new(1);
+        metadata
+            .reserve(first, 1, None)
+            .expect("first metadata reserves");
+        assert_eq!(
+            metadata
+                .reserve(second, 2, None)
+                .expect_err("nonterminal metadata is retained")
+                .code(),
+            ErrorCode::ResourceExhausted
+        );
+
+        metadata.mark_terminal(first);
+        metadata
+            .reserve(second, 2, None)
+            .expect("terminal metadata is evicted");
+        assert!(!metadata.records.contains_key(&first));
+        assert!(metadata.records.contains_key(&second));
     }
 
     fn repository_submission(operation: OperationId, seed: u8) -> OperationSubmission {
@@ -3979,7 +4512,9 @@ mod tests {
 
         let mut metadata = OperationMetadataSet::new(1);
         let operation = OperationId::from_bytes([42; 16]);
-        metadata.reserve(operation, 1).expect("metadata reserves");
+        metadata
+            .reserve(operation, 1, None)
+            .expect("metadata reserves");
         metadata.fail_closed(operation);
         assert_eq!(
             metadata
@@ -4037,7 +4572,9 @@ mod tests {
         let failed_record = journal
             .transition(failed, OperationState::Failed, Some(&stored_error))
             .expect("failure persists");
-        metadata.reserve(failed, 1).expect("metadata reserves");
+        metadata
+            .reserve(failed, 1, None)
+            .expect("metadata reserves");
         assert_eq!(
             retry_index_response(&Mutex::new(metadata), failed_record)
                 .expect_err("failed retry replays its error"),
@@ -4057,7 +4594,7 @@ mod tests {
             .operation;
         let mut cancelled_metadata = OperationMetadataSet::new(1);
         cancelled_metadata
-            .reserve(cancelled, 1)
+            .reserve(cancelled, 1, None)
             .expect("metadata reserves");
         let cancelled_error =
             retry_index_response(&Mutex::new(cancelled_metadata), cancelled_record)
@@ -4073,7 +4610,7 @@ mod tests {
             .expect("interruption persists");
         let mut interrupted_metadata = OperationMetadataSet::new(1);
         interrupted_metadata
-            .reserve(interrupted, 1)
+            .reserve(interrupted, 1, None)
             .expect("metadata reserves");
         let interrupted_error =
             retry_index_response(&Mutex::new(interrupted_metadata), interrupted_record)
@@ -4096,7 +4633,9 @@ mod tests {
             .expect("publication completes");
         let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
         let mut metadata = OperationMetadataSet::new(1);
-        metadata.reserve(operation, 1).expect("metadata reserves");
+        metadata
+            .reserve(operation, 1, None)
+            .expect("metadata reserves");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -4151,11 +4690,18 @@ mod tests {
                 .operation(operation)
                 .build()
                 .expect("error is valid");
+        let metadata = Mutex::new(OperationMetadataSet::new(1));
+        metadata
+            .lock()
+            .expect("metadata locks")
+            .reserve(operation, 1, None)
+            .expect("metadata reserves");
 
         finish_failed_index(
             &runtime,
             Instant::now() + Duration::from_secs(1),
             &actor.handle(),
+            &metadata,
             operation,
             &elapsed,
             &adapter_error,

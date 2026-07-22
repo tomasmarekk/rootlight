@@ -582,6 +582,11 @@ message RepositoryCatalogPageResponse {
 message RepositoryStatusRequest {
   rootlight.common.v1.RepositoryId repository = 1;
   GenerationSelector generation = 2;
+  // "summary" or "language"; finer projections are rejected before IPC.
+  string coverage_detail = 3;
+  bool include_operations = 4;
+  // "none", "structural", or "semantic".
+  string require_freshness = 5;
 }
 
 // One language-scoped coverage entry for one repository generation.
@@ -591,6 +596,17 @@ message RepositoryCoverageEntry {
   string status = 3;
   uint64 discovered_files = 4;
   uint64 indexed_files = 5;
+}
+
+// One bounded source-free repository-index operation summary.
+message RepositoryStatusOperation {
+  rootlight.common.v1.OperationId operation = 1;
+  OperationKind kind = 2;
+  OperationState state = 3;
+  uint32 completed_units = 4;
+  uint32 total_units = 5;
+  bool owned_by_client = 6;
+  uint64 started_unix_ms = 7;
 }
 
 // Reports one repository's resolved and active generation status.
@@ -605,6 +621,13 @@ message RepositoryStatusResponse {
   repeated RepositoryCoverageEntry coverage = 7;
   rootlight.common.v1.GenerationId resolved_generation = 8;
   optional rootlight.common.v1.GenerationId active_parent_generation = 9;
+  string display_name = 10;
+  optional string alias = 11;
+  string publication_state = 12;
+  repeated RepositoryStatusOperation operations = 13;
+  string coverage_detail = 14;
+  string active_structural_freshness = 15;
+  string active_semantic_freshness = 16;
 }
 
 // Requests bounded typed relation neighborhoods for stable symbols.

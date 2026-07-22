@@ -433,22 +433,43 @@ const REPO_STATUS_RULES: &[CapabilityRule] = &[
         "generation",
         "selects the active or one retained exact repository generation",
     ),
-    accepted_fallback("include_operations"),
+    implemented(
+        "coverage_detail",
+        "summary is the default and language returns bounded per-language coverage",
+    ),
+    implemented_value(
+        "coverage_detail",
+        "summary",
+        "returns aggregate repository coverage",
+    ),
+    implemented_value(
+        "coverage_detail",
+        "language",
+        "returns aggregate and bounded per-language coverage",
+    ),
+    unsupported_value(
+        "coverage_detail",
+        "project",
+        "project coverage is not served because project boundaries are not indexed",
+    ),
+    unsupported_value(
+        "coverage_detail",
+        "file",
+        "file coverage is not served because repo status has no file scope",
+    ),
+    implemented(
+        "include_operations",
+        "true returns bounded current and recent repository index operations",
+    ),
+    implemented(
+        "require_freshness",
+        "enforces structural or semantic freshness before returning status",
+    ),
     accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
         "only stable repository identifiers are served",
-    ),
-    unsupported(
-        "coverage_detail",
-        "granular coverage projection is not served",
-    ),
-    unsupported("require_freshness", "freshness gates are not served"),
-    unsupported_value(
-        "include_operations",
-        "true",
-        "active-operation projection is not served",
     ),
     unsupported("budget", "custom response budgets are not served"),
     unsupported_value(
