@@ -15,6 +15,7 @@
 pub mod advanced;
 pub mod batch;
 pub mod change;
+pub mod claim_safety;
 pub mod context_pack;
 pub mod explain;
 pub mod policy;
