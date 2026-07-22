@@ -5105,7 +5105,7 @@ mod tests {
                 FirstSliceBudget::default().reduce_source_max_selectors(1),
                 &cancellation,
             ),
-            Err(FirstSliceError::Query)
+            Err(FirstSliceError::BudgetExceeded)
         ));
     }
 
