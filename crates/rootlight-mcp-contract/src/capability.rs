@@ -1739,7 +1739,7 @@ mod tests {
             serde_json::json!({
                 "mode": "selectable",
                 "wireField": "response_profile",
-                "supported": ["compact"],
+                "supported": ["compact", "standard", "evidence"],
                 "default": "compact"
             })
         );
