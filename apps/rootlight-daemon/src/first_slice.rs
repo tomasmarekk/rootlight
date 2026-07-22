@@ -3910,7 +3910,7 @@ mod tests {
         let resolved = located.data.hits[0].symbol;
         let absent = SymbolId::from_bytes([0xff; 20]);
         assert_ne!(resolved, absent);
-        let mut requested = vec![resolved, absent];
+        let mut requested = [resolved, absent];
         requested.sort_unstable();
         let context = FirstSliceIpcContext {
             client_instance_id: ClientInstanceId::from_bytes([7; 16]),
