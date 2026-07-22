@@ -13,6 +13,9 @@ use rootlight_mcp_contract::context::{QueryAstNode, QueryPredicate, QueryValue};
 /// Maximum AST depth accepted by the validator.
 pub const MAX_AST_DEPTH: usize = 5;
 
+/// Maximum number of operators in one accepted AST.
+pub const MAX_AST_NODES: usize = 31;
+
 /// Maximum rows a single advanced query may return.
 pub const MAX_ADVANCED_ROWS: usize = 1_000;
 
@@ -24,6 +27,18 @@ pub const MAX_ESTIMATED_COST: u64 = 1_000_000;
 
 /// Maximum encoded size of the advanced-query parameter map.
 pub const MAX_PARAMETER_BYTES: usize = 64 * 1024;
+
+const MAX_PREDICATE_DEPTH: usize = 5;
+const MAX_PREDICATE_NODES: usize = 256;
+const MAX_BOOLEAN_PREDICATES: usize = 16;
+const MAX_IN_VALUES: usize = 256;
+const MAX_PROJECT_COLUMNS: usize = 64;
+const MAX_GROUP_COLUMNS: usize = 16;
+const MAX_AGGREGATIONS: usize = 16;
+const MAX_SORT_KEYS: usize = 8;
+const MAX_FIELD_BYTES: usize = 256;
+const MAX_TEXT_BYTES: usize = 4_096;
+const MAX_TRAVERSE_DEPTH: u8 = 5;
 
 /// Errors returned during advanced query validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -296,6 +311,7 @@ impl AdvancedQueryPlan {
         max_traversal: usize,
         cost_limit: Option<u64>,
     ) -> Result<Self, AdvancedQueryError> {
+        validate_ast_structure(query)?;
         let mut operators = Vec::new();
         let depth = derive_query_operators(query, &mut operators);
         let plan = Self::validate(&operators, max_rows, max_traversal, depth)?;
@@ -323,7 +339,7 @@ impl AdvancedQueryPlan {
         if operators.is_empty() {
             return Err(AdvancedQueryError::Malformed);
         }
-        if max_rows > MAX_ADVANCED_ROWS {
+        if max_rows == 0 || max_rows > MAX_ADVANCED_ROWS {
             return Err(AdvancedQueryError::RowLimitExceeded);
         }
         if max_traversal > MAX_ADVANCED_TRAVERSAL {
@@ -361,6 +377,174 @@ impl AdvancedQueryPlan {
             self.estimated_cost
         )
     }
+}
+
+fn validate_ast_structure(query: &QueryAstNode) -> Result<(), AdvancedQueryError> {
+    let mut ast_nodes = 0;
+    validate_ast_node(query, 1, &mut ast_nodes)
+}
+
+fn validate_ast_node(
+    node: &QueryAstNode,
+    depth: usize,
+    ast_nodes: &mut usize,
+) -> Result<(), AdvancedQueryError> {
+    if depth > MAX_AST_DEPTH {
+        return Err(AdvancedQueryError::DepthExceeded);
+    }
+    *ast_nodes = ast_nodes.saturating_add(1);
+    if *ast_nodes > MAX_AST_NODES {
+        return Err(AdvancedQueryError::Malformed);
+    }
+
+    match node {
+        QueryAstNode::Scan { filter, .. } => {
+            if let Some(predicate) = filter {
+                validate_predicate_structure(predicate)?;
+            }
+        }
+        QueryAstNode::Filter { input, predicate } => {
+            validate_ast_node(input, depth.saturating_add(1), ast_nodes)?;
+            validate_predicate_structure(predicate)?;
+        }
+        QueryAstNode::Project { input, columns } => {
+            validate_ast_node(input, depth.saturating_add(1), ast_nodes)?;
+            validate_fields(columns, 1, MAX_PROJECT_COLUMNS)?;
+        }
+        QueryAstNode::Join { left, right, on } => {
+            validate_ast_node(left, depth.saturating_add(1), ast_nodes)?;
+            validate_ast_node(right, depth.saturating_add(1), ast_nodes)?;
+            validate_field(on)?;
+        }
+        QueryAstNode::Aggregate {
+            input,
+            group_by,
+            aggregations,
+        } => {
+            validate_ast_node(input, depth.saturating_add(1), ast_nodes)?;
+            validate_fields(group_by, 0, MAX_GROUP_COLUMNS)?;
+            if aggregations.is_empty() || aggregations.len() > MAX_AGGREGATIONS {
+                return Err(AdvancedQueryError::Malformed);
+            }
+            for aggregation in aggregations {
+                match aggregation {
+                    rootlight_mcp_contract::context::AggregateFunction::Count => {}
+                    rootlight_mcp_contract::context::AggregateFunction::Sum { field }
+                    | rootlight_mcp_contract::context::AggregateFunction::Min { field }
+                    | rootlight_mcp_contract::context::AggregateFunction::Max { field } => {
+                        validate_field(field)?;
+                    }
+                }
+            }
+        }
+        QueryAstNode::Traverse { max_depth, .. } => {
+            if max_depth.is_some_and(|depth| depth == 0 || depth > MAX_TRAVERSE_DEPTH) {
+                return Err(AdvancedQueryError::TraversalLimitExceeded);
+            }
+        }
+        QueryAstNode::Sort { input, by } => {
+            validate_ast_node(input, depth.saturating_add(1), ast_nodes)?;
+            if by.is_empty() || by.len() > MAX_SORT_KEYS {
+                return Err(AdvancedQueryError::Malformed);
+            }
+            for key in by {
+                validate_field(&key.field)?;
+            }
+        }
+        QueryAstNode::Limit { input, max_rows } => {
+            validate_ast_node(input, depth.saturating_add(1), ast_nodes)?;
+            if *max_rows == 0 || usize::from(*max_rows) > MAX_ADVANCED_ROWS {
+                return Err(AdvancedQueryError::RowLimitExceeded);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_predicate_structure(predicate: &QueryPredicate) -> Result<(), AdvancedQueryError> {
+    let mut predicate_nodes = 0;
+    validate_predicate_node(predicate, 1, &mut predicate_nodes)
+}
+
+fn validate_predicate_node(
+    predicate: &QueryPredicate,
+    depth: usize,
+    predicate_nodes: &mut usize,
+) -> Result<(), AdvancedQueryError> {
+    if depth > MAX_PREDICATE_DEPTH {
+        return Err(AdvancedQueryError::DepthExceeded);
+    }
+    *predicate_nodes = predicate_nodes.saturating_add(1);
+    if *predicate_nodes > MAX_PREDICATE_NODES {
+        return Err(AdvancedQueryError::Malformed);
+    }
+
+    match predicate {
+        QueryPredicate::Equals { field, value } | QueryPredicate::NotEquals { field, value } => {
+            validate_field(field)?;
+            validate_query_value(value)
+        }
+        QueryPredicate::In { field, values } => {
+            validate_field(field)?;
+            if values.is_empty() || values.len() > MAX_IN_VALUES {
+                return Err(AdvancedQueryError::Malformed);
+            }
+            for value in values {
+                validate_query_value(value)?;
+            }
+            Ok(())
+        }
+        QueryPredicate::And { predicates } | QueryPredicate::Or { predicates } => {
+            if predicates.is_empty() || predicates.len() > MAX_BOOLEAN_PREDICATES {
+                return Err(AdvancedQueryError::Malformed);
+            }
+            for predicate in predicates {
+                validate_predicate_node(predicate, depth.saturating_add(1), predicate_nodes)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_query_value(value: &QueryValue) -> Result<(), AdvancedQueryError> {
+    match value {
+        QueryValue::Text(value) if value.is_empty() || value.len() > MAX_TEXT_BYTES => {
+            Err(AdvancedQueryError::Malformed)
+        }
+        QueryValue::Parameter { name } if !valid_parameter_name(name) => {
+            Err(AdvancedQueryError::InvalidParameter)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_fields(
+    fields: &[String],
+    minimum: usize,
+    maximum: usize,
+) -> Result<(), AdvancedQueryError> {
+    if fields.len() < minimum || fields.len() > maximum {
+        return Err(AdvancedQueryError::Malformed);
+    }
+    for field in fields {
+        validate_field(field)?;
+    }
+    Ok(())
+}
+
+fn validate_field(field: &str) -> Result<(), AdvancedQueryError> {
+    if field.is_empty() || field.len() > MAX_FIELD_BYTES {
+        return Err(AdvancedQueryError::Malformed);
+    }
+    let mut bytes = field.bytes();
+    if !bytes
+        .next()
+        .is_some_and(|byte| byte == b'_' || byte.is_ascii_alphabetic())
+        || !bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+    {
+        return Err(AdvancedQueryError::Malformed);
+    }
+    Ok(())
 }
 
 fn derive_query_operators(node: &QueryAstNode, operators: &mut Vec<QueryOperator>) -> usize {
@@ -413,12 +597,175 @@ mod tests {
 
     use super::{
         AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_ROWS, MAX_ADVANCED_TRAVERSAL,
-        MAX_AST_DEPTH, MAX_ESTIMATED_COST, QueryOperator, bind_query_parameters,
+        MAX_AST_DEPTH, MAX_AST_NODES, MAX_ESTIMATED_COST, MAX_PREDICATE_NODES, QueryOperator,
+        bind_query_parameters,
     };
+    use proptest::{
+        prelude::*,
+        test_runner::{RngAlgorithm, RngSeed},
+    };
+    use rootlight_ids::SymbolId;
     use rootlight_mcp_contract::{
-        context::{QueryAstNode, QueryPredicate, QueryValue},
+        context::{
+            AggregateFunction, QueryAstNode, QueryPredicate, QueryValue, RelationKind, SortKey,
+            TraverseDirection,
+        },
         vertical::EntityKind,
     };
+
+    const GENERATED_CASES: u32 = 96;
+    const GENERATED_SEED: u64 = 202_607_220_040;
+
+    fn entity_kind() -> impl Strategy<Value = EntityKind> {
+        prop_oneof![
+            Just(EntityKind::File),
+            Just(EntityKind::Module),
+            Just(EntityKind::Type),
+            Just(EntityKind::Function),
+            Just(EntityKind::Method),
+            Just(EntityKind::Field),
+            Just(EntityKind::Constant),
+            Just(EntityKind::Variable),
+            Just(EntityKind::Configuration),
+        ]
+    }
+
+    fn field_name() -> impl Strategy<Value = String> {
+        prop::sample::select(vec!["id", "kind", "name", "path"]).prop_map(str::to_owned)
+    }
+
+    fn scalar_value() -> impl Strategy<Value = QueryValue> {
+        prop_oneof![
+            "[a-zA-Z0-9_]{1,24}".prop_map(QueryValue::Text),
+            any::<i64>().prop_map(QueryValue::Integer),
+            any::<bool>().prop_map(QueryValue::Boolean),
+        ]
+    }
+
+    fn simple_predicate() -> impl Strategy<Value = QueryPredicate> {
+        (field_name(), scalar_value())
+            .prop_map(|(field, value)| QueryPredicate::Equals { field, value })
+    }
+
+    fn valid_ast() -> impl Strategy<Value = QueryAstNode> {
+        let leaf = prop_oneof![
+            entity_kind().prop_map(|entity| QueryAstNode::Scan {
+                entity,
+                filter: None,
+            }),
+            any::<[u8; 20]>().prop_map(|bytes| QueryAstNode::Traverse {
+                seed: SymbolId::from_bytes(bytes),
+                relation: RelationKind::Calls,
+                direction: TraverseDirection::Outbound,
+                max_depth: Some(1),
+            }),
+        ];
+
+        leaf.prop_recursive(
+            4,
+            u32::try_from(MAX_AST_NODES).expect("AST node limit fits u32"),
+            2,
+            |inner| {
+                prop_oneof![
+                    (inner.clone(), simple_predicate()).prop_map(|(input, predicate)| {
+                        QueryAstNode::Filter {
+                            input: Box::new(input),
+                            predicate,
+                        }
+                    }),
+                    (inner.clone(), field_name()).prop_map(|(input, column)| {
+                        QueryAstNode::Project {
+                            input: Box::new(input),
+                            columns: vec![column],
+                        }
+                    }),
+                    inner.clone().prop_map(|input| QueryAstNode::Aggregate {
+                        input: Box::new(input),
+                        group_by: vec!["kind".to_owned()],
+                        aggregations: vec![AggregateFunction::Count],
+                    }),
+                    (inner.clone(), field_name(), any::<bool>()).prop_map(
+                        |(input, field, descending)| QueryAstNode::Sort {
+                            input: Box::new(input),
+                            by: vec![SortKey { field, descending }],
+                        },
+                    ),
+                    (inner.clone(), 1_u16..=1_000).prop_map(|(input, max_rows)| {
+                        QueryAstNode::Limit {
+                            input: Box::new(input),
+                            max_rows,
+                        }
+                    }),
+                    (inner.clone(), inner, field_name()).prop_map(|(left, right, on)| {
+                        QueryAstNode::Join {
+                            left: Box::new(left),
+                            right: Box::new(right),
+                            on,
+                        }
+                    }),
+                ]
+            },
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: GENERATED_CASES,
+            max_shrink_iters: 512,
+            failure_persistence: None,
+            rng_algorithm: RngAlgorithm::ChaCha,
+            rng_seed: RngSeed::Fixed(GENERATED_SEED),
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn generated_valid_asts_round_trip_to_the_same_plan(query in valid_ast()) {
+            let encoded = serde_json::to_vec(&query).expect("generated AST serializes");
+            let decoded: QueryAstNode =
+                serde_json::from_slice(&encoded).expect("generated AST deserializes");
+            let first = AdvancedQueryPlan::from_ast(
+                &query,
+                100,
+                MAX_ADVANCED_TRAVERSAL,
+                None,
+            ).expect("generated AST is structurally valid");
+            let replay = AdvancedQueryPlan::from_ast(
+                &decoded,
+                100,
+                MAX_ADVANCED_TRAVERSAL,
+                None,
+            ).expect("round-tripped AST is structurally valid");
+
+            prop_assert_eq!(decoded, query);
+            prop_assert_eq!(replay, first);
+            prop_assert!(encoded.len() <= 32 * 1024);
+        }
+
+        #[test]
+        fn bounded_deserializer_corpus_never_escapes_the_typed_ast(
+            bytes in prop::collection::vec(any::<u8>(), 0..=512),
+        ) {
+            if let Ok(query) = serde_json::from_slice::<QueryAstNode>(&bytes) {
+                let outcome = AdvancedQueryPlan::from_ast(
+                    &query,
+                    100,
+                    MAX_ADVANCED_TRAVERSAL,
+                    None,
+                );
+                prop_assert!(outcome.is_ok() || matches!(
+                    outcome,
+                    Err(
+                        AdvancedQueryError::DepthExceeded
+                            | AdvancedQueryError::Malformed
+                            | AdvancedQueryError::RowLimitExceeded
+                            | AdvancedQueryError::TraversalLimitExceeded
+                            | AdvancedQueryError::InvalidParameter
+                            | AdvancedQueryError::CostExceeded
+                    )
+                ));
+            }
+        }
+    }
 
     #[test]
     fn simple_scan_with_limit_is_valid() {
@@ -538,6 +885,279 @@ mod tests {
             bind_query_parameters(&parameter_query("needle"), Some(&wrong_type)),
             Err(AdvancedQueryError::TypeMismatch)
         );
+    }
+
+    #[test]
+    fn parameter_payloads_cannot_inject_fields_or_operators() {
+        for payload in [
+            "name; DROP TABLE symbols",
+            "MATCH (n) RETURN n",
+            "$(shutdown -h now)",
+            ".*",
+            "{\"op\":\"join\",\"on\":\"id\"}",
+        ] {
+            let parameters =
+                BTreeMap::from([("needle".to_owned(), QueryValue::Text(payload.to_owned()))]);
+            let bound = bind_query_parameters(&parameter_query("needle"), Some(&parameters))
+                .expect("executable-looking text remains a typed value");
+            let plan = AdvancedQueryPlan::from_ast(&bound, 100, MAX_ADVANCED_TRAVERSAL, None)
+                .expect("typed text is not interpreted as query structure");
+
+            assert_eq!(plan.operators, vec![QueryOperator::Scan]);
+            assert!(matches!(
+                bound,
+                QueryAstNode::Scan {
+                    filter: Some(predicate),
+                    ..
+                } if matches!(
+                    &*predicate,
+                    QueryPredicate::Equals {
+                        value: QueryValue::Text(value),
+                        ..
+                    } if value == payload
+                )
+            ));
+        }
+    }
+
+    #[test]
+    fn executable_language_and_unknown_grammar_corpus_is_rejected() {
+        let corpus = [
+            r#""SELECT * FROM symbols""#,
+            r#"{"op":"sql","query":"SELECT * FROM symbols"}"#,
+            r#"{"op":"cypher","query":"MATCH (n) RETURN n"}"#,
+            r#"{"op":"shell","command":"rm -rf /"}"#,
+            r#"{"op":"eval","code":"loop {}"}"#,
+            r#"{"op":"scan","entity":"function","filter":{"pred":"regex","field":"name","pattern":".*.*"}}"#,
+            r#"{"op":"scan","entity":"function","filter":{"pred":"execute","field":"name","value":{"text":"x"}}}"#,
+            r#"{"op":"scan","entity":"function","filter":{"pred":"equals","field":{"parameter":"field"},"value":{"text":"x"}}}"#,
+        ];
+
+        for input in corpus {
+            assert!(
+                serde_json::from_str::<QueryAstNode>(input).is_err(),
+                "closed AST accepted hostile grammar: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn structural_collection_limits_are_enforced_at_the_boundary() {
+        let scan = || QueryAstNode::Scan {
+            entity: EntityKind::Function,
+            filter: None,
+        };
+        let field = "a".to_owned();
+
+        for columns in [vec![field.clone()], vec![field.clone(); 64]] {
+            let query = QueryAstNode::Project {
+                input: Box::new(scan()),
+                columns,
+            };
+            assert!(AdvancedQueryPlan::from_ast(&query, 100, MAX_ADVANCED_TRAVERSAL, None).is_ok());
+        }
+        for columns in [Vec::new(), vec![field.clone(); 65]] {
+            let query = QueryAstNode::Project {
+                input: Box::new(scan()),
+                columns,
+            };
+            assert_eq!(
+                AdvancedQueryPlan::from_ast(&query, 100, MAX_ADVANCED_TRAVERSAL, None),
+                Err(AdvancedQueryError::Malformed)
+            );
+        }
+
+        for key_count in [1, 8] {
+            let query = QueryAstNode::Sort {
+                input: Box::new(scan()),
+                by: vec![
+                    SortKey {
+                        field: field.clone(),
+                        descending: false,
+                    };
+                    key_count
+                ],
+            };
+            assert!(AdvancedQueryPlan::from_ast(&query, 100, MAX_ADVANCED_TRAVERSAL, None).is_ok());
+        }
+        for key_count in [0, 9] {
+            let query = QueryAstNode::Sort {
+                input: Box::new(scan()),
+                by: vec![
+                    SortKey {
+                        field: field.clone(),
+                        descending: false,
+                    };
+                    key_count
+                ],
+            };
+            assert_eq!(
+                AdvancedQueryPlan::from_ast(&query, 100, MAX_ADVANCED_TRAVERSAL, None),
+                Err(AdvancedQueryError::Malformed)
+            );
+        }
+
+        for aggregation_count in [1, 16] {
+            let query = QueryAstNode::Aggregate {
+                input: Box::new(scan()),
+                group_by: vec![field.clone(); 16],
+                aggregations: vec![AggregateFunction::Count; aggregation_count],
+            };
+            assert!(AdvancedQueryPlan::from_ast(&query, 100, MAX_ADVANCED_TRAVERSAL, None).is_ok());
+        }
+        for aggregation_count in [0, 17] {
+            let query = QueryAstNode::Aggregate {
+                input: Box::new(scan()),
+                group_by: Vec::new(),
+                aggregations: vec![AggregateFunction::Count; aggregation_count],
+            };
+            assert_eq!(
+                AdvancedQueryPlan::from_ast(&query, 100, MAX_ADVANCED_TRAVERSAL, None),
+                Err(AdvancedQueryError::Malformed)
+            );
+        }
+        let excessive_groups = QueryAstNode::Aggregate {
+            input: Box::new(scan()),
+            group_by: vec![field; 17],
+            aggregations: vec![AggregateFunction::Count],
+        };
+        assert_eq!(
+            AdvancedQueryPlan::from_ast(&excessive_groups, 100, MAX_ADVANCED_TRAVERSAL, None),
+            Err(AdvancedQueryError::Malformed)
+        );
+    }
+
+    #[test]
+    fn predicate_limits_are_enforced_at_below_and_above_boundaries() {
+        fn equals() -> QueryPredicate {
+            QueryPredicate::Equals {
+                field: "name".to_owned(),
+                value: QueryValue::Text("x".to_owned()),
+            }
+        }
+        fn scan_with(predicate: QueryPredicate) -> QueryAstNode {
+            QueryAstNode::Scan {
+                entity: EntityKind::Function,
+                filter: Some(Box::new(predicate)),
+            }
+        }
+
+        for value_count in [1, 256] {
+            let query = scan_with(QueryPredicate::In {
+                field: "name".to_owned(),
+                values: vec![QueryValue::Text("x".to_owned()); value_count],
+            });
+            assert!(AdvancedQueryPlan::from_ast(&query, 100, MAX_ADVANCED_TRAVERSAL, None).is_ok());
+        }
+        for value_count in [0, 257] {
+            let query = scan_with(QueryPredicate::In {
+                field: "name".to_owned(),
+                values: vec![QueryValue::Text("x".to_owned()); value_count],
+            });
+            assert_eq!(
+                AdvancedQueryPlan::from_ast(&query, 100, MAX_ADVANCED_TRAVERSAL, None),
+                Err(AdvancedQueryError::Malformed)
+            );
+        }
+
+        let exact_node_limit = QueryPredicate::And {
+            predicates: (0..15)
+                .map(|_| QueryPredicate::And {
+                    predicates: vec![equals(); 16],
+                })
+                .collect(),
+        };
+        assert_eq!(1 + 15 * 17, MAX_PREDICATE_NODES);
+        assert!(
+            AdvancedQueryPlan::from_ast(
+                &scan_with(exact_node_limit),
+                100,
+                MAX_ADVANCED_TRAVERSAL,
+                None
+            )
+            .is_ok()
+        );
+
+        let excessive_nodes = QueryPredicate::And {
+            predicates: (0..15)
+                .map(|_| QueryPredicate::And {
+                    predicates: vec![equals(); 16],
+                })
+                .chain(std::iter::once(equals()))
+                .collect(),
+        };
+        assert_eq!(
+            AdvancedQueryPlan::from_ast(
+                &scan_with(excessive_nodes),
+                100,
+                MAX_ADVANCED_TRAVERSAL,
+                None
+            ),
+            Err(AdvancedQueryError::Malformed)
+        );
+    }
+
+    #[test]
+    fn embedded_row_and_traversal_limits_are_runtime_validated() {
+        let scan = || QueryAstNode::Scan {
+            entity: EntityKind::Function,
+            filter: None,
+        };
+        for max_rows in [1, u16::try_from(MAX_ADVANCED_ROWS).expect("limit fits u16")] {
+            let query = QueryAstNode::Limit {
+                input: Box::new(scan()),
+                max_rows,
+            };
+            assert!(
+                AdvancedQueryPlan::from_ast(
+                    &query,
+                    MAX_ADVANCED_ROWS,
+                    MAX_ADVANCED_TRAVERSAL,
+                    None
+                )
+                .is_ok()
+            );
+        }
+        for max_rows in [
+            0,
+            u16::try_from(MAX_ADVANCED_ROWS + 1).expect("limit fits u16"),
+        ] {
+            let query = QueryAstNode::Limit {
+                input: Box::new(scan()),
+                max_rows,
+            };
+            assert_eq!(
+                AdvancedQueryPlan::from_ast(
+                    &query,
+                    MAX_ADVANCED_ROWS,
+                    MAX_ADVANCED_TRAVERSAL,
+                    None
+                ),
+                Err(AdvancedQueryError::RowLimitExceeded)
+            );
+        }
+
+        for max_depth in [Some(1), Some(5), None] {
+            let query = QueryAstNode::Traverse {
+                seed: SymbolId::from_bytes([0; 20]),
+                relation: RelationKind::Calls,
+                direction: TraverseDirection::Outbound,
+                max_depth,
+            };
+            assert!(AdvancedQueryPlan::from_ast(&query, 100, MAX_ADVANCED_TRAVERSAL, None).is_ok());
+        }
+        for max_depth in [Some(0), Some(6)] {
+            let query = QueryAstNode::Traverse {
+                seed: SymbolId::from_bytes([0; 20]),
+                relation: RelationKind::Calls,
+                direction: TraverseDirection::Outbound,
+                max_depth,
+            };
+            assert_eq!(
+                AdvancedQueryPlan::from_ast(&query, 100, MAX_ADVANCED_TRAVERSAL, None),
+                Err(AdvancedQueryError::TraversalLimitExceeded)
+            );
+        }
     }
 
     #[test]
