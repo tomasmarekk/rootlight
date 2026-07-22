@@ -1075,8 +1075,11 @@ fn context_pack_budget_exhaustion_is_a_checked_public_error() {
     let unsupported = PublicError::builder(ErrorCode::UnsupportedCapability, UNSUPPORTED_MESSAGE)
         .build()
         .expect("static unsupported error is valid");
-    let error =
-        map_context_pack_service_error(ContextPackServiceError::BudgetExceeded, &unsupported);
+    let error = map_context_pack_service_error(
+        ContextPackServiceError::BudgetExceeded,
+        &unsupported,
+        &unsupported,
+    );
 
     assert_canonical_budget_error(
         error
