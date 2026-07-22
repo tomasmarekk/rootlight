@@ -873,6 +873,50 @@ fn analytical_budget_lowers_every_public_resource_dimension() {
 }
 
 #[test]
+fn context_evidence_options_never_widen_parent_reservation() {
+    let reservation = BudgetCharge {
+        rows: 23,
+        results: 7,
+        tokens: 211,
+        actual_tokens: 0,
+        source_bytes: 307,
+        traversal_facts: 11,
+        depth: 3,
+        paths: 5,
+        json_bytes: 4_096,
+        memory_bytes: 8_192,
+        time_ms: 17,
+    };
+    let options = context_evidence::context_evidence_options(reservation)
+        .expect("complete parent reservation is valid");
+    let transported = options
+        .effective_budget()
+        .expect("child request carries an explicit budget")
+        .limits();
+
+    assert_eq!(transported.rows, reservation.rows);
+    assert_eq!(transported.edges, reservation.traversal_facts);
+    assert_eq!(transported.results, reservation.results);
+    assert_eq!(transported.source_bytes, reservation.source_bytes);
+    assert_eq!(transported.json_bytes, reservation.json_bytes);
+    assert_eq!(transported.estimated_tokens, reservation.tokens);
+    assert_eq!(transported.memory_bytes, reservation.memory_bytes);
+    assert_eq!(
+        transported.duration,
+        Duration::from_millis(reservation.time_ms)
+    );
+    assert_eq!(transported.depth, Some(reservation.depth));
+    assert_eq!(transported.paths, Some(reservation.paths));
+    assert_eq!(
+        options
+            .timeout()
+            .expect("child request carries the same deadline budget")
+            .duration(),
+        Duration::from_millis(reservation.time_ms)
+    );
+}
+
+#[test]
 fn omitted_analytical_budget_transports_the_complete_server_ceiling() {
     let budget = AnalyticalBudget::new(None).expect("server ceiling is representable");
     assert_eq!(budget.limits, BudgetLimits::server_ceiling());

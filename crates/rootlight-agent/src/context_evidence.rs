@@ -226,6 +226,10 @@ impl ProviderInvocationId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceProviderInvocation {
     id: ProviderInvocationId,
+    repository: RepositoryId,
+    generation: GenerationId,
+    objective: ContextPackObjective,
+    task: String,
     provider: EvidenceProvider,
     role: EvidenceRole,
     anchors: Vec<EvidenceAnchor>,
@@ -238,6 +242,30 @@ impl EvidenceProviderInvocation {
     #[must_use]
     pub const fn id(&self) -> &ProviderInvocationId {
         &self.id
+    }
+
+    /// Returns the exact repository identity.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the exact generation identity.
+    #[must_use]
+    pub const fn generation(&self) -> GenerationId {
+        self.generation
+    }
+
+    /// Returns the canonical task objective.
+    #[must_use]
+    pub const fn objective(&self) -> ContextPackObjective {
+        self.objective
+    }
+
+    /// Returns the normalized source-free task text.
+    #[must_use]
+    pub fn task(&self) -> &str {
+        &self.task
     }
 
     /// Returns the selected provider.
@@ -1242,6 +1270,10 @@ fn push_invocation(
     let id = provider_invocation_id(request, provider, role, anchors);
     invocations.push(EvidenceProviderInvocation {
         id,
+        repository: request.repository(),
+        generation: request.generation(),
+        objective: request.objective(),
+        task: request.task().to_owned(),
         provider,
         role,
         anchors: anchors.to_vec(),
@@ -1278,13 +1310,13 @@ fn provider_reservation(provider: EvidenceProvider, max_candidates: u16) -> Budg
     };
     let source_bytes = match provider {
         EvidenceProvider::Source | EvidenceProvider::Implementation => results * 2_048,
-        _ => 0,
+        _ => results * 256,
     };
     let traversal_facts = match provider {
         EvidenceProvider::Relationships
         | EvidenceProvider::Architecture
         | EvidenceProvider::ChangeImpact => results * 8,
-        _ => 0,
+        _ => results,
     };
     BudgetCharge {
         rows: results.saturating_mul(8),
@@ -1294,6 +1326,7 @@ fn provider_reservation(provider: EvidenceProvider, max_candidates: u16) -> Budg
         traversal_facts,
         depth: 4,
         paths: results,
+        json_bytes: results.saturating_mul(4_096),
         memory_bytes: results.saturating_mul(4_096),
         time_ms: 2_000,
         ..BudgetCharge::default()

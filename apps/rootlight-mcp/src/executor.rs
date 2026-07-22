@@ -20,10 +20,15 @@ use rootlight_agent::{
     },
     change::{
         PlanChangeError, PlanChangePort, PlanChangePortOutput, PlanChangeRequest, PlanChangeResult,
-        PlanChangeService, PlanChangeServiceError, PlanImpactResult,
+        PlanChangeService, PlanChangeServiceError, PlanImpactResult, normalize_plan_change,
+    },
+    context_evidence::{
+        ContextEvidenceCallContext, ContextEvidencePort, ContextEvidencePortError,
+        ContextEvidencePortErrorKind, EvidenceAnchor, EvidenceCandidateDraft, EvidenceProvenance,
+        EvidenceProvider, EvidenceProviderInvocation, EvidenceProviderOutput,
     },
     context_pack::{ContextPackService, ContextPackServiceError},
-    policy::{BudgetLimits, is_compact_profile},
+    policy::{BudgetCharge, BudgetLimits, is_compact_profile},
     port::{
         AgentCallContext, AgentIdentityRequest, AgentPortError, AgentPortFuture,
         AgentResolutionContext, AgentResolvedIdentity, AgentToolPort, AgentToolRequest,
@@ -40,9 +45,10 @@ use rootlight_mcp_contract::change::{
     ArchitectureDelta, BreakingCandidate, ChangeClassification, ChangeImpactData,
     ChangeImpactInput, ChangePlanStep, CompareChangeKind, ContextPackRequest, HistoryCompareData,
     HistoryCompareInput, ImpactEntry, ImpactGroup, ImpactRiskSummary, LineageMatch, MatchedStates,
-    PlanChangeInput, PlanDecision, RankedTest, RelationPolicy, ResolvedChange, RevisionSelector,
-    RiskLevel, SemanticChange, SemanticChangeKind, TestCandidate, TestCoverageStrategy, TestGap,
-    TestKind, TestsSelectData, TestsSelectInput,
+    PlanChangeInput, PlanDecision, PlanObjective, PlanSymbolTarget, PlanTargetSelector, RankedTest,
+    RelationPolicy, ResolvedChange, RevisionSelector, RiskLevel, SemanticChange,
+    SemanticChangeKind, TestCandidate, TestCoverageStrategy, TestGap, TestKind, TestsSelectData,
+    TestsSelectInput,
 };
 use rootlight_mcp_contract::intent::{
     ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesData, ArchitectureCyclesInput,
@@ -7265,6 +7271,8 @@ fn map_port_error(error: ClientPortError) -> ToolExecutionError {
 const fn internal(failure: ToolExecutionFailure) -> ToolExecutionError {
     ToolExecutionError::internal(failure)
 }
+
+mod context_evidence;
 
 #[cfg(test)]
 mod tests;

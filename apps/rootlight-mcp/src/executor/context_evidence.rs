@@ -1,0 +1,1085 @@
+//! Production adapters for typed context-pack evidence providers.
+
+use super::*;
+
+impl<P> ContextEvidencePort<RequestCancellation> for McpAgentToolPort<P>
+where
+    P: FirstSliceClientPort,
+{
+    fn retrieve(
+        &self,
+        invocation: EvidenceProviderInvocation,
+        context: ContextEvidenceCallContext<RequestCancellation>,
+    ) -> AgentPortFuture<Result<EvidenceProviderOutput, ContextEvidencePortError>> {
+        let port = Arc::clone(&self.port);
+        let deadline = context.deadline();
+        let reservation = context.reservation();
+        let cancellation = context.cancellation().clone();
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(context_evidence_error(
+                    ContextEvidencePortErrorKind::Cancelled,
+                    BudgetCharge::default(),
+                ));
+            }
+            let operation =
+                retrieve_context_evidence(port, invocation, reservation, cancellation.clone());
+            let mut cancellation_wait = cancellation.clone();
+            tokio::select! {
+                biased;
+                _ = cancellation_wait.cancelled() => Err(context_evidence_error(
+                    ContextEvidencePortErrorKind::Cancelled,
+                    BudgetCharge::default(),
+                )),
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    Err(context_evidence_error(
+                        ContextEvidencePortErrorKind::DeadlineExceeded,
+                        BudgetCharge::default(),
+                    ))
+                }
+                response = operation => response,
+            }
+        })
+    }
+}
+
+async fn retrieve_context_evidence<P>(
+    port: Arc<P>,
+    invocation: EvidenceProviderInvocation,
+    reservation: BudgetCharge,
+    cancellation: RequestCancellation,
+) -> Result<EvidenceProviderOutput, ContextEvidencePortError>
+where
+    P: FirstSliceClientPort,
+{
+    let options = context_evidence_options(reservation)?;
+    match invocation.provider() {
+        EvidenceProvider::Locate => {
+            retrieve_located_evidence(port, invocation, options, cancellation).await
+        }
+        EvidenceProvider::Definition => {
+            retrieve_definition_evidence(port, invocation, options, cancellation).await
+        }
+        EvidenceProvider::Implementation | EvidenceProvider::Source => {
+            retrieve_source_evidence(port, invocation, options, cancellation).await
+        }
+        EvidenceProvider::Relationships => {
+            retrieve_relationship_evidence(port, invocation, options, cancellation).await
+        }
+        EvidenceProvider::Tests => {
+            retrieve_test_evidence(port, invocation, options, cancellation).await
+        }
+        EvidenceProvider::Architecture => {
+            retrieve_architecture_evidence(port, invocation, options, cancellation).await
+        }
+        EvidenceProvider::ChangeImpact => {
+            retrieve_change_evidence(port, invocation, options, cancellation).await
+        }
+        EvidenceProvider::History => {
+            retrieve_history_evidence(port, invocation, options, cancellation).await
+        }
+        EvidenceProvider::Planning => {
+            retrieve_planning_evidence(port, invocation, options, cancellation).await
+        }
+    }
+}
+
+pub(super) fn context_evidence_options(
+    reservation: BudgetCharge,
+) -> Result<client::RequestOptions, ContextEvidencePortError> {
+    AnalyticalBudget::from_limits(BudgetLimits::from_maximums(reservation))
+        .map(|value| value.options)
+        .map_err(|_| invalid_context_evidence_response())
+}
+
+const fn context_evidence_error(
+    kind: ContextEvidencePortErrorKind,
+    usage: BudgetCharge,
+) -> ContextEvidencePortError {
+    ContextEvidencePortError { kind, usage }
+}
+
+const fn invalid_context_evidence_response() -> ContextEvidencePortError {
+    context_evidence_error(
+        ContextEvidencePortErrorKind::InvalidResponse,
+        BudgetCharge {
+            rows: 0,
+            results: 0,
+            tokens: 0,
+            actual_tokens: 0,
+            source_bytes: 0,
+            traversal_facts: 0,
+            depth: 0,
+            paths: 0,
+            json_bytes: 0,
+            memory_bytes: 0,
+            time_ms: 0,
+        },
+    )
+}
+
+const fn unsupported_context_evidence() -> ContextEvidencePortError {
+    context_evidence_error(
+        ContextEvidencePortErrorKind::Unsupported,
+        BudgetCharge {
+            rows: 0,
+            results: 0,
+            tokens: 0,
+            actual_tokens: 0,
+            source_bytes: 0,
+            traversal_facts: 0,
+            depth: 0,
+            paths: 0,
+            json_bytes: 0,
+            memory_bytes: 0,
+            time_ms: 0,
+        },
+    )
+}
+
+fn map_context_evidence_client_error(error: ClientPortError) -> ContextEvidencePortError {
+    let kind = match error {
+        ClientPortError::Public(error) if error.code() == ErrorCode::UnsupportedCapability => {
+            ContextEvidencePortErrorKind::Unsupported
+        }
+        ClientPortError::InvalidResponse => ContextEvidencePortErrorKind::InvalidResponse,
+        ClientPortError::Public(_) | ClientPortError::Transport | ClientPortError::Executor => {
+            ContextEvidencePortErrorKind::Unavailable
+        }
+    };
+    context_evidence_error(kind, BudgetCharge::default())
+}
+
+fn context_evidence_completeness(
+    completeness: client::ResultCompleteness,
+) -> Result<ResultCompleteness, ContextEvidencePortError> {
+    contract_completeness(completeness).map_err(|_| invalid_context_evidence_response())
+}
+
+fn context_evidence_usage(context: &client::QueryContext) -> BudgetCharge {
+    BudgetCharge {
+        rows: context.usage.rows,
+        results: context.usage.results,
+        tokens: context.usage.estimated_tokens,
+        actual_tokens: 0,
+        source_bytes: context.usage.source_bytes,
+        traversal_facts: context.usage.edges,
+        depth: 0,
+        paths: 0,
+        json_bytes: context.usage.json_bytes,
+        memory_bytes: context.usage.memory_bytes.unwrap_or(0),
+        time_ms: context.usage.elapsed_micros.div_ceil(1_000),
+    }
+}
+
+fn add_context_evidence_usage(left: BudgetCharge, right: BudgetCharge) -> BudgetCharge {
+    BudgetCharge {
+        rows: left.rows.saturating_add(right.rows),
+        results: left.results.saturating_add(right.results),
+        tokens: left.tokens.saturating_add(right.tokens),
+        actual_tokens: left.actual_tokens.saturating_add(right.actual_tokens),
+        source_bytes: left.source_bytes.saturating_add(right.source_bytes),
+        traversal_facts: left.traversal_facts.saturating_add(right.traversal_facts),
+        depth: left.depth.max(right.depth),
+        paths: left.paths.saturating_add(right.paths),
+        json_bytes: left.json_bytes.saturating_add(right.json_bytes),
+        memory_bytes: left.memory_bytes.saturating_add(right.memory_bytes),
+        time_ms: left.time_ms.max(right.time_ms),
+    }
+}
+
+fn merge_context_evidence_completeness(
+    left: ResultCompleteness,
+    right: ResultCompleteness,
+) -> Result<ResultCompleteness, ContextEvidencePortError> {
+    left.merge(&right)
+        .map_err(|_| invalid_context_evidence_response())
+}
+
+fn validate_context_evidence_identity(
+    invocation: &EvidenceProviderInvocation,
+    context: &client::QueryContext,
+) -> Result<(), ContextEvidencePortError> {
+    if context.repository != invocation.repository()
+        || context.generation != invocation.generation()
+        || context.parent_generation == Some(context.generation)
+    {
+        return Err(invalid_context_evidence_response());
+    }
+    Ok(())
+}
+
+fn make_context_evidence_output(
+    invocation: &EvidenceProviderInvocation,
+    candidates: Vec<EvidenceCandidateDraft>,
+    completeness: ResultCompleteness,
+    usage: BudgetCharge,
+) -> Result<EvidenceProviderOutput, ContextEvidencePortError> {
+    if candidates.len() > usize::from(invocation.max_candidates()) {
+        return Err(context_evidence_error(
+            ContextEvidencePortErrorKind::InvalidResponse,
+            usage,
+        ));
+    }
+    Ok(EvidenceProviderOutput {
+        repository: invocation.repository(),
+        generation: invocation.generation(),
+        invocation: invocation.id().clone(),
+        candidates,
+        completeness,
+        usage,
+    })
+}
+
+fn context_candidate_cost(tokens: usize, source_bytes: usize) -> BudgetCharge {
+    BudgetCharge {
+        results: 1,
+        tokens: u64::try_from(tokens.clamp(1, 32_000)).unwrap_or(32_000),
+        source_bytes: u64::try_from(source_bytes).unwrap_or(u64::MAX),
+        memory_bytes: u64::try_from(tokens.saturating_add(source_bytes)).unwrap_or(u64::MAX),
+        ..BudgetCharge::default()
+    }
+}
+
+fn context_source_refs(
+    references: &[client::SourceReference],
+) -> Result<Vec<SourceRef>, ContextEvidencePortError> {
+    if references.len() > rootlight_agent::context_evidence::MAX_CANDIDATE_LINKS {
+        return Err(invalid_context_evidence_response());
+    }
+    references
+        .iter()
+        .map(|reference| {
+            client_source_ref(reference).map_err(|_| invalid_context_evidence_response())
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+struct ResolvedEvidenceAnchors {
+    symbols: Vec<SymbolId>,
+    hits: Vec<client::LocateHit>,
+    completeness: ResultCompleteness,
+    usage: BudgetCharge,
+}
+
+async fn resolve_context_evidence_anchors<P>(
+    port: Arc<P>,
+    invocation: &EvidenceProviderInvocation,
+    options: client::RequestOptions,
+    cancellation: RequestCancellation,
+) -> Result<ResolvedEvidenceAnchors, ContextEvidencePortError>
+where
+    P: FirstSliceClientPort,
+{
+    let mut symbols = Vec::new();
+    let mut queries = Vec::new();
+    for anchor in invocation.anchors() {
+        match anchor {
+            EvidenceAnchor::Symbol(symbol) | EvidenceAnchor::Test(symbol) => {
+                symbols.push(*symbol);
+            }
+            EvidenceAnchor::Path(path) | EvidenceAnchor::Route(path) => {
+                queries.push(path.clone());
+            }
+            EvidenceAnchor::Change(value) | EvidenceAnchor::Plan(value) => {
+                if let Ok(symbol) = value.parse() {
+                    symbols.push(symbol);
+                }
+            }
+            EvidenceAnchor::Located(_) => {}
+        }
+    }
+    symbols.sort_unstable();
+    symbols.dedup();
+
+    let mut hits = Vec::new();
+    let mut completeness = ResultCompleteness::complete();
+    let mut usage = BudgetCharge::default();
+    let per_query = usize::from(invocation.max_candidates())
+        .div_ceil(queries.len().max(1))
+        .max(1);
+    let maximum_results = u32::try_from(per_query).unwrap_or(u32::MAX);
+    for query in queries {
+        let request = CodeLocatePortRequest {
+            repository: invocation.repository(),
+            generation: client::GenerationSelector::Generation(invocation.generation()),
+            query,
+            mode: LocateMode::Text,
+            maximum_results,
+            page_offset: 0,
+        };
+        let response = port
+            .code_locate(request, options, cancellation.clone())
+            .await
+            .map_err(map_context_evidence_client_error)?;
+        validate_context_evidence_identity(invocation, &response.result.context)?;
+        usage = add_context_evidence_usage(usage, context_evidence_usage(&response.result.context));
+        completeness = merge_context_evidence_completeness(
+            completeness,
+            context_evidence_completeness(response.result.execution_completeness.clone())?,
+        )?;
+        for hit in response.result.hits {
+            symbols.push(hit.symbol);
+            hits.push(hit);
+        }
+    }
+    symbols.sort_unstable();
+    symbols.dedup();
+    if symbols.len() > usize::from(invocation.max_candidates()) {
+        return Err(context_evidence_error(
+            ContextEvidencePortErrorKind::InvalidResponse,
+            usage,
+        ));
+    }
+    Ok(ResolvedEvidenceAnchors {
+        symbols,
+        hits,
+        completeness,
+        usage,
+    })
+}
+
+fn symbol_explain_request(
+    invocation: &EvidenceProviderInvocation,
+    symbols: Vec<SymbolId>,
+) -> SymbolExplainPortRequest {
+    SymbolExplainPortRequest {
+        repository: invocation.repository(),
+        generation: client::GenerationSelector::Generation(invocation.generation()),
+        symbols,
+        include_provenance: true,
+    }
+}
+
+async fn retrieve_located_evidence<P>(
+    port: Arc<P>,
+    invocation: EvidenceProviderInvocation,
+    options: client::RequestOptions,
+    cancellation: RequestCancellation,
+) -> Result<EvidenceProviderOutput, ContextEvidencePortError>
+where
+    P: FirstSliceClientPort,
+{
+    let resolved =
+        resolve_context_evidence_anchors(port, &invocation, options, cancellation).await?;
+    if resolved.hits.is_empty()
+        && invocation
+            .anchors()
+            .iter()
+            .any(|anchor| matches!(anchor, EvidenceAnchor::Located(_)))
+    {
+        return Err(context_evidence_error(
+            ContextEvidencePortErrorKind::Unsupported,
+            resolved.usage,
+        ));
+    }
+    let mut candidates = Vec::new();
+    for hit in resolved.hits {
+        let source_refs = match hit.source.as_ref() {
+            Some(source) => context_source_refs(std::slice::from_ref(source))?,
+            None => Vec::new(),
+        };
+        let tokens = hit
+            .identifier
+            .len()
+            .saturating_add(hit.qualified_name.len())
+            .saturating_add(hit.path.len());
+        candidates.push(EvidenceCandidateDraft {
+            repository: invocation.repository(),
+            generation: invocation.generation(),
+            invocation: invocation.id().clone(),
+            provider: invocation.provider(),
+            role: invocation.role(),
+            provenance: EvidenceProvenance::Graph,
+            symbol_id: Some(hit.symbol),
+            identity: hit.symbol.to_string(),
+            relevance: u16::try_from(hit.score.min(1_000)).unwrap_or(1_000),
+            confidence: u16::try_from(hit.score.min(1_000)).unwrap_or(1_000),
+            cost: context_candidate_cost(tokens, 0),
+            source_refs,
+            dependencies: Vec::new(),
+        });
+    }
+    make_context_evidence_output(
+        &invocation,
+        candidates,
+        resolved.completeness,
+        resolved.usage,
+    )
+}
+
+async fn retrieve_definition_evidence<P>(
+    port: Arc<P>,
+    invocation: EvidenceProviderInvocation,
+    options: client::RequestOptions,
+    cancellation: RequestCancellation,
+) -> Result<EvidenceProviderOutput, ContextEvidencePortError>
+where
+    P: FirstSliceClientPort,
+{
+    let resolved = resolve_context_evidence_anchors(
+        Arc::clone(&port),
+        &invocation,
+        options,
+        cancellation.clone(),
+    )
+    .await?;
+    if resolved.symbols.is_empty() {
+        return Err(context_evidence_error(
+            ContextEvidencePortErrorKind::Unsupported,
+            resolved.usage,
+        ));
+    }
+    let response = port
+        .symbol_explain(
+            symbol_explain_request(&invocation, resolved.symbols),
+            options,
+            cancellation,
+        )
+        .await
+        .map_err(map_context_evidence_client_error)?;
+    validate_context_evidence_identity(&invocation, &response.result.context)?;
+    let usage = add_context_evidence_usage(
+        resolved.usage,
+        context_evidence_usage(&response.result.context),
+    );
+    let completeness = merge_context_evidence_completeness(
+        resolved.completeness,
+        context_evidence_completeness(response.result.execution_completeness.clone())?,
+    )?;
+    let mut candidates = Vec::new();
+    for explanation in response.result.symbols {
+        let source_refs = context_source_refs(std::slice::from_ref(&explanation.definition))?;
+        let tokens = explanation
+            .display_name
+            .len()
+            .saturating_add(explanation.signature.as_ref().map_or(0, String::len));
+        let confidence = u16::try_from(explanation.confidence.min(1_000)).unwrap_or(1_000);
+        candidates.push(EvidenceCandidateDraft {
+            repository: invocation.repository(),
+            generation: invocation.generation(),
+            invocation: invocation.id().clone(),
+            provider: invocation.provider(),
+            role: invocation.role(),
+            provenance: EvidenceProvenance::Graph,
+            symbol_id: Some(explanation.symbol),
+            identity: explanation.symbol.to_string(),
+            relevance: confidence,
+            confidence,
+            cost: context_candidate_cost(tokens, 0),
+            source_refs,
+            dependencies: Vec::new(),
+        });
+    }
+    make_context_evidence_output(&invocation, candidates, completeness, usage)
+}
+
+async fn retrieve_source_evidence<P>(
+    port: Arc<P>,
+    invocation: EvidenceProviderInvocation,
+    options: client::RequestOptions,
+    cancellation: RequestCancellation,
+) -> Result<EvidenceProviderOutput, ContextEvidencePortError>
+where
+    P: FirstSliceClientPort,
+{
+    let resolved = resolve_context_evidence_anchors(
+        Arc::clone(&port),
+        &invocation,
+        options,
+        cancellation.clone(),
+    )
+    .await?;
+    if resolved.symbols.is_empty() {
+        return Err(context_evidence_error(
+            ContextEvidencePortErrorKind::Unsupported,
+            resolved.usage,
+        ));
+    }
+    let explained = port
+        .symbol_explain(
+            symbol_explain_request(&invocation, resolved.symbols),
+            options,
+            cancellation.clone(),
+        )
+        .await
+        .map_err(map_context_evidence_client_error)?;
+    validate_context_evidence_identity(&invocation, &explained.result.context)?;
+    let mut usage = add_context_evidence_usage(
+        resolved.usage,
+        context_evidence_usage(&explained.result.context),
+    );
+    let mut completeness = merge_context_evidence_completeness(
+        resolved.completeness,
+        context_evidence_completeness(explained.result.execution_completeness.clone())?,
+    )?;
+    let symbols = explained
+        .result
+        .symbols
+        .iter()
+        .map(|value| (value.symbol, value.confidence))
+        .collect::<Vec<_>>();
+    let references = explained
+        .result
+        .symbols
+        .iter()
+        .map(|value| value.definition.clone())
+        .collect::<Vec<_>>();
+    if references.is_empty() {
+        return make_context_evidence_output(&invocation, Vec::new(), completeness, usage);
+    }
+    let source = port
+        .source_read(
+            SourceReadPortRequest {
+                repository: invocation.repository(),
+                generation: client::GenerationSelector::Generation(invocation.generation()),
+                references,
+            },
+            options,
+            cancellation,
+        )
+        .await
+        .map_err(map_context_evidence_client_error)?;
+    validate_context_evidence_identity(&invocation, &source.result.context)?;
+    usage = add_context_evidence_usage(usage, context_evidence_usage(&source.result.context));
+    completeness = merge_context_evidence_completeness(
+        completeness,
+        context_evidence_completeness(source.result.execution_completeness.clone())?,
+    )?;
+    let mut candidates = Vec::new();
+    for (index, chunk) in source.result.chunks.into_iter().enumerate() {
+        let Some((symbol, confidence)) = symbols.get(index).copied() else {
+            return Err(context_evidence_error(
+                ContextEvidencePortErrorKind::InvalidResponse,
+                usage,
+            ));
+        };
+        let source_refs = context_source_refs(std::slice::from_ref(&chunk.source))?;
+        let confidence = u16::try_from(confidence.min(1_000)).unwrap_or(1_000);
+        candidates.push(EvidenceCandidateDraft {
+            repository: invocation.repository(),
+            generation: invocation.generation(),
+            invocation: invocation.id().clone(),
+            provider: invocation.provider(),
+            role: invocation.role(),
+            provenance: EvidenceProvenance::Source,
+            symbol_id: Some(symbol),
+            identity: format!("{}:{}:{}", symbol, chunk.start_byte, chunk.end_byte),
+            relevance: confidence,
+            confidence,
+            cost: context_candidate_cost(chunk.content.len(), chunk.content.len()),
+            source_refs,
+            dependencies: Vec::new(),
+        });
+    }
+    make_context_evidence_output(&invocation, candidates, completeness, usage)
+}
+
+async fn retrieve_relationship_evidence<P>(
+    port: Arc<P>,
+    invocation: EvidenceProviderInvocation,
+    options: client::RequestOptions,
+    cancellation: RequestCancellation,
+) -> Result<EvidenceProviderOutput, ContextEvidencePortError>
+where
+    P: FirstSliceClientPort,
+{
+    let resolved = resolve_context_evidence_anchors(
+        Arc::clone(&port),
+        &invocation,
+        options,
+        cancellation.clone(),
+    )
+    .await?;
+    if resolved.symbols.is_empty() {
+        return Err(context_evidence_error(
+            ContextEvidencePortErrorKind::Unsupported,
+            resolved.usage,
+        ));
+    }
+    let response = port
+        .symbol_relationships(
+            SymbolRelationshipsPortRequest {
+                repository: invocation.repository(),
+                generation: client::GenerationSelector::Generation(invocation.generation()),
+                seeds: resolved.symbols,
+                relations: vec!["calls".to_owned(), "references".to_owned()],
+                direction: None,
+                min_confidence: None,
+                max_results: Some(invocation.max_candidates()),
+                page_offset: 0,
+            },
+            options,
+            cancellation,
+        )
+        .await
+        .map_err(map_context_evidence_client_error)?;
+    validate_context_evidence_identity(&invocation, &response.result.context)?;
+    let usage = add_context_evidence_usage(
+        resolved.usage,
+        context_evidence_usage(&response.result.context),
+    );
+    let completeness = merge_context_evidence_completeness(
+        resolved.completeness,
+        context_evidence_completeness(response.result.execution_completeness.clone())?,
+    )?;
+    let mut candidates = Vec::new();
+    for group in response.result.groups {
+        for item in group.items {
+            let source_refs = context_source_refs(&item.source_refs)?;
+            candidates.push(EvidenceCandidateDraft {
+                repository: invocation.repository(),
+                generation: invocation.generation(),
+                invocation: invocation.id().clone(),
+                provider: invocation.provider(),
+                role: invocation.role(),
+                provenance: EvidenceProvenance::Graph,
+                symbol_id: Some(item.symbol),
+                identity: item.symbol.to_string(),
+                relevance: item.confidence,
+                confidence: item.confidence,
+                cost: context_candidate_cost(
+                    group.relation.len().saturating_add(group.direction.len()),
+                    0,
+                ),
+                source_refs,
+                dependencies: Vec::new(),
+            });
+        }
+    }
+    make_context_evidence_output(&invocation, candidates, completeness, usage)
+}
+
+async fn retrieve_test_evidence<P>(
+    port: Arc<P>,
+    invocation: EvidenceProviderInvocation,
+    options: client::RequestOptions,
+    cancellation: RequestCancellation,
+) -> Result<EvidenceProviderOutput, ContextEvidencePortError>
+where
+    P: FirstSliceClientPort,
+{
+    let resolved = resolve_context_evidence_anchors(
+        Arc::clone(&port),
+        &invocation,
+        options,
+        cancellation.clone(),
+    )
+    .await?;
+    if resolved.symbols.is_empty() {
+        return Err(context_evidence_error(
+            ContextEvidencePortErrorKind::Unsupported,
+            resolved.usage,
+        ));
+    }
+    let response = port
+        .tests_select(
+            TestsSelectPortRequest {
+                repository: invocation.repository(),
+                generation: client::GenerationSelector::Generation(invocation.generation()),
+                seeds: resolved.symbols,
+                test_kinds: Vec::new(),
+                max_tests: Some(invocation.max_candidates()),
+                include_commands: Some(false),
+            },
+            options,
+            cancellation,
+        )
+        .await
+        .map_err(map_context_evidence_client_error)?;
+    validate_context_evidence_identity(&invocation, &response.result.context)?;
+    let usage = add_context_evidence_usage(
+        resolved.usage,
+        context_evidence_usage(&response.result.context),
+    );
+    let completeness = merge_context_evidence_completeness(
+        resolved.completeness,
+        context_evidence_completeness(response.result.execution_completeness.clone())?,
+    )?;
+    let mut candidates = Vec::new();
+    for test in response.result.tests {
+        let tokens = test
+            .test_id
+            .len()
+            .saturating_add(test.path.as_ref().map_or(0, String::len))
+            .saturating_add(test.why.iter().map(String::len).sum::<usize>());
+        candidates.push(EvidenceCandidateDraft {
+            repository: invocation.repository(),
+            generation: invocation.generation(),
+            invocation: invocation.id().clone(),
+            provider: invocation.provider(),
+            role: invocation.role(),
+            provenance: EvidenceProvenance::TestIndex,
+            symbol_id: test.test_id.parse().ok(),
+            identity: test.test_id,
+            relevance: test.score,
+            confidence: test.score,
+            cost: context_candidate_cost(tokens, 0),
+            source_refs: Vec::new(),
+            dependencies: Vec::new(),
+        });
+    }
+    make_context_evidence_output(&invocation, candidates, completeness, usage)
+}
+
+async fn retrieve_architecture_evidence<P>(
+    port: Arc<P>,
+    invocation: EvidenceProviderInvocation,
+    options: client::RequestOptions,
+    cancellation: RequestCancellation,
+) -> Result<EvidenceProviderOutput, ContextEvidencePortError>
+where
+    P: FirstSliceClientPort,
+{
+    let response = port
+        .architecture_overview(
+            ArchitectureOverviewPortRequest {
+                repository: invocation.repository(),
+                generation: client::GenerationSelector::Generation(invocation.generation()),
+                views: vec!["hotspots".to_owned()],
+                max_components: Some(invocation.max_candidates()),
+                include_edges: Some(true),
+                min_confidence: None,
+            },
+            options,
+            cancellation,
+        )
+        .await
+        .map_err(map_context_evidence_client_error)?;
+    validate_context_evidence_identity(&invocation, &response.result.context)?;
+    let usage = context_evidence_usage(&response.result.context);
+    let completeness =
+        context_evidence_completeness(response.result.execution_completeness.clone())?;
+    let mut candidates = Vec::new();
+    for component in response.result.components {
+        let tokens = component
+            .id
+            .len()
+            .saturating_add(component.kind.len())
+            .saturating_add(component.name.len())
+            .saturating_add(
+                component
+                    .responsibility_evidence
+                    .iter()
+                    .map(String::len)
+                    .sum::<usize>(),
+            );
+        candidates.push(EvidenceCandidateDraft {
+            repository: invocation.repository(),
+            generation: invocation.generation(),
+            invocation: invocation.id().clone(),
+            provider: invocation.provider(),
+            role: invocation.role(),
+            provenance: EvidenceProvenance::ArchitectureAnalysis,
+            symbol_id: None,
+            identity: component.id,
+            relevance: component.confidence,
+            confidence: component.confidence,
+            cost: context_candidate_cost(tokens, 0),
+            source_refs: Vec::new(),
+            dependencies: Vec::new(),
+        });
+    }
+    make_context_evidence_output(&invocation, candidates, completeness, usage)
+}
+
+fn change_impact_request(
+    invocation: &EvidenceProviderInvocation,
+) -> Result<ChangeImpactPortRequest, ContextEvidencePortError> {
+    let mut changed_symbols = Vec::new();
+    let mut changed_paths = Vec::new();
+    for anchor in invocation.anchors() {
+        match anchor {
+            EvidenceAnchor::Symbol(symbol) | EvidenceAnchor::Test(symbol) => {
+                changed_symbols.push(*symbol);
+            }
+            EvidenceAnchor::Path(path) => changed_paths.push(path.clone()),
+            EvidenceAnchor::Change(value) | EvidenceAnchor::Plan(value) => {
+                if let Ok(symbol) = value.parse() {
+                    changed_symbols.push(symbol);
+                }
+            }
+            EvidenceAnchor::Route(_) | EvidenceAnchor::Located(_) => {}
+        }
+    }
+    changed_symbols.sort_unstable();
+    changed_symbols.dedup();
+    changed_paths.sort();
+    changed_paths.dedup();
+    if changed_symbols.is_empty() && changed_paths.is_empty() {
+        return Err(unsupported_context_evidence());
+    }
+    Ok(ChangeImpactPortRequest {
+        repository: invocation.repository(),
+        generation: client::GenerationSelector::Generation(invocation.generation()),
+        changed_symbols,
+        changed_paths,
+        max_depth: Some(4),
+        min_confidence: None,
+        include_tests: Some(true),
+        max_dependents: Some(invocation.max_candidates()),
+    })
+}
+
+async fn retrieve_change_evidence<P>(
+    port: Arc<P>,
+    invocation: EvidenceProviderInvocation,
+    options: client::RequestOptions,
+    cancellation: RequestCancellation,
+) -> Result<EvidenceProviderOutput, ContextEvidencePortError>
+where
+    P: FirstSliceClientPort,
+{
+    let request = change_impact_request(&invocation)?;
+    let response = port
+        .change_impact(request, options, cancellation)
+        .await
+        .map_err(map_context_evidence_client_error)?;
+    validate_context_evidence_identity(&invocation, &response.result.context)?;
+    let usage = context_evidence_usage(&response.result.context);
+    let completeness =
+        context_evidence_completeness(response.result.execution_completeness.clone())?;
+    let mut candidates = Vec::new();
+    match invocation.role() {
+        rootlight_agent::context_pack::EvidenceRole::Risk => {
+            let observed_confidence = response
+                .result
+                .impacted
+                .iter()
+                .flat_map(|group| group.dependents.iter())
+                .map(|entry| entry.confidence)
+                .max()
+                .or_else(|| (!response.result.resolved_changes.is_empty()).then_some(700));
+            if let Some(confidence) = observed_confidence {
+                candidates.push(EvidenceCandidateDraft {
+                    repository: invocation.repository(),
+                    generation: invocation.generation(),
+                    invocation: invocation.id().clone(),
+                    provider: invocation.provider(),
+                    role: invocation.role(),
+                    provenance: EvidenceProvenance::ChangeAnalysis,
+                    symbol_id: response
+                        .result
+                        .impacted
+                        .iter()
+                        .flat_map(|group| group.dependents.iter())
+                        .next()
+                        .map(|entry| entry.symbol_id),
+                    identity: format!("risk:{}", invocation.id().as_str()),
+                    relevance: confidence,
+                    confidence,
+                    cost: context_candidate_cost(
+                        response.result.risk_summary.reasons.len().max(1) * 16,
+                        0,
+                    ),
+                    source_refs: Vec::new(),
+                    dependencies: Vec::new(),
+                });
+            }
+        }
+        _ => {
+            for group in response.result.impacted {
+                for dependent in group.dependents {
+                    candidates.push(EvidenceCandidateDraft {
+                        repository: invocation.repository(),
+                        generation: invocation.generation(),
+                        invocation: invocation.id().clone(),
+                        provider: invocation.provider(),
+                        role: invocation.role(),
+                        provenance: EvidenceProvenance::ChangeAnalysis,
+                        symbol_id: Some(dependent.symbol_id),
+                        identity: dependent.symbol_id.to_string(),
+                        relevance: dependent.confidence,
+                        confidence: dependent.confidence,
+                        cost: context_candidate_cost(
+                            dependent.via.iter().map(String::len).sum::<usize>(),
+                            0,
+                        ),
+                        source_refs: Vec::new(),
+                        dependencies: Vec::new(),
+                    });
+                }
+            }
+        }
+    }
+    make_context_evidence_output(&invocation, candidates, completeness, usage)
+}
+
+async fn retrieve_history_evidence<P>(
+    port: Arc<P>,
+    invocation: EvidenceProviderInvocation,
+    options: client::RequestOptions,
+    cancellation: RequestCancellation,
+) -> Result<EvidenceProviderOutput, ContextEvidencePortError>
+where
+    P: FirstSliceClientPort,
+{
+    let base = invocation.anchors().iter().find_map(|anchor| match anchor {
+        EvidenceAnchor::Change(value)
+        | EvidenceAnchor::Plan(value)
+        | EvidenceAnchor::Located(value) => value.parse::<GenerationId>().ok(),
+        EvidenceAnchor::Symbol(_)
+        | EvidenceAnchor::Path(_)
+        | EvidenceAnchor::Route(_)
+        | EvidenceAnchor::Test(_) => None,
+    });
+    let Some(base) = base.filter(|value| *value != invocation.generation()) else {
+        return Err(unsupported_context_evidence());
+    };
+    let response = port
+        .history_compare(
+            HistoryComparePortRequest {
+                repository: invocation.repository(),
+                base,
+                head: invocation.generation(),
+                change_kinds: Vec::new(),
+                max_results: Some(invocation.max_candidates()),
+            },
+            options,
+            cancellation,
+        )
+        .await
+        .map_err(map_context_evidence_client_error)?;
+    validate_context_evidence_identity(&invocation, &response.result.context)?;
+    if response.result.matched_states.base_generation != base
+        || response.result.matched_states.head_generation != invocation.generation()
+    {
+        return Err(invalid_context_evidence_response());
+    }
+    let usage = context_evidence_usage(&response.result.context);
+    let completeness =
+        context_evidence_completeness(response.result.execution_completeness.clone())?;
+    let mut candidates = Vec::new();
+    for change in response.result.changes {
+        let tokens = change.kind.len().saturating_add(change.entity_kind.len());
+        candidates.push(EvidenceCandidateDraft {
+            repository: invocation.repository(),
+            generation: invocation.generation(),
+            invocation: invocation.id().clone(),
+            provider: invocation.provider(),
+            role: invocation.role(),
+            provenance: EvidenceProvenance::HistoryAnalysis,
+            symbol_id: Some(change.symbol_id),
+            identity: change.symbol_id.to_string(),
+            relevance: change.significance,
+            confidence: change.significance,
+            cost: context_candidate_cost(tokens, 0),
+            source_refs: Vec::new(),
+            dependencies: Vec::new(),
+        });
+    }
+    make_context_evidence_output(&invocation, candidates, completeness, usage)
+}
+
+fn plan_objective_for_context(
+    objective: rootlight_agent::context_pack_request::ContextPackObjective,
+) -> PlanObjective {
+    match objective {
+        rootlight_agent::context_pack_request::ContextPackObjective::BugFix => {
+            PlanObjective::BugFix
+        }
+        rootlight_agent::context_pack_request::ContextPackObjective::Refactor => {
+            PlanObjective::Refactor
+        }
+        rootlight_agent::context_pack_request::ContextPackObjective::Explanation => {
+            PlanObjective::Explanation
+        }
+        rootlight_agent::context_pack_request::ContextPackObjective::Migration => {
+            PlanObjective::Migration
+        }
+        rootlight_agent::context_pack_request::ContextPackObjective::Review => {
+            PlanObjective::Review
+        }
+    }
+}
+
+async fn retrieve_planning_evidence<P>(
+    port: Arc<P>,
+    invocation: EvidenceProviderInvocation,
+    options: client::RequestOptions,
+    cancellation: RequestCancellation,
+) -> Result<EvidenceProviderOutput, ContextEvidencePortError>
+where
+    P: FirstSliceClientPort,
+{
+    let resolved = resolve_context_evidence_anchors(
+        Arc::clone(&port),
+        &invocation,
+        options,
+        cancellation.clone(),
+    )
+    .await?;
+    if resolved.symbols.is_empty() {
+        return Err(context_evidence_error(
+            ContextEvidencePortErrorKind::Unsupported,
+            resolved.usage,
+        ));
+    }
+    let targets = resolved
+        .symbols
+        .into_iter()
+        .map(|symbol_id| PlanTargetSelector::Symbol(PlanSymbolTarget { symbol_id }))
+        .collect();
+    let request = normalize_plan_change(PlanChangeInput {
+        repository: RepositorySelector::ById(
+            rootlight_mcp_contract::vertical::RepositoryIdSelector {
+                repository_id: invocation.repository(),
+            },
+        ),
+        generation: Some(GenerationSelector::Explicit(invocation.generation())),
+        objective: plan_objective_for_context(invocation.objective()),
+        objective_text: invocation.task().to_owned(),
+        targets,
+        constraints: None,
+        change_context: None,
+        max_steps: Some(u8::try_from(invocation.max_candidates().min(100)).unwrap_or(100)),
+        budget: None,
+        profile: Some(ResponseProfile::Compact),
+        explain: Some(false),
+    })
+    .map_err(|_| unsupported_context_evidence())?;
+    let response = port
+        .plan_change(request, options, cancellation)
+        .await
+        .map_err(map_context_evidence_client_error)?;
+    validate_context_evidence_identity(&invocation, &response.result.context)?;
+    let usage = add_context_evidence_usage(
+        resolved.usage,
+        context_evidence_usage(&response.result.context),
+    );
+    let completeness = merge_context_evidence_completeness(
+        resolved.completeness,
+        context_evidence_completeness(response.result.execution_completeness.clone())?,
+    )?;
+    let confidence = match completeness.state {
+        CompletenessState::Complete => 900,
+        CompletenessState::Truncated => 700,
+        CompletenessState::UnsupportedPartial | CompletenessState::Indeterminate => 0,
+    };
+    let mut candidates = Vec::new();
+    for step in response.result.plan {
+        let symbol_id = step.targets.first().copied();
+        let tokens = step
+            .action
+            .len()
+            .saturating_add(step.risks.iter().map(String::len).sum::<usize>())
+            .saturating_add(step.verification.as_ref().map_or(0, String::len));
+        candidates.push(EvidenceCandidateDraft {
+            repository: invocation.repository(),
+            generation: invocation.generation(),
+            invocation: invocation.id().clone(),
+            provider: invocation.provider(),
+            role: invocation.role(),
+            provenance: EvidenceProvenance::PlanArtifact,
+            symbol_id,
+            identity: format!("plan-step:{}:{}", step.step, invocation.id().as_str()),
+            relevance: confidence,
+            confidence,
+            cost: context_candidate_cost(tokens, 0),
+            source_refs: Vec::new(),
+            dependencies: Vec::new(),
+        });
+    }
+    make_context_evidence_output(&invocation, candidates, completeness, usage)
+}

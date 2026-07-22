@@ -20,15 +20,11 @@ use rootlight_mcp_contract::{
         LimitingResourceKind, ResultCompleteness,
     },
     context::{
-        BatchTool, ContextItem, ContextPackData, ContextPackId, ContextPackInput, ContextStructure,
+        ContextItem, ContextPackData, ContextPackId, ContextPackInput, ContextStructure,
         EvidenceRole as ContractEvidenceRole, OmissionSummary, TokenAccounting, ToolSuggestion,
     },
-    vertical::{
-        GenerationSelector, ReadEnvelope, RequiredNullable, ResponseBudget, SymbolExplainData,
-        SymbolExplanation,
-    },
+    vertical::{GenerationSelector, ReadEnvelope, RequiredNullable, SymbolExplanation},
 };
-use serde_json::Map;
 
 use crate::{
     context_evidence::{
@@ -42,8 +38,8 @@ use crate::{
     explain::context_pack_plan,
     policy::{BudgetCharge, BudgetLedger, CancellationSignal, ExecutionPolicyError},
     port::{
-        AgentCallContext, AgentIdentityRequest, AgentPortError, AgentResolutionContext,
-        AgentResolvedIdentity, AgentToolPort, AgentToolRequest,
+        AgentIdentityRequest, AgentPortError, AgentResolutionContext, AgentResolvedIdentity,
+        AgentToolPort,
     },
 };
 
@@ -256,6 +252,8 @@ pub struct PlannedContextPack {
     pub truncated: bool,
     /// Planner-owned completeness merged from evidence providers and selection.
     pub completeness: ResultCompleteness,
+    /// Provider retrieval and output materialization charged to one ledger.
+    pub usage: BudgetCharge,
 }
 
 #[derive(Debug, Clone)]
@@ -361,6 +359,7 @@ where
             data: context_pack_data(request.request, &pack, &metadata),
             truncated: pack.truncated,
             completeness,
+            usage: budget.consumed(),
         })
     }
 }
@@ -451,7 +450,7 @@ impl DefaultContextPackPlanner {
 
         let mut budget = corpus.budget().clone();
         let available_tokens = u32::try_from(budget.remaining().tokens).unwrap_or(u32::MAX);
-        let pack = optimize_pack(request.objective(), &mut candidates, available_tokens)?;
+        let pack = optimize_admitted_pack(request.objective(), &mut candidates, available_tokens)?;
         budget.charge(BudgetCharge {
             results: u64::try_from(pack.items.len()).unwrap_or(u64::MAX),
             tokens: u64::from(pack.total_tokens),
@@ -473,6 +472,7 @@ impl DefaultContextPackPlanner {
             data,
             truncated,
             completeness,
+            usage: budget.consumed(),
         })
     }
 }
@@ -516,7 +516,7 @@ impl ContextPackService {
         cancellation: C,
     ) -> Result<ReadEnvelope<ContextPackData>, ContextPackServiceError>
     where
-        P: AgentToolPort<C>,
+        P: AgentToolPort<C> + ContextEvidencePort<C>,
         C: CancellationSignal + Clone + Send + Sync + 'static,
     {
         validate_supported_fields(&input)?;
@@ -562,7 +562,7 @@ impl ContextPackService {
         deadline: Instant,
     ) -> Result<ReadEnvelope<ContextPackData>, ContextPackServiceError>
     where
-        P: AgentToolPort<C>,
+        P: AgentToolPort<C> + ContextEvidencePort<C>,
         C: CancellationSignal + Clone + Send + Sync + 'static,
     {
         validate_supported_fields(&input)?;
@@ -588,7 +588,7 @@ impl ContextPackService {
         deadline: Instant,
     ) -> Result<ReadEnvelope<ContextPackData>, ContextPackServiceError>
     where
-        P: AgentToolPort<C>,
+        P: AgentToolPort<C> + ContextEvidencePort<C>,
         C: CancellationSignal + Clone + Send + Sync + 'static,
     {
         if identity.repository.repository_id != repository {
@@ -614,8 +614,6 @@ impl ContextPackService {
             identity.generation.generation_id,
         )
         .map_err(map_canonical_request_error)?;
-        let seeds = canonical.seeds().retrieval_symbols();
-
         if input.explain == Some(true) {
             let explanation = context_pack_plan(&canonical);
             let data = ContextPackData {
@@ -650,92 +648,29 @@ impl ContextPackService {
             });
         }
 
-        let mut arguments = Map::new();
-        // The public selector is an object, while ResolvedRepository includes a
-        // display name. Preserve only the strict inherited selector shape.
-        arguments.insert(
-            "repository".to_owned(),
-            serde_json::json!({"repository_id": identity.repository.repository_id}),
-        );
-        arguments.insert(
-            "generation".to_owned(),
-            serde_json::to_value(identity.generation.generation_id)
-                .map_err(|_| ContextPackServiceError::Unavailable)?,
-        );
-        arguments.insert(
-            "symbol_ids".to_owned(),
-            serde_json::to_value(&seeds).map_err(|_| ContextPackServiceError::Unavailable)?,
-        );
-        let budget = ResponseBudget {
-            max_results: Some(u16::try_from(seeds.len()).unwrap_or(16)),
-            max_tokens: None,
-            max_source_bytes: None,
-            max_traversal_facts: None,
-            max_depth: None,
-            max_paths: None,
-            timeout_ms: Some(CONTEXT_PACK_TIMEOUT_MS),
-            evidence_level: None,
-        };
-        let envelope = port
-            .execute(
-                AgentToolRequest::new(BatchTool::SymbolExplain, arguments),
-                AgentCallContext::new(cancellation.clone(), budget, Some(deadline)),
-            )
-            .await
-            .map_err(map_port_error)?;
-        context_service_checkpoint(&cancellation, deadline)?;
-        if envelope.repository.repository_id != identity.repository.repository_id
-            || envelope.generation.generation_id != identity.generation.generation_id
-        {
-            return Err(ContextPackServiceError::InvalidResponse);
-        }
-        let resource_truncated = envelope.completeness.state == CompletenessState::Truncated
-            || envelope
-                .completeness
-                .limiting_resources
-                .iter()
-                .any(|resource| {
-                    !matches!(
-                        resource.kind,
-                        LimitingResourceKind::Capability | LimitingResourceKind::Coverage
-                    )
-                });
-        if (envelope.completeness.continuation == ContinuationAvailability::Available)
-            != envelope.next_cursor.0.is_some()
-            || resource_truncated != envelope.truncated
-        {
-            return Err(ContextPackServiceError::InvalidResponse);
-        }
-        let symbols: SymbolExplainData = serde_json::from_value(envelope.data.clone())
-            .map_err(|_| ContextPackServiceError::InvalidResponse)?;
         let planned = DefaultContextPackPlanner
-            .plan(
-                ContextPackPlanRequest {
-                    request: &canonical,
-                    symbols: &symbols.symbols,
-                },
-                &cancellation,
-            )
-            .map_err(|_| ContextPackServiceError::Unavailable)?;
-        let truncated = envelope.truncated || planned.truncated;
-        let completeness =
-            context_pack_completeness(&envelope.completeness, &planned.completeness)?;
+            .collect_and_plan(port.as_ref(), &canonical, cancellation.clone(), deadline)
+            .await
+            .map_err(map_evidence_planning_error)?;
+        context_service_checkpoint(&cancellation, deadline)?;
+        let usage = usage_summary(planned.usage, "context-pack");
         Ok(ReadEnvelope {
             schema_version: SchemaVersion::V1_0,
             repository: identity.repository,
             generation: identity.generation,
             coverage: identity.coverage,
             data: planned.data,
-            truncated,
-            completeness,
+            truncated: planned.truncated,
+            completeness: planned.completeness,
             next_cursor: RequiredNullable(None),
-            usage: envelope.usage,
-            warnings: envelope.warnings,
+            usage,
+            warnings: identity.warnings,
             trust: TrustClassification::UntrustedRepositoryData,
         })
     }
 }
 
+#[cfg(test)]
 fn context_pack_completeness(
     child: &ResultCompleteness,
     planner: &ResultCompleteness,
@@ -836,20 +771,8 @@ where
 }
 
 fn validate_supported_fields(input: &ContextPackInput) -> Result<(), ContextPackServiceError> {
-    let fields = [
-        (input.seeds.paths.is_some(), "paths"),
-        (input.seeds.routes.is_some(), "routes"),
-        (input.seeds.located.is_some(), "located"),
-        (input.seeds.change.is_some(), "change"),
-        (input.seeds.plan.is_some(), "plan"),
-        (input.source_policy.is_some(), "source_policy"),
-        (input.sections.is_some(), "sections"),
-        (input.diversity.is_some(), "diversity"),
-        (input.min_confidence.is_some(), "min_confidence"),
-        (input.continuation.is_some(), "continuation"),
-    ];
-    if let Some((_, field)) = fields.into_iter().find(|(present, _)| *present) {
-        return Err(ContextPackServiceError::UnsupportedField(field));
+    if input.continuation.is_some() {
+        return Err(ContextPackServiceError::UnsupportedField("continuation"));
     }
     Ok(())
 }
@@ -889,17 +812,60 @@ fn map_port_error(error: AgentPortError) -> ContextPackServiceError {
     }
 }
 
-fn empty_usage(trace_id: &str) -> rootlight_mcp_contract::vertical::UsageSummary {
+fn map_evidence_planning_error(error: ContextEvidencePlanningError) -> ContextPackServiceError {
+    match error {
+        ContextEvidencePlanningError::ProviderPlan(_) => ContextPackServiceError::InvalidResponse,
+        ContextEvidencePlanningError::Collection(error) => match error {
+            ContextEvidenceCollectionError::Cancelled => ContextPackServiceError::Cancelled,
+            ContextEvidenceCollectionError::DeadlineExceeded => {
+                ContextPackServiceError::DeadlineExceeded
+            }
+            ContextEvidenceCollectionError::IdentityMismatch
+            | ContextEvidenceCollectionError::UnsafeCompleteness
+            | ContextEvidenceCollectionError::InvalidCandidate(_)
+            | ContextEvidenceCollectionError::InvalidProviderResponse => {
+                ContextPackServiceError::InvalidResponse
+            }
+            ContextEvidenceCollectionError::Policy(ExecutionPolicyError::Cancelled) => {
+                ContextPackServiceError::Cancelled
+            }
+            ContextEvidenceCollectionError::Policy(ExecutionPolicyError::BudgetExceeded {
+                ..
+            }) => ContextPackServiceError::Unavailable,
+        },
+        ContextEvidencePlanningError::Planning(error) => match error {
+            ContextPackPlanningError::Policy(ExecutionPolicyError::Cancelled) => {
+                ContextPackServiceError::Cancelled
+            }
+            ContextPackPlanningError::Pack(_)
+            | ContextPackPlanningError::Policy(ExecutionPolicyError::BudgetExceeded { .. }) => {
+                ContextPackServiceError::Unavailable
+            }
+            ContextPackPlanningError::InvalidCompleteness => {
+                ContextPackServiceError::InvalidResponse
+            }
+        },
+    }
+}
+
+fn usage_summary(
+    usage: BudgetCharge,
+    trace_id: &str,
+) -> rootlight_mcp_contract::vertical::UsageSummary {
     rootlight_mcp_contract::vertical::UsageSummary {
-        rows: 0,
-        edges: 0,
-        source_bytes: 0,
-        json_bytes: 0,
-        estimated_tokens: 0,
-        wall_time_ms: 0,
+        rows: usage.rows,
+        edges: usage.traversal_facts,
+        source_bytes: usage.source_bytes,
+        json_bytes: usage.json_bytes,
+        estimated_tokens: usage.tokens,
+        wall_time_ms: usage.time_ms,
         cache_status: rootlight_mcp_contract::vertical::CacheStatus::NotApplicable,
         trace_id: trace_id.to_owned(),
     }
+}
+
+fn empty_usage(trace_id: &str) -> rootlight_mcp_contract::vertical::UsageSummary {
+    usage_summary(BudgetCharge::default(), trace_id)
 }
 
 /// Optimizes a context pack from scored candidates under a token budget.
@@ -921,6 +887,17 @@ pub fn optimize_pack(
     token_budget: u32,
 ) -> Result<PackResult, PackError> {
     if !(MIN_PACK_TOKENS..=MAX_PACK_TOKENS).contains(&token_budget) {
+        return Err(PackError::InvalidBudget);
+    }
+    optimize_admitted_pack(objective, candidates, token_budget)
+}
+
+fn optimize_admitted_pack(
+    objective: PackObjective,
+    candidates: &mut [EvidenceCandidate],
+    token_budget: u32,
+) -> Result<PackResult, PackError> {
+    if token_budget > MAX_PACK_TOKENS {
         return Err(PackError::InvalidBudget);
     }
     if candidates.is_empty() {

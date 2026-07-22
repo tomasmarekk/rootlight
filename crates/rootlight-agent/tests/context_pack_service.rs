@@ -12,8 +12,13 @@ use std::{
 };
 
 use rootlight_agent::{
+    context_evidence::{
+        ContextEvidenceCallContext, ContextEvidencePort, ContextEvidencePortError,
+        ContextEvidencePortErrorKind, EvidenceCandidateDraft, EvidenceProvenance, EvidenceProvider,
+        EvidenceProviderInvocation, EvidenceProviderOutput,
+    },
     context_pack::{CONTEXT_PACK_TIMEOUT_MS, ContextPackService, ContextPackServiceError},
-    policy::CancellationSignal,
+    policy::{BudgetCharge, CancellationSignal},
     port::{
         AgentCallContext, AgentIdentityRequest, AgentPortError, AgentPortFuture,
         AgentResolutionContext, AgentResolvedIdentity, AgentToolPort, AgentToolRequest,
@@ -23,14 +28,14 @@ use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, SymbolId};
 use rootlight_ir::{CoverageStatus, LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::{
     ErrorCode, PublicError, RepositorySelector, SchemaVersion, TrustClassification,
-    context::{BatchTool, ContextPackData, ContextPackInput, ContextSeedSelector},
+    context::{ContextPackData, ContextPackInput, ContextSeedSelector},
     vertical::{
-        CacheStatus, CoverageSummary, Freshness, GenerationSelector, GenerationSummary,
-        ReadEnvelope, RelationSummary, RepositoryIdSelector, RequiredNullable, ResolvedRepository,
-        ResponseBudget, SymbolExplainData, SymbolExplanation, UsageSummary,
+        CacheStatus, ContinuationCursor, CoverageSummary, Freshness, GenerationSelector,
+        GenerationSummary, ReadEnvelope, RelationSummary, RepositoryIdSelector, RequiredNullable,
+        ResolvedRepository, SymbolExplainData, SymbolExplanation, UsageSummary,
     },
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy)]
 struct TestCancellation(bool);
@@ -50,11 +55,11 @@ struct IdentityCall {
 }
 
 #[derive(Debug)]
-struct ChildCall {
-    request: AgentToolRequest,
-    budget: ResponseBudget,
+struct EvidenceCall {
+    invocation: EvidenceProviderInvocation,
+    reservation: BudgetCharge,
     cancelled: bool,
-    deadline: Option<Instant>,
+    deadline: Instant,
 }
 
 #[derive(Debug)]
@@ -62,7 +67,7 @@ struct FakePort {
     identity_response: Mutex<Option<Result<AgentResolvedIdentity, AgentPortError>>>,
     child_response: Mutex<Option<Result<ReadEnvelope<Value>, AgentPortError>>>,
     identity_calls: Mutex<Vec<IdentityCall>>,
-    child_calls: Mutex<Vec<ChildCall>>,
+    evidence_calls: Mutex<Vec<EvidenceCall>>,
     call_count: AtomicUsize,
 }
 
@@ -75,9 +80,89 @@ impl FakePort {
             identity_response: Mutex::new(Some(identity_response)),
             child_response: Mutex::new(child_response),
             identity_calls: Mutex::new(Vec::new()),
-            child_calls: Mutex::new(Vec::new()),
+            evidence_calls: Mutex::new(Vec::new()),
             call_count: AtomicUsize::new(0),
         }
+    }
+}
+
+impl ContextEvidencePort<TestCancellation> for FakePort {
+    fn retrieve(
+        &self,
+        invocation: EvidenceProviderInvocation,
+        context: ContextEvidenceCallContext<TestCancellation>,
+    ) -> AgentPortFuture<Result<EvidenceProviderOutput, ContextEvidencePortError>> {
+        self.call_count.fetch_add(1, Ordering::Relaxed);
+        self.evidence_calls
+            .lock()
+            .expect("evidence call lock is available")
+            .push(EvidenceCall {
+                invocation: invocation.clone(),
+                reservation: context.reservation(),
+                cancelled: context.cancellation().is_cancelled(),
+                deadline: context.deadline(),
+            });
+        if let Some(Err(error)) = self
+            .child_response
+            .lock()
+            .expect("child response lock is available")
+            .take()
+        {
+            let kind = match error {
+                AgentPortError::Cancelled => ContextEvidencePortErrorKind::Cancelled,
+                AgentPortError::DeadlineExceeded => ContextEvidencePortErrorKind::DeadlineExceeded,
+                AgentPortError::InvalidResponse => ContextEvidencePortErrorKind::InvalidResponse,
+                _ => ContextEvidencePortErrorKind::Unavailable,
+            };
+            return Box::pin(async move {
+                Err(ContextEvidencePortError {
+                    kind,
+                    usage: BudgetCharge::default(),
+                })
+            });
+        }
+
+        if invocation.provider() != EvidenceProvider::Definition {
+            return Box::pin(async move {
+                Err(ContextEvidencePortError {
+                    kind: ContextEvidencePortErrorKind::Unsupported,
+                    usage: BudgetCharge::default(),
+                })
+            });
+        }
+        let definition = explanation(invocation.generation()).definition;
+        let candidate = EvidenceCandidateDraft {
+            repository: invocation.repository(),
+            generation: invocation.generation(),
+            invocation: invocation.id().clone(),
+            provider: invocation.provider(),
+            role: invocation.role(),
+            provenance: EvidenceProvenance::Graph,
+            symbol_id: Some(symbol()),
+            identity: symbol().to_string(),
+            relevance: 900,
+            confidence: 900,
+            cost: BudgetCharge {
+                results: 1,
+                tokens: 32,
+                ..BudgetCharge::default()
+            },
+            source_refs: vec![definition],
+            dependencies: Vec::new(),
+        };
+        let output = EvidenceProviderOutput {
+            repository: invocation.repository(),
+            generation: invocation.generation(),
+            invocation: invocation.id().clone(),
+            candidates: vec![candidate],
+            completeness: rootlight_mcp_contract::completeness::ResultCompleteness::complete(),
+            usage: BudgetCharge {
+                results: 1,
+                tokens: 32,
+                ..BudgetCharge::default()
+            },
+        };
+        Box::pin(async move { Ok(output) })
     }
 }
 
@@ -108,19 +193,9 @@ impl AgentToolPort<TestCancellation> for FakePort {
 
     fn execute(
         &self,
-        request: AgentToolRequest,
-        context: AgentCallContext<TestCancellation>,
+        _request: AgentToolRequest,
+        _context: AgentCallContext<TestCancellation>,
     ) -> AgentPortFuture<Result<ReadEnvelope<Value>, AgentPortError>> {
-        self.call_count.fetch_add(1, Ordering::Relaxed);
-        self.child_calls
-            .lock()
-            .expect("child call lock is available")
-            .push(ChildCall {
-                request,
-                budget: context.budget().clone(),
-                cancelled: context.cancellation().is_cancelled(),
-                deadline: context.deadline(),
-            });
         let response = self
             .child_response
             .lock()
@@ -256,9 +331,10 @@ fn input(generation_id: GenerationId) -> ContextPackInput {
 }
 
 #[tokio::test]
-async fn admission_rejects_unsupported_seed_before_port_work() {
+async fn admission_rejects_continuation_before_port_work() {
     let mut request = input(generation(2));
-    request.seeds.paths = Some(vec!["src/lib.rs".to_owned()]);
+    request.continuation =
+        Some(ContinuationCursor::parse("next-page").expect("fixture cursor is valid"));
     let port = Arc::new(FakePort::new(Ok(identity(generation(2))), None));
 
     let result = ContextPackService
@@ -272,7 +348,7 @@ async fn admission_rejects_unsupported_seed_before_port_work() {
 
     assert_eq!(
         result,
-        Err(ContextPackServiceError::UnsupportedField("paths"))
+        Err(ContextPackServiceError::UnsupportedField("continuation"))
     );
     assert!(
         port.identity_calls
@@ -351,21 +427,14 @@ async fn execution_propagates_policy_and_shapes_child_response() {
         .expect("context-pack request succeeds");
 
     let calls = port
-        .child_calls
+        .evidence_calls
         .lock()
-        .expect("child call lock is available");
+        .expect("evidence call lock is available");
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].request.tool(), BatchTool::SymbolExplain);
-    let arguments = calls[0].request.clone().into_arguments();
-    assert_eq!(
-        arguments["repository"],
-        json!({"repository_id": repository()})
-    );
-    assert_eq!(arguments["generation"], json!(generation(2)));
-    assert_eq!(arguments["symbol_ids"], json!([symbol()]));
-    assert_eq!(calls[0].budget.max_results, Some(1));
-    assert_eq!(calls[0].budget.max_tokens, None);
-    assert_eq!(calls[0].budget.timeout_ms, Some(CONTEXT_PACK_TIMEOUT_MS));
+    assert_eq!(calls[0].invocation.provider(), EvidenceProvider::Definition);
+    assert_eq!(calls[0].invocation.repository(), repository());
+    assert_eq!(calls[0].invocation.generation(), generation(2));
+    assert_eq!(calls[0].reservation, calls[0].invocation.reservation());
     assert_eq!(
         u64::from(CONTEXT_PACK_TIMEOUT_MS),
         rootlight_agent::policy::BudgetLimits::server_ceiling()
@@ -373,8 +442,8 @@ async fn execution_propagates_policy_and_shapes_child_response() {
             .time_ms
     );
     assert!(!calls[0].cancelled);
-    assert!(calls[0].deadline.is_some());
-    assert_eq!(output.usage, usage());
+    assert!(calls[0].deadline > Instant::now());
+    assert_eq!(output.usage.estimated_tokens, 64);
     assert_eq!(output.generation.generation_id, generation(2));
     let encoded = serde_json::to_value(output).expect("context-pack envelope serializes");
     serde_json::from_value::<ReadEnvelope<ContextPackData>>(encoded)
@@ -415,18 +484,15 @@ async fn pinned_identity_path_skips_resolution_and_preserves_child_behavior() {
             .is_empty()
     );
     let calls = port
-        .child_calls
+        .evidence_calls
         .lock()
-        .expect("child call lock is available");
+        .expect("evidence call lock is available");
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].request.tool(), BatchTool::SymbolExplain);
-    assert_eq!(
-        calls[0].request.clone().into_arguments()["generation"],
-        json!(generation(2))
-    );
-    assert_eq!(calls[0].deadline, Some(deadline));
+    assert_eq!(calls[0].invocation.provider(), EvidenceProvider::Definition);
+    assert_eq!(calls[0].invocation.generation(), generation(2));
+    assert_eq!(calls[0].deadline, deadline);
     assert_eq!(output.generation.generation_id, generation(2));
-    assert_eq!(output.usage, usage());
+    assert_eq!(output.usage.estimated_tokens, 64);
 }
 
 #[tokio::test]
