@@ -17,15 +17,15 @@ use rootlight_storage::GenerationSnapshot;
 use serde::Serialize;
 
 use crate::model::{
-    AdvancedAggregateFunction, AdvancedAstNode, AdvancedColumnSchema, AdvancedColumnType,
-    AdvancedCompleteness, AdvancedEntityKind, AdvancedPlanExplanation, AdvancedPredicate,
-    AdvancedQueryPlan, AdvancedQueryResult, AdvancedRelationKind, AdvancedSortKey,
-    AdvancedTraverseDirection, AdvancedValue, ArchitectureComponent, ArchitectureConnection,
-    ArchitectureCyclesPlan, ArchitectureCyclesProjection, ArchitectureCyclesResult,
-    ArchitectureHotspot, ArchitectureOverviewDerivedView, ArchitectureOverviewPlan,
-    ArchitectureOverviewResult, ArchitectureOverviewView, BreakingCandidateRecord,
-    ChangeImpactClassification, ChangeImpactPlan, ChangeImpactResult, ChangeImpactRiskLevel,
-    ChangeImpactRiskSummary, ChangeImpactTestCandidate, CodeDeadBlindSpot,
+    ADVANCED_MAX_DEPTH, AdvancedAggregateFunction, AdvancedAstNode, AdvancedColumnSchema,
+    AdvancedColumnType, AdvancedCompleteness, AdvancedEntityKind, AdvancedPlanExplanation,
+    AdvancedPredicate, AdvancedQueryPlan, AdvancedQueryResult, AdvancedRelationKind,
+    AdvancedSortKey, AdvancedTraverseDirection, AdvancedValue, ArchitectureComponent,
+    ArchitectureConnection, ArchitectureCyclesPlan, ArchitectureCyclesProjection,
+    ArchitectureCyclesResult, ArchitectureHotspot, ArchitectureOverviewDerivedView,
+    ArchitectureOverviewPlan, ArchitectureOverviewResult, ArchitectureOverviewView,
+    BreakingCandidateRecord, ChangeImpactClassification, ChangeImpactPlan, ChangeImpactResult,
+    ChangeImpactRiskLevel, ChangeImpactRiskSummary, ChangeImpactTestCandidate, CodeDeadBlindSpot,
     CodeDeadEntryPointPolicy, CodeDeadEntryPointSummary, CodeDeadPlan, CodeDeadResult,
     CodeDeadSuppressionRule, CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent,
     CyclePath, DeadCodeCandidate, DeadCodeClassification, ExecutionCompleteness, FlowTraceEdge,
@@ -1739,9 +1739,9 @@ where
     /// # Errors
     ///
     /// Returns [`QueryError`] for an invalid budget, an empty or too-deep AST,
-    /// an out-of-range row or traversal bound, a cost estimate that exceeds the
-    /// ceiling or the client limit, or a conservative estimate that cannot be
-    /// admitted.
+    /// an out-of-range row or cumulative edge-work bound, a cost estimate that
+    /// exceeds the ceiling or the client limit, or a conservative estimate that
+    /// cannot be admitted.
     #[expect(
         clippy::too_many_arguments,
         reason = "each argument is one bounded advanced query dimension"
@@ -1758,6 +1758,11 @@ where
         budget: QueryBudget,
     ) -> Result<AdvancedQueryPlan, QueryError> {
         budget.validate()?;
+        if !advanced_traversal_depths_valid(&ast) {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Depth,
+            });
+        }
         let (operators, depth) = ast.derive_plan_shape();
         let estimated_cost =
             AdvancedQueryPlan::validate(&operators, max_results, max_traversal, depth)?;
@@ -1778,7 +1783,7 @@ where
         }
         let estimate = PlanEstimate {
             rows: budget.max_rows,
-            edges: budget.max_edges,
+            edges: budget.max_edges.min(checked_usize_to_u64(max_traversal)?),
             results: budget.max_results,
             source_bytes: 0,
             // The normalized generation bounds every inspected record while the
@@ -1835,7 +1840,8 @@ where
         let control = QueryControl::new(cancellation, plan.budget.max_duration);
         control.check()?;
         let document = self.generation.document();
-        let mut tracker = UsageTracker::new(plan.budget);
+        let runtime_budget = advanced_runtime_budget(plan)?;
+        let mut tracker = UsageTracker::new(runtime_budget);
         let mut limiting_resources = Vec::new();
 
         let built = build_advanced_query(
@@ -2052,6 +2058,14 @@ struct AdvancedRowSet {
     rows: Vec<BTreeMap<String, AdvancedValue>>,
 }
 
+fn advanced_runtime_budget(plan: &AdvancedQueryPlan) -> Result<QueryBudget, QueryError> {
+    Ok(plan.budget.with_max_edges(
+        plan.budget
+            .max_edges
+            .min(checked_usize_to_u64(plan.max_traversal)?),
+    ))
+}
+
 /// Executes a bounded advanced query against the pinned generation document.
 ///
 /// Supported operators are materialized into typed rows; unsupported traversal
@@ -2190,6 +2204,23 @@ fn advanced_ast_supported(node: &AdvancedAstNode) -> bool {
         AdvancedAstNode::Traverse {
             seed, seed_from, ..
         } => seed.is_some() && seed_from.is_none(),
+    }
+}
+
+fn advanced_traversal_depths_valid(node: &AdvancedAstNode) -> bool {
+    match node {
+        AdvancedAstNode::Scan { .. } => true,
+        AdvancedAstNode::Filter { input, .. }
+        | AdvancedAstNode::Project { input, .. }
+        | AdvancedAstNode::Aggregate { input, .. }
+        | AdvancedAstNode::Sort { input, .. }
+        | AdvancedAstNode::Limit { input, .. } => advanced_traversal_depths_valid(input),
+        AdvancedAstNode::Join { left, right, .. } => {
+            advanced_traversal_depths_valid(left) && advanced_traversal_depths_valid(right)
+        }
+        AdvancedAstNode::Traverse { max_depth, .. } => {
+            max_depth.is_none_or(|depth| depth > 0 && usize::from(depth) <= ADVANCED_MAX_DEPTH)
+        }
     }
 }
 
@@ -2372,31 +2403,28 @@ fn eval_advanced_node(
             Ok((set, false))
         }
         AdvancedAstNode::Filter { input, predicate } => {
-            let (mut set, truncated) =
+            let (set, truncated) =
                 eval_advanced_node(document, input, file_paths, control, tracker)?;
-            set.rows
-                .retain(|row| advanced_predicate_matches(predicate, row));
-            Ok((set, truncated))
+            Ok((advanced_filter_rows(set, predicate, control)?, truncated))
         }
         AdvancedAstNode::Project { input, columns } => {
             let (set, truncated) =
                 eval_advanced_node(document, input, file_paths, control, tracker)?;
-            Ok((advanced_project_rows(set, columns), truncated))
+            Ok((advanced_project_rows(set, columns, control)?, truncated))
         }
         AdvancedAstNode::Sort { input, by } => {
             let (mut set, truncated) =
                 eval_advanced_node(document, input, file_paths, control, tracker)?;
-            advanced_sort_rows(&mut set.rows, by);
+            advanced_sort_rows(&mut set.rows, by, control, tracker)?;
             Ok((set, truncated))
         }
         AdvancedAstNode::Limit { input, max_rows } => {
-            let (mut set, truncated) =
+            let (set, truncated) =
                 eval_advanced_node(document, input, file_paths, control, tracker)?;
-            let cap = usize::from(*max_rows);
-            if set.rows.len() > cap {
-                set.rows.truncate(cap);
-            }
-            Ok((set, truncated))
+            Ok((
+                advanced_limit_rows(set, usize::from(*max_rows), control)?,
+                truncated,
+            ))
         }
         AdvancedAstNode::Join { left, right, on } => {
             let (left, left_truncated) =
@@ -2527,26 +2555,63 @@ fn advanced_predicate_matches(
     }
 }
 
+fn advanced_filter_rows(
+    mut set: AdvancedRowSet,
+    predicate: &AdvancedPredicate,
+    control: &QueryControl<'_>,
+) -> Result<AdvancedRowSet, QueryError> {
+    let mut cancellation = None;
+    set.rows.retain(|row| {
+        if cancellation.is_some() {
+            return false;
+        }
+        if let Err(error) = control.check() {
+            cancellation = Some(error);
+            return false;
+        }
+        advanced_predicate_matches(predicate, row)
+    });
+    if let Some(error) = cancellation {
+        return Err(error);
+    }
+    Ok(set)
+}
+
 /// Projects each row onto the requested columns.
-fn advanced_project_rows(set: AdvancedRowSet, columns: &[String]) -> AdvancedRowSet {
+fn advanced_project_rows(
+    set: AdvancedRowSet,
+    columns: &[String],
+    control: &QueryControl<'_>,
+) -> Result<AdvancedRowSet, QueryError> {
     let schema = advanced_project_schema(&set.columns, columns);
-    let rows = set
-        .rows
-        .into_iter()
-        .map(|row| {
-            let mut projected = BTreeMap::new();
-            for name in columns {
-                if let Some(value) = row.get(name) {
-                    projected.insert(name.clone(), value.clone());
-                }
+    let mut rows = Vec::new();
+    try_reserve(&mut rows, set.rows.len())?;
+    for row in set.rows {
+        control.check()?;
+        let mut projected = BTreeMap::new();
+        for name in columns {
+            if let Some(value) = row.get(name) {
+                projected.insert(name.clone(), value.clone());
             }
-            projected
-        })
-        .collect();
-    AdvancedRowSet {
+        }
+        rows.push(projected);
+    }
+    Ok(AdvancedRowSet {
         columns: schema,
         rows,
+    })
+}
+
+fn advanced_limit_rows(
+    mut set: AdvancedRowSet,
+    cap: usize,
+    control: &QueryControl<'_>,
+) -> Result<AdvancedRowSet, QueryError> {
+    control.check()?;
+    if set.rows.len() > cap {
+        set.rows.truncate(cap);
     }
+    Ok(set)
 }
 
 fn advanced_traverse_rows(
@@ -2558,6 +2623,11 @@ fn advanced_traverse_rows(
     control: &QueryControl<'_>,
     tracker: &mut UsageTracker,
 ) -> Result<AdvancedRowSet, QueryError> {
+    if max_depth == 0 || usize::from(max_depth) > ADVANCED_MAX_DEPTH {
+        return Err(QueryError::PlanRejected {
+            resource: QueryResource::Depth,
+        });
+    }
     let (predicate, invert_relation) = advanced_relation_projection(relation);
     let mut adjacency: BTreeMap<SymbolId, Vec<SymbolId>> = BTreeMap::new();
     for fact in &document.relations {
@@ -2598,7 +2668,7 @@ fn advanced_traverse_rows(
     let mut visited = frontier.clone();
     let mut emitted = BTreeSet::new();
     let mut rows = Vec::new();
-    for _ in 0..max_depth.min(5) {
+    for _ in 0..max_depth {
         let mut next = BTreeSet::new();
         for source in frontier {
             let Some(targets) = adjacency.get(&source) else {
@@ -2656,6 +2726,47 @@ const fn advanced_relation_projection(relation: AdvancedRelationKind) -> (Relati
     }
 }
 
+const ADVANCED_BTREE_ENTRY_OVERHEAD_BYTES: usize = mem::size_of::<usize>() * 4;
+
+fn advanced_value_dynamic_bytes(value: &AdvancedValue) -> usize {
+    match value {
+        AdvancedValue::Text(text) => text.len(),
+        AdvancedValue::Integer(_)
+        | AdvancedValue::Boolean(_)
+        | AdvancedValue::Symbol(_)
+        | AdvancedValue::File(_) => 0,
+    }
+}
+
+fn advanced_row_owned_bytes(row: &BTreeMap<String, AdvancedValue>) -> Result<u64, QueryError> {
+    let mut bytes = mem::size_of::<BTreeMap<String, AdvancedValue>>();
+    for (name, value) in row {
+        bytes = bytes
+            .saturating_add(ADVANCED_BTREE_ENTRY_OVERHEAD_BYTES)
+            .saturating_add(mem::size_of::<String>())
+            .saturating_add(name.len())
+            .saturating_add(mem::size_of::<AdvancedValue>())
+            .saturating_add(advanced_value_dynamic_bytes(value));
+    }
+    checked_usize_to_u64(bytes)
+}
+
+fn advanced_group_owned_bytes(
+    key: &[AdvancedValue],
+    aggregate_count: usize,
+) -> Result<u64, QueryError> {
+    let mut bytes = mem::size_of::<BTreeMap<Vec<AdvancedValue>, Vec<AdvancedAggregateState>>>()
+        .saturating_add(ADVANCED_BTREE_ENTRY_OVERHEAD_BYTES)
+        .saturating_add(mem::size_of::<Vec<AdvancedValue>>())
+        .saturating_add(key.len().saturating_mul(mem::size_of::<AdvancedValue>()))
+        .saturating_add(mem::size_of::<Vec<AdvancedAggregateState>>())
+        .saturating_add(aggregate_count.saturating_mul(mem::size_of::<AdvancedAggregateState>()));
+    for value in key {
+        bytes = bytes.saturating_add(advanced_value_dynamic_bytes(value));
+    }
+    checked_usize_to_u64(bytes)
+}
+
 fn advanced_join_rows(
     left: AdvancedRowSet,
     right: AdvancedRowSet,
@@ -2700,6 +2811,7 @@ fn advanced_join_rows(
                     joined.insert(name.clone(), value.clone());
                 }
             }
+            tracker.add_memory(advanced_row_owned_bytes(&joined)?)?;
             try_push(&mut rows, joined)?;
         }
     }
@@ -2771,12 +2883,13 @@ fn advanced_aggregate_rows(
             key.push(value.clone());
         }
         if !groups.contains_key(&key) {
+            tracker.add_memory(advanced_group_owned_bytes(&key, aggregations.len())?)?;
             groups.insert(key.clone(), initial_aggregate_states(aggregations)?);
         }
         let states = groups.get_mut(&key).ok_or(QueryError::PlanRejected {
             resource: QueryResource::Results,
         })?;
-        update_aggregate_states(states, aggregations, row)?;
+        update_aggregate_states(states, aggregations, row, tracker)?;
     }
 
     let mut rows = Vec::new();
@@ -2789,6 +2902,7 @@ fn advanced_aggregate_rows(
         for (column, state) in columns.iter().skip(group_by.len()).zip(states) {
             row.insert(column.name.clone(), aggregate_state_value(state)?);
         }
+        tracker.add_memory(advanced_row_owned_bytes(&row)?)?;
         rows.push(row);
     }
     Ok(AdvancedRowSet { columns, rows })
@@ -2814,6 +2928,7 @@ fn update_aggregate_states(
     states: &mut [AdvancedAggregateState],
     aggregations: &[AdvancedAggregateFunction],
     row: &BTreeMap<String, AdvancedValue>,
+    tracker: &mut UsageTracker,
 ) -> Result<(), QueryError> {
     for (state, aggregation) in states.iter_mut().zip(aggregations) {
         match (state, aggregation) {
@@ -2839,6 +2954,8 @@ fn update_aggregate_states(
                     });
                 };
                 if current.as_ref().is_none_or(|minimum| value < minimum) {
+                    tracker
+                        .add_memory(checked_usize_to_u64(advanced_value_dynamic_bytes(value))?)?;
                     *current = Some(value.clone());
                 }
             }
@@ -2849,6 +2966,8 @@ fn update_aggregate_states(
                     });
                 };
                 if current.as_ref().is_none_or(|maximum| value > maximum) {
+                    tracker
+                        .add_memory(checked_usize_to_u64(advanced_value_dynamic_bytes(value))?)?;
                     *current = Some(value.clone());
                 }
             }
@@ -2876,27 +2995,112 @@ fn aggregate_state_value(state: AdvancedAggregateState) -> Result<AdvancedValue,
 }
 
 /// Sorts rows deterministically by the requested keys with a stable tie-break.
-fn advanced_sort_rows(rows: &mut [BTreeMap<String, AdvancedValue>], by: &[AdvancedSortKey]) {
-    rows.sort_by(|left, right| {
-        for key in by {
-            let ordering = match (left.get(&key.field), right.get(&key.field)) {
-                (Some(left_value), Some(right_value)) => left_value.cmp(right_value),
-                (Some(_), None) => std::cmp::Ordering::Greater,
-                (None, Some(_)) => std::cmp::Ordering::Less,
-                (None, None) => std::cmp::Ordering::Equal,
-            };
-            let ordering = if key.descending {
-                ordering.reverse()
-            } else {
-                ordering
-            };
-            if ordering != std::cmp::Ordering::Equal {
-                return ordering;
+fn advanced_sort_rows(
+    rows: &mut Vec<BTreeMap<String, AdvancedValue>>,
+    by: &[AdvancedSortKey],
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+) -> Result<(), QueryError> {
+    control.check()?;
+    if rows.len() < 2 {
+        return Ok(());
+    }
+
+    tracker.add_memory(advanced_sort_workspace_bytes(rows.len())?)?;
+
+    let mut order = Vec::new();
+    try_reserve(&mut order, rows.len())?;
+    order.extend(0..rows.len());
+    let mut scratch = Vec::new();
+    try_reserve(&mut scratch, rows.len())?;
+    scratch.resize(rows.len(), 0);
+
+    let mut width = 1_usize;
+    while width < order.len() {
+        let span = width.saturating_mul(2);
+        let mut start = 0_usize;
+        while start < order.len() {
+            let middle = start.saturating_add(width).min(order.len());
+            let end = start.saturating_add(span).min(order.len());
+            let (mut left, mut right, mut output) = (start, middle, start);
+            while left < middle && right < end {
+                control.check()?;
+                if advanced_compare_rows(&rows[order[left]], &rows[order[right]], by)
+                    != std::cmp::Ordering::Greater
+                {
+                    scratch[output] = order[left];
+                    left += 1;
+                } else {
+                    scratch[output] = order[right];
+                    right += 1;
+                }
+                output += 1;
             }
+            while left < middle {
+                control.check()?;
+                scratch[output] = order[left];
+                left += 1;
+                output += 1;
+            }
+            while right < end {
+                control.check()?;
+                scratch[output] = order[right];
+                right += 1;
+                output += 1;
+            }
+            start = end;
         }
-        // Total deterministic tie-break over the ordered row contents.
-        left.cmp(right)
-    });
+        std::mem::swap(&mut order, &mut scratch);
+        width = span;
+    }
+
+    let mut slots = Vec::new();
+    try_reserve(&mut slots, rows.len())?;
+    slots.extend(std::mem::take(rows).into_iter().map(Some));
+    try_reserve(rows, slots.len())?;
+    for index in order {
+        control.check()?;
+        let row = slots[index].take().ok_or(QueryError::PlanRejected {
+            resource: QueryResource::Results,
+        })?;
+        rows.push(row);
+    }
+    Ok(())
+}
+
+fn advanced_sort_workspace_bytes(row_count: usize) -> Result<u64, QueryError> {
+    let index_bytes = row_count
+        .saturating_mul(mem::size_of::<usize>())
+        .saturating_mul(2);
+    let row_slots = row_count
+        .saturating_mul(mem::size_of::<Option<BTreeMap<String, AdvancedValue>>>())
+        .saturating_mul(2);
+    checked_usize_to_u64(index_bytes.saturating_add(row_slots))
+}
+
+fn advanced_compare_rows(
+    left: &BTreeMap<String, AdvancedValue>,
+    right: &BTreeMap<String, AdvancedValue>,
+    by: &[AdvancedSortKey],
+) -> std::cmp::Ordering {
+    for key in by {
+        let ordering = match (left.get(&key.field), right.get(&key.field)) {
+            (Some(left_value), Some(right_value)) => left_value.cmp(right_value),
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (None, None) => std::cmp::Ordering::Equal,
+        };
+        let ordering = if key.descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    // Total deterministic tie-break over the ordered row contents.
+    left.cmp(right)
 }
 
 /// Encodes one intermediate row as a JSON object keyed by column name.
@@ -8938,7 +9142,14 @@ mod tests {
     }
 
     fn run_advanced(document: &NormalizedIrDocument, plan: &AdvancedQueryPlan) -> AdvancedBuild {
-        let mut tracker = UsageTracker::new(plan.budget);
+        try_run_advanced(document, plan).expect("bounded advanced query succeeds")
+    }
+
+    fn try_run_advanced(
+        document: &NormalizedIrDocument,
+        plan: &AdvancedQueryPlan,
+    ) -> Result<AdvancedBuild, QueryError> {
+        let mut tracker = UsageTracker::new(advanced_runtime_budget(plan)?);
         let mut limiting_resources = Vec::new();
         let cancellation = Cancellation::with_deadline(
             Instant::now()
@@ -8953,7 +9164,6 @@ mod tests {
             &mut tracker,
             &mut limiting_resources,
         )
-        .expect("bounded advanced query succeeds")
     }
 
     fn scan_functions() -> AdvancedAstNode {
@@ -9314,6 +9524,22 @@ mod tests {
         }
     }
 
+    fn advanced_text_rows(values: &[&str]) -> AdvancedRowSet {
+        let rows = values
+            .iter()
+            .map(|value| {
+                BTreeMap::from([("id".to_owned(), AdvancedValue::Text((*value).to_owned()))])
+            })
+            .collect();
+        AdvancedRowSet {
+            columns: vec![AdvancedColumnSchema {
+                name: "id".to_owned(),
+                column_type: AdvancedColumnType::Text,
+            }],
+            rows,
+        }
+    }
+
     fn advanced_file_paths(document: &NormalizedIrDocument) -> BTreeMap<FileId, String> {
         document
             .files
@@ -9408,6 +9634,48 @@ mod tests {
     }
 
     #[test]
+    fn advanced_join_materialization_is_memory_bounded() {
+        let joined_row =
+            BTreeMap::from([("id".to_owned(), AdvancedValue::Text("alpha".to_owned()))]);
+        let required =
+            advanced_row_owned_bytes(&joined_row).expect("joined row size is representable");
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(30));
+
+        let mut below = UsageTracker::new(QueryBudget::new().with_max_memory_bytes(required - 1));
+        let error = expect_advanced_error(
+            advanced_join_rows(
+                advanced_text_rows(&["alpha"]),
+                advanced_text_rows(&["alpha"]),
+                "id",
+                &control,
+                &mut below,
+            ),
+            "join materialization must respect the memory ledger",
+        );
+        assert!(matches!(
+            error,
+            QueryError::BudgetExceeded {
+                resource: QueryResource::MemoryBytes,
+                limit,
+            } if limit == required - 1
+        ));
+        assert_eq!(below.memory_bytes, 0);
+
+        let mut exact = UsageTracker::new(QueryBudget::new().with_max_memory_bytes(required));
+        let joined = advanced_join_rows(
+            advanced_text_rows(&["alpha"]),
+            advanced_text_rows(&["alpha"]),
+            "id",
+            &control,
+            &mut exact,
+        )
+        .expect("the exact joined-row memory budget is sufficient");
+        assert_eq!(exact.memory_bytes, required);
+        assert_eq!(joined.rows, vec![joined_row]);
+    }
+
+    #[test]
     fn advanced_aggregate_charges_each_input_row_at_the_boundary() {
         let cancellation = Cancellation::new();
         let control = QueryControl::new(&cancellation, Duration::from_secs(30));
@@ -9443,6 +9711,55 @@ mod tests {
         .expect("the exact input-row budget is sufficient");
         assert_eq!(exact.edges, 3);
         assert_eq!(groups.rows.len(), 3);
+    }
+
+    #[test]
+    fn advanced_aggregate_groups_and_output_are_memory_bounded() {
+        let key = [AdvancedValue::Text("alpha".to_owned())];
+        let group_bytes = advanced_group_owned_bytes(&key, 1).expect("group size is representable");
+        let output_row = BTreeMap::from([
+            ("count".to_owned(), AdvancedValue::Integer(1)),
+            ("id".to_owned(), AdvancedValue::Text("alpha".to_owned())),
+        ]);
+        let output_bytes =
+            advanced_row_owned_bytes(&output_row).expect("output row size is representable");
+        let required = group_bytes + output_bytes;
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(30));
+        let group_by = ["id".to_owned()];
+        let aggregations = [AdvancedAggregateFunction::Count];
+
+        let mut below = UsageTracker::new(QueryBudget::new().with_max_memory_bytes(required - 1));
+        let error = expect_advanced_error(
+            advanced_aggregate_rows(
+                advanced_text_rows(&["alpha"]),
+                &group_by,
+                &aggregations,
+                &control,
+                &mut below,
+            ),
+            "aggregate output must respect the memory ledger",
+        );
+        assert!(matches!(
+            error,
+            QueryError::BudgetExceeded {
+                resource: QueryResource::MemoryBytes,
+                limit,
+            } if limit == required - 1
+        ));
+        assert_eq!(below.memory_bytes, group_bytes);
+
+        let mut exact = UsageTracker::new(QueryBudget::new().with_max_memory_bytes(required));
+        let rows = advanced_aggregate_rows(
+            advanced_text_rows(&["alpha"]),
+            &group_by,
+            &aggregations,
+            &control,
+            &mut exact,
+        )
+        .expect("the exact group and output memory budget is sufficient");
+        assert_eq!(exact.memory_bytes, required);
+        assert_eq!(rows.rows, vec![output_row]);
     }
 
     #[test]
@@ -9558,6 +9875,168 @@ mod tests {
     }
 
     #[test]
+    fn advanced_transform_stages_reject_precancelled_work() {
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        let control = QueryControl::new(&cancellation, Duration::from_secs(30));
+        let predicate = AdvancedPredicate::Equals {
+            field: "id".to_owned(),
+            value: AdvancedValue::Integer(1),
+        };
+
+        assert!(matches!(
+            advanced_filter_rows(advanced_integer_rows(&[1, 2]), &predicate, &control),
+            Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+        ));
+        assert!(matches!(
+            advanced_project_rows(advanced_integer_rows(&[1, 2]), &["id".to_owned()], &control,),
+            Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+        ));
+        assert!(matches!(
+            advanced_limit_rows(advanced_integer_rows(&[1, 2]), 1, &control),
+            Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+        ));
+
+        let mut rows = advanced_integer_rows(&[2, 1]).rows;
+        let mut tracker = UsageTracker::new(QueryBudget::new());
+        assert!(matches!(
+            advanced_sort_rows(
+                &mut rows,
+                &[AdvancedSortKey {
+                    field: "id".to_owned(),
+                    descending: false,
+                }],
+                &control,
+                &mut tracker,
+            ),
+            Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+        ));
+        assert_eq!(tracker.memory_bytes, 0);
+    }
+
+    #[test]
+    fn advanced_sort_workspace_is_memory_bounded_at_the_exact_boundary() {
+        let row_count = 3;
+        let required =
+            advanced_sort_workspace_bytes(row_count).expect("workspace size is representable");
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(30));
+        let keys = [AdvancedSortKey {
+            field: "id".to_owned(),
+            descending: false,
+        }];
+
+        let mut below_rows = advanced_integer_rows(&[3, 1, 2]).rows;
+        let mut below = UsageTracker::new(QueryBudget::new().with_max_memory_bytes(required - 1));
+        assert!(matches!(
+            advanced_sort_rows(&mut below_rows, &keys, &control, &mut below),
+            Err(QueryError::BudgetExceeded {
+                resource: QueryResource::MemoryBytes,
+                limit,
+            }) if limit == required - 1
+        ));
+        assert_eq!(below.memory_bytes, 0);
+
+        let mut exact_rows = advanced_integer_rows(&[3, 1, 2]).rows;
+        let mut exact = UsageTracker::new(QueryBudget::new().with_max_memory_bytes(required));
+        advanced_sort_rows(&mut exact_rows, &keys, &control, &mut exact)
+            .expect("the exact sort workspace budget is sufficient");
+        assert_eq!(exact.memory_bytes, required);
+        assert_eq!(
+            exact_rows
+                .iter()
+                .map(|row| row["id"].clone())
+                .collect::<Vec<_>>(),
+            vec![
+                AdvancedValue::Integer(1),
+                AdvancedValue::Integer(2),
+                AdvancedValue::Integer(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn advanced_declared_work_cap_limits_join_fanout() {
+        let document = advanced_document();
+        let ast = AdvancedAstNode::Join {
+            left: Box::new(scan_functions()),
+            right: Box::new(scan_functions()),
+            on: "id".to_owned(),
+        };
+
+        let mut below = advanced_plan(ast.clone(), false, 100);
+        below.max_traversal = 3;
+        let error = match try_run_advanced(&document, &below) {
+            Ok(_) => panic!("the global advanced edge-work cap must reject the fourth join pair"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            QueryError::BudgetExceeded {
+                resource: QueryResource::Edges,
+                limit: 3,
+            }
+        ));
+
+        let mut exact = advanced_plan(ast, false, 100);
+        exact.max_traversal = 4;
+        let built =
+            try_run_advanced(&document, &exact).expect("four join pairs fit the exact work cap");
+        assert_eq!(built.rows.len(), 2);
+    }
+
+    #[test]
+    fn advanced_traversal_depth_is_rejected_instead_of_clamped() {
+        let document = advanced_document();
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(30));
+
+        for depth in [0, 6] {
+            let mut tracker = UsageTracker::new(QueryBudget::new());
+            let error = expect_advanced_error(
+                advanced_traverse_rows(
+                    &document,
+                    symbol(11),
+                    AdvancedRelationKind::Calls,
+                    AdvancedTraverseDirection::Outbound,
+                    depth,
+                    &control,
+                    &mut tracker,
+                ),
+                "invalid traversal depth must be rejected",
+            );
+            assert!(matches!(
+                error,
+                QueryError::PlanRejected {
+                    resource: QueryResource::Depth,
+                }
+            ));
+            assert_eq!(tracker.edges, 0);
+        }
+
+        for depth in [None, Some(1), Some(5)] {
+            let ast = AdvancedAstNode::Traverse {
+                seed: Some(symbol(11)),
+                seed_from: None,
+                relation: AdvancedRelationKind::Calls,
+                direction: AdvancedTraverseDirection::Outbound,
+                max_depth: depth,
+            };
+            assert!(advanced_traversal_depths_valid(&ast));
+        }
+        for depth in [Some(0), Some(6)] {
+            let ast = AdvancedAstNode::Traverse {
+                seed: Some(symbol(11)),
+                seed_from: None,
+                relation: AdvancedRelationKind::Calls,
+                direction: AdvancedTraverseDirection::Outbound,
+                max_depth: depth,
+            };
+            assert!(!advanced_traversal_depths_valid(&ast));
+        }
+    }
+
+    #[test]
     fn advanced_static_cost_accepts_the_exact_ceiling() {
         let exact = vec![AdvancedOperator::Join; 200];
         assert_eq!(
@@ -9569,5 +10048,13 @@ mod tests {
         let mut excessive = exact;
         excessive.push(AdvancedOperator::Limit);
         assert!(AdvancedQueryPlan::validate(&excessive, 999, ADVANCED_MAX_TRAVERSAL, 2).is_err());
+    }
+
+    #[test]
+    fn advanced_work_limit_rejects_zero_and_accepts_the_hard_ceiling() {
+        let operators = [AdvancedOperator::Scan];
+        assert!(AdvancedQueryPlan::validate(&operators, 1, 0, 1).is_err());
+        assert!(AdvancedQueryPlan::validate(&operators, 1, ADVANCED_MAX_TRAVERSAL, 1).is_ok());
+        assert!(AdvancedQueryPlan::validate(&operators, 1, ADVANCED_MAX_TRAVERSAL + 1, 1).is_err());
     }
 }

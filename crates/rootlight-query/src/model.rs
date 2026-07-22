@@ -2071,7 +2071,7 @@ pub const ADVANCED_MAX_RESULTS: usize = 1_000;
 pub const ADVANCED_MAX_DEPTH: usize = 5;
 /// Default maximum traversal or plan depth.
 pub const ADVANCED_DEFAULT_MAX_DEPTH: usize = 3;
-/// Hard ceiling on traversal facts an advanced query may examine.
+/// Hard ceiling on cumulative edge work across advanced joins, aggregates, and traversals.
 pub const ADVANCED_MAX_TRAVERSAL: usize = 100_000;
 /// Hard ceiling on the static advanced query cost estimate.
 pub const ADVANCED_MAX_ESTIMATED_COST: u64 = 1_000_000;
@@ -2581,7 +2581,8 @@ impl AdvancedQueryPlan {
     ///
     /// Returns [`QueryError::PlanRejected`] when the operator list is empty, the
     /// depth exceeds the hard ceiling, the row limit is out of range, the
-    /// traversal bound is exceeded, or the static cost estimate is too large.
+    /// cumulative edge-work bound is exceeded, or the static cost estimate is
+    /// too large.
     pub fn validate(
         operators: &[AdvancedOperator],
         max_rows: usize,
@@ -2603,7 +2604,7 @@ impl AdvancedQueryPlan {
                 resource: QueryResource::Results,
             });
         }
-        if max_traversal > ADVANCED_MAX_TRAVERSAL {
+        if max_traversal == 0 || max_traversal > ADVANCED_MAX_TRAVERSAL {
             return Err(QueryError::PlanRejected {
                 resource: QueryResource::Edges,
             });

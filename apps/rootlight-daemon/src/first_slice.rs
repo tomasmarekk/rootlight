@@ -2437,10 +2437,8 @@ fn advanced_query(
         max_depth,
         context.effective_budget.and_then(|budget| budget.depth()),
     )?;
-    let max_traversal = reduce_optional_usize(
-        ADVANCED_MAX_TRAVERSAL,
-        context.effective_budget.and_then(|budget| budget.paths()),
-    )?;
+    let budget = service_budget(context);
+    let max_traversal = advanced_edge_work_limit(budget)?;
     let response = service
         .advanced_query_with_budget(
             generation.generation,
@@ -2451,7 +2449,7 @@ fn advanced_query(
             max_depth,
             max_traversal,
             request.cost_limit,
-            service_budget(context),
+            budget,
             &context.cancellation,
         )
         .map_err(service_error)?;
@@ -2494,6 +2492,10 @@ fn advanced_query(
         next_page_offset: data.next_page_offset,
         result_completeness: Some(result_completeness),
     })
+}
+
+fn advanced_edge_work_limit(budget: FirstSliceBudget) -> Result<usize, PublicError> {
+    reduce_optional_usize(ADVANCED_MAX_TRAVERSAL, Some(budget.query().max_edges()))
 }
 
 /// Parses a history-compare revision selector into an explicit generation.
@@ -3767,6 +3769,28 @@ mod tests {
         assert_eq!(
             reduce_optional_usize(default_paths, Some(20)).expect("validated path limit converts"),
             default_paths
+        );
+    }
+
+    #[test]
+    fn advanced_work_limit_uses_the_effective_edge_budget() {
+        let reduced = reduced_service_budget(Some(ServiceBudgetReduction {
+            rows: u64::MAX,
+            edges: 7,
+            results: u64::MAX,
+            source_bytes: u64::MAX,
+            json_bytes: u64::MAX,
+            estimated_tokens: u64::MAX,
+            memory_bytes: u64::MAX,
+            duration: Duration::MAX,
+        }));
+        assert_eq!(
+            advanced_edge_work_limit(reduced).expect("edge budget converts"),
+            7
+        );
+        assert_eq!(
+            advanced_edge_work_limit(FirstSliceBudget::new()).expect("default budget converts"),
+            ADVANCED_MAX_TRAVERSAL
         );
     }
 

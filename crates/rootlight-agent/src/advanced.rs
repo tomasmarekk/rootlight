@@ -19,7 +19,7 @@ pub const MAX_AST_NODES: usize = 31;
 /// Maximum rows a single advanced query may return.
 pub const MAX_ADVANCED_ROWS: usize = 1_000;
 
-/// Maximum traversal facts a single advanced query may examine.
+/// Maximum cumulative edge work across advanced joins, aggregates, and traversals.
 pub const MAX_ADVANCED_TRAVERSAL: usize = 100_000;
 
 /// Maximum estimated cost units before a query is rejected.
@@ -290,7 +290,7 @@ pub struct AdvancedQueryPlan {
     pub operators: Vec<QueryOperator>,
     /// Maximum rows requested.
     pub max_rows: usize,
-    /// Maximum traversal facts requested.
+    /// Maximum cumulative edge work requested.
     pub max_traversal: usize,
     /// Static cost estimate.
     pub estimated_cost: u64,
@@ -342,7 +342,7 @@ impl AdvancedQueryPlan {
         if max_rows == 0 || max_rows > MAX_ADVANCED_ROWS {
             return Err(AdvancedQueryError::RowLimitExceeded);
         }
-        if max_traversal > MAX_ADVANCED_TRAVERSAL {
+        if max_traversal == 0 || max_traversal > MAX_ADVANCED_TRAVERSAL {
             return Err(AdvancedQueryError::TraversalLimitExceeded);
         }
 
@@ -1193,6 +1193,14 @@ mod tests {
 
     #[test]
     fn excessive_traversal_is_rejected() {
+        assert_eq!(
+            AdvancedQueryPlan::validate(&[QueryOperator::Traverse], 100, 0, 1),
+            Err(AdvancedQueryError::TraversalLimitExceeded)
+        );
+        assert!(
+            AdvancedQueryPlan::validate(&[QueryOperator::Traverse], 100, MAX_ADVANCED_TRAVERSAL, 1)
+                .is_ok()
+        );
         assert_eq!(
             AdvancedQueryPlan::validate(
                 &[QueryOperator::Traverse],
