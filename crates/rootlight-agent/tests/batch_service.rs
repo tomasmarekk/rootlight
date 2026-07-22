@@ -23,7 +23,10 @@ use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, SymbolId};
 use rootlight_ir::{CoverageStatus, LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::{
     ErrorCode, PublicError, RepositorySelector, SchemaVersion, TrustClassification,
-    context::{BatchOperation, BatchOperationStatus, BatchStatus, BatchTool, QueryBatchInput},
+    context::{
+        BatchArguments, BatchOperation, BatchOperationStatus, BatchStatus, BatchTool,
+        QueryBatchInput,
+    },
     vertical::{
         CacheStatus, CoverageSummary, Freshness, GenerationSelector, GenerationSummary,
         ReadEnvelope, RepositoryIdSelector, RequiredNullable, ResolvedRepository, ResponseBudget,
@@ -397,7 +400,9 @@ fn operation(
         tool,
         depends_on: depends_on
             .map(|dependencies| dependencies.into_iter().map(str::to_owned).collect()),
-        arguments,
+        arguments: arguments
+            .try_into()
+            .expect("test operation arguments contain valid bindings"),
         local_budget,
     }
 }
@@ -436,13 +441,13 @@ fn typed_scalar_bindings_resolve_and_record_exact_destinations() {
     arguments.insert(
         "from".to_owned(),
         json!({
-            "symbol_id": {"$from": "find", "pointer": "/data/matches/0/symbol_id"}
+            "symbol_id": {"$from": "find", "source": "symbol_id", "index": 0}
         }),
     );
     arguments.insert(
         "to".to_owned(),
         json!({
-            "symbol_id": {"$from": "find", "pointer": "/data/matches/0/symbol_id"}
+            "symbol_id": {"$from": "find", "source": "symbol_id", "index": 0}
         }),
     );
     let request = input(
@@ -495,7 +500,8 @@ fn runtime_binding_values_enforce_type_cardinality_and_identity() {
                 "from": {
                     "symbol_id": {
                         "$from": "source",
-                        "pointer": "/data/matches/0/symbol_id"
+                        "source": "symbol_id",
+                        "index": 0
                     }
                 }
             }),
@@ -508,7 +514,8 @@ fn runtime_binding_values_enforce_type_cardinality_and_identity() {
             json!({
                 "symbol_ids": {
                     "$from": "source",
-                    "pointer": "/data/paths/0/nodes"
+                    "source": "nodes",
+                    "index": 0
                 }
             }),
             BatchExecutionError::BindingCardinalityMismatch,
@@ -521,7 +528,8 @@ fn runtime_binding_values_enforce_type_cardinality_and_identity() {
                 "references": [{
                     "source_ref": {
                         "$from": "source",
-                        "pointer": "/data/symbols/0/definition"
+                        "source": "definition",
+                        "index": 0
                     }
                 }]
             }),
@@ -560,7 +568,8 @@ fn runtime_binding_values_enforce_type_cardinality_and_identity() {
 fn missing_optional_and_empty_collection_are_distinct() {
     let binding = json!({
         "$from": "source",
-        "pointer": "/data/plan/0/targets"
+        "source": "symbol_ids",
+        "index": 0
     });
     let Value::Object(empty_arguments) = json!({
         "seeds": {"symbols": binding}
@@ -603,7 +612,8 @@ fn missing_optional_and_empty_collection_are_distinct() {
         "from": {
             "symbol_id": {
                 "$from": "source",
-                "pointer": "/data/matches/0/symbol_id"
+                "source": "symbol_id",
+                "index": 0
             }
         }
     }) else {
@@ -648,7 +658,7 @@ async fn service_materializes_bindings_and_propagates_policy() {
     let mut second_arguments = Map::new();
     second_arguments.insert(
         "symbol_ids".to_owned(),
-        json!({"$from": "trace", "pointer": "/data/paths/0/nodes"}),
+        json!({"$from": "trace", "source": "nodes", "index": 0}),
     );
     let input = input(
         vec![
@@ -728,7 +738,8 @@ async fn batch_bindings_use_canonical_data_while_public_results_are_compact() {
         "references": [{
             "source_ref": {
                 "$from": "find",
-                "pointer": "/data/matches/0/source_ref"
+                "source": "source_ref",
+                "index": 0
             }
         }]
     }) else {
@@ -875,89 +886,32 @@ async fn reserved_child_control_keys_fail_before_identity_resolution() {
     }
 }
 
-#[tokio::test]
-async fn binding_objects_with_extra_keys_fail_before_identity_resolution() {
+#[test]
+fn binding_objects_with_extra_keys_fail_at_the_contract_boundary() {
     let mut arguments = Map::new();
     arguments.insert(
         "query".to_owned(),
         json!({
             "$from": "find",
-            "pointer": "/data/matches/0/symbol_id",
+            "source": "symbol_id",
+            "index": 0,
             "fallback": "publish"
         }),
     );
-    let port = Arc::new(FakePort::with_responses([]));
-    let result = BatchService
-        .execute(
-            Arc::clone(&port),
-            input(
-                vec![
-                    operation("find", BatchTool::CodeLocate, Map::new(), None, None),
-                    operation(
-                        "invalid",
-                        BatchTool::CodeLocate,
-                        arguments,
-                        Some(vec!["find"]),
-                        None,
-                    ),
-                ],
-                budget(500),
-            ),
-            repository(),
-            TestCancellation(false),
-            errors(),
-        )
-        .await;
-    assert_eq!(result, Err(BatchOrchestrationError::InvalidArguments));
-    assert_eq!(port.identity_calls.load(Ordering::Relaxed), 0);
-    assert!(
-        port.calls
-            .lock()
-            .expect("call lock is available")
-            .is_empty()
-    );
+    assert!(BatchArguments::try_from(arguments).is_err());
 }
 
-#[tokio::test]
-async fn malformed_binding_fields_fail_before_identity_resolution() {
+#[test]
+fn malformed_binding_fields_fail_at_the_contract_boundary() {
     for binding in [
-        json!({"$from": "x".repeat(33), "pointer": "/data/matches/0/symbol_id"}),
-        json!({"$from": "find!", "pointer": "/data/matches/0/symbol_id"}),
-        json!({"$from": "find", "pointer": format!("/data/{}/symbol_id", "0".repeat(1009))}),
-        json!({"$from": "find", "pointer": "/warnings/0/code"}),
+        json!({"$from": "x".repeat(33), "source": "symbol_id", "index": 0}),
+        json!({"$from": "find!", "source": "symbol_id", "index": 0}),
+        json!({"$from": "find", "source": "symbol_id", "index": 500}),
+        json!({"$from": "find", "source": "warnings", "index": 0}),
     ] {
         let mut arguments = Map::new();
         arguments.insert("query".to_owned(), binding);
-        let port = Arc::new(FakePort::with_responses([]));
-        let result = BatchService
-            .execute(
-                Arc::clone(&port),
-                input(
-                    vec![
-                        operation("find", BatchTool::CodeLocate, Map::new(), None, None),
-                        operation(
-                            "invalid",
-                            BatchTool::CodeLocate,
-                            arguments,
-                            Some(vec!["find"]),
-                            None,
-                        ),
-                    ],
-                    budget(500),
-                ),
-                repository(),
-                TestCancellation(false),
-                errors(),
-            )
-            .await;
-        assert_eq!(result, Err(BatchOrchestrationError::InvalidArguments));
-        assert_eq!(port.identity_calls.load(Ordering::Relaxed), 0);
-        assert!(
-            port.calls
-                .lock()
-                .expect("call lock is available")
-                .is_empty()
-        );
+        assert!(BatchArguments::try_from(arguments).is_err());
     }
 }
 
@@ -1253,16 +1207,16 @@ async fn local_timeout_is_a_per_operation_budget_error_after_prior_success() {
 }
 
 #[tokio::test]
-async fn bindings_cannot_read_warnings_or_envelope_metadata_before_identity_resolution() {
+async fn unregistered_source_selections_fail_before_identity_resolution() {
     let mut metadata_arguments = Map::new();
     metadata_arguments.insert(
         "query".to_owned(),
-        json!({"$from": "find", "pointer": "/warnings/0/code"}),
+        json!({"$from": "find", "source": "test_id", "index": 0}),
     );
     let mut nested_arguments = Map::new();
     nested_arguments.insert(
         "query".to_owned(),
-        json!({"$from": "find", "pointer": "/data/warnings/0/symbol_id"}),
+        json!({"$from": "find", "source": "pack_id"}),
     );
     let request = input(
         vec![
@@ -1714,7 +1668,7 @@ async fn incompatible_binding_types_fail_before_identity_resolution() {
     let mut arguments = Map::new();
     arguments.insert(
         "search_modes".to_owned(),
-        json!({"$from": "find", "pointer": "/data/matches/0/symbol_id"}),
+        json!({"$from": "find", "source": "symbol_id", "index": 0}),
     );
     let input = input(
         vec![

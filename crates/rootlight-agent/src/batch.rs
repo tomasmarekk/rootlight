@@ -26,8 +26,9 @@ use rootlight_mcp_contract::{
         LimitingResourceKind, ResultCompleteness,
     },
     context::{
-        BatchOperation as ContractBatchOperation, BatchOperationResult, BatchOperationStatus,
-        BatchStatus, BatchTool, FailurePolicy, QueryBatchData, QueryBatchInput,
+        BatchBinding, BatchOperation as ContractBatchOperation, BatchOperationResult,
+        BatchOperationStatus, BatchStatus, BatchTool, FailurePolicy, QueryBatchData,
+        QueryBatchInput,
     },
     vertical::{
         CacheStatus, GenerationSelector, ReadEnvelope, RepositoryIdSelector, RequiredNullable,
@@ -607,13 +608,17 @@ fn compile_argument_template(
 ) -> Result<ArgumentTemplate, BatchExecutionError> {
     match value {
         Value::Object(map) => {
-            if let Some((from_name, pointer)) = binding_reference(map)? {
+            if let Some(binding) = binding_reference(map)? {
                 let source_operation = declared
                     .iter()
-                    .find(|&&index| operations[index].id == from_name)
+                    .find(|&&index| operations[index].id == binding.from)
                     .copied()
                     .ok_or(BatchExecutionError::InvalidBinding)?;
-                let source = translate_source_binding(operations[source_operation].tool, pointer)?;
+                let source = translate_source_binding(
+                    operations[source_operation].tool,
+                    binding.source,
+                    binding.index,
+                )?;
                 let target = translate_target_binding(target_tool, destination)?;
                 validate_binding_pair(source.slot, target)?;
                 Ok(ArgumentTemplate::Binding(PlannedBinding {
@@ -1562,11 +1567,11 @@ impl BindingResolver<'_> {
     fn resolve(&mut self, value: &Value, destination: &str) -> Result<Value, BatchExecutionError> {
         match value {
             Value::Object(map) => {
-                if let Some((from_name, pointer)) = binding_reference(map)? {
+                if let Some(binding) = binding_reference(map)? {
                     let dependency = self
                         .declared
                         .iter()
-                        .find(|&&index| self.operations[index].id == from_name)
+                        .find(|&&index| self.operations[index].id == binding.from)
                         .ok_or(BatchExecutionError::InvalidBinding)?;
                     let envelope = self.envelopes[*dependency]
                         .as_ref()
@@ -1575,7 +1580,8 @@ impl BindingResolver<'_> {
                         return Err(BatchExecutionError::InvalidBinding);
                     }
                     let source_tool = self.operations[*dependency].tool;
-                    let source = translate_source_binding(source_tool, pointer)?;
+                    let source =
+                        translate_source_binding(source_tool, binding.source, binding.index)?;
                     let target = translate_target_binding(self.target_tool, destination)?;
                     validate_binding_pair(source.slot, target)?;
                     let resolved =
@@ -1638,25 +1644,16 @@ fn batch_operation_id_is_valid(id: &str) -> bool {
 
 fn binding_reference(
     map: &Map<String, Value>,
-) -> Result<Option<(&str, &str)>, BatchExecutionError> {
-    let Some(from) = map.get("$from") else {
+) -> Result<Option<BatchBinding>, BatchExecutionError> {
+    if !map.contains_key("$from") {
         return Ok(None);
-    };
-    if map.len() != 2 {
+    }
+    let binding = serde_json::from_value::<BatchBinding>(Value::Object(map.clone()))
+        .map_err(|_| BatchExecutionError::InvalidBinding)?;
+    if !batch_operation_id_is_valid(&binding.from) {
         return Err(BatchExecutionError::InvalidBinding);
     }
-    let from = from.as_str().ok_or(BatchExecutionError::InvalidBinding)?;
-    let pointer = map
-        .get("pointer")
-        .and_then(Value::as_str)
-        .ok_or(BatchExecutionError::InvalidBinding)?;
-    if !batch_operation_id_is_valid(from)
-        || !(1..=1024).contains(&pointer.len())
-        || !pointer.starts_with('/')
-    {
-        return Err(BatchExecutionError::InvalidBinding);
-    }
-    Ok(Some((from, pointer)))
+    Ok(Some(binding))
 }
 
 /// Validates every binding edge against the typed source and destination registry.
@@ -1700,12 +1697,16 @@ fn validate_typed_binding_value(
 ) -> Result<(), BatchExecutionError> {
     match value {
         Value::Object(map) => {
-            if let Some((from_name, pointer)) = binding_reference(map)? {
+            if let Some(binding) = binding_reference(map)? {
                 let dependency = declared
                     .iter()
-                    .find(|&&index| operations[index].id == from_name)
+                    .find(|&&index| operations[index].id == binding.from)
                     .ok_or(BatchExecutionError::InvalidBinding)?;
-                let source = translate_source_binding(operations[*dependency].tool, pointer)?;
+                let source = translate_source_binding(
+                    operations[*dependency].tool,
+                    binding.source,
+                    binding.index,
+                )?;
                 let target = translate_target_binding(target_tool, destination)?;
                 validate_binding_pair(source.slot, target)
             } else {
@@ -1746,13 +1747,30 @@ struct TypedSourceBinding<'a> {
 
 fn translate_source_binding(
     tool: BatchTool,
-    pointer: &str,
+    source: rootlight_mcp_contract::batch::BatchBindingSource,
+    index: Option<u16>,
 ) -> Result<TypedSourceBinding<'static>, BatchExecutionError> {
-    let segments = compatibility_segments(pointer, true)?;
     for slot in batch_descriptor(tool).bindings.sources {
-        if let Some(indices) = match_typed_path(slot.path, &segments)? {
-            return Ok(TypedSourceBinding { slot, indices });
+        if slot.source != source || !slot.composable {
+            continue;
         }
+        let mut indices = Vec::new();
+        for segment in slot.path {
+            if let BatchBindingPathSegment::Index { max_exclusive } = segment {
+                if !indices.is_empty() {
+                    return Err(BatchExecutionError::InvalidBinding);
+                }
+                let index = index.ok_or(BatchExecutionError::InvalidBinding)?;
+                if index >= *max_exclusive {
+                    return Err(BatchExecutionError::InvalidBinding);
+                }
+                indices.push(usize::from(index));
+            }
+        }
+        if indices.is_empty() != index.is_none() {
+            return Err(BatchExecutionError::InvalidBinding);
+        }
+        return Ok(TypedSourceBinding { slot, indices });
     }
     Err(BatchExecutionError::InvalidBinding)
 }
@@ -2826,7 +2844,6 @@ mod tests {
         },
         vertical::ResponseBudget,
     };
-    use serde_json::Map;
     use std::time::{Duration, Instant};
 
     fn contract_operation(
@@ -2839,7 +2856,7 @@ mod tests {
             tool,
             depends_on: depends_on
                 .map(|dependencies| dependencies.into_iter().map(str::to_owned).collect()),
-            arguments: Map::new(),
+            arguments: rootlight_mcp_contract::context::BatchArguments::new(),
             local_budget: None,
         }
     }

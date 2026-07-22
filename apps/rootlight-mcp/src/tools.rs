@@ -758,7 +758,10 @@ fn capability_rejection(
 }
 
 fn is_batch_binding(object: &Map<String, Value>) -> bool {
-    object.len() == 2 && object.contains_key("$from") && object.contains_key("pointer")
+    serde_json::from_value::<rootlight_mcp_contract::context::BatchBinding>(Value::Object(
+        object.clone(),
+    ))
+    .is_ok()
 }
 
 fn join_object_path(parent: &str, child: &str) -> String {
@@ -2251,7 +2254,7 @@ mod tests {
 
     #[test]
     fn unresolved_bindings_fail_closed_only_for_restricted_targets() {
-        let binding = json!({"$from": "find", "pointer": "/data/matches/0/source_ref"});
+        let binding = json!({"$from": "find", "source": "source_ref", "index": 0});
         let error = validate_capability_input(
             VerticalTool::SourceRead,
             &json!({"response_profile": binding}),
@@ -2271,7 +2274,8 @@ mod tests {
                 "references": [{
                     "source_ref": {
                         "$from": "find",
-                        "pointer": "/data/matches/0/source_ref"
+                        "source": "source_ref",
+                        "index": 0
                     }
                 }]
             }),
@@ -2302,7 +2306,7 @@ mod tests {
             rules: RULES,
             ..*capability_for(McpTool::QueryBatch)
         };
-        let binding = json!({"$from": "find", "pointer": "/data/selector"});
+        let binding = json!({"$from": "find", "source": "symbol_id", "index": 0});
         let current = PendingCapabilityValue {
             value: &binding,
             registry_path: "selector".to_owned(),
@@ -2325,7 +2329,8 @@ mod tests {
                 "references": [{
                     "source_ref": {
                         "$from": "find",
-                        "pointer": "/data/matches/0/source_ref"
+                        "source": "source_ref",
+                        "index": 0
                     }
                 }]
             }),
@@ -4104,7 +4109,7 @@ mod tests {
             id: id.to_owned(),
             tool,
             depends_on: depends_on.map(|names| names.into_iter().map(str::to_owned).collect()),
-            arguments: Map::new(),
+            arguments: rootlight_mcp_contract::context::BatchArguments::new(),
             local_budget: None,
         }
     }
@@ -4190,10 +4195,13 @@ mod tests {
         let mut arguments = Map::new();
         arguments.insert(
             "symbol_ids".to_owned(),
-            json!([{ "$from": "find", "pointer": "/data/matches/0/symbol_id" }]),
+            json!([{ "$from": "find", "source": "symbol_id", "index": 0 }]),
         );
         let mut declared = batch_operation("explain", BatchTool::SymbolExplain, Some(vec!["find"]));
-        declared.arguments = arguments.clone();
+        declared.arguments = arguments
+            .clone()
+            .try_into()
+            .expect("test operation arguments contain a valid typed binding");
         let valid = batch_input(vec![
             batch_operation("find", BatchTool::CodeLocate, None),
             declared,
@@ -4204,7 +4212,9 @@ mod tests {
         ));
 
         let mut undeclared = batch_operation("explain", BatchTool::SymbolExplain, None);
-        undeclared.arguments = arguments;
+        undeclared.arguments = arguments
+            .try_into()
+            .expect("test operation arguments contain a valid typed binding");
         let invalid = batch_input(vec![
             batch_operation("find", BatchTool::CodeLocate, None),
             undeclared,

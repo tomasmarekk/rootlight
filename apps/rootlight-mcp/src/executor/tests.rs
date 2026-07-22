@@ -3729,7 +3729,7 @@ async fn query_batch_defers_allowed_bindings_until_runtime_materialization() {
                 "objective": "bug_fix",
                 "objective_text": "fix the defect",
                 "targets": [{
-                    "symbol_id": {"$from": "find", "pointer": "/data/matches/0/symbol_id"}
+                    "symbol_id": {"$from": "find", "source": "symbol_id", "index": 0}
                 }]
             }}
         ]
@@ -3817,7 +3817,7 @@ async fn query_batch_keeps_invalid_binding_inside_the_operation_result() {
                     "objective": "bug_fix",
                     "objective_text": "fix the defect",
                     "targets": [{
-                        "symbol_id": {"$from": "find", "pointer": "/data/matches/99/symbol_id"}
+                        "symbol_id": {"$from": "find", "source": "symbol_id", "index": 99}
                     }]
                 }}
             ]
@@ -3859,7 +3859,8 @@ async fn query_batch_skips_target_dependents_after_runtime_binding_failure() {
                     "targets": [{
                         "symbol_id": {
                             "$from": "find",
-                            "pointer": "/data/matches/99/symbol_id"
+                            "source": "symbol_id",
+                            "index": 99
                         }
                     }]
                 }},
@@ -3959,7 +3960,7 @@ async fn query_batch_rejects_incompatible_binding_types_during_static_preflight(
                 {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}},
                 {"id": "refine", "tool": "code.locate", "depends_on": ["find"], "arguments": {
                     "query": "publish",
-                    "search_modes": {"$from": "find", "pointer": "/data/matches/0/symbol_id"}
+                    "search_modes": {"$from": "find", "source": "symbol_id", "index": 0}
                 }},
                 {"id": "later", "tool": "code.locate", "depends_on": ["refine"], "arguments": {
                     "query": "stage"
@@ -4032,7 +4033,8 @@ async fn query_batch_rejects_later_static_arguments_before_any_call() {
                     "targets": [{
                         "symbol_id": {
                             "$from": "find",
-                            "pointer": "/data/matches/0/symbol_id"
+                            "source": "symbol_id",
+                            "index": 0
                         }
                     }]
                 }}
@@ -4177,7 +4179,8 @@ async fn query_batch_rejects_unproven_restricted_bindings_before_dependencies() 
                 {"id": "restricted", "tool": "source.read", "depends_on": ["find"], "arguments": {
                     "response_profile": {
                         "$from": "find",
-                        "pointer": "/data/matches/0/symbol_id"
+                        "source": "symbol_id",
+                        "index": 0
                     }
                 }}
             ]
@@ -4261,7 +4264,8 @@ async fn query_batch_rejects_bound_unsupported_fields_before_dependencies() {
                     "query": "publish",
                     "min_confidence": {
                         "$from": "find",
-                        "pointer": "/data/matches/0/symbol_id"
+                        "source": "symbol_id",
+                        "index": 0
                     }
                 }}
             ]
@@ -8521,7 +8525,7 @@ async fn query_batch_fingerprint_binds_arguments_dependencies_and_typed_bindings
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(
         repository_status_response(),
     )));
-    let arguments = |query: &str, pointer: &str| {
+    let arguments = |query: &str, index: u16| {
         json!({
             "repository": {"repository_id": repository()},
             "operations": [
@@ -8530,21 +8534,16 @@ async fn query_batch_fingerprint_binds_arguments_dependencies_and_typed_bindings
                     "objective": "bug_fix",
                     "objective_text": "fix the defect",
                     "targets": [{
-                        "symbol_id": {"$from": "find", "pointer": pointer}
+                        "symbol_id": {"$from": "find", "source": "symbol_id", "index": index}
                     }]
                 }}
             ],
             "explain": true
         })
     };
-    let base =
-        batch_explain_fingerprint(&harness, arguments("publish", "/data/matches/0/symbol_id"))
-            .await;
-    let other_argument =
-        batch_explain_fingerprint(&harness, arguments("stage", "/data/matches/0/symbol_id")).await;
-    let other_binding =
-        batch_explain_fingerprint(&harness, arguments("publish", "/data/matches/1/symbol_id"))
-            .await;
+    let base = batch_explain_fingerprint(&harness, arguments("publish", 0)).await;
+    let other_argument = batch_explain_fingerprint(&harness, arguments("stage", 0)).await;
+    let other_binding = batch_explain_fingerprint(&harness, arguments("publish", 1)).await;
 
     assert_ne!(base, other_argument);
     assert_ne!(base, other_binding);

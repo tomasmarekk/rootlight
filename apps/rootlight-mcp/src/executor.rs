@@ -1961,7 +1961,7 @@ fn preflight_batch_capabilities(input: &QueryBatchInput) -> Result<(), ToolExecu
         let Some(tool) = vertical_tool_for_batch(operation.tool) else {
             return Err(unsupported_field("operations"));
         };
-        let arguments = Value::Object(operation.arguments.clone());
+        let arguments = Value::Object(operation.arguments.clone().into());
         if let Err(error) = validate_capability_input(
             tool,
             &arguments,

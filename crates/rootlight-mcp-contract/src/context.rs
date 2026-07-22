@@ -6,12 +6,14 @@
 //! data; server-generated guidance is kept structurally separate and source-free.
 
 use std::collections::BTreeMap;
+use std::ops::Deref;
 
 use rootlight_error::SafeLabel;
 use rootlight_ids::{FileId, GenerationId, SymbolId};
 use rootlight_ir::SourceRef;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use schemars::{JsonSchema, Schema, SchemaGenerator};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use crate::vertical::{
@@ -19,7 +21,7 @@ use crate::vertical::{
     RequiredNullable, ResponseBudget, ResponseProfile, ResponseWarning, SourceFreeMessage,
     ToolResponse, UsageSummary,
 };
-use crate::{TrustClassification, completeness::LimitingResource};
+use crate::{TrustClassification, batch::BatchBindingSource, completeness::LimitingResource};
 
 // ---------------------------------------------------------------------------
 // context.pack
@@ -773,11 +775,10 @@ impl BatchTool {
 
 /// A restricted typed binding from one declared dependency operation.
 ///
-/// The legacy-compatible `pointer` spelling is retained for the `1.0` wire
-/// contract, but only paths translated by the versioned typed binding registry
-/// are accepted. It is not a general JSON Pointer: wildcards, filters,
-/// expressions, templates, array expansion, envelope metadata, warnings, and
-/// repository-controlled free text are forbidden.
+/// The semantic source and bounded item index select one registry-reviewed
+/// output slot. Arbitrary response paths, envelope metadata, warnings, cursor
+/// payloads, usage fields, and repository-controlled free text are not
+/// representable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BatchBinding {
@@ -785,9 +786,180 @@ pub struct BatchBinding {
     #[serde(rename = "$from")]
     #[schemars(length(min = 1, max = 32))]
     pub from: String,
-    /// Registry-reviewed compatibility path naming one typed output slot.
-    #[schemars(length(min = 1, max = 1024))]
-    pub pointer: String,
+    /// Stable semantic name of the registry-reviewed dependency output.
+    pub source: BatchBindingSource,
+    /// Item selected from the source tool's bounded result collection.
+    ///
+    /// A source slot without a collection omits this field. Static planning
+    /// validates whether the selected source requires an index and applies the
+    /// tighter source-specific bound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(max = 499))]
+    pub index: Option<u16>,
+}
+
+/// Strict argument object for one operation in a public batch.
+///
+/// Ordinary JSON values remain available for each selected tool's own input
+/// schema. Any nested object containing the reserved `$from` member must be a
+/// complete [`BatchBinding`], so arbitrary pointer-shaped or partially typed
+/// bindings are rejected while decoding the public contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[serde(transparent)]
+pub struct BatchArguments(Map<String, Value>);
+
+impl BatchArguments {
+    /// Returns an empty argument object.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Borrows the validated JSON argument object.
+    #[must_use]
+    pub const fn as_map(&self) -> &Map<String, Value> {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the validated JSON argument object.
+    #[must_use]
+    pub fn into_map(self) -> Map<String, Value> {
+        self.0
+    }
+}
+
+impl Deref for BatchArguments {
+    type Target = Map<String, Value>;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_map()
+    }
+}
+
+impl<'a> IntoIterator for &'a BatchArguments {
+    type Item = (&'a String, &'a Value);
+    type IntoIter = serde_json::map::Iter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl TryFrom<Map<String, Value>> for BatchArguments {
+    type Error = InvalidBatchArguments;
+
+    fn try_from(arguments: Map<String, Value>) -> Result<Self, Self::Error> {
+        validate_batch_arguments(&arguments)?;
+        Ok(Self(arguments))
+    }
+}
+
+impl From<BatchArguments> for Map<String, Value> {
+    fn from(arguments: BatchArguments) -> Self {
+        arguments.into_map()
+    }
+}
+
+impl<'de> Deserialize<'de> for BatchArguments {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let arguments = Map::<String, Value>::deserialize(deserializer)?;
+        Self::try_from(arguments).map_err(D::Error::custom)
+    }
+}
+
+impl JsonSchema for BatchArguments {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "BatchArguments".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let argument = generator.subschema_for::<BatchArgumentSchema>();
+        schemars::json_schema!({
+            "type": "object",
+            "additionalProperties": argument
+        })
+    }
+}
+
+/// A decoded batch argument object violated the reserved binding shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("batch arguments contain an invalid typed binding")]
+pub struct InvalidBatchArguments;
+
+fn validate_batch_arguments(arguments: &Map<String, Value>) -> Result<(), InvalidBatchArguments> {
+    let mut pending = arguments.values().collect::<Vec<_>>();
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Array(values) => pending.extend(values),
+            Value::Object(object) if object.contains_key("$from") => {
+                if object.len() > 3
+                    || !object
+                        .keys()
+                        .all(|key| matches!(key.as_str(), "$from" | "source" | "index"))
+                {
+                    return Err(InvalidBatchArguments);
+                }
+                let binding = serde_json::from_value::<BatchBinding>(Value::Object(object.clone()))
+                    .map_err(|_| InvalidBatchArguments)?;
+                if !batch_binding_operation_id_is_valid(&binding.from)
+                    || binding.index.is_some_and(|index| index > 499)
+                {
+                    return Err(InvalidBatchArguments);
+                }
+            }
+            Value::Object(object) => pending.extend(object.values()),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn batch_binding_operation_id_is_valid(id: &str) -> bool {
+    (1..=32).contains(&id.len())
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+#[expect(
+    dead_code,
+    reason = "schema-only variants describe the recursive public JSON value grammar"
+)]
+#[derive(JsonSchema)]
+#[serde(untagged)]
+#[schemars(rename = "BatchArgument")]
+enum BatchArgumentSchema {
+    Binding(BatchBinding),
+    Null(()),
+    Boolean(bool),
+    SignedInteger(i64),
+    UnsignedInteger(u64),
+    Number(f64),
+    String(String),
+    Array(Vec<Self>),
+    Object(BatchArgumentObjectSchema),
+}
+
+struct BatchArgumentObjectSchema;
+
+impl JsonSchema for BatchArgumentObjectSchema {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "BatchArgumentObject".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let argument = generator.subschema_for::<BatchArgumentSchema>();
+        schemars::json_schema!({
+            "type": "object",
+            "not": {
+                "required": ["$from"]
+            },
+            "additionalProperties": argument
+        })
+    }
 }
 
 /// One operation inside a `query.batch` request.
@@ -813,7 +985,7 @@ pub struct BatchOperation {
     ///
     /// Leaf values may be [`BatchBinding`] references that are resolved from
     /// completed dependency responses before schema validation.
-    pub arguments: Map<String, Value>,
+    pub arguments: BatchArguments,
     /// Optional per-operation budget cap that may only reduce the allocation
     /// derived from the shared batch budget.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1317,11 +1489,16 @@ pub type QueryAdvancedOutput = ToolResponse<ReadEnvelope<QueryAdvancedData>>;
 mod tests {
     use std::collections::BTreeSet;
 
+    use proptest::prelude::*;
+    use schemars::schema_for;
+    use serde_json::{Map, Value, json};
+
     use super::{
-        ContextPackObjective, EvidenceRole, OBJECTIVE_ROLE_POLICY_VERSION, PLANNER_VERSION,
-        PlanExplanation, RoleCoverageEntry, RoleCoverageStatus, RoleCoverageSummary,
-        RoleRequirement,
+        BatchArguments, ContextPackObjective, EvidenceRole, OBJECTIVE_ROLE_POLICY_VERSION,
+        PLANNER_VERSION, PlanExplanation, QueryBatchInput, RoleCoverageEntry, RoleCoverageStatus,
+        RoleCoverageSummary, RoleRequirement,
     };
+    use crate::batch::BatchBindingSource;
 
     #[test]
     fn new_plans_carry_the_current_planner_version() {
@@ -1469,5 +1646,140 @@ mod tests {
         let mut encoded = serde_json::to_value(coverage).expect("coverage serializes");
         encoded["complete"] = serde_json::Value::Bool(false);
         assert!(serde_json::from_value::<RoleCoverageSummary>(encoded).is_err());
+    }
+
+    #[test]
+    fn batch_arguments_accept_only_the_closed_typed_binding_shape() {
+        let encoded = json!({
+            "seeds": {
+                "symbols": {
+                    "$from": "find",
+                    "source": "symbol_id",
+                    "index": 3
+                }
+            }
+        });
+
+        let arguments: BatchArguments =
+            serde_json::from_value(encoded.clone()).expect("typed binding is accepted");
+
+        assert_eq!(
+            serde_json::to_value(arguments).expect("typed binding serializes"),
+            encoded
+        );
+        for invalid in [
+            json!({"seed": {"$from": "find", "pointer": "/data/matches/0/symbol_id"}}),
+            json!({"seed": {"$from": "find", "source": "warnings", "index": 0}}),
+            json!({"seed": {"$from": "find", "source": "symbol_id", "index": 0, "extra": true}}),
+            json!({"seed": {"$from": 7, "source": "symbol_id", "index": 0}}),
+            json!({"seed": {"$from": "find!", "source": "symbol_id", "index": 0}}),
+            json!({"seed": {"$from": "find", "source": "symbol_id", "index": 500}}),
+        ] {
+            assert!(serde_json::from_value::<BatchArguments>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn batch_argument_schema_exposes_and_enforces_typed_bindings() {
+        let schema = serde_json::to_value(schema_for!(BatchArguments))
+            .expect("batch argument schema serializes");
+        let validator =
+            jsonschema::draft202012::new(&schema).expect("batch argument schema compiles");
+        let query_batch_schema =
+            serde_json::to_value(schema_for!(QueryBatchInput)).expect("batch schema serializes");
+
+        assert!(validator.is_valid(&json!({
+            "seed": {
+                "$from": "find",
+                "source": "source_ref",
+                "index": 0
+            },
+            "ordinary": {
+                "nested": [null, true, 7, 2.5, "text"]
+            }
+        })));
+        assert!(!validator.is_valid(&json!({
+            "seed": {
+                "$from": "find",
+                "pointer": "/data/matches/0/source_ref"
+            }
+        })));
+        assert!(!validator.is_valid(&json!({
+            "seed": {
+                "$from": "find",
+                "source": "warnings",
+                "index": 0
+            }
+        })));
+        assert!(!validator.is_valid(&json!({
+            "seed": {
+                "$from": "find",
+                "source": "source_ref",
+                "index": 500
+            }
+        })));
+        assert_eq!(
+            query_batch_schema["$defs"]["BatchOperation"]["properties"]["arguments"]["$ref"],
+            "#/$defs/BatchArguments"
+        );
+        assert!(
+            query_batch_schema["$defs"]
+                .as_object()
+                .is_some_and(|definitions| definitions.contains_key("BatchBinding"))
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn typed_batch_bindings_round_trip_for_all_declared_sources(
+            from in "[A-Za-z0-9_]{1,32}",
+            source in prop_oneof![
+                Just(BatchBindingSource::SymbolId),
+                Just(BatchBindingSource::SymbolIds),
+                Just(BatchBindingSource::SourceRef),
+                Just(BatchBindingSource::SourceRefs),
+                Just(BatchBindingSource::Definition),
+                Just(BatchBindingSource::Nodes),
+                Just(BatchBindingSource::TestId),
+                Just(BatchBindingSource::PackId),
+            ],
+            index in proptest::option::of(0_u16..500),
+        ) {
+            let mut binding = Map::new();
+            binding.insert("$from".to_owned(), Value::String(from));
+            binding.insert(
+                "source".to_owned(),
+                serde_json::to_value(source).expect("source enum serializes"),
+            );
+            if let Some(index) = index {
+                binding.insert("index".to_owned(), json!(index));
+            }
+            let encoded = Value::Object(Map::from_iter([(
+                "nested".to_owned(),
+                Value::Array(vec![Value::Object(binding)]),
+            )]));
+
+            let decoded: BatchArguments =
+                serde_json::from_value(encoded.clone()).expect("typed binding decodes");
+            prop_assert_eq!(
+                serde_json::to_value(decoded).expect("typed binding re-encodes"),
+                encoded
+            );
+        }
+
+        #[test]
+        fn legacy_pointer_bindings_are_rejected_at_any_nested_depth(
+            from in "[A-Za-z0-9_]{1,32}",
+            pointer in "\\PC{0,128}",
+            depth in 0_usize..16,
+        ) {
+            let mut value = json!({"$from": from, "pointer": pointer});
+            for _ in 0..depth {
+                value = Value::Array(vec![value]);
+            }
+            let encoded = Value::Object(Map::from_iter([("nested".to_owned(), value)]));
+
+            prop_assert!(serde_json::from_value::<BatchArguments>(encoded).is_err());
+        }
     }
 }

@@ -3,6 +3,9 @@
 //! Each public [`BatchTool`] has exactly one descriptor that binds its catalog
 //! identity, schemas, exposure, response, budget, binding, and adapter policy.
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 use crate::catalog::{ExposureProfile, McpTool};
 use crate::context::BatchTool;
 use crate::vertical::{ResponseProfile, VerticalTool};
@@ -36,7 +39,10 @@ pub struct BatchBudgetPolicy {
 }
 
 /// Stable semantic name of a reviewed dependency-output slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum BatchBindingSource {
     /// One stable symbol identifier.
     SymbolId,
