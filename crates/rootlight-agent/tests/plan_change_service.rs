@@ -327,7 +327,10 @@ async fn explain_resolves_explicit_identity_without_plan_call_and_shapes_envelop
 
 #[tokio::test]
 async fn plan_call_receives_cancellation_deadline_and_result_budget() {
-    let port = Arc::new(FakePort::new(None, Some(Ok(plan_output(generation(2))))));
+    let port = Arc::new(FakePort::new(
+        Some(Ok(identity(generation(2)))),
+        Some(Ok(plan_output(generation(2)))),
+    ));
     let deadline = Instant::now() + Duration::from_secs(1);
 
     let output = PlanChangeService
@@ -340,11 +343,12 @@ async fn plan_call_receives_cancellation_deadline_and_result_budget() {
         .await
         .expect("change-plan request succeeds");
 
-    assert!(
+    assert_eq!(
         port.identity_calls
             .lock()
             .expect("identity call lock is available")
-            .is_empty()
+            .len(),
+        1
     );
     let calls = port.plan_calls.lock().expect("plan call lock is available");
     assert_eq!(calls.len(), 1);
@@ -386,7 +390,10 @@ async fn accepted_budget_is_preserved_and_max_steps_only_reduces_results() {
         let mut request = input(generation(2));
         request.max_steps = Some(max_steps);
         request.budget = Some(requested_budget.clone());
-        let port = Arc::new(FakePort::new(None, Some(Ok(plan_output(generation(2))))));
+        let port = Arc::new(FakePort::new(
+            Some(Ok(identity(generation(2)))),
+            Some(Ok(plan_output(generation(2)))),
+        ));
 
         PlanChangeService
             .execute(
@@ -468,7 +475,10 @@ async fn expired_deadline_stops_before_identity_or_plan_work() {
 
 #[tokio::test]
 async fn explicit_generation_mismatch_fails_closed() {
-    let port = Arc::new(FakePort::new(None, Some(Ok(plan_output(generation(9))))));
+    let port = Arc::new(FakePort::new(
+        Some(Ok(identity(generation(2)))),
+        Some(Ok(plan_output(generation(9)))),
+    ));
 
     assert_eq!(
         PlanChangeService
@@ -508,7 +518,7 @@ async fn port_errors_preserve_public_and_policy_classification() {
         .build()
         .expect("static public error is valid");
     let public_port = Arc::new(FakePort::new(
-        None,
+        Some(Ok(identity(generation(2)))),
         Some(Err(AgentPortError::Public(Box::new(public.clone())))),
     ));
     assert_eq!(
@@ -534,7 +544,10 @@ async fn port_errors_preserve_public_and_policy_classification() {
             PlanChangeServiceError::InvalidResponse,
         ),
     ] {
-        let port = Arc::new(FakePort::new(None, Some(Err(port_error))));
+        let port = Arc::new(FakePort::new(
+            Some(Ok(identity(generation(2)))),
+            Some(Err(port_error)),
+        ));
         assert_eq!(
             PlanChangeService
                 .execute(
@@ -547,4 +560,42 @@ async fn port_errors_preserve_public_and_policy_classification() {
             Err(expected)
         );
     }
+}
+
+#[tokio::test]
+async fn pinned_identity_path_skips_resolution_and_preserves_plan_behavior() {
+    let port = Arc::new(FakePort::new(
+        Some(Err(AgentPortError::Unavailable)),
+        Some(Ok(plan_output(generation(2)))),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut request = input(generation(9));
+    request.generation = None;
+
+    let output = PlanChangeService
+        .execute_with_identity(
+            Arc::clone(&port),
+            request,
+            identity(generation(2)),
+            TestCancellation(false),
+            deadline,
+        )
+        .await
+        .expect("change plan succeeds under the pinned identity");
+
+    assert!(
+        port.identity_calls
+            .lock()
+            .expect("identity call lock is available")
+            .is_empty()
+    );
+    let calls = port.plan_calls.lock().expect("plan call lock is available");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].request.generation(),
+        &GenerationSelector::Explicit(generation(2))
+    );
+    assert_eq!(calls[0].deadline, Some(deadline));
+    assert_eq!(output.generation.generation_id, generation(2));
+    assert_eq!(output.usage, usage());
 }

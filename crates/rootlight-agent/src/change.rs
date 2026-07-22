@@ -281,32 +281,76 @@ impl PlanChangeService {
     {
         plan_change_checkpoint(&cancellation, deadline)?;
         let request = normalize_plan_change(input).map_err(PlanChangeServiceError::Admission)?;
-        if request.explain_only() {
-            let identity = port
-                .resolve_identity(
-                    AgentIdentityRequest::new(
-                        RepositorySelector::ById(
-                            rootlight_mcp_contract::vertical::RepositoryIdSelector {
-                                repository_id: request.repository(),
-                            },
-                        ),
-                        Some(request.generation().clone()),
+        let identity = port
+            .resolve_identity(
+                AgentIdentityRequest::new(
+                    RepositorySelector::ById(
+                        rootlight_mcp_contract::vertical::RepositoryIdSelector {
+                            repository_id: request.repository(),
+                        },
                     ),
-                    AgentResolutionContext::new(cancellation.clone(), deadline),
-                )
-                .await
-                .map_err(map_plan_port_error)?;
-            plan_change_checkpoint(&cancellation, deadline)?;
-            if identity.repository.repository_id != request.repository() {
-                return Err(PlanChangeServiceError::InvalidResponse);
-            }
-            if matches!(
-                request.generation(),
-                GenerationSelector::Explicit(expected)
-                    if identity.generation.generation_id != *expected
-            ) {
-                return Err(PlanChangeServiceError::InvalidResponse);
-            }
+                    Some(request.generation().clone()),
+                ),
+                AgentResolutionContext::new(cancellation.clone(), deadline),
+            )
+            .await
+            .map_err(map_plan_port_error)?;
+        plan_change_checkpoint(&cancellation, deadline)?;
+
+        self.execute_admitted_with_identity(port, request, identity, cancellation, deadline)
+            .await
+    }
+
+    /// Plans a change under a repository and generation identity pinned by the
+    /// caller, without performing another identity lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlanChangeServiceError`] when admission fails, cancellation or
+    /// the deadline wins, or adapter facts violate the pinned identity.
+    pub async fn execute_with_identity<P, C>(
+        &self,
+        port: Arc<P>,
+        input: PlanChangeInput,
+        identity: AgentResolvedIdentity,
+        cancellation: C,
+        deadline: Instant,
+    ) -> Result<ReadEnvelope<PlanChangeData>, PlanChangeServiceError>
+    where
+        P: PlanChangePort<C>,
+        C: CancellationSignal + Clone + Send + Sync + 'static,
+    {
+        plan_change_checkpoint(&cancellation, deadline)?;
+        let request = normalize_plan_change(input).map_err(PlanChangeServiceError::Admission)?;
+        self.execute_admitted_with_identity(port, request, identity, cancellation, deadline)
+            .await
+    }
+
+    async fn execute_admitted_with_identity<P, C>(
+        &self,
+        port: Arc<P>,
+        mut request: PlanChangeRequest,
+        identity: AgentResolvedIdentity,
+        cancellation: C,
+        deadline: Instant,
+    ) -> Result<ReadEnvelope<PlanChangeData>, PlanChangeServiceError>
+    where
+        P: PlanChangePort<C>,
+        C: CancellationSignal + Clone + Send + Sync + 'static,
+    {
+        if identity.repository.repository_id != request.repository() {
+            return Err(PlanChangeServiceError::InvalidResponse);
+        }
+        if matches!(
+            request.generation(),
+            GenerationSelector::Explicit(expected)
+                if identity.generation.generation_id != *expected
+        ) {
+            return Err(PlanChangeServiceError::InvalidResponse);
+        }
+        request.generation = GenerationSelector::Explicit(identity.generation.generation_id);
+
+        if request.explain_only() {
             let data = explain_plan_change(&request, identity.generation.generation_id);
             return Ok(ReadEnvelope {
                 schema_version: SchemaVersion::V1_0,
@@ -347,12 +391,8 @@ impl PlanChangeService {
             .await
             .map_err(map_plan_port_error)?;
         plan_change_checkpoint(&cancellation, deadline)?;
-        if output.identity.repository.repository_id != request.repository()
-            || matches!(
-                request.generation(),
-                GenerationSelector::Explicit(expected)
-                    if output.identity.generation.generation_id != *expected
-            )
+        if output.identity.repository.repository_id != identity.repository.repository_id
+            || output.identity.generation.generation_id != identity.generation.generation_id
         {
             return Err(PlanChangeServiceError::InvalidResponse);
         }
@@ -375,9 +415,9 @@ impl PlanChangeService {
         let data = shape_plan_change(output.result).map_err(PlanChangeServiceError::Admission)?;
         Ok(ReadEnvelope {
             schema_version: SchemaVersion::V1_0,
-            repository: output.identity.repository,
-            generation: output.identity.generation,
-            coverage: output.identity.coverage,
+            repository: identity.repository,
+            generation: identity.generation,
+            coverage: identity.coverage,
             data,
             truncated: output.truncated,
             completeness: output.completeness,

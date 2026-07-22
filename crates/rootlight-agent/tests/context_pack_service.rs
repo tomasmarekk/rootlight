@@ -382,6 +382,54 @@ async fn execution_propagates_policy_and_shapes_child_response() {
 }
 
 #[tokio::test]
+async fn pinned_identity_path_skips_resolution_and_preserves_child_behavior() {
+    let response_data = serde_json::to_value(SymbolExplainData {
+        symbols: vec![explanation(generation(2))],
+        unresolved_ids: Vec::new(),
+        detail_handles: Vec::new(),
+        explanation: None,
+    })
+    .expect("symbol explanation fixture serializes");
+    let port = Arc::new(FakePort::new(
+        Err(AgentPortError::Unavailable),
+        Some(Ok(child_response(generation(2), response_data))),
+    ));
+    let deadline = Instant::now() + std::time::Duration::from_secs(1);
+
+    let output = ContextPackService
+        .execute_with_identity(
+            Arc::clone(&port),
+            input(generation(2)),
+            repository(),
+            identity(generation(2)),
+            TestCancellation(false),
+            deadline,
+        )
+        .await
+        .expect("context pack succeeds under the pinned identity");
+
+    assert!(
+        port.identity_calls
+            .lock()
+            .expect("identity call lock is available")
+            .is_empty()
+    );
+    let calls = port
+        .child_calls
+        .lock()
+        .expect("child call lock is available");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].request.tool(), BatchTool::SymbolExplain);
+    assert_eq!(
+        calls[0].request.clone().into_arguments()["generation"],
+        json!(generation(2))
+    );
+    assert_eq!(calls[0].deadline, Some(deadline));
+    assert_eq!(output.generation.generation_id, generation(2));
+    assert_eq!(output.usage, usage());
+}
+
+#[tokio::test]
 async fn already_cancelled_request_stops_before_identity_or_child_work() {
     let port = Arc::new(FakePort::new(Ok(identity(generation(2))), None));
 

@@ -13,7 +13,8 @@ use std::{
 
 use rootlight_ids::{RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
-    PublicError, SafeLabel, SchemaVersion, SourceFreeMessage, TrustClassification,
+    PublicError, RepositorySelector, SafeLabel, SchemaVersion, SourceFreeMessage,
+    TrustClassification,
     completeness::{
         CompletenessState, ContinuationAvailability, ContinuationGuidance, LimitingResource,
         LimitingResourceKind, ResultCompleteness,
@@ -34,7 +35,7 @@ use crate::{
     policy::{BudgetCharge, BudgetLedger, CancellationSignal, ExecutionPolicyError},
     port::{
         AgentCallContext, AgentIdentityRequest, AgentPortError, AgentResolutionContext,
-        AgentToolPort, AgentToolRequest,
+        AgentResolvedIdentity, AgentToolPort, AgentToolRequest,
     },
 };
 
@@ -394,7 +395,77 @@ impl ContextPackService {
             .await
             .map_err(map_port_error)?;
         context_service_checkpoint(&cancellation, deadline)?;
+
+        Self::execute_admitted_with_identity(
+            port,
+            input,
+            seeds,
+            repository,
+            identity,
+            cancellation,
+            deadline,
+        )
+        .await
+    }
+
+    /// Resolves evidence under a repository and generation identity pinned by
+    /// the caller, without performing another identity lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContextPackServiceError`] when request admission, pinned
+    /// identity validation, evidence retrieval, or deterministic planning
+    /// fails.
+    pub async fn execute_with_identity<P, C>(
+        &self,
+        port: Arc<P>,
+        input: ContextPackInput,
+        repository: RepositoryId,
+        identity: AgentResolvedIdentity,
+        cancellation: C,
+        deadline: Instant,
+    ) -> Result<ReadEnvelope<ContextPackData>, ContextPackServiceError>
+    where
+        P: AgentToolPort<C>,
+        C: CancellationSignal + Clone + Send + Sync + 'static,
+    {
+        validate_supported_fields(&input)?;
+        let seeds = supported_seed_symbols(&input)?;
+        context_service_checkpoint(&cancellation, deadline)?;
+
+        Self::execute_admitted_with_identity(
+            port,
+            input,
+            seeds,
+            repository,
+            identity,
+            cancellation,
+            deadline,
+        )
+        .await
+    }
+
+    async fn execute_admitted_with_identity<P, C>(
+        port: Arc<P>,
+        input: ContextPackInput,
+        seeds: BTreeSet<SymbolId>,
+        repository: RepositoryId,
+        identity: AgentResolvedIdentity,
+        cancellation: C,
+        deadline: Instant,
+    ) -> Result<ReadEnvelope<ContextPackData>, ContextPackServiceError>
+    where
+        P: AgentToolPort<C>,
+        C: CancellationSignal + Clone + Send + Sync + 'static,
+    {
         if identity.repository.repository_id != repository {
+            return Err(ContextPackServiceError::InvalidResponse);
+        }
+        if matches!(
+            &input.repository,
+            RepositorySelector::ById(expected)
+                if expected.repository_id != identity.repository.repository_id
+        ) {
             return Err(ContextPackServiceError::InvalidResponse);
         }
         if matches!(
