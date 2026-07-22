@@ -27,12 +27,14 @@ const EXECUTION_MATRIX_SCHEMA: &str = "rootlight.mcp-execution-matrix/1";
 const INITIAL_MISMATCH_SCHEMA: &str = "rootlight.mcp-capability-mismatches/1";
 const SCHEMA_GOLDEN_SCHEMA: &str = "rootlight.mcp-schema-goldens/1";
 
+/// Optional source-bound artifact output requested from the parity gate.
 pub(crate) struct Options {
     output_dir: Option<PathBuf>,
     source_revision: Option<String>,
 }
 
 impl Options {
+    /// Parses the artifact output pair, or selects validation-only mode.
     pub(crate) fn parse(args: &mut impl Iterator<Item = String>) -> Result<Self, CapabilityError> {
         let mut output_dir = None;
         let mut source_revision = None;
