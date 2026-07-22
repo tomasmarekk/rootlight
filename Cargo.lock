@@ -2093,6 +2093,8 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "unicode-casefold",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -2101,6 +2103,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "jsonschema",
+ "proptest",
  "rootlight-error",
  "rootlight-ids",
  "rootlight-ir",

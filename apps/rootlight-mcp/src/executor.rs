@@ -69,6 +69,8 @@ use rootlight_mcp_contract::{
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use thiserror::Error;
+use unicode_casefold::UnicodeCaseFold as _;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::advanced::{AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL, QueryOperator};
 use crate::batch::BatchPlan;
@@ -1341,6 +1343,70 @@ pub enum ToolExecutorBuildError {
     CursorKeyInitialization,
 }
 
+/// Process-local material used to authenticate pagination cursors.
+///
+/// The secret never leaves the executor. The public identifier allows a
+/// restarted process to reject cursors from a retired key before attempting
+/// authentication.
+#[derive(Clone, Copy)]
+struct CursorSigningKey {
+    secret: [u8; 32],
+    key_id: u64,
+}
+
+impl CursorSigningKey {
+    fn new(secret: [u8; 32], key_id: u64) -> Result<Self, ToolExecutorBuildError> {
+        if secret.iter().all(|byte| *byte == 0) || key_id == 0 {
+            return Err(ToolExecutorBuildError::CursorKeyInitialization);
+        }
+        Ok(Self { secret, key_id })
+    }
+
+    #[cfg(test)]
+    fn deterministic(secret: [u8; 32]) -> Result<Self, ToolExecutorBuildError> {
+        let digest = blake3::hash(&secret);
+        let key_id = u64::from_le_bytes(
+            digest.as_bytes()[..8]
+                .try_into()
+                .expect("BLAKE3 digest contains eight key-id bytes"),
+        );
+        Self::new(secret, key_id)
+    }
+}
+
+impl fmt::Debug for CursorSigningKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CursorSigningKey")
+            .field("key_id", &self.key_id)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
+}
+
+trait CursorKeyProvider {
+    fn load(&self) -> Result<CursorSigningKey, ToolExecutorBuildError>;
+}
+
+struct SystemCursorKeyProvider;
+
+impl CursorKeyProvider for SystemCursorKeyProvider {
+    fn load(&self) -> Result<CursorSigningKey, ToolExecutorBuildError> {
+        let mut material = [0_u8; 40];
+        getrandom::fill(&mut material)
+            .map_err(|_| ToolExecutorBuildError::CursorKeyInitialization)?;
+        let secret = material[..32]
+            .try_into()
+            .expect("cursor key material contains a 32-byte secret");
+        let key_id = u64::from_le_bytes(
+            material[32..]
+                .try_into()
+                .expect("cursor key material contains an eight-byte identifier"),
+        );
+        CursorSigningKey::new(secret, key_id)
+    }
+}
+
 /// Production MCP executor over an injected asynchronous daemon-client port.
 pub struct FirstSliceToolExecutor<P> {
     port: Arc<P>,
@@ -1351,7 +1417,7 @@ pub struct FirstSliceToolExecutor<P> {
     ///
     /// It rotates on process restart, gracefully invalidating outstanding
     /// cursors (they fail validation and clients restart the listing).
-    cursor_key: [u8; 32],
+    cursor_key: CursorSigningKey,
 }
 
 impl<P> FirstSliceToolExecutor<P>
@@ -1366,14 +1432,7 @@ where
     /// cannot be represented by the shared public error contract, or if secure
     /// entropy for the cursor signing key is unavailable.
     pub fn new(port: P) -> Result<Self, ToolExecutorBuildError> {
-        // A process-local cursor signing key gives cursors per-process
-        // rotation. Key generation fails closed: when secure entropy is
-        // unavailable, construction fails rather than falling back to a
-        // reproducible all-zero key.
-        let mut cursor_key = [0_u8; 32];
-        getrandom::fill(&mut cursor_key)
-            .map_err(|_| ToolExecutorBuildError::CursorKeyInitialization)?;
-        Self::build(port, cursor_key)
+        Self::with_cursor_key_provider(port, &SystemCursorKeyProvider)
     }
 
     /// Creates an executor with a caller-provided cursor key.
@@ -1385,10 +1444,17 @@ where
         port: P,
         cursor_key: [u8; 32],
     ) -> Result<Self, ToolExecutorBuildError> {
-        Self::build(port, cursor_key)
+        Self::build(port, CursorSigningKey::deterministic(cursor_key)?)
     }
 
-    fn build(port: P, cursor_key: [u8; 32]) -> Result<Self, ToolExecutorBuildError> {
+    fn with_cursor_key_provider(
+        port: P,
+        provider: &impl CursorKeyProvider,
+    ) -> Result<Self, ToolExecutorBuildError> {
+        Self::build(port, provider.load()?)
+    }
+
+    fn build(port: P, cursor_key: CursorSigningKey) -> Result<Self, ToolExecutorBuildError> {
         let field =
             DetailKey::parse("arguments").map_err(ToolExecutorBuildError::UnsupportedError)?;
         let unsupported =
@@ -2311,7 +2377,7 @@ async fn execute_repo_list<P>(
     arguments: Map<String, Value>,
     cancellation: RequestCancellation,
     invalid_cursor: &PublicError,
-    cursor_key: [u8; 32],
+    cursor_key: CursorSigningKey,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
@@ -2327,32 +2393,36 @@ where
         return Err(unsupported_field("response_profile"));
     }
     let page_size = input.max_results.unwrap_or(DEFAULT_REPO_LIST_RESULTS);
-    let context = repo_list_cursor_context(input.query.as_deref(), page_size);
-    let offset = if explain_only {
-        0
-    } else {
-        match &input.cursor {
-            Some(cursor) => decode_repo_list_cursor(cursor, &context, &cursor_key, invalid_cursor)?,
-            None => 0,
-        }
-    };
+    let query = normalize_repo_list_query(input.query);
 
     // The daemon returns the full bounded list; the bridge applies the
     // authenticated page window so the continuation cursor is tamper-protected.
-    let request = RepositoryListPortRequest::new(None, input.query);
+    let request = RepositoryListPortRequest::new(None, query.clone());
     let future = port.repository_list(request, cancellation.clone());
-    let list = await_port(future, cancellation).await?;
+    let mut list = await_port(future, cancellation).await?;
+    list.repositories.sort_by_key(|entry| entry.repository_id);
 
     let Some(first) = list.repositories.first() else {
         return Err(ToolExecutionError::new(no_repositories_error()?));
     };
 
+    let snapshot_id = repo_list_snapshot_id(&list.repositories);
+    let context =
+        repo_list_cursor_context(query.as_deref(), page_size, snapshot_id, cursor_key.key_id);
+    let offset = if explain_only {
+        0
+    } else {
+        match &input.cursor {
+            Some(cursor) => {
+                decode_repo_list_cursor(cursor, &context, &cursor_key.secret, invalid_cursor)?
+            }
+            None => 0,
+        }
+    };
+
     let total = list.repositories.len();
     if explain_only {
-        let explanation = rootlight_agent::explain::finalize_plan(
-            rootlight_agent::explain::repo_list_plan(),
-            &first.active_generation.to_string(),
-        );
+        let explanation = repo_list_explanation(&snapshot_id);
         let total_count = u64::try_from(total).unwrap_or(u64::MAX);
         let data = RepoListData {
             repositories: Vec::new(),
@@ -2425,8 +2495,9 @@ where
                 .to_le_bytes()
                 .to_vec(),
             now_unix_ms(),
-            &cursor_key,
-        );
+            &cursor_key.secret,
+        )
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
         RequiredNullable(Some(
             ContinuationCursor::parse(&next.to_wire())
                 .map_err(|_| internal(ToolExecutionFailure::Executor))?,
@@ -2475,23 +2546,113 @@ const DEFAULT_REPO_LIST_RESULTS: u16 = 20;
 
 /// Builds the list-level cursor context for `repo.list`.
 ///
-/// `repo.list` is not generation-bound, so the cursor binds to a documented
-/// list-level sentinel identity and instead authenticates the request shape
-/// (the query filter) and the page offset.
-fn repo_list_cursor_context(query: Option<&str>, page_size: u16) -> CursorContext {
+/// `repo.list` has no single repository generation, so the cursor derives
+/// catalog-level identities from the immutable snapshot rather than using
+/// ambiguous all-zero sentinels.
+fn repo_list_cursor_context(
+    query: Option<&str>,
+    page_size: u16,
+    snapshot_id: [u8; 32],
+    key_id: u64,
+) -> CursorContext {
+    let repository_digest = domain_hash(b"rootlight.repo-list.repository.v1", &snapshot_id);
+    let generation_digest = domain_hash(b"rootlight.repo-list.generation.v1", &snapshot_id);
     CursorContext {
-        repository: RepositoryId::from_bytes([0; 16]),
-        generation: GenerationId::from_bytes([0; 20]),
-        tool_name: "repo.list",
+        repository: RepositoryId::from_bytes(
+            repository_digest[..16]
+                .try_into()
+                .expect("digest contains a repository identity"),
+        ),
+        generation: GenerationId::from_bytes(
+            generation_digest[..20]
+                .try_into()
+                .expect("digest contains a generation identity"),
+        ),
+        tool: McpTool::RepoList,
+        tool_major_version: 1,
         query_fingerprint: repo_list_fingerprint(query),
+        plan_fingerprint: repo_list_plan_fingerprint(&snapshot_id),
+        response_profile: ResponseProfile::Compact,
+        snapshot_id,
         page_size,
+        key_id,
     }
 }
 
 fn repo_list_fingerprint(query: Option<&str>) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"repo.list");
-    hasher.update(query.unwrap_or("").as_bytes());
+    hasher.update(b"rootlight.repo-list.request.v1");
+    match query {
+        Some(query) => {
+            hasher.update(&[1]);
+            hash_length_prefixed(&mut hasher, query.as_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn normalize_repo_list_query(query: Option<String>) -> Option<String> {
+    query
+        .map(|value| value.nfd().case_fold().nfc().collect::<String>())
+        .filter(|value| !value.is_empty())
+}
+
+fn repo_list_explanation(snapshot_id: &[u8; 32]) -> PlanExplanation {
+    let catalog_identity = blake3::Hash::from_bytes(*snapshot_id).to_hex();
+    rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::repo_list_plan(),
+        catalog_identity.as_str(),
+    )
+}
+
+fn repo_list_plan_fingerprint(snapshot_id: &[u8; 32]) -> [u8; 32] {
+    let catalog_identity = blake3::Hash::from_bytes(*snapshot_id).to_hex();
+    rootlight_agent::explain::physical_plan_fingerprint(
+        &rootlight_agent::explain::repo_list_plan(),
+        catalog_identity.as_str(),
+    )
+}
+
+fn repo_list_snapshot_id(entries: &[client::RepositoryListEntry]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rootlight.repo-list.snapshot.v1");
+    hasher.update(
+        &u64::try_from(entries.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for entry in entries {
+        hasher.update(entry.repository_id.as_bytes());
+        hasher.update(entry.active_generation.as_bytes());
+        hash_length_prefixed(&mut hasher, entry.state.as_bytes());
+        hash_length_prefixed(&mut hasher, entry.structural_freshness.as_bytes());
+        hash_length_prefixed(&mut hasher, entry.semantic_freshness.as_bytes());
+        let mut languages = entry.languages.clone();
+        languages.sort();
+        hasher.update(
+            &u64::try_from(languages.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        for language in languages {
+            hash_length_prefixed(&mut hasher, language.as_bytes());
+        }
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn hash_length_prefixed(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hasher.update(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(value);
+}
+
+fn domain_hash(domain: &[u8], value: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hash_length_prefixed(&mut hasher, value);
     *hasher.finalize().as_bytes()
 }
 

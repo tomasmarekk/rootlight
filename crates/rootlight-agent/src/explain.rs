@@ -352,26 +352,47 @@ pub fn repo_list_plan() -> PlanExplanation {
 /// random.
 #[must_use]
 pub fn finalize_plan(mut plan: PlanExplanation, generation: &str) -> PlanExplanation {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&plan.planner_version.to_le_bytes());
-    hasher.update(b"\x00");
-    hasher.update(generation.as_bytes());
-    hasher.update(b"\x00");
-    hasher.update(&plan.estimated_cost.to_le_bytes());
-    hasher.update(b"\x00");
-    for operator in &plan.operators {
-        hasher.update(operator.as_bytes());
-        hasher.update(b",");
-    }
-    hasher.update(b"\x00");
-    for limit in &plan.applied_limits {
-        hasher.update(limit.as_bytes());
-        hasher.update(b",");
-    }
-    let hex = hasher.finalize().to_hex();
+    let fingerprint = physical_plan_fingerprint(&plan, generation);
+    let hex = blake3::Hash::from_bytes(fingerprint).to_hex();
     let short: String = hex.chars().take(32).collect();
     plan.fingerprint = format!("plan1_{short}");
     plan
+}
+
+/// Computes the canonical full-width physical-plan fingerprint.
+///
+/// Length prefixes and collection counts make the typed encoding
+/// unambiguous. Cursor bindings use the full digest while public explain
+/// output uses a stable, human-sized prefix of the same digest.
+#[must_use]
+pub fn physical_plan_fingerprint(plan: &PlanExplanation, generation: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rootlight.physical-plan.v1");
+    hasher.update(&plan.planner_version.to_le_bytes());
+    hash_length_prefixed(&mut hasher, generation.as_bytes());
+    hasher.update(&plan.estimated_cost.to_le_bytes());
+    hasher.update(
+        &u64::try_from(plan.operators.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for operator in &plan.operators {
+        hash_length_prefixed(&mut hasher, operator.as_bytes());
+    }
+    hasher.update(
+        &u64::try_from(plan.applied_limits.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for limit in &plan.applied_limits {
+        hash_length_prefixed(&mut hasher, limit.as_bytes());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn hash_length_prefixed(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hasher.update(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(value);
 }
 
 #[cfg(test)]
@@ -556,6 +577,27 @@ mod tests {
         let other_plan = finalize_plan(code_locate_plan(true, 20), "gen-1");
         assert_ne!(base.fingerprint, other_generation.fingerprint);
         assert_ne!(base.fingerprint, other_plan.fingerprint);
+    }
+
+    #[test]
+    fn physical_plan_fingerprint_has_unambiguous_collection_boundaries() {
+        use super::{PlanExplanation, physical_plan_fingerprint};
+
+        let split = PlanExplanation {
+            estimated_cost: 1,
+            operators: vec!["a".to_owned(), "b".to_owned()],
+            applied_limits: Vec::new(),
+            planner_version: 1,
+            fingerprint: String::new(),
+        };
+        let joined = PlanExplanation {
+            operators: vec!["a,b".to_owned()],
+            ..split.clone()
+        };
+        assert_ne!(
+            physical_plan_fingerprint(&split, "generation"),
+            physical_plan_fingerprint(&joined, "generation")
+        );
     }
 
     #[test]

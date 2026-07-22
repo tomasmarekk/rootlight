@@ -5,6 +5,7 @@
 
 use std::{
     collections::VecDeque,
+    process::Command,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1398,6 +1399,86 @@ async fn repo_list_paginates_with_authenticated_cursor() {
     assert!(second.next_cursor.0.is_none());
 }
 
+#[test]
+fn repo_list_query_normalization_is_case_folded_and_canonical() {
+    assert_eq!(
+        normalize_repo_list_query(Some("Straße".to_owned())),
+        Some("strasse".to_owned())
+    );
+    assert_eq!(
+        normalize_repo_list_query(Some("STRASSE".to_owned())),
+        Some("strasse".to_owned())
+    );
+    assert_eq!(
+        normalize_repo_list_query(Some("e\u{301}".to_owned())),
+        normalize_repo_list_query(Some("é".to_owned()))
+    );
+    assert_eq!(normalize_repo_list_query(Some(String::new())), None);
+    assert_eq!(normalize_repo_list_query(None), None);
+}
+
+#[tokio::test]
+async fn repo_list_cursor_accepts_equivalent_normalized_query() {
+    let entries: Vec<RepositoryListEntry> = (0..3_u8)
+        .map(|index| RepositoryListEntry {
+            repository_id: RepositoryId::from_bytes([index + 1; 16]),
+            active_generation: generation(),
+            languages: vec!["rust".to_owned()],
+            structural_freshness: "current".to_owned(),
+            semantic_freshness: "current".to_owned(),
+            state: "ready".to_owned(),
+        })
+        .collect();
+    let harness = Harness::with_cursor_key(
+        FakeOutcome::RepositoryList(Ok(RepositoryList {
+            repositories: entries,
+        })),
+        [7; 32],
+    );
+    let first: RepoListOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoList,
+            json!({"query": "Straße", "max_results": 2}),
+        )
+        .await
+        .expect("first page maps"),
+    );
+    let ToolResponse::Success(first) = first else {
+        panic!("expected first page success");
+    };
+    let cursor = first
+        .next_cursor
+        .0
+        .expect("first page has a continuation cursor");
+
+    let second: RepoListOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoList,
+            json!({"query": "STRASSE", "max_results": 2, "cursor": cursor.as_str()}),
+        )
+        .await
+        .expect("equivalent query resumes the cursor"),
+    );
+    let ToolResponse::Success(second) = second else {
+        panic!("expected second page success");
+    };
+    assert_eq!(second.data.repositories.len(), 1);
+
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    assert_eq!(calls.len(), 2);
+    for call in calls.iter() {
+        let ObservedCall::RepositoryList(request) = call else {
+            panic!("expected only repository list calls");
+        };
+        assert_eq!(request.query(), Some("strasse"));
+    }
+}
+
 #[tokio::test]
 async fn cursor_signed_with_one_key_is_rejected_under_another() {
     let entries: Vec<RepositoryListEntry> = (0..3u8)
@@ -1444,6 +1525,310 @@ async fn cursor_signed_with_one_key_is_rejected_under_another() {
         .public_error()
         .expect("cursor failure is a checked public error");
     assert_eq!(public.code(), ErrorCode::InvalidCursor);
+}
+
+#[tokio::test]
+async fn cursor_is_rejected_after_executor_process_restart() {
+    const CHILD_MODE: &str = "ROOTLIGHT_CURSOR_RESTART_CHILD";
+    const FIXTURE_PATH: &str = "ROOTLIGHT_CURSOR_RESTART_FIXTURE";
+    const TEST_NAME: &str = "executor::tests::cursor_is_rejected_after_executor_process_restart";
+
+    let entries = || {
+        (0..3_u8)
+            .map(|index| RepositoryListEntry {
+                repository_id: RepositoryId::from_bytes([index + 1; 16]),
+                active_generation: generation(),
+                languages: vec!["rust".to_owned()],
+                structural_freshness: "current".to_owned(),
+                semantic_freshness: "current".to_owned(),
+                state: "ready".to_owned(),
+            })
+            .collect()
+    };
+
+    if let Some(mode) = std::env::var_os(CHILD_MODE) {
+        let fixture = std::env::var_os(FIXTURE_PATH)
+            .map(std::path::PathBuf::from)
+            .expect("child fixture path is present");
+        let harness = Harness::new(FakeOutcome::RepositoryList(Ok(RepositoryList {
+            repositories: entries(),
+        })));
+        if mode == "issue" {
+            let output: RepoListOutput = decode(
+                execute(
+                    &harness.executor,
+                    VerticalTool::RepoList,
+                    json!({"max_results": 2}),
+                )
+                .await
+                .expect("issuing process returns a first page"),
+            );
+            let ToolResponse::Success(output) = output else {
+                panic!("expected first page success");
+            };
+            let cursor = output
+                .next_cursor
+                .0
+                .expect("issuing process returns a continuation");
+            std::fs::write(fixture, cursor.as_str()).expect("child writes cursor fixture");
+            return;
+        }
+
+        let cursor = std::fs::read_to_string(&fixture).expect("restart process reads cursor");
+        let error = execute(
+            &harness.executor,
+            VerticalTool::RepoList,
+            json!({"max_results": 2, "cursor": cursor}),
+        )
+        .await
+        .expect_err("a restarted executor rejects the retired process key");
+        let public = error
+            .public_error()
+            .expect("restart failure is a checked public error");
+        assert_eq!(public.code(), ErrorCode::InvalidCursor);
+        assert!(
+            public
+                .next_actions()
+                .contains(&NextAction::RestartEnumeration)
+        );
+        std::fs::write(fixture, "invalid_cursor:restart_enumeration")
+            .expect("child writes restart result");
+        return;
+    }
+
+    let directory = tempfile::tempdir().expect("restart fixture directory exists");
+    let fixture = directory.path().join("cursor.txt");
+    let executable = std::env::current_exe().expect("test executable path is available");
+    for mode in ["issue", "validate"] {
+        let output = Command::new(&executable)
+            .args(["--exact", TEST_NAME])
+            .env(CHILD_MODE, mode)
+            .env(FIXTURE_PATH, &fixture)
+            .output()
+            .expect("cursor child process starts");
+        assert!(
+            output.status.success(),
+            "{mode} child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(fixture).expect("parent reads restart result"),
+        "invalid_cursor:restart_enumeration"
+    );
+}
+
+#[test]
+fn executor_fails_closed_when_cursor_key_provider_fails() {
+    struct FailingProvider;
+
+    impl CursorKeyProvider for FailingProvider {
+        fn load(&self) -> Result<CursorSigningKey, ToolExecutorBuildError> {
+            Err(ToolExecutorBuildError::CursorKeyInitialization)
+        }
+    }
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let port = FakePort {
+        outcome: FakeOutcome::RepositoryList(Ok(RepositoryList {
+            repositories: Vec::new(),
+        })),
+        calls,
+        call_count,
+    };
+    assert!(matches!(
+        FirstSliceToolExecutor::with_cursor_key_provider(port, &FailingProvider),
+        Err(ToolExecutorBuildError::CursorKeyInitialization)
+    ));
+}
+
+#[test]
+fn executor_rejects_all_zero_cursor_key_material() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let port = FakePort {
+        outcome: FakeOutcome::RepositoryList(Ok(RepositoryList {
+            repositories: Vec::new(),
+        })),
+        calls,
+        call_count,
+    };
+    assert!(matches!(
+        FirstSliceToolExecutor::with_cursor_key(port, [0; 32]),
+        Err(ToolExecutorBuildError::CursorKeyInitialization)
+    ));
+}
+
+#[test]
+fn cursor_signing_key_debug_output_redacts_secret_material() {
+    let key = CursorSigningKey::deterministic([0xAB; 32]).expect("test key is valid");
+    let debug = format!("{key:?}");
+    assert!(debug.contains("<redacted>"));
+    assert!(!debug.contains("[171"));
+    assert!(!debug.contains("171, 171"));
+}
+
+#[tokio::test]
+async fn repo_list_cursor_is_rejected_after_catalog_snapshot_changes() {
+    let entries = |count: u8| {
+        (0..count)
+            .map(|index| RepositoryListEntry {
+                repository_id: RepositoryId::from_bytes([index + 1; 16]),
+                active_generation: generation(),
+                languages: vec!["rust".to_owned()],
+                structural_freshness: "current".to_owned(),
+                semantic_freshness: "current".to_owned(),
+                state: "ready".to_owned(),
+            })
+            .collect()
+    };
+    let first: RepoListOutput = decode(
+        execute(
+            &Harness::with_cursor_key(
+                FakeOutcome::RepositoryList(Ok(RepositoryList {
+                    repositories: entries(3),
+                })),
+                [7; 32],
+            )
+            .executor,
+            VerticalTool::RepoList,
+            json!({"max_results": 2}),
+        )
+        .await
+        .expect("first page maps"),
+    );
+    let ToolResponse::Success(first) = first else {
+        panic!("expected first page success");
+    };
+    let cursor = first
+        .next_cursor
+        .0
+        .expect("first page has a continuation cursor");
+
+    let error = execute(
+        &Harness::with_cursor_key(
+            FakeOutcome::RepositoryList(Ok(RepositoryList {
+                repositories: entries(4),
+            })),
+            [7; 32],
+        )
+        .executor,
+        VerticalTool::RepoList,
+        json!({"max_results": 2, "cursor": cursor.as_str()}),
+    )
+    .await
+    .expect_err("catalog drift invalidates the cursor");
+    assert_eq!(
+        error
+            .public_error()
+            .expect("snapshot mismatch is a checked public error")
+            .code(),
+        ErrorCode::InvalidCursor
+    );
+}
+
+#[tokio::test]
+async fn every_repo_list_cursor_failure_category_maps_to_invalid_cursor() {
+    let entries: Vec<RepositoryListEntry> = (0..3_u8)
+        .map(|index| RepositoryListEntry {
+            repository_id: RepositoryId::from_bytes([index + 1; 16]),
+            active_generation: generation(),
+            languages: vec!["rust".to_owned()],
+            structural_freshness: "current".to_owned(),
+            semantic_freshness: "current".to_owned(),
+            state: "ready".to_owned(),
+        })
+        .collect();
+    let signing_key = CursorSigningKey::deterministic([7; 32]).expect("test key is valid");
+    let snapshot = repo_list_snapshot_id(&entries);
+    let base = repo_list_cursor_context(None, 2, snapshot, signing_key.key_id);
+    let wire = |context: CursorContext, issued_at_ms| {
+        AuthenticatedCursor::create(
+            context,
+            2_u32.to_le_bytes().to_vec(),
+            issued_at_ms,
+            &signing_key.secret,
+        )
+        .expect("test cursor fits")
+        .to_wire()
+    };
+    let current = wire(base.clone(), now_unix_ms());
+    let mut tampered = current.clone().into_bytes();
+    let last = tampered
+        .last_mut()
+        .expect("cursor always has an encoded payload");
+    *last = if *last == b'A' { b'B' } else { b'A' };
+    let tampered = String::from_utf8(tampered).expect("base64url remains UTF-8");
+
+    let mut wrong_key_id = base.clone();
+    wrong_key_id.key_id = wrong_key_id.key_id.saturating_add(1);
+    let mut wrong_tool_major = base.clone();
+    wrong_tool_major.tool_major_version = 2;
+    let mut wrong_tool = base.clone();
+    wrong_tool.tool = McpTool::RepoStatus;
+    let mut wrong_repository = base.clone();
+    wrong_repository.repository = repository();
+    let mut wrong_generation = base.clone();
+    wrong_generation.generation = generation();
+    let mut wrong_request = base.clone();
+    wrong_request.query_fingerprint = repo_list_fingerprint(Some("other"));
+    let mut wrong_plan = base.clone();
+    wrong_plan.plan_fingerprint = [9; 32];
+    let mut wrong_profile = base.clone();
+    wrong_profile.response_profile = ResponseProfile::Standard;
+    let mut wrong_page_size = base.clone();
+    wrong_page_size.page_size = 3;
+    let mut stale_snapshot = base.clone();
+    stale_snapshot.snapshot_id = [9; 32];
+
+    let cases = [
+        ("malformed", "c2.A".to_owned()),
+        ("legacy version", "c1.AAAA".to_owned()),
+        ("tampered", tampered),
+        ("expired", wire(base, now_unix_ms().saturating_sub(400_000))),
+        (
+            "future issue time",
+            wire(
+                repo_list_cursor_context(None, 2, snapshot, signing_key.key_id),
+                now_unix_ms().saturating_add(60_000),
+            ),
+        ),
+        ("unknown key", wire(wrong_key_id, now_unix_ms())),
+        ("wrong tool", wire(wrong_tool, now_unix_ms())),
+        ("wrong tool major", wire(wrong_tool_major, now_unix_ms())),
+        ("wrong repository", wire(wrong_repository, now_unix_ms())),
+        ("wrong generation", wire(wrong_generation, now_unix_ms())),
+        ("wrong request", wire(wrong_request, now_unix_ms())),
+        ("wrong plan", wire(wrong_plan, now_unix_ms())),
+        ("wrong profile", wire(wrong_profile, now_unix_ms())),
+        ("wrong page size", wire(wrong_page_size, now_unix_ms())),
+        ("stale snapshot", wire(stale_snapshot, now_unix_ms())),
+    ];
+
+    for (label, cursor) in cases {
+        let harness = Harness::with_cursor_key(
+            FakeOutcome::RepositoryList(Ok(RepositoryList {
+                repositories: entries.clone(),
+            })),
+            [7; 32],
+        );
+        let error = execute(
+            &harness.executor,
+            VerticalTool::RepoList,
+            json!({"max_results": 2, "cursor": cursor}),
+        )
+        .await
+        .expect_err(label);
+        assert_eq!(
+            error
+                .public_error()
+                .expect("cursor failures are checked public errors")
+                .code(),
+            ErrorCode::InvalidCursor,
+            "{label}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3454,15 +3839,17 @@ async fn explain_fingerprint_is_stable_for_identical_requests() {
 
 #[tokio::test]
 async fn repo_list_explain_returns_a_plan_without_retrieval() {
+    let entries = vec![RepositoryListEntry {
+        repository_id: repository(),
+        active_generation: generation(),
+        languages: vec!["rust".to_owned()],
+        structural_freshness: "current".to_owned(),
+        semantic_freshness: "current".to_owned(),
+        state: "ready".to_owned(),
+    }];
+    let snapshot = repo_list_snapshot_id(&entries);
     let harness = Harness::new(FakeOutcome::RepositoryList(Ok(RepositoryList {
-        repositories: vec![RepositoryListEntry {
-            repository_id: repository(),
-            active_generation: generation(),
-            languages: vec!["rust".to_owned()],
-            structural_freshness: "current".to_owned(),
-            semantic_freshness: "current".to_owned(),
-            state: "ready".to_owned(),
-        }],
+        repositories: entries,
     })));
     let output: RepoListOutput = decode(
         execute(
@@ -3483,7 +3870,13 @@ async fn repo_list_explain_returns_a_plan_without_retrieval() {
     assert_eq!(output.data.total_count, 1);
     let explanation = output.data.explanation.expect("explain returns a plan");
     assert_eq!(explanation.operators, vec!["repository_listing".to_owned()]);
-    assert!(explanation.fingerprint.starts_with("plan1_"));
+    let full_fingerprint = repo_list_plan_fingerprint(&snapshot);
+    let expected = blake3::Hash::from_bytes(full_fingerprint).to_hex();
+    assert_eq!(
+        explanation.fingerprint,
+        format!("plan1_{}", &expected[..32]),
+        "the public explanation and cursor context use one physical plan"
+    );
     assert_eq!(
         harness.call_count.load(Ordering::Relaxed),
         1,
