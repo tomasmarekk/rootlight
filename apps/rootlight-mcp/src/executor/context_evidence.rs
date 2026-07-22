@@ -395,11 +395,14 @@ fn validate_context_evidence_identity(
 
 fn make_context_evidence_output(
     invocation: &EvidenceProviderInvocation,
-    candidates: Vec<EvidenceCandidateDraft>,
+    observations: Vec<EvidenceProviderObservation>,
     completeness: ResultCompleteness,
     usage: BudgetCharge,
 ) -> Result<EvidenceProviderOutput, ContextEvidencePortError> {
-    if candidates.len() > usize::from(invocation.max_candidates()) {
+    let transport_ceiling = usize::from(invocation.max_candidates()).saturating_add(usize::from(
+        invocation.provider() == EvidenceProvider::ChangeImpact,
+    ));
+    if observations.len() > transport_ceiling {
         return Err(context_evidence_error(
             ContextEvidencePortErrorKind::InvalidResponse,
             usage,
@@ -409,20 +412,10 @@ fn make_context_evidence_output(
         repository: invocation.repository(),
         generation: invocation.generation(),
         invocation: invocation.id().clone(),
-        candidates,
+        observations,
         completeness,
         usage,
     })
-}
-
-fn context_candidate_cost(tokens: usize, source_bytes: usize) -> BudgetCharge {
-    BudgetCharge {
-        results: 1,
-        tokens: u64::try_from(tokens.clamp(1, 32_000)).unwrap_or(32_000),
-        source_bytes: u64::try_from(source_bytes).unwrap_or(u64::MAX),
-        memory_bytes: u64::try_from(tokens.saturating_add(source_bytes)).unwrap_or(u64::MAX),
-        ..BudgetCharge::default()
-    }
 }
 
 fn context_source_refs(
@@ -558,7 +551,7 @@ where
             resolved.usage,
         ));
     }
-    let mut candidates = Vec::new();
+    let mut observations = Vec::new();
     for hit in resolved.hits {
         let source_refs = match hit.source.as_ref() {
             Some(source) => context_source_refs(std::slice::from_ref(source))?,
@@ -569,25 +562,19 @@ where
             .len()
             .saturating_add(hit.qualified_name.len())
             .saturating_add(hit.path.len());
-        candidates.push(EvidenceCandidateDraft {
-            repository: invocation.repository(),
-            generation: invocation.generation(),
-            invocation: invocation.id().clone(),
-            provider: invocation.provider(),
-            role: invocation.role(),
-            provenance: EvidenceProvenance::Graph,
+        observations.push(EvidenceProviderObservation {
+            kind: EvidenceProviderObservationKind::Primary,
             symbol_id: Some(hit.symbol),
             identity: hit.symbol.to_string(),
-            relevance: u16::try_from(hit.score.min(1_000)).unwrap_or(1_000),
-            confidence: u16::try_from(hit.score.min(1_000)).unwrap_or(1_000),
-            cost: context_candidate_cost(tokens, 0),
+            observed_score: Some(u16::try_from(hit.score.min(1_000)).unwrap_or(1_000)),
+            estimated_tokens: u64::try_from(tokens).unwrap_or(u64::MAX),
+            source_bytes: 0,
             source_refs,
-            dependencies: Vec::new(),
         });
     }
     make_context_evidence_output(
         &invocation,
-        candidates,
+        observations,
         resolved.completeness,
         resolved.usage,
     )
@@ -632,7 +619,7 @@ where
         resolved.completeness,
         context_evidence_completeness(response.result.execution_completeness.clone())?,
     )?;
-    let mut candidates = Vec::new();
+    let mut observations = Vec::new();
     for explanation in response.result.symbols {
         let source_refs = context_source_refs(std::slice::from_ref(&explanation.definition))?;
         let tokens = explanation
@@ -640,23 +627,17 @@ where
             .len()
             .saturating_add(explanation.signature.as_ref().map_or(0, String::len));
         let confidence = u16::try_from(explanation.confidence.min(1_000)).unwrap_or(1_000);
-        candidates.push(EvidenceCandidateDraft {
-            repository: invocation.repository(),
-            generation: invocation.generation(),
-            invocation: invocation.id().clone(),
-            provider: invocation.provider(),
-            role: invocation.role(),
-            provenance: EvidenceProvenance::Graph,
+        observations.push(EvidenceProviderObservation {
+            kind: EvidenceProviderObservationKind::Primary,
             symbol_id: Some(explanation.symbol),
             identity: explanation.symbol.to_string(),
-            relevance: confidence,
-            confidence,
-            cost: context_candidate_cost(tokens, 0),
+            observed_score: Some(confidence),
+            estimated_tokens: u64::try_from(tokens).unwrap_or(u64::MAX),
+            source_bytes: 0,
             source_refs,
-            dependencies: Vec::new(),
         });
     }
-    make_context_evidence_output(&invocation, candidates, completeness, usage)
+    make_context_evidence_output(&invocation, observations, completeness, usage)
 }
 
 async fn retrieve_source_evidence<P>(
@@ -736,7 +717,7 @@ where
         completeness,
         context_evidence_completeness(source.result.execution_completeness.clone())?,
     )?;
-    let mut candidates = Vec::new();
+    let mut observations = Vec::new();
     for (index, chunk) in source.result.chunks.into_iter().enumerate() {
         let Some((symbol, confidence)) = symbols.get(index).copied() else {
             return Err(context_evidence_error(
@@ -746,23 +727,17 @@ where
         };
         let source_refs = context_source_refs(std::slice::from_ref(&chunk.source))?;
         let confidence = u16::try_from(confidence.min(1_000)).unwrap_or(1_000);
-        candidates.push(EvidenceCandidateDraft {
-            repository: invocation.repository(),
-            generation: invocation.generation(),
-            invocation: invocation.id().clone(),
-            provider: invocation.provider(),
-            role: invocation.role(),
-            provenance: EvidenceProvenance::Source,
+        observations.push(EvidenceProviderObservation {
+            kind: EvidenceProviderObservationKind::Primary,
             symbol_id: Some(symbol),
             identity: format!("{}:{}:{}", symbol, chunk.start_byte, chunk.end_byte),
-            relevance: confidence,
-            confidence,
-            cost: context_candidate_cost(chunk.content.len(), chunk.content.len()),
+            observed_score: Some(confidence),
+            estimated_tokens: u64::try_from(chunk.content.len()).unwrap_or(u64::MAX),
+            source_bytes: u64::try_from(chunk.content.len()).unwrap_or(u64::MAX),
             source_refs,
-            dependencies: Vec::new(),
         });
     }
-    make_context_evidence_output(&invocation, candidates, completeness, usage)
+    make_context_evidence_output(&invocation, observations, completeness, usage)
 }
 
 async fn retrieve_relationship_evidence<P>(
@@ -813,31 +788,25 @@ where
         resolved.completeness,
         context_evidence_completeness(response.result.execution_completeness.clone())?,
     )?;
-    let mut candidates = Vec::new();
+    let mut observations = Vec::new();
     for group in response.result.groups {
         for item in group.items {
             let source_refs = context_source_refs(&item.source_refs)?;
-            candidates.push(EvidenceCandidateDraft {
-                repository: invocation.repository(),
-                generation: invocation.generation(),
-                invocation: invocation.id().clone(),
-                provider: invocation.provider(),
-                role: invocation.role(),
-                provenance: EvidenceProvenance::Graph,
+            observations.push(EvidenceProviderObservation {
+                kind: EvidenceProviderObservationKind::Primary,
                 symbol_id: Some(item.symbol),
                 identity: item.symbol.to_string(),
-                relevance: item.confidence,
-                confidence: item.confidence,
-                cost: context_candidate_cost(
+                observed_score: Some(item.confidence),
+                estimated_tokens: u64::try_from(
                     group.relation.len().saturating_add(group.direction.len()),
-                    0,
-                ),
+                )
+                .unwrap_or(u64::MAX),
+                source_bytes: 0,
                 source_refs,
-                dependencies: Vec::new(),
             });
         }
     }
-    make_context_evidence_output(&invocation, candidates, completeness, usage)
+    make_context_evidence_output(&invocation, observations, completeness, usage)
 }
 
 async fn retrieve_test_evidence<P>(
@@ -886,30 +855,24 @@ where
         resolved.completeness,
         context_evidence_completeness(response.result.execution_completeness.clone())?,
     )?;
-    let mut candidates = Vec::new();
+    let mut observations = Vec::new();
     for test in response.result.tests {
         let tokens = test
             .test_id
             .len()
             .saturating_add(test.path.as_ref().map_or(0, String::len))
             .saturating_add(test.why.iter().map(String::len).sum::<usize>());
-        candidates.push(EvidenceCandidateDraft {
-            repository: invocation.repository(),
-            generation: invocation.generation(),
-            invocation: invocation.id().clone(),
-            provider: invocation.provider(),
-            role: invocation.role(),
-            provenance: EvidenceProvenance::TestIndex,
+        observations.push(EvidenceProviderObservation {
+            kind: EvidenceProviderObservationKind::Primary,
             symbol_id: test.test_id.parse().ok(),
             identity: test.test_id,
-            relevance: test.score,
-            confidence: test.score,
-            cost: context_candidate_cost(tokens, 0),
+            observed_score: Some(test.score),
+            estimated_tokens: u64::try_from(tokens).unwrap_or(u64::MAX),
+            source_bytes: 0,
             source_refs: Vec::new(),
-            dependencies: Vec::new(),
         });
     }
-    make_context_evidence_output(&invocation, candidates, completeness, usage)
+    make_context_evidence_output(&invocation, observations, completeness, usage)
 }
 
 async fn retrieve_architecture_evidence<P>(
@@ -940,7 +903,7 @@ where
     let usage = context_evidence_usage(&response.result.context);
     let completeness =
         context_evidence_completeness(response.result.execution_completeness.clone())?;
-    let mut candidates = Vec::new();
+    let mut observations = Vec::new();
     for component in response.result.components {
         let tokens = component
             .id
@@ -954,23 +917,17 @@ where
                     .map(String::len)
                     .sum::<usize>(),
             );
-        candidates.push(EvidenceCandidateDraft {
-            repository: invocation.repository(),
-            generation: invocation.generation(),
-            invocation: invocation.id().clone(),
-            provider: invocation.provider(),
-            role: invocation.role(),
-            provenance: EvidenceProvenance::ArchitectureAnalysis,
+        observations.push(EvidenceProviderObservation {
+            kind: EvidenceProviderObservationKind::Primary,
             symbol_id: None,
             identity: component.id,
-            relevance: component.confidence,
-            confidence: component.confidence,
-            cost: context_candidate_cost(tokens, 0),
+            observed_score: Some(component.confidence),
+            estimated_tokens: u64::try_from(tokens).unwrap_or(u64::MAX),
+            source_bytes: 0,
             source_refs: Vec::new(),
-            dependencies: Vec::new(),
         });
     }
-    make_context_evidence_output(&invocation, candidates, completeness, usage)
+    make_context_evidence_output(&invocation, observations, completeness, usage)
 }
 
 fn change_impact_request(
@@ -1029,70 +986,49 @@ where
     let usage = context_evidence_usage(&response.result.context);
     let completeness =
         context_evidence_completeness(response.result.execution_completeness.clone())?;
-    let mut candidates = Vec::new();
-    match invocation.role() {
-        rootlight_agent::context_pack::EvidenceRole::Risk => {
-            let observed_confidence = response
+    let mut observations = Vec::new();
+    let observed_confidence = response
+        .result
+        .impacted
+        .iter()
+        .flat_map(|group| group.dependents.iter())
+        .map(|entry| entry.confidence)
+        .max();
+    if observed_confidence.is_some() || !response.result.resolved_changes.is_empty() {
+        observations.push(EvidenceProviderObservation {
+            kind: EvidenceProviderObservationKind::ChangeRiskSummary,
+            symbol_id: response
                 .result
                 .impacted
                 .iter()
                 .flat_map(|group| group.dependents.iter())
-                .map(|entry| entry.confidence)
-                .max()
-                .or_else(|| (!response.result.resolved_changes.is_empty()).then_some(700));
-            if let Some(confidence) = observed_confidence {
-                candidates.push(EvidenceCandidateDraft {
-                    repository: invocation.repository(),
-                    generation: invocation.generation(),
-                    invocation: invocation.id().clone(),
-                    provider: invocation.provider(),
-                    role: invocation.role(),
-                    provenance: EvidenceProvenance::ChangeAnalysis,
-                    symbol_id: response
-                        .result
-                        .impacted
-                        .iter()
-                        .flat_map(|group| group.dependents.iter())
-                        .next()
-                        .map(|entry| entry.symbol_id),
-                    identity: format!("risk:{}", invocation.id().as_str()),
-                    relevance: confidence,
-                    confidence,
-                    cost: context_candidate_cost(
-                        response.result.risk_summary.reasons.len().max(1) * 16,
-                        0,
-                    ),
-                    source_refs: Vec::new(),
-                    dependencies: Vec::new(),
-                });
-            }
-        }
-        _ => {
-            for group in response.result.impacted {
-                for dependent in group.dependents {
-                    candidates.push(EvidenceCandidateDraft {
-                        repository: invocation.repository(),
-                        generation: invocation.generation(),
-                        invocation: invocation.id().clone(),
-                        provider: invocation.provider(),
-                        role: invocation.role(),
-                        provenance: EvidenceProvenance::ChangeAnalysis,
-                        symbol_id: Some(dependent.symbol_id),
-                        identity: dependent.symbol_id.to_string(),
-                        relevance: dependent.confidence,
-                        confidence: dependent.confidence,
-                        cost: context_candidate_cost(
-                            dependent.via.iter().map(String::len).sum::<usize>(),
-                            0,
-                        ),
-                        source_refs: Vec::new(),
-                        dependencies: Vec::new(),
-                    });
-                }
-            }
+                .next()
+                .map(|entry| entry.symbol_id),
+            identity: format!("risk:{}", invocation.id().as_str()),
+            observed_score: observed_confidence,
+            estimated_tokens: u64::try_from(response.result.risk_summary.reasons.len().max(1) * 16)
+                .unwrap_or(u64::MAX),
+            source_bytes: 0,
+            source_refs: Vec::new(),
+        });
+    }
+    for group in response.result.impacted {
+        for dependent in group.dependents {
+            observations.push(EvidenceProviderObservation {
+                kind: EvidenceProviderObservationKind::Primary,
+                symbol_id: Some(dependent.symbol_id),
+                identity: dependent.symbol_id.to_string(),
+                observed_score: Some(dependent.confidence),
+                estimated_tokens: u64::try_from(
+                    dependent.via.iter().map(String::len).sum::<usize>(),
+                )
+                .unwrap_or(u64::MAX),
+                source_bytes: 0,
+                source_refs: Vec::new(),
+            });
         }
     }
-    make_context_evidence_output(&invocation, candidates, completeness, usage)
+    make_context_evidence_output(&invocation, observations, completeness, usage)
 }
 
 async fn retrieve_history_evidence<P>(
@@ -1139,26 +1075,20 @@ where
     let usage = context_evidence_usage(&response.result.context);
     let completeness =
         context_evidence_completeness(response.result.execution_completeness.clone())?;
-    let mut candidates = Vec::new();
+    let mut observations = Vec::new();
     for change in response.result.changes {
         let tokens = change.kind.len().saturating_add(change.entity_kind.len());
-        candidates.push(EvidenceCandidateDraft {
-            repository: invocation.repository(),
-            generation: invocation.generation(),
-            invocation: invocation.id().clone(),
-            provider: invocation.provider(),
-            role: invocation.role(),
-            provenance: EvidenceProvenance::HistoryAnalysis,
+        observations.push(EvidenceProviderObservation {
+            kind: EvidenceProviderObservationKind::Primary,
             symbol_id: Some(change.symbol_id),
             identity: change.symbol_id.to_string(),
-            relevance: change.significance,
-            confidence: change.significance,
-            cost: context_candidate_cost(tokens, 0),
+            observed_score: Some(change.significance),
+            estimated_tokens: u64::try_from(tokens).unwrap_or(u64::MAX),
+            source_bytes: 0,
             source_refs: Vec::new(),
-            dependencies: Vec::new(),
         });
     }
-    make_context_evidence_output(&invocation, candidates, completeness, usage)
+    make_context_evidence_output(&invocation, observations, completeness, usage)
 }
 
 fn plan_objective_for_context(
@@ -1241,12 +1171,7 @@ where
         resolved.completeness,
         context_evidence_completeness(response.result.execution_completeness.clone())?,
     )?;
-    let confidence = match completeness.state {
-        CompletenessState::Complete => 900,
-        CompletenessState::Truncated => 700,
-        CompletenessState::UnsupportedPartial | CompletenessState::Indeterminate => 0,
-    };
-    let mut candidates = Vec::new();
+    let mut observations = Vec::new();
     for step in response.result.plan {
         let symbol_id = step.targets.first().copied();
         let tokens = step
@@ -1254,23 +1179,17 @@ where
             .len()
             .saturating_add(step.risks.iter().map(String::len).sum::<usize>())
             .saturating_add(step.verification.as_ref().map_or(0, String::len));
-        candidates.push(EvidenceCandidateDraft {
-            repository: invocation.repository(),
-            generation: invocation.generation(),
-            invocation: invocation.id().clone(),
-            provider: invocation.provider(),
-            role: invocation.role(),
-            provenance: EvidenceProvenance::PlanArtifact,
+        observations.push(EvidenceProviderObservation {
+            kind: EvidenceProviderObservationKind::Primary,
             symbol_id,
             identity: format!("plan-step:{}:{}", step.step, invocation.id().as_str()),
-            relevance: confidence,
-            confidence,
-            cost: context_candidate_cost(tokens, 0),
+            observed_score: None,
+            estimated_tokens: u64::try_from(tokens).unwrap_or(u64::MAX),
+            source_bytes: 0,
             source_refs: Vec::new(),
-            dependencies: Vec::new(),
         });
     }
-    make_context_evidence_output(&invocation, candidates, completeness, usage)
+    make_context_evidence_output(&invocation, observations, completeness, usage)
 }
 
 #[cfg(test)]

@@ -14,8 +14,8 @@ use std::{
 use rootlight_agent::{
     context_evidence::{
         ContextEvidenceCallContext, ContextEvidencePort, ContextEvidencePortError,
-        ContextEvidencePortErrorKind, EvidenceCandidateDraft, EvidenceProvenance, EvidenceProvider,
-        EvidenceProviderInvocation, EvidenceProviderOutput,
+        ContextEvidencePortErrorKind, EvidenceProvider, EvidenceProviderInvocation,
+        EvidenceProviderObservation, EvidenceProviderObservationKind, EvidenceProviderOutput,
     },
     context_pack::{CONTEXT_PACK_TIMEOUT_MS, ContextPackService, ContextPackServiceError},
     policy::{BudgetCharge, CancellationSignal},
@@ -131,30 +131,20 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
             });
         }
         let definition = explanation(invocation.generation()).definition;
-        let candidate = EvidenceCandidateDraft {
-            repository: invocation.repository(),
-            generation: invocation.generation(),
-            invocation: invocation.id().clone(),
-            provider: invocation.provider(),
-            role: invocation.role(),
-            provenance: EvidenceProvenance::Graph,
+        let observation = EvidenceProviderObservation {
+            kind: EvidenceProviderObservationKind::Primary,
             symbol_id: Some(symbol()),
             identity: symbol().to_string(),
-            relevance: 900,
-            confidence: 900,
-            cost: BudgetCharge {
-                results: 1,
-                tokens: 32,
-                ..BudgetCharge::default()
-            },
+            observed_score: Some(900),
+            estimated_tokens: 32,
+            source_bytes: 0,
             source_refs: vec![definition],
-            dependencies: Vec::new(),
         };
         let output = EvidenceProviderOutput {
             repository: invocation.repository(),
             generation: invocation.generation(),
             invocation: invocation.id().clone(),
-            candidates: vec![candidate],
+            observations: vec![observation],
             completeness: rootlight_mcp_contract::completeness::ResultCompleteness::complete(),
             usage: BudgetCharge {
                 results: 1,

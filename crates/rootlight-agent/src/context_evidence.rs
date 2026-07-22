@@ -417,35 +417,53 @@ impl EvidenceDedupKey {
     }
 }
 
-/// Unvalidated observation returned by one bounded provider adapter.
+/// Transport observation returned by one bounded provider adapter.
+///
+/// The adapter reports only facts present in the provider response. Candidate
+/// role, provenance, trust, confidence, cost, stable ID, and deduplication key
+/// are assigned by the agent from the authoritative invocation and these facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvidenceCandidateDraft {
-    /// Authoritative repository identity reported by the provider.
-    pub repository: RepositoryId,
-    /// Authoritative generation identity reported by the provider.
-    pub generation: GenerationId,
-    /// Invocation that produced the observation.
-    pub invocation: ProviderInvocationId,
-    /// Adapter domain that produced the observation.
-    pub provider: EvidenceProvider,
-    /// Observed evidence role.
-    pub role: EvidenceRole,
-    /// Provider-independent evidence provenance.
-    pub provenance: EvidenceProvenance,
+pub struct EvidenceProviderObservation {
+    /// Provider-response record category, independent of context-pack roles.
+    pub kind: EvidenceProviderObservationKind,
     /// Stable symbol identity when the evidence describes a symbol.
     pub symbol_id: Option<SymbolId>,
     /// Canonical source-free identity supplied by the provider.
     pub identity: String,
-    /// Relevance score from observed graph or index evidence.
-    pub relevance: u16,
-    /// Confidence score from observed graph or index evidence.
-    pub confidence: u16,
-    /// Conservative materialization cost.
-    pub cost: BudgetCharge,
+    /// Fixed-point score reported by the provider, when one exists.
+    pub observed_score: Option<u16>,
+    /// Material size observed by the adapter.
+    pub estimated_tokens: u64,
+    /// Exact source bytes observed by the adapter.
+    pub source_bytes: u64,
     /// Exact generation-pinned source references.
     pub source_refs: Vec<SourceRef>,
-    /// Candidate dependencies by stable candidate identity.
-    pub dependencies: Vec<EvidenceCandidateId>,
+}
+
+/// Transport-level record categories exposed by provider responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceProviderObservationKind {
+    /// Ordinary result row from the selected provider.
+    Primary,
+    /// Aggregate risk facts from one change-impact response.
+    ChangeRiskSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvidenceCandidateDraft {
+    pub(crate) repository: RepositoryId,
+    pub(crate) generation: GenerationId,
+    pub(crate) invocation: ProviderInvocationId,
+    pub(crate) provider: EvidenceProvider,
+    pub(crate) role: EvidenceRole,
+    pub(crate) provenance: EvidenceProvenance,
+    pub(crate) symbol_id: Option<SymbolId>,
+    pub(crate) identity: String,
+    pub(crate) relevance: u16,
+    pub(crate) confidence: u16,
+    pub(crate) cost: BudgetCharge,
+    pub(crate) source_refs: Vec<SourceRef>,
+    pub(crate) dependencies: Vec<EvidenceCandidateId>,
 }
 
 /// One fully validated typed evidence candidate.
@@ -476,7 +494,7 @@ impl TypedEvidenceCandidate {
     ///
     /// Returns [`EvidenceCandidateError`] when identity, confidence, cost,
     /// source references, or dependency bounds are invalid.
-    pub fn from_draft(
+    pub(crate) fn from_draft(
         expected_repository: RepositoryId,
         expected_generation: GenerationId,
         mut draft: EvidenceCandidateDraft,
@@ -663,8 +681,8 @@ pub struct EvidenceProviderOutput {
     pub generation: GenerationId,
     /// Invocation identity echoed by the adapter.
     pub invocation: ProviderInvocationId,
-    /// Typed observations returned within the invocation ceiling.
-    pub candidates: Vec<EvidenceCandidateDraft>,
+    /// Transport observations returned within the invocation ceiling.
+    pub observations: Vec<EvidenceProviderObservation>,
     /// Authoritative completeness and limiting-resource state.
     pub completeness: ResultCompleteness,
     /// Measured provider work charged to the parent ledger.
@@ -1017,7 +1035,12 @@ impl ContextEvidenceCollector {
             };
 
             validate_provider_output(request, invocation, &output)?;
-            if output.candidates.is_empty() {
+            let observations = output
+                .observations
+                .into_iter()
+                .filter(|observation| observation_applies(invocation, observation.kind))
+                .collect::<Vec<_>>();
+            if observations.is_empty() {
                 record_provider_omission(
                     &mut omissions,
                     invocation.provider(),
@@ -1029,7 +1052,7 @@ impl ContextEvidenceCollector {
             }
             if output.completeness.state == CompletenessState::Truncated {
                 let omitted = u32::from(invocation.max_candidates())
-                    .saturating_sub(u32::try_from(output.candidates.len()).unwrap_or(u32::MAX))
+                    .saturating_sub(u32::try_from(observations.len()).unwrap_or(u32::MAX))
                     .max(1);
                 record_provider_omission(
                     &mut omissions,
@@ -1041,14 +1064,14 @@ impl ContextEvidenceCollector {
                 );
             }
 
-            for mut draft in output.candidates {
+            for observation in observations {
                 collection_checkpoint(&cancellation, deadline)?;
-                if draft.provider != invocation.provider()
-                    || draft.invocation != *invocation.id()
-                    || draft.role != invocation.role()
-                {
-                    return Err(ContextEvidenceCollectionError::IdentityMismatch);
-                }
+                let mut draft = shape_provider_observation(
+                    request,
+                    invocation,
+                    output.completeness.state,
+                    observation,
+                )?;
                 if output.completeness.state == CompletenessState::Truncated {
                     // A bounded partial observation remains useful, but it must
                     // not retain the confidence of an exhaustive provider run.
@@ -1096,8 +1119,17 @@ fn validate_provider_output(
     {
         return Err(ContextEvidenceCollectionError::IdentityMismatch);
     }
-    if output.candidates.len() > usize::from(invocation.max_candidates())
-        || output.usage.results < u64::try_from(output.candidates.len()).unwrap_or(u64::MAX)
+    let applicable_count = output
+        .observations
+        .iter()
+        .filter(|observation| observation_applies(invocation, observation.kind))
+        .count();
+    let transport_ceiling = usize::from(invocation.max_candidates()).saturating_add(usize::from(
+        invocation.provider() == EvidenceProvider::ChangeImpact,
+    ));
+    if output.observations.len() > transport_ceiling
+        || applicable_count > usize::from(invocation.max_candidates())
+        || output.usage.results < u64::try_from(applicable_count).unwrap_or(u64::MAX)
     {
         return Err(ContextEvidenceCollectionError::InvalidProviderResponse);
     }
@@ -1108,6 +1140,94 @@ fn validate_provider_output(
         return Err(ContextEvidenceCollectionError::UnsafeCompleteness);
     }
     Ok(())
+}
+
+const fn observation_applies(
+    invocation: &EvidenceProviderInvocation,
+    kind: EvidenceProviderObservationKind,
+) -> bool {
+    match (invocation.provider(), invocation.role(), kind) {
+        (
+            EvidenceProvider::ChangeImpact,
+            EvidenceRole::Risk,
+            EvidenceProviderObservationKind::ChangeRiskSummary,
+        ) => true,
+        (
+            EvidenceProvider::ChangeImpact,
+            EvidenceRole::Risk,
+            EvidenceProviderObservationKind::Primary,
+        )
+        | (EvidenceProvider::ChangeImpact, _, EvidenceProviderObservationKind::ChangeRiskSummary) => {
+            false
+        }
+        (_, _, EvidenceProviderObservationKind::Primary) => true,
+        (_, _, EvidenceProviderObservationKind::ChangeRiskSummary) => false,
+    }
+}
+
+fn shape_provider_observation(
+    request: &CanonicalContextPackRequest,
+    invocation: &EvidenceProviderInvocation,
+    completeness: CompletenessState,
+    observation: EvidenceProviderObservation,
+) -> Result<EvidenceCandidateDraft, ContextEvidenceCollectionError> {
+    let confidence = match observation.observed_score {
+        Some(score) => score,
+        None if invocation.provider() == EvidenceProvider::Planning => match completeness {
+            CompletenessState::Complete => 900,
+            CompletenessState::Truncated => 700,
+            CompletenessState::UnsupportedPartial | CompletenessState::Indeterminate => {
+                return Err(ContextEvidenceCollectionError::UnsafeCompleteness);
+            }
+        },
+        None if invocation.provider() == EvidenceProvider::ChangeImpact
+            && observation.kind == EvidenceProviderObservationKind::ChangeRiskSummary =>
+        {
+            700
+        }
+        None => return Err(ContextEvidenceCollectionError::InvalidProviderResponse),
+    };
+
+    Ok(EvidenceCandidateDraft {
+        repository: request.repository(),
+        generation: request.generation(),
+        invocation: invocation.id().clone(),
+        provider: invocation.provider(),
+        role: invocation.role(),
+        provenance: provider_provenance(invocation.provider()),
+        symbol_id: observation.symbol_id,
+        identity: observation.identity,
+        relevance: confidence,
+        confidence,
+        cost: candidate_cost(observation.estimated_tokens, observation.source_bytes),
+        source_refs: observation.source_refs,
+        dependencies: Vec::new(),
+    })
+}
+
+const fn provider_provenance(provider: EvidenceProvider) -> EvidenceProvenance {
+    match provider {
+        EvidenceProvider::Locate
+        | EvidenceProvider::Definition
+        | EvidenceProvider::Relationships => EvidenceProvenance::Graph,
+        EvidenceProvider::Implementation | EvidenceProvider::Source => EvidenceProvenance::Source,
+        EvidenceProvider::Tests => EvidenceProvenance::TestIndex,
+        EvidenceProvider::Architecture => EvidenceProvenance::ArchitectureAnalysis,
+        EvidenceProvider::ChangeImpact => EvidenceProvenance::ChangeAnalysis,
+        EvidenceProvider::History => EvidenceProvenance::HistoryAnalysis,
+        EvidenceProvider::Planning => EvidenceProvenance::PlanArtifact,
+    }
+}
+
+fn candidate_cost(estimated_tokens: u64, source_bytes: u64) -> BudgetCharge {
+    let tokens = estimated_tokens.clamp(1, 32_000);
+    BudgetCharge {
+        results: 1,
+        tokens,
+        source_bytes,
+        memory_bytes: estimated_tokens.saturating_add(source_bytes),
+        ..BudgetCharge::default()
+    }
 }
 
 fn deduplicate_candidates(
@@ -1705,24 +1825,14 @@ mod tests {
             repository: REPOSITORY,
             generation: GENERATION,
             invocation: invocation.id().clone(),
-            candidates: vec![EvidenceCandidateDraft {
-                repository: REPOSITORY,
-                generation: GENERATION,
-                invocation: invocation.id().clone(),
-                provider: invocation.provider(),
-                role: invocation.role(),
-                provenance: EvidenceProvenance::Graph,
+            observations: vec![EvidenceProviderObservation {
+                kind: EvidenceProviderObservationKind::Primary,
                 symbol_id: Some(SymbolId::from_bytes([3; 20])),
                 identity: identity.to_owned(),
-                relevance: 900,
-                confidence: 900,
-                cost: BudgetCharge {
-                    results: 1,
-                    tokens: 64,
-                    ..BudgetCharge::default()
-                },
+                observed_score: Some(900),
+                estimated_tokens: 64,
+                source_bytes: 0,
                 source_refs: vec![source_ref(REPOSITORY, GENERATION)],
-                dependencies: Vec::new(),
             }],
             completeness: ResultCompleteness::complete(),
             usage: BudgetCharge {
@@ -1944,6 +2054,178 @@ mod tests {
     }
 
     #[test]
+    fn agent_shapes_transport_observations_from_the_authoritative_invocation() {
+        let request = request("fix crash");
+        let invocation = one_invocation_plan(&request)
+            .invocations()
+            .first()
+            .expect("fixture invocation")
+            .clone();
+        let source = source_ref(REPOSITORY, GENERATION);
+        let draft = shape_provider_observation(
+            &request,
+            &invocation,
+            CompletenessState::Complete,
+            EvidenceProviderObservation {
+                kind: EvidenceProviderObservationKind::Primary,
+                symbol_id: Some(SymbolId::from_bytes([3; 20])),
+                identity: "parser".to_owned(),
+                observed_score: Some(875),
+                estimated_tokens: 40_000,
+                source_bytes: 128,
+                source_refs: vec![source.clone()],
+            },
+        )
+        .expect("scored transport observation is accepted");
+
+        assert_eq!(draft.repository, request.repository());
+        assert_eq!(draft.generation, request.generation());
+        assert_eq!(draft.invocation, *invocation.id());
+        assert_eq!(draft.provider, invocation.provider());
+        assert_eq!(draft.role, invocation.role());
+        assert_eq!(draft.provenance, provider_provenance(invocation.provider()));
+        assert_eq!(draft.relevance, 875);
+        assert_eq!(draft.confidence, 875);
+        assert_eq!(draft.cost.results, 1);
+        assert_eq!(draft.cost.tokens, 32_000);
+        assert_eq!(draft.cost.source_bytes, 128);
+        assert_eq!(draft.cost.memory_bytes, 40_128);
+        assert_eq!(draft.source_refs, [source]);
+        assert!(draft.dependencies.is_empty());
+
+        let candidate =
+            TypedEvidenceCandidate::from_draft(request.repository(), request.generation(), draft)
+                .expect("agent-shaped candidate validates");
+        assert_eq!(
+            candidate.trust(),
+            TrustClassification::UntrustedRepositoryData
+        );
+    }
+
+    #[test]
+    fn provider_provenance_policy_covers_every_transport_adapter() {
+        for (provider, expected) in [
+            (EvidenceProvider::Locate, EvidenceProvenance::Graph),
+            (EvidenceProvider::Definition, EvidenceProvenance::Graph),
+            (EvidenceProvider::Implementation, EvidenceProvenance::Source),
+            (EvidenceProvider::Relationships, EvidenceProvenance::Graph),
+            (EvidenceProvider::Tests, EvidenceProvenance::TestIndex),
+            (
+                EvidenceProvider::Architecture,
+                EvidenceProvenance::ArchitectureAnalysis,
+            ),
+            (
+                EvidenceProvider::ChangeImpact,
+                EvidenceProvenance::ChangeAnalysis,
+            ),
+            (
+                EvidenceProvider::History,
+                EvidenceProvenance::HistoryAnalysis,
+            ),
+            (EvidenceProvider::Planning, EvidenceProvenance::PlanArtifact),
+            (EvidenceProvider::Source, EvidenceProvenance::Source),
+        ] {
+            assert_eq!(provider_provenance(provider), expected);
+        }
+    }
+
+    #[test]
+    fn agent_assigns_confidence_when_transport_has_no_native_score() {
+        let request = request("migrate parser");
+        let plan = ContextEvidenceProviderRegistry
+            .plan(&request)
+            .expect("provider plan");
+        for (provider, expected) in [
+            (EvidenceProvider::ChangeImpact, 700),
+            (EvidenceProvider::Planning, 900),
+        ] {
+            let invocation = plan
+                .invocations()
+                .iter()
+                .find(|invocation| invocation.provider() == provider)
+                .expect("provider invocation");
+            let draft = shape_provider_observation(
+                &request,
+                invocation,
+                CompletenessState::Complete,
+                EvidenceProviderObservation {
+                    kind: if provider == EvidenceProvider::ChangeImpact {
+                        EvidenceProviderObservationKind::ChangeRiskSummary
+                    } else {
+                        EvidenceProviderObservationKind::Primary
+                    },
+                    symbol_id: None,
+                    identity: provider.name().to_owned(),
+                    observed_score: None,
+                    estimated_tokens: 1,
+                    source_bytes: 0,
+                    source_refs: Vec::new(),
+                },
+            )
+            .expect("agent policy assigns confidence");
+            assert_eq!(draft.confidence, expected);
+            assert_eq!(draft.relevance, expected);
+        }
+
+        let definition = plan
+            .invocations()
+            .iter()
+            .find(|invocation| invocation.provider() == EvidenceProvider::Definition)
+            .expect("definition invocation");
+        assert_eq!(
+            shape_provider_observation(
+                &request,
+                definition,
+                CompletenessState::Complete,
+                EvidenceProviderObservation {
+                    kind: EvidenceProviderObservationKind::Primary,
+                    symbol_id: None,
+                    identity: "unscored-definition".to_owned(),
+                    observed_score: None,
+                    estimated_tokens: 1,
+                    source_bytes: 0,
+                    source_refs: Vec::new(),
+                },
+            ),
+            Err(ContextEvidenceCollectionError::InvalidProviderResponse)
+        );
+    }
+
+    #[test]
+    fn agent_projects_change_transport_records_by_invocation_role() {
+        let request = request("fix crash");
+        let mut invocation = ContextEvidenceProviderRegistry
+            .plan(&request)
+            .expect("provider plan")
+            .invocations()
+            .iter()
+            .find(|invocation| {
+                invocation.provider() == EvidenceProvider::ChangeImpact
+                    && invocation.role() == EvidenceRole::Risk
+            })
+            .expect("risk invocation")
+            .clone();
+        assert!(observation_applies(
+            &invocation,
+            EvidenceProviderObservationKind::ChangeRiskSummary
+        ));
+        assert!(!observation_applies(
+            &invocation,
+            EvidenceProviderObservationKind::Primary
+        ));
+
+        invocation.role = EvidenceRole::Change;
+        assert!(observation_applies(
+            &invocation,
+            EvidenceProviderObservationKind::Primary
+        ));
+        assert!(!observation_applies(
+            &invocation,
+            EvidenceProviderObservationKind::ChangeRiskSummary
+        ));
+    }
+
+    #[test]
     fn semantic_aliases_and_overlapping_ranges_deduplicate_deterministically() {
         let invocation = one_invocation_plan(&request("fix crash"))
             .invocations()
@@ -2055,13 +2337,13 @@ mod tests {
         let plan = one_invocation_plan(&request);
         let invocation = &plan.invocations()[0];
         let mut output = complete_output(invocation, "threshold");
-        output.candidates[0].confidence = 700;
-        let mut below = output.candidates[0].clone();
+        output.observations[0].observed_score = Some(700);
+        let mut below = output.observations[0].clone();
         below.identity = "below".to_owned();
         below.symbol_id = Some(SymbolId::from_bytes([9; 20]));
         below.source_refs = vec![ranged_source_ref(REPOSITORY, GENERATION, 100, 120)];
-        below.confidence = 699;
-        output.candidates.push(below);
+        below.observed_score = Some(699);
+        output.observations.push(below);
         output.usage.results = 2;
         let corpus = ContextEvidenceCollector
             .collect(
@@ -2198,7 +2480,7 @@ mod tests {
         );
 
         let mut corrupt = complete_output(&plan.invocations[0], "corrupt");
-        corrupt.candidates[0].source_refs =
+        corrupt.observations[0].source_refs =
             vec![source_ref(REPOSITORY, GenerationId::from_bytes([8; 20]))];
         let port = FakeEvidencePort::with_responses([Ok(corrupt)]);
         assert_eq!(
@@ -2289,7 +2571,7 @@ mod tests {
         );
 
         let mut empty = complete_output(&plan.invocations[0], "unused");
-        empty.candidates.clear();
+        empty.observations.clear();
         empty.usage = BudgetCharge::default();
         let port = FakeEvidencePort::with_responses([Ok(empty)]);
         let corpus = ContextEvidenceCollector
