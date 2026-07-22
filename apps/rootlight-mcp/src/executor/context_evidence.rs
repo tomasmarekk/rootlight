@@ -348,7 +348,7 @@ fn symbol_explain_request(
         repository: invocation.repository(),
         generation: client::GenerationSelector::Generation(invocation.generation()),
         symbols,
-        include_provenance: true,
+        include_provenance: ProvenanceLevel::Compact,
     }
 }
 
@@ -535,6 +535,9 @@ where
                 repository: invocation.repository(),
                 generation: client::GenerationSelector::Generation(invocation.generation()),
                 references,
+                merge_overlaps: false,
+                include_line_numbers: true,
+                encoding: SourceEncodingRequest::Utf8LosslessWhenValid,
             },
             options,
             cancellation,

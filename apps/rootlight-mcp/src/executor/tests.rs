@@ -4299,7 +4299,8 @@ async fn maps_symbol_explain_with_compact_provenance_and_unresolved_ids() {
     let ObservedCall::SymbolExplain(request) = harness.only_call() else {
         panic!("expected symbol explain request");
     };
-    assert!(request.include_provenance);
+    assert!(request.include_provenance());
+    assert_eq!(request.provenance_level(), ProvenanceLevel::Compact);
     assert_eq!(request.symbols, [symbol(), missing_symbol()]);
 }
 
@@ -6947,6 +6948,119 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
         panic!("expected source read request");
     };
     assert_eq!(request.references, [requested]);
+    assert!(!request.merge_overlaps());
+    assert!(request.include_line_numbers());
+    assert_eq!(
+        request.encoding(),
+        SourceEncodingRequest::Utf8LosslessWhenValid
+    );
+}
+
+#[tokio::test]
+async fn retrieval_mappers_reject_untrusted_identity_and_path_drift() {
+    let mut locate = locate_response();
+    locate.result.hits[0].path = "../outside.rs".to_owned();
+    let locate_harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate)));
+    let locate_error = execute(
+        &locate_harness.executor,
+        VerticalTool::CodeLocate,
+        json!({
+            "repository": {"repository_id": repository()},
+            "query": "publish"
+        }),
+    )
+    .await
+    .expect_err("root-escaping locate paths fail closed");
+    assert_eq!(
+        locate_error.failure(),
+        Some(ToolExecutionFailure::InvalidResponse)
+    );
+
+    let mut duplicate_locate = locate_response();
+    duplicate_locate
+        .result
+        .hits
+        .push(duplicate_locate.result.hits[0].clone());
+    duplicate_locate.result.matched_candidates = 2;
+    let duplicate_harness = Harness::new(FakeOutcome::CodeLocate(Ok(duplicate_locate)));
+    let duplicate_error = execute(
+        &duplicate_harness.executor,
+        VerticalTool::CodeLocate,
+        json!({
+            "repository": {"repository_id": repository()},
+            "query": "publish",
+            "max_results": 2
+        }),
+    )
+    .await
+    .expect_err("duplicate locate identities fail closed");
+    assert_eq!(
+        duplicate_error.failure(),
+        Some(ToolExecutionFailure::InvalidResponse)
+    );
+
+    let mut explain = explain_response(source_reference(4, 12, 2, 2));
+    explain.result.unresolved_symbols.clear();
+    let explain_harness = Harness::new(FakeOutcome::SymbolExplain(Ok(explain)));
+    let explain_error = execute(
+        &explain_harness.executor,
+        VerticalTool::SymbolExplain,
+        json!({
+            "repository": {"repository_id": repository()},
+            "symbol_ids": [symbol(), missing_symbol()]
+        }),
+    )
+    .await
+    .expect_err("incomplete resolved and unresolved identity partitions fail closed");
+    assert_eq!(
+        explain_error.failure(),
+        Some(ToolExecutionFailure::InvalidResponse)
+    );
+
+    let foreign_definition = client::SourceReference::new(
+        alternate_repository(),
+        generation(),
+        file(),
+        4..12,
+        content_hash(),
+        Some(2..=2),
+    )
+    .expect("foreign definition fixture is structurally valid");
+    let foreign_explain = explain_response(foreign_definition);
+    let foreign_harness = Harness::new(FakeOutcome::SymbolExplain(Ok(foreign_explain)));
+    let foreign_error = execute(
+        &foreign_harness.executor,
+        VerticalTool::SymbolExplain,
+        json!({
+            "repository": {"repository_id": repository()},
+            "symbol_ids": [symbol(), missing_symbol()]
+        }),
+    )
+    .await
+    .expect_err("foreign definition identities fail closed");
+    assert_eq!(
+        foreign_error.failure(),
+        Some(ToolExecutionFailure::InvalidResponse)
+    );
+
+    let source = source_reference(4, 12, 2, 2);
+    let mut source_response = source_read_response(source);
+    source_response.result.total_source_bytes = 7;
+    let source_harness = Harness::new(FakeOutcome::SourceRead(Ok(source_response)));
+    let source_error = execute(
+        &source_harness.executor,
+        VerticalTool::SourceRead,
+        json!({
+            "repository": {"repository_id": repository()},
+            "references": [{"source_ref": wire_source_reference(4, 12, 2, 2)}]
+        }),
+    )
+    .await
+    .expect_err("source byte accounting drift fails closed");
+    assert_eq!(
+        source_error.failure(),
+        Some(ToolExecutionFailure::InvalidResponse)
+    );
 }
 
 #[tokio::test]
@@ -6999,6 +7113,33 @@ async fn source_read_rejects_explicit_context_fields_before_the_port() {
         0,
         "capability rejection must happen before source retrieval"
     );
+}
+
+#[tokio::test]
+async fn source_read_rejects_unimplemented_projection_values_before_the_port() {
+    let harness = Harness::new(FakeOutcome::SourceRead(Err(ClientPortError::Executor)));
+    for (field, value) in [
+        ("merge_overlaps", json!(true)),
+        ("include_line_numbers", json!(false)),
+        ("encoding", json!("bytes_base64")),
+    ] {
+        let mut arguments = json!({
+            "repository": {"repository_id": repository()},
+            "references": [{"source_ref": wire_source_reference(5, 10, 2, 2)}]
+        });
+        arguments
+            .as_object_mut()
+            .expect("fixture arguments are an object")
+            .insert(field.to_owned(), value);
+        let error = execute(&harness.executor, VerticalTool::SourceRead, arguments)
+            .await
+            .expect_err("unsupported source projections fail before retrieval");
+        assert_eq!(
+            error.public_error().map(PublicError::code),
+            Some(ErrorCode::UnsupportedCapability)
+        );
+    }
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]

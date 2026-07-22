@@ -625,7 +625,7 @@ pub struct SymbolExplainPortRequest {
     repository: RepositoryId,
     generation: client::GenerationSelector,
     symbols: Vec<SymbolId>,
-    include_provenance: bool,
+    include_provenance: ProvenanceLevel,
 }
 
 impl SymbolExplainPortRequest {
@@ -647,9 +647,15 @@ impl SymbolExplainPortRequest {
         &self.symbols
     }
 
-    /// Reports whether compact provenance was requested.
+    /// Reports whether provenance was requested.
     #[must_use]
     pub const fn include_provenance(&self) -> bool {
+        !matches!(self.include_provenance, ProvenanceLevel::None)
+    }
+
+    /// Returns the requested provenance projection.
+    #[must_use]
+    pub const fn provenance_level(&self) -> ProvenanceLevel {
         self.include_provenance
     }
 }
@@ -1330,6 +1336,9 @@ pub struct SourceReadPortRequest {
     repository: RepositoryId,
     generation: client::GenerationSelector,
     references: Vec<client::SourceReference>,
+    merge_overlaps: bool,
+    include_line_numbers: bool,
+    encoding: SourceEncodingRequest,
 }
 
 impl SourceReadPortRequest {
@@ -1349,6 +1358,24 @@ impl SourceReadPortRequest {
     #[must_use]
     pub fn references(&self) -> &[client::SourceReference] {
         &self.references
+    }
+
+    /// Reports whether overlapping ranges are merged.
+    #[must_use]
+    pub const fn merge_overlaps(&self) -> bool {
+        self.merge_overlaps
+    }
+
+    /// Reports whether returned chunks include line numbers.
+    #[must_use]
+    pub const fn include_line_numbers(&self) -> bool {
+        self.include_line_numbers
+    }
+
+    /// Returns the requested source representation.
+    #[must_use]
+    pub const fn encoding(&self) -> SourceEncodingRequest {
+        self.encoding
     }
 }
 
@@ -6153,7 +6180,7 @@ fn normalize_symbol_explain(
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
-    let include_provenance = !matches!(input.include_provenance, Some(ProvenanceLevel::None));
+    let include_provenance = input.include_provenance.unwrap_or(ProvenanceLevel::Compact);
     Ok(SymbolExplainPortRequest {
         repository,
         generation: client_generation(input.generation),
@@ -6222,6 +6249,11 @@ fn normalize_source_read(
         repository,
         generation,
         references,
+        merge_overlaps: input.merge_overlaps.unwrap_or(false),
+        include_line_numbers: input.include_line_numbers.unwrap_or(true),
+        encoding: input
+            .encoding
+            .unwrap_or(SourceEncodingRequest::Utf8LosslessWhenValid),
     })
 }
 
@@ -6407,12 +6439,19 @@ fn map_code_locate(
     matches
         .try_reserve_exact(response.result.hits.len())
         .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    let resolved_generation = response.result.context.generation;
+    let mut seen_symbols = BTreeSet::new();
     for hit in response.result.hits {
         if hit.identifier.is_empty()
             || hit.identifier.len() > 1_024
-            || hit.path.is_empty()
-            || hit.path.len() > 8_192
+            || !safe_repository_relative_path(&hit.path)
             || !safe_label(&hit.language, 64)
+            || !seen_symbols.insert(hit.symbol)
+            || hit.source.as_ref().is_some_and(|source| {
+                source.repository() != request.repository
+                    || source.generation() != resolved_generation
+                    || source.file() != hit.file
+            })
         {
             return Err(internal(ToolExecutionFailure::InvalidResponse));
         }
@@ -6466,6 +6505,33 @@ fn map_symbol_explain(
         request.repository,
         request.generation,
     )?;
+    let resolved_generation = response.result.context.generation;
+    let requested = request.symbols.iter().copied().collect::<BTreeSet<_>>();
+    let mut accounted = BTreeSet::new();
+    let mut previous_resolved = None;
+    for explanation in &response.result.symbols {
+        if !requested.contains(&explanation.symbol)
+            || !accounted.insert(explanation.symbol)
+            || previous_resolved.is_some_and(|previous| previous >= explanation.symbol)
+        {
+            return Err(internal(ToolExecutionFailure::InvalidResponse));
+        }
+        previous_resolved = Some(explanation.symbol);
+    }
+    let mut previous_unresolved = None;
+    for unresolved in &response.result.unresolved_symbols {
+        if !requested.contains(unresolved)
+            || !accounted.insert(*unresolved)
+            || previous_unresolved.is_some_and(|previous| previous >= *unresolved)
+        {
+            return Err(internal(ToolExecutionFailure::InvalidResponse));
+        }
+        previous_unresolved = Some(*unresolved);
+    }
+    if accounted != requested {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+
     let mut symbols = Vec::new();
     symbols
         .try_reserve_exact(response.result.symbols.len())
@@ -6479,12 +6545,14 @@ fn map_symbol_explain(
                 .is_some_and(|signature| signature.len() > 4_096)
             || !safe_label(&explanation.provider, 128)
             || !safe_label(&explanation.evidence, 128)
+            || explanation.definition.repository() != request.repository
+            || explanation.definition.generation() != resolved_generation
         {
             return Err(internal(ToolExecutionFailure::InvalidResponse));
         }
         let confidence = u16::try_from(explanation.confidence)
             .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
-        let provenance = if request.include_provenance {
+        let provenance = if request.include_provenance() {
             vec![ProvenanceSummary {
                 provider: explanation.provider,
                 evidence: explanation.evidence,
@@ -6560,6 +6628,8 @@ fn map_source_read(
     chunks
         .try_reserve_exact(response.result.chunks.len())
         .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    let resolved_generation = response.result.context.generation;
+    let mut measured_source_bytes = 0_u64;
     for (chunk, requested) in response.result.chunks.into_iter().zip(&request.references) {
         let requested_bytes = requested.byte_range();
         let returned_bytes = chunk
@@ -6567,6 +6637,8 @@ fn map_source_read(
             .checked_sub(chunk.start_byte)
             .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
         if chunk.source != *requested
+            || chunk.source.repository() != request.repository
+            || chunk.source.generation() != resolved_generation
             || chunk.start_byte > requested_bytes.start
             || chunk.end_byte < requested_bytes.end
             || chunk.start_line == 0
@@ -6576,9 +6648,13 @@ fn map_source_read(
                 .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?
                 != returned_bytes
             || !safe_label(&chunk.language, 256)
+            || !safe_repository_relative_path(&chunk.path)
         {
             return Err(internal(ToolExecutionFailure::InvalidResponse));
         }
+        measured_source_bytes = measured_source_bytes
+            .checked_add(returned_bytes)
+            .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
         let span = SourceSpan::new(requested.file(), chunk.start_byte, chunk.end_byte)
             .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
         let lines = LineRange::new(chunk.start_line, chunk.end_line)
@@ -6590,6 +6666,12 @@ fn map_source_read(
             requested.content_hash(),
             Some(lines),
         );
+        let encoding = match request.encoding {
+            SourceEncodingRequest::Utf8LosslessWhenValid => SourceEncoding::Utf8,
+            SourceEncodingRequest::BytesBase64 => {
+                return Err(internal(ToolExecutionFailure::InvalidResponse));
+            }
+        };
         chunks.push(SourceChunk {
             source_ref,
             path: chunk.path,
@@ -6598,12 +6680,15 @@ fn map_source_read(
             start_line: chunk.start_line,
             end_line: chunk.end_line,
             content: chunk.content,
-            encoding: SourceEncoding::Utf8,
+            encoding,
             content_hash: chunk.content_hash,
             language: chunk.language,
             generated: chunk.generated,
             trust: TrustClassification::UntrustedRepositoryData,
         });
+    }
+    if response.result.total_source_bytes != measured_source_bytes {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
     }
     let total_source_bytes = u32::try_from(response.result.total_source_bytes)
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
@@ -7050,6 +7135,18 @@ fn safe_label(value: &str, maximum: usize) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'+')
         })
+}
+
+fn safe_repository_relative_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 8_192
+        && !value.starts_with('/')
+        && !value
+            .bytes()
+            .any(|byte| matches!(byte, b'\0' | b'\\' | b':'))
+        && value
+            .split('/')
+            .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
 }
 
 fn has_adjacent_duplicates(values: &[String]) -> bool {
