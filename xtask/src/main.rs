@@ -13,6 +13,7 @@ mod git_metadata;
 mod grammar_lock;
 mod ids;
 mod license;
+mod markdown_links;
 mod mcp_vertical;
 mod policy;
 mod protobuf_compatibility;
@@ -62,6 +63,10 @@ fn run() -> Result<(), XtaskError> {
         }
         Some("policy-check") | Some("policy") => policy::check()?,
         Some("license-check") => license::check()?,
+        Some("markdown-link-check") => {
+            let root = parse_required_root(&mut args)?;
+            markdown_links::check(&root)?;
+        }
         Some("internal-id-check") => git_metadata_command(&mut args)?,
         Some("disposition-check") => {
             let root = parse_required_root(&mut args)?;
@@ -155,7 +160,7 @@ fn git_metadata_command(args: &mut impl Iterator<Item = String>) -> Result<(), X
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|capability-check|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|policy-check|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|capability-check|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -188,6 +193,8 @@ enum XtaskError {
     IdVectors(#[from] ids::IdVectorError),
     #[error(transparent)]
     License(#[from] license::LicenseError),
+    #[error(transparent)]
+    MarkdownLinks(#[from] markdown_links::MarkdownLinkError),
     #[error(transparent)]
     McpVertical(#[from] mcp_vertical::VerticalError),
     #[error(transparent)]
