@@ -9299,4 +9299,275 @@ mod tests {
         assert_eq!(first.rows, second.rows);
         assert_eq!(first.completeness, second.completeness);
     }
+
+    fn advanced_integer_rows(values: &[i64]) -> AdvancedRowSet {
+        let rows = values
+            .iter()
+            .map(|value| BTreeMap::from([("id".to_owned(), AdvancedValue::Integer(*value))]))
+            .collect();
+        AdvancedRowSet {
+            columns: vec![AdvancedColumnSchema {
+                name: "id".to_owned(),
+                column_type: AdvancedColumnType::Integer,
+            }],
+            rows,
+        }
+    }
+
+    fn advanced_file_paths(document: &NormalizedIrDocument) -> BTreeMap<FileId, String> {
+        document
+            .files
+            .iter()
+            .map(|file| (file.id, file.path.clone()))
+            .collect()
+    }
+
+    fn expect_advanced_error(
+        result: Result<AdvancedRowSet, QueryError>,
+        message: &str,
+    ) -> QueryError {
+        match result {
+            Ok(_) => panic!("{message}"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn advanced_scan_checks_the_row_budget_at_the_exact_boundary() {
+        let document = advanced_document();
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(30));
+
+        let mut below = UsageTracker::new(QueryBudget::new().with_max_rows(1));
+        let error = expect_advanced_error(
+            eval_advanced_scan(
+                &document,
+                AdvancedEntityKind::Function,
+                None,
+                &advanced_file_paths(&document),
+                &control,
+                &mut below,
+            ),
+            "the second matching entity exceeds a one-row budget",
+        );
+        assert!(matches!(
+            error,
+            QueryError::BudgetExceeded {
+                resource: QueryResource::Rows,
+                limit: 1,
+            }
+        ));
+        assert_eq!(below.rows, 1);
+
+        let mut exact = UsageTracker::new(QueryBudget::new().with_max_rows(2));
+        let rows = eval_advanced_scan(
+            &document,
+            AdvancedEntityKind::Function,
+            None,
+            &advanced_file_paths(&document),
+            &control,
+            &mut exact,
+        )
+        .expect("two matching entities fit the exact row budget");
+        assert_eq!(rows.rows.len(), 2);
+        assert_eq!(exact.rows, 2);
+    }
+
+    #[test]
+    fn advanced_join_charges_every_candidate_pair() {
+        let left = advanced_integer_rows(&[1, 2]);
+        let right = advanced_integer_rows(&[1, 2, 3]);
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(30));
+
+        let mut below = UsageTracker::new(QueryBudget::new().with_max_edges(5));
+        let error = expect_advanced_error(
+            advanced_join_rows(
+                advanced_integer_rows(&[1, 2]),
+                advanced_integer_rows(&[1, 2, 3]),
+                "id",
+                &control,
+                &mut below,
+            ),
+            "a two-by-three join requires six candidate checks",
+        );
+        assert!(matches!(
+            error,
+            QueryError::BudgetExceeded {
+                resource: QueryResource::Edges,
+                limit: 5,
+            }
+        ));
+        assert_eq!(below.edges, 5);
+
+        let mut exact = UsageTracker::new(QueryBudget::new().with_max_edges(6));
+        let joined = advanced_join_rows(left, right, "id", &control, &mut exact)
+            .expect("the exact candidate-pair budget is sufficient");
+        assert_eq!(exact.edges, 6);
+        assert_eq!(joined.rows.len(), 2);
+    }
+
+    #[test]
+    fn advanced_aggregate_charges_each_input_row_at_the_boundary() {
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(30));
+
+        let mut below = UsageTracker::new(QueryBudget::new().with_max_edges(2));
+        let error = expect_advanced_error(
+            advanced_aggregate_rows(
+                advanced_integer_rows(&[1, 2, 3]),
+                &["id".to_owned()],
+                &[AdvancedAggregateFunction::Count],
+                &control,
+                &mut below,
+            ),
+            "three input rows exceed a two-edge aggregation budget",
+        );
+        assert!(matches!(
+            error,
+            QueryError::BudgetExceeded {
+                resource: QueryResource::Edges,
+                limit: 2,
+            }
+        ));
+        assert_eq!(below.edges, 2);
+
+        let mut exact = UsageTracker::new(QueryBudget::new().with_max_edges(3));
+        let groups = advanced_aggregate_rows(
+            advanced_integer_rows(&[1, 2, 3]),
+            &["id".to_owned()],
+            &[AdvancedAggregateFunction::Count],
+            &control,
+            &mut exact,
+        )
+        .expect("the exact input-row budget is sufficient");
+        assert_eq!(exact.edges, 3);
+        assert_eq!(groups.rows.len(), 3);
+    }
+
+    #[test]
+    fn advanced_traversal_charges_indexing_and_expansion_edges() {
+        let mut document = advanced_document();
+        add_calls(&mut document, 1, 11, 13, 900);
+        add_calls(&mut document, 2, 13, 12, 900);
+        let relation_count =
+            u64::try_from(document.relations.len()).expect("fixture relation count fits u64");
+        let exact_edge_count = relation_count + 2;
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(30));
+
+        let mut below = UsageTracker::new(QueryBudget::new().with_max_edges(exact_edge_count - 1));
+        let error = expect_advanced_error(
+            advanced_traverse_rows(
+                &document,
+                symbol(11),
+                AdvancedRelationKind::Calls,
+                AdvancedTraverseDirection::Outbound,
+                2,
+                &control,
+                &mut below,
+            ),
+            "indexing plus two expansions exceed the lower budget",
+        );
+        assert!(matches!(
+            error,
+            QueryError::BudgetExceeded {
+                resource: QueryResource::Edges,
+                limit,
+            } if limit == exact_edge_count - 1
+        ));
+
+        let mut exact = UsageTracker::new(QueryBudget::new().with_max_edges(exact_edge_count));
+        let traversed = advanced_traverse_rows(
+            &document,
+            symbol(11),
+            AdvancedRelationKind::Calls,
+            AdvancedTraverseDirection::Outbound,
+            2,
+            &control,
+            &mut exact,
+        )
+        .expect("the exact indexing and expansion budget is sufficient");
+        assert_eq!(exact.edges, exact_edge_count);
+        assert_eq!(traversed.rows.len(), 2);
+    }
+
+    #[test]
+    fn advanced_long_operators_reject_precancelled_work_without_results() {
+        let mut document = advanced_document();
+        add_calls(&mut document, 1, 11, 13, 900);
+        let file_paths = advanced_file_paths(&document);
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        let control = QueryControl::new(&cancellation, Duration::from_secs(30));
+
+        let mut scan_tracker = UsageTracker::new(QueryBudget::new());
+        assert!(matches!(
+            eval_advanced_scan(
+                &document,
+                AdvancedEntityKind::Function,
+                None,
+                &file_paths,
+                &control,
+                &mut scan_tracker,
+            ),
+            Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+        ));
+        assert_eq!(scan_tracker.rows, 0);
+
+        let mut join_tracker = UsageTracker::new(QueryBudget::new());
+        assert!(matches!(
+            advanced_join_rows(
+                advanced_integer_rows(&[1]),
+                advanced_integer_rows(&[1]),
+                "id",
+                &control,
+                &mut join_tracker,
+            ),
+            Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+        ));
+        assert_eq!(join_tracker.edges, 0);
+
+        let mut aggregate_tracker = UsageTracker::new(QueryBudget::new());
+        assert!(matches!(
+            advanced_aggregate_rows(
+                advanced_integer_rows(&[1]),
+                &["id".to_owned()],
+                &[AdvancedAggregateFunction::Count],
+                &control,
+                &mut aggregate_tracker,
+            ),
+            Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+        ));
+        assert_eq!(aggregate_tracker.edges, 0);
+
+        let mut traversal_tracker = UsageTracker::new(QueryBudget::new());
+        assert!(matches!(
+            advanced_traverse_rows(
+                &document,
+                symbol(11),
+                AdvancedRelationKind::Calls,
+                AdvancedTraverseDirection::Outbound,
+                1,
+                &control,
+                &mut traversal_tracker,
+            ),
+            Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+        ));
+        assert_eq!(traversal_tracker.edges, 0);
+    }
+
+    #[test]
+    fn advanced_static_cost_accepts_the_exact_ceiling() {
+        let exact = vec![AdvancedOperator::Join; 200];
+        assert_eq!(
+            AdvancedQueryPlan::validate(&exact, 999, ADVANCED_MAX_TRAVERSAL, 2)
+                .expect("the exact static cost ceiling is accepted"),
+            ADVANCED_MAX_ESTIMATED_COST
+        );
+
+        let mut excessive = exact;
+        excessive.push(AdvancedOperator::Limit);
+        assert!(AdvancedQueryPlan::validate(&excessive, 999, ADVANCED_MAX_TRAVERSAL, 2).is_err());
+    }
 }
