@@ -81,7 +81,8 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     assert_same_operation(&submitted, &retried)?;
     wait_for_terminal(&rootlight, &operation, &environment)?;
 
-    let cancelled_operation = OperationId::from_bytes([44; 16]).to_string();
+    let cancelled_operation_id = OperationId::from_bytes([44; 16]);
+    let cancelled_operation = cancelled_operation_id.to_string();
     let cancelled_submit = run_json(
         &rootlight,
         &["operation-submit", &cancelled_operation],
@@ -89,6 +90,29 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
         COMMAND_TIMEOUT,
     )?;
     assert_success_type(&cancelled_submit, "operation_submit")?;
+    let foreign_client = Client::connect_or_start(&paths, [43; 16], ConnectPolicy::ExistingOnly)
+        .map_err(|source| client_stage("foreign cancellation client connection", source))?;
+    let foreign_error = match foreign_client.operation_cancel(cancelled_operation_id) {
+        Ok(_) => return Err(LifecycleError::UnexpectedEnvelope),
+        Err(error) => error,
+    };
+    if foreign_error
+        .as_public_error()
+        .map(rootlight_error::PublicError::code)
+        != Some(ErrorCode::PermissionDenied)
+    {
+        return Err(LifecycleError::UnexpectedEnvelope);
+    }
+    let after_foreign = foreign_client
+        .operation_status(cancelled_operation_id)
+        .map_err(|source| client_stage("foreign cancellation status verification", source))?;
+    if matches!(
+        after_foreign.state,
+        OperationState::Cancelling | OperationState::Cancelled
+    ) {
+        return Err(LifecycleError::UnexpectedEnvelope);
+    }
+    drop(foreign_client);
     let cancelled = run_json(
         &rootlight,
         &["operation-cancel", &cancelled_operation],
@@ -156,10 +180,10 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
         .checked_add(60_000)
         .ok_or(LifecycleError::Clock)?;
     let lease_client = Client::connect_or_start(&paths, [48; 16], ConnectPolicy::ExistingOnly)
-        .map_err(LifecycleError::Client)?;
+        .map_err(|source| client_stage("lease client connection", source))?;
     lease_client
         .operation_submit_attached(lease_operation, None, initial_lease)
-        .map_err(LifecycleError::Client)?;
+        .map_err(|source| client_stage("attached lease submission", source))?;
     let renewal = match lease_client.operation_renew_lease(lease_operation, renewed_lease) {
         Ok(_) => return Err(LifecycleError::UnexpectedEnvelope),
         Err(error) => error,
@@ -205,14 +229,16 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     assert_error_code(&writer_conflict, "BUSY")?;
 
     let evidence_client = Client::connect_or_start(&paths, [62; 16], ConnectPolicy::ExistingOnly)
-        .map_err(LifecycleError::Client)?;
-    let telemetry_health = evidence_client.health().map_err(LifecycleError::Client)?;
+        .map_err(|source| client_stage("evidence client connection", source))?;
+    let telemetry_health = evidence_client
+        .health()
+        .map_err(|source| client_stage("evidence health request", source))?;
     let first_support = evidence_client
         .support_bundle()
-        .map_err(LifecycleError::Client)?;
+        .map_err(|source| client_stage("first support bundle request", source))?;
     let support = evidence_client
         .support_bundle()
-        .map_err(LifecycleError::Client)?;
+        .map_err(|source| client_stage("second support bundle request", source))?;
     assert_support_telemetry(&telemetry_health, &first_support, &support)?;
     assert_privacy_sentinels_absent(
         "support archive",
@@ -1898,6 +1924,21 @@ fn binary_path(directory: &Path, name: &str) -> Result<PathBuf, LifecycleError> 
     }
 }
 
+fn client_stage(stage: &'static str, source: ClientError) -> LifecycleError {
+    let public_code = source
+        .as_public_error()
+        .map(rootlight_error::PublicError::code);
+    let public_message = source
+        .as_public_error()
+        .map(|error| error.message().to_owned());
+    LifecycleError::ClientStage {
+        stage,
+        public_code,
+        public_message,
+        source,
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LifecycleError {
     #[error("daemon lifecycle binary is missing: {0}")]
@@ -1910,6 +1951,16 @@ pub(crate) enum LifecycleError {
     Ipc(#[source] rootlight_ipc::IpcError),
     #[error("daemon lifecycle client failed")]
     Client(#[source] rootlight_client::ClientError),
+    #[error(
+        "daemon lifecycle client failed during {stage} (public code: {public_code:?}, message: {public_message:?})"
+    )]
+    ClientStage {
+        stage: &'static str,
+        public_code: Option<ErrorCode>,
+        public_message: Option<String>,
+        #[source]
+        source: rootlight_client::ClientError,
+    },
     #[error("failed to spawn supervised daemon")]
     SpawnDaemon(#[source] io::Error),
     #[error("supervised daemon stderr pipe is missing")]
