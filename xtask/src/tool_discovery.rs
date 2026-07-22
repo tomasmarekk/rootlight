@@ -174,6 +174,9 @@ fn baseline_payload(profile: ExposureProfile) -> Result<Value, DiscoveryError> {
         if tool == McpTool::RepoList {
             restore_repo_list_baseline(object)?;
         }
+        if tool == McpTool::RepoStatus {
+            restore_repo_status_baseline(object)?;
+        }
         let capability = object
             .get_mut("_meta")
             .and_then(Value::as_object_mut)
@@ -272,6 +275,22 @@ fn restore_repo_list_baseline(
             ]
         }),
     );
+    Ok(())
+}
+
+fn restore_repo_status_baseline(
+    definition: &mut serde_json::Map<String, Value>,
+) -> Result<(), DiscoveryError> {
+    definition
+        .get_mut("_meta")
+        .and_then(Value::as_object_mut)
+        .and_then(|metadata| metadata.get_mut(DISCOVERY_METADATA_KEY))
+        .and_then(Value::as_object_mut)
+        .ok_or(DiscoveryError::InvalidPayload)?
+        .insert(
+            "generation".to_owned(),
+            Value::String("active_generation_fallback".to_owned()),
+        );
     Ok(())
 }
 
@@ -534,12 +553,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reconstructed_repo_status_retains_historical_generation_semantics() {
+        let historical =
+            baseline_payload(ExposureProfile::Developer).expect("baseline payload reconstructs");
+        let historical = repo_status_definition(&historical);
+        assert_eq!(
+            historical["_meta"][DISCOVERY_METADATA_KEY]["generation"],
+            "active_generation_fallback"
+        );
+        assert!(
+            historical["_meta"][DISCOVERY_METADATA_KEY]["limitations"]
+                .as_array()
+                .expect("limitations are an array")
+                .iter()
+                .all(|limitation| limitation["field"] != "generation")
+        );
+
+        let current = tool_list_payload(ExposureProfile::Developer);
+        let current = repo_status_definition(&current);
+        assert_eq!(
+            current["_meta"][DISCOVERY_METADATA_KEY]["generation"],
+            "selects_generation"
+        );
+    }
+
     fn repo_list_definition(payload: &Value) -> &Value {
+        tool_definition(payload, McpTool::RepoList)
+    }
+
+    fn repo_status_definition(payload: &Value) -> &Value {
+        tool_definition(payload, McpTool::RepoStatus)
+    }
+
+    fn tool_definition(payload: &Value, tool: McpTool) -> &Value {
         payload["tools"]
             .as_array()
             .expect("tools list is an array")
             .iter()
-            .find(|definition| definition["name"] == McpTool::RepoList.name())
-            .expect("developer payload contains repo.list")
+            .find(|definition| definition["name"] == tool.name())
+            .expect("developer payload contains the requested tool")
     }
 }
