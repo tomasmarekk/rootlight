@@ -324,6 +324,10 @@ fn measure_success(
     response: &Value,
     tokenizer: &tiktoken_rs::CoreBPE,
 ) -> SuccessMeasurement {
+    assert!(
+        response.get("error").is_none(),
+        "{tool} baseline returned a JSON-RPC error: {response:#}"
+    );
     assert_ne!(
         response["result"]["isError"], true,
         "{tool} baseline returned a public error: {response:#}"
@@ -361,6 +365,10 @@ fn measure_error(
     expected_code: &'static str,
     tokenizer: &tiktoken_rs::CoreBPE,
 ) -> LimitMeasurement {
+    assert!(
+        response.get("error").is_none(),
+        "{tool} hard limit returned a JSON-RPC error: {response:#}"
+    );
     assert_eq!(
         response["result"]["isError"], true,
         "{tool} hard limit did not return a checked public error: {response:#}"
