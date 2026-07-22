@@ -46,6 +46,9 @@ const PLAN_COST_PER_STEP: u64 = 50;
 /// Estimated cost units per planned target for `plan.change`.
 const PLAN_COST_PER_TARGET: u64 = 15;
 
+/// Fixed estimated cost units for the metadata-only `repo.status` plan.
+const STATUS_READ_COST: u64 = 4;
+
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
@@ -238,6 +241,19 @@ pub fn plan_change_plan(max_steps: Option<u8>, target_count: usize) -> PlanExpla
     }
 }
 
+/// Builds the source-free `repo.status` plan for explain mode.
+///
+/// `repo.status` reads only repository metadata, so the plan is a fixed bounded
+/// status read with no traversal.
+#[must_use]
+pub fn repo_status_plan() -> PlanExplanation {
+    PlanExplanation {
+        estimated_cost: STATUS_READ_COST,
+        operators: vec!["status_read".to_owned()],
+        applied_limits: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::code_locate_plan;
@@ -379,5 +395,14 @@ mod tests {
             plan.applied_limits,
             vec!["max_steps: 5".to_owned(), "targets: 2".to_owned()]
         );
+    }
+
+    #[test]
+    fn repo_status_plan_is_deterministic_and_bounded() {
+        use super::repo_status_plan;
+        assert_eq!(repo_status_plan(), repo_status_plan());
+        let plan = repo_status_plan();
+        assert_eq!(plan.operators, vec!["status_read".to_owned()]);
+        assert!(plan.applied_limits.is_empty());
     }
 }

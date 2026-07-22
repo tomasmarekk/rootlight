@@ -21,6 +21,10 @@
         }
       ]
     },
+    "explain": {
+      "description": "Return the bounded plan without executing retrieval.",
+      "type": "boolean"
+    },
     "generation": {
       "description": "Active or explicit generation selector.",
       "anyOf": [

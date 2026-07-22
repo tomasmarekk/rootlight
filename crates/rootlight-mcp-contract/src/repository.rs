@@ -39,6 +39,9 @@ pub struct RepoStatusInput {
     /// Requested evidence detail.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_profile: Option<ResponseProfile>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
 }
 
 /// Requested coverage reporting granularity.
@@ -154,6 +157,9 @@ pub struct RepoStatusData {
     /// Recommended next actions for the agent.
     #[schemars(length(max = 8))]
     pub recommended_actions: Vec<crate::vertical::SourceFreeMessage>,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
 }
 
 /// Checked success-or-error output for `repo.status`.

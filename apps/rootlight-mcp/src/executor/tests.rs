@@ -2880,6 +2880,37 @@ async fn unsupported_fields_are_rejected_with_field_specific_actions() {
 }
 
 #[tokio::test]
+async fn repo_status_explain_attaches_a_plan_to_the_metadata_read() {
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
+        repository_id: repository(),
+        active_generation: generation(),
+        parent_generation: None,
+        structural_freshness: "current".to_owned(),
+        semantic_freshness: "current".to_owned(),
+        state: "ready".to_owned(),
+        coverage: vec![],
+    })));
+    let output = execute(
+        &harness.executor,
+        VerticalTool::RepoStatus,
+        json!({"repository": {"repository_id": repository()}, "explain": true}),
+    )
+    .await
+    .expect("explain executes");
+    let output: RepoStatusOutput = decode(output);
+    let ToolResponse::Success(output) = output else {
+        panic!("expected explain success");
+    };
+    let explanation = output.data.explanation.expect("explain returns a plan");
+    assert_eq!(explanation.operators, vec!["status_read".to_owned()]);
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        1,
+        "repo.status reads only metadata"
+    );
+}
+
+#[tokio::test]
 async fn plan_change_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),

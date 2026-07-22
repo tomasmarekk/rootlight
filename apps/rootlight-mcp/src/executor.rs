@@ -2375,6 +2375,7 @@ where
     P: FirstSliceClientPort,
 {
     let input: RepoStatusInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     let repository = repository_id(input.repository.clone(), unsupported)?;
     // Granular coverage, operation lists, freshness gates, custom budgets, and
     // non-compact profiles are not served by this slice; each is rejected by
@@ -2419,6 +2420,7 @@ where
         coverage: status_coverage_report(&status.coverage),
         operations: Vec::new(),
         recommended_actions: Vec::new(),
+        explanation: explain_only.then(rootlight_agent::explain::repo_status_plan),
     };
     let envelope = ReadEnvelope {
         schema_version: SchemaVersion::V1_0,
