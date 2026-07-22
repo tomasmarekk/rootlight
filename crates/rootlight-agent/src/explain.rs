@@ -12,7 +12,7 @@ use rootlight_mcp_contract::{
     vertical::ResponseProfile,
 };
 
-use crate::advanced::AdvancedQueryPlan;
+use crate::{advanced::AdvancedQueryPlan, batch::StaticBatchPlan};
 
 /// Estimated cost units per planned match for `code.locate`.
 const LOCATE_COST_PER_RESULT: u64 = 8;
@@ -422,6 +422,32 @@ pub fn query_batch_plan(operation_count: usize) -> PlanExplanation {
         estimated_cost: cost,
         operators: vec!["batch_dispatch".to_owned()],
         applied_limits: vec![format!("operations: {operations}")],
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
+    }
+}
+
+/// Builds the source-free explanation from an admitted static batch plan.
+///
+/// The canonical plan digest binds operation identities, request order,
+/// dependencies, adapters, normalized defaults, effective budgets, and typed
+/// argument templates into the physical-plan fingerprint.
+#[must_use]
+pub fn static_query_batch_plan(plan: &StaticBatchPlan) -> PlanExplanation {
+    let operations = u64::try_from(plan.operations().len()).unwrap_or(u64::MAX);
+    let cost = operations.saturating_mul(BATCH_COST_PER_OPERATION);
+    PlanExplanation {
+        estimated_cost: cost,
+        operators: vec!["batch_dispatch".to_owned()],
+        applied_limits: vec![
+            format!("operations: {operations}"),
+            format!("depth: {}", plan.max_depth()),
+            format!(
+                "max_tokens: {}",
+                plan.parent_budget().max_tokens.unwrap_or_default()
+            ),
+            format!("canonical_plan: {}", plan.canonical_digest_hex()),
+        ],
         planner_version: PLANNER_VERSION,
         fingerprint: String::new(),
     }

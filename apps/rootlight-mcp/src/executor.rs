@@ -15,8 +15,8 @@ use std::{
 use rootlight_agent::{
     batch::{
         BatchExecutionError, BatchOrchestrationError, BatchPlan, BatchPublicErrors, BatchService,
-        BatchValidationError, mcp_tool_for_batch,
-        resolve_dependencies as resolve_batch_dependencies, terminal_result,
+        BatchValidationError, StaticBatchPlan, mcp_tool_for_batch,
+        resolve_dependencies as resolve_batch_dependencies,
     },
     change::{
         PlanChangeError, PlanChangePort, PlanChangePortOutput, PlanChangeRequest, PlanChangeResult,
@@ -65,9 +65,9 @@ use rootlight_mcp_contract::{
         LimitingResourceKind as ContractLimitingResourceKind, ResultCompleteness,
     },
     context::{
-        BatchOperationStatus, BatchStatus, BatchTool, ColumnSchema, ColumnType, ContextPackInput,
-        PlanExplanation, QueryAdvancedData, QueryAdvancedInput, QueryBatchData, QueryBatchInput,
-        QueryCompleteness,
+        BatchOperationResult, BatchOperationStatus, BatchStatus, BatchTool, ColumnSchema,
+        ColumnType, ContextPackInput, PlanExplanation, QueryAdvancedData, QueryAdvancedInput,
+        QueryBatchData, QueryBatchInput, QueryCompleteness,
     },
     error_definition,
     pagination::{AuthenticatedCursor, CursorContext},
@@ -1793,28 +1793,38 @@ impl<P> fmt::Debug for FirstSliceToolExecutor<P> {
 async fn explain_query_batch<P>(
     port: Arc<P>,
     repository: RepositoryId,
-    input: &QueryBatchInput,
+    plan: &StaticBatchPlan,
     cancellation: RequestCancellation,
 ) -> Result<ReadEnvelope<QueryBatchData>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
     let status_request =
-        RepositoryStatusPortRequest::new(repository, client_generation(input.generation.clone()));
+        RepositoryStatusPortRequest::new(repository, client_generation(plan.generation().cloned()));
     let status = await_port(
         port.repository_status(status_request, cancellation.clone()),
         cancellation,
     )
     .await?;
     let explanation = rootlight_agent::explain::finalize_plan_for_identity(
-        rootlight_agent::explain::query_batch_plan(input.operations.len()),
+        rootlight_agent::explain::static_query_batch_plan(plan),
         status.repository_id,
         status.resolved_generation,
     );
-    let operation_results = input
-        .operations
+    let operation_results = plan
+        .operations()
         .iter()
-        .map(|operation| terminal_result(operation, BatchOperationStatus::NotRun))
+        .map(|operation| BatchOperationResult {
+            id: operation.id().to_owned(),
+            tool: operation.tool(),
+            status: BatchOperationStatus::NotRun,
+            data: None,
+            error: None,
+            truncated: false,
+            next_cursor: RequiredNullable(None),
+            usage: None,
+            warnings: Vec::new(),
+        })
         .collect();
     let data = QueryBatchData {
         batch_status: BatchStatus::Planned,
@@ -1850,7 +1860,6 @@ where
     if !is_compact_profile(input.response_profile) {
         return Err(unsupported_field("response_profile"));
     }
-
     let tools: Vec<McpTool> = input
         .operations
         .iter()
@@ -1860,10 +1869,18 @@ where
         resolve_batch_dependencies(&input.operations).map_err(batch_dependency_error)?;
     BatchPlan::validate(&tools, &dependencies).map_err(batch_plan_error)?;
     preflight_batch_capabilities(&input)?;
+    let plan =
+        StaticBatchPlan::build(input, exposure_profile).map_err(map_batch_orchestration_error)?;
+    preflight_static_batch_inputs(
+        &plan,
+        batch_validator.as_ref(),
+        exposure_profile,
+        invalid_arguments,
+    )?;
 
-    let repository = repository_id(input.repository.clone(), unsupported)?;
+    let repository = repository_id(plan.repository().clone(), unsupported)?;
     if explain_only {
-        let output = explain_query_batch(port, repository, &input, cancellation).await?;
+        let output = explain_query_batch(port, repository, &plan, cancellation).await?;
         return serialize_measured_read_success(output, started_at, budget.limits);
     }
     let operation_failed =
@@ -1882,7 +1899,7 @@ where
     });
     let errors = BatchPublicErrors::new(binding_invalid_error(), operation_failed, budget_exceeded);
     let output = BatchService
-        .execute(adapter, input, repository, cancellation, errors)
+        .execute_plan(adapter, plan, repository, cancellation, errors)
         .await
         .map_err(map_batch_orchestration_error)?;
     serialize_measured_read_success(output, started_at, budget.limits)
@@ -1905,6 +1922,46 @@ fn preflight_batch_capabilities(input: &QueryBatchInput) -> Result<(), ToolExecu
                 .map_err(|_| internal(ToolExecutionFailure::Executor))?;
             return Err(ToolExecutionError::new(public));
         }
+    }
+    Ok(())
+}
+
+fn preflight_static_batch_inputs(
+    plan: &StaticBatchPlan,
+    validator: &MaterializedToolValidator,
+    exposure_profile: ExposureProfile,
+    invalid_arguments: &PublicError,
+) -> Result<(), ToolExecutionError> {
+    for operation in plan.operations() {
+        let mut arguments = operation
+            .witness_arguments()
+            .map_err(map_batch_orchestration_error)?;
+        arguments.insert(
+            "repository".to_owned(),
+            serde_json::to_value(plan.repository())
+                .map_err(|_| internal(ToolExecutionFailure::Executor))?,
+        );
+        if let Some(generation) = plan.generation() {
+            arguments.insert(
+                "generation".to_owned(),
+                serde_json::to_value(generation)
+                    .map_err(|_| internal(ToolExecutionFailure::Executor))?,
+            );
+        }
+        validate_local_child_budget(operation.tool(), operation.local_budget())?;
+        apply_child_budget(
+            operation.tool(),
+            operation.effective_budget(),
+            &mut arguments,
+        )?;
+        validator
+            .validate(operation.descriptor().adapter, &arguments, exposure_profile)
+            .map_err(|error| match error {
+                MaterializedInputError::Invalid { .. } => {
+                    ToolExecutionError::new(invalid_arguments.clone())
+                }
+                MaterializedInputError::Public(error) => ToolExecutionError::new(*error),
+            })?;
     }
     Ok(())
 }
@@ -6983,7 +7040,9 @@ where
             rootlight_agent::response_profile::shape_read_envelope(&mut output, profile);
             serialize_measured_read_success(output, started_at, limits)
         }
-        ResponseShaping::CanonicalInternal => serialize_success(output),
+        ResponseShaping::CanonicalInternal => {
+            serialize_measured_read_success(output, started_at, limits)
+        }
     }
 }
 
@@ -7009,14 +7068,14 @@ where
     T: Serialize,
     F: for<'a> Fn(&'a mut T) -> &'a mut UsageSummary,
 {
+    // Freeze elapsed time before solving the self-describing byte/token
+    // counters. Updating a serialized timestamp inside the fixed-point loop
+    // would move the document being measured and can prevent convergence for
+    // larger canonical child envelopes.
+    usage(&mut output).wall_time_ms = u64::try_from(started_at.elapsed().as_micros())
+        .unwrap_or(u64::MAX)
+        .div_ceil(1_000);
     for _ in 0..8 {
-        // This timestamp covers decode, cursor validation, daemon I/O, mapping,
-        // and prior accounting passes. The final serde conversion is excluded
-        // because including work performed after a serialized timestamp would
-        // make an exact self-describing payload impossible.
-        usage(&mut output).wall_time_ms = u64::try_from(started_at.elapsed().as_micros())
-            .unwrap_or(u64::MAX)
-            .div_ceil(1_000);
         let value = serde_json::to_value(ToolResponse::Success(&output))
             .map_err(|_| internal(ToolExecutionFailure::Executor))?;
         let serialized =

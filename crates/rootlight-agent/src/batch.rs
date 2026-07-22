@@ -7,18 +7,19 @@
 //! admitted child calls onto its concrete client.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use rootlight_ids::{GenerationId, RepositoryId, SymbolId};
-use rootlight_ir::SourceRef;
+use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, SymbolId};
+use rootlight_ir::{SourceRef, SourceSpan};
 use rootlight_mcp_contract::{
-    McpTool, PublicError, SchemaVersion, TrustClassification,
+    ExposureProfile, McpTool, PublicError, SchemaVersion, TrustClassification,
     batch::{
         BatchBindingCardinality, BatchBindingPathSegment, BatchBindingSourceSlot,
-        BatchBindingTargetSlot, BatchBindingValueType, batch_descriptor,
+        BatchBindingTargetSlot, BatchBindingValueType, BatchBudgetDimension, BatchToolDescriptor,
+        batch_descriptor,
     },
     completeness::{
         CompletenessState, ContinuationAvailability, ContinuationGuidance, LimitingResource,
@@ -30,7 +31,7 @@ use rootlight_mcp_contract::{
     },
     vertical::{
         CacheStatus, GenerationSelector, ReadEnvelope, RepositoryIdSelector, RequiredNullable,
-        ResponseBudget, UsageSummary,
+        ResponseBudget, ResponseProfile, UsageSummary,
     },
 };
 use serde_json::{Map, Value};
@@ -150,6 +151,66 @@ pub struct BatchPlan {
     pub execution_order: Vec<usize>,
 }
 
+/// A typed argument template compiled before any repository or child call.
+///
+/// Object keys and array positions remain structural nodes while dependency
+/// references become reviewed typed binding edges. Runtime materialization
+/// therefore never has to reinterpret repository-controlled JSON as template
+/// syntax.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArgumentTemplate {
+    /// A scalar JSON value copied unchanged into the child request.
+    Literal(Value),
+    /// A recursively compiled JSON object.
+    Object(BTreeMap<String, ArgumentTemplate>),
+    /// A recursively compiled JSON array.
+    Array(Vec<ArgumentTemplate>),
+    /// One registry-reviewed dependency-output binding.
+    Binding(PlannedBinding),
+}
+
+/// One statically validated typed binding edge in a batch plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedBinding {
+    source_operation: usize,
+    source_slot: &'static BatchBindingSourceSlot,
+    source_indices: Vec<usize>,
+    target_slot: &'static BatchBindingTargetSlot,
+    destination: String,
+}
+
+/// One immutable operation consumed by the batch scheduler.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannedBatchOperation {
+    id: String,
+    request_index: usize,
+    tool: BatchTool,
+    dependencies: Vec<usize>,
+    depth: usize,
+    arguments: ArgumentTemplate,
+    local_budget: Option<ResponseBudget>,
+    effective_budget: ResponseBudget,
+    descriptor: &'static BatchToolDescriptor,
+}
+
+/// Complete deterministic batch plan admitted before identity resolution.
+///
+/// The selected repository and generation are resolved only after this plan is
+/// accepted. The resulting pinned identity is passed to every materialization
+/// and child call without changing the plan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StaticBatchPlan {
+    repository: rootlight_mcp_contract::RepositorySelector,
+    generation: Option<GenerationSelector>,
+    operations: Vec<PlannedBatchOperation>,
+    execution_order: Vec<usize>,
+    max_depth: usize,
+    failure_policy: FailurePolicy,
+    parent_budget: ResponseBudget,
+    response_profile: ResponseProfile,
+    explain: bool,
+}
+
 impl BatchPlan {
     /// Validates and builds a batch execution plan from raw operation specs.
     ///
@@ -218,6 +279,692 @@ impl BatchPlan {
             depths[*idx] = dep_depth;
         }
         depths.into_iter().max().unwrap_or(0)
+    }
+}
+
+impl StaticBatchPlan {
+    /// Compiles and admits every deterministic part of a batch request.
+    ///
+    /// This function performs no repository or child-tool calls. A successful
+    /// return is the only input accepted by [`BatchService::execute_plan`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a checked orchestration error when the DAG, templates, profile,
+    /// binding edges, or statically knowable budget requirements are invalid.
+    pub fn build(
+        input: QueryBatchInput,
+        exposure_profile: ExposureProfile,
+    ) -> Result<Self, BatchOrchestrationError> {
+        if !is_compact_profile(input.response_profile) {
+            return Err(BatchOrchestrationError::UnsupportedProfile);
+        }
+        if input.operations.iter().any(|operation| {
+            operation.arguments.keys().any(|key| {
+                matches!(
+                    key.as_str(),
+                    "repository"
+                        | "generation"
+                        | "budget"
+                        | "cursor"
+                        | "profile"
+                        | "response_profile"
+                )
+            })
+        }) {
+            return Err(BatchOrchestrationError::InvalidArguments);
+        }
+
+        let mut dependencies =
+            resolve_dependencies(&input.operations).map_err(map_execution_error)?;
+        for declared in &mut dependencies {
+            declared.sort_unstable();
+            declared.dedup();
+        }
+        let tools: Vec<McpTool> = input
+            .operations
+            .iter()
+            .map(|operation| mcp_tool_for_batch(operation.tool))
+            .collect();
+        let dag = BatchPlan::validate(&tools, &dependencies)
+            .map_err(|_| BatchOrchestrationError::InvalidArguments)?;
+        if tools
+            .iter()
+            .any(|tool| !is_batch_allowed_under_profile(*tool, exposure_profile))
+        {
+            return Err(BatchOrchestrationError::InvalidArguments);
+        }
+
+        let parent_budget = admitted_parent_budget(input.budget.as_ref());
+        if parent_budget.evidence_level.is_some() {
+            return Err(BatchOrchestrationError::InvalidArguments);
+        }
+
+        let mut depths = vec![0usize; input.operations.len()];
+        for index in &dag.execution_order {
+            depths[*index] = dependencies[*index]
+                .iter()
+                .map(|dependency| depths[*dependency] + 1)
+                .max()
+                .unwrap_or(0);
+        }
+
+        let mut operations = Vec::new();
+        operations
+            .try_reserve_exact(input.operations.len())
+            .map_err(|_| BatchOrchestrationError::Internal)?;
+        let mut required_tokens = 0_u64;
+        for (index, operation) in input.operations.iter().enumerate() {
+            let descriptor = batch_descriptor(operation.tool);
+            validate_local_budget(descriptor, operation.local_budget.as_ref())?;
+            let effective_budget =
+                effective_static_budget(&parent_budget, operation.local_budget.as_ref());
+            let minimum_tokens = minimum_static_tokens(operation.tool);
+            if effective_budget
+                .max_tokens
+                .is_some_and(|tokens| u64::from(tokens) < minimum_tokens)
+            {
+                return Err(BatchOrchestrationError::BudgetExceeded);
+            }
+            required_tokens = required_tokens.saturating_add(minimum_tokens);
+
+            let mut arguments = BTreeMap::new();
+            for (key, value) in &operation.arguments {
+                let destination = append_pointer("", key).map_err(map_execution_error)?;
+                arguments.insert(
+                    key.clone(),
+                    compile_argument_template(
+                        value,
+                        operation.tool,
+                        &destination,
+                        &input.operations,
+                        &dependencies[index],
+                    )
+                    .map_err(map_execution_error)?,
+                );
+            }
+            operations.push(PlannedBatchOperation {
+                id: operation.id.clone(),
+                request_index: index,
+                tool: operation.tool,
+                dependencies: dependencies[index].clone(),
+                depth: depths[index],
+                arguments: ArgumentTemplate::Object(arguments),
+                local_budget: operation.local_budget.clone(),
+                effective_budget,
+                descriptor,
+            });
+        }
+        if parent_budget
+            .max_tokens
+            .is_some_and(|tokens| required_tokens > u64::from(tokens))
+        {
+            return Err(BatchOrchestrationError::BudgetExceeded);
+        }
+
+        let max_depth = dag.max_depth();
+        Ok(Self {
+            repository: input.repository,
+            generation: input.generation,
+            operations,
+            execution_order: dag.execution_order,
+            max_depth,
+            failure_policy: input
+                .failure_policy
+                .unwrap_or(FailurePolicy::ContinueIndependent),
+            parent_budget,
+            response_profile: input.response_profile.unwrap_or(ResponseProfile::Compact),
+            explain: input.explain.unwrap_or(false),
+        })
+    }
+
+    /// Returns the selected repository before identity pinning.
+    #[must_use]
+    pub const fn repository(&self) -> &rootlight_mcp_contract::RepositorySelector {
+        &self.repository
+    }
+
+    /// Returns the normalized generation selector.
+    #[must_use]
+    pub const fn generation(&self) -> Option<&GenerationSelector> {
+        self.generation.as_ref()
+    }
+
+    /// Returns operations in public request order.
+    #[must_use]
+    pub fn operations(&self) -> &[PlannedBatchOperation] {
+        &self.operations
+    }
+
+    /// Returns the normalized admitted parent budget.
+    #[must_use]
+    pub const fn parent_budget(&self) -> &ResponseBudget {
+        &self.parent_budget
+    }
+
+    /// Returns whether the caller requested source-free explain mode.
+    #[must_use]
+    pub const fn explain(&self) -> bool {
+        self.explain
+    }
+
+    /// Returns the maximum admitted dependency depth.
+    #[must_use]
+    pub const fn max_depth(&self) -> usize {
+        self.max_depth
+    }
+
+    /// Computes the request-sensitive canonical plan digest.
+    ///
+    /// Repository and resolved generation identity are intentionally added by
+    /// explain finalization. This digest covers every normalized deterministic
+    /// request field, registry selection, budget, dependency, and template.
+    #[must_use]
+    pub fn canonical_digest(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"rootlight.static-batch-plan.v1");
+        hasher.update(&[failure_policy_tag(self.failure_policy)]);
+        hasher.update(&[response_profile_tag(self.response_profile)]);
+        hash_budget(&mut hasher, &self.parent_budget);
+        hash_usize(&mut hasher, self.max_depth);
+        hash_usize(&mut hasher, self.operations.len());
+        for operation in &self.operations {
+            operation.hash_canonical(&mut hasher);
+        }
+        *hasher.finalize().as_bytes()
+    }
+
+    /// Returns a stable lowercase encoding of [`Self::canonical_digest`].
+    #[must_use]
+    pub fn canonical_digest_hex(&self) -> String {
+        blake3::Hash::from_bytes(self.canonical_digest())
+            .to_hex()
+            .to_string()
+    }
+}
+
+impl PlannedBatchOperation {
+    /// Returns the canonical request-scoped operation ID.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Returns the public request position.
+    #[must_use]
+    pub const fn request_index(&self) -> usize {
+        self.request_index
+    }
+
+    /// Returns the selected batch tool.
+    #[must_use]
+    pub const fn tool(&self) -> BatchTool {
+        self.tool
+    }
+
+    /// Returns the dependency indices in request order.
+    #[must_use]
+    pub fn dependencies(&self) -> &[usize] {
+        &self.dependencies
+    }
+
+    /// Returns the statically computed DAG depth.
+    #[must_use]
+    pub const fn depth(&self) -> usize {
+        self.depth
+    }
+
+    /// Returns the selected canonical tool descriptor.
+    #[must_use]
+    pub const fn descriptor(&self) -> &'static BatchToolDescriptor {
+        self.descriptor
+    }
+
+    /// Returns the normalized initial effective child budget.
+    #[must_use]
+    pub const fn effective_budget(&self) -> &ResponseBudget {
+        &self.effective_budget
+    }
+
+    /// Returns the caller-provided child-local cap after static admission.
+    #[must_use]
+    pub const fn local_budget(&self) -> Option<&ResponseBudget> {
+        self.local_budget.as_ref()
+    }
+
+    /// Materializes schema-valid typed witnesses for static child validation.
+    ///
+    /// Witnesses are never dispatched. Real dependency values are independently
+    /// validated again by the standalone child validator before execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error if a built-in witness cannot be represented.
+    pub fn witness_arguments(&self) -> Result<Map<String, Value>, BatchOrchestrationError> {
+        let Value::Object(arguments) = witness_template(&self.arguments)? else {
+            return Err(BatchOrchestrationError::Internal);
+        };
+        Ok(arguments)
+    }
+
+    fn materialize_arguments(
+        &self,
+        envelopes: &[Option<ReadEnvelope<Value>>],
+        expected_repository: RepositoryId,
+        expected_generation: GenerationId,
+    ) -> Result<ResolvedBatchArguments, BatchExecutionError> {
+        let mut binding_paths = Vec::new();
+        let Value::Object(arguments) = materialize_template(
+            &self.arguments,
+            envelopes,
+            expected_repository,
+            expected_generation,
+            &mut binding_paths,
+        )?
+        else {
+            return Err(BatchExecutionError::Serialization);
+        };
+        Ok(ResolvedBatchArguments {
+            arguments,
+            materialized_binding_paths: binding_paths,
+        })
+    }
+
+    fn hash_canonical(&self, hasher: &mut blake3::Hasher) {
+        hash_length_prefixed(hasher, self.id.as_bytes());
+        hash_usize(hasher, self.request_index);
+        hash_length_prefixed(hasher, self.tool.name().as_bytes());
+        hash_length_prefixed(hasher, self.descriptor.contract_version.as_bytes());
+        hash_length_prefixed(hasher, self.descriptor.adapter.name().as_bytes());
+        hash_usize(hasher, self.depth);
+        hash_usize(hasher, self.dependencies.len());
+        for dependency in &self.dependencies {
+            hash_usize(hasher, *dependency);
+        }
+        hash_budget(hasher, &self.effective_budget);
+        hash_template(hasher, &self.arguments);
+    }
+}
+
+fn compile_argument_template(
+    value: &Value,
+    target_tool: BatchTool,
+    destination: &str,
+    operations: &[ContractBatchOperation],
+    declared: &[usize],
+) -> Result<ArgumentTemplate, BatchExecutionError> {
+    match value {
+        Value::Object(map) => {
+            if let Some((from_name, pointer)) = binding_reference(map)? {
+                let source_operation = declared
+                    .iter()
+                    .find(|&&index| operations[index].id == from_name)
+                    .copied()
+                    .ok_or(BatchExecutionError::InvalidBinding)?;
+                let source = translate_source_binding(operations[source_operation].tool, pointer)?;
+                let target = translate_target_binding(target_tool, destination)?;
+                validate_binding_pair(source.slot, target)?;
+                Ok(ArgumentTemplate::Binding(PlannedBinding {
+                    source_operation,
+                    source_slot: source.slot,
+                    source_indices: source.indices,
+                    target_slot: target,
+                    destination: destination.to_owned(),
+                }))
+            } else {
+                let mut object = BTreeMap::new();
+                for (key, inner) in map {
+                    let child_destination = append_pointer(destination, key)?;
+                    object.insert(
+                        key.clone(),
+                        compile_argument_template(
+                            inner,
+                            target_tool,
+                            &child_destination,
+                            operations,
+                            declared,
+                        )?,
+                    );
+                }
+                Ok(ArgumentTemplate::Object(object))
+            }
+        }
+        Value::Array(items) => {
+            let mut array = Vec::new();
+            array
+                .try_reserve_exact(items.len())
+                .map_err(|_| BatchExecutionError::MemoryUnavailable)?;
+            for (index, inner) in items.iter().enumerate() {
+                let child_destination = append_pointer(destination, &index.to_string())?;
+                array.push(compile_argument_template(
+                    inner,
+                    target_tool,
+                    &child_destination,
+                    operations,
+                    declared,
+                )?);
+            }
+            Ok(ArgumentTemplate::Array(array))
+        }
+        scalar => Ok(ArgumentTemplate::Literal(scalar.clone())),
+    }
+}
+
+fn validate_local_budget(
+    descriptor: &BatchToolDescriptor,
+    local: Option<&ResponseBudget>,
+) -> Result<(), BatchOrchestrationError> {
+    let Some(local) = local else {
+        return Ok(());
+    };
+    if local.evidence_level.is_some() {
+        return Err(BatchOrchestrationError::InvalidArguments);
+    }
+    for (present, dimension) in [
+        (local.max_results.is_some(), BatchBudgetDimension::Results),
+        (local.max_tokens.is_some(), BatchBudgetDimension::Tokens),
+        (
+            local.max_source_bytes.is_some(),
+            BatchBudgetDimension::SourceBytes,
+        ),
+        (
+            local.max_traversal_facts.is_some(),
+            BatchBudgetDimension::TraversalFacts,
+        ),
+        (local.max_depth.is_some(), BatchBudgetDimension::Depth),
+        (local.max_paths.is_some(), BatchBudgetDimension::Paths),
+        (local.timeout_ms.is_some(), BatchBudgetDimension::Timeout),
+    ] {
+        if present && !descriptor.budget.locally_reducible.contains(&dimension) {
+            return Err(BatchOrchestrationError::InvalidArguments);
+        }
+    }
+    Ok(())
+}
+
+fn effective_static_budget(
+    parent: &ResponseBudget,
+    local: Option<&ResponseBudget>,
+) -> ResponseBudget {
+    let local = local.cloned().unwrap_or(ResponseBudget {
+        max_results: None,
+        max_tokens: None,
+        max_source_bytes: None,
+        max_traversal_facts: None,
+        max_depth: None,
+        max_paths: None,
+        timeout_ms: None,
+        evidence_level: None,
+    });
+    ResponseBudget {
+        max_results: min_optional(parent.max_results, local.max_results),
+        max_tokens: min_optional(parent.max_tokens, local.max_tokens),
+        max_source_bytes: min_optional(parent.max_source_bytes, local.max_source_bytes),
+        max_traversal_facts: min_optional(parent.max_traversal_facts, local.max_traversal_facts),
+        max_depth: min_optional(parent.max_depth, local.max_depth),
+        max_paths: min_optional(parent.max_paths, local.max_paths),
+        timeout_ms: min_optional(parent.timeout_ms, local.timeout_ms),
+        evidence_level: None,
+    }
+}
+
+fn min_optional<T: Ord + Copy>(parent: Option<T>, local: Option<T>) -> Option<T> {
+    match (parent, local) {
+        (Some(parent), Some(local)) => Some(parent.min(local)),
+        (parent, None) => parent,
+        (None, local) => local,
+    }
+}
+
+const fn minimum_static_tokens(tool: BatchTool) -> u64 {
+    match tool {
+        BatchTool::ContextPack => 500,
+        BatchTool::CodeLocate
+        | BatchTool::SymbolExplain
+        | BatchTool::SymbolRelationships
+        | BatchTool::FlowTrace
+        | BatchTool::ChangeImpact
+        | BatchTool::TestsSelect
+        | BatchTool::ArchitectureOverview
+        | BatchTool::ArchitectureCycles
+        | BatchTool::CodeDead
+        | BatchTool::PlanChange
+        | BatchTool::SourceRead => 0,
+    }
+}
+
+fn witness_template(template: &ArgumentTemplate) -> Result<Value, BatchOrchestrationError> {
+    match template {
+        ArgumentTemplate::Literal(value) => Ok(value.clone()),
+        ArgumentTemplate::Object(fields) => {
+            let mut object = Map::new();
+            for (key, value) in fields {
+                object.insert(key.clone(), witness_template(value)?);
+            }
+            Ok(Value::Object(object))
+        }
+        ArgumentTemplate::Array(items) => items
+            .iter()
+            .map(witness_template)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        ArgumentTemplate::Binding(binding) => binding_witness(binding),
+    }
+}
+
+fn materialize_template(
+    template: &ArgumentTemplate,
+    envelopes: &[Option<ReadEnvelope<Value>>],
+    expected_repository: RepositoryId,
+    expected_generation: GenerationId,
+    binding_paths: &mut Vec<String>,
+) -> Result<Value, BatchExecutionError> {
+    match template {
+        ArgumentTemplate::Literal(value) => Ok(value.clone()),
+        ArgumentTemplate::Object(fields) => {
+            let mut object = Map::new();
+            for (key, value) in fields {
+                object.insert(
+                    key.clone(),
+                    materialize_template(
+                        value,
+                        envelopes,
+                        expected_repository,
+                        expected_generation,
+                        binding_paths,
+                    )?,
+                );
+            }
+            Ok(Value::Object(object))
+        }
+        ArgumentTemplate::Array(items) => {
+            let mut array = Vec::new();
+            array
+                .try_reserve_exact(items.len())
+                .map_err(|_| BatchExecutionError::MemoryUnavailable)?;
+            for value in items {
+                array.push(materialize_template(
+                    value,
+                    envelopes,
+                    expected_repository,
+                    expected_generation,
+                    binding_paths,
+                )?);
+            }
+            Ok(Value::Array(array))
+        }
+        ArgumentTemplate::Binding(binding) => {
+            let envelope = envelopes
+                .get(binding.source_operation)
+                .and_then(Option::as_ref)
+                .ok_or(BatchExecutionError::InvalidBinding)?;
+            if envelope.trust != TrustClassification::UntrustedRepositoryData {
+                return Err(BatchExecutionError::InvalidBinding);
+            }
+            let resolved =
+                extract_typed_source(&envelope.data, binding.source_slot, &binding.source_indices)?
+                    .clone();
+            validate_runtime_binding(
+                &resolved,
+                binding.source_slot,
+                binding.target_slot,
+                expected_repository,
+                expected_generation,
+            )?;
+            binding_paths
+                .try_reserve(1)
+                .map_err(|_| BatchExecutionError::MemoryUnavailable)?;
+            binding_paths.push(binding.destination.clone());
+            Ok(resolved)
+        }
+    }
+}
+
+fn binding_witness(binding: &PlannedBinding) -> Result<Value, BatchOrchestrationError> {
+    let seed = u8::try_from(binding.destination.len() % 251 + 1).unwrap_or(1);
+    let symbol = || SymbolId::from_bytes([seed; 20]);
+    let source_ref = || {
+        let span = SourceSpan::new(FileId::from_bytes([seed; 20]), 0, 1)
+            .map_err(|_| BatchOrchestrationError::Internal)?;
+        Ok::<SourceRef, BatchOrchestrationError>(SourceRef::new(
+            RepositoryId::from_bytes([seed; 16]),
+            GenerationId::from_bytes([seed; 20]),
+            span,
+            ContentHash::from_bytes([seed; 32]),
+            None,
+        ))
+    };
+    let collection_length = match binding.target_slot.cardinality {
+        BatchBindingCardinality::Scalar => 1,
+        BatchBindingCardinality::Collection { min, max } => usize::from(min.max(1).min(max)),
+    };
+    let value = match binding.target_slot.value_type {
+        BatchBindingValueType::SymbolId => serde_json::to_value(symbol()),
+        BatchBindingValueType::SymbolIds => serde_json::to_value(vec![symbol(); collection_length]),
+        BatchBindingValueType::SourceRef => serde_json::to_value(source_ref()?),
+        BatchBindingValueType::SourceRefs => {
+            serde_json::to_value(vec![source_ref()?; collection_length])
+        }
+        BatchBindingValueType::TestId => serde_json::to_value(format!("test_{seed}")),
+        BatchBindingValueType::PackId => serde_json::to_value(format!("pack_{seed}")),
+    };
+    value.map_err(|_| BatchOrchestrationError::Internal)
+}
+
+fn hash_template(hasher: &mut blake3::Hasher, template: &ArgumentTemplate) {
+    match template {
+        ArgumentTemplate::Literal(value) => {
+            hasher.update(&[0]);
+            let encoded = serde_json::to_vec(value).unwrap_or_default();
+            hash_length_prefixed(hasher, &encoded);
+        }
+        ArgumentTemplate::Object(fields) => {
+            hasher.update(&[1]);
+            hash_usize(hasher, fields.len());
+            for (key, value) in fields {
+                hash_length_prefixed(hasher, key.as_bytes());
+                hash_template(hasher, value);
+            }
+        }
+        ArgumentTemplate::Array(items) => {
+            hasher.update(&[2]);
+            hash_usize(hasher, items.len());
+            for value in items {
+                hash_template(hasher, value);
+            }
+        }
+        ArgumentTemplate::Binding(binding) => {
+            hasher.update(&[3]);
+            hash_usize(hasher, binding.source_operation);
+            hash_length_prefixed(hasher, binding.destination.as_bytes());
+            hash_usize(hasher, binding.source_indices.len());
+            for index in &binding.source_indices {
+                hash_usize(hasher, *index);
+            }
+            hasher.update(&[binding_value_type_tag(binding.source_slot.value_type)]);
+            hash_cardinality(hasher, binding.source_slot.cardinality);
+            hash_cardinality(hasher, binding.target_slot.cardinality);
+            hasher.update(&[binding_trust_tag(binding.source_slot.trust)]);
+        }
+    }
+}
+
+fn hash_budget(hasher: &mut blake3::Hasher, budget: &ResponseBudget) {
+    hash_option(hasher, budget.max_results.map(u64::from));
+    hash_option(hasher, budget.max_tokens.map(u64::from));
+    hash_option(hasher, budget.max_source_bytes.map(u64::from));
+    hash_option(hasher, budget.max_traversal_facts.map(u64::from));
+    hash_option(hasher, budget.max_depth.map(u64::from));
+    hash_option(hasher, budget.max_paths.map(u64::from));
+    hash_option(hasher, budget.timeout_ms.map(u64::from));
+}
+
+fn hash_option(hasher: &mut blake3::Hasher, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(&value.to_le_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+fn hash_usize(hasher: &mut blake3::Hasher, value: usize) {
+    hasher.update(&u64::try_from(value).unwrap_or(u64::MAX).to_le_bytes());
+}
+
+fn hash_length_prefixed(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hash_usize(hasher, value.len());
+    hasher.update(value);
+}
+
+const fn failure_policy_tag(policy: FailurePolicy) -> u8 {
+    match policy {
+        FailurePolicy::ContinueIndependent => 0,
+        FailurePolicy::FailFast => 1,
+    }
+}
+
+const fn response_profile_tag(profile: ResponseProfile) -> u8 {
+    match profile {
+        ResponseProfile::Compact => 0,
+        ResponseProfile::Standard => 1,
+        ResponseProfile::Evidence => 2,
+    }
+}
+
+const fn binding_value_type_tag(value_type: BatchBindingValueType) -> u8 {
+    match value_type {
+        BatchBindingValueType::SymbolId => 0,
+        BatchBindingValueType::SymbolIds => 1,
+        BatchBindingValueType::SourceRef => 2,
+        BatchBindingValueType::SourceRefs => 3,
+        BatchBindingValueType::TestId => 4,
+        BatchBindingValueType::PackId => 5,
+    }
+}
+
+fn hash_cardinality(hasher: &mut blake3::Hasher, cardinality: BatchBindingCardinality) {
+    match cardinality {
+        BatchBindingCardinality::Scalar => {
+            hasher.update(&[0]);
+        }
+        BatchBindingCardinality::Collection { min, max } => {
+            hasher.update(&[1]);
+            hasher.update(&min.to_le_bytes());
+            hasher.update(&max.to_le_bytes());
+        }
+    }
+}
+
+const fn binding_trust_tag(trust: rootlight_mcp_contract::batch::BatchBindingTrust) -> u8 {
+    use rootlight_mcp_contract::batch::BatchBindingTrust;
+    match trust {
+        BatchBindingTrust::TypedIdentifier => 0,
+        BatchBindingTrust::GenerationPinnedReference => 1,
+        BatchBindingTrust::OpaqueRootlightIdentifier => 2,
     }
 }
 
@@ -471,6 +1218,57 @@ pub fn error_result(
 #[must_use]
 pub fn terminal_result(
     operation: &ContractBatchOperation,
+    status: BatchOperationStatus,
+) -> BatchOperationResult {
+    BatchOperationResult {
+        id: operation.id.clone(),
+        tool: operation.tool,
+        status,
+        data: None,
+        error: None,
+        truncated: false,
+        next_cursor: RequiredNullable(None),
+        usage: None,
+        warnings: Vec::new(),
+    }
+}
+
+fn planned_success_result(
+    operation: &PlannedBatchOperation,
+    envelope: &ReadEnvelope<Value>,
+) -> BatchOperationResult {
+    BatchOperationResult {
+        id: operation.id.clone(),
+        tool: operation.tool,
+        status: BatchOperationStatus::Ok,
+        data: Some(envelope.data.clone()),
+        error: None,
+        truncated: envelope.truncated,
+        next_cursor: envelope.next_cursor.clone(),
+        usage: Some(envelope.usage.clone()),
+        warnings: envelope.warnings.clone(),
+    }
+}
+
+fn planned_error_result(
+    operation: &PlannedBatchOperation,
+    error: &PublicError,
+) -> BatchOperationResult {
+    BatchOperationResult {
+        id: operation.id.clone(),
+        tool: operation.tool,
+        status: BatchOperationStatus::Error,
+        data: None,
+        error: Some(error.clone()),
+        truncated: false,
+        next_cursor: RequiredNullable(None),
+        usage: None,
+        warnings: Vec::new(),
+    }
+}
+
+fn planned_terminal_result(
+    operation: &PlannedBatchOperation,
     status: BatchOperationStatus,
 ) -> BatchOperationResult {
     BatchOperationResult {
@@ -1063,7 +1861,7 @@ impl BatchService {
     pub async fn execute<P, C>(
         &self,
         port: Arc<P>,
-        mut input: QueryBatchInput,
+        input: QueryBatchInput,
         repository: RepositoryId,
         cancellation: C,
         errors: BatchPublicErrors,
@@ -1073,46 +1871,41 @@ impl BatchService {
         C: CancellationSignal + Clone + Send + Sync + 'static,
     {
         checkpoint(&cancellation)?;
-        if !is_compact_profile(input.response_profile) {
-            return Err(BatchOrchestrationError::UnsupportedProfile);
-        }
-        if input.operations.iter().any(|operation| {
-            operation.arguments.keys().any(|key| {
-                matches!(
-                    key.as_str(),
-                    "repository"
-                        | "generation"
-                        | "budget"
-                        | "cursor"
-                        | "profile"
-                        | "response_profile"
-                )
-            })
-        }) {
-            return Err(BatchOrchestrationError::InvalidArguments);
-        }
+        let plan = StaticBatchPlan::build(input, ExposureProfile::Developer)?;
+        self.execute_plan(port, plan, repository, cancellation, errors)
+            .await
+    }
 
-        let dependencies = resolve_dependencies(&input.operations).map_err(map_execution_error)?;
-        validate_typed_bindings(&input, &dependencies)
-            .map_err(|_| BatchOrchestrationError::InvalidArguments)?;
-        let tools: Vec<McpTool> = input
-            .operations
-            .iter()
-            .map(|operation| mcp_tool_for_batch(operation.tool))
-            .collect();
-        let plan = BatchPlan::validate(&tools, &dependencies)
-            .map_err(|_| BatchOrchestrationError::InvalidArguments)?;
-
-        let parent_budget = admitted_parent_budget(input.budget.as_ref());
-        if parent_budget.evidence_level.is_some() {
-            return Err(BatchOrchestrationError::InvalidArguments);
-        }
+    /// Executes one fully admitted immutable plan.
+    ///
+    /// Transport boundaries must run standalone child-template validation
+    /// before invoking this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BatchOrchestrationError`] for identity, runtime binding,
+    /// cancellation, deadline, budget, or child-contract failures.
+    pub async fn execute_plan<P, C>(
+        &self,
+        port: Arc<P>,
+        plan: StaticBatchPlan,
+        repository: RepositoryId,
+        cancellation: C,
+        errors: BatchPublicErrors,
+    ) -> Result<ReadEnvelope<QueryBatchData>, BatchOrchestrationError>
+    where
+        P: AgentToolPort<C>,
+        C: CancellationSignal + Clone + Send + Sync + 'static,
+    {
+        checkpoint(&cancellation)?;
+        let parent_budget = plan.parent_budget.clone();
         let started_at = Instant::now();
         let parent_deadline = deadline_from(started_at, parent_budget.timeout_ms)?
             .ok_or(BatchOrchestrationError::Internal)?;
         let identity = resolve_identity(
             Arc::clone(&port),
-            &input,
+            plan.repository.clone(),
+            plan.generation.clone(),
             cancellation.clone(),
             parent_deadline,
         )
@@ -1120,45 +1913,37 @@ impl BatchService {
         if identity.repository.repository_id != repository {
             return Err(BatchOrchestrationError::InvalidResponse);
         }
-        input.repository = rootlight_mcp_contract::RepositorySelector::ById(RepositoryIdSelector {
-            repository_id: identity.repository.repository_id,
-        });
-        input.generation = Some(GenerationSelector::Explicit(
-            identity.generation.generation_id,
-        ));
 
         let mut parent_ledger = BudgetLedger::new(Some(parent_budget.clone()));
-        let fail_fast = matches!(input.failure_policy, Some(FailurePolicy::FailFast));
-        let count = input.operations.len();
+        let fail_fast = matches!(plan.failure_policy, FailurePolicy::FailFast);
+        let count = plan.operations.len();
         let mut results: Vec<Option<BatchOperationResult>> = vec![None; count];
         let mut binding_envelopes: Vec<Option<ReadEnvelope<Value>>> = vec![None; count];
         let mut observed_envelopes: Vec<Option<ReadEnvelope<Value>>> = vec![None; count];
         let mut stop_scheduling = false;
 
-        for index in plan.execution_order {
+        for index in &plan.execution_order {
+            let index = *index;
             checkpoint(&cancellation)?;
             check_deadline(Some(parent_deadline))?;
-            let operation = &input.operations[index];
-            if dependency_failed(&dependencies[index], &results) {
-                results[index] = Some(terminal_result(
+            let operation = &plan.operations[index];
+            if dependency_failed(&operation.dependencies, &results) {
+                results[index] = Some(planned_terminal_result(
                     operation,
                     BatchOperationStatus::SkippedDependency,
                 ));
                 continue;
             }
             if stop_scheduling {
-                results[index] = Some(terminal_result(
+                results[index] = Some(planned_terminal_result(
                     operation,
                     BatchOperationStatus::NotRunFailFast,
                 ));
                 continue;
             }
 
-            let resolved = match resolve_arguments(
-                operation,
+            let mut resolved = match operation.materialize_arguments(
                 &binding_envelopes,
-                &input,
-                &dependencies[index],
                 identity.repository.repository_id,
                 identity.generation.generation_id,
             ) {
@@ -1170,7 +1955,7 @@ impl BatchService {
                     | BatchExecutionError::BindingCardinalityMismatch
                     | BatchExecutionError::BindingIdentityMismatch,
                 ) => {
-                    results[index] = Some(error_result(operation, &errors.binding_invalid));
+                    results[index] = Some(planned_error_result(operation, &errors.binding_invalid));
                     stop_scheduling |= fail_fast;
                     continue;
                 }
@@ -1183,6 +1968,22 @@ impl BatchService {
                     BatchExecutionError::Serialization | BatchExecutionError::MemoryUnavailable,
                 ) => return Err(BatchOrchestrationError::Internal),
             };
+            resolved.arguments.insert(
+                "repository".to_owned(),
+                serde_json::to_value(rootlight_mcp_contract::RepositorySelector::ById(
+                    RepositoryIdSelector {
+                        repository_id: identity.repository.repository_id,
+                    },
+                ))
+                .map_err(|_| BatchOrchestrationError::Internal)?,
+            );
+            resolved.arguments.insert(
+                "generation".to_owned(),
+                serde_json::to_value(GenerationSelector::Explicit(
+                    identity.generation.generation_id,
+                ))
+                .map_err(|_| BatchOrchestrationError::Internal)?,
+            );
             let remaining = match remaining_parent_budget(
                 &parent_budget,
                 parent_ledger.consumed(),
@@ -1190,7 +1991,7 @@ impl BatchService {
             ) {
                 Ok(remaining) => remaining,
                 Err(BatchOrchestrationError::BudgetExceeded) => {
-                    results[index] = Some(error_result(operation, &errors.budget_exceeded));
+                    results[index] = Some(planned_error_result(operation, &errors.budget_exceeded));
                     stop_scheduling |= fail_fast;
                     continue;
                 }
@@ -1198,16 +1999,17 @@ impl BatchService {
             };
             let tool_limits =
                 BudgetLimits::server_ceiling().constrained_by_response_budget(Some(&remaining));
-            let mut allocation =
-                match parent_ledger.allocate_child(tool_limits, operation.local_budget.as_ref()) {
-                    Ok(allocation) => allocation,
-                    Err(ExecutionPolicyError::BudgetExceeded { .. }) => {
-                        results[index] = Some(error_result(operation, &errors.budget_exceeded));
-                        stop_scheduling |= fail_fast;
-                        continue;
-                    }
-                    Err(error) => return Err(map_policy_error(error)),
-                };
+            let mut allocation = match parent_ledger
+                .allocate_child(tool_limits, operation.local_budget.as_ref())
+            {
+                Ok(allocation) => allocation,
+                Err(ExecutionPolicyError::BudgetExceeded { .. }) => {
+                    results[index] = Some(planned_error_result(operation, &errors.budget_exceeded));
+                    stop_scheduling |= fail_fast;
+                    continue;
+                }
+                Err(error) => return Err(map_policy_error(error)),
+            };
             let child_budget = response_budget_from_limits(
                 allocation.limits(),
                 minimum_evidence(
@@ -1248,16 +2050,17 @@ impl BatchService {
 
                     if allocation.ledger_mut().charge(charge).is_err() {
                         consume_allocation(allocation)?;
-                        results[index] = Some(error_result(operation, &errors.budget_exceeded));
+                        results[index] =
+                            Some(planned_error_result(operation, &errors.budget_exceeded));
                         stop_scheduling |= fail_fast;
                         continue;
                     }
                     allocation.commit().map_err(map_policy_error)?;
-                    results[index] = Some(success_result(operation, &envelope));
+                    results[index] = Some(planned_success_result(operation, &envelope));
                     binding_envelopes[index] = Some(envelope);
                 }
                 Err(AgentPortError::Public(error)) => {
-                    results[index] = Some(error_result(operation, &error));
+                    results[index] = Some(planned_error_result(operation, &error));
                     stop_scheduling |= fail_fast;
                 }
                 Err(AgentPortError::Cancelled) => {
@@ -1267,14 +2070,15 @@ impl BatchService {
                     return Err(BatchOrchestrationError::DeadlineExceeded);
                 }
                 Err(AgentPortError::LocalDeadlineExceeded) => {
-                    results[index] = Some(error_result(operation, &errors.budget_exceeded));
+                    results[index] = Some(planned_error_result(operation, &errors.budget_exceeded));
                     stop_scheduling |= fail_fast;
                 }
                 Err(AgentPortError::InvalidResponse) => {
                     return Err(BatchOrchestrationError::InvalidResponse);
                 }
                 Err(AgentPortError::Unavailable) => {
-                    results[index] = Some(error_result(operation, &errors.operation_failed));
+                    results[index] =
+                        Some(planned_error_result(operation, &errors.operation_failed));
                     stop_scheduling |= fail_fast;
                 }
             }
@@ -1348,7 +2152,8 @@ fn admitted_parent_budget(requested: Option<&ResponseBudget>) -> ResponseBudget 
 
 async fn resolve_identity<P, C>(
     port: Arc<P>,
-    input: &QueryBatchInput,
+    repository: rootlight_mcp_contract::RepositorySelector,
+    generation: Option<GenerationSelector>,
     cancellation: C,
     deadline: Instant,
 ) -> Result<AgentResolvedIdentity, BatchOrchestrationError>
@@ -1356,12 +2161,13 @@ where
     P: AgentToolPort<C>,
     C: CancellationSignal + Clone + Send + Sync + 'static,
 {
-    let request = AgentIdentityRequest::new(input.repository.clone(), input.generation.clone());
+    let requested_generation = generation.clone();
+    let request = AgentIdentityRequest::new(repository, generation);
     let context = AgentResolutionContext::new(cancellation, deadline);
     match port.resolve_identity(request, context).await {
         Ok(identity)
             if matches!(
-                input.generation.as_ref(),
+                requested_generation.as_ref(),
                 Some(GenerationSelector::Explicit(expected))
                     if identity.generation.generation_id != *expected
             ) =>

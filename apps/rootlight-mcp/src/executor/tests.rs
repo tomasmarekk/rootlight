@@ -3067,8 +3067,45 @@ async fn query_batch_enforces_aggregate_budget_across_the_app_boundary() {
     );
     assert_eq!(
         harness.call_count.load(Ordering::Relaxed),
-        2,
-        "status pinning and the first child exhaust the budget before more work starts"
+        3,
+        "identity and both measured children run before aggregate serialization enforces the cap"
+    );
+}
+
+#[tokio::test]
+async fn query_batch_admits_known_plan_minima_before_identity_resolution() {
+    let harness = batch_harness();
+    let error = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {"id": "first", "tool": "context.pack", "arguments": {
+                    "task": "first",
+                    "seeds": {"symbols": [symbol()]},
+                    "token_budget": 500
+                }},
+                {"id": "second", "tool": "context.pack", "arguments": {
+                    "task": "second",
+                    "seeds": {"symbols": [symbol()]},
+                    "token_budget": 500
+                }}
+            ],
+            "budget": {"max_tokens": 900}
+        }),
+    )
+    .await
+    .expect_err("known child minima exceed the shared static token ceiling");
+    assert_canonical_budget_error(
+        error
+            .public_error()
+            .expect("static plan admission returns a checked budget error"),
+    );
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        0,
+        "static shared-budget rejection must precede identity resolution"
     );
 }
 
@@ -3362,7 +3399,10 @@ async fn query_batch_skips_dependents_of_an_unavailable_subtool() {
         "generation": "active",
         "operations": [
             {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}},
-            {"id": "rels", "tool": "symbol.relationships", "arguments": {}},
+            {"id": "rels", "tool": "symbol.relationships", "arguments": {
+                "symbol_ids": [symbol()],
+                "relations": ["calls"]
+            }},
             {"id": "after", "tool": "code.locate", "depends_on": ["rels"], "arguments": {"query": "stage"}}
         ]
     });
@@ -3388,8 +3428,8 @@ async fn query_batch_skips_dependents_of_an_unavailable_subtool() {
         by_id("after"),
         Some(BatchOperationStatus::SkippedDependency)
     );
-    // Only the code.locate operation reaches the port.
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 2);
+    // Identity and both scheduled children reach the port; the dependent does not.
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 3);
 }
 
 #[tokio::test]
@@ -3430,6 +3470,114 @@ async fn query_batch_keeps_invalid_binding_inside_the_operation_result() {
             .map(PublicError::code),
         Some(ErrorCode::BindingInvalid)
     );
+}
+
+#[tokio::test]
+async fn query_batch_skips_target_dependents_after_runtime_binding_failure() {
+    let harness = Harness::new(FakeOutcome::BatchPlanChange {
+        status: Box::new(Ok(repository_status_response())),
+        locate: Ok(locate_response()),
+        plan_change: Box::new(Ok(batch_plan_change_response())),
+    });
+    let output = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}},
+                {"id": "refine", "tool": "plan.change", "depends_on": ["find"], "arguments": {
+                    "objective": "bug_fix",
+                    "objective_text": "fix the defect",
+                    "targets": [{
+                        "symbol_id": {
+                            "$from": "find",
+                            "pointer": "/data/matches/99/symbol_id"
+                        }
+                    }]
+                }},
+                {"id": "after", "tool": "code.locate", "depends_on": ["refine"], "arguments": {
+                    "query": "stage"
+                }}
+            ]
+        }),
+    )
+    .await
+    .expect("runtime binding failure remains in the ordered batch envelope");
+    let ToolResponse::Success(output) = decode::<QueryBatchOutput>(output) else {
+        panic!("expected batch success envelope");
+    };
+    assert_eq!(
+        output
+            .data
+            .operation_results
+            .iter()
+            .map(|result| (result.id.as_str(), result.status))
+            .collect::<Vec<_>>(),
+        [
+            ("find", BatchOperationStatus::Ok),
+            ("refine", BatchOperationStatus::Error),
+            ("after", BatchOperationStatus::SkippedDependency),
+        ]
+    );
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        2,
+        "only identity and the binding source may reach the client port"
+    );
+}
+
+#[tokio::test]
+async fn query_batch_preserves_request_order_when_execution_order_differs() {
+    let responses = Arc::new(Mutex::new(VecDeque::from([
+        Ok(locate_response()),
+        Ok(locate_response()),
+    ])));
+    let harness = Harness::new(FakeOutcome::BatchLocateSequence {
+        status: Box::new(Ok(repository_status_response())),
+        locate: Arc::clone(&responses),
+    });
+    let output = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {"id": "requested_first", "tool": "code.locate", "depends_on": ["source"], "arguments": {
+                    "query": "requested-first"
+                }},
+                {"id": "source", "tool": "code.locate", "arguments": {
+                    "query": "executed-first"
+                }}
+            ]
+        }),
+    )
+    .await
+    .expect("reverse request and execution order is valid");
+    let ToolResponse::Success(output) = decode::<QueryBatchOutput>(output) else {
+        panic!("expected batch success envelope");
+    };
+    assert_eq!(
+        output
+            .data
+            .operation_results
+            .iter()
+            .map(|result| result.id.as_str())
+            .collect::<Vec<_>>(),
+        ["requested_first", "source"]
+    );
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    let queries = calls
+        .iter()
+        .filter_map(|call| match call {
+            ObservedCall::CodeLocate(call) => Some(call.request.query()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(queries, ["executed-first", "requested-first"]);
 }
 
 #[tokio::test]
@@ -3474,7 +3622,7 @@ async fn query_batch_does_not_launder_malformed_limits_through_budget_lowering()
         serde_json::from_str::<Value>("18446744073709551616").expect("JSON number is valid");
     for malformed in [json!("bad"), json!(-1), json!(1.5), Value::Null, overflow] {
         let harness = batch_harness();
-        let output = execute(
+        let error = execute(
             &harness.executor,
             VerticalTool::QueryBatch,
             json!({
@@ -3488,71 +3636,52 @@ async fn query_batch_does_not_launder_malformed_limits_through_budget_lowering()
             }),
         )
         .await
-        .expect("a child validation failure remains inside the batch envelope");
-        let ToolResponse::Success(output) = decode::<QueryBatchOutput>(output) else {
-            panic!("expected batch success envelope");
-        };
+        .expect_err("deterministic child validation fails the complete static plan");
         assert_eq!(
-            output.data.operation_results[0]
-                .error
-                .as_ref()
-                .map(PublicError::code),
+            error.public_error().map(PublicError::code),
             Some(ErrorCode::InvalidArgument)
         );
-        let calls = harness
-            .calls
-            .lock()
-            .expect("fake call recorder is available");
         assert_eq!(
-            calls
-                .iter()
-                .filter(|call| matches!(call, ObservedCall::CodeLocate(_)))
-                .count(),
-            0
+            harness.call_count.load(Ordering::Relaxed),
+            0,
+            "static child errors must fail before identity or child dispatch"
         );
     }
 }
 
 #[tokio::test]
-async fn unrelated_static_validation_error_is_not_reclassified_as_a_binding_error() {
+async fn query_batch_rejects_later_static_arguments_before_any_call() {
     let harness = batch_harness();
-    let output = execute(
+    let error = execute(
         &harness.executor,
         VerticalTool::QueryBatch,
         json!({
             "repository": {"repository_id": repository()},
             "operations": [
                 {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}},
-                {"id": "mixed", "tool": "code.locate", "depends_on": ["find"], "arguments": {
-                    "query": {"$from": "find", "pointer": "/data/matches/0/symbol_id"},
-                    "search_modes": ["not_a_mode"]
+                {"id": "mixed", "tool": "plan.change", "depends_on": ["find"], "arguments": {
+                    "objective": "not_an_objective",
+                    "objective_text": "fix the defect",
+                    "targets": [{
+                        "symbol_id": {
+                            "$from": "find",
+                            "pointer": "/data/matches/0/symbol_id"
+                        }
+                    }]
                 }}
             ]
         }),
     )
     .await
-    .expect("the static validation failure remains inside the batch envelope");
-    let ToolResponse::Success(output) = decode::<QueryBatchOutput>(output) else {
-        panic!("expected batch success envelope");
-    };
+    .expect_err("a later deterministic child defect rejects the complete static plan");
     assert_eq!(
-        output.data.operation_results[1]
-            .error
-            .as_ref()
-            .map(PublicError::code),
+        error.public_error().map(PublicError::code),
         Some(ErrorCode::InvalidArgument)
     );
-    let calls = harness
-        .calls
-        .lock()
-        .expect("fake call recorder is available");
     assert_eq!(
-        calls
-            .iter()
-            .filter(|call| matches!(call, ObservedCall::CodeLocate(_)))
-            .count(),
-        1,
-        "only the independent dependency may cross the client port"
+        harness.call_count.load(Ordering::Relaxed),
+        0,
+        "neither identity nor the harmless first operation may run"
     );
 }
 
@@ -7719,6 +7848,9 @@ async fn query_batch_identity_fingerprint_binds_and_normalizes_equivalent_json()
         json!({
             "explain": true,
             "generation": "active",
+            "failure_policy": "continue_independent",
+            "response_profile": "compact",
+            "budget": {"max_tokens": 3000, "timeout_ms": 30000},
             "operations": [{
                 "arguments": {"max_results": 20, "query": "publish"},
                 "tool": "code.locate",
@@ -7772,6 +7904,40 @@ async fn query_batch_identity_fingerprint_binds_and_normalizes_equivalent_json()
     );
     assert_ne!(first, other_repository_fingerprint);
     assert_ne!(first, other_generation_fingerprint);
+}
+
+#[tokio::test]
+async fn query_batch_fingerprint_binds_arguments_dependencies_and_typed_bindings() {
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(
+        repository_status_response(),
+    )));
+    let arguments = |query: &str, pointer: &str| {
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {"id": "find", "tool": "code.locate", "arguments": {"query": query}},
+                {"id": "plan", "tool": "plan.change", "depends_on": ["find"], "arguments": {
+                    "objective": "bug_fix",
+                    "objective_text": "fix the defect",
+                    "targets": [{
+                        "symbol_id": {"$from": "find", "pointer": pointer}
+                    }]
+                }}
+            ],
+            "explain": true
+        })
+    };
+    let base =
+        batch_explain_fingerprint(&harness, arguments("publish", "/data/matches/0/symbol_id"))
+            .await;
+    let other_argument =
+        batch_explain_fingerprint(&harness, arguments("stage", "/data/matches/0/symbol_id")).await;
+    let other_binding =
+        batch_explain_fingerprint(&harness, arguments("publish", "/data/matches/1/symbol_id"))
+            .await;
+
+    assert_ne!(base, other_argument);
+    assert_ne!(base, other_binding);
 }
 
 #[tokio::test]
