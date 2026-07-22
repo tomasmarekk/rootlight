@@ -2439,6 +2439,8 @@ fn advanced_query(
     )?;
     let budget = service_budget(context);
     let max_traversal = advanced_edge_work_limit(budget)?;
+    #[cfg(feature = "process-test-hooks")]
+    await_process_cancellation(context)?;
     let response = service
         .advanced_query_with_budget(
             generation.generation,

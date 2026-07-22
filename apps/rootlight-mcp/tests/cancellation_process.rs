@@ -20,11 +20,13 @@ const CANCELLATION_TIMEOUT: Duration = Duration::from_secs(10);
 const FOLLOW_UP_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const LATE_RESPONSE_WINDOW: Duration = Duration::from_millis(250);
-const CANCELLED_REQUEST_ID: &str = "cancel-active-cycles";
-const FOLLOW_UP_REQUEST_ID: &str = "status-after-cancel";
+const CYCLES_REQUEST_ID: &str = "cancel-active-cycles";
+const CYCLES_FOLLOW_UP_ID: &str = "status-after-cycles-cancel";
+const ADVANCED_REQUEST_ID: &str = "cancel-active-advanced-query";
+const ADVANCED_FOLLOW_UP_ID: &str = "status-after-advanced-cancel";
 
 #[test]
-fn cancellation_reaches_active_daemon_work_without_emitting_a_response() {
+fn cancellation_reaches_active_daemon_analyses_without_emitting_responses() {
     let fixture = tempfile::tempdir().expect("isolated process fixture is available");
     let repository_root = fixture.path().join("repository");
     write_large_repository(&repository_root);
@@ -59,8 +61,12 @@ fn cancellation_reaches_active_daemon_work_without_emitting_a_response() {
         .to_owned();
     wait_for_publication(&mut mcp, &index, &operation_id);
 
-    mcp.write(&tool_call(
-        CANCELLED_REQUEST_ID,
+    assert_cancelled_request(
+        &listener,
+        &mut daemon,
+        &mut mcp,
+        CYCLES_REQUEST_ID,
+        CYCLES_FOLLOW_UP_ID,
         "architecture.cycles",
         json!({
             "repository": {"repository_id": repository_id},
@@ -73,7 +79,45 @@ fn cancellation_reaches_active_daemon_work_without_emitting_a_response() {
                 "timeout_ms": 30000
             }
         }),
-    ));
+    );
+    assert_cancelled_request(
+        &listener,
+        &mut daemon,
+        &mut mcp,
+        ADVANCED_REQUEST_ID,
+        ADVANCED_FOLLOW_UP_ID,
+        "query.advanced",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "generation": "active",
+            "query": {
+                "op": "scan",
+                "entity": "function"
+            },
+            "max_results": 1000,
+            "max_depth": 5,
+            "cost_limit": 10000000
+        }),
+    );
+
+    mcp.finish();
+    daemon.finish();
+}
+
+fn assert_cancelled_request(
+    listener: &LocalListener,
+    daemon: &mut DaemonProcess,
+    mcp: &mut McpProcess,
+    request_id: &str,
+    follow_up_id: &str,
+    tool: &str,
+    arguments: Value,
+) {
+    let repository_id = arguments["repository"]["repository_id"]
+        .as_str()
+        .expect("cancelled analytical request has a repository selector")
+        .to_owned();
+    mcp.write(&tool_call(request_id, tool, arguments));
     let mut hook = match listener.accept_timeout(CANCELLATION_TIMEOUT) {
         Ok(hook) => hook,
         Err(error) => {
@@ -85,7 +129,7 @@ fn cancellation_reaches_active_daemon_work_without_emitting_a_response() {
                 .try_wait()
                 .expect("daemon status is readable");
             panic!(
-                "active daemon analysis did not reach the cancellation hook: \
+                "{tool} did not reach the cancellation hook: \
                  {error}; early MCP response: {early_response:?}; daemon status: {daemon_status:?}"
             );
         }
@@ -101,7 +145,7 @@ fn cancellation_reaches_active_daemon_work_without_emitting_a_response() {
         "jsonrpc": "2.0",
         "method": "notifications/cancelled",
         "params": {
-            "requestId": CANCELLED_REQUEST_ID,
+            "requestId": request_id,
             "reason": "process cancellation evidence"
         }
     }));
@@ -117,7 +161,7 @@ fn cancellation_reaches_active_daemon_work_without_emitting_a_response() {
 
     let follow_up_started = Instant::now();
     mcp.write(&tool_call(
-        FOLLOW_UP_REQUEST_ID,
+        follow_up_id,
         "repo.status",
         json!({
             "repository": {"repository_id": repository_id},
@@ -126,19 +170,16 @@ fn cancellation_reaches_active_daemon_work_without_emitting_a_response() {
     ));
     let follow_up = mcp.read(FOLLOW_UP_TIMEOUT);
     assert_ne!(
-        follow_up["id"], CANCELLED_REQUEST_ID,
+        follow_up["id"], request_id,
         "cancelled MCP requests must not emit a JSON-RPC response"
     );
-    assert_eq!(follow_up["id"], FOLLOW_UP_REQUEST_ID);
+    assert_eq!(follow_up["id"], follow_up_id);
     assert_success(&follow_up, "repo.status");
     assert!(
         follow_up_started.elapsed() <= FOLLOW_UP_TIMEOUT,
         "the analytical lane must be reusable within the follow-up bound"
     );
-    mcp.assert_no_response_for(CANCELLED_REQUEST_ID, LATE_RESPONSE_WINDOW);
-
-    mcp.finish();
-    daemon.finish();
+    mcp.assert_no_response_for(request_id, LATE_RESPONSE_WINDOW);
 }
 
 fn write_large_repository(root: &Path) {
