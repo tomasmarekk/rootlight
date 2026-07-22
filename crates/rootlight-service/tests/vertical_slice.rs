@@ -20,6 +20,10 @@ use rootlight_service::{
     FirstSliceFreshnessStatus, FirstSliceIncrementalEvidence, FirstSliceObservedFreshness,
     FirstSlicePublicationMode, FirstSliceService, FirstSliceTwoStageAvailability,
     PlanChangeObjective, RelationDirection, RelationFamily,
+    catalog::{
+        CatalogInstant, CatalogListFilter, CatalogPageRequest, CatalogPageSize,
+        CatalogRepositoryState,
+    },
 };
 use tempfile::TempDir;
 
@@ -611,6 +615,35 @@ fn repository_list_and_status_report_the_active_generation() {
     assert_eq!(status.coverage.len(), 1);
     assert_eq!(status.coverage[0].language, "rust");
     assert_eq!(status.coverage[0].indexed_files, 1);
+
+    let catalog_page = service
+        .repository_catalog_page(
+            CatalogPageRequest::new(
+                None,
+                None,
+                CatalogListFilter::new(None, None, None).expect("catalog filter is valid"),
+                CatalogPageSize::new(20).expect("catalog page size is valid"),
+            )
+            .expect("catalog request is valid"),
+            CatalogInstant::from_millis(1_000),
+        )
+        .expect("catalog page succeeds");
+    assert_eq!(catalog_page.total_count(), 1);
+    let catalog_entry = &catalog_page.items()[0];
+    assert_eq!(catalog_entry.repository(), indexed.repository);
+    assert_eq!(
+        catalog_entry.display_name(),
+        fixture
+            .path()
+            .file_name()
+            .expect("temporary root has a basename")
+            .to_string_lossy()
+    );
+    assert_eq!(catalog_entry.alias(), None);
+    assert_eq!(catalog_entry.active_generation(), Some(indexed.generation));
+    assert_eq!(catalog_entry.generation_count(), 1);
+    assert_eq!(catalog_entry.state(), CatalogRepositoryState::Ready);
+    assert_eq!(catalog_entry.languages().collect::<Vec<_>>(), vec!["rust"]);
 
     let unknown = RepositoryId::from_bytes([250; 16]);
     assert!(matches!(

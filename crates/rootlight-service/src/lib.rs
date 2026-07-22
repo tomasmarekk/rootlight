@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod catalog;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -12,6 +14,10 @@ use std::{
     time::Instant,
 };
 
+use catalog::{
+    CATALOG_MAX_LABEL_BYTES, CatalogInstant, CatalogLanguageCoverage, CatalogPage,
+    CatalogPageRequest, CatalogRepositoryRecord, CatalogRepositoryState, CatalogSnapshotStore,
+};
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, AnalysisRequest, BatchThresholds, EncodingId,
     GenerationBoundSnapshot, LanguageId, MemoryAdmissionPolicy, ParseProvider, StreamLimits,
@@ -466,6 +472,7 @@ pub struct PreparedFirstSliceIndex {
     incremental: PreparedIncrementalState,
     receipt: FirstSliceIndexReceipt,
     root_identity: ContentHash,
+    display_name: String,
     register_repository: bool,
 }
 
@@ -494,6 +501,7 @@ enum FirstSlicePublication {
     Retained,
     Pending {
         root_identity: ContentHash,
+        display_name: String,
         register_repository: bool,
         incremental: PreparedIncrementalState,
     },
@@ -1077,6 +1085,8 @@ pub struct FirstSliceService {
     // nondurable fallback uses a random local UUID rather than path-derived
     // public identity; durable UUID persistence remains outside this service.
     repositories: BTreeMap<ContentHash, RepositoryId>,
+    repository_display_names: BTreeMap<RepositoryId, String>,
+    published_generation_counts: BTreeMap<RepositoryId, u64>,
     active_by_repository: BTreeMap<RepositoryId, GenerationId>,
     generations: GenerationSet<LexicalIndex>,
     source_snapshots: SourceSnapshotRetention,
@@ -1085,6 +1095,7 @@ pub struct FirstSliceService {
     incremental_baselines: BTreeMap<GenerationId, IncrementalDiscoveryBaseline>,
     incremental_inputs: BTreeMap<GenerationId, InputSnapshot>,
     incremental_evidence: BTreeMap<GenerationId, FirstSliceIncrementalEvidence>,
+    catalog_snapshots: CatalogSnapshotStore,
 }
 
 impl FirstSliceService {
@@ -1092,9 +1103,9 @@ impl FirstSliceService {
     ///
     /// # Errors
     ///
-    /// Returns [`FirstSliceError`] when a required bounded parser, analyzer,
-    /// configuration, generation-retention, or source-retention contract cannot
-    /// initialize.
+    /// Returns [`FirstSliceError`] when required local identity randomness,
+    /// parser, analyzer, configuration, generation-retention, or
+    /// source-retention state cannot initialize.
     pub fn new(maximum_generations: usize) -> Result<Self, FirstSliceError> {
         Self::new_with_source_limit(maximum_generations, MAX_RETAINED_SOURCE_BYTES)
     }
@@ -1133,6 +1144,9 @@ impl FirstSliceService {
             maximum_generations,
             MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES,
         )?;
+        let mut catalog_instance_nonce = [0_u8; 32];
+        getrandom::fill(&mut catalog_instance_nonce)
+            .map_err(|_| FirstSliceError::RandomUnavailable)?;
         Ok(Self {
             config,
             analysis_limits,
@@ -1140,6 +1154,8 @@ impl FirstSliceService {
             analyzer,
             resolver: ResolutionEngine::default(),
             repositories: BTreeMap::new(),
+            repository_display_names: BTreeMap::new(),
+            published_generation_counts: BTreeMap::new(),
             active_by_repository: BTreeMap::new(),
             generations,
             source_snapshots,
@@ -1148,6 +1164,10 @@ impl FirstSliceService {
             incremental_baselines: BTreeMap::new(),
             incremental_inputs: BTreeMap::new(),
             incremental_evidence: BTreeMap::new(),
+            catalog_snapshots: CatalogSnapshotStore::new(
+                catalog::CatalogSnapshotLimits::default(),
+                catalog_instance_nonce,
+            ),
         })
     }
 
@@ -1201,6 +1221,7 @@ impl FirstSliceService {
         };
         check_cancellation(cancellation)?;
         let repository = repository_result;
+        let display_name = sanitized_repository_display_name(&canonical, repository)?;
         let root_result = RepositoryRoot::open(repository, &canonical);
         check_cancellation(cancellation)?;
         let root = root_result.map_err(|_| FirstSliceError::Repository)?;
@@ -1496,6 +1517,7 @@ impl FirstSliceService {
                 incremental,
                 receipt,
                 root_identity,
+                display_name,
                 register_repository: existing_repository.is_none(),
             },
         ))
@@ -1555,6 +1577,7 @@ impl FirstSliceService {
                     mut incremental,
                     receipt,
                     root_identity,
+                    display_name,
                     register_repository,
                 } = prepared;
                 let source_admission =
@@ -1590,6 +1613,7 @@ impl FirstSliceService {
                     receipt,
                     publication: FirstSlicePublication::Pending {
                         root_identity,
+                        display_name,
                         register_repository,
                         incremental,
                     },
@@ -1622,9 +1646,17 @@ impl FirstSliceService {
             }
             FirstSlicePublication::Pending {
                 root_identity,
+                display_name,
                 register_repository,
                 incremental,
             } => {
+                let published_generation_count = self
+                    .published_generation_counts
+                    .get(&receipt.repository)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .ok_or(FirstSliceError::Retention)?;
                 self.source_snapshots
                     .commit_staged(receipt.generation)
                     .map_err(|_| FirstSliceError::Retention)?;
@@ -1658,8 +1690,12 @@ impl FirstSliceService {
                     .insert(receipt.generation, incremental.inputs);
                 self.incremental_evidence
                     .insert(receipt.generation, incremental.evidence);
+                self.published_generation_counts
+                    .insert(receipt.repository, published_generation_count);
                 if register_repository {
                     self.repositories.insert(root_identity, receipt.repository);
+                    self.repository_display_names
+                        .insert(receipt.repository, display_name);
                 }
             }
         }
@@ -2365,6 +2401,80 @@ impl FirstSliceService {
                 state: REPOSITORY_STATE_READY.to_owned(),
             })
             .collect()
+    }
+
+    /// Returns one page from an immutable, service-owned repository snapshot.
+    ///
+    /// A first-page request freezes authoritative filtered records. A
+    /// continuation request reads only that retained snapshot, even if later
+    /// registrations or publications mutate the live catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] for invalid bounds or continuation metadata,
+    /// unsupported filters, unavailable snapshots, or inconsistent internal
+    /// repository metadata.
+    pub fn repository_catalog_page(
+        &mut self,
+        request: CatalogPageRequest,
+        now: CatalogInstant,
+    ) -> Result<CatalogPage, catalog::CatalogError> {
+        let records = if request.snapshot_id().is_none() {
+            self.catalog_records()?
+        } else {
+            Vec::new()
+        };
+        self.catalog_snapshots.page(request, records, now)
+    }
+
+    fn catalog_records(&self) -> Result<Vec<CatalogRepositoryRecord>, catalog::CatalogError> {
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(self.active_by_repository.len())
+            .map_err(|_| catalog::CatalogError::SnapshotEntryBound)?;
+        for (repository, active_generation) in &self.active_by_repository {
+            let receipt = self
+                .receipts
+                .get(active_generation)
+                .ok_or(catalog::CatalogError::CatalogInvariant)?;
+            if receipt.repository != *repository {
+                return Err(catalog::CatalogError::CatalogInvariant);
+            }
+            let display_name = self
+                .repository_display_names
+                .get(repository)
+                .ok_or(catalog::CatalogError::CatalogInvariant)?
+                .clone();
+            let generation_count = self
+                .published_generation_counts
+                .get(repository)
+                .copied()
+                .ok_or(catalog::CatalogError::CatalogInvariant)?;
+            let (tier, status) = if receipt.indexed_files == 0 {
+                (AnalysisTier::TierD, rootlight_ir::CoverageStatus::Unknown)
+            } else if receipt.discovered_inputs == receipt.indexed_files {
+                (AnalysisTier::TierA, rootlight_ir::CoverageStatus::Complete)
+            } else {
+                (AnalysisTier::TierB, rootlight_ir::CoverageStatus::Bounded)
+            };
+            let coverage = CatalogLanguageCoverage::new(
+                FIRST_SLICE_LANGUAGE.to_owned(),
+                tier,
+                status,
+                receipt.discovered_inputs,
+                receipt.indexed_files,
+            )?;
+            let record = CatalogRepositoryRecord::new(
+                *repository,
+                display_name,
+                Some(*active_generation),
+                generation_count,
+                CatalogRepositoryState::Ready,
+            )?
+            .with_coverage(vec![coverage])?;
+            records.push(record);
+        }
+        Ok(records)
     }
 
     /// Returns the active generation, freshness, and coverage for one repository.
@@ -3580,6 +3690,35 @@ fn random_repository_id(
     Err(FirstSliceError::RandomUnavailable)
 }
 
+fn sanitized_repository_display_name(
+    canonical_root: &Path,
+    repository: RepositoryId,
+) -> Result<String, FirstSliceError> {
+    let component = canonical_root
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    let mut display_name = String::new();
+    display_name
+        .try_reserve_exact(CATALOG_MAX_LABEL_BYTES)
+        .map_err(|_| FirstSliceError::Limits)?;
+    for character in component.trim().chars() {
+        let character = if character.is_control() || matches!(character, '/' | '\\') {
+            '\u{fffd}'
+        } else {
+            character
+        };
+        if display_name.len().saturating_add(character.len_utf8()) > CATALOG_MAX_LABEL_BYTES {
+            break;
+        }
+        display_name.push(character);
+    }
+    if display_name.is_empty() {
+        display_name.push_str(&repository.to_string());
+    }
+    Ok(display_name)
+}
+
 fn validate_repository_path_length(path: &Path) -> Result<(), FirstSliceError> {
     if repository_path_identity_bytes(path)? > MAX_REPOSITORY_PATH_IDENTITY_BYTES {
         return Err(FirstSliceError::Repository);
@@ -4554,6 +4693,48 @@ mod tests {
         ];
         EquivalenceSnapshot::new(components, cancellation)
             .expect("complete equivalence snapshot builds")
+    }
+
+    #[test]
+    fn catalog_generation_count_survives_reclamation_and_idempotent_publication() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        let source = fixture.path().join("src/lib.rs");
+        fs::write(&source, EQUIVALENCE_INITIAL).expect("initial source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(3).expect("first-slice service initializes");
+
+        let first = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("initial generation publishes");
+        let repeated = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("unchanged publication is idempotent");
+        assert_eq!(repeated, first);
+
+        fs::write(&source, EQUIVALENCE_BODY_EDIT).expect("successor source writes");
+        let second = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("successor generation publishes");
+        assert_ne!(second.generation, first.generation);
+
+        // Receipt reclamation models future generation-retention eviction. The
+        // repository-owned publication count must not depend on retained query
+        // artifacts or increment for the earlier idempotent publication.
+        service.receipts.remove(&first.generation);
+        let request = CatalogPageRequest::new(
+            None,
+            None,
+            catalog::CatalogListFilter::new(None, None, None).expect("filter is valid"),
+            catalog::CatalogPageSize::new(20).expect("page size is valid"),
+        )
+        .expect("request is valid");
+        let page = service
+            .repository_catalog_page(request, CatalogInstant::from_millis(1_000))
+            .expect("catalog page succeeds after receipt reclamation");
+        assert_eq!(page.items().len(), 1);
+        assert_eq!(page.items()[0].active_generation(), Some(second.generation));
+        assert_eq!(page.items()[0].generation_count(), 2);
     }
 
     fn logical_component(

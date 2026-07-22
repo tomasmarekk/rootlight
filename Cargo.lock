@@ -2242,6 +2242,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "getrandom 0.3.4",
+ "proptest",
  "rootlight-adapter-sdk",
  "rootlight-adapter-treesitter",
  "rootlight-cancel",
@@ -2261,6 +2262,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "unicode-casefold",
+ "unicode-normalization",
 ]
 
 [[package]]
