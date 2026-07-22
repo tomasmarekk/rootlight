@@ -5749,6 +5749,140 @@ async fn repo_status_propagates_actionable_missing_generation() {
 }
 
 #[tokio::test]
+async fn repo_status_lifecycle_states_and_errors_match_the_versioned_golden() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/mcp/repository-lifecycle/status-goldens-v1.json"
+    ))
+    .expect("repository status lifecycle golden is valid JSON");
+    assert_eq!(
+        fixture["schema"],
+        "rootlight.repository-status-lifecycle-goldens/1"
+    );
+
+    for case in fixture["success_cases"]
+        .as_array()
+        .expect("success cases are an array")
+    {
+        let mut status = repository_status_response();
+        status.state = case["state"]
+            .as_str()
+            .expect("success state is a string")
+            .to_owned();
+        status.structural_freshness = case["structural_freshness"]
+            .as_str()
+            .expect("structural freshness is a string")
+            .to_owned();
+        status.semantic_freshness = case["semantic_freshness"]
+            .as_str()
+            .expect("semantic freshness is a string")
+            .to_owned();
+        if let Some(operation_state) = case["operation_state"].as_str() {
+            let state = match operation_state {
+                "running" => client::OperationState::Running,
+                _ => panic!("unsupported operation state in lifecycle golden"),
+            };
+            status.operations.push(RepositoryStatusOperation {
+                operation: operation(),
+                kind: client::OperationKind::RepositoryIndex,
+                state,
+                completed_units: 1,
+                total_units: 2,
+                owned_by_client: true,
+                started_unix_ms: 1,
+            });
+        }
+        let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(status)));
+        let output: RepoStatusOutput = decode(
+            execute(
+                &harness.executor,
+                VerticalTool::RepoStatus,
+                json!({
+                    "repository": {"repository_id": repository()},
+                    "include_operations": true
+                }),
+            )
+            .await
+            .expect("golden lifecycle state maps"),
+        );
+        let ToolResponse::Success(output) = output else {
+            panic!("expected repository status success");
+        };
+        let observed = json!({
+            "repository_state": output.data.repository_state,
+            "warnings": output.warnings,
+            "recommended_actions": output.data.recommended_actions,
+        });
+        assert_eq!(
+            observed,
+            case["expected"],
+            "lifecycle success golden differs for {}",
+            case["name"].as_str().expect("case name is a string")
+        );
+    }
+
+    for case in fixture["error_cases"]
+        .as_array()
+        .expect("error cases are an array")
+    {
+        let (code, message, action) =
+            match case["error_kind"].as_str().expect("error kind is a string") {
+                "missing" => (
+                    ErrorCode::StaleGeneration,
+                    "generation is not retained",
+                    NextAction::RestartEnumeration,
+                ),
+                "corrupt" => (
+                    ErrorCode::IndexCorrupt,
+                    "repository index is corrupt",
+                    NextAction::RebuildRepository,
+                ),
+                "incompatible" => (
+                    ErrorCode::MigrationRequired,
+                    "stored data requires migration",
+                    NextAction::RebuildRepository,
+                ),
+                _ => panic!("unsupported error kind in lifecycle golden"),
+            };
+        let public = PublicError::builder(code, message)
+            .repository(repository())
+            .generation(generation())
+            .next_action(action)
+            .build()
+            .expect("lifecycle error fixture is valid");
+        let harness = Harness::new(FakeOutcome::RepositoryStatus(Err(ClientPortError::Public(
+            Box::new(public),
+        ))));
+        let error = execute(
+            &harness.executor,
+            VerticalTool::RepoStatus,
+            json!({
+                "repository": {"repository_id": repository()},
+                "generation": generation()
+            }),
+        )
+        .await
+        .expect_err("exceptional exact generation remains a checked error");
+        let public = error
+            .public_error()
+            .expect("exceptional lifecycle failure remains public");
+        let observed = json!({
+            "code": public.code(),
+            "message": public.message(),
+            "retryable": public.retryable(),
+            "repository_bound": public.repository() == Some(repository()),
+            "generation_bound": public.generation() == Some(generation()),
+            "next_actions": public.next_actions(),
+        });
+        assert_eq!(
+            observed,
+            case["expected"],
+            "lifecycle error golden differs for {}",
+            case["name"].as_str().expect("case name is a string")
+        );
+    }
+}
+
+#[tokio::test]
 async fn symbol_relationships_maps_groups_and_totals() {
     let response = SymbolRelationshipsPortResponse::new(
         ClientRelationships {
