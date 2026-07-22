@@ -118,24 +118,15 @@ fn every_advertised_batch_subtool_reaches_its_production_adapter() {
         let result = &results[0];
         assert_eq!(result["id"], format!("adapter_{index}"));
         assert_eq!(result["tool"], descriptor.batch_tool.name());
-        if result["status"] == "ok" {
-            assert!(result["data"].is_object());
-        } else if matches!(
-            descriptor.batch_tool,
-            BatchTool::SymbolExplain | BatchTool::ContextPack
-        ) && result["error"]["code"] == "NOT_FOUND"
-        {
-            assert!(
-                result["error"]["details"].is_object(),
-                "stable domain errors retain structured details"
-            );
-        } else {
+        if result["status"] != "ok" {
             failures.push(format!(
                 "{}: operation {} ({result})",
                 descriptor.batch_tool.name(),
                 result["error"]["code"]
             ));
+            continue;
         }
+        assert!(result["data"].is_object());
     }
     assert!(
         failures.is_empty(),
@@ -155,7 +146,15 @@ fn process_preflight_rejects_non_subtools_and_profile_hidden_members() {
         &fixture.path().join("runtime-developer"),
         "developer",
     );
-    for forbidden in ["query.batch", "repo.index", "operation.status"] {
+    for forbidden in [
+        "query.batch",
+        "repo.index",
+        "repo.list",
+        "repo.status",
+        "operation.status",
+        "history.compare",
+        "query.advanced",
+    ] {
         let response = developer.call(
             &format!("forbidden-{forbidden}"),
             "query.batch",
