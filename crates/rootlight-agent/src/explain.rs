@@ -40,6 +40,12 @@ const DEAD_COST_PER_CANDIDATE: u64 = 18;
 /// Estimated cost units per planned comparison result for `history.compare`.
 const HISTORY_COST_PER_RESULT: u64 = 22;
 
+/// Estimated cost units per planned step for `plan.change`.
+const PLAN_COST_PER_STEP: u64 = 50;
+
+/// Estimated cost units per planned target for `plan.change`.
+const PLAN_COST_PER_TARGET: u64 = 15;
+
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
@@ -214,6 +220,24 @@ pub fn history_compare_plan(max_results: Option<u16>) -> PlanExplanation {
     }
 }
 
+/// Builds the source-free `plan.change` plan for explain mode.
+///
+/// `max_steps` and `target_count` bound the planned change planning and drive
+/// the cost estimate.
+#[must_use]
+pub fn plan_change_plan(max_steps: Option<u8>, target_count: usize) -> PlanExplanation {
+    let steps = u64::from(max_steps.unwrap_or(10));
+    let targets = u64::try_from(target_count).unwrap_or(u64::MAX);
+    let cost = steps
+        .saturating_mul(PLAN_COST_PER_STEP)
+        .saturating_add(targets.saturating_mul(PLAN_COST_PER_TARGET));
+    PlanExplanation {
+        estimated_cost: cost,
+        operators: vec!["change_planning".to_owned()],
+        applied_limits: vec![format!("max_steps: {steps}"), format!("targets: {targets}")],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::code_locate_plan;
@@ -343,5 +367,17 @@ mod tests {
         let plan = history_compare_plan(Some(30));
         assert_eq!(plan.operators, vec!["revision_comparison".to_owned()]);
         assert_eq!(plan.applied_limits, vec!["max_results: 30".to_owned()]);
+    }
+
+    #[test]
+    fn plan_change_plan_is_deterministic_and_bounded() {
+        use super::plan_change_plan;
+        assert_eq!(plan_change_plan(Some(5), 2), plan_change_plan(Some(5), 2));
+        let plan = plan_change_plan(Some(5), 2);
+        assert_eq!(plan.operators, vec!["change_planning".to_owned()]);
+        assert_eq!(
+            plan.applied_limits,
+            vec!["max_steps: 5".to_owned(), "targets: 2".to_owned()]
+        );
     }
 }

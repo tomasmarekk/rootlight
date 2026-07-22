@@ -782,6 +782,9 @@ pub struct PlanChangeInput {
     /// Requested response profile.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<ResponseProfile>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
 }
 
 /// One ordered step in a change plan.
@@ -866,6 +869,9 @@ pub struct PlanChangeData {
     pub open_decisions: Vec<PlanDecision>,
     /// Ready follow-up context pack arguments.
     pub context_pack_request: ContextPackRequest,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
 }
 
 /// Checked success-or-error output for `plan.change`.

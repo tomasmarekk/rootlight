@@ -32,6 +32,10 @@
       "maxItems": 32,
       "minItems": 1
     },
+    "explain": {
+      "description": "Return the bounded plan without executing retrieval.",
+      "type": "boolean"
+    },
     "generation": {
       "description": "Generation to plan against.",
       "anyOf": [

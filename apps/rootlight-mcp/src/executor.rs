@@ -4041,6 +4041,55 @@ fn ir_entity_kind_from_label(label: &str) -> Result<IrEntityKind, ToolExecutionE
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
 
+/// Builds the source-free `plan.change` plan without executing retrieval.
+///
+/// Only repository metadata is read (to pin the generation); no change planning
+/// runs. A single marked placeholder step keeps the bounded plan schema-valid.
+async fn explain_plan_change<P>(
+    port: Arc<P>,
+    request: PlanChangePortRequest,
+    cancellation: RequestCancellation,
+) -> Result<ReadEnvelope<PlanChangeData>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let status_request = RepositoryStatusPortRequest::new(request.repository, request.generation);
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let target_count = request
+        .target_symbols
+        .len()
+        .saturating_add(request.target_files.len());
+    let explanation = rootlight_agent::explain::plan_change_plan(request.max_steps, target_count);
+    let data = PlanChangeData {
+        plan: vec![ChangePlanStep {
+            step: 1,
+            action: "explain_only_no_change_planning_executed".to_owned(),
+            targets: Vec::new(),
+            depends_on: Vec::new(),
+            risks: Vec::new(),
+            verification: None,
+        }],
+        affected_scope: PlanImpactSummary {
+            affected_symbols: 0,
+            affected_files: 0,
+            risk_level: RiskLevel::None,
+            touches_public_surface: false,
+        },
+        test_plan: Vec::new(),
+        open_decisions: Vec::new(),
+        context_pack_request: ContextPackRequest {
+            symbols: Vec::new(),
+            files: Vec::new(),
+        },
+        explanation: Some(explanation),
+    };
+    explain_envelope_from_status(status, data)
+}
+
 async fn execute_plan_change<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -4051,7 +4100,12 @@ where
     P: FirstSliceClientPort,
 {
     let input: PlanChangeInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     let request = normalize_plan_change(input, unsupported)?;
+    if explain_only {
+        let output = explain_plan_change(port, request, cancellation).await?;
+        return serialize_success(output);
+    }
     let expected = request.clone();
     let future = port.plan_change(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -4167,6 +4221,7 @@ fn map_plan_change(
             symbols: pack.symbols,
             files: pack.files,
         },
+        explanation: None,
     };
     map_read_envelope(response.result.context, response.metadata, data, false)
 }

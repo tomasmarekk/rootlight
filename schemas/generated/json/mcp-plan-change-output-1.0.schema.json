@@ -563,6 +563,17 @@
           "description": "Ready follow-up context pack arguments.",
           "$ref": "#/$defs/ContextPackRequest"
         },
+        "explanation": {
+          "description": "Bounded source-free plan present when explain was requested.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanExplanation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "open_decisions": {
           "description": "Open decisions requiring user input.",
           "type": "array",
@@ -619,6 +630,45 @@
       "required": [
         "question",
         "recommended_default"
+      ]
+    },
+    "PlanExplanation": {
+      "description": "Explainable cost and plan for an advanced query execution.",
+      "type": "object",
+      "properties": {
+        "applied_limits": {
+          "description": "Applied limit descriptions.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1
+          },
+          "maxItems": 16
+        },
+        "estimated_cost": {
+          "description": "Estimated total cost units for the query plan.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 10000000,
+          "minimum": 0
+        },
+        "operators": {
+          "description": "Ordered operator names in the physical plan.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "maxItems": 64
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "estimated_cost",
+        "operators",
+        "applied_limits"
       ]
     },
     "PlanImpactSummary": {
