@@ -6,14 +6,21 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rootlight_mcp_contract::MCP_SCHEMA_VERSION;
 use rootlight_mcp_contract::accounting::tool_list_payload;
 use rootlight_mcp_contract::capability::{DISCOVERY_METADATA_KEY, capability_for};
 use rootlight_mcp_contract::catalog::{ExposureProfile, McpTool};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const REPORT_SCHEMA: &str = "rootlight.mcp-tool-discovery-evidence/1";
 const BASELINE_REVISION: &str = "41a39be6d5c00f40afc8412c6d7de293b76c43ab";
+const REPO_LIST_V1_INPUT_SCHEMA: &str =
+    include_str!("../../schemas/generated/json/mcp-repo-list-input-1.0.schema.json");
+const REPO_LIST_V1_OUTPUT_SCHEMA: &str =
+    include_str!("../../schemas/generated/json/mcp-repo-list-output-1.0.schema.json");
+const REPO_LIST_V1_INPUT_SHAPE_HASH: &str =
+    "5f2a9e3fe96343fa1e75e8c4151d07cbc38ca6b1935ee7a8fadfd9defa9759b7";
 
 /// Source-bound artifact options for discovery evidence.
 pub(crate) struct Options {
@@ -164,6 +171,9 @@ fn baseline_payload(profile: ExposureProfile) -> Result<Value, DiscoveryError> {
                 .ok_or(DiscoveryError::InvalidPayload)?
                 .insert("idempotentHint".to_owned(), Value::Bool(true));
         }
+        if tool == McpTool::RepoList {
+            restore_repo_list_baseline(object)?;
+        }
         let capability = object
             .get_mut("_meta")
             .and_then(Value::as_object_mut)
@@ -202,6 +212,67 @@ fn baseline_payload(profile: ExposureProfile) -> Result<Value, DiscoveryError> {
         });
     }
     Ok(payload)
+}
+
+fn restore_repo_list_baseline(
+    definition: &mut serde_json::Map<String, Value>,
+) -> Result<(), DiscoveryError> {
+    definition.insert(
+        "inputSchema".to_owned(),
+        serde_json::from_str(REPO_LIST_V1_INPUT_SCHEMA)?,
+    );
+    definition.insert(
+        "outputSchema".to_owned(),
+        serde_json::from_str(REPO_LIST_V1_OUTPUT_SCHEMA)?,
+    );
+    let metadata = definition
+        .get_mut("_meta")
+        .and_then(Value::as_object_mut)
+        .ok_or(DiscoveryError::InvalidPayload)?;
+    metadata.insert(
+        DISCOVERY_METADATA_KEY.to_owned(),
+        json!({
+            "contractVersion": MCP_SCHEMA_VERSION,
+            "inputShapeHash": REPO_LIST_V1_INPUT_SHAPE_HASH,
+            "status": "fallback_limited",
+            "profiles": ["developer"],
+            "batchEligible": false,
+            "explainSupported": true,
+            "pagination": "authenticated_cursor",
+            "generation": "none",
+            "budget": "none",
+            "batchSharedBudget": false,
+            "fallbackSummary": baseline_fallback_summary(McpTool::RepoList),
+            "limitations": [
+                {
+                    "field": "query",
+                    "status": "blocked",
+                    "summary": "query is cursor-bound but does not filter opaque repository identities"
+                },
+                {
+                    "field": "states",
+                    "status": "unsupported_stable_error",
+                    "errorCode": "UNSUPPORTED_CAPABILITY",
+                    "summary": "repository-state filtering is not served"
+                },
+                {
+                    "field": "response_profile",
+                    "value": "evidence",
+                    "status": "unsupported_stable_error",
+                    "errorCode": "UNSUPPORTED_CAPABILITY",
+                    "summary": "only compact response projection is served"
+                },
+                {
+                    "field": "response_profile",
+                    "value": "standard",
+                    "status": "unsupported_stable_error",
+                    "errorCode": "UNSUPPORTED_CAPABILITY",
+                    "summary": "only compact response projection is served"
+                }
+            ]
+        }),
+    );
+    Ok(())
 }
 
 const fn baseline_hash(profile: ExposureProfile) -> &'static str {
@@ -429,5 +500,46 @@ mod tests {
                 profile.name()
             );
         }
+    }
+
+    #[test]
+    fn reconstructed_repo_list_retains_v1_while_the_catalog_serves_v2() {
+        let historical =
+            baseline_payload(ExposureProfile::Developer).expect("baseline payload reconstructs");
+        let historical = repo_list_definition(&historical);
+        let expected_input: Value =
+            serde_json::from_str(REPO_LIST_V1_INPUT_SCHEMA).expect("v1 input schema is valid");
+        let expected_output: Value =
+            serde_json::from_str(REPO_LIST_V1_OUTPUT_SCHEMA).expect("v1 output schema is valid");
+        assert_eq!(historical["inputSchema"], expected_input);
+        assert_eq!(historical["outputSchema"], expected_output);
+        assert_eq!(
+            historical["_meta"][DISCOVERY_METADATA_KEY]["contractVersion"],
+            MCP_SCHEMA_VERSION
+        );
+
+        let current = tool_list_payload(ExposureProfile::Developer);
+        let current = repo_list_definition(&current);
+        assert_eq!(
+            current["_meta"][DISCOVERY_METADATA_KEY]["contractVersion"],
+            rootlight_mcp_contract::REPO_LIST_SCHEMA_VERSION
+        );
+        assert_eq!(
+            current["inputSchema"]["$id"],
+            "https://rootlight.local/schema/mcp/repo.list/input/2.0"
+        );
+        assert_eq!(
+            current["outputSchema"]["$id"],
+            "https://rootlight.local/schema/mcp/repo.list/output/2.0"
+        );
+    }
+
+    fn repo_list_definition(payload: &Value) -> &Value {
+        payload["tools"]
+            .as_array()
+            .expect("tools list is an array")
+            .iter()
+            .find(|definition| definition["name"] == McpTool::RepoList.name())
+            .expect("developer payload contains repo.list")
     }
 }

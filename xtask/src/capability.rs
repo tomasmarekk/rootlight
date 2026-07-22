@@ -150,11 +150,13 @@ fn validate_catalog_parity(registry: &[ToolCapability], problems: &mut Vec<Probl
 
 fn validate_contract_version(registry: &[ToolCapability], problems: &mut Vec<Problem>) {
     for entry in registry {
-        if entry.contract_version != MCP_SCHEMA_VERSION {
+        let expected = entry.tool.contract_version();
+        if entry.contract_version != expected {
             problems.push(Problem::new(
                 entry.tool.name(),
                 ProblemKind::ContractVersion {
-                    version: entry.contract_version.to_owned(),
+                    expected: expected.to_owned(),
+                    observed: entry.contract_version.to_owned(),
                 },
             ));
         }
@@ -1329,7 +1331,8 @@ enum ProblemKind {
         expected: String,
     },
     ContractVersion {
-        version: String,
+        expected: String,
+        observed: String,
     },
     DiscoveryDescriptionDrift {
         summary: String,
@@ -1436,9 +1439,9 @@ impl std::fmt::Display for Problem {
                     "registry position {position} should be {expected}"
                 )
             }
-            ProblemKind::ContractVersion { version } => write!(
+            ProblemKind::ContractVersion { expected, observed } => write!(
                 formatter,
-                "contract_version {version} does not match {MCP_SCHEMA_VERSION}"
+                "contract_version {observed} does not match {expected}"
             ),
             ProblemKind::DiscoveryDescriptionDrift { summary } => write!(
                 formatter,
@@ -2118,13 +2121,9 @@ mod tests {
                 .iter()
                 .all(|case| { case["observation"] == "not_run" && case["verdict"] == "unknown" })
         );
-        for blocked_case in [
-            "repo.list::query",
-            "query.batch::operations[].local_budget.max_tokens",
-        ] {
-            assert!(cases.iter().any(|case| {
-                case["id"] == blocked_case && case["expectedDisposition"] == "blocked"
-            }));
-        }
+        assert!(cases.iter().any(|case| {
+            case["id"] == "query.batch::operations[].local_budget.max_tokens"
+                && case["expectedDisposition"] == "blocked"
+        }));
     }
 }

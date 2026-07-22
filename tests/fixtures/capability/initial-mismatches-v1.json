@@ -15,13 +15,6 @@
       "schemaDisposition": "accepted",
       "runtimeDisposition": "not_propagated",
       "currentRegistryDisposition": "blocked"
-    },
-    {
-      "tool": "repo.list",
-      "capability": "query",
-      "schemaDisposition": "accepted",
-      "runtimeDisposition": "not_applied",
-      "currentRegistryDisposition": "blocked"
     }
   ]
 }
