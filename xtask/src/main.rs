@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod architecture;
+mod budget_conformance;
 mod capability;
 mod daemon_lifecycle;
 mod disposition;
@@ -49,6 +50,10 @@ fn run() -> Result<(), XtaskError> {
         Some("architecture-check") | Some("architecture") => {
             let fixture_root = parse_fixture_root(&mut args)?;
             architecture::check(fixture_root.as_deref())?;
+        }
+        Some("budget-conformance-check") => {
+            let options = budget_conformance::Options::parse(&mut args)?;
+            budget_conformance::check(&options)?;
         }
         Some("id-vectors") => ids::print_vectors()?,
         Some("generate") | Some("schemas") => {
@@ -188,7 +193,7 @@ fn git_metadata_command(args: &mut impl Iterator<Item = String>) -> Result<(), X
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|response-profile-check [--fixture-root PATH] [--refresh]|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|budget-conformance-check [--fixture-root PATH] [--refresh]|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|response-profile-check [--fixture-root PATH] [--refresh]|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -209,6 +214,8 @@ enum XtaskError {
     WorkingDir(#[source] std::io::Error),
     #[error(transparent)]
     Architecture(#[from] architecture::ArchitectureError),
+    #[error(transparent)]
+    BudgetConformance(#[from] budget_conformance::BudgetConformanceError),
     #[error(transparent)]
     Capability(#[from] capability::CapabilityError),
     #[error(transparent)]
