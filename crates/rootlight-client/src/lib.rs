@@ -31,10 +31,11 @@ use rootlight_observability::{
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
-    MAX_FIRST_SLICE_BUDGET_DEPTH, MAX_FIRST_SLICE_BUDGET_DURATION_MICROS,
-    MAX_FIRST_SLICE_BUDGET_EDGES, MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS,
-    MAX_FIRST_SLICE_BUDGET_JSON_BYTES, MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES,
-    MAX_FIRST_SLICE_BUDGET_PATHS, MAX_FIRST_SLICE_BUDGET_RESULTS, MAX_FIRST_SLICE_BUDGET_ROWS,
+    MAX_CODE_DEAD_CLASSIFICATION_BYTES, MAX_FIRST_SLICE_BUDGET_DEPTH,
+    MAX_FIRST_SLICE_BUDGET_DURATION_MICROS, MAX_FIRST_SLICE_BUDGET_EDGES,
+    MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS, MAX_FIRST_SLICE_BUDGET_JSON_BYTES,
+    MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES, MAX_FIRST_SLICE_BUDGET_PATHS,
+    MAX_FIRST_SLICE_BUDGET_RESULTS, MAX_FIRST_SLICE_BUDGET_ROWS,
     MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES, MINIMUM_PROTOCOL_MINOR,
     generated::{common::v1 as common, daemon::v1 as daemon},
 };
@@ -7656,7 +7657,7 @@ fn parse_code_dead(
         .map_err(|_| ClientError::ResponseAllocationFailed)?;
     for candidate in response.candidates {
         if candidate.classification.is_empty()
-            || candidate.classification.len() > 32
+            || candidate.classification.len() > MAX_CODE_DEAD_CLASSIFICATION_BYTES
             || candidate.confidence > 1_000
             || candidate.why.is_empty()
             || candidate.why.len() > 16
@@ -9984,6 +9985,36 @@ mod tests {
 
     fn wire_source(reference: &SourceReference) -> daemon::FirstSliceSourceRef {
         source_reference_to_wire(reference)
+    }
+
+    #[test]
+    fn code_dead_parser_accepts_the_longest_stable_classification() {
+        let classification = "not_observed_from_entry_points_strong_references";
+        assert!(classification.len() <= MAX_CODE_DEAD_CLASSIFICATION_BYTES);
+        let response = daemon::CodeDeadResponse {
+            schema_version: Some(first_slice_schema()),
+            context: Some(wire_query_context(1, 0)),
+            candidates: vec![daemon::FirstSliceDeadCandidate {
+                symbol_id: Some(symbol_to_wire(SymbolId::from_bytes([4; 20]))),
+                classification: classification.to_owned(),
+                confidence: 1_000,
+                why: vec!["reachability".to_owned()],
+                suppressions_checked: Vec::new(),
+                source_refs: Vec::new(),
+            }],
+            entry_points: Some(daemon::FirstSliceEntryPointSummary {
+                policy: "standard".to_owned(),
+                entry_point_count: 1,
+                complete: true,
+            }),
+            blind_spots: Vec::new(),
+            false_positive_controls: Vec::new(),
+            completeness: None,
+        };
+
+        let parsed = parse_code_dead(response, test_repository(), GenerationSelector::Active)
+            .expect("the stable classification parses");
+        assert_eq!(parsed.candidates[0].classification, classification);
     }
 
     fn wire_operation(operation: OperationId) -> daemon::OperationStatus {

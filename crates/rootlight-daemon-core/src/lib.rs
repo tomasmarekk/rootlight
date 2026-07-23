@@ -43,10 +43,11 @@ use rootlight_operations::{
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
-    MAX_FIRST_SLICE_BUDGET_DEPTH, MAX_FIRST_SLICE_BUDGET_DURATION_MICROS,
-    MAX_FIRST_SLICE_BUDGET_EDGES, MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS,
-    MAX_FIRST_SLICE_BUDGET_JSON_BYTES, MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES,
-    MAX_FIRST_SLICE_BUDGET_PATHS, MAX_FIRST_SLICE_BUDGET_RESULTS, MAX_FIRST_SLICE_BUDGET_ROWS,
+    MAX_CODE_DEAD_CLASSIFICATION_BYTES, MAX_FIRST_SLICE_BUDGET_DEPTH,
+    MAX_FIRST_SLICE_BUDGET_DURATION_MICROS, MAX_FIRST_SLICE_BUDGET_EDGES,
+    MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS, MAX_FIRST_SLICE_BUDGET_JSON_BYTES,
+    MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES, MAX_FIRST_SLICE_BUDGET_PATHS,
+    MAX_FIRST_SLICE_BUDGET_RESULTS, MAX_FIRST_SLICE_BUDGET_ROWS,
     MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES, MINIMUM_PROTOCOL_MINOR, PROTOCOL_VERSION,
     generated::{common::v1 as common, daemon::v1 as daemon},
 };
@@ -6414,7 +6415,7 @@ fn first_slice_response_correlates(
                 && response.candidates.iter().all(|candidate| {
                     wire_id_has_len(candidate.symbol_id.as_ref().map(|id| &id.value), 20)
                         && !candidate.classification.is_empty()
-                        && candidate.classification.len() <= 32
+                        && candidate.classification.len() <= MAX_CODE_DEAD_CLASSIFICATION_BYTES
                         && candidate.confidence <= 1_000
                         && !candidate.why.is_empty()
                         && candidate.why.len() <= 16
@@ -14899,6 +14900,49 @@ mod tests {
             start_line: Some(1),
             end_line: Some(1),
         }
+    }
+
+    #[test]
+    fn code_dead_correlation_accepts_the_longest_stable_classification() {
+        let repository = common::RepositoryId { value: vec![1; 16] };
+        let generation = common::GenerationId { value: vec![2; 20] };
+        let schema = common::ContractVersion { major: 1, minor: 0 };
+        let request = FirstSliceIpcRequest::CodeDead(daemon::CodeDeadRequest {
+            schema_version: Some(schema),
+            repository: Some(repository.clone()),
+            generation: Some(daemon::GenerationSelector {
+                selector: Some(daemon::generation_selector::Selector::Active(true)),
+            }),
+            entry_point_policy: None,
+            include_exported: None,
+            include_tests: None,
+            min_confidence: None,
+            max_candidates: None,
+        });
+        let classification = "not_observed_from_entry_points_strong_references";
+        assert!(classification.len() <= MAX_CODE_DEAD_CLASSIFICATION_BYTES);
+        let response = FirstSliceIpcResponse::CodeDead(daemon::CodeDeadResponse {
+            schema_version: Some(schema),
+            context: Some(correlation_context(&repository, &generation, 1, 0)),
+            candidates: vec![daemon::FirstSliceDeadCandidate {
+                symbol_id: Some(common::SymbolId { value: vec![3; 20] }),
+                classification: classification.to_owned(),
+                confidence: 1_000,
+                why: vec!["reachability".to_owned()],
+                suppressions_checked: Vec::new(),
+                source_refs: Vec::new(),
+            }],
+            entry_points: Some(daemon::FirstSliceEntryPointSummary {
+                policy: "standard".to_owned(),
+                entry_point_count: 1,
+                complete: true,
+            }),
+            blind_spots: Vec::new(),
+            false_positive_controls: Vec::new(),
+            completeness: None,
+        });
+
+        assert!(first_slice_response_correlates(&request, &response));
     }
 
     #[test]
