@@ -799,9 +799,11 @@ pub struct ChangePlanStep {
     #[schemars(length(min = 1, max = 1024))]
     pub action: String,
     /// Source-free explanation of why this step follows from the available evidence.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     #[schemars(length(min = 1, max = 1024))]
     pub rationale: String,
     /// Evidence records that support this step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(
         length(max = 16),
         inner(length(min = 1, max = 128), regex(pattern = "^[a-z0-9_.:-]+$"))
@@ -996,6 +998,7 @@ pub struct PlanChangeData {
     /// Ready follow-up context pack arguments.
     pub context_pack_request: ContextPackRequest,
     /// Deterministically ordered provider coverage and omission records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(min = 7, max = 7))]
     pub provider_coverage: Vec<PlanProviderCoverage>,
     /// Bounded source-free plan present when explain was requested.
