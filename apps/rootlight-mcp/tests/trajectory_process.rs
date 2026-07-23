@@ -14,17 +14,19 @@ use std::{
 };
 
 use rootlight_bench::{
-    BoundedFileExplorationAdapter, O200kTrajectoryTokenizer, RawTrajectoryAttempt,
-    RawTrajectoryCall, TrajectoryAdapter, TrajectoryAttemptOutcome, TrajectoryClaimSignals,
-    TrajectoryCondition, TrajectoryExecutionBoundary, TrajectoryExecutionInput,
-    TrajectoryExposureProfile, TrajectoryOperationStatus, TrajectoryToolIdentity,
-    UnavailableTrajectoryAdapter, encode_trajectory_evidence, preregistered_trajectory_protocol,
+    AblationBlindingKey, AblationDecision, BoundedFileExplorationAdapter, O200kTrajectoryTokenizer,
+    RawTrajectoryAttempt, RawTrajectoryCall, TrajectoryAdapter, TrajectoryAttemptOutcome,
+    TrajectoryClaimSignals, TrajectoryCondition, TrajectoryExecutionBoundary,
+    TrajectoryExecutionInput, TrajectoryExposureProfile, TrajectoryOperationStatus,
+    TrajectoryToolIdentity, UnavailableTrajectoryAdapter, encode_context_pack_ablation,
+    encode_trajectory_evidence, preregistered_trajectory_protocol, produce_context_pack_ablation,
     run_trajectory_suite,
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 const REPORT_ENV: &str = "ROOTLIGHT_TRAJECTORY_REPORT";
+const ABLATION_REPORT_ENV: &str = "ROOTLIGHT_ABLATION_REPORT";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -114,15 +116,56 @@ fn preregistered_trajectories_run_through_daemon_and_mcp_processes() {
                     && call.accounting.total.actual_tokens.is_some()
             })
     );
+    let ablation = produce_context_pack_ablation(
+        &package,
+        &AblationBlindingKey::new([0x48; 32]),
+        &source_revision(),
+        vec![],
+    )
+    .expect("real trajectory package produces truthful ablation evidence");
+    assert!(matches!(
+        ablation.aggregate.decision,
+        AblationDecision::Blocked { .. }
+    ));
+    assert_eq!(ablation.aggregate.expected_pairs, 2);
+    assert_eq!(ablation.aggregate.complete_quality_pairs, 0);
 
     if let Some(path) = std::env::var_os(REPORT_ENV) {
         let encoded =
             encode_trajectory_evidence(&package).expect("retained trajectory evidence encodes");
         fs::write(path, encoded).expect("trajectory evidence report is written");
     }
+    if let Some(path) = std::env::var_os(ABLATION_REPORT_ENV) {
+        let encoded = encode_context_pack_ablation(&ablation).expect("ablation evidence encodes");
+        fs::write(path, encoded).expect("ablation evidence report is written");
+    }
     drop(rootlight);
     mcp.finish();
     daemon.finish();
+}
+
+fn source_revision() -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .expect("git source revision command starts");
+    assert!(
+        output.status.success(),
+        "git source revision command succeeds"
+    );
+    let revision = String::from_utf8(output.stdout)
+        .expect("git source revision is UTF-8")
+        .trim()
+        .to_owned();
+    assert!(
+        matches!(revision.len(), 40 | 64)
+            && revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "git source revision is canonical"
+    );
+    revision
 }
 
 struct RootlightProcessAdapter<'a> {
