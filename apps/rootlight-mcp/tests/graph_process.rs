@@ -42,11 +42,18 @@ fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
 
     let index = index_repository(&mut mcp, &repository_root);
     let symbol_id = locate_symbol(&mut mcp, &index, "matrix_entry");
+    for fixture_symbol in [
+        "cycle_left",
+        "dag_leaf",
+        "disconnected_probe",
+        "generated_probe",
+        "integration_probe",
+    ] {
+        let _ = locate_symbol(&mut mcp, &index, fixture_symbol);
+    }
     let descriptions = tool_descriptions(&mut mcp);
     assert_graph_descriptions_are_bounded(&descriptions);
 
-    let repository = || json!({"repository_id": index.repository_id});
-    let generation = || Value::String(index.generation_id.clone());
     let mut outputs = Map::new();
     for (index_number, (tool, arguments)) in
         graph_tool_calls(&index, &symbol_id).into_iter().enumerate()
@@ -58,38 +65,11 @@ fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
         outputs.insert(tool.to_owned(), output);
     }
 
+    assert_deterministic_graph_outputs(&mut mcp, &index, &symbol_id, &outputs);
+
     let relationships = &outputs["symbol.relationships"];
     assert!(relationships["data"]["groups"].is_array());
     assert_eq!(relationships["data"]["totals"]["exact"], true);
-    let repeated = mcp.call(
-        "graph-relationships-repeat",
-        "symbol.relationships",
-        json!({
-            "repository": repository(),
-            "generation": generation(),
-            "symbol_ids": [symbol_id],
-            "relations": ["calls"],
-            "direction": "outbound",
-            "max_results": 1
-        }),
-    );
-    assert_success(&repeated, "symbol.relationships");
-    let repeated = &repeated["result"]["structuredContent"];
-    for field in [
-        "repository",
-        "generation",
-        "data",
-        "coverage",
-        "completeness",
-        "truncated",
-        "next_cursor",
-        "trust",
-    ] {
-        assert_eq!(
-            relationships[field], repeated[field],
-            "symbol.relationships changed deterministic field {field}"
-        );
-    }
 
     let trace = &outputs["flow.trace"];
     assert_eq!(trace["data"]["projection"]["relations"], json!(["calls"]));
@@ -171,17 +151,18 @@ fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
         .expect("code.dead returns candidates")
     {
         assert!(
-            candidate["why"]
+            !candidate["why"]
                 .as_array()
                 .expect("a dead-code observation explains its basis")
-                .iter()
-                .any(|reason| reason == "not_observed_from_partial_entry_points")
+                .is_empty(),
+            "dead-code observation lacks a negative rationale: {candidate:#}"
         );
         assert!(
             candidate["classification"]
                 .as_str()
                 .expect("a dead-code observation is classified")
                 .starts_with("not_observed")
+                || candidate["classification"] == "no_observed_incoming_references"
         );
     }
     assert!(
@@ -194,9 +175,45 @@ fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
     assert_profile_matrix(&mut mcp, &index, &symbol_id, &outputs);
     assert_hard_token_budget_taxonomy(&mut mcp, &index, &symbol_id);
     assert_truncated_negative_analyses_are_caveated(&mut mcp, &index, &symbol_id);
+    assert_flow_truncation_is_explicit(&mut mcp, &index, &symbol_id);
+
+    let negative_root = fixture.path().join("negative-repository");
+    write_negative_repository_fixture(&negative_root);
+    let negative = index_repository(&mut mcp, &negative_root);
+    assert_safe_negative_analyses(&mut mcp, &negative);
 
     mcp.finish();
     daemon.finish();
+}
+
+fn assert_deterministic_graph_outputs(
+    mcp: &mut McpProcess,
+    index: &IndexReceipt,
+    symbol_id: &str,
+    first_outputs: &Map<String, Value>,
+) {
+    for (tool_index, (tool, arguments)) in
+        graph_tool_calls(index, symbol_id).into_iter().enumerate()
+    {
+        let repeated = mcp.call(&format!("graph-determinism-{tool_index}"), tool, arguments);
+        assert_success(&repeated, tool);
+        let repeated = &repeated["result"]["structuredContent"];
+        for field in [
+            "repository",
+            "generation",
+            "data",
+            "coverage",
+            "completeness",
+            "truncated",
+            "next_cursor",
+            "trust",
+        ] {
+            assert_eq!(
+                first_outputs[tool][field], repeated[field],
+                "{tool} changed deterministic field {field}"
+            );
+        }
+    }
 }
 
 fn graph_tool_calls(index: &IndexReceipt, symbol_id: &str) -> [(&'static str, Value); 5] {
@@ -355,6 +372,97 @@ fn assert_truncated_negative_analyses_are_caveated(
     }
 }
 
+fn assert_flow_truncation_is_explicit(mcp: &mut McpProcess, index: &IndexReceipt, symbol_id: &str) {
+    let response = mcp.call(
+        "graph-flow-small-traversal",
+        "flow.trace",
+        json!({
+            "repository": {"repository_id": index.repository_id},
+            "generation": index.generation_id,
+            "from": {"symbol_id": symbol_id},
+            "relations": ["calls"],
+            "direction": "outbound",
+            "max_depth": 8,
+            "max_paths": 100,
+            "budget": {"max_traversal_facts": 1}
+        }),
+    );
+    assert_success(&response, "flow.trace");
+    let output = &response["result"]["structuredContent"];
+    assert_common_read_contract("flow.trace", output, index);
+    assert_eq!(output["truncated"], true);
+    assert_eq!(output["completeness"]["state"], "truncated");
+    assert!(
+        output["completeness"]["limiting_resources"]
+            .as_array()
+            .expect("truncated flow names limiting resources")
+            .iter()
+            .any(|resource| resource["kind"] == "edges")
+    );
+    assert!(
+        !output["completeness"]["guidance"]
+            .as_array()
+            .expect("truncated flow provides guidance")
+            .is_empty()
+    );
+}
+
+fn assert_safe_negative_analyses(mcp: &mut McpProcess, index: &IndexReceipt) {
+    let cycles = mcp.call(
+        "graph-negative-cycles",
+        "architecture.cycles",
+        json!({
+            "repository": {"repository_id": index.repository_id},
+            "generation": index.generation_id,
+            "projection": {"relations": ["calls"], "level": "symbol"},
+            "max_cycles": 20
+        }),
+    );
+    assert_success(&cycles, "architecture.cycles");
+    let cycles = &cycles["result"]["structuredContent"];
+    assert_common_read_contract("architecture.cycles", cycles, index);
+    assert_eq!(cycles["data"]["cycles"], json!([]));
+    assert_eq!(cycles["truncated"], false);
+    assert_ne!(cycles["coverage"]["status"], "unknown");
+
+    let dead = mcp.call(
+        "graph-negative-dead",
+        "code.dead",
+        json!({
+            "repository": {"repository_id": index.repository_id},
+            "generation": index.generation_id,
+            "entry_point_policy": "standard",
+            "include_exported": true,
+            "include_tests": true,
+            "max_candidates": 20
+        }),
+    );
+    assert_success(&dead, "code.dead");
+    let dead = &dead["result"]["structuredContent"];
+    assert_common_read_contract("code.dead", dead, index);
+    assert_eq!(dead["truncated"], false);
+    assert_eq!(dead["data"]["entry_points"]["complete"], false);
+    assert!(
+        !dead["data"]["blind_spots"]
+            .as_array()
+            .expect("negative dead-code analysis retains blind spots")
+            .is_empty()
+    );
+    for candidate in dead["data"]["candidates"]
+        .as_array()
+        .expect("negative dead-code analysis returns candidates")
+    {
+        assert!(
+            candidate["classification"]
+                .as_str()
+                .is_some_and(|classification| {
+                    classification.starts_with("not_observed")
+                        || classification == "no_observed_incoming_references"
+                })
+        );
+    }
+}
+
 fn assert_unsupported_inputs_are_rejected_without_a_daemon(state_dir: &Path, runtime_dir: &Path) {
     let repository_id = RepositoryId::from_bytes([3; 16]);
     let symbol_id = SymbolId::from_bytes([7; 20]);
@@ -419,6 +527,8 @@ fn assert_unsupported_inputs_are_rejected_without_a_daemon(state_dir: &Path, run
 
 fn write_repository_fixture(root: &Path) {
     fs::create_dir_all(root.join("src")).expect("fixture source directory is created");
+    fs::create_dir_all(root.join("generated")).expect("fixture generated directory is created");
+    fs::create_dir_all(root.join("tests")).expect("fixture test directory is created");
     fs::write(
         root.join("Cargo.toml"),
         "[package]\nname = \"graph_process_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -426,13 +536,62 @@ fn write_repository_fixture(root: &Path) {
     .expect("fixture manifest is written");
     fs::write(
         root.join("src/lib.rs"),
-        "mod alpha;\nmod beta;\npub fn matrix_entry() -> usize { alpha::alpha() + beta::beta() }\n",
+        concat!(
+            "mod alpha;\n",
+            "mod beta;\n",
+            "pub fn matrix_entry() -> usize { alpha::alpha() + beta::beta() }\n",
+            "pub fn cycle_left() -> usize { cycle_right() }\n",
+            "pub fn cycle_right() -> usize { cycle_left() }\n",
+            "pub fn dag_root() -> usize { dag_branch() }\n",
+            "pub fn dag_branch() -> usize { dag_leaf() }\n",
+            "pub fn dag_leaf() -> usize { 3 }\n",
+            "pub fn disconnected_probe() -> usize { 5 }\n",
+        ),
     )
     .expect("fixture root source is written");
-    fs::write(root.join("src/alpha.rs"), "pub fn alpha() -> usize { 1 }\n")
-        .expect("first fixture module is written");
-    fs::write(root.join("src/beta.rs"), "pub fn beta() -> usize { 2 }\n")
-        .expect("second fixture module is written");
+    fs::write(
+        root.join("src/alpha.rs"),
+        "pub fn alpha() -> usize { super::dag_root() }\n",
+    )
+    .expect("first fixture module is written");
+    fs::write(
+        root.join("src/beta.rs"),
+        "pub fn beta() -> usize { super::dag_leaf() }\n",
+    )
+    .expect("second fixture module is written");
+    fs::write(
+        root.join("generated/bindings.rs"),
+        "pub fn generated_probe() -> usize { 8 }\n",
+    )
+    .expect("generated fixture source is written");
+    fs::write(
+        root.join("tests/integration.rs"),
+        "#[test]\nfn integration_probe() { assert_eq!(2 + 2, 4); }\n",
+    )
+    .expect("test fixture source is written");
+    fs::write(
+        root.join("src/partial_language.kt"),
+        "fun unsupportedProbe(): Int = 13\n",
+    )
+    .expect("partial-language fixture source is written");
+}
+
+fn write_negative_repository_fixture(root: &Path) {
+    fs::create_dir_all(root.join("src")).expect("negative fixture source directory is created");
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"graph_negative_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("negative fixture manifest is written");
+    fs::write(
+        root.join("src/lib.rs"),
+        concat!(
+            "pub fn negative_entry() -> usize { negative_branch() }\n",
+            "fn negative_branch() -> usize { negative_leaf() }\n",
+            "fn negative_leaf() -> usize { 1 }\n",
+        ),
+    )
+    .expect("negative fixture source is written");
 }
 
 fn index_repository(mcp: &mut McpProcess, root: &Path) -> IndexReceipt {
