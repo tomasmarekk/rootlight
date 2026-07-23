@@ -3344,6 +3344,12 @@ pub enum FirstSliceError {
     /// Normalized SQLite persistence or verification failed.
     #[error("first-slice oracle failed")]
     Catalog,
+    /// A retained generation failed integrity validation.
+    #[error("first-slice oracle is corrupt")]
+    CatalogCorrupt,
+    /// A retained generation uses an unsupported storage schema.
+    #[error("first-slice oracle requires migration")]
+    CatalogMigrationRequired,
     /// Lexical projection, construction, or validation failed.
     #[error("first-slice search failed")]
     Search,
@@ -4349,14 +4355,22 @@ fn map_catalog_error(error: &CatalogError, cancellation: &Cancellation) -> First
     if let Some(cancelled) = current_cancellation(cancellation) {
         return cancelled;
     }
-    if error.kind() == CatalogErrorKind::Cancelled {
-        FirstSliceError::Cancelled(
+    map_catalog_error_kind(error.kind(), cancellation)
+}
+
+fn map_catalog_error_kind(kind: CatalogErrorKind, cancellation: &Cancellation) -> FirstSliceError {
+    match kind {
+        CatalogErrorKind::Cancelled => FirstSliceError::Cancelled(
             cancellation
                 .reason()
                 .unwrap_or(CancellationReason::ParentCancelled),
-        )
-    } else {
-        FirstSliceError::Catalog
+        ),
+        CatalogErrorKind::Corrupt
+        | CatalogErrorKind::MigrationChecksumMismatch
+        | CatalogErrorKind::InvalidGeneration
+        | CatalogErrorKind::IdentityProofRequired => FirstSliceError::CatalogCorrupt,
+        CatalogErrorKind::IncompatibleSchema => FirstSliceError::CatalogMigrationRequired,
+        _ => FirstSliceError::Catalog,
     }
 }
 
@@ -4616,6 +4630,27 @@ mod tests {
         include_str!("../../../tests/fixtures/vertical-slice/first-slice/v1-to-v2.patch");
     const IGNORED_SENTINEL: &str = "ROOTLIGHT_IGNORED_SENTINEL";
     const EQUIVALENCE_COMPONENT_BYTES: usize = 4 * 1024 * 1024;
+
+    #[test]
+    fn catalog_integrity_failures_retain_stable_service_classes() {
+        let cancellation = Cancellation::new();
+
+        for kind in [
+            CatalogErrorKind::Corrupt,
+            CatalogErrorKind::MigrationChecksumMismatch,
+            CatalogErrorKind::InvalidGeneration,
+            CatalogErrorKind::IdentityProofRequired,
+        ] {
+            assert_eq!(
+                map_catalog_error_kind(kind, &cancellation),
+                FirstSliceError::CatalogCorrupt
+            );
+        }
+        assert_eq!(
+            map_catalog_error_kind(CatalogErrorKind::IncompatibleSchema, &cancellation),
+            FirstSliceError::CatalogMigrationRequired
+        );
+    }
     const EQUIVALENCE_INITIAL: &str =
         "pub fn answer() -> u32 {\n    42\n}\n\npub fn helper() -> u32 {\n    7\n}\n";
     const EQUIVALENCE_BODY_EDIT: &str =

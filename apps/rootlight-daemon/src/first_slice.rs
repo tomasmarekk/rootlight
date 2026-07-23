@@ -3509,9 +3509,25 @@ fn service_error(error: FirstSliceError) -> PublicError {
             "repository analysis failed",
             false,
         ),
+        FirstSliceError::CatalogCorrupt => (
+            ErrorCode::IndexCorrupt,
+            "repository generation is corrupt",
+            false,
+        ),
+        FirstSliceError::CatalogMigrationRequired => (
+            ErrorCode::MigrationRequired,
+            "repository generation requires migration",
+            false,
+        ),
         _ => (ErrorCode::Internal, "first-slice operation failed", false),
     };
     let mut builder = PublicError::builder(code, message);
+    if matches!(
+        error,
+        FirstSliceError::CatalogCorrupt | FirstSliceError::CatalogMigrationRequired
+    ) {
+        builder = builder.next_action(NextAction::RebuildRepository);
+    }
     if retryable {
         builder = builder.retryable().next_action(NextAction::Retry);
     }
@@ -3747,6 +3763,22 @@ mod tests {
 
         assert_eq!(error.code(), ErrorCode::BudgetExceeded);
         assert!(!error.retryable());
+    }
+
+    #[test]
+    fn catalog_integrity_failures_keep_stable_public_recovery() {
+        for (service, code) in [
+            (FirstSliceError::CatalogCorrupt, ErrorCode::IndexCorrupt),
+            (
+                FirstSliceError::CatalogMigrationRequired,
+                ErrorCode::MigrationRequired,
+            ),
+        ] {
+            let error = service_error(service);
+            assert_eq!(error.code(), code);
+            assert_eq!(error.next_actions(), &[NextAction::RebuildRepository]);
+            assert!(!error.retryable());
+        }
     }
 
     #[test]
