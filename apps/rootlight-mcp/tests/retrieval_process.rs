@@ -32,6 +32,42 @@ pub fn matrix_target_beta(value: usize) -> usize {
 pub fn matrix_target_gamma(value: usize) -> usize {
     value.saturating_sub(1)
 }
+
+pub fn matrix_target_delta(value: usize) -> usize {
+    value.saturating_add(4)
+}
+
+pub fn matrix_target_epsilon(value: usize) -> usize {
+    value.saturating_add(5)
+}
+
+pub fn matrix_target_zeta(value: usize) -> usize {
+    value.saturating_add(6)
+}
+
+pub fn matrix_target_eta(value: usize) -> usize {
+    value.saturating_add(7)
+}
+
+pub fn matrix_target_theta(value: usize) -> usize {
+    value.saturating_add(8)
+}
+
+pub fn matrix_target_iota(value: usize) -> usize {
+    value.saturating_add(9)
+}
+
+pub fn matrix_target_kappa(value: usize) -> usize {
+    value.saturating_add(10)
+}
+
+pub fn matrix_target_lambda(value: usize) -> usize {
+    value.saturating_add(11)
+}
+
+pub fn matrix_target_mu(value: usize) -> usize {
+    value.saturating_add(12)
+}
 ";
 
 #[test]
@@ -387,6 +423,22 @@ fn retrieval_limits_cursors_and_unresolved_ids_are_truthful(fixture: &mut Retrie
     );
     assert_public_error(&mismatched_cursor, "INVALID_CURSOR");
 
+    let first_exhaustion = collect_locate_pages(fixture, "exhaustion-first");
+    let second_exhaustion = collect_locate_pages(fixture, "exhaustion-second");
+    assert_eq!(
+        first_exhaustion, second_exhaustion,
+        "multi-page locate ordering must be repeatable"
+    );
+    assert_eq!(first_exhaustion.len(), 12);
+    assert_eq!(
+        first_exhaustion
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        first_exhaustion.len(),
+        "multi-page locate must not duplicate results"
+    );
+
     let absent = serde_json::to_value(SymbolId::from_bytes([0xff; 20]))
         .expect("stable symbol identity serializes");
     let mixed = fixture.standalone(
@@ -492,6 +544,65 @@ fn retrieval_limits_cursors_and_unresolved_ids_are_truthful(fixture: &mut Retrie
         assert!(error["repository"].is_null());
         assert!(error["generation"].is_null());
     }
+}
+
+fn collect_locate_pages(fixture: &mut RetrievalFixture, run_id: &str) -> Vec<String> {
+    let mut cursor = None;
+    let mut identity = None;
+    let mut symbols = Vec::new();
+    for page_index in 0..16 {
+        let mut arguments = json!({
+            "query": "matrix_target",
+            "search_modes": ["lexical"],
+            "max_results": 2
+        });
+        if let Some(cursor) = cursor.take() {
+            arguments["cursor"] = json!(cursor);
+        }
+        let response = fixture.standalone(
+            &format!("{run_id}-page-{page_index}"),
+            "code.locate",
+            arguments,
+        );
+        assert_success(&response, "code.locate");
+        let output = &response["result"]["structuredContent"];
+        assert_common_read_contract(output, &fixture.repository_id);
+        let observed_identity = (
+            output["repository"].clone(),
+            output["generation"].clone(),
+            output["trust"].clone(),
+        );
+        if let Some(expected) = &identity {
+            assert_eq!(&observed_identity, expected);
+        } else {
+            identity = Some(observed_identity);
+        }
+        let matches = output["data"]["matches"]
+            .as_array()
+            .expect("locate page returns matches");
+        assert!(
+            !matches.is_empty(),
+            "locate emitted an empty intermediate page"
+        );
+        symbols.extend(matches.iter().map(|matched| {
+            matched["symbol_id"]
+                .as_str()
+                .expect("locate match has a symbol identity")
+                .to_owned()
+        }));
+
+        let Some(next_cursor) = output["next_cursor"].as_str() else {
+            assert_eq!(output["truncated"], false);
+            assert_eq!(output["completeness"]["state"], "complete");
+            assert_eq!(output["completeness"]["continuation"], "not_applicable");
+            return symbols;
+        };
+        assert_eq!(output["truncated"], true);
+        assert_eq!(output["completeness"]["state"], "truncated");
+        assert_eq!(output["completeness"]["continuation"], "available");
+        cursor = Some(next_cursor.to_owned());
+    }
+    panic!("locate pagination did not terminate within the bounded page count");
 }
 
 fn assert_profile_identity(outputs: &Map<String, Value>, item_path: &str) {

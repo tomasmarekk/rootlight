@@ -6020,12 +6020,23 @@ fn first_slice_response_correlates(
                 && response.hits.len()
                     <= usize::try_from(request.maximum_results).unwrap_or(usize::MAX)
                 && u64::try_from(response.hits.len()).is_ok_and(|returned_results| {
-                    response.matched_candidates >= returned_results
-                        && (response.truncated || response.matched_candidates == returned_results)
-                        && context
-                            .usage
-                            .as_ref()
-                            .is_some_and(|usage| usage.results >= returned_results)
+                    request
+                        .page_offset
+                        .checked_add(returned_results)
+                        .is_some_and(|returned_end| {
+                            response.matched_candidates >= returned_end
+                                && (response.truncated
+                                    || response.matched_candidates == returned_end)
+                                && response.next_page_offset.is_none_or(|next| {
+                                    response.truncated
+                                        && next == returned_end
+                                        && next < response.matched_candidates
+                                })
+                                && context
+                                    .usage
+                                    .as_ref()
+                                    .is_some_and(|usage| usage.results >= returned_results)
+                        })
                 })
                 && response.hits.iter().all(|hit| {
                     wire_id_has_len(hit.symbol.as_ref().map(|id| &id.value), 20)
@@ -15197,6 +15208,35 @@ mod tests {
         assert!(first_slice_response_correlates(
             &locate_request,
             &FirstSliceIpcResponse::CodeLocate(incomplete_without_truncation)
+        ));
+        let mut final_page_request = locate_request.clone();
+        let FirstSliceIpcRequest::CodeLocate(final_page) = &mut final_page_request else {
+            unreachable!("fixture request is code.locate");
+        };
+        final_page.page_offset = 2;
+        let mut final_page_response = locate_response.clone();
+        final_page_response.matched_candidates = 4;
+        assert!(first_slice_response_correlates(
+            &final_page_request,
+            &FirstSliceIpcResponse::CodeLocate(final_page_response.clone())
+        ));
+        final_page_response.matched_candidates = 3;
+        assert!(!first_slice_response_correlates(
+            &final_page_request,
+            &FirstSliceIpcResponse::CodeLocate(final_page_response)
+        ));
+        let mut continued_page_response = locate_response.clone();
+        continued_page_response.matched_candidates = 5;
+        continued_page_response.truncated = true;
+        continued_page_response.next_page_offset = Some(2);
+        assert!(first_slice_response_correlates(
+            &locate_request,
+            &FirstSliceIpcResponse::CodeLocate(continued_page_response.clone())
+        ));
+        continued_page_response.next_page_offset = Some(1);
+        assert!(!first_slice_response_correlates(
+            &locate_request,
+            &FirstSliceIpcResponse::CodeLocate(continued_page_response)
         ));
         let mut wrong_result_usage = locate_response.clone();
         wrong_result_usage

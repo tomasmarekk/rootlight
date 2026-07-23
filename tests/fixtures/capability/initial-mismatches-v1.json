@@ -1,20 +1,5 @@
 {
   "schema": "rootlight.mcp-capability-mismatches/1",
   "assessedRevision": "4767335c0edd40cf89bb8677d772e35d16279d1d",
-  "findings": [
-    {
-      "tool": "query.batch",
-      "capability": "budget",
-      "schemaDisposition": "accepted",
-      "runtimeDisposition": "partially_accounted",
-      "currentRegistryDisposition": "blocked"
-    },
-    {
-      "tool": "query.batch",
-      "capability": "operations[].local_budget.max_tokens",
-      "schemaDisposition": "accepted",
-      "runtimeDisposition": "not_propagated",
-      "currentRegistryDisposition": "blocked"
-    }
-  ]
+  "findings": []
 }

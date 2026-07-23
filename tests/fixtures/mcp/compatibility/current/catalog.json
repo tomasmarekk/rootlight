@@ -35172,14 +35172,16 @@
                 "summary": "active is resolved and pinned once; non-active explicit generations fail closed until retained-generation lookup is available"
               },
               {
-                "field": "budget",
-                "status": "blocked",
-                "summary": "measured child usage is bounded but orchestration and response serialization are not fully charged"
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "budget.evidence_level",
+                "status": "unsupported_stable_error",
+                "summary": "evidence representation is selected only through response_profile"
               },
               {
-                "field": "operations[].local_budget",
-                "status": "blocked",
-                "summary": "intersects representable caps and rejects unsupported child dimensions before work"
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "operations[].local_budget.evidence_level",
+                "status": "unsupported_stable_error",
+                "summary": "child evidence representation is inherited from response_profile"
               }
             ],
             "pagination": "child_continuations",
