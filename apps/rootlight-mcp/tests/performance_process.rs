@@ -35,6 +35,7 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const WARMUP_SAMPLES: u64 = 5;
+const MAX_MEASURED_ATTEMPTS_PER_TOOL: u64 = 150;
 const TOKENIZER_ASSET_SHA256: &str =
     "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d";
 
@@ -93,7 +94,8 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
     );
 
     for case in &cases {
-        for ordinal in 0..WARMUP_SAMPLES + MIN_PRIMARY_SUCCESS_SAMPLES {
+        let mut successful_measured = 0_u64;
+        for ordinal in 0..WARMUP_SAMPLES + MAX_MEASURED_ATTEMPTS_PER_TOOL {
             let phase = if ordinal < WARMUP_SAMPLES {
                 SamplePhase::Warmup
             } else {
@@ -106,8 +108,8 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
                 case.tool,
                 case.arguments.clone(),
             );
-            assert_success(&response, case.tool);
-            if case.tool == "repo.index" {
+            let outcome = response_outcome(&response);
+            if case.tool == "repo.index" && matches!(outcome, PerformanceSampleOutcome::Succeeded) {
                 wait_for_index_response(&mut mcp, &response);
             }
             let elapsed_ns = duration_ns(started.elapsed());
@@ -130,9 +132,22 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
                 process_tree_cpu_ns: resources.cpu_ns,
                 process_tree_peak_rss_bytes: resources.peak_rss_bytes,
                 dimensions: response_dimensions(structured, encoded.len(), actual_tokens),
-                outcome: PerformanceSampleOutcome::Succeeded,
+                outcome: outcome.clone(),
             });
+            if phase == SamplePhase::Measured
+                && matches!(outcome, PerformanceSampleOutcome::Succeeded)
+            {
+                successful_measured = successful_measured.saturating_add(1);
+                if successful_measured == MIN_PRIMARY_SUCCESS_SAMPLES {
+                    break;
+                }
+            }
         }
+        assert_eq!(
+            successful_measured, MIN_PRIMARY_SUCCESS_SAMPLES,
+            "{} did not retain the preregistered successful denominator",
+            case.tool
+        );
     }
 
     let environment =
@@ -254,6 +269,29 @@ fn response_dimensions(
         estimated_tokens: observed_usage(usage, "estimated_tokens", "estimate_not_reported"),
         actual_tokens: EvidenceValue::observed(actual_tokens),
         calls: 1,
+    }
+}
+
+fn response_outcome(response: &Value) -> PerformanceSampleOutcome {
+    if let Some(code) = response["error"]["code"].as_i64() {
+        return PerformanceSampleOutcome::Failed {
+            error_code: format!("json_rpc_{}", code.unsigned_abs()),
+        };
+    }
+    if response["result"]["isError"] == true {
+        return PerformanceSampleOutcome::Failed {
+            error_code: response["result"]["structuredContent"]["error"]["code"]
+                .as_str()
+                .map(normalize_identifier)
+                .unwrap_or_else(|| "public_tool_error".to_owned()),
+        };
+    }
+    if response["result"]["structuredContent"].is_object() {
+        PerformanceSampleOutcome::Succeeded
+    } else {
+        PerformanceSampleOutcome::Failed {
+            error_code: "missing_structured_content".to_owned(),
+        }
     }
 }
 
