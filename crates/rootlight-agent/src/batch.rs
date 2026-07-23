@@ -2833,9 +2833,10 @@ mod tests {
         BatchExecutionError, BatchPlan, BatchValidationError, DEFAULT_BATCH_TOKENS, DeadlineSource,
         MAX_BATCH_DEPTH, MAX_BATCH_OPERATIONS, admitted_parent_budget, aggregate_status,
         effective_child_deadline, is_batch_allowed, is_batch_allowed_under_profile,
-        resolve_dependencies, terminal_result, validate_binding_pair,
+        resolve_dependencies, terminal_result, translate_target_binding, validate_binding_pair,
     };
     use crate::policy::BudgetLimits;
+    use proptest::prelude::*;
     use rootlight_mcp_contract::{
         ExposureProfile, McpTool,
         batch::BatchBindingCardinality,
@@ -2996,6 +2997,52 @@ mod tests {
         assert!(pos(0) < pos(1));
         assert!(pos(0) < pos(2));
         assert!(pos(1) < pos(2));
+    }
+
+    proptest! {
+        #[test]
+        fn valid_dependency_graphs_plan_deterministically(masks in prop::collection::vec(any::<u8>(), 1..=MAX_BATCH_OPERATIONS)) {
+            let tools = vec![McpTool::CodeLocate; masks.len()];
+            let dependencies = masks
+                .iter()
+                .enumerate()
+                .map(|(index, mask)| {
+                    (0..index.min(8))
+                        .filter(|dependency| (*mask & (1_u8 << dependency)) != 0)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+
+            let first = BatchPlan::validate(&tools, &dependencies)
+                .expect("backward-only dependencies form a bounded DAG");
+            let second = BatchPlan::validate(&tools, &dependencies)
+                .expect("the same bounded DAG remains valid");
+            prop_assert_eq!(&first.execution_order, &second.execution_order);
+
+            let positions = first
+                .execution_order
+                .iter()
+                .enumerate()
+                .map(|(position, operation)| (*operation, position))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            for (operation, declared) in dependencies.iter().enumerate() {
+                for dependency in declared {
+                    prop_assert!(positions[dependency] < positions[&operation]);
+                }
+            }
+        }
+
+        #[test]
+        fn arbitrary_target_paths_cannot_escape_the_binding_registry(segment in "[A-Za-z0-9_]{1,32}") {
+            let path = format!("/unregistered_{segment}");
+            for descriptor in rootlight_mcp_contract::batch::BATCH_TOOL_REGISTRY {
+                prop_assert!(
+                    translate_target_binding(descriptor.batch_tool, &path).is_err(),
+                    "{} unexpectedly accepted {path}",
+                    descriptor.batch_tool.name()
+                );
+            }
+        }
     }
 
     #[test]
