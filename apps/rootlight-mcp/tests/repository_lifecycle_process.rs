@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const UNINDEXED_REPOSITORY: &str = "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v";
 
 #[test]
 fn repository_lifecycle_is_generation_exact_and_preflights_unsupported_controls() {
@@ -176,6 +177,118 @@ fn repository_lifecycle_is_generation_exact_and_preflights_unsupported_controls(
     assert_public_error(&unsupported_budget, "UNSUPPORTED_CAPABILITY");
 
     mcp.finish();
+}
+
+#[test]
+fn repository_status_distinguishes_empty_missing_failed_and_unavailable_results() {
+    let fixture = tempfile::tempdir().expect("isolated process fixture is available");
+    let repository_root = fixture.path().join("empty-repository");
+    fs::create_dir_all(repository_root.join("src"))
+        .expect("empty repository source directory is created");
+    fs::write(
+        repository_root.join("Cargo.toml"),
+        "[package]\nname = \"empty_repository_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("empty repository manifest is written");
+    fs::write(repository_root.join("src").join("lib.rs"), [])
+        .expect("empty repository source is written");
+
+    let state_dir = fixture.path().join("state");
+    let runtime_dir = fixture.path().join("runtime");
+    let daemon_binary = build_default_daemon();
+    let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
+    daemon.wait_until_ready(&runtime_dir);
+    let mut mcp = McpProcess::spawn(&state_dir, &runtime_dir);
+
+    let indexed = index_repository(&mut mcp, "index-empty", &repository_root);
+    let repository_id = required_text(
+        &indexed,
+        &["result", "structuredContent", "data", "repository_id"],
+    );
+    assert_ne!(repository_id, UNINDEXED_REPOSITORY);
+
+    let empty = mcp.call(
+        "status-empty",
+        "repo.status",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "coverage_detail": "language",
+            "include_operations": true
+        }),
+    );
+    assert_success(&empty, "repo.status");
+    let empty_status = &empty["result"]["structuredContent"];
+    assert_eq!(empty_status["data"]["repository_state"], "ready");
+    assert_eq!(
+        empty_status["data"]["coverage"]["languages"][0]["language"],
+        "rust"
+    );
+    assert_eq!(
+        empty_status["data"]["coverage"]["languages"][0]["files_indexed"],
+        1
+    );
+    assert_eq!(empty_status["data"]["recommended_actions"], json!([]));
+
+    let missing = mcp.call(
+        "status-not-indexed",
+        "repo.status",
+        json!({
+            "repository": {"repository_id": UNINDEXED_REPOSITORY}
+        }),
+    );
+    assert_public_error(&missing, "NOT_FOUND");
+    assert_eq!(
+        missing["result"]["structuredContent"]["error"]["message"],
+        "repository was not found"
+    );
+
+    fs::remove_file(repository_root.join("src").join("lib.rs"))
+        .expect("indexed source is removed before the failed update");
+    let failed_index = mcp.call(
+        "index-failed",
+        "repo.index",
+        json!({
+            "root": repository_root,
+            "mode": "structural",
+            "detached": false
+        }),
+    );
+    assert_public_error(&failed_index, "UNSUPPORTED_CAPABILITY");
+
+    let failed = mcp.call(
+        "status-failed",
+        "repo.status",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "include_operations": true
+        }),
+    );
+    assert_success(&failed, "repo.status");
+    let failed_status = &failed["result"]["structuredContent"];
+    assert_eq!(failed_status["data"]["repository_state"], "ready");
+    assert_eq!(failed_status["data"]["operations"][0]["state"], "failed");
+    assert_eq!(
+        failed_status["data"]["recommended_actions"],
+        json!(["inspect operation"])
+    );
+
+    mcp.finish();
+    daemon.finish();
+
+    let unavailable_state = fixture.path().join("unavailable-state");
+    let unavailable_runtime = fixture.path().join("unavailable-runtime");
+    let mut unavailable =
+        McpProcess::spawn_transport_only(&unavailable_state, &unavailable_runtime);
+    let response = unavailable.call(
+        "status-unavailable",
+        "repo.status",
+        json!({
+            "repository": {"repository_id": UNINDEXED_REPOSITORY}
+        }),
+    );
+    assert_eq!(response["error"]["code"], -32_603);
+    assert_eq!(response["error"]["message"], "tool transport failed");
+    unavailable.finish();
 }
 
 fn write_repository(root: &Path, value: u32) {
@@ -339,7 +452,19 @@ struct McpProcess {
 
 impl McpProcess {
     fn spawn(state_dir: &Path, runtime_dir: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rootlight-mcp"))
+        Self::spawn_with_mode(state_dir, runtime_dir, false)
+    }
+
+    fn spawn_transport_only(state_dir: &Path, runtime_dir: &Path) -> Self {
+        Self::spawn_with_mode(state_dir, runtime_dir, true)
+    }
+
+    fn spawn_with_mode(state_dir: &Path, runtime_dir: &Path, transport_only: bool) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rootlight-mcp"));
+        if transport_only {
+            command.arg("--transport-only");
+        }
+        let mut child = command
             .env("ROOTLIGHT_STATE_DIR", state_dir)
             .env("ROOTLIGHT_RUNTIME_DIR", runtime_dir)
             .env("ROOTLIGHT_MCP_PROFILE", "developer")

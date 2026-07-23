@@ -3584,7 +3584,7 @@ where
     if operations.iter().any(|operation| {
         matches!(
             operation.state,
-            OperationState::Queued | OperationState::Running
+            OperationState::Queued | OperationState::Running | OperationState::Failed
         )
     }) {
         recommended_actions.push(source_free_message("inspect operation")?);
