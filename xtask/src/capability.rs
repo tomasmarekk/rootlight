@@ -1931,20 +1931,18 @@ mod tests {
 
     #[test]
     fn schema_valid_ineligible_batch_tool_requires_explicit_disposition() {
-        let mut batch = entry(McpTool::QueryBatch);
-        let rules = batch
-            .rules
-            .iter()
-            .copied()
-            .filter(|rule| !(rule.path == "operations[].tool" && rule.value == Some("plan.change")))
-            .collect::<Vec<_>>();
-        batch.rules = Box::leak(rules.into_boxed_slice());
-        let shape = schema_shape(
+        let batch = entry(McpTool::QueryBatch);
+        let mut shape = schema_shape(
             vertical_tool(McpTool::QueryBatch)
                 .expect("batch has a generated contract")
                 .input_schema_json(),
         )
         .expect("batch input schema is valid");
+        shape
+            .get_mut("operations[].tool")
+            .expect("batch tool field is registered")
+            .closed_values
+            .insert(McpTool::HistoryCompare.name().to_owned());
         let mut problems = Vec::new();
         validate_batch_tool_values(&batch, &shape, &mut problems);
         assert!(problems.iter().any(|problem| matches!(
