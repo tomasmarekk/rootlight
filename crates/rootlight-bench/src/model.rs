@@ -447,11 +447,11 @@ pub struct TrajectoryStep {
     pub budget: TrajectoryBudget,
     /// Measured counters consumed by the operation.
     pub usage: TrajectoryUsage,
-    /// Tokenizer-measured request tokens, including any attributed source tokens.
+    /// Tokenizer-measured request tokens.
     pub request_tokens: u64,
     /// Tokenizer-measured response tokens.
     pub response_tokens: u64,
-    /// Request tokens attributed to source material, retained only as a count.
+    /// Tokens attributed to source material in either direction, retained only as a count.
     pub source_tokens: u64,
 }
 

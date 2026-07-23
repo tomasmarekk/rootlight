@@ -15,6 +15,7 @@ mod parser;
 mod sampler;
 mod semantic_contract;
 mod token_accounting;
+mod trajectory;
 
 pub use bundle::{
     BundleError, BundleLimits, OperationalEvent, OperationalLog, OperationalLogRecord,
@@ -57,6 +58,19 @@ pub use semantic_contract::{
 pub use token_accounting::{
     ActualTokenizerIdentity, TOKEN_ACCOUNTING_SCHEMA_VERSION, TokenAccountingError, TokenInputKind,
     TokenMeasurement, TokenTotals, WorkflowTokenAccounting, sha256_hex,
+};
+pub use trajectory::{
+    AdapterAvailabilityPolicy, BoundedFileExplorationAdapter, MAX_ATTEMPTS_PER_CONDITION,
+    MAX_TRAJECTORY_PACKAGE_BYTES, MIN_PREREGISTERED_WORKFLOWS, O200kTrajectoryTokenizer,
+    RawTrajectoryAttempt, RawTrajectoryCall, TRAJECTORY_PROTOCOL_SCHEMA_VERSION,
+    TRAJECTORY_RUNNER_ID, TrajectoryAdapter, TrajectoryAttemptOutcome, TrajectoryAttemptRecord,
+    TrajectoryCallRecord, TrajectoryClaimSignals, TrajectoryCondition, TrajectoryConditionProtocol,
+    TrajectoryDenominator, TrajectoryError, TrajectoryEvidencePackage, TrajectoryExecutionBoundary,
+    TrajectoryExecutionInput, TrajectoryProtocol, TrajectoryProtocolDigests, TrajectoryRetryPolicy,
+    TrajectorySharedBounds, TrajectoryStoppingPolicy, TrajectoryTokenizer,
+    TrajectoryWorkflowFamily, TrajectoryWorkflowProtocol, UnavailableTrajectoryAdapter,
+    decode_trajectory_evidence, encode_trajectory_evidence, preregistered_trajectory_protocol,
+    run_trajectory_suite,
 };
 
 /// Result-bundle schema version written and verified by this crate.
