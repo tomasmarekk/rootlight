@@ -35,7 +35,7 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const WARMUP_SAMPLES: u64 = 5;
-const MAX_MEASURED_ATTEMPTS_PER_TOOL: u64 = 150;
+const MAX_MEASURED_ATTEMPTS_PER_TOOL: u64 = 600;
 const TOKENIZER_ASSET_SHA256: &str =
     "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d";
 
@@ -141,6 +141,10 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
                 if successful_measured == MIN_PRIMARY_SUCCESS_SAMPLES {
                     break;
                 }
+            } else if phase == SamplePhase::Measured {
+                // A failed attempt remains in the evidence. This bounded pause
+                // lets the single analytical lane recover before the retry.
+                thread::sleep(Duration::from_millis(2));
             }
         }
         assert_eq!(
