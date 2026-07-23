@@ -95,7 +95,13 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
 
     for case in &cases {
         let mut successful_measured = 0_u64;
+        let mut next_context_session_rotation = 20_u64;
         for ordinal in 0..WARMUP_SAMPLES + MAX_MEASURED_ATTEMPTS_PER_TOOL {
+            if case.tool == "context.pack" && successful_measured == next_context_session_rotation {
+                mcp.finish();
+                mcp = McpProcess::spawn(&mcp_binary, &state_dir, &runtime_dir);
+                next_context_session_rotation = next_context_session_rotation.saturating_add(20);
+            }
             let phase = if ordinal < WARMUP_SAMPLES {
                 SamplePhase::Warmup
             } else {
