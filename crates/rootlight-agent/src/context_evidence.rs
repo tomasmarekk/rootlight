@@ -1525,7 +1525,8 @@ fn provider_reservation(provider: EvidenceProvider, max_candidates: u16) -> Budg
         | EvidenceProvider::ChangeImpact
         | EvidenceProvider::History
         | EvidenceProvider::Planning => 192,
-        EvidenceProvider::Locate | EvidenceProvider::Definition => 96,
+        EvidenceProvider::Definition => 384,
+        EvidenceProvider::Locate => 96,
     };
     let source_bytes = match provider {
         EvidenceProvider::Source | EvidenceProvider::Implementation => results * 2_048,
@@ -2033,6 +2034,23 @@ mod tests {
                 EvidenceProvider::History,
                 EvidenceProvider::Planning,
             ])
+        );
+    }
+
+    #[test]
+    fn definition_reservation_covers_bounded_explanation_envelopes() {
+        let plan = ContextEvidenceProviderRegistry
+            .plan(&request("explain parser"))
+            .expect("definition provider plan");
+        let definition = plan
+            .invocations()
+            .iter()
+            .find(|invocation| invocation.provider() == EvidenceProvider::Definition)
+            .expect("definition invocation");
+
+        assert_eq!(
+            definition.reservation().tokens,
+            u64::from(definition.max_candidates()).saturating_mul(384)
         );
     }
 
