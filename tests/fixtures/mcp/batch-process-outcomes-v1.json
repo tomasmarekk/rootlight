@@ -1,0 +1,153 @@
+{
+  "$schema": "rootlight.query-batch-process-outcomes/1",
+  "cases": {
+    "all_error": {
+      "repository_preserved": true,
+      "generation_preserved": true,
+      "batch_status": "error",
+      "operation_results": [
+        {
+          "id": "only_error",
+          "tool": "code.locate",
+          "status": "error",
+          "error_code": "BUDGET_EXCEEDED",
+          "truncated": false
+        }
+      ],
+      "truncated": false,
+      "completeness": {
+        "state": "complete",
+        "limiting_resources": []
+      },
+      "warnings": 0,
+      "usage": {
+        "json_bytes_exact": true,
+        "estimated_tokens_exact": true
+      }
+    },
+    "cancelled": {
+      "repository_preserved": true,
+      "generation_preserved": true,
+      "batch_status": "error",
+      "operation_results": [
+        {
+          "id": "cancelled",
+          "tool": "code.locate",
+          "status": "cancelled",
+          "error_code": null,
+          "truncated": false
+        }
+      ],
+      "truncated": false,
+      "completeness": {
+        "state": "indeterminate",
+        "limiting_resources": ["cancellation"]
+      },
+      "warnings": 0,
+      "usage": {
+        "json_bytes_exact": true,
+        "estimated_tokens_exact": true
+      }
+    },
+    "fail_fast": {
+      "repository_preserved": true,
+      "generation_preserved": true,
+      "batch_status": "partial",
+      "operation_results": [
+        {
+          "id": "not_run",
+          "tool": "code.locate",
+          "status": "not_run_fail_fast",
+          "error_code": null,
+          "truncated": false
+        },
+        {
+          "id": "source",
+          "tool": "code.locate",
+          "status": "ok",
+          "error_code": null,
+          "truncated": false
+        },
+        {
+          "id": "failure",
+          "tool": "plan.change",
+          "status": "error",
+          "error_code": "BINDING_INVALID",
+          "truncated": false
+        }
+      ],
+      "truncated": false,
+      "completeness": {
+        "state": "indeterminate",
+        "limiting_resources": []
+      },
+      "warnings": 1,
+      "usage": {
+        "json_bytes_exact": true,
+        "estimated_tokens_exact": true
+      }
+    },
+    "mixed": {
+      "repository_preserved": true,
+      "generation_preserved": true,
+      "batch_status": "partial",
+      "operation_results": [
+        {
+          "id": "success",
+          "tool": "code.locate",
+          "status": "ok",
+          "error_code": null,
+          "truncated": false
+        },
+        {
+          "id": "failure",
+          "tool": "plan.change",
+          "status": "error",
+          "error_code": "BINDING_INVALID",
+          "truncated": false
+        }
+      ],
+      "truncated": false,
+      "completeness": {
+        "state": "complete",
+        "limiting_resources": []
+      },
+      "warnings": 1,
+      "usage": {
+        "json_bytes_exact": true,
+        "estimated_tokens_exact": true
+      }
+    },
+    "resource_exhausted": {
+      "repository_preserved": true,
+      "generation_preserved": true,
+      "batch_status": "error",
+      "operation_results": [
+        {
+          "id": "later",
+          "tool": "code.locate",
+          "status": "not_run_budget",
+          "error_code": null,
+          "truncated": false
+        },
+        {
+          "id": "overrun",
+          "tool": "code.locate",
+          "status": "error",
+          "error_code": "BUDGET_EXCEEDED",
+          "truncated": false
+        }
+      ],
+      "truncated": true,
+      "completeness": {
+        "state": "truncated",
+        "limiting_resources": ["estimated_tokens"]
+      },
+      "warnings": 0,
+      "usage": {
+        "json_bytes_exact": true,
+        "estimated_tokens_exact": true
+      }
+    }
+  }
+}

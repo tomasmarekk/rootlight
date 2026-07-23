@@ -2127,6 +2127,12 @@ where
                     map_materialized_input_error(error, &binding_paths, &invalid_arguments)
                 })?;
             let child_started_at = Instant::now();
+            #[cfg(feature = "process-test-hooks")]
+            if std::env::var_os("ROOTLIGHT_PROCESS_TEST_BATCH_CANCEL").is_some() {
+                return Err(
+                    AgentPortError::Cancelled.with_usage(measured_failure_usage(child_started_at))
+                );
+            }
             let operation = execute_agent_child(
                 tool,
                 port,

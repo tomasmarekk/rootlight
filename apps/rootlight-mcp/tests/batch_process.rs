@@ -390,7 +390,7 @@ fn process_preflight_rejects_non_subtools_and_profile_hidden_members() {
                     }
                 }
             ]),
-            "BINDING_INVALID",
+            "INVALID_ARGUMENT",
         ),
         (
             "child-profile-override",
@@ -490,6 +490,221 @@ fn process_preflight_rejects_non_subtools_and_profile_hidden_members() {
     );
     assert_public_error(&hidden, "UNSUPPORTED_CAPABILITY");
     scout.finish();
+}
+
+#[test]
+fn ordered_runtime_outcomes_match_the_public_process_golden() {
+    let fixture = tempfile::tempdir().expect("isolated process fixture is available");
+    let repository_root = fixture.path().join("repository");
+    fs::create_dir_all(repository_root.join("src")).expect("fixture source directory is created");
+    fs::write(
+        repository_root.join("Cargo.toml"),
+        "[package]\nname = \"batch_outcome_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("fixture manifest is written");
+    fs::write(
+        repository_root.join("src").join("lib.rs"),
+        "pub fn batch_outcome_fixture() -> usize { 12 }\n",
+    )
+    .expect("fixture source is written");
+
+    let state_dir = fixture.path().join("state");
+    let runtime_dir = fixture.path().join("runtime");
+    let daemon_binary = ensure_daemon_binary();
+    let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
+    daemon.wait_until_ready(&runtime_dir);
+    let mut mcp = McpProcess::spawn(false, &state_dir, &runtime_dir, "developer");
+
+    let index = mcp.call(
+        "outcome-index",
+        "repo.index",
+        json!({
+            "root": repository_root,
+            "mode": "auto",
+            "detached": false
+        }),
+    );
+    assert_success(&index, "repo.index");
+    let repository_id = index["result"]["structuredContent"]["data"]["repository_id"]
+        .as_str()
+        .expect("repo.index returns a repository identity")
+        .to_owned();
+    let operation_id = index["result"]["structuredContent"]["data"]["operation_id"]
+        .as_str()
+        .expect("repo.index returns an operation identity")
+        .to_owned();
+    wait_for_publication(&mut mcp, &index, &operation_id);
+
+    let locate = |id: &str, local_tokens: u16| {
+        json!({
+            "id": id,
+            "tool": "code.locate",
+            "arguments": {
+                "query": "__batch_absent__",
+                "search_modes": ["exact"]
+            },
+            "local_budget": {"max_tokens": local_tokens}
+        })
+    };
+    let missing_binding = |id: &str, source: &str| {
+        json!({
+            "id": id,
+            "tool": "plan.change",
+            "depends_on": [source],
+            "arguments": {
+                "objective": "bug_fix",
+                "objective_text": "fix the fixture",
+                "targets": [{
+                    "symbol_id": {
+                        "$from": source,
+                        "source": "symbol_id",
+                        "index": 99
+                    }
+                }]
+            }
+        })
+    };
+    let cases = [
+        (
+            "mixed",
+            json!({
+                "repository": {"repository_id": repository_id},
+                "generation": "active",
+                "operations": [
+                    locate("success", 500),
+                    missing_binding("failure", "success")
+                ],
+                "failure_policy": "continue_independent"
+            }),
+        ),
+        (
+            "all_error",
+            json!({
+                "repository": {"repository_id": repository_id},
+                "generation": "active",
+                "operations": [locate("only_error", 100)],
+                "failure_policy": "continue_independent"
+            }),
+        ),
+        (
+            "fail_fast",
+            json!({
+                "repository": {"repository_id": repository_id},
+                "generation": "active",
+                "operations": [
+                    locate("not_run", 500),
+                    locate("source", 500),
+                    missing_binding("failure", "source")
+                ],
+                "failure_policy": "fail_fast"
+            }),
+        ),
+        (
+            "resource_exhausted",
+            json!({
+                "repository": {"repository_id": repository_id},
+                "generation": "active",
+                "operations": [locate("later", 500), locate("overrun", 500)],
+                "failure_policy": "continue_independent",
+                "budget": {"max_tokens": 500}
+            }),
+        ),
+    ];
+    let mut observed = serde_json::Map::new();
+    for (name, arguments) in cases {
+        let response = mcp.call(&format!("outcome-{name}"), "query.batch", arguments);
+        assert_success(&response, "query.batch");
+        observed.insert(
+            name.to_owned(),
+            process_outcome_snapshot(&response, &repository_id),
+        );
+    }
+
+    mcp.finish();
+    let hook_binary = build_batch_hook_mcp();
+    let mut cancellation_mcp = McpProcess::spawn_with_binary(
+        &hook_binary,
+        false,
+        &state_dir,
+        &runtime_dir,
+        "developer",
+        true,
+    );
+    let cancelled = cancellation_mcp.call(
+        "outcome-cancelled",
+        "query.batch",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "generation": "active",
+            "operations": [locate("cancelled", 500)]
+        }),
+    );
+    assert_success(&cancelled, "query.batch");
+    observed.insert(
+        "cancelled".to_owned(),
+        process_outcome_snapshot(&cancelled, &repository_id),
+    );
+    cancellation_mcp.finish();
+
+    let expected: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/mcp/batch-process-outcomes-v1.json"
+    ))
+    .expect("batch process outcome golden is valid JSON");
+    assert_eq!(
+        Value::Object(observed),
+        expected["cases"],
+        "public process batch outcomes drifted"
+    );
+
+    daemon.finish();
+}
+
+fn process_outcome_snapshot(response: &Value, repository_id: &str) -> Value {
+    let content = &response["result"]["structuredContent"];
+    let encoded = serde_json::to_vec(content).expect("structured batch response serializes");
+    let operation_results = content["data"]["operation_results"]
+        .as_array()
+        .expect("batch response contains ordered operation results")
+        .iter()
+        .map(|result| {
+            json!({
+                "id": result["id"],
+                "tool": result["tool"],
+                "status": result["status"],
+                "error_code": result
+                    .get("error")
+                    .map_or(Value::Null, |error| error["code"].clone()),
+                "truncated": result["truncated"]
+            })
+        })
+        .collect::<Vec<_>>();
+    let limiting_resources = content["completeness"]["limiting_resources"]
+        .as_array()
+        .expect("batch completeness has limiting resources")
+        .iter()
+        .map(|resource| resource["kind"].clone())
+        .collect::<Vec<_>>();
+    json!({
+        "repository_preserved":
+            content["repository"]["repository_id"] == Value::String(repository_id.to_owned()),
+        "generation_preserved":
+            content["data"]["generation_id"] == content["generation"]["generation_id"],
+        "batch_status": content["data"]["batch_status"],
+        "operation_results": operation_results,
+        "truncated": content["truncated"],
+        "completeness": {
+            "state": content["completeness"]["state"],
+            "limiting_resources": limiting_resources
+        },
+        "warnings": content["warnings"]
+            .as_array()
+            .map_or(0, Vec::len),
+        "usage": {
+            "json_bytes_exact": content["usage"]["json_bytes"] == json!(encoded.len()),
+            "estimated_tokens_exact": content["usage"]["estimated_tokens"]
+                == json!(rootlight_mcp_contract::accounting::estimate_tokens(encoded.len()))
+        }
+    })
 }
 
 fn dispatch_arguments(tool: BatchTool, symbol: &Value, source_ref: &Value) -> Value {
@@ -687,6 +902,42 @@ fn ensure_daemon_binary() -> PathBuf {
     daemon
 }
 
+fn build_batch_hook_mcp() -> PathBuf {
+    let mcp_binary = PathBuf::from(env!("CARGO_BIN_EXE_rootlight-mcp"));
+    let profile_dir = mcp_binary
+        .parent()
+        .expect("MCP binary has a profile directory");
+    let target_dir = profile_dir
+        .parent()
+        .expect("profile directory belongs to a Cargo target directory");
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = Command::new(cargo)
+        .current_dir(&workspace)
+        .args([
+            OsStr::new("build"),
+            OsStr::new("--locked"),
+            OsStr::new("-p"),
+            OsStr::new("rootlight-mcp"),
+            OsStr::new("--bin"),
+            OsStr::new("rootlight-mcp"),
+            OsStr::new("--features"),
+            OsStr::new("process-test-hooks"),
+            OsStr::new("--target-dir"),
+        ])
+        .arg(target_dir)
+        .output()
+        .expect("batch hook MCP build starts");
+    assert!(
+        output.status.success(),
+        "batch hook MCP build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let binary = profile_dir.join(format!("rootlight-mcp{}", std::env::consts::EXE_SUFFIX));
+    assert!(binary.is_file(), "batch hook MCP binary is present");
+    binary
+}
+
 struct DaemonProcess {
     child: Option<Child>,
     input: Option<ChildStdin>,
@@ -758,9 +1009,30 @@ struct McpProcess {
 
 impl McpProcess {
     fn spawn(transport_only: bool, state_dir: &Path, runtime_dir: &Path, profile: &str) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_rootlight-mcp"));
+        Self::spawn_with_binary(
+            Path::new(env!("CARGO_BIN_EXE_rootlight-mcp")),
+            transport_only,
+            state_dir,
+            runtime_dir,
+            profile,
+            false,
+        )
+    }
+
+    fn spawn_with_binary(
+        binary: &Path,
+        transport_only: bool,
+        state_dir: &Path,
+        runtime_dir: &Path,
+        profile: &str,
+        cancel_batch_child: bool,
+    ) -> Self {
+        let mut command = Command::new(binary);
         if transport_only {
             command.arg("--transport-only");
+        }
+        if cancel_batch_child {
+            command.env("ROOTLIGHT_PROCESS_TEST_BATCH_CANCEL", "1");
         }
         let mut child = command
             .env("ROOTLIGHT_STATE_DIR", state_dir)
