@@ -6,11 +6,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rootlight_mcp_contract::ErrorCode;
 use rootlight_mcp_contract::accounting::tool_list_payload;
-use rootlight_mcp_contract::capability::{
-    DISCOVERY_METADATA_KEY, DiscoveryCapabilityLimit, capability_for,
-};
+use rootlight_mcp_contract::capability::capability_for;
 use rootlight_mcp_contract::catalog::{ExposureProfile, McpTool};
 use serde::Serialize;
 use serde_json::Value;
@@ -140,91 +137,18 @@ pub(crate) fn emit(options: &Options) -> Result<(), DiscoveryError> {
 }
 
 fn baseline_payload(profile: ExposureProfile) -> Result<Value, DiscoveryError> {
-    let mut payload = tool_list_payload(profile);
-    let tools = payload
-        .get_mut("tools")
-        .and_then(Value::as_array_mut)
-        .ok_or(DiscoveryError::InvalidPayload)?;
-    for definition in tools {
-        let name = definition
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or(DiscoveryError::InvalidPayload)?;
-        let tool = McpTool::ALL
-            .into_iter()
-            .find(|tool| tool.name() == name)
-            .ok_or(DiscoveryError::InvalidPayload)?;
-        let object = definition
-            .as_object_mut()
-            .ok_or(DiscoveryError::InvalidPayload)?;
-        if let Some(description) = pre_profile_description(tool) {
-            object.insert(
-                "description".to_owned(),
-                Value::String(description.to_owned()),
-            );
+    let encoded = match profile {
+        ExposureProfile::Scout => {
+            include_str!("../../tests/fixtures/mcp/tool-discovery-baseline/tools-list-scout.json")
         }
-        let capability = object
-            .get_mut("_meta")
-            .and_then(Value::as_object_mut)
-            .and_then(|metadata| metadata.get_mut(DISCOVERY_METADATA_KEY))
-            .and_then(Value::as_object_mut)
-            .ok_or(DiscoveryError::InvalidPayload)?;
-        // The profile baseline predates positive response-representation
-        // discovery and admits only the compact selector values restored below.
-        capability.remove("responseProfiles");
-        if tool == McpTool::SymbolExplain {
-            capability.insert(
-                "fallbackSummary".to_owned(),
-                Value::String(
-                    "bounded compact semantic evidence for explicit stable symbol identifiers"
-                        .to_owned(),
-                ),
-            );
-        }
-        let limitations = capability
-            .get_mut("limitations")
-            .and_then(Value::as_array_mut)
-            .ok_or(DiscoveryError::InvalidPayload)?;
-        if tool == McpTool::HistoryCompare {
-            for limitation in &mut *limitations {
-                if limitation["field"] == "profile"
-                    && matches!(limitation["value"].as_str(), Some("evidence" | "standard"))
-                {
-                    limitation["summary"] =
-                        Value::String("only compact response projection is served".to_owned());
-                }
-            }
-        }
-        restore_compact_only_profile_limitations(tool, limitations)?;
-    }
-    Ok(payload)
-}
-
-fn restore_compact_only_profile_limitations(
-    tool: McpTool,
-    limitations: &mut Vec<Value>,
-) -> Result<(), DiscoveryError> {
-    let field = match tool {
-        McpTool::CodeLocate
-        | McpTool::SymbolExplain
-        | McpTool::SymbolRelationships
-        | McpTool::FlowTrace
-        | McpTool::ArchitectureOverview
-        | McpTool::ArchitectureCycles
-        | McpTool::CodeDead => "response_profile",
-        McpTool::ChangeImpact | McpTool::TestsSelect | McpTool::PlanChange => "profile",
-        _ => return Ok(()),
+        ExposureProfile::Analysis => include_str!(
+            "../../tests/fixtures/mcp/tool-discovery-baseline/tools-list-analysis.json"
+        ),
+        ExposureProfile::Developer => include_str!(
+            "../../tests/fixtures/mcp/tool-discovery-baseline/tools-list-developer.json"
+        ),
     };
-    for value in ["evidence", "standard"] {
-        limitations.push(serde_json::to_value(DiscoveryCapabilityLimit {
-            field,
-            value: Some(value),
-            status: "unsupported_stable_error",
-            error_code: Some(ErrorCode::UnsupportedCapability),
-            summary: "only compact response projection is served",
-        })?);
-    }
-    Ok(())
+    Ok(serde_json::from_str(encoded)?)
 }
 
 const fn baseline_hash(profile: ExposureProfile) -> &'static str {
@@ -238,30 +162,6 @@ const fn baseline_hash(profile: ExposureProfile) -> &'static str {
         ExposureProfile::Developer => {
             "d131ad767f752d065f626c1c00292ddd61f4e662e2c4891a3602cb12603bc924"
         }
-    }
-}
-
-const fn pre_profile_description(tool: McpTool) -> Option<&'static str> {
-    match tool {
-        McpTool::CodeLocate => Some(
-            "Use bounded exact-identifier and lexical matching in one selected generation; path, structural, semantic, documentation, and continuation modes are unsupported.",
-        ),
-        McpTool::SymbolExplain => Some(
-            "Return bounded compact semantic evidence for explicit stable symbol identifiers; custom sections and full provenance are unsupported.",
-        ),
-        McpTool::SymbolRelationships => Some(
-            "Return bounded typed relationships around explicit stable symbol identifiers; custom scope, candidate projection, and continuation are unsupported.",
-        ),
-        McpTool::ArchitectureCycles => Some(
-            "Use bounded cycle detection in a selected relation projection; custom scope, ranking, budgets, and expanded profiles are unsupported.",
-        ),
-        McpTool::CodeDead => Some(
-            "Return bounded dead-code candidates with entry-point and blind-spot caveats; custom scope, budgets, and expanded profiles are unsupported.",
-        ),
-        McpTool::PlanChange => Some(
-            "Use bounded change planning from an explicit objective and targets; change-context resolution, user constraints, budgets, and expanded profiles are unsupported.",
-        ),
-        _ => None,
     }
 }
 
@@ -351,10 +251,7 @@ pub(crate) enum DiscoveryError {
     /// The revision is not a lowercase hexadecimal object identifier.
     #[error("invalid source revision: {0}")]
     InvalidSourceRevision(String),
-    /// The canonical discovery payload had an unexpected shape.
-    #[error("canonical tools/list payload has an unexpected shape")]
-    InvalidPayload,
-    /// Historical reconstruction no longer matches its retained full-payload hash.
+    /// A retained historical payload no longer matches its full-payload hash.
     #[error(
         "historical {profile} tools/list payload drifted: expected {expected}, observed {observed}"
     )]
@@ -383,11 +280,12 @@ pub(crate) enum DiscoveryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rootlight_mcp_contract::capability::DISCOVERY_METADATA_KEY;
 
     #[test]
     fn profile_baseline_payloads_match_the_retained_complete_goldens() {
         for profile in ExposureProfile::ALL {
-            let payload = baseline_payload(profile).expect("baseline payload reconstructs");
+            let payload = baseline_payload(profile).expect("baseline payload parses");
             let encoded = serde_json::to_vec(&payload).expect("payload serializes");
             assert_eq!(
                 blake3::hash(&encoded).to_hex().as_str(),
@@ -401,7 +299,7 @@ mod tests {
     #[test]
     fn profile_baseline_restores_compact_only_limitations() {
         let baseline =
-            baseline_payload(ExposureProfile::Developer).expect("baseline payload reconstructs");
+            baseline_payload(ExposureProfile::Developer).expect("baseline payload parses");
         for (tool, field) in [
             (McpTool::CodeLocate, "response_profile"),
             (McpTool::SymbolExplain, "response_profile"),

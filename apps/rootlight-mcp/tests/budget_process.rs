@@ -105,6 +105,7 @@ fn all_budget_tools_enforce_hard_limits_across_daemon_and_mcp_processes() {
             limited: limited_measurement,
         });
     }
+    assert_context_objective_coverage(&mut mcp, &second, &entry, &helper);
 
     mcp.finish();
     daemon.finish();
@@ -285,6 +286,78 @@ fn tool_cases(
             }),
         ),
     ]
+}
+
+fn assert_context_objective_coverage(
+    mcp: &mut McpProcess,
+    index: &IndexReceipt,
+    entry: &LocatedSymbol,
+    helper: &LocatedSymbol,
+) {
+    let cases = [
+        ("fix bounded entry behavior", "bug_fix", 3_u64),
+        ("refactor bounded entry behavior", "refactor", 3),
+        ("explain bounded entry behavior", "explanation", 2),
+        ("migrate bounded entry behavior", "migration", 3),
+        ("review bounded entry behavior", "review", 3),
+    ];
+
+    for (case_index, (task, expected_objective, required_count)) in cases.into_iter().enumerate() {
+        let response = mcp.call_evidence(
+            &format!("context-objective-{case_index}"),
+            "context.pack",
+            json!({
+                "repository": {"repository_id": index.repository_id},
+                "generation": index.generation_id,
+                "task": task,
+                "seeds": {
+                    "symbols": [entry.symbol_id, helper.symbol_id]
+                },
+                "token_budget": 4_500,
+                "response_profile": "evidence"
+            }),
+        );
+        assert_success(&response, "context.pack objective coverage");
+        let envelope = &response["result"]["structuredContent"];
+        let coverage = &envelope["data"]["role_coverage"];
+        assert_eq!(coverage["objective"], expected_objective);
+        assert_eq!(coverage["objective_rule_version"], 1);
+        let roles = coverage["roles"]
+            .as_array()
+            .expect("role coverage is a bounded array");
+        assert_eq!(roles.len(), 7);
+        let required = roles
+            .iter()
+            .filter(|role| role["requirement"] == "required")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            u64::try_from(required.len()).expect("required role count fits u64"),
+            required_count
+        );
+
+        let derived_complete = required.iter().all(|role| role["status"] == "satisfied");
+        assert_eq!(
+            coverage["complete"],
+            Value::Bool(derived_complete),
+            "objective completeness must be derived from required roles"
+        );
+        for role in required {
+            if role["status"] == "missing_required" {
+                assert!(
+                    role["missing_reason"].is_string(),
+                    "missing required role must retain an observed reason: {role:#}"
+                );
+            }
+        }
+        if derived_complete {
+            assert_eq!(envelope["completeness"]["state"], "complete");
+        } else {
+            assert_ne!(
+                envelope["completeness"]["state"], "complete",
+                "incomplete required-role coverage cannot publish complete"
+            );
+        }
+    }
 }
 
 fn limited_arguments(
