@@ -7,6 +7,9 @@ repository.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+process-test-hooks = []
+
 [dependencies]
 blake3.workspace = true
 getrandom.workspace = true

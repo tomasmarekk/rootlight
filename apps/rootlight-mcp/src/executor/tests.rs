@@ -12144,6 +12144,7 @@ async fn accepted_effect_query_batch_failure_policy_changes_scheduling() {
     assert_eq!(
         registered,
         std::collections::BTreeSet::from([
+            ("query.batch", "budget"),
             ("query.batch", "failure_policy"),
             ("query.batch", "operations"),
             ("query.batch", "repository"),

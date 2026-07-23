@@ -875,12 +875,16 @@ fn validate_contract_input(
                 |error| MaterializedInputError::Public(Box::new(error)),
             )
         });
-    let capability_error = validate_capability_input(
-        contract.tool,
-        arguments,
-        CapabilityBindingPolicy::Materialized,
-    )
-    .err();
+    let binding_policy = if contract.tool == VerticalTool::QueryBatch {
+        // The batch planner compiles typed bindings before child-specific
+        // capability preflight and validates their materialized values again
+        // before dispatch.
+        CapabilityBindingPolicy::RejectUnprovenRestrictedBindings
+    } else {
+        CapabilityBindingPolicy::Materialized
+    };
+    let capability_error =
+        validate_capability_input(contract.tool, arguments, binding_policy).err();
 
     // Typed decoding and malformed invariants retain precedence. When both
     // admission layers select the same domain code, the registry error is more
