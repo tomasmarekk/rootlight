@@ -317,6 +317,93 @@ fn cancellation_stays_typed_across_index_and_query_boundaries() {
             CancellationReason::ParentCancelled
         ))
     ));
+
+    let symbol = service
+        .code_locate(
+            indexed.generation,
+            "answer".to_owned(),
+            LocateMode::Exact,
+            1,
+            0,
+            &deadline(),
+        )
+        .expect("fixture symbol remains queryable")
+        .data
+        .hits[0]
+        .symbol;
+    let cancelled = deadline();
+    assert!(cancelled.cancel(CancellationReason::ClientRequest));
+    assert!(matches!(
+        service.symbol_relationships(
+            indexed.generation,
+            BTreeSet::from([symbol]),
+            vec![RelationFamily::Calls],
+            Some(RelationDirection::Outbound),
+            0,
+            8,
+            0,
+            &cancelled,
+        ),
+        Err(FirstSliceError::Cancelled(
+            CancellationReason::ClientRequest
+        ))
+    ));
+    assert!(matches!(
+        service.flow_trace(
+            indexed.generation,
+            symbol,
+            None,
+            vec![RelationFamily::Calls],
+            Some(RelationDirection::Outbound),
+            0,
+            3,
+            8,
+            &cancelled,
+        ),
+        Err(FirstSliceError::Cancelled(
+            CancellationReason::ClientRequest
+        ))
+    ));
+    assert!(matches!(
+        service.architecture_cycles(
+            indexed.generation,
+            vec![RelationFamily::Calls],
+            2,
+            8,
+            false,
+            &cancelled,
+        ),
+        Err(FirstSliceError::Cancelled(
+            CancellationReason::ClientRequest
+        ))
+    ));
+    assert!(matches!(
+        service.code_dead(
+            indexed.generation,
+            CodeDeadEntryPointPolicy::Standard,
+            false,
+            false,
+            0,
+            8,
+            &cancelled,
+        ),
+        Err(FirstSliceError::Cancelled(
+            CancellationReason::ClientRequest
+        ))
+    ));
+    assert!(matches!(
+        service.architecture_overview(
+            indexed.generation,
+            vec![ArchitectureOverviewView::Hotspots],
+            0,
+            8,
+            true,
+            &cancelled,
+        ),
+        Err(FirstSliceError::Cancelled(
+            CancellationReason::ClientRequest
+        ))
+    ));
 }
 
 #[test]
