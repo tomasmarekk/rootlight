@@ -4708,7 +4708,7 @@ fn normalize_architecture_cycles(
 }
 
 fn map_architecture_cycles(
-    response: ArchitectureCyclesPortResponse,
+    mut response: ArchitectureCyclesPortResponse,
     request: &ArchitectureCyclesPortRequest,
 ) -> Result<ReadEnvelope<ArchitectureCyclesData>, ToolExecutionError> {
     validate_query_context(
@@ -4786,6 +4786,16 @@ fn map_architecture_cycles(
         break_candidates,
         explanation: None,
     };
+    push_completeness_warning(
+        &mut response.metadata.warnings,
+        "static_projection_only",
+        "cycle claims cover only the served static relation projection",
+    )?;
+    push_completeness_warning(
+        &mut response.metadata.warnings,
+        "dynamic_edges_unobserved",
+        "dynamic runtime edges may be unobserved",
+    )?;
     // The requested cycle cap is an explicit bound honored by the daemon; this
     // slice does not surface separate budget-truncation through the wire.
     map_read_envelope(

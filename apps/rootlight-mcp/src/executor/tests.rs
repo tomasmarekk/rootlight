@@ -6176,6 +6176,13 @@ async fn architecture_cycles_maps_components_cycles_and_breaks() {
     assert_eq!(candidate.kind, RelationKind::Calls);
     assert_eq!(candidate.break_cost, 700);
     assert_eq!(candidate.source_refs.len(), 1);
+    let warning_codes: Vec<_> = output
+        .warnings
+        .iter()
+        .map(|warning| warning.code.as_str())
+        .collect();
+    assert!(warning_codes.contains(&"static_projection_only"));
+    assert!(warning_codes.contains(&"dynamic_edges_unobserved"));
     let ObservedCall::ArchitectureCycles(request) = harness.only_call() else {
         panic!("expected architecture cycles call");
     };
