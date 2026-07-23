@@ -282,8 +282,42 @@ fn process_preflight_rejects_non_subtools_and_profile_hidden_members() {
         }
         excessive_depth.push(operation);
     }
+    let oversized = (0..17)
+        .map(|index| {
+            json!({
+                "id": format!("oversized_{index}"),
+                "tool": "code.locate",
+                "arguments": {"query": "fixture"}
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut excessive_fan_in = (0..9)
+        .map(|index| {
+            json!({
+                "id": format!("source_{index}"),
+                "tool": "code.locate",
+                "arguments": {"query": "fixture"}
+            })
+        })
+        .collect::<Vec<_>>();
+    excessive_fan_in.push(json!({
+        "id": "dependent",
+        "tool": "code.locate",
+        "depends_on": (0..9).map(|index| format!("source_{index}")).collect::<Vec<_>>(),
+        "arguments": {"query": "fixture"}
+    }));
     for (case, operations, expected) in [
         ("empty", json!([]), "INVALID_ARGUMENT"),
+        ("oversized", Value::Array(oversized), "INVALID_ARGUMENT"),
+        (
+            "invalid-id",
+            json!([{
+                "id": "invalid-id",
+                "tool": "code.locate",
+                "arguments": {"query": "fixture"}
+            }]),
+            "INVALID_ARGUMENT",
+        ),
         (
             "duplicate-id",
             json!([
@@ -323,6 +357,11 @@ fn process_preflight_rejects_non_subtools_and_profile_hidden_members() {
         (
             "excessive-depth",
             Value::Array(excessive_depth),
+            "INVALID_ARGUMENT",
+        ),
+        (
+            "excessive-fan-in",
+            Value::Array(excessive_fan_in),
             "INVALID_ARGUMENT",
         ),
         (
