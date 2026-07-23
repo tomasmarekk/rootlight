@@ -1,0 +1,1 @@
+{"repository":{"repository_id":"repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"},"operations":[{"id":"source","tool":"code.locate","arguments":{"query":"needle"}},{"id":"target","tool":"source.read","depends_on":["source"],"arguments":{"references":[{"source_ref":{"$from":"source","source":"symbol_id","index":0}}]}}]}
