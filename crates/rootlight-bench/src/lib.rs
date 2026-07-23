@@ -13,6 +13,7 @@ mod decode;
 mod integrity;
 mod model;
 mod parser;
+mod performance;
 mod sampler;
 mod semantic_contract;
 mod token_accounting;
@@ -60,6 +61,19 @@ pub use model::{
 pub use parser::{
     ParserBenchmarkConfig, ParserBenchmarkEvidence, ParserDatasetInput, ParserRunError,
     SemanticFactProbe, UnavailableSemanticFacts, run_parser_benchmark,
+};
+pub use performance::{
+    CacheState, CancellationAggregate, CancellationClassPlan, CancellationRawSample, FixtureScale,
+    GateDisposition, MAX_PERFORMANCE_EVIDENCE_BYTES, MAX_PERFORMANCE_SAMPLES,
+    MIN_PRIMARY_SUCCESS_SAMPLES, ObservedDistribution, PERFORMANCE_EVIDENCE_SCHEMA_VERSION,
+    PUBLIC_MCP_TOOLS, PerformanceAggregate, PerformanceCondition, PerformanceDimensions,
+    PerformanceEnvironmentManifest, PerformanceEvidenceError, PerformanceEvidencePackage,
+    PerformanceProtocol, PerformanceRawSample, PerformanceSampleOutcome, PerformanceThreshold,
+    ProcessState, RegressionComparison, ResourceMeasurementMethod, ResultCompleteness, SamplePhase,
+    SampleReconciliation, ThresholdClass, ThresholdEvaluation, ThresholdMetric,
+    ToolMeasurementPlan, UnavailablePolicy, build_performance_evidence,
+    decode_performance_evidence, encode_performance_evidence, nearest_rank_distribution,
+    performance_evidence_sha256, performance_protocol_sha256, validate_performance_evidence,
 };
 pub use sampler::{
     ProcessTreeMeasurement, ProcessTreeSample, ProcessTreeSampler, UnavailableProcessTreeSample,
