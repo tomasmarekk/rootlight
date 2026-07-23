@@ -352,6 +352,8 @@ allow_build_script = false
 [[crates]]
 name = "xtask"
 allowed_internal_dependencies = [
+  "rootlight-agent",
+  "rootlight-bench",
   "rootlight-catalog",
   "rootlight-client",
   "rootlight-config",
