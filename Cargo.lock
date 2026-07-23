@@ -2109,6 +2109,7 @@ dependencies = [
  "jsonschema",
  "proptest",
  "rootlight-agent",
+ "rootlight-bench",
  "rootlight-client",
  "rootlight-ids",
  "rootlight-ipc",

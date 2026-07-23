@@ -26,6 +26,7 @@ unicode-normalization.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+rootlight-bench = { path = "../../crates/rootlight-bench" }
 rootlight-ipc = { path = "../../crates/rootlight-ipc" }
 serde_json.workspace = true
 sha2.workspace = true
