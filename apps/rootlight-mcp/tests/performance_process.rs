@@ -26,6 +26,8 @@ use rootlight_bench::{
 use rootlight_bench::{
     LinuxProcTreeSampler, ProcessTreeMeasurement, ProcessTreeSample, ProcessTreeSampler,
 };
+use rootlight_client::{Client, ConnectPolicy};
+use rootlight_runtime::RuntimePaths;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
@@ -72,6 +74,11 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
     );
     let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
+    let runtime_paths = RuntimePaths::new(state_dir.clone(), runtime_dir.clone())
+        .expect("isolated runtime paths are valid");
+    let control_client =
+        Client::connect_or_start(&runtime_paths, [0x70; 16], ConnectPolicy::ExistingOnly)
+            .expect("control client connects to the isolated daemon");
     let mcp_binary = PathBuf::from(env!("CARGO_BIN_EXE_rootlight-mcp"));
     let mut mcp = McpProcess::spawn(&mcp_binary, &state_dir, &runtime_dir);
 
@@ -140,6 +147,9 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
                 dimensions: response_dimensions(structured, encoded.len(), actual_tokens),
                 outcome: outcome.clone(),
             });
+            if case.tool == "context.pack" {
+                wait_until_connections_released(&control_client);
+            }
             if phase == SamplePhase::Measured
                 && matches!(outcome, PerformanceSampleOutcome::Succeeded)
             {
@@ -185,6 +195,27 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
 
     mcp.finish();
     daemon.finish();
+}
+
+fn wait_until_connections_released(client: &Client) {
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    let mut consecutive_released_samples = 0_u8;
+    loop {
+        let health = client.health().expect("daemon health remains available");
+        if health.active_connections <= 1 {
+            consecutive_released_samples = consecutive_released_samples.saturating_add(1);
+            if consecutive_released_samples == 3 {
+                return;
+            }
+        } else {
+            consecutive_released_samples = 0;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon did not release context-pack provider connections"
+        );
+        thread::sleep(POLL_INTERVAL);
+    }
 }
 
 fn protocol() -> PerformanceProtocol {
