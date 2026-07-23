@@ -4921,12 +4921,15 @@ fn build_plan_change(
 
     let open_decisions = plan_change_decisions(plan.objective, &affected_scope);
 
-    let context_pack_request = plan_change_context_pack(
+    let (context_pack_request, context_pack_truncated) = plan_change_context_pack(
         &resolved_targets,
         &closure,
         &resolved_target_files,
         &entity_file,
     );
+    if context_pack_truncated {
+        record_limit(limiting_resources, QueryResource::Results)?;
+    }
 
     Ok(PlanChangeAnalysis {
         plan: plan_steps,
@@ -4969,8 +4972,12 @@ fn build_plan_change_tests(
     }
     // The reused selection admits a bounded seed set; keep the smallest
     // identities deterministically when the impacted surface is larger.
-    if seeds.len() > 64 {
-        seeds = seeds.into_iter().take(64).collect();
+    if seeds.len() > PLAN_CHANGE_MAX_CONTEXT_ITEMS {
+        seeds = seeds
+            .into_iter()
+            .take(PLAN_CHANGE_MAX_CONTEXT_ITEMS)
+            .collect();
+        record_limit(limiting_resources, QueryResource::Results)?;
     }
     let selection_plan = TestsSelectPlan {
         seeds,
@@ -5055,6 +5062,10 @@ fn build_plan_change_steps(
     affected_scope: &PlanChangeImpactSummary,
     max_steps: usize,
 ) -> (Vec<PlanChangeStepRecord>, bool) {
+    let target_symbols_truncated = resolved_targets.len() > PLAN_CHANGE_MAX_STEP_TARGETS;
+    let direct_dependents_truncated =
+        closure.iter().filter(|entry| entry.distance == 1).count() > PLAN_CHANGE_MAX_STEP_TARGETS;
+    let test_targets_truncated = test_symbols.len() > PLAN_CHANGE_MAX_STEP_TARGETS;
     let target_symbols: Vec<SymbolId> = resolved_targets
         .iter()
         .copied()
@@ -5195,7 +5206,10 @@ fn build_plan_change_steps(
             }
         }
     }
-    let truncated = steps.len() > max_steps;
+    let truncated = steps.len() > max_steps
+        || target_symbols_truncated
+        || direct_dependents_truncated
+        || test_targets_truncated;
     steps.truncate(max_steps);
     (steps, truncated)
 }
@@ -5262,11 +5276,12 @@ fn plan_change_context_pack(
     closure: &[ImpactEntryRecord],
     resolved_target_files: &BTreeSet<FileId>,
     entity_file: &BTreeMap<SymbolId, FileId>,
-) -> PlanChangeContextPack {
+) -> (PlanChangeContextPack, bool) {
     let mut symbols: BTreeSet<SymbolId> = resolved_targets.clone();
     for entry in closure {
         symbols.insert(entry.symbol_id);
     }
+    let symbols_truncated = symbols.len() > PLAN_CHANGE_MAX_CONTEXT_ITEMS;
     let symbols: Vec<SymbolId> = symbols
         .into_iter()
         .take(PLAN_CHANGE_MAX_CONTEXT_ITEMS)
@@ -5277,11 +5292,15 @@ fn plan_change_context_pack(
             files.insert(*file);
         }
     }
+    let files_truncated = files.len() > PLAN_CHANGE_MAX_CONTEXT_ITEMS;
     let files: Vec<FileId> = files
         .into_iter()
         .take(PLAN_CHANGE_MAX_CONTEXT_ITEMS)
         .collect();
-    PlanChangeContextPack { symbols, files }
+    (
+        PlanChangeContextPack { symbols, files },
+        symbols_truncated || files_truncated,
+    )
 }
 
 /// Maximum semantic changes, breaking candidates, or lineage matches carried in
@@ -8749,6 +8768,28 @@ mod tests {
         assert_eq!(analysis.plan[1].step, 2);
         // Truncation keeps every dependency reference valid.
         assert!(analysis.plan[1].depends_on.iter().all(|dep| *dep <= 2));
+        assert!(execution.is_truncated());
+        assert_eq!(execution.limiting_resources(), &[QueryResource::Results]);
+    }
+
+    #[test]
+    fn plan_change_reports_internal_projection_caps_as_truncation() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        let mut targets = BTreeSet::new();
+        for byte in 1..=65 {
+            add_entity(&mut document, byte, 1, EntityKind::Function);
+            targets.insert(symbol(byte));
+        }
+
+        let plan = plan_change_plan(PlanChangeObjective::Review, targets, BTreeSet::new(), 6);
+        let (analysis, execution) = run_plan_change_with_execution(&document, &plan);
+
+        assert_eq!(analysis.plan[0].targets.len(), PLAN_CHANGE_MAX_STEP_TARGETS);
+        assert_eq!(
+            analysis.context_pack_request.symbols.len(),
+            PLAN_CHANGE_MAX_CONTEXT_ITEMS
+        );
         assert!(execution.is_truncated());
         assert_eq!(execution.limiting_resources(), &[QueryResource::Results]);
     }
