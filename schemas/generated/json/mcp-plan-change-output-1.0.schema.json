@@ -82,6 +82,23 @@
           },
           "maxItems": 32
         },
+        "evidence_refs": {
+          "description": "Evidence records that support this step.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[a-z0-9_.:-]+$"
+          },
+          "maxItems": 16
+        },
+        "rationale": {
+          "description": "Source-free explanation of why this step follows from the available evidence.",
+          "type": "string",
+          "maxLength": 1024,
+          "minLength": 1
+        },
         "risks": {
           "description": "Source-free risk codes for this step.",
           "type": "array",
@@ -795,6 +812,15 @@
           "maxItems": 100,
           "minItems": 1
         },
+        "provider_coverage": {
+          "description": "Deterministically ordered provider coverage and omission records.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanProviderCoverage"
+          },
+          "maxItems": 7,
+          "minItems": 7
+        },
         "test_plan": {
           "description": "Ranked verification test plan.",
           "type": "array",
@@ -834,6 +860,170 @@
       "required": [
         "question",
         "recommended_default"
+      ]
+    },
+    "PlanEvidenceKind": {
+      "description": "Kind of bounded evidence summarized for a change plan.",
+      "oneOf": [
+        {
+          "description": "Resolved affected-scope evidence.",
+          "type": "string",
+          "const": "impact_scope"
+        },
+        {
+          "description": "Structural relationship evidence.",
+          "type": "string",
+          "const": "relationship_graph"
+        },
+        {
+          "description": "Ranked test-selection evidence.",
+          "type": "string",
+          "const": "test_selection"
+        },
+        {
+          "description": "Architecture component and connection evidence.",
+          "type": "string",
+          "const": "architecture"
+        },
+        {
+          "description": "Historical change evidence.",
+          "type": "string",
+          "const": "history"
+        },
+        {
+          "description": "Generation-bound source evidence.",
+          "type": "string",
+          "const": "source"
+        },
+        {
+          "description": "Ownership or authorship evidence.",
+          "type": "string",
+          "const": "ownership"
+        }
+      ]
+    },
+    "PlanEvidenceOmission": {
+      "description": "Explicit omission record for an unsupported or skipped evidence provider.",
+      "type": "object",
+      "properties": {
+        "reason": {
+          "description": "Stable omission reason.",
+          "$ref": "#/$defs/PlanEvidenceOmissionReason"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "reason"
+      ]
+    },
+    "PlanEvidenceOmissionReason": {
+      "description": "Stable reason that one evidence provider could not contribute facts.",
+      "oneOf": [
+        {
+          "description": "Explain mode intentionally performs no evidence retrieval.",
+          "type": "string",
+          "const": "explain_only"
+        },
+        {
+          "description": "The request does not contain a historical comparison baseline.",
+          "type": "string",
+          "const": "history_baseline_unavailable"
+        },
+        {
+          "description": "The accepted targets do not contain generation-bound source references.",
+          "type": "string",
+          "const": "source_references_unavailable"
+        },
+        {
+          "description": "The runtime does not serve ownership or authorship relationships.",
+          "type": "string",
+          "const": "ownership_provider_unsupported"
+        },
+        {
+          "description": "The provider does not accept any target present in this request.",
+          "type": "string",
+          "const": "no_compatible_targets"
+        },
+        {
+          "description": "The provider was unavailable without yielding checked evidence.",
+          "type": "string",
+          "const": "provider_unavailable"
+        },
+        {
+          "description": "The shared orchestration budget prevented another provider call.",
+          "type": "string",
+          "const": "shared_budget_exhausted"
+        }
+      ]
+    },
+    "PlanEvidenceProvider": {
+      "description": "Evidence providers evaluated while producing a change plan.",
+      "oneOf": [
+        {
+          "description": "Generation-pinned change-impact analysis.",
+          "type": "string",
+          "const": "change_impact"
+        },
+        {
+          "description": "Generation-pinned structural relationship expansion.",
+          "type": "string",
+          "const": "relationships"
+        },
+        {
+          "description": "Generation-pinned test selection.",
+          "type": "string",
+          "const": "tests"
+        },
+        {
+          "description": "Generation-pinned architecture overview.",
+          "type": "string",
+          "const": "architecture"
+        },
+        {
+          "description": "Bounded historical change evidence.",
+          "type": "string",
+          "const": "history"
+        },
+        {
+          "description": "Generation-pinned source evidence.",
+          "type": "string",
+          "const": "source"
+        },
+        {
+          "description": "Bounded ownership or authorship evidence.",
+          "type": "string",
+          "const": "ownership"
+        }
+      ]
+    },
+    "PlanEvidenceRecord": {
+      "description": "One bounded evidence record that plan steps may reference.",
+      "type": "object",
+      "properties": {
+        "evidence_id": {
+          "description": "Stable source-free identifier referenced by plan steps.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9_.:-]+$"
+        },
+        "kind": {
+          "description": "Evidence family represented by this record.",
+          "$ref": "#/$defs/PlanEvidenceKind"
+        },
+        "observed_items": {
+          "description": "Number of provider items summarized by the record.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 100000,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "kind",
+        "observed_items"
       ]
     },
     "PlanExplanation": {
@@ -922,6 +1112,75 @@
         "affected_files",
         "risk_level",
         "touches_public_surface"
+      ]
+    },
+    "PlanProviderCoverage": {
+      "description": "Coverage and completeness reported by one evidence provider.",
+      "type": "object",
+      "properties": {
+        "completeness": {
+          "description": "Provider-specific execution completeness.",
+          "$ref": "#/$defs/ResultCompleteness"
+        },
+        "evidence": {
+          "description": "Bounded evidence records emitted by this provider.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanEvidenceRecord"
+          },
+          "maxItems": 64
+        },
+        "omission": {
+          "description": "Explicit reason when the provider is unsupported or omitted.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanEvidenceOmission"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider": {
+          "description": "Evidence provider represented by this entry.",
+          "$ref": "#/$defs/PlanEvidenceProvider"
+        },
+        "state": {
+          "description": "Provider disposition.",
+          "$ref": "#/$defs/PlanProviderState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "state",
+        "evidence",
+        "completeness"
+      ]
+    },
+    "PlanProviderState": {
+      "description": "Authoritative disposition of one plan evidence provider.",
+      "oneOf": [
+        {
+          "description": "The provider completed its supported bounded domain.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "The provider returned useful evidence with explicit uncertainty.",
+          "type": "string",
+          "const": "partial"
+        },
+        {
+          "description": "The provider cannot serve the requested evidence domain.",
+          "type": "string",
+          "const": "unsupported"
+        },
+        {
+          "description": "The provider was not run because a bounded orchestration condition won.",
+          "type": "string",
+          "const": "omitted"
+        }
       ]
     },
     "PublicError": {

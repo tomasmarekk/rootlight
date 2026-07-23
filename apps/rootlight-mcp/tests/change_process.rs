@@ -253,6 +253,39 @@ fn assert_tool_data(tool: &str, output: &Value, first: &IndexReceipt, second: &I
                 );
                 assert!(step["depends_on"].is_array());
                 assert!(step["risks"].is_array());
+                assert!(
+                    step["rationale"]
+                        .as_str()
+                        .is_some_and(|rationale| !rationale.is_empty())
+                );
+                assert!(step["evidence_refs"].is_array());
+            }
+            let provider_coverage = output["data"]["provider_coverage"]
+                .as_array()
+                .expect("plan.change reports every evidence provider");
+            assert_eq!(provider_coverage.len(), 7);
+            assert_eq!(
+                provider_coverage
+                    .iter()
+                    .map(|coverage| coverage["provider"].as_str())
+                    .collect::<Vec<_>>(),
+                vec![
+                    Some("change_impact"),
+                    Some("relationships"),
+                    Some("tests"),
+                    Some("architecture"),
+                    Some("history"),
+                    Some("source"),
+                    Some("ownership"),
+                ]
+            );
+            for provider in ["history", "source", "ownership"] {
+                let coverage = provider_coverage
+                    .iter()
+                    .find(|coverage| coverage["provider"] == provider)
+                    .expect("bounded unsupported provider is present");
+                assert_eq!(coverage["state"], "unsupported");
+                assert!(coverage["omission"]["reason"].is_string());
             }
             assert!(output["data"]["affected_scope"]["affected_symbols"].is_number());
             assert!(output["data"]["test_plan"].is_array());
