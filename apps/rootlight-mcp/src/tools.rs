@@ -8,10 +8,11 @@ use std::{fmt, future::Future, io, pin::Pin, sync::Arc};
 use jsonschema::{Validator, error::ValidationErrorKind};
 use rootlight_mcp_contract::{
     CodeLocateInput, CodeLocateOutput, ContinuationCursor, DetailKey, ErrorCode, ErrorResponse,
-    ExposureProfile, GenerationSelector, McpTool, OperationStatusInput, OperationStatusOutput,
-    PublicError, PublicErrorBuildError, PublicValue, RepoIndexInput, RepoIndexOutput,
-    RepositorySelector, SafeLabel, SchemaVersion, SourceReadInput, SourceReadOutput,
-    SymbolExplainInput, SymbolExplainOutput, ToolResponse, TrustClassification, VerticalTool,
+    ExposureProfile, GenerationSelector, McpTool, NextAction, OperationStatusInput,
+    OperationStatusOutput, PublicError, PublicErrorBuildError, PublicValue, RepoIndexInput,
+    RepoIndexOutput, RepositorySelector, SafeLabel, SchemaVersion, SourceReadInput,
+    SourceReadOutput, SymbolExplainInput, SymbolExplainOutput, ToolResponse, TrustClassification,
+    VerticalTool,
     capability::{
         CapabilityStatus, DISCOVERY_METADATA_KEY, ToolCapability, capability_for,
         discovery_metadata,
@@ -50,6 +51,8 @@ const MAX_CODE_LOCATE_ARGUMENT_BYTES: usize = 64 * 1_024;
 const MAX_SYMBOL_EXPLAIN_ARGUMENT_BYTES: usize = 64 * 1_024;
 const MAX_SOURCE_READ_ARGUMENT_BYTES: usize = 64 * 1_024;
 const MAX_JSON_RPC_RESPONSE_OVERHEAD: usize = (MAX_REQUEST_ID_BYTES * 6) + 256;
+const TOOL_CONTRACT_VERSION_META_KEY: &str = "rootlight/toolContractVersion";
+const MAX_TOOL_CONTRACT_VERSION_BYTES: usize = 32;
 const MAX_TOOL_RESULT_BYTES: usize =
     DEFAULT_MAX_RESPONSE_BYTES - MAX_JSON_RPC_RESPONSE_OVERHEAD - 1;
 const MAX_TOOL_RESULT_FIXED_BYTES: usize = 512;
@@ -279,7 +282,11 @@ where
         if cancellation.is_cancelled() {
             return HandlerResponse::Cancelled;
         }
-        let (name, arguments) = match decode_call_params(params) {
+        let DecodedCall {
+            name,
+            arguments,
+            requested_contract_version,
+        } = match decode_call_params(params) {
             Ok(decoded) => decoded,
             Err(CallParamsError::Invalid) => {
                 return cancel_or(
@@ -314,6 +321,15 @@ where
                 &cancellation,
                 HandlerResponse::error(INVALID_PARAMS, "tool is not available"),
             );
+        }
+        if requested_contract_version
+            .as_deref()
+            .is_some_and(|requested| requested != contract.tool.contract_version())
+        {
+            let response = unsupported_contract_version_error(contract)
+                .and_then(|error| tool_error(contract, error))
+                .unwrap_or_else(|_| internal_tool_error("tool error validation failed"));
+            return cancel_or(&cancellation, response);
         }
         let arguments_value = Value::Object(arguments);
         let typed_input = match validate_contract_input(contract, &arguments_value, profile) {
@@ -1547,9 +1563,13 @@ enum CallParamsError {
     TaskUnsupported,
 }
 
-fn decode_call_params(
-    params: Option<Value>,
-) -> Result<(String, Map<String, Value>), CallParamsError> {
+struct DecodedCall {
+    name: String,
+    arguments: Map<String, Value>,
+    requested_contract_version: Option<String>,
+}
+
+fn decode_call_params(params: Option<Value>) -> Result<DecodedCall, CallParamsError> {
     let Some(Value::Object(mut params)) = params else {
         return Err(CallParamsError::Invalid);
     };
@@ -1565,6 +1585,15 @@ fn decode_call_params(
     if params.contains_key("task") {
         return Err(CallParamsError::TaskUnsupported);
     }
+    let requested_contract_version = params
+        .remove("_meta")
+        .and_then(|value| value.as_object().cloned())
+        .and_then(|mut metadata| metadata.remove(TOOL_CONTRACT_VERSION_META_KEY))
+        .map(|value| match value {
+            Value::String(version) if valid_tool_contract_version(&version) => Ok(version),
+            _ => Err(CallParamsError::Invalid),
+        })
+        .transpose()?;
     let Some(Value::String(name)) = params.remove("name") else {
         return Err(CallParamsError::Invalid);
     };
@@ -1576,7 +1605,24 @@ fn decode_call_params(
         Some(Value::Object(arguments)) => arguments,
         Some(_) => return Err(CallParamsError::Invalid),
     };
-    Ok((name, arguments))
+    Ok(DecodedCall {
+        name,
+        arguments,
+        requested_contract_version,
+    })
+}
+
+fn valid_tool_contract_version(version: &str) -> bool {
+    if version.is_empty() || version.len() > MAX_TOOL_CONTRACT_VERSION_BYTES {
+        return false;
+    }
+    let Some((major, minor)) = version.split_once('.') else {
+        return false;
+    };
+    !major.is_empty()
+        && !minor.is_empty()
+        && major.bytes().all(|byte| byte.is_ascii_digit())
+        && minor.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1604,6 +1650,24 @@ fn tool_error(
         return Err(ToolResultError::Serialize);
     }
     tool_result(structured, true)
+}
+
+fn unsupported_contract_version_error(
+    contract: &ToolContract,
+) -> Result<PublicError, ToolResultError> {
+    let supported = SafeLabel::parse(contract.tool.contract_version())
+        .map_err(|_| ToolResultError::Serialize)?;
+    PublicError::builder(
+        ErrorCode::ProtocolMismatch,
+        "tool contract version is unsupported",
+    )
+    .detail(
+        DetailKey::parse("supported_version").map_err(|_| ToolResultError::Serialize)?,
+        PublicValue::Label(supported),
+    )
+    .next_action(NextAction::SelectSupportedVersion)
+    .build()
+    .map_err(|_| ToolResultError::Serialize)
 }
 
 fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
@@ -3742,6 +3806,102 @@ mod tests {
             }
         ));
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn tool_contract_version_selection_rejects_every_unsupported_major() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let supported_key =
+            DetailKey::parse("supported_version").expect("static detail key is valid");
+
+        for tool in VerticalTool::ALL {
+            let response = router
+                .handle(
+                    request(
+                        "tools/call",
+                        json!({
+                            "name": tool.name(),
+                            "arguments": {},
+                            "_meta": {
+                                (TOOL_CONTRACT_VERSION_META_KEY): "99.0"
+                            }
+                        }),
+                    ),
+                    cancellation(),
+                )
+                .await;
+            let result = success(response);
+            let error: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
+                .expect("version rejection uses the checked error contract");
+
+            assert_eq!(error.error.code(), ErrorCode::ProtocolMismatch);
+            assert_eq!(
+                error.error.details().get(&supported_key),
+                Some(&PublicValue::Label(
+                    SafeLabel::parse(tool.contract_version())
+                        .expect("built-in contract version is a safe label")
+                )),
+                "{} advertises its supported contract version",
+                tool.name()
+            );
+            assert_eq!(
+                error.error.next_actions(),
+                &[NextAction::SelectSupportedVersion]
+            );
+            assert_eq!(result["isError"], true);
+        }
+
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn current_tool_contract_version_reaches_execution_and_malformed_versions_do_not() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let current = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "repo.index",
+                        "arguments": {"root": "C:/fixture"},
+                        "_meta": {
+                            (TOOL_CONTRACT_VERSION_META_KEY): "1.0"
+                        }
+                    }),
+                ),
+                cancellation(),
+            )
+            .await;
+        assert_eq!(success(current)["isError"], false);
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 1);
+
+        for malformed in [json!("1"), json!("1.0.0"), json!(""), json!(1)] {
+            let response = router
+                .handle(
+                    request(
+                        "tools/call",
+                        json!({
+                            "name": "repo.index",
+                            "arguments": {"root": "C:/fixture"},
+                            "_meta": {
+                                (TOOL_CONTRACT_VERSION_META_KEY): malformed
+                            }
+                        }),
+                    ),
+                    cancellation(),
+                )
+                .await;
+            assert!(matches!(
+                response,
+                HandlerResponse::Error {
+                    code: INVALID_PARAMS,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
