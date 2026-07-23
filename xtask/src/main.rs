@@ -11,6 +11,7 @@ mod capability;
 mod contract_matrix;
 mod daemon_lifecycle;
 mod disposition;
+mod gate3;
 mod git_metadata;
 mod grammar_lock;
 mod ids;
@@ -89,6 +90,10 @@ fn run() -> Result<(), XtaskError> {
         Some("disposition-check") => {
             let root = parse_required_root(&mut args)?;
             disposition::check(&root)?;
+        }
+        Some("gate3") => {
+            let options = gate3::Options::parse(&mut args)?;
+            gate3::run(&options)?;
         }
         Some("capability-check") => {
             let options = capability::Options::parse(&mut args)?;
@@ -198,7 +203,7 @@ fn git_metadata_command(args: &mut impl Iterator<Item = String>) -> Result<(), X
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|budget-conformance-check [--fixture-root PATH] [--refresh] [--runtime-report PATH --cancellation-report PATH --output PATH]|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|contract-matrix <--output PATH|--verify PATH> --source-revision REV|daemon-lifecycle-check --bin-dir PATH|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|response-profile-check [--fixture-root PATH] [--refresh]|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|budget-conformance-check [--fixture-root PATH] [--refresh] [--runtime-report PATH --cancellation-report PATH --output PATH]|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|contract-matrix <--output PATH|--verify PATH> --source-revision REV|daemon-lifecycle-check --bin-dir PATH|gate3 <--input-dir PATH --bin-dir PATH --output PATH|--verify PATH> --source-revision REV|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|response-profile-check [--fixture-root PATH] [--refresh]|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -229,6 +234,8 @@ enum XtaskError {
     DaemonLifecycle(#[from] daemon_lifecycle::LifecycleError),
     #[error(transparent)]
     Disposition(#[from] disposition::DispositionError),
+    #[error(transparent)]
+    Gate3(#[from] gate3::Gate3Error),
     #[error(transparent)]
     GitMetadata(#[from] git_metadata::GitMetadataError),
     #[error(transparent)]

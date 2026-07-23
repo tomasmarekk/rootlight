@@ -974,10 +974,78 @@ jobs:
           overwrite: false
           include-hidden-files: false
 
+  acceptance-evidence:
+    name: acceptance evidence / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Build evidence binaries
+        run: cargo build --locked --package rootlight-daemon --package rootlight-mcp --package xtask
+      - name: Produce all-tool process evidence
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          mkdir -p artifacts/acceptance-input artifacts/acceptance-vertical
+          cargo run --locked --quiet --package xtask -- mcp-vertical-check \
+            --bin-dir target/debug \
+            --output-dir artifacts/acceptance-vertical
+          cp artifacts/acceptance-vertical/summary.json \
+            artifacts/acceptance-input/vertical-summary.json
+          cp artifacts/acceptance-vertical/transcript.jsonl \
+            artifacts/acceptance-input/vertical-transcript.jsonl
+      - name: Produce adversarial contract evidence
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          cargo run --locked --quiet --package xtask -- contract-matrix \
+            --output artifacts/acceptance-input/contract-security-matrix.json \
+            --source-revision "$SOURCE_REVISION"
+      - name: Produce workflow and blinded quality evidence
+        env:
+          ROOTLIGHT_TRAJECTORY_REPORT: artifacts/acceptance-input/trajectory-evidence.json
+          ROOTLIGHT_ABLATION_REPORT: artifacts/acceptance-input/ablation-evidence.json
+        run: |
+          cargo test --locked --package rootlight-mcp --test trajectory_process \
+            -- --ignored --exact preregistered_trajectories_run_through_daemon_and_mcp_processes
+      - name: Produce performance and resource evidence
+        env:
+          ROOTLIGHT_PERFORMANCE_EVIDENCE: artifacts/acceptance-input/performance-evidence.json
+        run: |
+          cargo test --locked --package rootlight-mcp --test performance_process \
+            -- --ignored --exact real_daemon_mcp_produces_all_tool_performance_evidence
+      - name: Assemble and independently verify immutable evidence
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          cargo run --locked --quiet --package xtask -- gate3 \
+            --input-dir artifacts/acceptance-input \
+            --bin-dir target/debug \
+            --output artifacts/acceptance-evidence.json \
+            --source-revision "$SOURCE_REVISION"
+          cargo run --locked --quiet --package xtask -- gate3 \
+            --verify artifacts/acceptance-evidence.json \
+            --source-revision "$SOURCE_REVISION"
+      - name: Upload immutable acceptance evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-acceptance-evidence-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/acceptance-evidence.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, commit-hygiene, parser-evidence, semantic-evidence, capability-evidence, adapter-isolation, budget-evidence]
+    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, commit-hygiene, parser-evidence, semantic-evidence, capability-evidence, adapter-isolation, budget-evidence, acceptance-evidence]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
