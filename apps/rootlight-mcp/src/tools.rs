@@ -2227,17 +2227,13 @@ mod tests {
     }
 
     #[test]
-    fn capability_traversal_checks_explicit_empty_containers() {
-        let error = validate_capability_input(
+    fn capability_traversal_admits_an_explicit_empty_batch_budget() {
+        validate_capability_input(
             VerticalTool::QueryBatch,
             &json!({"budget": {}}),
             CapabilityBindingPolicy::Materialized,
         )
-        .expect_err("an explicit blocked budget is rejected even when empty");
-
-        assert_eq!(error.registry_path(), "budget");
-        assert_eq!(error.instance_path(), "budget");
-        assert_eq!(error.reason(), CapabilityRejectionReason::BlockedField);
+        .expect("an explicit empty budget selects the server-bounded defaults");
     }
 
     #[test]
@@ -3030,16 +3026,16 @@ mod tests {
             observed,
             [
                 (
-                    229_799,
-                    "02013c23beba0c65c6541d3740f9ebd1e16b4f6ab8bab2bdfec0ea8e2e983415".to_owned(),
+                    229_886,
+                    "de23b7ee42ad4674700993d68ca96d5c7c0a6a868aee53c26604ca5ac8b2e369".to_owned(),
                 ),
                 (
-                    501_223,
-                    "62768536534dce4e194afaa40b461a4d57a39c9bcb2a785fc021e20a7628826c".to_owned(),
+                    501_310,
+                    "6793660ea8a728fca0bbbecf874f06d3b63d6fa037d4bfb5122e44a3a163bc5a".to_owned(),
                 ),
                 (
-                    672_345,
-                    "8c37e93af821ce7138ea139c995d9ea18345c36a19132dea23f0222207395f8c".to_owned(),
+                    672_432,
+                    "adfed374fb19b6c51df1be186ee30d39649e3681ed3f6e94d589212de11482fb".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"

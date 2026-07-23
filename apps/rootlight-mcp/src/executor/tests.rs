@@ -9520,10 +9520,16 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     );
     group!(QueryAdvanced, StructuredQueryAst, ["query", "parameters"]);
     group!(QueryAdvanced, CursorContinuation, ["cursor"]);
-    group!(
+    group_excluding!(
         QueryBatch,
         BatchRuntime,
-        ["budget", "failure_policy", "operations", "repository"]
+        ["budget", "failure_policy", "operations", "repository"],
+        ["operations[].local_budget.timeout_ms"]
+    );
+    group!(
+        QueryBatch,
+        LocalTimeout,
+        ["operations[].local_budget.timeout_ms"]
     );
     group!(QueryBatch, ExplainPlan, ["explain"]);
     group!(
@@ -9652,7 +9658,7 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[10],
         counts[11],
     );
-    assert_eq!(counts, [130, 97, 3, 69, 28, 16, 5, 16, 26, 0, 1, 4]);
+    assert_eq!(counts, [130, 97, 3, 69, 28, 16, 5, 16, 25, 1, 1, 4]);
     assert_eq!(categorized.len(), 395);
 }
 
