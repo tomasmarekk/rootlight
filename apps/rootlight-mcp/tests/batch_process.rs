@@ -269,6 +269,122 @@ fn process_preflight_rejects_non_subtools_and_profile_hidden_members() {
         );
         assert_public_error(&response, "INVALID_ARGUMENT");
     }
+    let mut excessive_depth = Vec::new();
+    for index in 0..10 {
+        let mut operation = json!({
+            "id": format!("depth_{index}"),
+            "tool": "code.locate",
+            "arguments": {"query": "fixture"}
+        });
+        if index > 0 {
+            operation["depends_on"] = json!([format!("depth_{}", index - 1)]);
+        }
+        excessive_depth.push(operation);
+    }
+    for (case, operations, expected) in [
+        ("empty", json!([]), "INVALID_ARGUMENT"),
+        (
+            "duplicate-id",
+            json!([
+                {"id": "same", "tool": "code.locate", "arguments": {"query": "fixture"}},
+                {"id": "same", "tool": "code.locate", "arguments": {"query": "fixture"}}
+            ]),
+            "INVALID_ARGUMENT",
+        ),
+        (
+            "unknown-dependency",
+            json!([{
+                "id": "dependent",
+                "tool": "code.locate",
+                "depends_on": ["missing"],
+                "arguments": {"query": "fixture"}
+            }]),
+            "INVALID_ARGUMENT",
+        ),
+        (
+            "cycle",
+            json!([
+                {
+                    "id": "first",
+                    "tool": "code.locate",
+                    "depends_on": ["second"],
+                    "arguments": {"query": "fixture"}
+                },
+                {
+                    "id": "second",
+                    "tool": "code.locate",
+                    "depends_on": ["first"],
+                    "arguments": {"query": "fixture"}
+                }
+            ]),
+            "INVALID_ARGUMENT",
+        ),
+        (
+            "excessive-depth",
+            Value::Array(excessive_depth),
+            "INVALID_ARGUMENT",
+        ),
+        (
+            "later-static-arguments",
+            json!([
+                {"id": "safe", "tool": "code.locate", "arguments": {"query": "fixture"}},
+                {"id": "invalid", "tool": "code.locate", "arguments": {}}
+            ]),
+            "INVALID_ARGUMENT",
+        ),
+        (
+            "incompatible-binding",
+            json!([
+                {"id": "find", "tool": "code.locate", "arguments": {"query": "fixture"}},
+                {
+                    "id": "refine",
+                    "tool": "code.locate",
+                    "depends_on": ["find"],
+                    "arguments": {
+                        "query": "fixture",
+                        "search_modes": {
+                            "$from": "find",
+                            "source": "symbol_id",
+                            "index": 0
+                        }
+                    }
+                }
+            ]),
+            "BINDING_INVALID",
+        ),
+        (
+            "child-profile-override",
+            json!([{
+                "id": "impact",
+                "tool": "change.impact",
+                "arguments": {
+                    "change": {"symbol_ids": [SymbolId::from_bytes([7; 20])]},
+                    "profile": "standard"
+                }
+            }]),
+            "INVALID_ARGUMENT",
+        ),
+        (
+            "unsupported-local-budget",
+            json!([{
+                "id": "locate",
+                "tool": "code.locate",
+                "arguments": {"query": "fixture"},
+                "local_budget": {"max_tokens": 100}
+            }]),
+            "UNSUPPORTED_CAPABILITY",
+        ),
+    ] {
+        let response = developer.call(
+            &format!("preflight-{case}"),
+            "query.batch",
+            json!({
+                "repository": {"repository_id": RepositoryId::from_bytes([3; 16])},
+                "operations": operations
+            }),
+        );
+        assert_public_error(&response, expected);
+    }
     for (case, tool, arguments) in [
         (
             "relationships-data-flow",
