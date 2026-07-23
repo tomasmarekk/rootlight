@@ -1,0 +1,6 @@
+{
+  "bug_fix": "bounded defect repair step derived from generation pinned provider evidence",
+  "migration": "bounded compatibility migration step derived from generation pinned provider evidence",
+  "refactor": "bounded behavior preserving step derived from generation pinned provider evidence",
+  "review": "bounded review step derived from generation pinned provider evidence"
+}

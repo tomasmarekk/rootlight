@@ -301,15 +301,18 @@ fn assert_hard_budgets_are_public(
         .into_iter()
         .enumerate()
     {
-        if tool == "plan.change" {
-            continue;
-        }
         arguments["budget"] = json!({"max_tokens": 100});
         if matches!(tool, "change.impact" | "tests.select") {
             arguments["profile"] = json!("evidence");
         }
         let response = mcp.call(&format!("change-budget-{case_index}"), tool, arguments);
         assert_public_error(&response, "BUDGET_EXCEEDED");
+        if tool == "plan.change" {
+            assert!(
+                response.get("error").is_none(),
+                "plan.change budget exhaustion must remain a checked tool error, not JSON-RPC -32603: {response:#}"
+            );
+        }
     }
 }
 
