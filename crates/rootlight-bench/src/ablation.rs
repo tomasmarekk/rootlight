@@ -533,6 +533,170 @@ pub struct PreparedBlindedAblation {
     pub pairing_map: RestrictedPairingMap,
 }
 
+impl PreparedBlindedAblation {
+    /// Adds one measured direct-retrieval execution to its preregistered pair.
+    ///
+    /// The caller must supply the exact observed tool identities and source-free
+    /// counters while raw request, response, and source frames remain ephemeral.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AblationError`] when the protocol or key differs, the attempt
+    /// is outside the preregistered pairs, the direct tool set or counters
+    /// violate shared bounds, or the pair already contains a direct candidate.
+    pub fn add_direct_sequence_measurement(
+        &mut self,
+        protocol: &AblationProtocol,
+        blinding_key: &AblationBlindingKey,
+        attempt_index: u16,
+        outcome: BlindedRunOutcome,
+        metrics: BlindedCandidateMetrics,
+        observed_tools: &[String],
+    ) -> Result<String, AblationError> {
+        protocol.validate()?;
+        validate_prepared(protocol, self)?;
+        if protocol.blinding_key_sha256 != blinding_key.commitment_sha256() {
+            return Err(AblationError::ProtocolBindingMismatch);
+        }
+        let direct = protocol
+            .variants
+            .iter()
+            .find(|variant| variant.variant == AblationVariant::DirectSequence)
+            .ok_or(AblationError::InvalidProtocol)?;
+        let mut canonical_tools = observed_tools.to_vec();
+        canonical_tools.sort();
+        if canonical_tools.windows(2).any(|tools| tools[0] == tools[1])
+            || canonical_tools != direct.required_tools
+            || metrics.calls
+                != u64::try_from(observed_tools.len())
+                    .map_err(|_| AblationError::CounterOverflow)?
+            || metrics.calls == 0
+            || metrics.calls > u64::from(protocol.shared_bounds.tool_calls)
+            || metrics.tokens > protocol.shared_bounds.total_tokens
+            || metrics.source_tokens > metrics.tokens
+            || metrics.elapsed_ns > protocol.shared_bounds.elapsed_ns
+        {
+            return Err(AblationError::InvalidDirectMeasurement);
+        }
+        let pair = self
+            .pairing_map
+            .pairs
+            .get_mut(usize::from(attempt_index))
+            .ok_or(AblationError::InvalidDirectMeasurement)?;
+        let expected_seed = *protocol
+            .attempt_seeds
+            .get(usize::from(attempt_index))
+            .ok_or(AblationError::InvalidDirectMeasurement)?;
+        if pair.deterministic_seed != expected_seed
+            || !pair
+                .missing_variants
+                .contains(&AblationVariant::DirectSequence)
+            || self.pairing_map.entries.iter().any(|entry| {
+                entry.pair_id == pair.pair_id && entry.variant == AblationVariant::DirectSequence
+            })
+        {
+            return Err(AblationError::InvalidDirectMeasurement);
+        }
+        let attempt_id = format!("{CONTEXT_WORKFLOW_ID}-direct_sequence-{attempt_index:02}");
+        let blind_id = opaque_id(
+            "candidate",
+            blinding_key,
+            &[
+                self.pairing_map.protocol_sha256.as_bytes(),
+                attempt_id.as_bytes(),
+                &expected_seed.to_le_bytes(),
+            ],
+        );
+        if self
+            .candidates
+            .iter()
+            .any(|candidate| candidate.blind_id == blind_id)
+        {
+            return Err(AblationError::BlindIdCollision);
+        }
+        let candidate_sha256 = digest_json(
+            "rootlight.ablation.candidate.v1",
+            &(
+                blind_id.as_str(),
+                pair.pair_id.as_str(),
+                pair.task_sha256.as_str(),
+                outcome,
+                metrics,
+            ),
+        )?;
+        self.candidates.push(BlindedAblationCandidate {
+            blind_id: blind_id.clone(),
+            pair_id: pair.pair_id.clone(),
+            task_sha256: pair.task_sha256.clone(),
+            outcome,
+            metrics,
+            candidate_sha256,
+        });
+        self.pairing_map.entries.push(RestrictedPairingEntry {
+            blind_id: blind_id.clone(),
+            pair_id: pair.pair_id.clone(),
+            attempt_id,
+            variant: AblationVariant::DirectSequence,
+            order_sha256: hex_digest(&randomized_order_key(
+                protocol.randomization_seed,
+                blinding_key,
+                &blind_id,
+            )),
+        });
+        pair.missing_variants
+            .retain(|variant| *variant != AblationVariant::DirectSequence);
+        self.candidates.sort_by_key(|candidate| {
+            randomized_order_key(
+                protocol.randomization_seed,
+                blinding_key,
+                &candidate.blind_id,
+            )
+        });
+        self.pairing_map
+            .entries
+            .sort_by(|left, right| left.order_sha256.cmp(&right.order_sha256));
+        validate_prepared(protocol, self)?;
+        Ok(blind_id)
+    }
+
+    /// Finalizes automated grades and aggregate decisions for prepared evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AblationError`] when prepared candidates, rubric observations,
+    /// automated grades, pairing, or aggregate reconciliation is invalid.
+    pub fn evaluate(
+        self,
+        protocol: AblationProtocol,
+        rubric_evidence: Vec<CandidateRubricEvidence>,
+    ) -> Result<ContextPackAblationEvidence, AblationError> {
+        protocol.validate()?;
+        validate_prepared(&protocol, &self)?;
+        let (raw_automated_grades, automated_adjudications, final_automated_grades, agreement) =
+            grade_candidates(&self.candidates, &rubric_evidence)?;
+        let aggregate = aggregate_report(
+            &protocol,
+            &self.candidates,
+            &self.pairing_map,
+            &final_automated_grades,
+            &rubric_evidence,
+        )?;
+        let evidence = ContextPackAblationEvidence {
+            protocol,
+            blinded_candidates: self.candidates,
+            rubric_evidence,
+            raw_automated_grades,
+            automated_agreement: agreement,
+            automated_adjudications,
+            final_automated_grades,
+            aggregate,
+            restricted_pairing_map: self.pairing_map,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+}
+
 /// Builds opaque, randomized candidates and a separate restricted pairing map.
 ///
 /// # Errors
@@ -1661,28 +1825,7 @@ pub fn evaluate_context_pack_ablation(
     rubric_evidence: Vec<CandidateRubricEvidence>,
 ) -> Result<ContextPackAblationEvidence, AblationError> {
     let prepared = prepare_blinded_ablation(package, &protocol, blinding_key)?;
-    let (raw_automated_grades, automated_adjudications, final_automated_grades, agreement) =
-        grade_candidates(&prepared.candidates, &rubric_evidence)?;
-    let aggregate = aggregate_report(
-        &protocol,
-        &prepared.candidates,
-        &prepared.pairing_map,
-        &final_automated_grades,
-        &rubric_evidence,
-    )?;
-    let evidence = ContextPackAblationEvidence {
-        protocol,
-        blinded_candidates: prepared.candidates,
-        rubric_evidence,
-        raw_automated_grades,
-        automated_agreement: agreement,
-        automated_adjudications,
-        final_automated_grades,
-        aggregate,
-        restricted_pairing_map: prepared.pairing_map,
-    };
-    evidence.validate()?;
-    Ok(evidence)
+    prepared.evaluate(protocol, rubric_evidence)
 }
 
 /// Produces a complete package from an exact source revision and raw rubric evidence.
@@ -2463,6 +2606,9 @@ pub enum AblationError {
     /// Actual token accounting is absent.
     #[error("context-pack ablation requires actual token counts")]
     MissingActualTokens,
+    /// A measured direct-sequence candidate violates its preregistration.
+    #[error("direct-sequence measurement violates the preregistered contract")]
+    InvalidDirectMeasurement,
     /// Rubric evidence is incomplete, unbounded, or bound to another candidate.
     #[error("context-pack rubric evidence is invalid")]
     InvalidRubricEvidence,
@@ -2675,6 +2821,76 @@ mod tests {
         assert_eq!(context.observed_attempts, 2);
         assert_eq!(context.quality_graded, 0);
         assert_eq!(context.unsupported_claim_rate_ppm, None);
+    }
+
+    #[test]
+    fn measured_direct_sequences_complete_preregistered_primary_pairs() {
+        let package = trajectory_package();
+        let ablation_protocol = protocol(&package);
+        let key = blinding_key();
+        let mut prepared = prepare_blinded_ablation(&package, &ablation_protocol, &key)
+            .expect("base preparation succeeds");
+        let tools = vec![
+            "code.locate".to_owned(),
+            "symbol.explain".to_owned(),
+            "source.read".to_owned(),
+            "symbol.relationships".to_owned(),
+        ];
+        for attempt_index in 0..2 {
+            prepared
+                .add_direct_sequence_measurement(
+                    &ablation_protocol,
+                    &key,
+                    attempt_index,
+                    BlindedRunOutcome::Succeeded,
+                    BlindedCandidateMetrics {
+                        calls: 4,
+                        tokens: 400,
+                        source_tokens: 100,
+                        elapsed_ns: 4_000,
+                        unsupported_claims: 0,
+                    },
+                    &tools,
+                )
+                .expect("direct measurement completes its pair");
+        }
+        let rubric_evidence = prepared
+            .candidates
+            .iter()
+            .map(|candidate| all_checks(candidate, vec![true, true]))
+            .collect();
+        let evidence = prepared
+            .evaluate(ablation_protocol, rubric_evidence)
+            .expect("complete measured pairs evaluate");
+        assert_eq!(evidence.aggregate.expected_pairs, 2);
+        assert_eq!(evidence.aggregate.complete_quality_pairs, 2);
+        assert_eq!(evidence.aggregate.quality_retention_ppm, Some(1_000_000));
+        assert!(evidence.aggregate.uncertainty.is_some());
+        assert!(matches!(
+            evidence.aggregate.decision,
+            AblationDecision::Pass
+        ));
+
+        let ablation_protocol = protocol(&package);
+        let mut invalid = prepare_blinded_ablation(&package, &ablation_protocol, &key)
+            .expect("second preparation succeeds");
+        assert!(matches!(
+            invalid.add_direct_sequence_measurement(
+                &ablation_protocol,
+                &key,
+                0,
+                BlindedRunOutcome::Succeeded,
+                BlindedCandidateMetrics {
+                    calls: 1,
+                    tokens: 1,
+                    source_tokens: 0,
+                    elapsed_ns: 1,
+                    unsupported_claims: 0,
+                },
+                &["code.locate".to_owned()],
+            ),
+            Err(AblationError::InvalidDirectMeasurement)
+        ));
     }
 
     #[test]
