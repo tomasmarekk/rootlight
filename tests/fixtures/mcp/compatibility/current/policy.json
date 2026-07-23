@@ -93,11 +93,14 @@
     }
   ],
   "tool_version_negotiation": {
-    "implemented": false,
-    "reason": "the public request boundary has no tool-contract version selector",
+    "implemented": true,
+    "omitted_selector": "current_contract",
     "required_error": "PROTOCOL_MISMATCH",
     "required_recovery": "select_supported_version",
-    "unsupported_major_evidence": "not_claimed"
+    "selector_key": "rootlight/toolContractVersion",
+    "selector_location": "_meta",
+    "supported_version_detail": "supported_version",
+    "unsupported_major_evidence": "all_tool_process_and_zero_execution_unit"
   },
   "unknown_fields": {
     "input": "reject",

@@ -291,6 +291,9 @@ fn validate_vertical(
         || matrix["unexecuted_applicable_cells"] != 0
         || matrix["input_and_output_schema_validation"] != true
         || matrix["source_free_transcript"] != true
+        || summary["protocol"]["tool_contract_version_selector"] != "rootlight/toolContractVersion"
+        || summary["protocol"]["versioned_tool_calls"] != true
+        || summary["protocol"]["unsupported_major_tool_count"] != 19
         || summary["fixture"]["prompt_injection_observed_only_in_untrusted_data_channel"] != true
         || summary["artifacts"]["transcript_sha256"] != sha256_hex(transcript)
         || summary["artifacts"]["repository_root_arguments_redacted"] != true

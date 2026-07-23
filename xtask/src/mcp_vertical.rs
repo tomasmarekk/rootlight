@@ -19,7 +19,7 @@ use rootlight_bench::{TokenInputKind, TokenMeasurement, WorkflowTokenAccounting}
 use rootlight_client::{Client, ConnectPolicy, OperationState as ClientOperationState};
 use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource};
 use rootlight_ids::{GenerationId, OperationId, RepositoryId};
-use rootlight_mcp_contract::MCP_SPECIFICATION_DATE;
+use rootlight_mcp_contract::{MCP_SPECIFICATION_DATE, capability::DISCOVERY_METADATA_KEY};
 use rootlight_operations::{OperationCounts, OperationJournal};
 use rootlight_runtime::{RuntimeError, RuntimePaths};
 use serde::{Deserialize, Serialize};
@@ -575,6 +575,9 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
             schema_version: "1.0",
             framing: "newline_delimited_json",
             exact_tools: EXPECTED_TOOLS,
+            tool_contract_version_selector: "rootlight/toolContractVersion",
+            versioned_tool_calls: true,
+            unsupported_major_tool_count: EXPECTED_TOOLS.len(),
             malformed_json_error: -32_700,
             unknown_method_error: -32_601,
         },
@@ -769,6 +772,9 @@ fn open_session(
         json!({}),
     )?;
     let catalog = ToolCatalog::parse(&tools.response)?;
+    if session == "primary" {
+        verify_unsupported_contract_majors(&mut process, &catalog, transcript)?;
+    }
     probe_live_daemon_port(session, &mut process, &catalog, transcript)?;
     Ok((process, catalog, elapsed_micros(started.elapsed())))
 }
@@ -790,7 +796,13 @@ fn probe_live_daemon_port(
         transcript,
         format!("{session}.live-daemon-port"),
         "tools/call",
-        json!({"name": "operation.status", "arguments": arguments}),
+        json!({
+            "name": "operation.status",
+            "arguments": arguments,
+            "_meta": {
+                "rootlight/toolContractVersion": catalog.contract_version("operation.status")?
+            }
+        }),
     )?;
     if exchange.response.get("error").is_some() {
         return Err(VerticalError::MissingLiveDaemonPort);
@@ -802,6 +814,45 @@ fn probe_live_daemon_port(
     } else {
         Err(VerticalError::MissingLiveDaemonPort)
     }
+}
+
+fn verify_unsupported_contract_majors(
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+) -> Result<(), VerticalError> {
+    for tool in EXPECTED_TOOLS {
+        let exchange = process.request(
+            transcript,
+            format!("primary.compatibility.unsupported-major.{tool}"),
+            "tools/call",
+            json!({
+                "name": tool,
+                "arguments": {},
+                "_meta": {
+                    "rootlight/toolContractVersion": "99.0"
+                }
+            }),
+        )?;
+        if exchange.response.get("error").is_some() {
+            return Err(VerticalError::Invariant(
+                "unsupported tool major returned a JSON-RPC protocol error",
+            ));
+        }
+        let outcome = catalog.validate_result(tool, &exchange.response)?;
+        if !outcome.is_error
+            || outcome.structured["error"]["code"] != "PROTOCOL_MISMATCH"
+            || outcome.structured["error"]["details"]["supported_version"]
+                != catalog.contract_version(tool)?
+            || outcome.structured["error"]["next_actions"]
+                != json!([{"action": "select_supported_version"}])
+        {
+            return Err(VerticalError::Invariant(
+                "unsupported tool major did not fail with checked recovery guidance",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn exercise_protocol_errors(
@@ -884,6 +935,7 @@ fn exercise_attached_cancellation(
         transcript,
         "cancellation.attached-repo-index",
         "repo.index",
+        catalog.contract_version("repo.index")?,
         arguments,
     )?;
     let (durable_admission_latency_us, durable_admission_counts) =
@@ -3091,7 +3143,13 @@ fn call_tool(
         transcript,
         label.to_owned(),
         "tools/call",
-        json!({"name": tool, "arguments": arguments}),
+        json!({
+            "name": tool,
+            "arguments": arguments,
+            "_meta": {
+                "rootlight/toolContractVersion": catalog.contract_version(tool)?
+            }
+        }),
     )?;
     if exchange.response.get("error").is_some() {
         return Err(VerticalError::Invariant(
@@ -3113,7 +3171,13 @@ fn call_tool_unchecked(
         transcript,
         label.to_owned(),
         "tools/call",
-        json!({"name": tool, "arguments": arguments}),
+        json!({
+            "name": tool,
+            "arguments": arguments,
+            "_meta": {
+                "rootlight/toolContractVersion": catalog.contract_version(tool)?
+            }
+        }),
     )?;
     if exchange.response.get("error").is_some() {
         return Err(VerticalError::Invariant(
@@ -3839,6 +3903,7 @@ impl McpProcess {
         transcript: &mut TranscriptWriter,
         request_label: &str,
         tool: &str,
+        contract_version: &str,
         arguments: Value,
     ) -> Result<u64, VerticalError> {
         let id = self.next_request_id;
@@ -3850,7 +3915,13 @@ impl McpProcess {
             "jsonrpc": "2.0",
             "id": id,
             "method": "tools/call",
-            "params": {"name": tool, "arguments": arguments}
+            "params": {
+                "name": tool,
+                "arguments": arguments,
+                "_meta": {
+                    "rootlight/toolContractVersion": contract_version
+                }
+            }
         });
         let mut request_bytes =
             serde_json::to_vec(&request).map_err(|source| VerticalError::Json {
@@ -4185,6 +4256,7 @@ struct ToolCatalog {
 struct ToolSchemas {
     input: Value,
     output: Value,
+    contract_version: String,
 }
 
 impl ToolCatalog {
@@ -4212,6 +4284,10 @@ impl ToolCatalog {
             let name = required_string(&tool["name"], "tool name")?;
             let input = tool["inputSchema"].clone();
             let output = tool["outputSchema"].clone();
+            let contract_version = required_string(
+                &tool["_meta"][DISCOVERY_METADATA_KEY]["contractVersion"],
+                "tool contract version",
+            )?;
             if !input.is_object() || !output.is_object() {
                 return Err(VerticalError::Invariant(
                     "tool definition omitted an object input or output schema",
@@ -4222,7 +4298,14 @@ impl ToolCatalog {
             jsonschema::draft202012::new(&output)
                 .map_err(|_| VerticalError::Invariant("tool output schema did not compile"))?;
             if contracts
-                .insert(name, ToolSchemas { input, output })
+                .insert(
+                    name,
+                    ToolSchemas {
+                        input,
+                        output,
+                        contract_version,
+                    },
+                )
                 .is_some()
             {
                 return Err(VerticalError::Invariant(
@@ -4249,6 +4332,15 @@ impl ToolCatalog {
                 "harness arguments did not satisfy the advertised input schema",
             ))
         }
+    }
+
+    fn contract_version(&self, tool: &str) -> Result<&str, VerticalError> {
+        self.contracts
+            .get(tool)
+            .map(|contract| contract.contract_version.as_str())
+            .ok_or(VerticalError::Invariant(
+                "harness requested a tool outside the exact catalog",
+            ))
     }
 
     fn validate_result(&self, tool: &str, response: &Value) -> Result<ToolOutcome, VerticalError> {
@@ -4936,6 +5028,9 @@ struct ProtocolEvidence {
     schema_version: &'static str,
     framing: &'static str,
     exact_tools: [&'static str; 19],
+    tool_contract_version_selector: &'static str,
+    versioned_tool_calls: bool,
+    unsupported_major_tool_count: usize,
     malformed_json_error: i32,
     unknown_method_error: i32,
 }

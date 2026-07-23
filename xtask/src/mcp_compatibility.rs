@@ -397,11 +397,14 @@ fn policy_snapshot() -> Value {
             }))
             .collect::<Vec<_>>(),
         "tool_version_negotiation": {
-            "implemented": false,
-            "unsupported_major_evidence": "not_claimed",
+            "implemented": true,
+            "selector_location": "_meta",
+            "selector_key": "rootlight/toolContractVersion",
+            "omitted_selector": "current_contract",
+            "unsupported_major_evidence": "all_tool_process_and_zero_execution_unit",
             "required_error": ErrorCode::ProtocolMismatch,
             "required_recovery": "select_supported_version",
-            "reason": "the public request boundary has no tool-contract version selector",
+            "supported_version_detail": "supported_version",
         },
         "output_projection": {
             "implemented": false,
@@ -1119,12 +1122,16 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_major_is_not_claimed_without_negotiation() {
+    fn unsupported_major_policy_requires_explicit_version_selection() {
         let policy = policy_snapshot();
-        assert_eq!(policy["tool_version_negotiation"]["implemented"], false);
+        assert_eq!(policy["tool_version_negotiation"]["implemented"], true);
+        assert_eq!(
+            policy["tool_version_negotiation"]["selector_key"],
+            "rootlight/toolContractVersion"
+        );
         assert_eq!(
             policy["tool_version_negotiation"]["unsupported_major_evidence"],
-            "not_claimed"
+            "all_tool_process_and_zero_execution_unit"
         );
         assert_eq!(
             policy["output_projection"]["older_closed_output_claimed"],
