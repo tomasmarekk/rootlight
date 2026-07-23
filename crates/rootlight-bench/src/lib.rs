@@ -75,12 +75,12 @@ pub use performance::{
     decode_performance_evidence, encode_performance_evidence, nearest_rank_distribution,
     performance_evidence_sha256, performance_protocol_sha256, validate_performance_evidence,
 };
+#[cfg(target_os = "linux")]
+pub use sampler::{LinuxProcTreeSample, LinuxProcTreeSampler, LinuxProcTreeSamplerError};
 pub use sampler::{
     ProcessTreeMeasurement, ProcessTreeSample, ProcessTreeSampler, UnavailableProcessTreeSample,
     UnavailableProcessTreeSampler,
 };
-#[cfg(target_os = "linux")]
-pub use sampler::{LinuxProcTreeSample, LinuxProcTreeSampler, LinuxProcTreeSamplerError};
 pub use semantic_contract::{
     SEMANTIC_EVIDENCE_ENVELOPE_MAX_BYTES, SEMANTIC_EVIDENCE_ENVELOPE_SCHEMA,
     SEMANTIC_EVIDENCE_MAX_BYTES, SEMANTIC_EVIDENCE_MAX_EXPECTATIONS,
