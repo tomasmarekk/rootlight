@@ -4,6 +4,7 @@
 //! `rootlight-bench`; raw JSON-RPC and source frames remain process-local.
 
 use std::{
+    collections::BTreeMap,
     fs,
     io::{BufRead as _, BufReader, Read as _, Write as _},
     path::{Path, PathBuf},
@@ -14,13 +15,16 @@ use std::{
 };
 
 use rootlight_bench::{
-    AblationBlindingKey, AblationDecision, BoundedFileExplorationAdapter, O200kTrajectoryTokenizer,
-    RawTrajectoryAttempt, RawTrajectoryCall, TrajectoryAdapter, TrajectoryAttemptOutcome,
-    TrajectoryClaimSignals, TrajectoryCondition, TrajectoryExecutionBoundary,
-    TrajectoryExecutionInput, TrajectoryExposureProfile, TrajectoryOperationStatus,
-    TrajectoryToolIdentity, UnavailableTrajectoryAdapter, encode_context_pack_ablation,
-    encode_trajectory_evidence, preregistered_trajectory_protocol, produce_context_pack_ablation,
-    run_trajectory_suite,
+    AblationBlindingKey, AblationDecision, AblationVariant, BlindedAblationCandidate,
+    BlindedCandidateMetrics, BlindedRunOutcome, BoundedFileExplorationAdapter,
+    CandidateRubricEvidence, O200kTrajectoryTokenizer, RawTrajectoryAttempt, RawTrajectoryCall,
+    RestrictedPairingMap, RubricDimension, RubricObservation, TrajectoryAdapter,
+    TrajectoryAttemptOutcome, TrajectoryClaimSignals, TrajectoryCondition,
+    TrajectoryExecutionBoundary, TrajectoryExecutionInput, TrajectoryExposureProfile,
+    TrajectoryOperationStatus, TrajectorySharedBounds, TrajectoryTokenizer, TrajectoryToolIdentity,
+    UnavailableTrajectoryAdapter, UnsupportedClaimAssessment, UnsupportedClaimCategory,
+    encode_context_pack_ablation, encode_trajectory_evidence, prepare_blinded_ablation,
+    preregister_context_pack_ablation, preregistered_trajectory_protocol, run_trajectory_suite,
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -69,6 +73,7 @@ fn preregistered_trajectories_run_through_daemon_and_mcp_processes() {
         second,
         entry,
         helper,
+        context_observations: Vec::new(),
     };
     let mut codebase_memory = UnavailableTrajectoryAdapter::new(
         TrajectoryCondition::CodebaseMemory,
@@ -116,19 +121,84 @@ fn preregistered_trajectories_run_through_daemon_and_mcp_processes() {
                     && call.accounting.total.actual_tokens.is_some()
             })
     );
-    let ablation = produce_context_pack_ablation(
-        &package,
-        &AblationBlindingKey::new([0x48; 32]),
-        &source_revision(),
-        vec![],
-    )
-    .expect("real trajectory package produces truthful ablation evidence");
-    assert!(matches!(
+    let blinding_key = AblationBlindingKey::new([0x48; 32]);
+    let ablation_protocol =
+        preregister_context_pack_ablation(&package, &blinding_key, &source_revision())
+            .expect("ablation protocol is preregistered before paired measurements");
+    let mut prepared = prepare_blinded_ablation(&package, &ablation_protocol, &blinding_key)
+        .expect("trajectory package prepares blinded candidates");
+    let context_observations = std::mem::take(&mut rootlight.context_observations);
+    assert_eq!(
+        context_observations.len(),
+        ablation_protocol.attempt_seeds.len()
+    );
+    let mut direct_observations = Vec::with_capacity(ablation_protocol.attempt_seeds.len());
+    for (attempt_index, seed) in ablation_protocol.attempt_seeds.iter().copied().enumerate() {
+        let attempt_index = u16::try_from(attempt_index).expect("attempt index fits u16");
+        let (raw, observation) = rootlight.execute_direct_sequence(attempt_index, seed);
+        assert_attempt_within_bounds(&raw, ablation_protocol.shared_bounds, &tokenizer);
+        let mut metrics = measured_metrics(&raw, &tokenizer);
+        metrics.unsupported_claims = unsupported_claim_categories(&observation)
+            .values()
+            .copied()
+            .try_fold(0_u32, u32::checked_add)
+            .expect("unsupported-claim count fits u32");
+        let tools = raw
+            .calls
+            .iter()
+            .map(|call| call.tool.tool_id.clone())
+            .collect::<Vec<_>>();
+        prepared
+            .add_direct_sequence_measurement(
+                &ablation_protocol,
+                &blinding_key,
+                attempt_index,
+                BlindedRunOutcome::from(&raw.outcome),
+                metrics,
+                &tools,
+            )
+            .expect("measured direct sequence completes its preregistered pair");
+        direct_observations.push(observation);
+    }
+    let rubric_evidence = primary_rubric_evidence(
+        &prepared.candidates,
+        &prepared.pairing_map,
+        &context_observations,
+        &direct_observations,
+        &rootlight.entry,
+        &rootlight.helper,
+    );
+    let ablation = prepared
+        .evaluate(ablation_protocol, rubric_evidence)
+        .expect("complete paired ablation evidence evaluates");
+    assert!(!matches!(
         ablation.aggregate.decision,
         AblationDecision::Blocked { .. }
     ));
     assert_eq!(ablation.aggregate.expected_pairs, 2);
-    assert_eq!(ablation.aggregate.complete_quality_pairs, 0);
+    assert_eq!(ablation.aggregate.complete_quality_pairs, 2);
+    assert!(ablation.aggregate.quality_retention_ppm.is_some());
+    assert!(ablation.aggregate.uncertainty.is_some());
+    assert_eq!(ablation.aggregate.sensitivity.context_ungraded, 0);
+    assert_eq!(ablation.aggregate.sensitivity.direct_ungraded, 0);
+    for variant in [
+        AblationVariant::ContextPack,
+        AblationVariant::DirectSequence,
+    ] {
+        let aggregate = ablation
+            .aggregate
+            .variants
+            .iter()
+            .find(|aggregate| aggregate.variant == variant)
+            .expect("primary variant aggregate is retained");
+        assert_eq!(aggregate.observed_attempts, 2);
+        assert_eq!(aggregate.quality_graded, 2);
+        assert!(aggregate.task_success_rate_ppm.is_some());
+        assert!(aggregate.unsupported_claim_rate_ppm.is_some());
+        assert!(aggregate.resource_totals.calls > 0);
+        assert!(aggregate.resource_totals.tokens > 0);
+        assert!(aggregate.resource_totals.elapsed_ns > 0);
+    }
 
     if let Some(path) = std::env::var_os(REPORT_ENV) {
         let encoded =
@@ -168,12 +238,25 @@ fn source_revision() -> String {
     revision
 }
 
+struct ObservableCall {
+    tool: String,
+    response: Value,
+    truncated: bool,
+    continuation_available: bool,
+}
+
+struct ObservableExecution {
+    attempt_index: u16,
+    calls: Vec<ObservableCall>,
+}
+
 struct RootlightProcessAdapter<'a> {
     mcp: &'a mut McpProcess,
     first: IndexReceipt,
     second: IndexReceipt,
     entry: LocatedSymbol,
     helper: LocatedSymbol,
+    context_observations: Vec<ObservableExecution>,
 }
 
 impl TrajectoryAdapter for RootlightProcessAdapter<'_> {
@@ -187,13 +270,37 @@ impl TrajectoryAdapter for RootlightProcessAdapter<'_> {
 
     fn execute(&mut self, input: TrajectoryExecutionInput<'_>) -> RawTrajectoryAttempt {
         let calls = self.tool_calls(&input.workflow.workflow_id);
+        let (raw, observation) =
+            self.execute_observed(&input.workflow.workflow_id, input.attempt_index, calls);
+        if input.workflow.workflow_id == "workflow-12-context-pack" {
+            self.context_observations.push(observation);
+        }
+        raw
+    }
+}
+
+impl RootlightProcessAdapter<'_> {
+    fn execute_direct_sequence(
+        &mut self,
+        attempt_index: u16,
+        seed: u64,
+    ) -> (RawTrajectoryAttempt, ObservableExecution) {
+        let calls = self.direct_tool_calls();
+        let execution_id = format!("workflow-12-context-pack-direct-{seed}");
+        self.execute_observed(&execution_id, attempt_index, calls)
+    }
+
+    fn execute_observed(
+        &mut self,
+        execution_id: &str,
+        attempt_index: u16,
+        calls: Vec<(&'static str, Value)>,
+    ) -> (RawTrajectoryAttempt, ObservableExecution) {
         let mut records = Vec::with_capacity(calls.len());
+        let mut observable_calls = Vec::with_capacity(calls.len());
         let mut outcome = TrajectoryAttemptOutcome::Succeeded;
         for (call_index, (tool, arguments)) in calls.into_iter().enumerate() {
-            let id = format!(
-                "{}-{}-{}",
-                input.workflow.workflow_id, input.attempt_index, call_index
-            );
+            let id = format!("{execution_id}-{attempt_index}-{call_index}");
             let request = tool_call(&id, tool, arguments.clone());
             let request_frame = serde_json::to_vec(&request)
                 .unwrap_or_else(|_| b"{\"error\":\"serialization_failed\"}".to_vec());
@@ -211,6 +318,12 @@ impl TrajectoryAdapter for RootlightProcessAdapter<'_> {
                         &response,
                         &["continuation", "continuation_token", "next_cursor"],
                     );
+                    observable_calls.push(ObservableCall {
+                        tool: tool.to_owned(),
+                        response: response.clone(),
+                        truncated,
+                        continuation_available,
+                    });
                     let public_error = response["result"]["isError"] == true
                         || response.get("error").is_some_and(Value::is_object);
                     let error_code = normalized_error_code(&response);
@@ -256,6 +369,12 @@ impl TrajectoryAdapter for RootlightProcessAdapter<'_> {
                 }
                 Err(()) => {
                     let error_code = "response_timeout".to_owned();
+                    observable_calls.push(ObservableCall {
+                        tool: tool.to_owned(),
+                        response: json!({"error": {"code": error_code.clone()}}),
+                        truncated: false,
+                        continuation_available: false,
+                    });
                     records.push(RawTrajectoryCall {
                         operation_id: format!("operation-{call_index:02}"),
                         tool: TrajectoryToolIdentity {
@@ -281,14 +400,67 @@ impl TrajectoryAdapter for RootlightProcessAdapter<'_> {
                 }
             }
         }
-        RawTrajectoryAttempt {
-            outcome,
-            calls: records,
-        }
+        (
+            RawTrajectoryAttempt {
+                outcome,
+                calls: records,
+            },
+            ObservableExecution {
+                attempt_index,
+                calls: observable_calls,
+            },
+        )
     }
-}
 
-impl RootlightProcessAdapter<'_> {
+    fn direct_tool_calls(&self) -> Vec<(&'static str, Value)> {
+        let repository = || json!({"repository_id": self.second.repository_id});
+        let generation = || Value::String(self.second.generation_id.clone());
+        vec![
+            (
+                "code.locate",
+                json!({
+                    "repository": repository(),
+                    "generation": generation(),
+                    "query": "budget_entry",
+                    "search_modes": ["exact"],
+                    "max_results": 20
+                }),
+            ),
+            (
+                "symbol.explain",
+                json!({
+                    "repository": repository(),
+                    "generation": generation(),
+                    "symbol_ids": [self.entry.symbol_id, self.helper.symbol_id]
+                }),
+            ),
+            (
+                "source.read",
+                json!({
+                    "repository": repository(),
+                    "generation": generation(),
+                    "references": [
+                        {"source_ref": self.entry.source_ref},
+                        {"source_ref": self.helper.source_ref}
+                    ],
+                    "include_line_numbers": true,
+                    "encoding": "utf8_lossless_when_valid"
+                }),
+            ),
+            (
+                "symbol.relationships",
+                json!({
+                    "repository": repository(),
+                    "generation": generation(),
+                    "symbol_ids": [self.entry.symbol_id],
+                    "relations": ["calls", "references"],
+                    "direction": "both",
+                    "max_results": 20
+                }),
+            ),
+        ]
+    }
+
     fn tool_calls(&self, workflow_id: &str) -> Vec<(&'static str, Value)> {
         let repository = || json!({"repository_id": self.second.repository_id});
         let generation = || Value::String(self.second.generation_id.clone());
@@ -455,6 +627,297 @@ impl RootlightProcessAdapter<'_> {
             )],
             _ => vec![("unsupported.workflow", json!({"workflow_id": workflow_id}))],
         }
+    }
+}
+
+fn measured_metrics(
+    attempt: &RawTrajectoryAttempt,
+    tokenizer: &dyn TrajectoryTokenizer,
+) -> BlindedCandidateMetrics {
+    let mut metrics = BlindedCandidateMetrics {
+        calls: u64::try_from(attempt.calls.len()).expect("call count fits u64"),
+        ..BlindedCandidateMetrics::default()
+    };
+    for call in &attempt.calls {
+        let request_tokens = tokenizer
+            .count(&call.request_frame)
+            .expect("direct request has actual token accounting");
+        let response_tokens = tokenizer
+            .count(&call.response_frame)
+            .expect("direct response has actual token accounting");
+        metrics.tokens = metrics
+            .tokens
+            .checked_add(request_tokens)
+            .and_then(|total| total.checked_add(response_tokens))
+            .expect("direct token total fits u64");
+        metrics.source_tokens = metrics
+            .source_tokens
+            .checked_add(
+                tokenizer
+                    .count(&call.source_frame)
+                    .expect("direct source has actual token accounting"),
+            )
+            .expect("direct source-token total fits u64");
+        metrics.elapsed_ns = metrics
+            .elapsed_ns
+            .checked_add(call.elapsed_ns)
+            .expect("direct elapsed time fits u64");
+    }
+    metrics
+}
+
+fn assert_attempt_within_bounds(
+    attempt: &RawTrajectoryAttempt,
+    bounds: TrajectorySharedBounds,
+    tokenizer: &dyn TrajectoryTokenizer,
+) {
+    let metrics = measured_metrics(attempt, tokenizer);
+    let result_items = attempt
+        .calls
+        .iter()
+        .try_fold(0_u64, |total, call| total.checked_add(call.result_items))
+        .expect("direct result-item total fits u64");
+    let source_bytes = attempt
+        .calls
+        .iter()
+        .try_fold(0_u64, |total, call| {
+            total.checked_add(
+                u64::try_from(call.source_frame.len()).expect("source length fits u64"),
+            )
+        })
+        .expect("direct source-byte total fits u64");
+    assert!(matches!(
+        attempt.outcome,
+        TrajectoryAttemptOutcome::Succeeded
+    ));
+    assert!(metrics.calls <= u64::from(bounds.tool_calls));
+    assert!(metrics.tokens <= bounds.total_tokens);
+    assert!(metrics.elapsed_ns <= bounds.elapsed_ns);
+    assert!(result_items <= bounds.result_items);
+    assert!(source_bytes <= bounds.source_bytes);
+    assert!(attempt.calls.iter().all(|call| {
+        !call.truncated
+            || call.continuation_available
+            || contains_present(
+                &serde_json::from_slice::<Value>(&call.response_frame)
+                    .expect("direct response frame remains structured JSON"),
+                &["completeness", "omitted", "truncated"],
+            )
+    }));
+}
+
+fn primary_rubric_evidence(
+    candidates: &[BlindedAblationCandidate],
+    pairing_map: &RestrictedPairingMap,
+    context: &[ObservableExecution],
+    direct: &[ObservableExecution],
+    entry: &LocatedSymbol,
+    helper: &LocatedSymbol,
+) -> Vec<CandidateRubricEvidence> {
+    let mut evidence = Vec::with_capacity(context.len() + direct.len());
+    for (variant, observations) in [
+        (AblationVariant::ContextPack, context),
+        (AblationVariant::DirectSequence, direct),
+    ] {
+        for observation in observations {
+            let pair = pairing_map
+                .pairs
+                .get(usize::from(observation.attempt_index))
+                .expect("observable execution has a preregistered pair");
+            let mapping = pairing_map
+                .entries
+                .iter()
+                .find(|mapping| mapping.pair_id == pair.pair_id && mapping.variant == variant)
+                .expect("observable execution has a restricted mapping");
+            let candidate = candidates
+                .iter()
+                .find(|candidate| candidate.blind_id == mapping.blind_id)
+                .expect("observable execution has a blinded candidate");
+            evidence.push(observable_rubric_evidence(
+                candidate,
+                observation,
+                variant,
+                entry,
+                helper,
+            ));
+        }
+    }
+    evidence
+}
+
+fn observable_rubric_evidence(
+    candidate: &BlindedAblationCandidate,
+    execution: &ObservableExecution,
+    variant: AblationVariant,
+    entry: &LocatedSymbol,
+    helper: &LocatedSymbol,
+) -> CandidateRubricEvidence {
+    let successful = execution.calls.iter().all(|call| {
+        call.response["result"]["isError"] != true
+            && !call.response.get("error").is_some_and(Value::is_object)
+    });
+    let contains_entry = execution
+        .calls
+        .iter()
+        .any(|call| value_contains(&call.response, &entry.symbol_id));
+    let contains_helper = execution
+        .calls
+        .iter()
+        .any(|call| value_contains(&call.response, &helper.symbol_id));
+    let has_source_reference = execution.calls.iter().any(|call| {
+        has_present_field(
+            &call.response["result"]["structuredContent"],
+            &["source_ref", "source_refs", "references"],
+        )
+    });
+    let has_source_material = execution.calls.iter().any(|call| {
+        has_nonempty_text_field(
+            &call.response["result"]["structuredContent"],
+            &["snippet", "content", "source", "source_text"],
+        )
+    });
+    let partial = execution
+        .calls
+        .iter()
+        .any(|call| call.truncated || call.continuation_available);
+    let partial_is_disclosed = !partial
+        || execution.calls.iter().any(|call| {
+            has_present_field(
+                &call.response,
+                &["completeness", "omitted", "truncated", "continuation"],
+            )
+        });
+    let observed_tools = execution
+        .calls
+        .iter()
+        .map(|call| call.tool.as_str())
+        .collect::<Vec<_>>();
+    let expected_tools: &[&str] = match variant {
+        AblationVariant::ContextPack => &["context.pack"],
+        AblationVariant::DirectSequence => &[
+            "code.locate",
+            "symbol.explain",
+            "source.read",
+            "symbol.relationships",
+        ],
+        AblationVariant::CodebaseMemory | AblationVariant::BoundedFileExploration => &[],
+    };
+    let task_adherent = observed_tools == expected_tools;
+    let observations = [
+        (
+            RubricDimension::Correctness,
+            vec![successful, contains_entry, contains_helper],
+        ),
+        (
+            RubricDimension::Completeness,
+            vec![
+                successful,
+                contains_entry,
+                contains_helper,
+                has_source_material,
+            ],
+        ),
+        (
+            RubricDimension::EvidenceSupport,
+            vec![has_source_reference, has_source_material],
+        ),
+        (
+            RubricDimension::UncertaintyHandling,
+            vec![partial_is_disclosed],
+        ),
+        (
+            RubricDimension::Actionability,
+            vec![has_source_reference, has_source_material, contains_entry],
+        ),
+        (
+            RubricDimension::SourceRelevance,
+            vec![contains_entry, contains_helper],
+        ),
+        (
+            RubricDimension::TaskAdherence,
+            vec![successful, task_adherent],
+        ),
+    ]
+    .into_iter()
+    .map(|(dimension, checks)| (dimension, RubricObservation::Checks { checks }))
+    .collect();
+    CandidateRubricEvidence {
+        blind_id: candidate.blind_id.clone(),
+        candidate_sha256: candidate.candidate_sha256.clone(),
+        observations,
+        unsupported_claims: UnsupportedClaimAssessment::Assessed {
+            categories: unsupported_claim_categories(execution),
+        },
+    }
+}
+
+fn unsupported_claim_categories(
+    execution: &ObservableExecution,
+) -> BTreeMap<UnsupportedClaimCategory, u32> {
+    let mut categories = BTreeMap::new();
+    for call in &execution.calls {
+        if (call.truncated || call.continuation_available)
+            && !has_present_field(
+                &call.response,
+                &["completeness", "omitted", "truncated", "continuation"],
+            )
+        {
+            categories
+                .entry(UnsupportedClaimCategory::PartialOrTruncatedResult)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+        }
+        if has_nonempty_text_field(
+            &call.response["result"]["structuredContent"],
+            &["snippet", "content", "source", "source_text"],
+        ) && !has_present_field(
+            &call.response["result"]["structuredContent"],
+            &["source_ref", "source_refs", "references"],
+        ) {
+            categories
+                .entry(UnsupportedClaimCategory::FabricatedSourceSupport)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+        }
+    }
+    categories
+}
+
+fn value_contains(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::String(text) => text == expected || text.contains(expected),
+        Value::Array(values) => values.iter().any(|value| value_contains(value, expected)),
+        Value::Object(fields) => fields.values().any(|value| value_contains(value, expected)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn has_present_field(value: &Value, keys: &[&str]) -> bool {
+    match value {
+        Value::Object(fields) => {
+            fields
+                .iter()
+                .any(|(key, value)| keys.contains(&key.as_str()) && !value.is_null())
+                || fields.values().any(|value| has_present_field(value, keys))
+        }
+        Value::Array(values) => values.iter().any(|value| has_present_field(value, keys)),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
+}
+
+fn has_nonempty_text_field(value: &Value, keys: &[&str]) -> bool {
+    match value {
+        Value::Object(fields) => {
+            fields.iter().any(|(key, value)| {
+                keys.contains(&key.as_str()) && value.as_str().is_some_and(|text| !text.is_empty())
+            }) || fields
+                .values()
+                .any(|value| has_nonempty_text_field(value, keys))
+        }
+        Value::Array(values) => values
+            .iter()
+            .any(|value| has_nonempty_text_field(value, keys)),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
     }
 }
 
