@@ -2108,7 +2108,7 @@ mod tests {
         );
         assert!(cases.iter().any(|case| {
             case["id"] == "query.batch::operations[].local_budget.max_tokens"
-                && case["expectedDisposition"] == "blocked"
+                && case["expectedDisposition"] == "implemented"
         }));
     }
 }
