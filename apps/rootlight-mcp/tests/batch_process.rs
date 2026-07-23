@@ -132,6 +132,7 @@ fn every_advertised_batch_subtool_reaches_its_production_adapter() {
         failures.is_empty(),
         "production batch adapters did not complete successfully: {failures:#?}"
     );
+    assert_process_profile_semantics(&mut mcp, &repository_id);
 
     mcp.finish();
     daemon.finish();
@@ -489,6 +490,53 @@ fn dispatch_arguments(tool: BatchTool, symbol: &Value, source_ref: &Value) -> Va
             json!({"references": [{"source_ref": source_ref.clone()}]})
         }
     }
+}
+
+fn assert_process_profile_semantics(mcp: &mut McpProcess, repository_id: &str) {
+    let success = |id: &str| {
+        json!({
+            "id": id,
+            "tool": "code.locate",
+            "arguments": {"query": "__batch_absent__", "search_modes": ["exact"]}
+        })
+    };
+
+    let mut semantic_outcomes = Vec::new();
+    for profile in ["compact", "standard", "evidence"] {
+        let response = mcp.call(
+            &format!("batch-profile-{profile}"),
+            "query.batch",
+            json!({
+                "repository": {"repository_id": repository_id},
+                "generation": "active",
+                "operations": [success("first"), success("second")],
+                "response_profile": profile
+            }),
+        );
+        assert_success(&response, "query.batch");
+        let content = &response["result"]["structuredContent"];
+        semantic_outcomes.push(json!({
+            "repository": content["repository"],
+            "generation": content["generation"],
+            "batch_status": content["data"]["batch_status"],
+            "operation_results": content["data"]["operation_results"]
+                .as_array()
+                .expect("profiled batch has operation results")
+                .iter()
+                .map(|result| json!({
+                    "id": result["id"],
+                    "tool": result["tool"],
+                    "status": result["status"]
+                }))
+                .collect::<Vec<_>>(),
+        }));
+    }
+    assert!(
+        semantic_outcomes
+            .windows(2)
+            .all(|window| window[0] == window[1]),
+        "response profiles changed batch identity or terminal semantics: {semantic_outcomes:#?}"
+    );
 }
 
 fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str) {
