@@ -11,6 +11,7 @@ use rootlight_ir::{CoverageStatus, EntityKind};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::completeness::ResultCompleteness;
 use crate::vertical::{
     GenerationSelector, ReadEnvelope, RepositorySelector, RequiredNullable, ResponseBudget,
     ResponseProfile, ToolResponse,
@@ -797,6 +798,15 @@ pub struct ChangePlanStep {
     /// Source-free action description.
     #[schemars(length(min = 1, max = 1024))]
     pub action: String,
+    /// Source-free explanation of why this step follows from the available evidence.
+    #[schemars(length(min = 1, max = 1024))]
+    pub rationale: String,
+    /// Evidence records that support this step.
+    #[schemars(
+        length(max = 16),
+        inner(length(min = 1, max = 128), regex(pattern = "^[a-z0-9_.:-]+$"))
+    )]
+    pub evidence_refs: Vec<String>,
     /// Target symbol identities for this step.
     #[schemars(length(max = 32))]
     pub targets: Vec<SymbolId>,
@@ -810,6 +820,122 @@ pub struct ChangePlanStep {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 1024))]
     pub verification: Option<String>,
+}
+
+/// Evidence providers evaluated while producing a change plan.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanEvidenceProvider {
+    /// Generation-pinned change-impact analysis.
+    ChangeImpact,
+    /// Generation-pinned structural relationship expansion.
+    Relationships,
+    /// Generation-pinned test selection.
+    Tests,
+    /// Generation-pinned architecture overview.
+    Architecture,
+    /// Bounded historical change evidence.
+    History,
+    /// Generation-pinned source evidence.
+    Source,
+    /// Bounded ownership or authorship evidence.
+    Ownership,
+}
+
+/// Authoritative disposition of one plan evidence provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanProviderState {
+    /// The provider completed its supported bounded domain.
+    Complete,
+    /// The provider returned useful evidence with explicit uncertainty.
+    Partial,
+    /// The provider cannot serve the requested evidence domain.
+    Unsupported,
+    /// The provider was not run because a bounded orchestration condition won.
+    Omitted,
+}
+
+/// Kind of bounded evidence summarized for a change plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanEvidenceKind {
+    /// Resolved affected-scope evidence.
+    ImpactScope,
+    /// Structural relationship evidence.
+    RelationshipGraph,
+    /// Ranked test-selection evidence.
+    TestSelection,
+    /// Architecture component and connection evidence.
+    Architecture,
+    /// Historical change evidence.
+    History,
+    /// Generation-bound source evidence.
+    Source,
+    /// Ownership or authorship evidence.
+    Ownership,
+}
+
+/// One bounded evidence record that plan steps may reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanEvidenceRecord {
+    /// Stable source-free identifier referenced by plan steps.
+    #[schemars(length(min = 1, max = 128), regex(pattern = "^[a-z0-9_.:-]+$"))]
+    pub evidence_id: String,
+    /// Evidence family represented by this record.
+    pub kind: PlanEvidenceKind,
+    /// Number of provider items summarized by the record.
+    #[schemars(range(max = 100_000))]
+    pub observed_items: u32,
+}
+
+/// Stable reason that one evidence provider could not contribute facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanEvidenceOmissionReason {
+    /// Explain mode intentionally performs no evidence retrieval.
+    ExplainOnly,
+    /// The request does not contain a historical comparison baseline.
+    HistoryBaselineUnavailable,
+    /// The accepted targets do not contain generation-bound source references.
+    SourceReferencesUnavailable,
+    /// The runtime does not serve ownership or authorship relationships.
+    OwnershipProviderUnsupported,
+    /// The provider does not accept any target present in this request.
+    NoCompatibleTargets,
+    /// The provider was unavailable without yielding checked evidence.
+    ProviderUnavailable,
+    /// The shared orchestration budget prevented another provider call.
+    SharedBudgetExhausted,
+}
+
+/// Explicit omission record for an unsupported or skipped evidence provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanEvidenceOmission {
+    /// Stable omission reason.
+    pub reason: PlanEvidenceOmissionReason,
+}
+
+/// Coverage and completeness reported by one evidence provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanProviderCoverage {
+    /// Evidence provider represented by this entry.
+    pub provider: PlanEvidenceProvider,
+    /// Provider disposition.
+    pub state: PlanProviderState,
+    /// Bounded evidence records emitted by this provider.
+    #[schemars(length(max = 64))]
+    pub evidence: Vec<PlanEvidenceRecord>,
+    /// Provider-specific execution completeness.
+    pub completeness: ResultCompleteness,
+    /// Explicit reason when the provider is unsupported or omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omission: Option<PlanEvidenceOmission>,
 }
 
 /// Compact impact and ownership summary for the plan.
@@ -869,6 +995,9 @@ pub struct PlanChangeData {
     pub open_decisions: Vec<PlanDecision>,
     /// Ready follow-up context pack arguments.
     pub context_pack_request: ContextPackRequest,
+    /// Deterministically ordered provider coverage and omission records.
+    #[schemars(length(min = 7, max = 7))]
+    pub provider_coverage: Vec<PlanProviderCoverage>,
     /// Bounded source-free plan present when explain was requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explanation: Option<crate::context::PlanExplanation>,

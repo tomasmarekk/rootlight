@@ -63,7 +63,8 @@ use rootlight_mcp_contract::{
     SymbolExplainOutput,
     change::{
         ChangeClassification, ChangeImpactOutput, HistoryCompareOutput, PlanChangeOutput,
-        RiskLevel, SemanticChangeKind, TestKind, TestsSelectOutput,
+        PlanEvidenceOmissionReason, PlanEvidenceProvider, PlanProviderState, RiskLevel,
+        SemanticChangeKind, TestKind, TestsSelectOutput,
     },
     context::{
         ColumnType, ContextPackOutput, QueryAdvancedOutput, QueryBatchOutput, QueryCompleteness,
@@ -581,6 +582,9 @@ impl FirstSliceClientPort for FakePort {
                 .expect("fake relationships sequence is not poisoned")
                 .pop_front()
                 .expect("fake relationships sequence is not exhausted"),
+            FakeOutcome::PlanChange(Ok(_)) | FakeOutcome::BatchPlanChange { .. } => {
+                Ok(plan_relationships_response())
+            }
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -645,6 +649,9 @@ impl FirstSliceClientPort for FakePort {
         ));
         let outcome = match &self.outcome {
             FakeOutcome::ArchitectureOverview(outcome) => outcome.clone(),
+            FakeOutcome::PlanChange(Ok(_)) | FakeOutcome::BatchPlanChange { .. } => {
+                Ok(plan_architecture_response())
+            }
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -661,6 +668,9 @@ impl FirstSliceClientPort for FakePort {
         )));
         let outcome = match &self.outcome {
             FakeOutcome::TestsSelect(outcome) => outcome.clone(),
+            FakeOutcome::PlanChange(Ok(_)) | FakeOutcome::BatchPlanChange { .. } => {
+                Ok(plan_tests_response())
+            }
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -677,6 +687,9 @@ impl FirstSliceClientPort for FakePort {
         )));
         let outcome = match &self.outcome {
             FakeOutcome::ChangeImpact(outcome) => outcome.clone(),
+            FakeOutcome::PlanChange(Ok(_)) | FakeOutcome::BatchPlanChange { .. } => {
+                Ok(plan_impact_response())
+            }
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1587,6 +1600,105 @@ fn batch_plan_change_response() -> PlanChangePortResponse {
             execution_completeness: complete_execution(),
         },
         metadata("batch-plan-change"),
+    )
+}
+
+fn plan_relationships_response() -> SymbolRelationshipsPortResponse {
+    SymbolRelationshipsPortResponse::new(
+        ClientRelationships {
+            context: context(1, 0),
+            groups: vec![ClientRelationshipGroup {
+                seed: symbol(),
+                relation: "calls".to_owned(),
+                direction: "outbound".to_owned(),
+                items: vec![ClientRelationshipTarget {
+                    symbol: missing_symbol(),
+                    confidence: 900,
+                    source_refs: vec![source_reference(0, 10, 1, 1)],
+                }],
+                total_count: 1,
+            }],
+            returned_edges: 1,
+            total_edges: 1,
+            exact: true,
+            truncated: false,
+            next_page_offset: None,
+            execution_completeness: complete_execution(),
+        },
+        metadata("plan-relationships"),
+    )
+}
+
+fn plan_architecture_response() -> ArchitectureOverviewPortResponse {
+    ArchitectureOverviewPortResponse::new(
+        ClientArchitectureOverview {
+            context: context(1, 0),
+            components: vec![ClientArchitectureComponent {
+                id: "file-a".to_owned(),
+                kind: "file".to_owned(),
+                name: "src/a.rs".to_owned(),
+                symbol_count: 2,
+                responsibility_evidence: vec!["contains_symbols".to_owned()],
+                confidence: 800,
+            }],
+            connections: Vec::new(),
+            hotspots: Vec::new(),
+            views: Vec::new(),
+            execution_completeness: complete_execution(),
+        },
+        metadata("plan-architecture"),
+    )
+}
+
+fn plan_tests_response() -> TestsSelectPortResponse {
+    TestsSelectPortResponse::new(
+        ClientTestsSelect {
+            context: context(1, 0),
+            tests: vec![ClientRankedTest {
+                test_id: "test-1".to_owned(),
+                kind: "unit".to_owned(),
+                path: Some("src/a.rs".to_owned()),
+                score: 970,
+                why: vec!["direct_test_edge".to_owned()],
+                estimated_cost_ms: None,
+                command_hint: None,
+            }],
+            coverage_strategy: ClientCoverageStrategy {
+                direct_edges: true,
+                transitive_signals: false,
+                history_signals: false,
+                file_colocation_signals: true,
+            },
+            gaps: Vec::new(),
+            execution_completeness: complete_execution(),
+        },
+        metadata("plan-tests"),
+    )
+}
+
+fn plan_impact_response() -> ChangeImpactPortResponse {
+    ChangeImpactPortResponse::new(
+        ClientChangeImpact {
+            context: context(1, 0),
+            resolved_changes: vec![ClientResolvedChange {
+                symbol_id: Some(symbol()),
+                file_id: Some(file()),
+                classification: "body".to_owned(),
+                kind: Some("function".to_owned()),
+            }],
+            impacted: Vec::new(),
+            tests: Vec::new(),
+            risk_summary: ClientRiskSummary {
+                level: "low".to_owned(),
+                reasons: Vec::new(),
+                coverage: "complete".to_owned(),
+                breaking_surface: false,
+                fanout: 0,
+                dynamic_blind_spots: false,
+            },
+            execution_completeness: complete_execution(),
+        },
+        metadata("plan-impact"),
     )
 }
 
@@ -3227,6 +3339,7 @@ async fn query_batch_executes_plan_change_under_the_pinned_identity() {
             json!({
                 "repository": {"repository_id": repository()},
                 "generation": "active",
+                "budget": {"max_tokens": 16000},
                 "operations": [{
                     "id": "plan",
                     "tool": "plan.change",
@@ -3251,13 +3364,17 @@ async fn query_batch_executes_plan_change_under_the_pinned_identity() {
         output.data.operation_results[0].status,
         BatchOperationStatus::Ok
     );
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 2);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 6);
     let calls = harness
         .calls
         .lock()
         .expect("fake call recorder is not poisoned");
     assert!(matches!(calls[0], ObservedCall::RepositoryStatus(_)));
-    let ObservedCall::PlanChange(request) = &calls[1] else {
+    assert!(matches!(calls[1], ObservedCall::ChangeImpact(_)));
+    assert!(matches!(calls[2], ObservedCall::SymbolRelationships(_)));
+    assert!(matches!(calls[3], ObservedCall::TestsSelect(_)));
+    assert!(matches!(calls[4], ObservedCall::ArchitectureOverview(_)));
+    let ObservedCall::PlanChange(request) = &calls[5] else {
         panic!("expected plan change call");
     };
     assert_eq!(
@@ -3265,6 +3382,67 @@ async fn query_batch_executes_plan_change_under_the_pinned_identity() {
         &GenerationSelector::Explicit(generation())
     );
     assert_eq!(request.max_steps(), Some(100));
+}
+
+#[tokio::test]
+async fn plan_change_data_is_identical_in_standalone_and_batch_execution() {
+    let standalone_harness =
+        Harness::new(FakeOutcome::PlanChange(Ok(batch_plan_change_response())));
+    let standalone: PlanChangeOutput = decode(
+        execute(
+            &standalone_harness.executor,
+            VerticalTool::PlanChange,
+            json!({
+                "repository": {"repository_id": repository()},
+                "generation": generation(),
+                "objective": "bug_fix",
+                "objective_text": "fix the defect",
+                "targets": [{"symbol_id": symbol()}],
+                "budget": {"max_tokens": 16000}
+            }),
+        )
+        .await
+        .expect("standalone change planning succeeds"),
+    );
+    let ToolResponse::Success(standalone) = standalone else {
+        panic!("expected standalone plan success");
+    };
+
+    let batch_harness = Harness::new(FakeOutcome::BatchPlanChange {
+        status: Box::new(Ok(repository_status_response())),
+        locate: Err(ClientPortError::Executor),
+        plan_change: Box::new(Ok(batch_plan_change_response())),
+    });
+    let batch: QueryBatchOutput = decode(
+        execute(
+            &batch_harness.executor,
+            VerticalTool::QueryBatch,
+            json!({
+                "repository": {"repository_id": repository()},
+                "generation": generation(),
+                "budget": {"max_tokens": 16000},
+                "operations": [{
+                    "id": "plan",
+                    "tool": "plan.change",
+                    "arguments": {
+                        "objective": "bug_fix",
+                        "objective_text": "fix the defect",
+                        "targets": [{"symbol_id": symbol()}]
+                    }
+                }]
+            }),
+        )
+        .await
+        .expect("batch change planning succeeds"),
+    );
+    let ToolResponse::Success(batch) = batch else {
+        panic!("expected batch plan success");
+    };
+
+    assert_eq!(
+        batch.data.operation_results[0].data,
+        Some(serde_json::to_value(standalone.data).expect("standalone plan data serializes"))
+    );
 }
 
 #[tokio::test]
@@ -6779,24 +6957,41 @@ async fn plan_change_maps_steps_impact_summary_decisions_and_context_pack() {
         metadata("plan-change-1"),
     );
     let harness = Harness::new(FakeOutcome::PlanChange(Ok(response)));
-    let output: PlanChangeOutput = decode(
-        execute(
-            &harness.executor,
-            VerticalTool::PlanChange,
-            json!({
-                "repository": {"repository_id": repository()},
-                "objective": "bug_fix",
-                "objective_text": "fix the defect",
-                "targets": [{"symbol_id": symbol()}]
-            }),
+    let execution = execute(
+        &harness.executor,
+        VerticalTool::PlanChange,
+        json!({
+            "repository": {"repository_id": repository()},
+            "objective": "bug_fix",
+            "objective_text": "fix the defect",
+            "targets": [{"symbol_id": symbol()}]
+        }),
+    )
+    .await;
+    let output: PlanChangeOutput = decode(execution.unwrap_or_else(|error| {
+        panic!(
+            "plan change maps: {error:?}; calls: {:?}",
+            harness
+                .calls
+                .lock()
+                .expect("fake call recorder is not poisoned")
         )
-        .await
-        .expect("plan change maps"),
-    );
+    }));
     let ToolResponse::Success(output) = output else {
         panic!("expected plan change success");
     };
-    assert_public_truncation(&output, ContractLimitingResourceKind::Results);
+    assert!(output.truncated);
+    assert_eq!(
+        output.completeness.state,
+        CompletenessState::UnsupportedPartial
+    );
+    assert!(
+        output
+            .completeness
+            .limiting_resources
+            .iter()
+            .any(|resource| resource.kind == ContractLimitingResourceKind::Results)
+    );
     assert_eq!(output.data.plan.len(), 2);
     assert_eq!(output.data.plan[0].step, 1);
     assert_eq!(output.data.plan[0].targets, vec![symbol()]);
@@ -6817,12 +7012,72 @@ async fn plan_change_maps_steps_impact_summary_decisions_and_context_pack() {
     );
     assert_eq!(output.data.context_pack_request.symbols, vec![symbol()]);
     assert_eq!(output.data.context_pack_request.files, vec![file()]);
+    assert_eq!(output.data.provider_coverage.len(), 7);
+    assert_eq!(
+        output
+            .data
+            .provider_coverage
+            .iter()
+            .map(|coverage| coverage.provider)
+            .collect::<Vec<_>>(),
+        vec![
+            PlanEvidenceProvider::ChangeImpact,
+            PlanEvidenceProvider::Relationships,
+            PlanEvidenceProvider::Tests,
+            PlanEvidenceProvider::Architecture,
+            PlanEvidenceProvider::History,
+            PlanEvidenceProvider::Source,
+            PlanEvidenceProvider::Ownership,
+        ]
+    );
+    for (provider, reason) in [
+        (
+            PlanEvidenceProvider::History,
+            PlanEvidenceOmissionReason::HistoryBaselineUnavailable,
+        ),
+        (
+            PlanEvidenceProvider::Source,
+            PlanEvidenceOmissionReason::SourceReferencesUnavailable,
+        ),
+        (
+            PlanEvidenceProvider::Ownership,
+            PlanEvidenceOmissionReason::OwnershipProviderUnsupported,
+        ),
+    ] {
+        let coverage = output
+            .data
+            .provider_coverage
+            .iter()
+            .find(|coverage| coverage.provider == provider)
+            .expect("required provider coverage is present");
+        assert_eq!(coverage.state, PlanProviderState::Unsupported);
+        assert_eq!(
+            coverage.omission.as_ref().map(|omission| omission.reason),
+            Some(reason)
+        );
+    }
+    assert_eq!(output.data.plan[0].evidence_refs.len(), 1);
+    assert!(!output.data.plan[0].rationale.is_empty());
+    let serialized = serde_json::to_vec(&ToolResponse::Success(output.clone()))
+        .expect("checked plan response serializes");
+    assert_eq!(
+        output.usage.json_bytes,
+        u64::try_from(serialized.len()).expect("test response length fits u64")
+    );
+    assert_eq!(
+        output.usage.estimated_tokens,
+        rootlight_mcp_contract::accounting::estimate_tokens(serialized.len())
+    );
     let calls = harness
         .calls
         .lock()
         .expect("fake call recorder is not poisoned");
     assert!(matches!(calls[0], ObservedCall::RepositoryStatus(_)));
-    let ObservedCall::PlanChange(request) = &calls[1] else {
+    assert!(matches!(calls[1], ObservedCall::ChangeImpact(_)));
+    assert!(matches!(calls[2], ObservedCall::SymbolRelationships(_)));
+    assert!(matches!(calls[3], ObservedCall::TestsSelect(_)));
+    assert!(matches!(calls[4], ObservedCall::ArchitectureOverview(_)));
+    let ObservedCall::PlanChange(request) = &calls[5] else {
         panic!("expected plan change call");
     };
     assert_eq!(request.repository(), repository());

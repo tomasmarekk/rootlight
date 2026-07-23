@@ -1873,6 +1873,7 @@ dependencies = [
  "rootlight-ir",
  "rootlight-mcp-contract",
  "rootlight-query",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",

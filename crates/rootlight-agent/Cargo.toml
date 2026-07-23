@@ -14,6 +14,7 @@ rootlight-mcp-contract = { path = "../rootlight-mcp-contract" }
 rootlight-query = { path = "../rootlight-query" }
 thiserror.workspace = true
 blake3.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 unicode-normalization.workspace = true
 

@@ -2231,15 +2231,6 @@ impl<P> PlanChangePort<RequestCancellation> for McpAgentToolPort<P>
 where
     P: FirstSliceClientPort,
 {
-    fn resolve_identity(
-        &self,
-        request: AgentIdentityRequest,
-        context: AgentResolutionContext<RequestCancellation>,
-    ) -> rootlight_agent::change::PlanChangePortFuture<Result<AgentResolvedIdentity, AgentPortError>>
-    {
-        <Self as AgentToolPort<RequestCancellation>>::resolve_identity(self, request, context)
-    }
-
     fn plan_change(
         &self,
         request: PlanChangeRequest,
@@ -5693,12 +5684,14 @@ fn map_plan_change_service_error(
             | PlanChangeError::UnsupportedOption
             | PlanChangeError::EmptyTargets,
         ) => ToolExecutionError::new(unsupported.clone()),
-        PlanChangeServiceError::Admission(PlanChangeError::InvalidRisk)
+        PlanChangeServiceError::Admission(
+            PlanChangeError::InvalidRisk | PlanChangeError::InvalidPlan,
+        )
         | PlanChangeServiceError::InvalidResponse => {
             internal(ToolExecutionFailure::InvalidResponse)
         }
         PlanChangeServiceError::Public(error) => ToolExecutionError::new(*error),
-        PlanChangeServiceError::DeadlineExceeded => {
+        PlanChangeServiceError::DeadlineExceeded | PlanChangeServiceError::BudgetExceeded => {
             ToolExecutionError::new(authoritative_error(MappedDomainFailure::budget_exceeded()))
         }
         PlanChangeServiceError::Cancelled | PlanChangeServiceError::Unavailable => {
@@ -5724,6 +5717,8 @@ fn adapt_plan_change_response(
         plan.push(ChangePlanStep {
             step: step.step,
             action: step.action,
+            rationale: "structural planner proposal awaiting provider evidence".to_owned(),
+            evidence_refs: Vec::new(),
             targets: step.targets,
             depends_on: step.depends_on,
             risks: step.risks,

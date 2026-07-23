@@ -938,7 +938,9 @@ impl ProfileShape for CodeDeadData {
 impl ProfileShape for PlanChangeData {
     fn shape_with_limits(&mut self, _profile: ResponseProfile, limits: ProfileLimits) {
         let rationale_limit = usize::from(limits.rationale_items_per_result);
+        let evidence_limit = usize::from(limits.evidence_references_per_result);
         for step in &mut self.plan {
+            step.evidence_refs.truncate(evidence_limit);
             if !limits.optional_fields.verification_hints {
                 step.verification = None;
             }
@@ -1869,6 +1871,8 @@ mod tests {
             plan: vec![ChangePlanStep {
                 step: 1,
                 action: "update the bounded response".to_owned(),
+                rationale: "generation pinned evidence supports this step".to_owned(),
+                evidence_refs: vec!["change-impact:000".to_owned()],
                 targets: vec![target],
                 depends_on: Vec::new(),
                 risks: vec!["public-contract".to_owned()],
@@ -1894,6 +1898,7 @@ mod tests {
                 symbols: vec![target],
                 files: vec![FileId::from_bytes([51; 20])],
             },
+            provider_coverage: Vec::new(),
             explanation: None,
         };
         let (compact, standard, evidence) = shaped_profiles(&raw);
