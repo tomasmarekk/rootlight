@@ -1536,13 +1536,20 @@ fn provider_reservation(provider: EvidenceProvider, max_candidates: u16) -> Budg
         // Component discovery accounts a small fixed repository scan in
         // addition to the rows represented by returned components.
         EvidenceProvider::Architecture => 9,
+        // Definition lookup scans the bounded symbol index before projecting
+        // the requested explanations, so returned candidates understate rows.
+        EvidenceProvider::Definition => 224,
         _ => 8,
     };
     // Every daemon response may account structural edges even when the
     // adapter ultimately emits a non-relationship role. Reserve the protocol
     // maximum per returned candidate so measured child usage cannot exceed the
     // parent allocation merely because identity resolution traversed edges.
-    let traversal_facts = results * 8;
+    let traversal_facts_per_result = match provider {
+        EvidenceProvider::Definition => 16,
+        _ => 8,
+    };
+    let traversal_facts = results * traversal_facts_per_result;
     BudgetCharge {
         rows: results.saturating_mul(rows_per_result),
         results,
@@ -2051,6 +2058,14 @@ mod tests {
         assert_eq!(
             definition.reservation().tokens,
             u64::from(definition.max_candidates()).saturating_mul(384)
+        );
+        assert_eq!(
+            definition.reservation().rows,
+            u64::from(definition.max_candidates()).saturating_mul(224)
+        );
+        assert_eq!(
+            definition.reservation().traversal_facts,
+            u64::from(definition.max_candidates()).saturating_mul(16)
         );
     }
 
