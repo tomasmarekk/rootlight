@@ -1517,7 +1517,10 @@ fn provider_reservation(provider: EvidenceProvider, max_candidates: u16) -> Budg
     let results = max_candidates as u64;
     let per_result_tokens = match provider {
         EvidenceProvider::Source | EvidenceProvider::Implementation => 512,
-        EvidenceProvider::Relationships | EvidenceProvider::Architecture => 128,
+        // Architecture rows include component, responsibility, connection, and
+        // derived-view envelopes even though each row yields one pack candidate.
+        EvidenceProvider::Architecture => 256,
+        EvidenceProvider::Relationships => 128,
         EvidenceProvider::Tests
         | EvidenceProvider::ChangeImpact
         | EvidenceProvider::History
@@ -1528,13 +1531,19 @@ fn provider_reservation(provider: EvidenceProvider, max_candidates: u16) -> Budg
         EvidenceProvider::Source | EvidenceProvider::Implementation => results * 2_048,
         _ => results * 256,
     };
+    let rows_per_result = match provider {
+        // Component discovery accounts a small fixed repository scan in
+        // addition to the rows represented by returned components.
+        EvidenceProvider::Architecture => 9,
+        _ => 8,
+    };
     // Every daemon response may account structural edges even when the
     // adapter ultimately emits a non-relationship role. Reserve the protocol
     // maximum per returned candidate so measured child usage cannot exceed the
     // parent allocation merely because identity resolution traversed edges.
     let traversal_facts = results * 8;
     BudgetCharge {
-        rows: results.saturating_mul(8),
+        rows: results.saturating_mul(rows_per_result),
         results,
         tokens: results.saturating_mul(per_result_tokens),
         source_bytes,
@@ -1870,6 +1879,17 @@ mod tests {
             }
         }
         assert!(plan.invocations().len() <= MAX_CONTEXT_PROVIDER_CALLS);
+    }
+
+    #[test]
+    fn architecture_provider_reserves_its_full_bounded_envelope() {
+        let reservation = provider_reservation(EvidenceProvider::Architecture, 4);
+
+        assert_eq!(reservation.results, 4);
+        assert_eq!(reservation.tokens, 1_024);
+        assert_eq!(reservation.rows, 36);
+        assert_eq!(reservation.json_bytes, 16_384);
+        assert_eq!(reservation.traversal_facts, 32);
     }
 
     #[test]
