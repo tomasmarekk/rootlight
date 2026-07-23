@@ -224,6 +224,14 @@ pub(crate) fn run(options: &Options) -> Result<(), ContractMatrixError> {
     }
 }
 
+pub(crate) fn verify_for_gate(
+    path: &Path,
+    source_revision: &str,
+) -> Result<(), ContractMatrixError> {
+    let report = decode_report(&read_bounded(path)?)?;
+    validate_report(&report, source_revision)
+}
+
 fn produce(path: &Path, source_revision: &str) -> Result<(), ContractMatrixError> {
     require_exact_revision(source_revision)?;
     let workspace = workspace_root()?;
