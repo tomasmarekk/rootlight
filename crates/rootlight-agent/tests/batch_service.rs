@@ -23,6 +23,10 @@ use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, SymbolId};
 use rootlight_ir::{CoverageStatus, LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::{
     ErrorCode, PublicError, RepositorySelector, SchemaVersion, TrustClassification,
+    batch::{
+        BATCH_TOOL_REGISTRY, BatchBindingCardinality, BatchBindingPathSegment,
+        BatchBindingSourceSlot, BatchBindingTargetSlot, BatchBindingValueType,
+    },
     context::{
         BatchArguments, BatchOperation, BatchOperationStatus, BatchStatus, BatchTool,
         FailurePolicy, QueryBatchData, QueryBatchInput,
@@ -388,6 +392,19 @@ fn budget(max_tokens: u16) -> ResponseBudget {
     }
 }
 
+fn full_budget(max_tokens: u16) -> ResponseBudget {
+    ResponseBudget {
+        max_results: Some(64),
+        max_tokens: Some(max_tokens),
+        max_source_bytes: Some(4_096),
+        max_traversal_facts: Some(64),
+        max_depth: Some(8),
+        max_paths: Some(64),
+        timeout_ms: Some(30_000),
+        evidence_level: None,
+    }
+}
+
 fn operation(
     id: &str,
     tool: BatchTool,
@@ -461,6 +478,172 @@ fn ordered_outcome_snapshot(output: &ReadEnvelope<QueryBatchData>) -> Value {
             }))
             .collect::<Vec<_>>()
     })
+}
+
+fn value_at_binding_path(path: &[BatchBindingPathSegment], leaf: Value) -> Value {
+    let Some((segment, remaining)) = path.split_first() else {
+        return leaf;
+    };
+    let child = value_at_binding_path(remaining, leaf);
+    match segment {
+        BatchBindingPathSegment::Field(field) => json!({*field: child}),
+        BatchBindingPathSegment::Index { .. } => Value::Array(vec![child]),
+    }
+}
+
+fn runtime_binding_value(
+    source: &BatchBindingSourceSlot,
+    target: &BatchBindingTargetSlot,
+) -> Value {
+    let collection_length = match (source.cardinality, target.cardinality) {
+        (BatchBindingCardinality::Scalar, BatchBindingCardinality::Scalar) => 1,
+        (
+            BatchBindingCardinality::Collection {
+                min: source_min,
+                max: source_max,
+            },
+            BatchBindingCardinality::Collection {
+                min: target_min,
+                max: target_max,
+            },
+        ) => {
+            let minimum = source_min.max(target_min);
+            assert!(
+                minimum <= source_max.min(target_max),
+                "compatible collection bounds must overlap"
+            );
+            usize::from(minimum)
+        }
+        _ => panic!("compatible bindings share a cardinality class"),
+    };
+    match source.value_type {
+        BatchBindingValueType::SymbolId => json!(symbol(3)),
+        BatchBindingValueType::SymbolIds => json!(vec![symbol(3); collection_length]),
+        BatchBindingValueType::SourceRef => json!(source_ref(generation(2))),
+        BatchBindingValueType::SourceRefs => {
+            json!(vec![source_ref(generation(2)); collection_length])
+        }
+        BatchBindingValueType::TestId => json!("test_fixture"),
+        BatchBindingValueType::PackId => json!("pack_fixture"),
+    }
+}
+
+fn compatible_binding_pair(
+    source: &BatchBindingSourceSlot,
+    target: &BatchBindingTargetSlot,
+) -> bool {
+    let same_cardinality_class = matches!(
+        (source.cardinality, target.cardinality),
+        (
+            BatchBindingCardinality::Scalar,
+            BatchBindingCardinality::Scalar
+        ) | (
+            BatchBindingCardinality::Collection { .. },
+            BatchBindingCardinality::Collection { .. }
+        )
+    );
+    source.composable
+        && source.value_type == target.value_type
+        && target.accepted_trust.contains(&source.trust)
+        && same_cardinality_class
+}
+
+#[test]
+fn every_advertised_compatible_binding_pair_materializes_at_runtime() {
+    let mut exercised = 0usize;
+    for source_descriptor in BATCH_TOOL_REGISTRY {
+        for source in source_descriptor.bindings.sources {
+            for target_descriptor in BATCH_TOOL_REGISTRY {
+                for target in target_descriptor.bindings.targets {
+                    if !compatible_binding_pair(source, target) {
+                        continue;
+                    }
+
+                    let binding = json!({
+                        "$from": "source",
+                        "source": source.source,
+                        "index": source.path.iter().any(|segment| {
+                            matches!(segment, BatchBindingPathSegment::Index { .. })
+                        }).then_some(0)
+                    });
+                    let Value::Object(arguments) = value_at_binding_path(target.path, binding)
+                    else {
+                        panic!("registry target paths start at an argument object");
+                    };
+                    let request = input(
+                        vec![
+                            operation(
+                                "source",
+                                source_descriptor.batch_tool,
+                                Map::new(),
+                                None,
+                                None,
+                            ),
+                            operation(
+                                "target",
+                                target_descriptor.batch_tool,
+                                arguments,
+                                Some(vec!["source"]),
+                                None,
+                            ),
+                        ],
+                        budget(1_000),
+                    );
+                    let value = runtime_binding_value(source, target);
+                    let envelopes = vec![
+                        Some(response(
+                            generation(2),
+                            100,
+                            value_at_binding_path(source.path, value.clone()),
+                        )),
+                        None,
+                    ];
+
+                    let resolved = resolve_arguments(
+                        &request.operations[1],
+                        &envelopes,
+                        &request,
+                        &[0],
+                        repository(),
+                        generation(2),
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{:?}.{:?} -> {:?}.{:?} must materialize: {error:?}",
+                            source_descriptor.batch_tool,
+                            source.source,
+                            target_descriptor.batch_tool,
+                            target.path
+                        )
+                    });
+                    let expected_path = target
+                        .path
+                        .iter()
+                        .map(|segment| match segment {
+                            BatchBindingPathSegment::Field(field) => format!("/{field}"),
+                            BatchBindingPathSegment::Index { .. } => "/0".to_owned(),
+                        })
+                        .collect::<String>();
+                    assert_eq!(resolved.materialized_binding_paths, [expected_path]);
+                    let resolved_arguments = Value::Object(resolved.arguments);
+                    let materialized =
+                        target
+                            .path
+                            .iter()
+                            .try_fold(&resolved_arguments, |current, segment| match segment {
+                                BatchBindingPathSegment::Field(field) => current.get(field),
+                                BatchBindingPathSegment::Index { .. } => current.get(0),
+                            });
+                    assert_eq!(materialized, Some(&value));
+                    exercised += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        exercised >= 40,
+        "the public registry must retain broad typed composition coverage"
+    );
 }
 
 #[test]
@@ -1389,6 +1572,136 @@ async fn child_reservations_release_unused_capacity_and_reconcile_measured_use()
         .max_tokens
         .expect("publication reservation leaves child capacity");
     assert_eq!(calls[1].budget.max_tokens, Some(first_tokens - 100));
+}
+
+#[tokio::test]
+async fn one_through_sixteen_operations_preserve_budget_subsets_and_order() {
+    for operation_count in 1..=16 {
+        let local_budget = ResponseBudget {
+            max_results: Some(2),
+            max_tokens: Some(512),
+            max_source_bytes: Some(64),
+            max_traversal_facts: Some(4),
+            max_depth: Some(4),
+            max_paths: Some(2),
+            timeout_ms: Some(20_000),
+            evidence_level: None,
+        };
+        let operations = (0..operation_count)
+            .map(|index| {
+                operation(
+                    &format!("op_{index}"),
+                    BatchTool::CodeLocate,
+                    Map::new(),
+                    None,
+                    Some(local_budget.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let responses = (0..operation_count).map(|_| {
+            Ok(typed_response(
+                BatchTool::CodeLocate,
+                generation(2),
+                1,
+                json!({"matches": []}),
+            ))
+        });
+        let port = Arc::new(FakePort::with_responses(responses));
+
+        let output = BatchService
+            .execute(
+                Arc::clone(&port),
+                input(operations, full_budget(16_000)),
+                repository(),
+                TestCancellation(false),
+                errors(),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{operation_count}-operation boundary must execute: {error:?}")
+            });
+
+        assert_eq!(output.data.operation_results.len(), operation_count);
+        for (index, result) in output.data.operation_results.iter().enumerate() {
+            assert_eq!(result.id, format!("op_{index}"));
+            assert_eq!(result.status, BatchOperationStatus::Ok);
+        }
+        let calls = port.calls.lock().expect("call lock is available");
+        assert_eq!(calls.len(), operation_count);
+        for call in calls.iter() {
+            assert_eq!(call.budget.max_results, local_budget.max_results);
+            assert_eq!(call.budget.max_tokens, local_budget.max_tokens);
+            assert_eq!(call.budget.max_source_bytes, local_budget.max_source_bytes);
+            assert_eq!(
+                call.budget.max_traversal_facts,
+                local_budget.max_traversal_facts
+            );
+            assert_eq!(call.budget.max_depth, local_budget.max_depth);
+            assert_eq!(call.budget.max_paths, local_budget.max_paths);
+            assert!(
+                call.budget.timeout_ms.is_some_and(|timeout| {
+                    timeout > 0 && timeout <= local_budget.timeout_ms.expect("bounded timeout")
+                }),
+                "elapsed time may only reduce the child timeout"
+            );
+            assert_eq!(call.response_profile, ResponseProfile::Compact);
+            assert_eq!(call.pinned_generation, Some(generation(2)));
+        }
+    }
+}
+
+#[tokio::test]
+async fn sequential_reservations_never_reuse_consumed_parent_capacity() {
+    let operation_count = 16;
+    let operations = (0..operation_count)
+        .map(|index| {
+            operation(
+                &format!("reserve_{index}"),
+                BatchTool::CodeLocate,
+                Map::new(),
+                None,
+                None,
+            )
+        })
+        .collect::<Vec<_>>();
+    let responses = (0..operation_count).map(|index| {
+        Ok(typed_response(
+            BatchTool::CodeLocate,
+            generation(2),
+            u64::try_from(index + 1).expect("bounded fixture count"),
+            json!({"matches": []}),
+        ))
+    });
+    let port = Arc::new(FakePort::with_responses(responses));
+
+    let output = BatchService
+        .execute(
+            Arc::clone(&port),
+            input(operations, full_budget(16_000)),
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("serialized reservations fit the parent budget");
+
+    assert_eq!(output.data.batch_status, BatchStatus::Ok);
+    let calls = port.calls.lock().expect("call lock is available");
+    assert_eq!(calls.len(), operation_count);
+    for pair in calls.windows(2) {
+        let earlier = pair[0]
+            .budget
+            .max_tokens
+            .expect("parent token limit reaches every child");
+        let later = pair[1]
+            .budget
+            .max_tokens
+            .expect("parent token remainder reaches every child");
+        assert!(
+            later < earlier,
+            "a later sequential reservation must observe prior measured use"
+        );
+    }
 }
 
 #[tokio::test]
