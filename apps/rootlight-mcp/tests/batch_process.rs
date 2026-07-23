@@ -405,12 +405,12 @@ fn process_preflight_rejects_non_subtools_and_profile_hidden_members() {
             "INVALID_ARGUMENT",
         ),
         (
-            "unsupported-local-budget",
+            "unsupported-local-evidence",
             json!([{
                 "id": "locate",
                 "tool": "code.locate",
                 "arguments": {"query": "fixture"},
-                "local_budget": {"max_tokens": 100}
+                "local_budget": {"evidence_level": "full"}
             }]),
             "UNSUPPORTED_CAPABILITY",
         ),

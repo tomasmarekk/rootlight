@@ -459,16 +459,6 @@ const fn accepted_fallback(path: &'static str) -> CapabilityRule {
     fallback_limited(path, ACCEPTED_FALLBACK_SUMMARY)
 }
 
-const fn blocked(path: &'static str, summary: &'static str) -> CapabilityRule {
-    CapabilityRule {
-        path,
-        value: None,
-        status: CapabilityStatus::Blocked,
-        error_code: None,
-        summary,
-    }
-}
-
 const REPO_INDEX_RULES: &[CapabilityRule] = &[
     accepted_fallback("root"),
     accepted_fallback("mode"),
@@ -1346,17 +1336,21 @@ const QUERY_BATCH_RULES: &[CapabilityRule] = &[
         "active",
         "resolves and pins the active generation once for all nested operations",
     ),
-    blocked(
+    implemented(
         "budget",
-        "measured child usage is bounded but orchestration and response serialization are not fully charged",
+        "enforces one server-bounded ledger across child work, orchestration, and final serialization",
     ),
-    blocked(
-        "operations[].local_budget",
-        "intersects representable caps and rejects unsupported child dimensions before work",
+    unsupported(
+        "budget.evidence_level",
+        "evidence representation is selected only through response_profile",
     ),
     implemented(
-        "operations[].local_budget.timeout_ms",
-        "bounds every child call by the lower local deadline",
+        "operations[].local_budget",
+        "intersects every selected child dimension with the shared and server ceilings before work",
+    ),
+    unsupported(
+        "operations[].local_budget.evidence_level",
+        "child evidence representation is inherited from response_profile",
     ),
 ];
 
@@ -2138,13 +2132,23 @@ mod tests {
             batch
                 .disposition("operations[].local_budget.max_tokens", None)
                 .status,
-            CapabilityStatus::Blocked
+            CapabilityStatus::Implemented
         );
         assert_eq!(
             batch
                 .disposition("operations[].local_budget.timeout_ms", None)
                 .status,
             CapabilityStatus::Implemented
+        );
+        assert_eq!(
+            batch.disposition("budget.max_source_bytes", None).status,
+            CapabilityStatus::Implemented
+        );
+        assert_eq!(
+            batch
+                .disposition("operations[].local_budget.evidence_level", None)
+                .status,
+            CapabilityStatus::UnsupportedStableError
         );
         assert_eq!(
             batch.disposition("generation", None).status,
