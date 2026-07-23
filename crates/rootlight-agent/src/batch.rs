@@ -2831,19 +2831,22 @@ fn map_policy_error(error: ExecutionPolicyError) -> BatchOrchestrationError {
 mod tests {
     use super::{
         BatchExecutionError, BatchPlan, BatchValidationError, DEFAULT_BATCH_TOKENS, DeadlineSource,
-        MAX_BATCH_DEPTH, MAX_BATCH_OPERATIONS, admitted_parent_budget, aggregate_status,
-        effective_child_deadline, is_batch_allowed, is_batch_allowed_under_profile,
-        resolve_dependencies, terminal_result, translate_target_binding, validate_binding_pair,
+        MAX_BATCH_DEPTH, MAX_BATCH_OPERATIONS, StaticBatchPlan, admitted_parent_budget,
+        aggregate_status, effective_child_deadline, is_batch_allowed,
+        is_batch_allowed_under_profile, resolve_dependencies, terminal_result,
+        translate_target_binding, validate_binding_pair,
     };
     use crate::policy::BudgetLimits;
     use proptest::prelude::*;
+    use rootlight_ids::RepositoryId;
     use rootlight_mcp_contract::{
-        ExposureProfile, McpTool,
+        ExposureProfile, McpTool, RepositorySelector,
         batch::BatchBindingCardinality,
         context::{
             BatchOperation as ContractBatchOperation, BatchOperationStatus, BatchStatus, BatchTool,
+            FailurePolicy, QueryBatchInput,
         },
-        vertical::ResponseBudget,
+        vertical::{RepositoryIdSelector, ResponseBudget, ResponseProfile},
     };
     use std::time::{Duration, Instant};
 
@@ -2997,6 +3000,47 @@ mod tests {
         assert!(pos(0) < pos(1));
         assert!(pos(0) < pos(2));
         assert!(pos(1) < pos(2));
+    }
+
+    #[test]
+    fn canonical_digest_binds_budget_profile_and_failure_policy() {
+        let request = QueryBatchInput {
+            repository: RepositorySelector::ById(RepositoryIdSelector {
+                repository_id: RepositoryId::from_bytes([1; 16]),
+            }),
+            generation: None,
+            operations: vec![contract_operation("find", BatchTool::CodeLocate, None)],
+            failure_policy: None,
+            budget: None,
+            response_profile: None,
+            explain: None,
+        };
+        let digest = |input| {
+            StaticBatchPlan::build(input, ExposureProfile::Developer)
+                .expect("fixture request admits a static batch plan")
+                .canonical_digest()
+        };
+        let baseline = digest(request.clone());
+
+        let mut different_budget = request.clone();
+        different_budget.budget = Some(ResponseBudget {
+            max_results: Some(1),
+            max_tokens: None,
+            max_source_bytes: None,
+            max_traversal_facts: None,
+            max_depth: None,
+            max_paths: None,
+            timeout_ms: None,
+            evidence_level: None,
+        });
+        let mut different_profile = request.clone();
+        different_profile.response_profile = Some(ResponseProfile::Standard);
+        let mut different_policy = request;
+        different_policy.failure_policy = Some(FailurePolicy::FailFast);
+
+        assert_ne!(baseline, digest(different_budget));
+        assert_ne!(baseline, digest(different_profile));
+        assert_ne!(baseline, digest(different_policy));
     }
 
     proptest! {
