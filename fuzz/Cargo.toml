@@ -1,0 +1,25 @@
+[package]
+name = "rootlight-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.90"
+license = "AGPL-3.0-only"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+rootlight-agent = { path = "../crates/rootlight-agent" }
+rootlight-mcp-contract = { path = "../crates/rootlight-mcp-contract" }
+serde_json = "=1.0.150"
+
+[[bin]]
+name = "batch_plan"
+path = "fuzz_targets/batch_plan.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
