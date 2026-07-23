@@ -1519,7 +1519,7 @@ fn provider_reservation(provider: EvidenceProvider, max_candidates: u16) -> Budg
         EvidenceProvider::Source | EvidenceProvider::Implementation => 512,
         // Architecture rows include component, responsibility, connection, and
         // derived-view envelopes even though each row yields one pack candidate.
-        EvidenceProvider::Architecture => 256,
+        EvidenceProvider::Architecture => 512,
         EvidenceProvider::Relationships => 128,
         EvidenceProvider::Tests
         | EvidenceProvider::ChangeImpact
@@ -1887,7 +1887,7 @@ mod tests {
         let reservation = provider_reservation(EvidenceProvider::Architecture, 4);
 
         assert_eq!(reservation.results, 4);
-        assert_eq!(reservation.tokens, 1_024);
+        assert_eq!(reservation.tokens, 2_048);
         assert_eq!(reservation.rows, 36);
         assert_eq!(reservation.json_bytes, 16_384);
         assert_eq!(reservation.traversal_facts, 32);
