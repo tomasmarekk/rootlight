@@ -1086,6 +1086,7 @@ fn daemon_binary() -> PathBuf {
 struct DaemonProcess {
     child: Option<Child>,
     input: Option<ChildStdin>,
+    stderr_reader: Option<JoinHandle<String>>,
 }
 
 impl DaemonProcess {
@@ -1100,9 +1101,18 @@ impl DaemonProcess {
             .spawn()
             .expect("isolated daemon process starts");
         let input = child.stdin.take().expect("daemon stdin is piped");
+        let stderr = child.stderr.take().expect("daemon stderr is piped");
+        let stderr_reader = thread::spawn(move || {
+            let mut output = String::new();
+            BufReader::new(stderr)
+                .read_to_string(&mut output)
+                .expect("daemon stderr reads");
+            output
+        });
         Self {
             child: Some(child),
             input: Some(input),
+            stderr_reader: Some(stderr_reader),
         }
     }
 
@@ -1136,18 +1146,17 @@ impl DaemonProcess {
         self.input.take();
         let child = self.child.as_mut().expect("daemon child is retained");
         let status = wait_for_exit(child, SHUTDOWN_TIMEOUT);
-        let mut stderr = String::new();
-        child
-            .stderr
+        self.child.take();
+        let stderr = self
+            .stderr_reader
             .take()
-            .expect("daemon stderr is piped")
-            .read_to_string(&mut stderr)
-            .expect("daemon stderr reads");
+            .expect("daemon stderr reader is retained")
+            .join()
+            .expect("daemon stderr reader joins");
         assert!(
             status.success(),
             "daemon process exits successfully: {stderr}"
         );
-        self.child.take();
     }
 }
 
@@ -1155,6 +1164,9 @@ impl Drop for DaemonProcess {
     fn drop(&mut self) {
         self.input.take();
         terminate(&mut self.child);
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 
