@@ -103,7 +103,8 @@ fn change_tools_preserve_truthful_contracts_across_processes() {
 
     assert_supported_profiles(&mut mcp, &first, &second, &symbol_id);
     assert_hard_budgets_are_public(&mut mcp, &first, &second, &symbol_id);
-    assert_missing_history_is_not_an_empty_comparison(&mut mcp, &second);
+    assert_plan_objectives_are_served(&mut mcp, &second, &symbol_id);
+    assert_history_absence_is_distinct_from_empty(&mut mcp, &second);
 
     mcp.finish();
     daemon.finish();
@@ -312,7 +313,50 @@ fn assert_hard_budgets_are_public(
     }
 }
 
-fn assert_missing_history_is_not_an_empty_comparison(mcp: &mut McpProcess, second: &IndexReceipt) {
+fn assert_plan_objectives_are_served(mcp: &mut McpProcess, second: &IndexReceipt, symbol_id: &str) {
+    for objective in ["bug_fix", "refactor", "explanation", "migration", "review"] {
+        let response = mcp.call(
+            &format!("change-plan-objective-{objective}"),
+            "plan.change",
+            json!({
+                "repository": {"repository_id": second.repository_id},
+                "generation": second.generation_id,
+                "objective": objective,
+                "objective_text": format!("prepare a bounded {objective} plan"),
+                "targets": [{"symbol_id": symbol_id}],
+                "max_steps": 12
+            }),
+        );
+        assert_success(&response, "plan.change");
+        let output = &response["result"]["structuredContent"];
+        assert_common_read_contract("plan.change", output, second);
+        assert!(
+            !output["data"]["plan"]
+                .as_array()
+                .expect("plan.change returns ordered steps")
+                .is_empty()
+        );
+    }
+}
+
+fn assert_history_absence_is_distinct_from_empty(mcp: &mut McpProcess, second: &IndexReceipt) {
+    let empty = mcp.call(
+        "change-empty-history",
+        "history.compare",
+        json!({
+            "repository": {"repository_id": second.repository_id},
+            "base": second.generation_id,
+            "head": second.generation_id,
+            "change_kinds": ["entities", "signatures"],
+            "max_results": 20
+        }),
+    );
+    assert_success(&empty, "history.compare");
+    let empty = &empty["result"]["structuredContent"];
+    assert_common_read_contract("history.compare", empty, second);
+    assert_eq!(empty["data"]["changes"], json!([]));
+    assert_eq!(empty["truncated"], false);
+
     let response = mcp.call(
         "change-missing-history",
         "history.compare",
