@@ -1592,7 +1592,6 @@ fn validate_trajectory_step(step: &TrajectoryStep) -> Result<(), BundleError> {
         || step.usage.result_items > step.budget.result_items
         || step.usage.source_bytes > step.budget.source_bytes
         || step.usage.tokens > step.budget.tokens
-        || step.source_tokens > step.request_tokens
     {
         return Err(BundleError::ArtifactInvariantViolation);
     }
@@ -1608,7 +1607,7 @@ fn validate_trajectory_step(step: &TrajectoryStep) -> Result<(), BundleError> {
         .request_tokens
         .checked_add(step.response_tokens)
         .ok_or(BundleError::ArtifactInvariantViolation)?;
-    if measured_tokens != step.usage.tokens {
+    if measured_tokens != step.usage.tokens || step.source_tokens > measured_tokens {
         return Err(BundleError::ArtifactInvariantViolation);
     }
     Ok(())
