@@ -9,7 +9,20 @@ use rootlight_ir::CoverageStatus;
 use rootlight_mcp_contract::completeness::{
     CompletenessState as PublicCompletenessState, ResultCompleteness,
 };
-use rootlight_query::{ExecutionCompleteness, ExecutionCompletenessState};
+
+/// Transport-neutral execution state considered by claim-safety policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ClaimExecutionState {
+    /// Execution observed the complete admitted domain.
+    Complete,
+    /// A hard resource limit stopped execution.
+    Truncated,
+    /// Part of the requested semantics was explicitly unsupported.
+    UnsupportedPartial,
+    /// Execution completeness was absent or could not be interpreted.
+    Indeterminate,
+}
 
 /// Semantic shape of a claim derived from an analytical result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +106,7 @@ impl ClaimAssessment {
 #[must_use]
 pub fn assess_claim(
     kind: ClaimKind,
-    execution: Option<&ExecutionCompleteness>,
+    execution: Option<ClaimExecutionState>,
     coverage: Option<CoverageStatus>,
 ) -> ClaimAssessment {
     assess(
@@ -159,11 +172,11 @@ fn assess(
     }
 }
 
-fn execution_limitation(execution: Option<&ExecutionCompleteness>) -> Option<ClaimLimitation> {
-    match execution.map(ExecutionCompleteness::state) {
-        Some(ExecutionCompletenessState::Complete) => None,
-        Some(ExecutionCompletenessState::Truncated) => Some(ClaimLimitation::ExecutionTruncated),
-        Some(ExecutionCompletenessState::UnsupportedPartial) => {
+fn execution_limitation(execution: Option<ClaimExecutionState>) -> Option<ClaimLimitation> {
+    match execution {
+        Some(ClaimExecutionState::Complete) => None,
+        Some(ClaimExecutionState::Truncated) => Some(ClaimLimitation::ExecutionTruncated),
+        Some(ClaimExecutionState::UnsupportedPartial) => {
             Some(ClaimLimitation::ExecutionUnsupportedPartial)
         }
         Some(_) | None => Some(ClaimLimitation::ExecutionIndeterminate),
@@ -183,14 +196,12 @@ fn coverage_limitation(coverage: Option<CoverageStatus>) -> Option<ClaimLimitati
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use proptest::prelude::*;
     use rootlight_mcp_contract::completeness::{
         CompletenessState as PublicCompletenessState, ContinuationAvailability,
         ContinuationGuidance, LimitingResource, LimitingResourceKind, ResultCompleteness,
     };
-    use rootlight_query::QueryResource;
-
-    use super::*;
 
     const CLAIMS: [ClaimKind; 5] = [
         ClaimKind::PositiveExistence,
@@ -209,17 +220,11 @@ mod tests {
     }
 
     impl ExecutionFixture {
-        fn value(self) -> Option<ExecutionCompleteness> {
+        const fn value(self) -> Option<ClaimExecutionState> {
             match self {
-                Self::Complete => Some(ExecutionCompleteness::complete()),
-                Self::Truncated => Some(ExecutionCompleteness::truncated(
-                    QueryResource::Results,
-                    std::iter::empty(),
-                )),
-                Self::UnsupportedPartial => Some(ExecutionCompleteness::unsupported_partial(
-                    QueryResource::Capability,
-                    std::iter::empty(),
-                )),
+                Self::Complete => Some(ClaimExecutionState::Complete),
+                Self::Truncated => Some(ClaimExecutionState::Truncated),
+                Self::UnsupportedPartial => Some(ClaimExecutionState::UnsupportedPartial),
                 Self::Indeterminate => None,
             }
         }
@@ -246,7 +251,7 @@ mod tests {
             for execution_fixture in EXECUTIONS {
                 let execution = execution_fixture.value();
                 for coverage in COVERAGES {
-                    let assessment = assess_claim(kind, execution.as_ref(), coverage);
+                    let assessment = assess_claim(kind, execution, coverage);
                     let evidence_complete = matches!(execution_fixture, ExecutionFixture::Complete)
                         && coverage == Some(CoverageStatus::Complete);
 
@@ -264,10 +269,10 @@ mod tests {
 
     #[test]
     fn incomplete_evidence_only_qualifies_witness_and_ranked_claims() {
-        let execution = ExecutionCompleteness::truncated(QueryResource::Depth, std::iter::empty());
+        let execution = ClaimExecutionState::Truncated;
 
         for kind in CLAIMS {
-            let assessment = assess_claim(kind, Some(&execution), Some(CoverageStatus::Bounded));
+            let assessment = assess_claim(kind, Some(execution), Some(CoverageStatus::Bounded));
             let expected = match kind {
                 ClaimKind::PositiveExistence | ClaimKind::RankedRecommendation => {
                     ClaimDisposition::Qualified
@@ -282,14 +287,11 @@ mod tests {
 
     #[test]
     fn limitations_preserve_execution_before_coverage() {
-        let execution = ExecutionCompleteness::unsupported_partial(
-            QueryResource::Capability,
-            std::iter::empty(),
-        );
+        let execution = ClaimExecutionState::UnsupportedPartial;
 
         let assessment = assess_claim(
             ClaimKind::PositiveExistence,
-            Some(&execution),
+            Some(execution),
             Some(CoverageStatus::Sampled),
         );
 
@@ -339,7 +341,7 @@ mod tests {
             let execution = EXECUTIONS[execution_index].value();
             let assessment = assess_claim(
                 CLAIMS[claim_index],
-                execution.as_ref(),
+                execution,
                 COVERAGES[coverage_index],
             );
 

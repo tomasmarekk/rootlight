@@ -4,7 +4,15 @@
 //! provides transactional accounting for standalone and nested agent work.
 
 use rootlight_mcp_contract::vertical::{ResponseBudget, ResponseProfile};
-use rootlight_query::QueryBudget;
+
+const SERVER_MAX_ROWS: u64 = 250_000;
+const SERVER_MAX_TRAVERSAL_FACTS: u64 = 100_000;
+const SERVER_MAX_RESULTS: u64 = 1_000;
+const SERVER_MAX_SOURCE_BYTES: u64 = 64 * 1024;
+const SERVER_MAX_JSON_BYTES: u64 = 1024 * 1024;
+const SERVER_MAX_TOKENS: u64 = 1_000_000;
+const SERVER_MAX_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
+const SERVER_MAX_TIME_MS: u64 = 2_000;
 
 /// Read-only cancellation signal supplied by an application adapter.
 ///
@@ -109,23 +117,21 @@ impl BudgetLimits {
     /// Tool entry points should further reduce this ceiling with
     /// [`BudgetLimits::constrained_by`] before beginning work.
     #[must_use]
-    pub fn server_ceiling() -> Self {
-        let query = QueryBudget::new();
-        let time_ms = u64::try_from(query.max_duration().as_millis()).unwrap_or(u64::MAX);
+    pub const fn server_ceiling() -> Self {
         Self::from_maximums(BudgetCharge {
-            rows: query.max_rows(),
-            results: query.max_results(),
-            tokens: query.max_tokens(),
+            rows: SERVER_MAX_ROWS,
+            results: SERVER_MAX_RESULTS,
+            tokens: SERVER_MAX_TOKENS,
             // A supported byte-level tokenizer cannot emit more tokens than
             // the exact serialized UTF-8 bytes from which those tokens are measured.
-            actual_tokens: query.max_json_bytes(),
-            source_bytes: query.max_source_bytes(),
-            traversal_facts: query.max_edges(),
+            actual_tokens: SERVER_MAX_JSON_BYTES,
+            source_bytes: SERVER_MAX_SOURCE_BYTES,
+            traversal_facts: SERVER_MAX_TRAVERSAL_FACTS,
             depth: 16,
-            paths: query.max_results(),
-            json_bytes: query.max_json_bytes(),
-            memory_bytes: query.max_memory_bytes(),
-            time_ms,
+            paths: SERVER_MAX_RESULTS,
+            json_bytes: SERVER_MAX_JSON_BYTES,
+            memory_bytes: SERVER_MAX_MEMORY_BYTES,
+            time_ms: SERVER_MAX_TIME_MS,
         })
     }
 
@@ -831,23 +837,22 @@ mod tests {
     }
 
     #[test]
-    fn server_ceiling_tracks_authoritative_query_limits() {
-        let query = QueryBudget::new();
-        let maximums = BudgetLimits::server_ceiling().maximums();
-
-        assert_eq!(maximums.rows, query.max_rows());
-        assert_eq!(maximums.results, query.max_results());
-        assert_eq!(maximums.tokens, query.max_tokens());
-        assert_eq!(maximums.actual_tokens, query.max_json_bytes());
-        assert_eq!(maximums.source_bytes, query.max_source_bytes());
-        assert_eq!(maximums.traversal_facts, query.max_edges());
-        assert_eq!(maximums.paths, query.max_results());
-        assert_eq!(maximums.json_bytes, query.max_json_bytes());
-        assert_eq!(maximums.memory_bytes, query.max_memory_bytes());
+    fn server_ceiling_is_complete_and_stable() {
         assert_eq!(
-            maximums.time_ms,
-            u64::try_from(query.max_duration().as_millis())
-                .expect("query default duration is representable in milliseconds")
+            BudgetLimits::server_ceiling().maximums(),
+            BudgetCharge {
+                rows: 250_000,
+                results: 1_000,
+                tokens: 1_000_000,
+                actual_tokens: 1024 * 1024,
+                source_bytes: 64 * 1024,
+                traversal_facts: 100_000,
+                depth: 16,
+                paths: 1_000,
+                json_bytes: 1024 * 1024,
+                memory_bytes: 16 * 1024 * 1024,
+                time_ms: 2_000,
+            }
         );
     }
 
