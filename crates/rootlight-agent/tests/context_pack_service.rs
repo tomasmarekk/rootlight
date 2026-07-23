@@ -19,8 +19,9 @@ use rootlight_agent::{
     context_evidence::{
         ContextEvidenceCallContext, ContextEvidencePort, ContextEvidencePortError,
         ContextEvidencePortErrorKind, ContextSourceMaterial, ContextSourceOutput,
-        ContextSourceRequest, EvidenceProvider, EvidenceProviderInvocation,
+        ContextSourceRequest, EvidenceAnchor, EvidenceProvider, EvidenceProviderInvocation,
         EvidenceProviderObservation, EvidenceProviderObservationKind, EvidenceProviderOutput,
+        EvidenceSeedKind,
     },
     context_pack::{CONTEXT_PACK_TIMEOUT_MS, ContextPackService, ContextPackServiceError},
     policy::{BudgetCharge, CancellationSignal},
@@ -33,11 +34,16 @@ use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, SymbolId};
 use rootlight_ir::{CoverageStatus, LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::{
     ErrorCode, PublicError, RepositorySelector, SchemaVersion, TrustClassification,
-    context::{ContextPackData, ContextPackInput, ContextSeedSelector},
+    completeness::{CompletenessState, LimitingResourceKind},
+    context::{
+        ContextPackData, ContextPackInput, ContextPackObjective, ContextSection,
+        ContextSeedSelector, Diversity, EvidenceRole, MissingRequiredRoleReason,
+        RoleCoverageStatus, SourcePolicy,
+    },
     vertical::{
         CacheStatus, ContinuationCursor, CoverageSummary, Freshness, GenerationSelector,
         GenerationSummary, ReadEnvelope, RelationSummary, RepositoryIdSelector, RequiredNullable,
-        ResolvedRepository, SymbolExplainData, SymbolExplanation, UsageSummary,
+        ResolvedRepository, ResponseProfile, SymbolExplainData, SymbolExplanation, UsageSummary,
     },
 };
 use serde_json::Value;
@@ -77,6 +83,7 @@ struct FakePort {
     definition_candidates: usize,
     candidate_tokens: u64,
     signature_bytes: Vec<usize>,
+    support_all_providers: bool,
 }
 
 impl FakePort {
@@ -93,6 +100,7 @@ impl FakePort {
             definition_candidates: 1,
             candidate_tokens: 32,
             signature_bytes: vec![1],
+            support_all_providers: false,
         }
     }
 
@@ -106,6 +114,24 @@ impl FakePort {
         port.definition_candidates = definition_candidates;
         port.candidate_tokens = candidate_tokens;
         port.signature_bytes = signature_bytes;
+        port
+    }
+
+    fn complete(identity_response: Result<AgentResolvedIdentity, AgentPortError>) -> Self {
+        let mut port = Self::new(identity_response, None);
+        port.candidate_tokens = 16;
+        port.support_all_providers = true;
+        port
+    }
+
+    fn complete_paged(
+        identity_response: Result<AgentResolvedIdentity, AgentPortError>,
+        candidates_per_provider: usize,
+        candidate_tokens: u64,
+    ) -> Self {
+        let mut port = Self::complete(identity_response);
+        port.definition_candidates = candidates_per_provider;
+        port.candidate_tokens = candidate_tokens;
         port
     }
 }
@@ -146,7 +172,7 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
             });
         }
 
-        if invocation.provider() != EvidenceProvider::Definition {
+        if !self.support_all_providers && invocation.provider() != EvidenceProvider::Definition {
             return Box::pin(async move {
                 Err(ContextEvidencePortError {
                     kind: ContextEvidencePortErrorKind::Unsupported,
@@ -154,22 +180,37 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
                 })
             });
         }
-        let observations = (0..self.definition_candidates)
+        let candidate_count = self.definition_candidates;
+        let observations = (0..candidate_count)
             .map(|index| {
-                let byte = u8::try_from(index).unwrap_or(u8::MAX).saturating_add(3);
-                let candidate_symbol = SymbolId::from_bytes([byte; 20]);
+                let mut hasher =
+                    blake3::Hasher::new_derive_key("rootlight.context-service-fixture.v1");
+                hasher.update(invocation.id().as_str().as_bytes());
+                hasher.update(&u64::try_from(index).unwrap_or(u64::MAX).to_le_bytes());
+                let digest = *hasher.finalize().as_bytes();
+                let mut symbol_bytes = [0; 20];
+                symbol_bytes.copy_from_slice(&digest[..20]);
+                let candidate_symbol = SymbolId::from_bytes(symbol_bytes);
+                let mut file_bytes = [0; 20];
+                file_bytes.copy_from_slice(&digest[12..]);
                 let definition = SourceRef::new(
                     invocation.repository(),
                     invocation.generation(),
-                    SourceSpan::new(FileId::from_bytes([byte.saturating_add(20); 20]), 0, 32)
+                    SourceSpan::new(FileId::from_bytes(file_bytes), 0, 32)
                         .expect("fixture source span is valid"),
-                    ContentHash::from_bytes([byte; 32]),
+                    ContentHash::from_bytes(digest),
                     Some(LineRange::new(1, 2).expect("fixture line range is valid")),
                 );
                 EvidenceProviderObservation {
-                    kind: EvidenceProviderObservationKind::Primary,
+                    kind: if invocation.provider() == EvidenceProvider::ChangeImpact
+                        && invocation.role() == rootlight_agent::context_pack::EvidenceRole::Risk
+                    {
+                        EvidenceProviderObservationKind::ChangeRiskSummary
+                    } else {
+                        EvidenceProviderObservationKind::Primary
+                    },
                     symbol_id: Some(candidate_symbol),
-                    identity: candidate_symbol.to_string(),
+                    identity: format!("{}:{index}", invocation.id().as_str()),
                     observed_score: Some(
                         900_u16.saturating_sub(u16::try_from(index).unwrap_or(u16::MAX)),
                     ),
@@ -186,9 +227,8 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
             observations,
             completeness: rootlight_mcp_contract::completeness::ResultCompleteness::complete(),
             usage: BudgetCharge {
-                results: u64::try_from(self.definition_candidates).unwrap_or(u64::MAX),
-                tokens: 32_u64
-                    .saturating_mul(u64::try_from(self.definition_candidates).unwrap_or(u64::MAX)),
+                results: u64::try_from(candidate_count).unwrap_or(u64::MAX),
+                tokens: 32_u64.saturating_mul(u64::try_from(candidate_count).unwrap_or(u64::MAX)),
                 ..BudgetCharge::default()
             },
         };
@@ -464,6 +504,95 @@ fn input(generation_id: GenerationId) -> ContextPackInput {
     }
 }
 
+#[derive(Debug)]
+struct ObjectiveFixture {
+    task: &'static str,
+    sections: Vec<ContextSection>,
+    objective: ContextPackObjective,
+    required_roles: Vec<EvidenceRole>,
+}
+
+fn objective_fixtures() -> Vec<ObjectiveFixture> {
+    vec![
+        ObjectiveFixture {
+            task: "fix parser crash",
+            sections: vec![
+                ContextSection::Definitions,
+                ContextSection::Source,
+                ContextSection::Tests,
+            ],
+            objective: ContextPackObjective::BugFix,
+            required_roles: vec![
+                EvidenceRole::Definition,
+                EvidenceRole::Implementation,
+                EvidenceRole::Test,
+            ],
+        },
+        ObjectiveFixture {
+            task: "refactor request admission",
+            sections: vec![
+                ContextSection::Definitions,
+                ContextSection::Callers,
+                ContextSection::Tests,
+            ],
+            objective: ContextPackObjective::Refactor,
+            required_roles: vec![
+                EvidenceRole::Definition,
+                EvidenceRole::Caller,
+                EvidenceRole::Test,
+            ],
+        },
+        ObjectiveFixture {
+            task: "explain request admission",
+            sections: vec![ContextSection::Architecture, ContextSection::Definitions],
+            objective: ContextPackObjective::Explanation,
+            required_roles: vec![EvidenceRole::Definition, EvidenceRole::Architecture],
+        },
+        ObjectiveFixture {
+            task: "migrate request admission",
+            sections: vec![
+                ContextSection::Definitions,
+                ContextSection::Callers,
+                ContextSection::History,
+            ],
+            objective: ContextPackObjective::Migration,
+            required_roles: vec![
+                EvidenceRole::Definition,
+                EvidenceRole::Caller,
+                EvidenceRole::Change,
+            ],
+        },
+        ObjectiveFixture {
+            task: "review request admission security",
+            sections: vec![
+                ContextSection::Definitions,
+                ContextSection::History,
+                ContextSection::Risks,
+            ],
+            objective: ContextPackObjective::Review,
+            required_roles: vec![
+                EvidenceRole::Definition,
+                EvidenceRole::Risk,
+                EvidenceRole::Change,
+            ],
+        },
+    ]
+}
+
+const fn section_label(section: ContextSection) -> &'static str {
+    match section {
+        ContextSection::Architecture => "architecture",
+        ContextSection::Definitions => "definitions",
+        ContextSection::Callers => "callers",
+        ContextSection::Callees => "callees",
+        ContextSection::Types => "types",
+        ContextSection::Tests => "tests",
+        ContextSection::History => "history",
+        ContextSection::Source => "source",
+        ContextSection::Risks => "risks",
+    }
+}
+
 #[tokio::test]
 async fn invalid_continuation_is_rejected_after_identity_resolution() {
     let mut request = input(generation(2));
@@ -619,6 +748,321 @@ async fn execution_propagates_policy_and_shapes_child_response() {
 }
 
 #[tokio::test]
+async fn every_objective_completes_through_the_public_service_boundary() {
+    let mut pack_ids = std::collections::BTreeSet::new();
+
+    for fixture in objective_fixtures() {
+        let mut request = input(generation(2));
+        request.task = fixture.task.to_owned();
+        request.sections = Some(fixture.sections.clone());
+        request.token_budget = 20_000;
+        let port = Arc::new(FakePort::complete(Ok(identity(generation(2)))));
+
+        let output = ContextPackService
+            .execute(
+                Arc::clone(&port),
+                request,
+                repository(),
+                TestCancellation(false),
+            )
+            .await
+            .expect("complete provider fixture satisfies the objective");
+
+        assert_eq!(output.data.role_coverage.objective(), fixture.objective);
+        assert!(
+            output.data.role_coverage.complete(),
+            "objective fixture remained incomplete: {}; coverage: {:#?}",
+            fixture.task,
+            output.data.role_coverage
+        );
+        assert_eq!(output.completeness.state, CompletenessState::Complete);
+        assert!(!output.truncated);
+        assert!(output.next_cursor.0.is_none());
+        assert!(output.data.omitted.is_empty());
+        assert!(output.data.items.iter().all(|item| {
+            item.trust == TrustClassification::UntrustedRepositoryData
+                && fixture.required_roles.contains(&item.role)
+        }));
+        for role in fixture.required_roles {
+            let coverage = output
+                .data
+                .role_coverage
+                .roles()
+                .iter()
+                .find(|entry| entry.role == role)
+                .expect("required role has a coverage entry");
+            assert_eq!(coverage.status, RoleCoverageStatus::Satisfied);
+            assert!(coverage.selected_items > 0);
+            assert!(coverage.missing_reason.is_none());
+        }
+        for section in fixture.sections {
+            assert!(
+                output
+                    .data
+                    .token_accounting
+                    .by_section
+                    .get(section_label(section))
+                    .is_some_and(|tokens| *tokens > 0)
+            );
+        }
+        assert_eq!(
+            output
+                .data
+                .token_accounting
+                .by_section
+                .values()
+                .copied()
+                .fold(0_u32, u32::saturating_add),
+            output.data.token_accounting.estimated_total
+        );
+        assert_eq!(
+            output.usage.estimated_tokens,
+            u64::from(output.data.token_accounting.estimated_total)
+        );
+        assert!(pack_ids.insert(output.data.pack_id));
+    }
+
+    assert_eq!(pack_ids.len(), 5);
+}
+
+#[tokio::test]
+async fn every_objective_resumes_across_authenticated_pages_without_duplicates() {
+    for fixture in objective_fixtures() {
+        let mut request = input(generation(2));
+        request.task = fixture.task.to_owned();
+        request.sections = Some(fixture.sections);
+        request.token_budget = 2_500;
+        let mut cursor = None;
+        let mut page_count = 0_usize;
+        let mut pack_id = None;
+        let mut emitted = std::collections::BTreeSet::new();
+
+        loop {
+            request.continuation = cursor;
+            let output = ContextPackService
+                .execute(
+                    Arc::new(FakePort::complete_paged(
+                        Ok(identity(generation(2))),
+                        2,
+                        600,
+                    )),
+                    request.clone(),
+                    repository(),
+                    TestCancellation(false),
+                )
+                .await
+                .expect("objective continuation page executes");
+            page_count = page_count.saturating_add(1);
+            assert!(page_count <= 10, "objective continuation must terminate");
+            assert_eq!(output.data.role_coverage.objective(), fixture.objective);
+            assert!(
+                output.data.role_coverage.complete(),
+                "first cumulative page must cover every required role: {}",
+                fixture.task
+            );
+            if let Some(expected) = &pack_id {
+                assert_eq!(&output.data.pack_id, expected);
+            } else {
+                pack_id = Some(output.data.pack_id.clone());
+            }
+            for item in &output.data.items {
+                let symbol = item
+                    .symbol_id
+                    .expect("provider fixture publishes stable symbol identity");
+                assert!(
+                    emitted.insert(format!("{:?}:{symbol}", item.role)),
+                    "continuation repeated public evidence for {}",
+                    fixture.task
+                );
+            }
+            assert_eq!(
+                output
+                    .data
+                    .token_accounting
+                    .by_section
+                    .values()
+                    .copied()
+                    .fold(0_u32, u32::saturating_add),
+                output.data.token_accounting.estimated_total
+            );
+            cursor = output.next_cursor.0;
+            if cursor.is_none() {
+                assert_eq!(output.completeness.state, CompletenessState::Complete);
+                assert!(!output.truncated);
+                break;
+            }
+            assert!(
+                output.completeness.guidance.contains(
+                    &rootlight_mcp_contract::completeness::ContinuationGuidance::UseCursor
+                )
+            );
+        }
+
+        assert!(
+            page_count >= 2,
+            "objective fixture must exercise continuation: {}",
+            fixture.task
+        );
+    }
+}
+
+#[tokio::test]
+async fn every_seed_category_changes_live_provider_planning_and_pack_identity() {
+    let mut request = input(generation(2));
+    request.task = "explain request admission".to_owned();
+    request.sections = Some(vec![
+        ContextSection::Architecture,
+        ContextSection::Definitions,
+    ]);
+    request.token_budget = 20_000;
+    request.seeds = ContextSeedSelector {
+        symbols: Some(vec![symbol()]),
+        paths: Some(vec!["src/context.rs".to_owned()]),
+        routes: Some(vec!["request admission".to_owned()]),
+        tests: Some(vec![SymbolId::from_bytes([8; 20])]),
+        located: Some(
+            ContinuationCursor::parse("located-result-v1")
+                .expect("located-result fixture is bounded"),
+        ),
+        change: Some("change-v1".to_owned()),
+        plan: Some("plan-v1".to_owned()),
+    };
+    let port = Arc::new(FakePort::complete(Ok(identity(generation(2)))));
+
+    let output = ContextPackService
+        .execute(
+            Arc::clone(&port),
+            request,
+            repository(),
+            TestCancellation(false),
+        )
+        .await
+        .expect("all advertised seed categories execute");
+
+    let observed_seed_kinds = port
+        .evidence_calls
+        .lock()
+        .expect("evidence call lock is available")
+        .iter()
+        .flat_map(|call| call.invocation.anchors())
+        .map(EvidenceAnchor::kind)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        observed_seed_kinds,
+        std::collections::BTreeSet::from([
+            EvidenceSeedKind::Symbol,
+            EvidenceSeedKind::Path,
+            EvidenceSeedKind::Route,
+            EvidenceSeedKind::Test,
+            EvidenceSeedKind::Located,
+            EvidenceSeedKind::Change,
+            EvidenceSeedKind::Plan,
+        ])
+    );
+    assert!(output.data.role_coverage.complete());
+
+    let mut symbol_only = input(generation(2));
+    symbol_only.sections = Some(vec![
+        ContextSection::Architecture,
+        ContextSection::Definitions,
+    ]);
+    symbol_only.token_budget = 20_000;
+    let symbol_port = Arc::new(FakePort::complete(Ok(identity(generation(2)))));
+    let symbol_output = ContextPackService
+        .execute(
+            symbol_port,
+            symbol_only,
+            repository(),
+            TestCancellation(false),
+        )
+        .await
+        .expect("symbol-only control request executes");
+    assert_ne!(output.data.pack_id, symbol_output.data.pack_id);
+    assert_ne!(
+        output.data.request_digest,
+        symbol_output.data.request_digest
+    );
+}
+
+#[tokio::test]
+async fn unsupported_providers_preserve_omission_reasons_and_section_accounting() {
+    let mut request = input(generation(2));
+    request.task = "fix parser crash".to_owned();
+    request.sections = Some(vec![
+        ContextSection::Definitions,
+        ContextSection::Source,
+        ContextSection::Tests,
+    ]);
+    let port = Arc::new(FakePort::new(Ok(identity(generation(2))), None));
+
+    let output = ContextPackService
+        .execute(port, request, repository(), TestCancellation(false))
+        .await
+        .expect("partial providers produce a truthful pack");
+
+    assert!(!output.data.role_coverage.complete());
+    assert_eq!(
+        output.completeness.state,
+        CompletenessState::UnsupportedPartial
+    );
+    for role in [EvidenceRole::Implementation, EvidenceRole::Test] {
+        let coverage = output
+            .data
+            .role_coverage
+            .roles()
+            .iter()
+            .find(|entry| entry.role == role)
+            .expect("missing required role has a coverage entry");
+        assert_eq!(coverage.status, RoleCoverageStatus::MissingRequired);
+        assert_eq!(
+            coverage.missing_reason,
+            Some(MissingRequiredRoleReason::Unsupported)
+        );
+        let omission = output
+            .data
+            .omitted
+            .iter()
+            .find(|omission| {
+                omission.role == Some(role) && omission.reason.as_str() == "provider_unsupported"
+            })
+            .expect("provider omission remains public");
+        assert!(omission.provider.is_some());
+        assert!(!omission.resumable);
+        assert!(omission.continuation.is_none());
+        assert!(
+            omission
+                .limiting_resources
+                .iter()
+                .any(|resource| { resource.kind == LimitingResourceKind::Capability })
+        );
+    }
+    for section in ["definitions", "role_coverage", "omissions", "envelope"] {
+        assert!(
+            output
+                .data
+                .token_accounting
+                .by_section
+                .get(section)
+                .is_some_and(|tokens| *tokens > 0)
+        );
+    }
+    assert_eq!(
+        output
+            .data
+            .token_accounting
+            .by_section
+            .values()
+            .copied()
+            .fold(0_u32, u32::saturating_add),
+        output.data.token_accounting.estimated_total
+    );
+    assert_eq!(
+        output.usage.estimated_tokens,
+        u64::from(output.data.token_accounting.estimated_total)
+    );
+}
+
+#[tokio::test]
 async fn authenticated_continuation_resumes_without_duplicates_and_preserves_partial_truth() {
     let token_budget = 1_550;
     let mut request = input(generation(2));
@@ -702,6 +1146,104 @@ async fn authenticated_continuation_resumes_without_duplicates_and_preserves_par
             .await,
         Err(ContextPackServiceError::InvalidContinuation)
     );
+}
+
+#[tokio::test]
+async fn continuation_rejects_every_changed_canonical_binding_before_provider_work() {
+    let token_budget = 1_550;
+    let mut request = input(generation(2));
+    request.token_budget = token_budget;
+    let first = ContextPackService
+        .execute(
+            Arc::new(FakePort::paged(
+                Ok(identity(generation(2))),
+                2,
+                900,
+                vec![1],
+            )),
+            request,
+            repository(),
+            TestCancellation(false),
+        )
+        .await
+        .expect("bounded first page succeeds");
+    let cursor = first
+        .next_cursor
+        .0
+        .expect("first page exposes an authenticated cursor");
+
+    let mut variants = Vec::new();
+    let mut changed = input(generation(2));
+    changed.token_budget = token_budget;
+    changed.task = "review request admission".to_owned();
+    variants.push((changed, generation(2)));
+
+    let mut changed = input(generation(2));
+    changed.token_budget = token_budget;
+    changed.seeds.symbols = Some(vec![SymbolId::from_bytes([9; 20])]);
+    variants.push((changed, generation(2)));
+
+    let mut changed = input(generation(2));
+    changed.token_budget = token_budget;
+    changed.source_policy = Some(SourcePolicy::Signatures);
+    variants.push((changed, generation(2)));
+
+    let mut changed = input(generation(2));
+    changed.token_budget = token_budget;
+    changed.sections = Some(vec![
+        ContextSection::Architecture,
+        ContextSection::Definitions,
+    ]);
+    variants.push((changed, generation(2)));
+
+    let mut changed = input(generation(2));
+    changed.token_budget = token_budget;
+    changed.diversity = Some(Diversity::Tests);
+    variants.push((changed, generation(2)));
+
+    let mut changed = input(generation(2));
+    changed.token_budget = token_budget;
+    changed.min_confidence = Some(701);
+    variants.push((changed, generation(2)));
+
+    let mut changed = input(generation(2));
+    changed.token_budget = token_budget;
+    changed.response_profile = Some(ResponseProfile::Standard);
+    variants.push((changed, generation(2)));
+
+    let mut increased_budget = input(generation(2));
+    increased_budget.token_budget = token_budget + 1;
+    variants.push((increased_budget, generation(2)));
+
+    let mut decreased_budget = input(generation(2));
+    decreased_budget.token_budget = token_budget - 1;
+    variants.push((decreased_budget, generation(2)));
+
+    let mut changed_generation = input(generation(3));
+    changed_generation.token_budget = token_budget;
+    variants.push((changed_generation, generation(3)));
+
+    for (mut changed, resolved_generation) in variants {
+        changed.continuation = Some(cursor.clone());
+        let port = Arc::new(FakePort::paged(
+            Ok(identity(resolved_generation)),
+            2,
+            900,
+            vec![1],
+        ));
+        assert_eq!(
+            ContextPackService
+                .execute(
+                    Arc::clone(&port),
+                    changed,
+                    repository(),
+                    TestCancellation(false),
+                )
+                .await,
+            Err(ContextPackServiceError::InvalidContinuation)
+        );
+        assert_eq!(port.call_count.load(Ordering::Relaxed), 0);
+    }
 }
 
 #[tokio::test]
