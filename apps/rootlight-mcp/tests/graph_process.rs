@@ -8,7 +8,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -42,15 +42,7 @@ fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
 
     let index = index_repository(&mut mcp, &repository_root);
     let symbol_id = locate_symbol(&mut mcp, &index, "matrix_entry");
-    for fixture_symbol in [
-        "cycle_left",
-        "dag_leaf",
-        "disconnected_probe",
-        "generated_probe",
-        "integration_probe",
-    ] {
-        let _ = locate_symbol(&mut mcp, &index, fixture_symbol);
-    }
+    let dynamic_dispatch_symbol = locate_symbol(&mut mcp, &index, "dynamic_dispatch_probe");
     let descriptions = tool_descriptions(&mut mcp);
     assert_graph_descriptions_are_bounded(&descriptions);
 
@@ -66,6 +58,10 @@ fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
     }
 
     assert_deterministic_graph_outputs(&mut mcp, &index, &symbol_id, &outputs);
+    assert_standalone_batch_parity(&mut mcp, &index, &symbol_id, &outputs);
+    assert_context_provider_parity(&mut mcp, &index, &symbol_id);
+    assert_relationship_pagination(&mut mcp, &index, &symbol_id);
+    assert_five_tool_capability_matrix(&outputs);
 
     let relationships = &outputs["symbol.relationships"];
     assert!(relationships["data"]["groups"].is_array());
@@ -171,6 +167,7 @@ fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
             .expect("code.dead has a description")
             .contains("do not prove runtime liveness")
     );
+    assert_dynamic_dispatch_remains_inconclusive(&mut mcp, &index, &dynamic_dispatch_symbol);
 
     assert_profile_matrix(&mut mcp, &index, &symbol_id, &outputs);
     assert_hard_token_budget_taxonomy(&mut mcp, &index, &symbol_id);
@@ -184,6 +181,426 @@ fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
 
     mcp.finish();
     daemon.finish();
+}
+
+fn assert_standalone_batch_parity(
+    mcp: &mut McpProcess,
+    index: &IndexReceipt,
+    symbol_id: &str,
+    standalone_outputs: &Map<String, Value>,
+) {
+    for (tool_index, (tool, arguments)) in
+        graph_tool_calls(index, symbol_id).into_iter().enumerate()
+    {
+        let mut operation_arguments = arguments
+            .as_object()
+            .expect("graph arguments are objects")
+            .clone();
+        operation_arguments.remove("repository");
+        operation_arguments.remove("generation");
+        let response = mcp.call(
+            &format!("graph-batch-parity-{tool_index}"),
+            "query.batch",
+            json!({
+                "repository": {"repository_id": index.repository_id},
+                "generation": index.generation_id,
+                "operations": [{
+                    "id": format!("graph_{tool_index}"),
+                    "tool": tool,
+                    "arguments": operation_arguments
+                }]
+            }),
+        );
+        assert_success(&response, "query.batch");
+        let batch = &response["result"]["structuredContent"];
+        let operation = &batch["data"]["operation_results"][0];
+        let standalone = &standalone_outputs[tool];
+        assert_eq!(batch["data"]["batch_status"], "ok");
+        assert_eq!(operation["tool"], tool);
+        assert_eq!(operation["status"], "ok");
+        assert!(operation.get("error").is_none());
+        assert_eq!(operation["data"], standalone["data"]);
+        assert_eq!(operation["truncated"], standalone["truncated"]);
+        assert_eq!(operation["next_cursor"], standalone["next_cursor"]);
+        assert_eq!(
+            batch["repository"]["repository_id"],
+            standalone["repository"]["repository_id"]
+        );
+        assert_eq!(batch["generation"], standalone["generation"]);
+        assert_eq!(batch["trust"], standalone["trust"]);
+        assert_eq!(batch["truncated"], standalone["truncated"]);
+        for field in ["state", "limiting_resources", "continuation"] {
+            assert_eq!(
+                batch["completeness"][field], standalone["completeness"][field],
+                "{tool} changed completeness.{field} through query.batch"
+            );
+        }
+        let batch_guidance = batch["completeness"]["guidance"]
+            .as_array()
+            .expect("batch completeness returns guidance");
+        for guidance in standalone["completeness"]["guidance"]
+            .as_array()
+            .expect("standalone completeness returns guidance")
+        {
+            assert!(
+                batch_guidance.contains(guidance),
+                "query.batch dropped {tool} guidance {guidance}"
+            );
+        }
+    }
+}
+
+fn assert_context_provider_parity(mcp: &mut McpProcess, index: &IndexReceipt, symbol_id: &str) {
+    let relationships = mcp.call(
+        "graph-context-relationships-standalone",
+        "symbol.relationships",
+        json!({
+            "repository": {"repository_id": index.repository_id},
+            "generation": index.generation_id,
+            "symbol_ids": [symbol_id],
+            "relations": ["calls", "references"],
+            "max_results": 8,
+            "min_confidence": 0
+        }),
+    );
+    assert_success(&relationships, "symbol.relationships");
+    let relationships = &relationships["result"]["structuredContent"];
+    let overview = mcp.call(
+        "graph-context-architecture-standalone",
+        "architecture.overview",
+        json!({
+            "repository": {"repository_id": index.repository_id},
+            "generation": index.generation_id,
+            "views": ["hotspots"],
+            "max_components": 4,
+            "include_edges": true,
+            "min_confidence": 0
+        }),
+    );
+    assert_success(&overview, "architecture.overview");
+    let overview = &overview["result"]["structuredContent"];
+    let context = mcp.call(
+        "graph-context-provider-parity",
+        "context.pack",
+        json!({
+            "repository": {"repository_id": index.repository_id},
+            "generation": index.generation_id,
+            "task": "explain callers and architecture for the selected symbol",
+            "seeds": {"symbols": [symbol_id]},
+            "token_budget": 20_000,
+            "source_policy": "references_only",
+            "sections": ["definitions", "callers", "architecture"],
+            "min_confidence": 0,
+            "response_profile": "evidence"
+        }),
+    );
+    assert_success(&context, "context.pack");
+    let context = &context["result"]["structuredContent"];
+    assert_eq!(
+        context["repository"]["repository_id"], index.repository_id,
+        "context.pack changed repository identity"
+    );
+    assert_eq!(
+        context["generation"]["generation_id"], index.generation_id,
+        "context.pack changed generation identity"
+    );
+    assert_eq!(context["trust"], "untrusted_repository_data");
+
+    let caller_items = context_items_for_role(context, "caller");
+    let expected_callers = relationship_targets(relationships);
+    assert_eq!(
+        caller_items, expected_callers,
+        "the relationships context provider diverged from symbol.relationships"
+    );
+
+    let architecture_scores = context_items_for_role(context, "architecture")
+        .into_iter()
+        .map(|(_, score)| score)
+        .collect::<Vec<_>>();
+    let expected_scores = overview["data"]["components"]
+        .as_array()
+        .expect("architecture.overview returns components")
+        .iter()
+        .map(|component| {
+            component["confidence"]
+                .as_u64()
+                .expect("an architecture component has confidence")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        architecture_scores, expected_scores,
+        "the architecture context provider diverged from architecture.overview; \
+         standalone usage={:#}, context={context:#}",
+        overview["usage"]
+    );
+}
+
+fn context_items_for_role(context: &Value, role: &str) -> Vec<(Option<String>, u64)> {
+    context["data"]["items"]
+        .as_array()
+        .expect("context.pack returns items")
+        .iter()
+        .filter(|item| item["role"] == role)
+        .map(|item| {
+            (
+                item["symbol_id"].as_str().map(str::to_owned),
+                item["score"].as_u64().expect("a context item has a score"),
+            )
+        })
+        .collect()
+}
+
+fn relationship_targets(output: &Value) -> Vec<(Option<String>, u64)> {
+    output["data"]["groups"]
+        .as_array()
+        .expect("symbol.relationships returns groups")
+        .iter()
+        .flat_map(|group| {
+            group["items"]
+                .as_array()
+                .expect("a relationship group returns items")
+        })
+        .map(|item| {
+            (
+                item["symbol_id"].as_str().map(str::to_owned),
+                item["confidence"]
+                    .as_u64()
+                    .expect("a relationship item has confidence"),
+            )
+        })
+        .collect()
+}
+
+fn assert_relationship_pagination(mcp: &mut McpProcess, index: &IndexReceipt, symbol_id: &str) {
+    let unpaged = mcp.call(
+        "graph-relationships-unpaged",
+        "symbol.relationships",
+        relationship_arguments(index, symbol_id, 100, None),
+    );
+    assert_success(&unpaged, "symbol.relationships");
+    let output = &unpaged["result"]["structuredContent"];
+    let expected = relationship_records(output);
+    if expected.is_empty() {
+        // The production first-slice parser records containment and dispatch
+        // candidates, not the served semantic relationship families. This
+        // path proves that missing Tier B facts stay exact and non-pageable;
+        // authenticated multi-page concatenation is covered by the executor's
+        // semantic-port fixture.
+        assert_eq!(output["data"]["totals"]["exact"], true);
+        assert_eq!(output["data"]["totals"]["total_edges"], 0);
+        assert_eq!(output["truncated"], false);
+        assert!(output["next_cursor"].is_null());
+        assert_eq!(output["completeness"]["continuation"], "not_applicable");
+        assert_ne!(output["coverage"]["status"], "complete");
+        assert!(
+            output["coverage"]["skipped_inputs"]
+                .as_u64()
+                .is_some_and(|skipped| skipped > 0)
+        );
+        assert!(
+            output["warnings"]
+                .as_array()
+                .expect("bounded relationship coverage returns warnings")
+                .iter()
+                .any(|warning| warning["code"] == "negative_claims_inconclusive")
+        );
+        return;
+    }
+
+    let first = collect_relationship_pages(mcp, index, symbol_id, "first");
+    let second = collect_relationship_pages(mcp, index, symbol_id, "second");
+    assert_eq!(first, expected);
+    assert_eq!(second, expected);
+}
+
+fn collect_relationship_pages(
+    mcp: &mut McpProcess,
+    index: &IndexReceipt,
+    symbol_id: &str,
+    run: &str,
+) -> Vec<Value> {
+    let mut records = Vec::new();
+    let mut cursor = None;
+    for page in 0..32 {
+        let response = mcp.call(
+            &format!("graph-relationships-page-{run}-{page}"),
+            "symbol.relationships",
+            relationship_arguments(index, symbol_id, 1, cursor.as_deref()),
+        );
+        assert_success(&response, "symbol.relationships");
+        let output = &response["result"]["structuredContent"];
+        assert_common_read_contract("symbol.relationships", output, index);
+        records.extend(relationship_records(output));
+        let Some(next_cursor) = output["next_cursor"].as_str() else {
+            assert_eq!(output["truncated"], false);
+            assert_eq!(output["completeness"]["continuation"], "not_applicable");
+            let unique = records
+                .iter()
+                .map(|record| {
+                    serde_json::to_string(record).expect("relationship record serializes")
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                unique.len(),
+                records.len(),
+                "relationship pages contain a duplicate record"
+            );
+            return records;
+        };
+        assert_eq!(output["truncated"], true);
+        assert_eq!(output["completeness"]["continuation"], "available");
+        if page == 0 {
+            let mut tampered = next_cursor.as_bytes().to_vec();
+            let last = tampered
+                .last_mut()
+                .expect("an authenticated cursor has an encoded payload");
+            *last = if *last == b'A' { b'B' } else { b'A' };
+            let tampered = String::from_utf8(tampered).expect("base64url cursor stays UTF-8");
+            let rejected = mcp.call(
+                &format!("graph-relationships-tampered-{run}"),
+                "symbol.relationships",
+                relationship_arguments(index, symbol_id, 1, Some(&tampered)),
+            );
+            assert_public_error(&rejected, "INVALID_CURSOR");
+        }
+        cursor = Some(next_cursor.to_owned());
+    }
+    panic!("relationship pagination did not terminate within the bounded page count");
+}
+
+fn relationship_arguments(
+    index: &IndexReceipt,
+    symbol_id: &str,
+    max_results: u16,
+    cursor: Option<&str>,
+) -> Value {
+    let mut arguments = json!({
+        "repository": {"repository_id": index.repository_id},
+        "generation": index.generation_id,
+        "symbol_ids": [symbol_id],
+        "relations": ["calls", "references"],
+        "direction": "outbound",
+        "max_results": max_results
+    });
+    if let Some(cursor) = cursor {
+        arguments["cursor"] = json!(cursor);
+    }
+    arguments
+}
+
+fn relationship_records(output: &Value) -> Vec<Value> {
+    output["data"]["groups"]
+        .as_array()
+        .expect("symbol.relationships returns groups")
+        .iter()
+        .flat_map(|group| {
+            group["items"]
+                .as_array()
+                .expect("a relationship group returns items")
+                .iter()
+                .map(|item| {
+                    json!({
+                        "seed": group["seed"],
+                        "relation": group["relation"],
+                        "direction": group["direction"],
+                        "item": item
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn assert_dynamic_dispatch_remains_inconclusive(
+    mcp: &mut McpProcess,
+    index: &IndexReceipt,
+    dynamic_symbol: &str,
+) {
+    let response = mcp.call(
+        "graph-dynamic-dispatch",
+        "code.dead",
+        json!({
+            "repository": {"repository_id": index.repository_id},
+            "generation": index.generation_id,
+            "entry_point_policy": "standard",
+            "include_exported": false,
+            "include_tests": true,
+            "max_candidates": 100
+        }),
+    );
+    assert_success(&response, "code.dead");
+    let output = &response["result"]["structuredContent"];
+    let blind_spots = output["data"]["blind_spots"]
+        .as_array()
+        .expect("code.dead returns blind spots");
+    assert!(
+        blind_spots
+            .iter()
+            .any(|blind_spot| blind_spot["category"] == "dynamic_dispatch")
+    );
+    if let Some(candidate) = output["data"]["candidates"]
+        .as_array()
+        .expect("code.dead returns candidates")
+        .iter()
+        .find(|candidate| candidate["symbol_id"] == dynamic_symbol)
+    {
+        assert!(
+            candidate["classification"]
+                .as_str()
+                .is_some_and(|classification| {
+                    classification.starts_with("not_observed")
+                        || classification == "no_observed_incoming_references"
+                }),
+            "dynamic-dispatch reachability must remain an observation, not a proof"
+        );
+    }
+    assert_eq!(output["data"]["entry_points"]["complete"], false);
+}
+
+fn assert_five_tool_capability_matrix(outputs: &Map<String, Value>) {
+    let expected_data_fields = [
+        ("symbol.relationships", &["groups", "totals"][..]),
+        ("flow.trace", &["paths", "frontier", "projection"][..]),
+        (
+            "architecture.overview",
+            &["components", "connections", "hotspots", "views"][..],
+        ),
+        (
+            "architecture.cycles",
+            &["components", "cycles", "break_candidates"][..],
+        ),
+        (
+            "code.dead",
+            &[
+                "candidates",
+                "entry_points",
+                "blind_spots",
+                "false_positive_controls",
+            ][..],
+        ),
+    ];
+    for (tool, fields) in expected_data_fields {
+        let output = &outputs[tool];
+        for field in fields {
+            assert!(
+                output["data"].get(*field).is_some(),
+                "{tool} omitted capability field {field}"
+            );
+        }
+        assert_ne!(output["coverage"]["status"], "unknown");
+        assert!(
+            output["coverage"]["languages"]
+                .as_array()
+                .is_some_and(
+                    |languages| languages
+                        .iter()
+                        .all(|language| language["language"].is_string()
+                            && language["tier"].is_string())
+                )
+        );
+        assert!(output["coverage"]["skipped_inputs"].as_u64().is_some());
+        assert!(output["completeness"]["state"].is_string());
+    }
 }
 
 fn assert_deterministic_graph_outputs(
@@ -546,6 +963,10 @@ fn write_repository_fixture(root: &Path) {
             "pub fn dag_branch() -> usize { dag_leaf() }\n",
             "pub fn dag_leaf() -> usize { 3 }\n",
             "pub fn disconnected_probe() -> usize { 5 }\n",
+            "pub trait DynamicProbe { fn invoke(&self) -> usize; }\n",
+            "pub fn dynamic_dispatch_probe(value: &dyn DynamicProbe) -> usize {\n",
+            "    value.invoke()\n",
+            "}\n",
         ),
     )
     .expect("fixture root source is written");
@@ -881,6 +1302,7 @@ struct McpProcess {
     child: Option<Child>,
     input: Option<ChildStdin>,
     output: Option<BufReader<ChildStdout>>,
+    stderr_reader: Option<JoinHandle<String>>,
 }
 
 impl McpProcess {
@@ -899,9 +1321,18 @@ impl McpProcess {
             .stderr(Stdio::piped())
             .spawn()
             .expect("MCP fixture process starts");
+        let mut stderr = child.stderr.take().expect("MCP stderr is piped");
+        let stderr_reader = thread::spawn(move || {
+            let mut output = String::new();
+            stderr
+                .read_to_string(&mut output)
+                .expect("MCP stderr reads");
+            output
+        });
         let mut process = Self {
             input: child.stdin.take(),
             output: child.stdout.take().map(BufReader::new),
+            stderr_reader: Some(stderr_reader),
             child: Some(child),
         };
         let response = process.request(
@@ -965,13 +1396,12 @@ impl McpProcess {
         self.output.take();
         let child = self.child.as_mut().expect("MCP child is retained");
         let status = wait_for_exit(child, SHUTDOWN_TIMEOUT);
-        let mut stderr = String::new();
-        child
-            .stderr
+        let stderr = self
+            .stderr_reader
             .take()
-            .expect("MCP stderr is piped")
-            .read_to_string(&mut stderr)
-            .expect("MCP stderr reads");
+            .expect("MCP stderr reader is retained")
+            .join()
+            .expect("MCP stderr reader thread joins");
         assert!(status.success(), "MCP process exits successfully: {stderr}");
         assert!(stderr.is_empty(), "MCP process wrote stderr: {stderr}");
         self.child.take();
@@ -983,6 +1413,9 @@ impl Drop for McpProcess {
         self.input.take();
         self.output.take();
         terminate(&mut self.child);
+        if let Some(stderr_reader) = self.stderr_reader.take() {
+            let _ = stderr_reader.join();
+        }
     }
 }
 
