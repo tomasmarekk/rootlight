@@ -1,0 +1,130 @@
+{
+  "$schema": "rootlight.query-batch-operation-status-goldens/1",
+  "cases": {
+    "all_success": {
+      "batch_status": "ok",
+      "operation_results": [
+        {
+          "error_code": null,
+          "id": "first",
+          "status": "ok",
+          "tool": "code.locate"
+        },
+        {
+          "error_code": null,
+          "id": "second",
+          "status": "ok",
+          "tool": "code.locate"
+        }
+      ]
+    },
+    "mixed": {
+      "batch_status": "partial",
+      "operation_results": [
+        {
+          "error_code": null,
+          "id": "success",
+          "status": "ok",
+          "tool": "code.locate"
+        },
+        {
+          "error_code": "UNSUPPORTED_CAPABILITY",
+          "id": "failure",
+          "status": "error",
+          "tool": "symbol.relationships"
+        },
+        {
+          "error_code": null,
+          "id": "later_success",
+          "status": "ok",
+          "tool": "code.locate"
+        }
+      ]
+    },
+    "all_error": {
+      "batch_status": "error",
+      "operation_results": [
+        {
+          "error_code": "UNSUPPORTED_CAPABILITY",
+          "id": "first_failure",
+          "status": "error",
+          "tool": "symbol.relationships"
+        },
+        {
+          "error_code": "UNSUPPORTED_CAPABILITY",
+          "id": "second_failure",
+          "status": "error",
+          "tool": "symbol.relationships"
+        }
+      ]
+    },
+    "fail_fast": {
+      "batch_status": "error",
+      "operation_results": [
+        {
+          "error_code": null,
+          "id": "not_started",
+          "status": "not_run_fail_fast",
+          "tool": "code.locate"
+        },
+        {
+          "error_code": "UNSUPPORTED_CAPABILITY",
+          "id": "failure",
+          "status": "error",
+          "tool": "symbol.relationships"
+        }
+      ]
+    },
+    "dependency_skip": {
+      "batch_status": "error",
+      "operation_results": [
+        {
+          "error_code": null,
+          "id": "dependent",
+          "status": "skipped_dependency",
+          "tool": "code.locate"
+        },
+        {
+          "error_code": "UNSUPPORTED_CAPABILITY",
+          "id": "failure",
+          "status": "error",
+          "tool": "symbol.relationships"
+        }
+      ]
+    },
+    "budget_exhaustion": {
+      "batch_status": "error",
+      "operation_results": [
+        {
+          "error_code": null,
+          "id": "later",
+          "status": "not_run_budget",
+          "tool": "code.locate"
+        },
+        {
+          "error_code": "BUDGET_EXCEEDED",
+          "id": "overrun",
+          "status": "error",
+          "tool": "source.read"
+        }
+      ]
+    },
+    "cancellation": {
+      "batch_status": "error",
+      "operation_results": [
+        {
+          "error_code": null,
+          "id": "first",
+          "status": "cancelled",
+          "tool": "code.locate"
+        },
+        {
+          "error_code": null,
+          "id": "second",
+          "status": "cancelled",
+          "tool": "code.locate"
+        }
+      ]
+    }
+  }
+}

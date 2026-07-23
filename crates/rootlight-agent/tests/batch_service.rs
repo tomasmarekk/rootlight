@@ -25,7 +25,7 @@ use rootlight_mcp_contract::{
     ErrorCode, PublicError, RepositorySelector, SchemaVersion, TrustClassification,
     context::{
         BatchArguments, BatchOperation, BatchOperationStatus, BatchStatus, BatchTool,
-        QueryBatchInput,
+        FailurePolicy, QueryBatchData, QueryBatchInput,
     },
     vertical::{
         CacheStatus, CoverageSummary, Freshness, GenerationSelector, GenerationSummary,
@@ -433,6 +433,34 @@ fn errors() -> BatchPublicErrors {
             .build()
             .expect("static error is valid"),
     )
+}
+
+fn unavailable_error() -> AgentPortError {
+    AgentPortError::Public(Box::new(
+        PublicError::builder(
+            ErrorCode::UnsupportedCapability,
+            "capability is unavailable",
+        )
+        .build()
+        .expect("static error is valid"),
+    ))
+}
+
+fn ordered_outcome_snapshot(output: &ReadEnvelope<QueryBatchData>) -> Value {
+    json!({
+        "batch_status": output.data.batch_status,
+        "operation_results": output
+            .data
+            .operation_results
+            .iter()
+            .map(|result| json!({
+                "id": result.id,
+                "tool": result.tool,
+                "status": result.status,
+                "error_code": result.error.as_ref().map(PublicError::code)
+            }))
+            .collect::<Vec<_>>()
+    })
 }
 
 #[test]
@@ -1507,6 +1535,228 @@ async fn all_child_errors_preserve_complete_per_operation_outcome() {
             .map(PublicError::code),
         Some(ErrorCode::UnsupportedCapability)
     );
+}
+
+#[tokio::test]
+async fn ordered_terminal_outcomes_match_the_versioned_golden() {
+    let successful = || {
+        Ok(typed_response(
+            BatchTool::CodeLocate,
+            generation(2),
+            10,
+            json!({"matches": []}),
+        ))
+    };
+    let mut observed = Map::new();
+
+    let all_success = BatchService
+        .execute(
+            Arc::new(FakePort::with_responses([successful(), successful()])),
+            input(
+                vec![
+                    operation("first", BatchTool::CodeLocate, Map::new(), None, None),
+                    operation("second", BatchTool::CodeLocate, Map::new(), None, None),
+                ],
+                budget(1_000),
+            ),
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("the all-success case produces a complete envelope");
+    observed.insert(
+        "all_success".to_owned(),
+        ordered_outcome_snapshot(&all_success),
+    );
+
+    let mixed = BatchService
+        .execute(
+            Arc::new(FakePort::with_responses([
+                successful(),
+                Err(unavailable_error()),
+                successful(),
+            ])),
+            input(
+                vec![
+                    operation("success", BatchTool::CodeLocate, Map::new(), None, None),
+                    operation(
+                        "failure",
+                        BatchTool::SymbolRelationships,
+                        Map::new(),
+                        None,
+                        None,
+                    ),
+                    operation(
+                        "later_success",
+                        BatchTool::CodeLocate,
+                        Map::new(),
+                        None,
+                        None,
+                    ),
+                ],
+                budget(1_000),
+            ),
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("continue-independent preserves mixed outcomes");
+    observed.insert("mixed".to_owned(), ordered_outcome_snapshot(&mixed));
+
+    let all_error = BatchService
+        .execute(
+            Arc::new(FakePort::with_responses([
+                Err(unavailable_error()),
+                Err(unavailable_error()),
+            ])),
+            input(
+                vec![
+                    operation(
+                        "first_failure",
+                        BatchTool::SymbolRelationships,
+                        Map::new(),
+                        None,
+                        None,
+                    ),
+                    operation(
+                        "second_failure",
+                        BatchTool::SymbolRelationships,
+                        Map::new(),
+                        None,
+                        None,
+                    ),
+                ],
+                budget(1_000),
+            ),
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("all child failures remain in the batch envelope");
+    observed.insert("all_error".to_owned(), ordered_outcome_snapshot(&all_error));
+
+    let mut fail_fast_request = input(
+        vec![
+            operation("not_started", BatchTool::CodeLocate, Map::new(), None, None),
+            operation(
+                "failure",
+                BatchTool::SymbolRelationships,
+                Map::new(),
+                None,
+                None,
+            ),
+        ],
+        budget(1_000),
+    );
+    fail_fast_request.failure_policy = Some(FailurePolicy::FailFast);
+    let fail_fast = BatchService
+        .execute(
+            Arc::new(FakePort::with_responses([Err(unavailable_error())])),
+            fail_fast_request,
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("fail-fast fills every request-order result slot");
+    observed.insert("fail_fast".to_owned(), ordered_outcome_snapshot(&fail_fast));
+
+    let dependency_skip = BatchService
+        .execute(
+            Arc::new(FakePort::with_responses([Err(unavailable_error())])),
+            input(
+                vec![
+                    operation(
+                        "dependent",
+                        BatchTool::CodeLocate,
+                        Map::new(),
+                        Some(vec!["failure"]),
+                        None,
+                    ),
+                    operation(
+                        "failure",
+                        BatchTool::SymbolRelationships,
+                        Map::new(),
+                        None,
+                        None,
+                    ),
+                ],
+                budget(1_000),
+            ),
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("a dependency failure remains distinct from fail-fast");
+    observed.insert(
+        "dependency_skip".to_owned(),
+        ordered_outcome_snapshot(&dependency_skip),
+    );
+
+    let budget_exhaustion = BatchService
+        .execute(
+            Arc::new(FakePort::with_responses([Ok(response(
+                generation(2),
+                200,
+                json!({
+                    "chunks": [],
+                    "elisions": [],
+                    "stale_references": [],
+                    "total_source_bytes": 0
+                }),
+            ))])),
+            input(
+                vec![
+                    operation("later", BatchTool::CodeLocate, Map::new(), None, None),
+                    operation("overrun", BatchTool::SourceRead, Map::new(), None, None),
+                ],
+                budget(500),
+            ),
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("budget exhaustion preserves completed and unstarted slots");
+    observed.insert(
+        "budget_exhaustion".to_owned(),
+        ordered_outcome_snapshot(&budget_exhaustion),
+    );
+
+    let cancellation = BatchService
+        .execute(
+            Arc::new(FakePort::with_responses([Err(AgentPortError::Cancelled)])),
+            input(
+                vec![
+                    operation("first", BatchTool::CodeLocate, Map::new(), None, None),
+                    operation("second", BatchTool::CodeLocate, Map::new(), None, None),
+                ],
+                budget(1_000),
+            ),
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("runtime cancellation preserves every request-order result slot");
+    observed.insert(
+        "cancellation".to_owned(),
+        ordered_outcome_snapshot(&cancellation),
+    );
+
+    let golden: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/mcp/batch-operation-status-goldens-v1.json"
+    ))
+    .expect("batch operation status golden is valid JSON");
+    assert_eq!(
+        golden["$schema"],
+        "rootlight.query-batch-operation-status-goldens/1"
+    );
+    assert_eq!(Value::Object(observed), golden["cases"]);
 }
 
 #[tokio::test]
