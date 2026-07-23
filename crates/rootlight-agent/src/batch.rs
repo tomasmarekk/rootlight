@@ -2111,7 +2111,7 @@ impl BatchService {
             .charge(minimum_publication_charge(
                 &plan,
                 &identity,
-                &errors.operation_failed,
+                &errors.budget_exceeded,
             )?)
             .map_err(map_policy_error)?;
         let fail_fast = matches!(plan.failure_policy, FailurePolicy::FailFast);

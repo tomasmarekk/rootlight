@@ -1211,7 +1211,7 @@ async fn local_timeout_is_a_per_operation_budget_error_after_prior_success() {
                         Some(local),
                     ),
                 ],
-                budget(500),
+                budget(1_000),
             ),
             repository(),
             TestCancellation(false),

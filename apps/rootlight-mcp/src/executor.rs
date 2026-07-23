@@ -7506,7 +7506,7 @@ fn serialize_measured_batch_success(
             let representation_exceeded =
                 json_bytes > maximums.json_bytes || estimated_tokens > maximums.tokens;
             if representation_exceeded && !payload_was_reduced {
-                reduce_batch_payload(&mut output);
+                reduce_batch_payload(&mut output)?;
                 payload_was_reduced = true;
                 continue;
             }
@@ -7531,12 +7531,19 @@ fn serialize_measured_batch_success(
     Err(internal(ToolExecutionFailure::Executor))
 }
 
-fn reduce_batch_payload(output: &mut ReadEnvelope<QueryBatchData>) {
+fn reduce_batch_payload(
+    output: &mut ReadEnvelope<QueryBatchData>,
+) -> Result<(), ToolExecutionError> {
+    let publication_error = authoritative_error(MappedDomainFailure::budget_exceeded());
     for result in &mut output.data.operation_results {
-        if result.data.is_some() {
-            result.data = Some(Value::Null);
+        if result.data.take().is_some() {
             result.truncated = true;
             result.next_cursor = RequiredNullable(None);
+        }
+        result.usage = None;
+        result.warnings.clear();
+        if result.status == BatchOperationStatus::Error {
+            result.error = Some(publication_error.clone());
         }
     }
     output.truncated = true;
@@ -7552,6 +7559,7 @@ fn reduce_batch_payload(output: &mut ReadEnvelope<QueryBatchData>) {
         ],
     )
     .unwrap_or_else(|_| ResultCompleteness::indeterminate());
+    Ok(())
 }
 
 fn serialize_profiled_read_success<T>(

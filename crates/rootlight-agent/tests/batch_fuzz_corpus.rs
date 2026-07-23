@@ -31,7 +31,11 @@ fn batch_plan_fuzz_corpus_is_parseable_and_deterministic() {
         let second = StaticBatchPlan::build(input, ExposureProfile::Developer);
         match (first, second) {
             (Ok(first), Ok(second)) => {
-                assert_eq!(first.canonical_digest(), second.canonical_digest(), "{name}");
+                assert_eq!(
+                    first.canonical_digest(),
+                    second.canonical_digest(),
+                    "{name}"
+                );
             }
             (Err(first), Err(second)) => {
                 assert_eq!(

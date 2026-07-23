@@ -4393,7 +4393,7 @@ async fn query_batch_keeps_local_deadline_budget_error_inside_the_operation_resu
 }
 
 #[tokio::test]
-async fn query_batch_root_gate_allows_timeout_descendants_but_blocks_max_tokens() {
+async fn query_batch_root_gate_admits_child_budget_dimensions() {
     let timeout_harness = batch_harness();
     let timeout_calls = Arc::clone(&timeout_harness.call_count);
     let timeout_router = ToolRouter::new(
@@ -4429,47 +4429,59 @@ async fn query_batch_root_gate_allows_timeout_descendants_but_blocks_max_tokens(
     );
     assert_eq!(timeout_calls.load(Ordering::Relaxed), 0);
 
-    let max_tokens_harness = batch_harness();
-    let max_tokens_calls = Arc::clone(&max_tokens_harness.call_count);
-    let max_tokens_router = ToolRouter::new(
-        max_tokens_harness.executor,
+    let token_harness = batch_harness();
+    let token_calls = Arc::clone(&token_harness.call_count);
+    let token_router = ToolRouter::new(
+        token_harness.executor,
         rootlight_mcp_contract::ExposureProfile::Developer,
     )
     .expect("router compiles");
-    let max_tokens_response = max_tokens_router
+    let token_response = token_router
         .handle(
             operating_request(json!({
                 "name": "query.batch",
                 "arguments": {
                     "repository": {"repository_id": repository()},
+                    "budget": {"max_tokens": 1000},
                     "operations": [{
-                        "id": "blocked",
+                        "id": "bounded",
                         "tool": "code.locate",
                         "arguments": {"query": "publish"},
-                        "local_budget": {"max_tokens": 100}
+                        "local_budget": {"max_tokens": 500}
                     }]
                 }
             })),
             cancellation(),
         )
         .await;
-    let HandlerResponse::Success(max_tokens_result) = max_tokens_response else {
+    let HandlerResponse::Success(token_result) = token_response else {
         panic!("max_tokens case returns an MCP tool result");
     };
-    assert_eq!(max_tokens_result["isError"], true);
+    assert_eq!(token_result["isError"], false);
     assert_eq!(
-        max_tokens_result["structuredContent"]["error"]["code"],
-        "UNSUPPORTED_CAPABILITY"
+        token_result["structuredContent"]["data"]["operation_results"][0]["status"],
+        "ok"
+    );
+    let structured = &token_result["structuredContent"];
+    let encoded = serde_json::to_vec(structured).expect("batch response serializes");
+    assert_eq!(
+        structured["usage"]["json_bytes"],
+        json!(encoded.len()),
+        "batch usage must report the exact final serialized response"
     );
     assert_eq!(
-        max_tokens_result["structuredContent"]["error"]["details"]["field_path"]["value"],
-        "operations.0.local_budget.max_tokens"
+        structured["usage"]["estimated_tokens"],
+        json!(rootlight_mcp_contract::accounting::estimate_tokens(
+            encoded.len()
+        ))
     );
-    assert_eq!(
-        max_tokens_result["structuredContent"]["error"]["details"]["capability_reason"]["value"],
-        "blocked_field"
+    assert!(
+        structured["usage"]["estimated_tokens"]
+            .as_u64()
+            .expect("batch usage contains estimated tokens")
+            <= 1_000
     );
-    assert_eq!(max_tokens_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(token_calls.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]
@@ -9515,17 +9527,10 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     );
     group!(QueryAdvanced, StructuredQueryAst, ["query", "parameters"]);
     group!(QueryAdvanced, CursorContinuation, ["cursor"]);
-    group!(QueryBatch, BatchRuntime, ["failure_policy", "repository"]);
-    group_excluding!(
-        QueryBatch,
-        BatchRuntime,
-        ["operations"],
-        ["operations[].local_budget"]
-    );
     group!(
         QueryBatch,
-        LocalTimeout,
-        ["operations[].local_budget.timeout_ms"]
+        BatchRuntime,
+        ["budget", "failure_policy", "operations", "repository"]
     );
     group!(QueryBatch, ExplainPlan, ["explain"]);
     group!(
@@ -9589,7 +9594,7 @@ fn accepted_schema_paths_have_effect_evidence() {
     let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
     assert_eq!(
         accepted_digest.as_str(),
-        "ff504b65b06de77ca46154ef97ef5333f1418deb2cee0c55bed545d4f55577fd",
+        "2e4079ef2c5ef2c8797a23b28b8e98a7534663135cc5b9bd1557f3ee1c94764d",
         "accepted path universe changed"
     );
     let categorized: Vec<_> = accepted
@@ -9654,8 +9659,8 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[10],
         counts[11],
     );
-    assert_eq!(counts, [130, 97, 3, 69, 28, 16, 5, 16, 10, 1, 1, 4]);
-    assert_eq!(categorized.len(), 380);
+    assert_eq!(counts, [130, 97, 3, 69, 28, 16, 5, 16, 26, 0, 1, 4]);
+    assert_eq!(categorized.len(), 395);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
