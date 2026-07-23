@@ -575,7 +575,7 @@ struct LocatedSymbol {
 }
 
 fn index_repository(mcp: &mut McpProcess, root: &Path, id: &str) -> IndexReceipt {
-    let response = mcp.call(
+    let response = mcp.call_success(
         id,
         "repo.index",
         json!({"root": root, "mode": "auto", "detached": false}),
@@ -588,7 +588,7 @@ fn index_repository(mcp: &mut McpProcess, root: &Path, id: &str) -> IndexReceipt
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| {
-            let status = mcp.call(
+            let status = mcp.call_success(
                 &format!("{id}-terminal"),
                 "operation.status",
                 json!({"operation_id": operation_id, "wait_ms": 0}),
@@ -614,7 +614,7 @@ fn wait_for_index_response(mcp: &mut McpProcess, response: &Value) {
         "operation identity",
     );
     for attempt in 0..30 {
-        let status = mcp.call(
+        let status = mcp.call_success(
             &format!("publication-{operation_id}-{attempt}"),
             "operation.status",
             json!({"operation_id": operation_id, "wait_ms": 1_000}),
@@ -632,7 +632,7 @@ fn wait_for_index_response(mcp: &mut McpProcess, response: &Value) {
 }
 
 fn locate_symbol(mcp: &mut McpProcess, index: &IndexReceipt, query: &str) -> LocatedSymbol {
-    let response = mcp.call(
+    let response = mcp.call_success(
         "setup-locate",
         "code.locate",
         json!({
@@ -1189,6 +1189,22 @@ impl McpProcess {
         let response = self.read();
         assert_eq!(response["id"], id, "MCP response identity differs");
         response
+    }
+
+    fn call_success(&mut self, id: &str, tool: &str, arguments: Value) -> Value {
+        const MAX_ATTEMPTS: u64 = 10;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let response = self.call(&format!("{id}-attempt-{attempt}"), tool, arguments.clone());
+            if matches!(
+                response_outcome(&response),
+                PerformanceSampleOutcome::Succeeded
+            ) {
+                return response;
+            }
+            thread::yield_now();
+        }
+        panic!("{tool} did not return a successful setup response");
     }
 
     fn write(&mut self, message: &Value) {
