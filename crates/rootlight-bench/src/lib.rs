@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod ablation;
 mod bundle;
 mod ci;
 mod decode;
@@ -17,6 +18,21 @@ mod semantic_contract;
 mod token_accounting;
 mod trajectory;
 
+pub use ablation::{
+    ABLATION_SCHEMA_VERSION, AblationAggregateReport, AblationBlindingKey, AblationDecision,
+    AblationError, AblationProtocol, AblationRubricProtocol, AblationVariant,
+    AblationVariantProtocol, AutomatedAdjudicationRecord, AutomatedAgreement,
+    AutomatedGraderIdentity, AutomatedRawGrade, BlindedAblationCandidate, BlindedCandidateMetrics,
+    BlindedRunOutcome, CandidateGrade, CandidateRubricEvidence, ContextPackAblationEvidence,
+    DimensionGrade, EfficiencyAlongsideQuality, FinalAutomatedGrade, GraderKind,
+    MAX_ABLATION_EVIDENCE_BYTES, MAX_CHECKS_PER_DIMENSION, MAX_QUALITY_LOSS_CENTIPOINTS,
+    MAX_QUALITY_SCORE_CENTIPOINTS, PAIRED_BOOTSTRAP_REPLICATES, PairedUncertaintyInterval,
+    PreparedBlindedAblation, QualitySensitivity, RestrictedPair, RestrictedPairingEntry,
+    RestrictedPairingMap, RubricDimension, RubricDimensionWeight, RubricObservation,
+    UncertaintyMethod, UnsupportedClaimAssessment, UnsupportedClaimCategory, VariantAggregate,
+    decode_context_pack_ablation, encode_context_pack_ablation, evaluate_context_pack_ablation,
+    prepare_blinded_ablation, preregister_context_pack_ablation, produce_context_pack_ablation,
+};
 pub use bundle::{
     BundleError, BundleLimits, OperationalEvent, OperationalLog, OperationalLogRecord,
     OperationalStatus, ResultBundle, publish_bundle, publish_bundle_with_limits, verify_bundle,
