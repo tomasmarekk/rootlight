@@ -586,17 +586,52 @@ fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>, Gate3Error> {
 }
 
 fn privacy_scan(bytes: &[u8]) -> Result<(), Gate3Error> {
-    const PATH_MARKERS: [&[u8]; 3] = [b"C:\\Users\\", b"/home/", b"/Users/"];
+    const PATH_MARKERS: [&[u8]; 4] = [b"C:\\Users\\", b"C:\\\\Users\\\\", b"/home/", b"/Users/"];
     if PATH_MARKERS
         .iter()
         .any(|marker| bytes.windows(marker.len()).any(|window| window == *marker))
         || bytes
             .split(|byte| *byte == b'\n')
-            .any(|line| crate::source_hygiene::forbidden_reference(line).is_some())
+            .any(|line| forbidden_reference_outside_cursors(line).is_some())
     {
         return Err(Gate3Error::PrivacyBoundary);
     }
     Ok(())
+}
+
+fn forbidden_reference_outside_cursors(
+    line: &[u8],
+) -> Option<crate::source_hygiene::ForbiddenRule> {
+    let mut remaining = line;
+    while let Some((start, end)) = next_opaque_cursor(remaining) {
+        if let Some(rule) = crate::source_hygiene::forbidden_reference(&remaining[..start]) {
+            return Some(rule);
+        }
+        remaining = &remaining[end..];
+    }
+    crate::source_hygiene::forbidden_reference(remaining)
+}
+
+fn next_opaque_cursor(input: &[u8]) -> Option<(usize, usize)> {
+    const PREFIX_BYTES: usize = 3;
+    const MINIMUM_PAYLOAD_BYTES: usize = 64;
+
+    for (start, prefix) in input.windows(PREFIX_BYTES).enumerate() {
+        if prefix[0] != b'c' || !prefix[1].is_ascii_digit() || prefix[2] != b'.' {
+            continue;
+        }
+        let payload_start = start.checked_add(PREFIX_BYTES)?;
+        let payload_bytes = input[payload_start..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            .count();
+        if payload_bytes >= MINIMUM_PAYLOAD_BYTES {
+            return payload_start
+                .checked_add(payload_bytes)
+                .map(|end| (start, end));
+        }
+    }
+    None
 }
 
 fn validate_revision(value: &str) -> Result<(), Gate3Error> {
@@ -883,7 +918,18 @@ mod tests {
     fn privacy_scan_rejects_paths_and_internal_labels() {
         assert!(privacy_scan(b"source-free").is_ok());
         assert!(privacy_scan(b"C:\\Users\\private\\repo").is_err());
+        assert!(privacy_scan(br#"{"path":"C:\\Users\\private\\repo"}"#).is_err());
         let private_label = ["GA", "TE-3"].concat();
         assert!(privacy_scan(private_label.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn privacy_scan_ignores_opaque_cursor_payloads_only() {
+        let cursor = ["c3.", "M", &"92".repeat(32)].concat();
+        assert!(privacy_scan(cursor.as_bytes()).is_ok());
+
+        let private_label = ["GA", "TE-3"].concat();
+        let cursor_and_label = format!("{cursor} {private_label}");
+        assert!(privacy_scan(cursor_and_label.as_bytes()).is_err());
     }
 }
