@@ -919,7 +919,11 @@ fn write_artifacts(
     let parity = ParityArtifact {
         schema: PARITY_ARTIFACT_SCHEMA,
         source_revision,
-        status: "passed_with_explicit_blockers",
+        status: if blocked_gaps == 0 {
+            "passed"
+        } else {
+            "passed_with_explicit_blockers"
+        },
         tool_count: CAPABILITIES.len(),
         reviewed_input_fields: reviewed_fields,
         schema_golden_pairs: VerticalTool::ALL.len(),
@@ -2110,5 +2114,20 @@ mod tests {
             case["id"] == "query.batch::operations[].local_budget.max_tokens"
                 && case["expectedDisposition"] == "implemented"
         }));
+
+        let parity: Value = serde_json::from_slice(
+            &fs::read(first.join("capability-parity-report-v1.json"))
+                .expect("parity artifact is readable"),
+        )
+        .expect("parity artifact is valid JSON");
+        assert_eq!(parity["blockedGaps"], blocked_gaps);
+        assert_eq!(
+            parity["status"],
+            if blocked_gaps == 0 {
+                "passed"
+            } else {
+                "passed_with_explicit_blockers"
+            }
+        );
     }
 }

@@ -90,7 +90,7 @@ jobs:
           expected_report = {
               "schema": "rootlight.mcp-capability-parity/1",
               "sourceRevision": revision,
-              "status": "passed_with_explicit_blockers",
+              "status": "passed",
               "toolCount": 19,
               "reviewedInputFields": 565,
               "schemaGoldenPairs": 19,
