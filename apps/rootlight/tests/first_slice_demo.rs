@@ -59,10 +59,20 @@ fn cli_demo_returns_three_queries_and_retains_the_old_generation() {
         data["source"]["data"]["chunks"][0]["trust"],
         "untrusted_repository_data"
     );
+    let source_bytes = data["source"]["data"]["chunks"][0]["bytes"]
+        .as_array()
+        .expect("source bytes are an array")
+        .iter()
+        .map(|byte| {
+            byte.as_u64()
+                .and_then(|value| u8::try_from(value).ok())
+                .expect("source byte is in range")
+        })
+        .collect::<Vec<_>>();
     assert!(
-        data["source"]["data"]["chunks"][0]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("answer"))
+        std::str::from_utf8(&source_bytes)
+            .expect("source bytes are UTF-8")
+            .contains("answer")
     );
     assert_eq!(data["second"]["parent"], data["first"]["generation"]);
     assert_ne!(data["second"]["generation"], data["first"]["generation"]);

@@ -209,6 +209,7 @@ fn execute_first_slice_demo(arguments: &[std::ffi::OsString]) -> Result<CommandR
         "answer".to_owned(),
         LocateMode::Exact,
         8,
+        0,
         &cancellation,
     )?;
     let hit = locate.data.hits.first().ok_or(CliError::DemoInvariant)?;
@@ -224,6 +225,7 @@ fn execute_first_slice_demo(arguments: &[std::ffi::OsString]) -> Result<CommandR
         "answer".to_owned(),
         LocateMode::Exact,
         8,
+        0,
         &cancellation,
     )?;
     let pinned_first = service.code_locate(
@@ -231,6 +233,7 @@ fn execute_first_slice_demo(arguments: &[std::ffi::OsString]) -> Result<CommandR
         "answer".to_owned(),
         LocateMode::Exact,
         8,
+        0,
         &cancellation,
     )?;
     let second_symbol = second_locate
