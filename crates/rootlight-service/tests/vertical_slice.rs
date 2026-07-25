@@ -1489,13 +1489,9 @@ fn history_compare_requires_a_known_base_generation() {
 }
 
 #[test]
-fn advanced_query_serves_a_scan_and_reports_unsupported_honestly() {
-    // The first-slice lexical oracle has entities and relations but no full
-    // relational engine, so the honest service-level proof serves the supported
-    // scan/filter/project/limit subset directly against the fixture entities and
-    // reports an honest unsupported result for operators this slice does not
-    // serve. Columns are always non-empty and no row is fabricated for an
-    // unsupported operator.
+fn advanced_query_serves_scan_and_aggregate_operators() {
+    // The service-level proof exercises both direct entity scans and relational
+    // aggregation against the same indexed fixture.
     let source =
         "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
     let fixture = fixture(source);
@@ -1533,8 +1529,7 @@ fn advanced_query_serves_a_scan_and_reports_unsupported_honestly() {
         RepositoryDataTrust::UntrustedRepositoryData
     );
 
-    // An aggregate operator is not served by this slice: the result is honestly
-    // unsupported with non-empty columns and no fabricated rows.
+    // Aggregation groups the two fixture functions by kind.
     let aggregate = AdvancedAstNode::Aggregate {
         input: Box::new(AdvancedAstNode::Scan {
             entity: AdvancedEntityKind::Function,
@@ -1543,7 +1538,7 @@ fn advanced_query_serves_a_scan_and_reports_unsupported_honestly() {
         group_by: vec!["kind".to_owned()],
         aggregations: vec![AdvancedAggregateFunction::Count],
     };
-    let unsupported = service
+    let aggregate = service
         .advanced_query(
             indexed.generation,
             aggregate,
@@ -1556,10 +1551,12 @@ fn advanced_query_serves_a_scan_and_reports_unsupported_honestly() {
             &cancellation,
         )
         .expect("advanced aggregate query succeeds");
+    assert_eq!(aggregate.data.completeness, AdvancedCompleteness::Complete);
+    assert!(!aggregate.data.columns.is_empty());
+    assert_eq!(aggregate.data.rows.len(), 1);
     assert_eq!(
-        unsupported.data.completeness,
-        AdvancedCompleteness::Unsupported
+        aggregate.data.rows[0]["kind"],
+        serde_json::json!("function")
     );
-    assert!(!unsupported.data.columns.is_empty());
-    assert!(unsupported.data.rows.is_empty());
+    assert_eq!(aggregate.data.rows[0]["count"], serde_json::json!(2));
 }
