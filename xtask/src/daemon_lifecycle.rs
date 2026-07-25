@@ -23,6 +23,7 @@ use rootlight_observability::{
     DaemonLifecycle as TelemetryDaemonLifecycle, LogEvent, MAX_STRUCTURED_LOG_LINE_BYTES, SpanKind,
     StructuredLogRecord, TELEMETRY_SCHEMA_VERSION, TelemetryOutcome,
 };
+use rootlight_protocol::CURRENT_PROTOCOL_MINOR;
 use rootlight_runtime::{RuntimeError, RuntimePaths};
 use serde_json::Value;
 
@@ -1664,7 +1665,7 @@ fn assert_support_telemetry(
     first: &rootlight_client::SupportBundle,
     second: &rootlight_client::SupportBundle,
 ) -> Result<(), LifecycleError> {
-    if health.protocol_version != "1.5"
+    if health.protocol_version != format!("1.{CURRENT_PROTOCOL_MINOR}")
         || first.schema_version != CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
         || second.schema_version != CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
         || first.contains_source
