@@ -2993,6 +2993,7 @@ async fn query_batch_composes_locate_subtools_under_one_pinned_generation() {
     let arguments = json!({
         "repository": {"repository_id": repository()},
         "generation": "active",
+        "budget": {"max_tokens": 16000},
         "operations": [
             {"id": "find_a", "tool": "code.locate", "arguments": {"query": "publish", "max_results": 5}},
             {"id": "find_b", "tool": "code.locate", "arguments": {"query": "stage", "max_results": 5}}
@@ -3929,6 +3930,7 @@ async fn query_batch_defers_allowed_bindings_until_runtime_materialization() {
     let arguments = json!({
         "repository": {"repository_id": repository()},
         "generation": "active",
+        "budget": {"max_tokens": 16000},
         "operations": [
             {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}},
             {"id": "refine", "tool": "plan.change", "depends_on": ["find"], "arguments": {
@@ -3959,9 +3961,17 @@ async fn query_batch_defers_allowed_bindings_until_runtime_materialization() {
     );
     assert_eq!(
         harness.call_count.load(Ordering::Relaxed),
-        3,
-        "identity and both child calls prove static preflight deferred the binding"
+        7,
+        "identity, dependency, evidence, and plan calls prove deferred execution"
     );
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    let ObservedCall::PlanChange(request) = calls.last().expect("plan call is recorded") else {
+        panic!("expected the final call to plan the change");
+    };
+    assert_eq!(request.target_symbols(), &[symbol()]);
 }
 
 #[tokio::test]
