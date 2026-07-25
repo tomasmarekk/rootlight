@@ -92,14 +92,14 @@ jobs:
               "sourceRevision": revision,
               "status": "passed_with_explicit_blockers",
               "toolCount": 19,
-              "reviewedInputFields": 557,
+              "reviewedInputFields": 565,
               "schemaGoldenPairs": 19,
               "profileCounts": {
                   "scout": 6,
                   "analysis": 13,
                   "developer": 19,
               },
-              "blockedGaps": 3,
+              "blockedGaps": 0,
           }
           if report != expected_report:
               raise SystemExit(f"capability parity report differs: {report!r}")
