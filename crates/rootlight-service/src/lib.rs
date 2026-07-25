@@ -4677,7 +4677,7 @@ mod tests {
         );
         assert_eq!(
             map_query_error(QueryError::SymbolNotFound, &cancellation),
-            FirstSliceError::Query
+            FirstSliceError::SymbolNotFound
         );
     }
     const EQUIVALENCE_SURFACE_EDIT: &str =
