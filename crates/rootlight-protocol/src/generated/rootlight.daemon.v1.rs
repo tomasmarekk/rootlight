@@ -999,15 +999,16 @@ pub struct FirstSliceSourceChunk {
     #[prost(uint64, tag = "4")]
     #[allow(missing_docs)]
     pub end_byte: u64,
-    #[prost(uint64, optional, tag = "5")]
+    /// Legacy UTF-8 projection retained for descriptor compatibility.
+    #[prost(uint64, tag = "5")]
     #[allow(missing_docs)]
-    pub start_line: ::core::option::Option<u64>,
-    #[prost(uint64, optional, tag = "6")]
+    pub start_line: u64,
+    #[prost(uint64, tag = "6")]
     #[allow(missing_docs)]
-    pub end_line: ::core::option::Option<u64>,
-    #[prost(bytes = "vec", tag = "7")]
+    pub end_line: u64,
+    #[prost(string, tag = "7")]
     #[allow(missing_docs)]
-    pub content: ::prost::alloc::vec::Vec<u8>,
+    pub content: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "8")]
     #[allow(missing_docs)]
     pub content_hash: ::core::option::Option<super::super::common::v1::ContentHash>,
@@ -1020,6 +1021,17 @@ pub struct FirstSliceSourceChunk {
     #[prost(enumeration = "SourceReadEncoding", tag = "11")]
     #[allow(missing_docs)]
     pub encoding: i32,
+    /// Exact optional line projection for new clients.
+    #[prost(uint64, optional, tag = "12")]
+    #[allow(missing_docs)]
+    pub included_start_line: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "13")]
+    #[allow(missing_docs)]
+    pub included_end_line: ::core::option::Option<u64>,
+    /// Exact bytes for both UTF-8 and binary source reads.
+    #[prost(bytes = "vec", tag = "14")]
+    #[allow(missing_docs)]
+    pub exact_content: ::prost::alloc::vec::Vec<u8>,
 }
 /// Returns exact verified source chunks.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1936,7 +1948,11 @@ pub struct FirstSliceTestCoverageStrategy {
     #[prost(bool, tag = "3")]
     #[allow(missing_docs)]
     pub history_signals: bool,
+    /// Historical field retained for descriptor compatibility.
     #[prost(bool, tag = "4")]
+    #[allow(missing_docs)]
+    pub build_target_signals: bool,
+    #[prost(bool, tag = "5")]
     #[allow(missing_docs)]
     pub file_colocation_signals: bool,
 }

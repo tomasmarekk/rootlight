@@ -6160,27 +6160,36 @@ fn first_slice_response_correlates(
                         && chunk.start_byte <= source.start_byte
                         && chunk.end_byte >= source.end_byte
                         && if request.include_line_numbers.unwrap_or(true) {
-                            chunk.start_line.is_some_and(|line| line > 0)
-                                && chunk.start_line <= chunk.end_line
+                            chunk.included_start_line.is_some_and(|line| line > 0)
+                                && chunk.included_start_line <= chunk.included_end_line
                                 && source.start_line.is_none_or(|line| {
-                                    chunk.start_line.is_some_and(|start| start <= line)
+                                    chunk.included_start_line.is_some_and(|start| start <= line)
                                 })
                                 && source.end_line.is_none_or(|line| {
-                                    chunk.end_line.is_some_and(|end| end >= line)
+                                    chunk.included_end_line.is_some_and(|end| end >= line)
                                 })
                         } else {
-                            chunk.start_line.is_none() && chunk.end_line.is_none()
+                            chunk.included_start_line.is_none() && chunk.included_end_line.is_none()
                         }
+                        && chunk.start_line == chunk.included_start_line.unwrap_or(0)
+                        && chunk.end_line == chunk.included_end_line.unwrap_or(0)
                         && chunk.encoding == request.encoding
+                        && match daemon::SourceReadEncoding::try_from(chunk.encoding) {
+                            Ok(daemon::SourceReadEncoding::Utf8) => {
+                                chunk.content.as_bytes() == chunk.exact_content
+                            }
+                            Ok(daemon::SourceReadEncoding::Bytes) => chunk.content.is_empty(),
+                            Err(_) => false,
+                        }
                         && wire_id_equals(
                             chunk.content_hash.as_ref().map(|hash| &hash.value),
                             source.content_hash.as_ref().map(|hash| &hash.value),
                         )
-                        && u64::try_from(chunk.content.len()).ok()
+                        && u64::try_from(chunk.exact_content.len()).ok()
                             == chunk.end_byte.checked_sub(chunk.start_byte)
                 })
                 && response.chunks.iter().try_fold(0_u64, |total, chunk| {
-                    total.checked_add(u64::try_from(chunk.content.len()).ok()?)
+                    total.checked_add(u64::try_from(chunk.exact_content.len()).ok()?)
                 }) == Some(response.total_source_bytes)
                 && context.usage.as_ref().is_some_and(|usage| {
                     usage.source_bytes == response.total_source_bytes
@@ -15356,13 +15365,16 @@ mod tests {
                 path: "src/lib.rs".to_owned(),
                 start_byte,
                 end_byte,
-                start_line: Some(1),
-                end_line: Some(1),
-                content: content.as_bytes().to_vec(),
+                start_line: 1,
+                end_line: 1,
+                content: content.to_owned(),
                 content_hash: source.content_hash.clone(),
                 language: "rust".to_owned(),
                 generated: false,
                 encoding: daemon::SourceReadEncoding::Utf8 as i32,
+                included_start_line: Some(1),
+                included_end_line: Some(1),
+                exact_content: content.as_bytes().to_vec(),
             };
         let source_response = daemon::SourceReadResponse {
             schema_version: schema,

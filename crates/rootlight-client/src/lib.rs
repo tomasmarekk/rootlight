@@ -8832,6 +8832,9 @@ fn parse_source_read(
         .map_err(|_| ClientError::ResponseAllocationFailed)?;
     let mut source_bytes = 0_u64;
     for (chunk, expected) in response.chunks.into_iter().zip(&expected) {
+        let start_line = chunk.included_start_line;
+        let end_line = chunk.included_end_line;
+        let content = chunk.exact_content;
         let source = parse_source_reference(
             chunk
                 .source
@@ -8849,28 +8852,34 @@ fn parse_source_read(
             || projection.context_lines_before == 0 && chunk.start_byte != source.start_byte
             || projection.context_lines_after == 0 && chunk.end_byte != source.end_byte
             || projection.include_line_numbers
-                && (chunk.start_line.is_none()
-                    || chunk.end_line.is_none()
-                    || chunk.start_line > chunk.end_line
-                    || chunk.start_line == Some(0))
-            || !projection.include_line_numbers
-                && (chunk.start_line.is_some() || chunk.end_line.is_some())
+                && (start_line.is_none()
+                    || end_line.is_none()
+                    || start_line > end_line
+                    || start_line == Some(0))
+            || !projection.include_line_numbers && (start_line.is_some() || end_line.is_some())
+            || chunk.start_line != start_line.unwrap_or(0)
+            || chunk.end_line != end_line.unwrap_or(0)
             || content_hash != source.content_hash
-            || u64::try_from(chunk.content.len())
-                .map_err(|_| ClientError::InvalidResponseCorrelation)?
+            || u64::try_from(content.len()).map_err(|_| ClientError::InvalidResponseCorrelation)?
                 != length
         {
             return Err(ClientError::InvalidResponseCorrelation);
         }
         let encoding = match daemon::SourceReadEncoding::try_from(chunk.encoding) {
             Ok(daemon::SourceReadEncoding::Utf8) if projection.encoding == SourceEncoding::Utf8 => {
-                std::str::from_utf8(&chunk.content)
+                let decoded = std::str::from_utf8(&content)
                     .map_err(|_| ClientError::InvalidResponseCorrelation)?;
+                if chunk.content != decoded {
+                    return Err(ClientError::InvalidResponseCorrelation);
+                }
                 SourceEncoding::Utf8
             }
             Ok(daemon::SourceReadEncoding::Bytes)
                 if projection.encoding == SourceEncoding::Bytes =>
             {
+                if !chunk.content.is_empty() {
+                    return Err(ClientError::InvalidResponseCorrelation);
+                }
                 SourceEncoding::Bytes
             }
             _ => return Err(ClientError::InvalidResponseCorrelation),
@@ -8883,9 +8892,9 @@ fn parse_source_read(
             path: chunk.path,
             start_byte: chunk.start_byte,
             end_byte: chunk.end_byte,
-            start_line: chunk.start_line,
-            end_line: chunk.end_line,
-            content: chunk.content,
+            start_line,
+            end_line,
+            content,
             encoding,
             content_hash,
             language: chunk.language,
@@ -10197,13 +10206,16 @@ mod tests {
                 path: "src/lib.rs".to_owned(),
                 start_byte: source.start_byte,
                 end_byte: source.end_byte,
-                start_line: Some(1),
-                end_line: Some(1),
-                content: b"abc".to_vec(),
+                start_line: 1,
+                end_line: 1,
+                content: "abc".to_owned(),
                 content_hash: Some(content_hash_to_wire(source.content_hash)),
                 language: "rust".to_owned(),
                 generated: false,
                 encoding: daemon::SourceReadEncoding::Utf8 as i32,
+                included_start_line: Some(1),
+                included_end_line: Some(1),
+                exact_content: b"abc".to_vec(),
             }],
             total_source_bytes: 3,
             truncated: false,
@@ -11937,13 +11949,16 @@ mod tests {
                 path: "src/lib.rs".to_owned(),
                 start_byte,
                 end_byte,
-                start_line: Some(1),
-                end_line: Some(1),
-                content: content.as_bytes().to_vec(),
+                start_line: 1,
+                end_line: 1,
+                content: content.to_owned(),
                 content_hash: Some(content_hash_to_wire(reference.content_hash)),
                 language: "rust".to_owned(),
                 generated: false,
                 encoding: daemon::SourceReadEncoding::Utf8 as i32,
+                included_start_line: Some(1),
+                included_end_line: Some(1),
+                exact_content: content.as_bytes().to_vec(),
             }
         };
         let source_read = daemon::SourceReadResponse {

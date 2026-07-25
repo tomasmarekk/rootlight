@@ -2089,6 +2089,7 @@ fn tests_select(
             direct_edges: strategy.direct_edges,
             transitive_signals: strategy.transitive_signals,
             history_signals: strategy.history_signals,
+            build_target_signals: false,
             file_colocation_signals: strategy.file_colocation_signals,
         }),
         gaps,
@@ -2583,25 +2584,32 @@ fn source_read(
         .try_reserve_exact(data.chunks.len())
         .map_err(|_| resource_exhausted())?;
     for chunk in data.chunks {
+        let included_start_line = include_line_numbers.then_some(chunk.start_line).flatten();
+        let included_end_line = include_line_numbers.then_some(chunk.end_line).flatten();
+        let (encoding, legacy_content) = match chunk.encoding {
+            rootlight_query::SourceChunkEncoding::Utf8 => (
+                daemon::SourceReadEncoding::Utf8 as i32,
+                String::from_utf8(chunk.bytes.clone()).map_err(|_| internal_error())?,
+            ),
+            rootlight_query::SourceChunkEncoding::Bytes => {
+                (daemon::SourceReadEncoding::Bytes as i32, String::new())
+            }
+        };
         chunks.push(daemon::FirstSliceSourceChunk {
             source: Some(source_ref_to_wire(&chunk.reference)),
             path: chunk.path,
             start_byte: chunk.start_byte,
             end_byte: chunk.end_byte,
-            start_line: include_line_numbers.then_some(chunk.start_line).flatten(),
-            end_line: include_line_numbers.then_some(chunk.end_line).flatten(),
-            content: chunk.bytes,
+            start_line: included_start_line.unwrap_or(0),
+            end_line: included_end_line.unwrap_or(0),
+            content: legacy_content,
             content_hash: Some(content_hash_to_wire(chunk.content_hash)),
             language: chunk.language,
             generated: chunk.generated,
-            encoding: match chunk.encoding {
-                rootlight_query::SourceChunkEncoding::Utf8 => {
-                    daemon::SourceReadEncoding::Utf8 as i32
-                }
-                rootlight_query::SourceChunkEncoding::Bytes => {
-                    daemon::SourceReadEncoding::Bytes as i32
-                }
-            },
+            encoding,
+            included_start_line,
+            included_end_line,
+            exact_content: chunk.bytes,
         });
     }
     Ok(daemon::SourceReadResponse {

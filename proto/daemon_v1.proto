@@ -598,13 +598,19 @@ message FirstSliceSourceChunk {
   string path = 2;
   uint64 start_byte = 3;
   uint64 end_byte = 4;
-  optional uint64 start_line = 5;
-  optional uint64 end_line = 6;
-  bytes content = 7;
+  // Legacy UTF-8 projection retained for descriptor compatibility.
+  uint64 start_line = 5;
+  uint64 end_line = 6;
+  string content = 7;
   rootlight.common.v1.ContentHash content_hash = 8;
   string language = 9;
   bool generated = 10;
   SourceReadEncoding encoding = 11;
+  // Exact optional line projection for new clients.
+  optional uint64 included_start_line = 12;
+  optional uint64 included_end_line = 13;
+  // Exact bytes for both UTF-8 and binary source reads.
+  bytes exact_content = 14;
 }
 
 // Returns exact verified source chunks.
@@ -1017,7 +1023,9 @@ message FirstSliceTestCoverageStrategy {
   bool direct_edges = 1;
   bool transitive_signals = 2;
   bool history_signals = 3;
-  bool file_colocation_signals = 4;
+  // Historical field retained for descriptor compatibility.
+  bool build_target_signals = 4;
+  bool file_colocation_signals = 5;
 }
 
 // One honest gap where a seed scope has no related test.
