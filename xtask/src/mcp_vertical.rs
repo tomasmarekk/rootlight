@@ -842,7 +842,8 @@ fn verify_unsupported_contract_majors(
         let outcome = catalog.validate_result(tool, &exchange.response)?;
         if !outcome.is_error
             || outcome.structured["error"]["code"] != "PROTOCOL_MISMATCH"
-            || outcome.structured["error"]["details"]["supported_version"]
+            || outcome.structured["error"]["details"]["supported_version"]["type"] != "label"
+            || outcome.structured["error"]["details"]["supported_version"]["value"]
                 != catalog.contract_version(tool)?
             || outcome.structured["error"]["next_actions"]
                 != json!([{"action": "select_supported_version"}])
