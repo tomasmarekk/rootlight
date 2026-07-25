@@ -3166,10 +3166,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unavailable_providers_produce_a_truthful_empty_pack() {
+    async fn unsupported_providers_produce_a_truthful_empty_pack() {
         let repository = RepositoryId::from_bytes([1; 16]);
         let generation = GenerationId::from_bytes([5; 20]);
-        let input = context_input(SymbolId::from_bytes([2; 20]));
+        let mut input = context_input(SymbolId::from_bytes([2; 20]));
+        input.token_budget =
+            u16::try_from(MAX_PACK_TOKENS).expect("maximum pack budget fits the public field");
         let canonical = CanonicalContextPackRequest::new(&input, repository, generation)
             .expect("fixture request canonicalizes");
 
