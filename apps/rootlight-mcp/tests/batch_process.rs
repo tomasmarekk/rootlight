@@ -91,6 +91,7 @@ fn every_advertised_batch_subtool_reaches_its_production_adapter() {
             json!({
                 "repository": {"repository_id": repository_id},
                 "generation": "active",
+                "budget": {"max_tokens": 16000},
                 "operations": [{
                     "id": format!("adapter_{index}"),
                     "tool": descriptor.batch_tool.name(),
