@@ -1133,7 +1133,14 @@ fn is_retryable_operation_failure(error: &ClientError, operation: OperationId) -
     };
     error.code() == ErrorCode::Busy
         && error.retryable()
-        && error.message() == "operation admission is still pending"
+        && matches!(
+            error.message(),
+            "operation admission is still pending"
+                | "operation state is busy"
+                | "operation diagnostic timed out"
+                | "operation lifecycle mutation timed out"
+                | "operation start timed out"
+        )
         && error.operation() == Some(operation)
         && error.next_actions() == [NextAction::InspectOperation]
 }
@@ -1202,7 +1209,9 @@ fn cancel_and_wait(client: &Client, operation: OperationId) -> Result<(), Lifecy
                 require_operation_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
-            Err(error) => return Err(LifecycleError::Client(error)),
+            Err(error) => {
+                return Err(client_stage("quota cleanup cancellation", error));
+            }
         }
     }
 }
@@ -1341,7 +1350,9 @@ fn wait_for_client_terminal_until(
                 thread::sleep(POLL_INTERVAL);
                 continue;
             }
-            Err(error) => return Err(LifecycleError::Client(error)),
+            Err(error) => {
+                return Err(client_stage("operation terminal status", error));
+            }
         };
         if status.state == expected {
             require_operation_window(deadline)?;
@@ -2374,6 +2385,34 @@ mod tests {
         assert!(!is_retryable_operation_failure(
             &ClientError::Public(Box::new(admission_pending)),
             OperationId::from_bytes([2; 16])
+        ));
+        for message in [
+            "operation state is busy",
+            "operation diagnostic timed out",
+            "operation lifecycle mutation timed out",
+            "operation start timed out",
+        ] {
+            let transient = PublicError::builder(ErrorCode::Busy, message)
+                .retryable()
+                .operation(operation)
+                .next_action(NextAction::InspectOperation)
+                .build()
+                .expect("closed operation transient fixture builds");
+            assert!(is_retryable_operation_failure(
+                &ClientError::Public(Box::new(transient)),
+                operation
+            ));
+        }
+        let unknown_transient =
+            PublicError::builder(ErrorCode::Busy, "unknown operation transient")
+                .retryable()
+                .operation(operation)
+                .next_action(NextAction::InspectOperation)
+                .build()
+                .expect("bounded unknown transient fixture builds");
+        assert!(!is_retryable_operation_failure(
+            &ClientError::Public(Box::new(unknown_transient)),
+            operation
         ));
         let semantic_busy =
             PublicError::builder(ErrorCode::Busy, "daemon is not accepting operations")
