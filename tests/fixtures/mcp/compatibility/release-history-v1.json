@@ -6,7 +6,9 @@
     "observed_release_count": 0
   },
   "owner_review": {
-    "status": "pending"
+    "status": "approved",
+    "approved_by": "@tomasmarekk",
+    "approved_on": "2026-07-26"
   },
   "releases": []
 }

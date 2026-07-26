@@ -1,7 +1,7 @@
 {
   "schema": "rootlight.mcp-compatibility-manifest/1",
   "algorithm": "sha256",
-  "release_history_sha256": "5f4eec56755c4d7b2e60a38139ba71e82b2301ac33d2fa756fe9051f0c0081bd",
+  "release_history_sha256": "eb55b8792d1b2b7605ad9a5becbced1c13f01ce6d64f4c21399454d6cc1001c7",
   "files": [
     {
       "path": "current/batch.json",
@@ -35,8 +35,8 @@
     },
     {
       "path": "release-history-v1.json",
-      "bytes": 276,
-      "sha256": "5f4eec56755c4d7b2e60a38139ba71e82b2301ac33d2fa756fe9051f0c0081bd"
+      "bytes": 345,
+      "sha256": "eb55b8792d1b2b7605ad9a5becbced1c13f01ce6d64f4c21399454d6cc1001c7"
     }
   ]
 }
