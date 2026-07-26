@@ -2,6 +2,8 @@
 //!
 //! The matrix crosses the real MCP stdio boundary and a supervised daemon.
 
+mod process_support;
+
 use std::{
     ffi::OsStr,
     fs,
@@ -27,7 +29,7 @@ const GRAPH_TOOLS: [&str; 5] = [
 
 #[test]
 fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
-    let fixture = tempfile::tempdir().expect("isolated graph process fixture is available");
+    let fixture = process_support::private_process_tempdir("rl-graph-");
     let state_dir = fixture.path().join("state");
     let runtime_dir = fixture.path().join("runtime");
 

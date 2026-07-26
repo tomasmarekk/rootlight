@@ -3,6 +3,8 @@
 //! The fixture crosses MCP stdio and the supervised daemon boundary so profile,
 //! role, identity, and budget assertions cover the deployed composition.
 
+mod process_support;
+
 use std::{
     ffi::OsStr,
     fs,
@@ -240,7 +242,7 @@ struct ContextFixture {
 
 impl ContextFixture {
     fn spawn() -> Self {
-        let root = tempfile::tempdir().expect("isolated context fixture is available");
+        let root = process_support::private_process_tempdir("rl-context-");
         let repository_root = root.path().join("repository");
         let source_path = repository_root.join("src").join("lib.rs");
         fs::create_dir_all(source_path.parent().expect("source file has a parent"))

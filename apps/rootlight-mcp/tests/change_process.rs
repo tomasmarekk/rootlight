@@ -3,6 +3,8 @@
 //! The matrix crosses MCP stdio and the supervised daemon while keeping
 //! unsupported Git and selector dimensions in preflight.
 
+mod process_support;
+
 use std::{
     ffi::OsStr,
     fs,
@@ -27,7 +29,7 @@ const CHANGE_TOOLS: [&str; 4] = [
 
 #[test]
 fn change_tools_preserve_truthful_contracts_across_processes() {
-    let fixture = tempfile::tempdir().expect("isolated change process fixture is available");
+    let fixture = process_support::private_process_tempdir("rl-change-");
     let state_dir = fixture.path().join("state");
     let runtime_dir = fixture.path().join("runtime");
     assert_unsupported_selectors_are_rejected_before_daemon(&state_dir, &runtime_dir);

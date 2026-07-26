@@ -3,6 +3,8 @@
 //! The retained report contains only bounded counters and digests; repository
 //! source and process-local identities never leave the isolated fixture.
 
+mod process_support;
+
 use std::{
     fs,
     io::{BufRead as _, BufReader, Read as _, Write as _},
@@ -49,7 +51,7 @@ const EXPECTED_TOOLS: [&str; 14] = [
 fn all_budget_tools_enforce_hard_limits_across_daemon_and_mcp_processes() {
     let fixture = fixture_root();
     let fixture_sha256 = fixture_digest(&fixture);
-    let isolated = tempfile::tempdir().expect("isolated process fixture is available");
+    let isolated = process_support::private_process_tempdir("rl-budget-");
     let repository_root = isolated.path().join("repository");
     copy_regular_tree(&fixture, &repository_root);
     let state_dir = isolated.path().join("state");

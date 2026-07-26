@@ -3,6 +3,8 @@
 //! The fixtures exercise only advertised retrieval capabilities and verify
 //! stable rejection for schema-visible options outside the accepted surface.
 
+mod process_support;
+
 use std::{
     ffi::OsStr,
     fs,
@@ -757,7 +759,7 @@ struct RetrievalFixture {
 
 impl RetrievalFixture {
     fn spawn() -> Self {
-        let root = tempfile::tempdir().expect("isolated retrieval fixture is available");
+        let root = process_support::private_process_tempdir("rl-retrieval-");
         let repository_root = root.path().join("repository");
         fs::create_dir_all(repository_root.join("src"))
             .expect("fixture source directory is created");

@@ -3,6 +3,8 @@
 //! The ignored suite reuses one daemon and MCP session for the measured
 //! denominator, retains every attempt, and writes only source-free evidence.
 
+mod process_support;
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -62,7 +64,7 @@ fn synthetic_wire_counter_calibration_matches_exact_input() {
 #[test]
 #[ignore = "runs 1,995 calls through persistent release-like daemon and MCP processes"]
 fn real_daemon_mcp_produces_all_tool_performance_evidence() {
-    let fixture = tempfile::tempdir().expect("isolated process fixture is available");
+    let fixture = process_support::private_process_tempdir("rl-perf-");
     let repository_root = fixture.path().join("repository");
     write_repository(&repository_root, 64);
     let state_dir = fixture.path().join("state");

@@ -1,5 +1,7 @@
 //! Cross-process evidence for MCP cancellation of active daemon analysis.
 
+mod process_support;
+
 use std::{
     ffi::OsStr,
     fs,
@@ -110,25 +112,7 @@ fn cancellation_reaches_active_daemon_analyses_without_emitting_responses() {
 }
 
 fn private_tempdir() -> tempfile::TempDir {
-    #[cfg(target_os = "macos")]
-    let fixture = {
-        // Keep authenticated Unix endpoints within macOS `sun_path`.
-        tempfile::Builder::new()
-            .prefix("rl-cancel-")
-            .tempdir_in("/private/tmp")
-            .expect("isolated process fixture is available")
-    };
-    #[cfg(not(target_os = "macos"))]
-    let fixture = tempfile::tempdir().expect("isolated process fixture is available");
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
-            .expect("process fixture permissions are private");
-    }
-    fixture
+    process_support::private_process_tempdir("rl-cancel-")
 }
 
 fn assert_cancelled_request(

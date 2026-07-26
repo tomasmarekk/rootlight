@@ -1,5 +1,7 @@
 //! Production-process evidence for repository indexing and status lifecycle.
 
+mod process_support;
+
 use std::{
     ffi::OsStr,
     fs,
@@ -20,7 +22,7 @@ const UNINDEXED_REPOSITORY: &str = "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v";
 
 #[test]
 fn repository_lifecycle_is_generation_exact_and_preflights_unsupported_controls() {
-    let fixture = tempfile::tempdir().expect("isolated process fixture is available");
+    let fixture = process_support::private_process_tempdir("rl-repo-");
     let repository_root = fixture.path().join("repository");
     write_repository(&repository_root, 1);
 
@@ -181,7 +183,7 @@ fn repository_lifecycle_is_generation_exact_and_preflights_unsupported_controls(
 
 #[test]
 fn repository_status_distinguishes_empty_missing_failed_and_unavailable_results() {
-    let fixture = tempfile::tempdir().expect("isolated process fixture is available");
+    let fixture = process_support::private_process_tempdir("rl-repo-");
     let repository_root = fixture.path().join("empty-repository");
     fs::create_dir_all(repository_root.join("src"))
         .expect("empty repository source directory is created");
