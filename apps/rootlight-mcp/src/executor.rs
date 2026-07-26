@@ -122,6 +122,7 @@ use crate::{
 
 const DEFAULT_LOCATE_RESULTS: u16 = 20;
 const DEFAULT_ADVANCED_RESULTS: u16 = 100;
+const ANALYTICAL_TRANSPORT_OVERHEAD: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const INVALID_ARGUMENT_MESSAGE: &str = error_definition(ErrorCode::InvalidArgument).message;
 #[cfg(test)]
@@ -163,7 +164,13 @@ impl AnalyticalBudget {
 
     fn from_limits(limits: BudgetLimits) -> Result<Self, ToolExecutionError> {
         let maximums = limits.maximums();
-        let timeout = client::RequestTimeout::new(Duration::from_millis(maximums.time_ms))
+        let execution_duration = Duration::from_millis(maximums.time_ms);
+        // The transport deadline also covers connection negotiation and
+        // response framing, while the effective budget bounds daemon work.
+        let transport_duration = execution_duration
+            .checked_add(ANALYTICAL_TRANSPORT_OVERHEAD)
+            .ok_or_else(|| internal(ToolExecutionFailure::Executor))?;
+        let timeout = client::RequestTimeout::new(transport_duration)
             .map_err(|_| internal(ToolExecutionFailure::Executor))?;
         let effective = client::EffectiveBudget::new(client::EffectiveBudgetLimits {
             rows: maximums.rows,
@@ -173,7 +180,7 @@ impl AnalyticalBudget {
             json_bytes: maximums.json_bytes,
             estimated_tokens: maximums.tokens,
             memory_bytes: maximums.memory_bytes,
-            duration: Duration::from_millis(maximums.time_ms),
+            duration: execution_duration,
             depth: Some(maximums.depth),
             paths: Some(maximums.paths),
         })

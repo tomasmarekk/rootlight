@@ -868,7 +868,10 @@ fn analytical_budget_lowers_every_public_resource_dimension() {
         .options
         .timeout()
         .expect("effective budget carries an explicit transport timeout");
-    assert_eq!(timeout.duration(), Duration::from_millis(10));
+    assert_eq!(
+        timeout.duration(),
+        Duration::from_millis(10) + ANALYTICAL_TRANSPORT_OVERHEAD
+    );
     let transported = budget
         .options
         .effective_budget()
@@ -931,9 +934,9 @@ fn context_evidence_options_never_widen_parent_reservation() {
     assert_eq!(
         options
             .timeout()
-            .expect("child request carries the same deadline budget")
+            .expect("child request carries a bounded transport deadline")
             .duration(),
-        Duration::from_millis(reservation.time_ms)
+        Duration::from_millis(reservation.time_ms) + ANALYTICAL_TRANSPORT_OVERHEAD
     );
 }
 
@@ -957,6 +960,7 @@ fn omitted_analytical_budget_transports_the_complete_server_ceiling() {
             .expect("server ceiling supplies the transport timeout")
             .duration(),
         Duration::from_millis(BudgetLimits::server_ceiling().maximums().time_ms)
+            + ANALYTICAL_TRANSPORT_OVERHEAD
     );
 }
 
