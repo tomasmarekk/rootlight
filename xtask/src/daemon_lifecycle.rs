@@ -1228,7 +1228,7 @@ fn is_cleanup_cancellation_conflict(error: &ClientError, operation: OperationId)
         && !error.retryable()
         && error.message() == "operation state conflicts with request"
         && error.operation() == Some(operation)
-        && error.next_actions() == [NextAction::InspectOperation]
+        && error.next_actions().is_empty()
 }
 
 fn deterministic_client_identity(index: usize) -> Result<[u8; 16], LifecycleError> {
@@ -2469,7 +2469,6 @@ mod tests {
             "operation state conflicts with request",
         )
         .operation(operation)
-        .next_action(NextAction::InspectOperation)
         .build()
         .expect("closed cleanup conflict fixture builds");
         assert!(is_cleanup_cancellation_conflict(
