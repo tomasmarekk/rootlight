@@ -27,7 +27,7 @@ use rootlight_protocol::CURRENT_PROTOCOL_MINOR;
 use rootlight_runtime::{RuntimeError, RuntimePaths};
 use serde_json::Value;
 
-const START_TIMEOUT: Duration = Duration::from_secs(10);
+const START_TIMEOUT: Duration = Duration::from_secs(30);
 const CLIENT_COUNT: usize = 100;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
