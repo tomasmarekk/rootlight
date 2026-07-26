@@ -5,6 +5,15 @@
 
 #![forbid(unsafe_code)]
 
+mod repair;
+
+pub use repair::{
+    GenerationRepairCandidate, MAX_REPAIR_CANDIDATES, MAX_REPAIR_REQUIRED_BYTES,
+    REPAIR_SCHEMA_VERSION, RepairAction, RepairBlockReason, RepairCatalogStatus, RepairError,
+    RepairPlan, RepairPlanStatus, RepairRollback, RepairWrite, RepairWriteKind,
+    plan_catalog_repair,
+};
+
 use std::{
     collections::BTreeMap,
     fs::{self, File, TryLockError},

@@ -7,7 +7,7 @@
 
 use std::{
     env, fs,
-    io::Write as _,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
@@ -30,9 +30,10 @@ use rootlight_daemon_core::{
 use rootlight_error::{DetailKey, ErrorCode, PublicError, PublicValue, SafeLabel};
 use rootlight_ids::OperationId;
 use rootlight_operations::{
-    CancellationAuthority, CatalogWriterLock, ClientInstanceId, OperationJournal, OperationRecord,
-    OperationStage as JournalStage, OperationState as JournalState,
-    RecoveryClass as JournalRecoveryClass,
+    CancellationAuthority, CatalogWriterLock, ClientInstanceId, GenerationRepairCandidate,
+    MAX_REPAIR_CANDIDATES, OperationJournal, OperationRecord, OperationStage as JournalStage,
+    OperationState as JournalState, RecoveryClass as JournalRecoveryClass, RepairAction,
+    RepairPlan, plan_catalog_repair,
 };
 use rootlight_runtime::{PrivateOutputFile, RuntimeError, RuntimePaths};
 #[cfg(test)]
@@ -41,7 +42,7 @@ use rootlight_service::{
     Cancellation, CodeLocateResult, FirstSliceError, FirstSliceIndexReceipt, FirstSliceService,
     LocateMode, QueryResponse, SourceReadQueryResult, SymbolExplainResult,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const CLI_CONTRACT_VERSION: &str = "1.0";
 // Local IPC authenticates the OS account. Short-lived operation commands then
@@ -50,6 +51,7 @@ const CLI_CONTRACT_VERSION: &str = "1.0";
 const CLI_CLIENT_INSTANCE_ID: [u8; 16] = *b"rootlight-cli-v1";
 const FIRST_SLICE_DEMO_CONTRACT_VERSION: &str = "1.0";
 const HARD_MAX_CLI_JSON_BYTES: usize = 4 * 1024 * 1024;
+const MAX_REPAIR_INVENTORY_BYTES: u64 = 2 * 1024 * 1024;
 const FIRST_SLICE_SOURCE_BEFORE: &str = "pub fn answer() -> u32 {\n    42\n}\n";
 const FIRST_SLICE_SOURCE_AFTER: &str = "pub fn answer() -> u32 {\n    43\n}\n";
 
@@ -143,6 +145,9 @@ fn run() -> Result<CommandResult, CliError> {
     if command == "first-slice-demo" {
         return execute_first_slice_demo(&trailing);
     }
+    if command == "repair" {
+        return execute_repair(&runtime_paths()?, &trailing);
+    }
 
     dispatch_after_command_preflight(standalone, &command, &trailing, |standalone| {
         let paths = runtime_paths()?;
@@ -167,6 +172,87 @@ fn run() -> Result<CommandResult, CliError> {
             execute_client(&client, command.to_string_lossy().as_ref(), &trailing)
         }
     })
+}
+
+fn execute_repair(
+    paths: &RuntimePaths,
+    arguments: &[std::ffi::OsString],
+) -> Result<CommandResult, CliError> {
+    let (action, candidates) = match arguments {
+        [dry_run, action] if dry_run == "--dry-run" => (parse_repair_action(action)?, Vec::new()),
+        [dry_run, action, inventory_flag, inventory_path]
+            if dry_run == "--dry-run" && inventory_flag == "--inventory" =>
+        {
+            (
+                parse_repair_action(action)?,
+                read_repair_inventory(Path::new(inventory_path))?,
+            )
+        }
+        _ => return Err(CliError::Usage),
+    };
+    if action == RepairAction::ReconstructCatalogFromManifests && candidates.is_empty() {
+        return Err(CliError::InvalidRepairInventory);
+    }
+    if action != RepairAction::ReconstructCatalogFromManifests && !candidates.is_empty() {
+        return Err(CliError::Usage);
+    }
+    Ok(CommandResult::RepairPlan(plan_catalog_repair(
+        &paths.operation_journal_path(),
+        action,
+        &candidates,
+    )?))
+}
+
+fn parse_repair_action(argument: &std::ffi::OsStr) -> Result<RepairAction, CliError> {
+    match argument.to_str() {
+        Some("verify-catalog") => Ok(RepairAction::VerifyCatalog),
+        Some("verify-generation-headers") => Ok(RepairAction::VerifyGenerationHeaders),
+        Some("full-scrub") => Ok(RepairAction::FullScrub),
+        Some("select-last-good-generation") => Ok(RepairAction::SelectLastGoodGeneration),
+        Some("rebuild-lexical-index") => Ok(RepairAction::RebuildLexicalIndex),
+        Some("rebuild-derived-overlays") => Ok(RepairAction::RebuildDerivedOverlays),
+        Some("rebuild-repository") => Ok(RepairAction::RebuildRepository),
+        Some("reconstruct-catalog") => Ok(RepairAction::ReconstructCatalogFromManifests),
+        Some("purge-quarantine") => Ok(RepairAction::PurgeQuarantine),
+        _ => Err(CliError::Usage),
+    }
+}
+
+fn read_repair_inventory(path: &Path) -> Result<Vec<GenerationRepairCandidate>, CliError> {
+    let metadata = fs::symlink_metadata(path).map_err(CliError::RepairInventoryRead)?;
+    if !metadata.file_type().is_file() {
+        return Err(CliError::InvalidRepairInventory);
+    }
+    if metadata.len() > MAX_REPAIR_INVENTORY_BYTES {
+        return Err(CliError::RepairInventoryTooLarge);
+    }
+    let mut bytes = Vec::new();
+    let maximum = MAX_REPAIR_INVENTORY_BYTES
+        .checked_add(1)
+        .ok_or(CliError::RepairInventoryTooLarge)?;
+    fs::File::open(path)
+        .map_err(CliError::RepairInventoryRead)?
+        .take(maximum)
+        .read_to_end(&mut bytes)
+        .map_err(CliError::RepairInventoryRead)?;
+    if u64::try_from(bytes.len()).map_or(true, |length| length > MAX_REPAIR_INVENTORY_BYTES) {
+        return Err(CliError::RepairInventoryTooLarge);
+    }
+    let inventory: RepairInventory =
+        serde_json::from_slice(&bytes).map_err(|_| CliError::InvalidRepairInventory)?;
+    if inventory.schema_version != rootlight_operations::REPAIR_SCHEMA_VERSION
+        || inventory.candidates.len() > MAX_REPAIR_CANDIDATES
+    {
+        return Err(CliError::InvalidRepairInventory);
+    }
+    Ok(inventory.candidates)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepairInventory {
+    schema_version: String,
+    candidates: Vec<GenerationRepairCandidate>,
 }
 
 fn dispatch_after_command_preflight<T>(
@@ -908,6 +994,7 @@ enum CommandResult {
     Health(Health),
     DiagnosticsQuick(DiagnosticsQuick),
     SupportBundle(SupportBundleReceipt),
+    RepairPlan(RepairPlan),
     OperationSubmit(OperationStatus),
     OperationStatus(OperationStatus),
     OperationCancel {
@@ -1006,7 +1093,7 @@ impl ExitFamily {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: rootlight [--standalone] first-slice-demo|health [--json]|diagnostics quick|support-bundle --output <file>|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
+        "usage: rootlight [--standalone] first-slice-demo|health [--json]|diagnostics quick|support-bundle --output <file>|repair --dry-run <verify-catalog|verify-generation-headers|full-scrub|select-last-good-generation|rebuild-lexical-index|rebuild-derived-overlays|rebuild-repository|reconstruct-catalog|purge-quarantine> [--inventory <file>]|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
     )]
     Usage,
     #[error("daemon path overrides must provide both state and runtime directories")]
@@ -1023,6 +1110,14 @@ enum CliError {
     DigestEncoding,
     #[error("support bundle staging cleanup failed")]
     SupportCleanup(#[source] RuntimeError),
+    #[error("repair inventory is invalid")]
+    InvalidRepairInventory,
+    #[error("repair inventory exceeds its byte limit")]
+    RepairInventoryTooLarge,
+    #[error("repair inventory could not be read")]
+    RepairInventoryRead(#[source] std::io::Error),
+    #[error("repair planning failed")]
+    Repair(#[from] rootlight_operations::RepairError),
     #[error("secure random source is unavailable")]
     RandomUnavailable,
     #[error("daemon runtime setup failed")]
@@ -1065,6 +1160,8 @@ impl CliError {
             | Self::IncompletePathOverride
             | Self::InvalidSupportPath
             | Self::SupportOutputExists
+            | Self::InvalidRepairInventory
+            | Self::RepairInventoryTooLarge
             | Self::InvalidOperation
             | Self::InvalidTimeout => ExitFamily::Usage,
             Self::MacosSupportOutputUnavailable => ExitFamily::Degraded,
@@ -1607,5 +1704,64 @@ mod tests {
         let json = serde_json::to_value(envelope).expect("CLI envelope serializes");
         assert_eq!(json["exit_family"], "internal");
         assert_eq!(json["error"]["code"], "INTERNAL");
+    }
+
+    #[test]
+    fn repair_reconstruction_is_a_source_free_non_mutating_plan() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let state = temporary.path().join("state");
+        let runtime = temporary.path().join("runtime");
+        let paths = RuntimePaths::new(state.clone(), runtime).expect("runtime paths are valid");
+        let inventory_path = temporary.path().join("inventory.json");
+        let inventory = serde_json::json!({
+            "schema_version": "1.0",
+            "candidates": [{
+                "generation_id": "generation-01",
+                "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "complete": true,
+                "verified": true,
+                "required_bytes": 4096
+            }]
+        });
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("inventory serializes"),
+        )
+        .expect("inventory writes");
+        let arguments = [
+            std::ffi::OsString::from("--dry-run"),
+            std::ffi::OsString::from("reconstruct-catalog"),
+            std::ffi::OsString::from("--inventory"),
+            inventory_path.into_os_string(),
+        ];
+
+        let result = execute_repair(&paths, &arguments).expect("repair plan builds");
+        let encoded = serde_json::to_string(&result).expect("result serializes");
+
+        let CommandResult::RepairPlan(plan) = result else {
+            panic!("repair returns its typed plan");
+        };
+        assert_eq!(plan.status, rootlight_operations::RepairPlanStatus::Ready);
+        assert!(!state.exists());
+        assert!(!encoded.contains(temporary.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn repair_reconstruction_requires_an_explicit_inventory() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .expect("runtime paths are valid");
+        let arguments = [
+            std::ffi::OsString::from("--dry-run"),
+            std::ffi::OsString::from("reconstruct-catalog"),
+        ];
+
+        assert!(matches!(
+            execute_repair(&paths, &arguments),
+            Err(CliError::InvalidRepairInventory)
+        ));
     }
 }
