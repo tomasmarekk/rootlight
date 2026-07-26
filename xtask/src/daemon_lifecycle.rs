@@ -1083,7 +1083,7 @@ fn require_quota_rejection_until(
                 require_quota_window(deadline)?;
                 return Ok(());
             }
-            Err(error) if is_retryable_control_failure(&error) => {
+            Err(error) if is_retryable_operation_failure(&error, operation) => {
                 require_quota_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
