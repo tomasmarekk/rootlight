@@ -884,8 +884,8 @@ jobs:
       - name: Generate and validate bounded runtime evidence
         env:
           SOURCE_REVISION: ${{ github.sha }}
-          ROOTLIGHT_BUDGET_RUNTIME_REPORT: artifacts/budget/budget-runtime.json
-          ROOTLIGHT_CANCELLATION_PROCESS_REPORT: artifacts/budget/cancellation-process.json
+          ROOTLIGHT_BUDGET_RUNTIME_REPORT: ${{ github.workspace }}/artifacts/budget/budget-runtime.json
+          ROOTLIGHT_CANCELLATION_PROCESS_REPORT: ${{ github.workspace }}/artifacts/budget/cancellation-process.json
         run: |
           test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
           mkdir -p artifacts/budget
