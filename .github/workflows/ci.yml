@@ -427,6 +427,51 @@ jobs:
           overwrite: false
           include-hidden-files: false
 
+  readiness-evidence:
+    name: release readiness / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Evaluate readiness twice
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          cargo run --locked --quiet --package xtask -- release-readiness \
+            --output artifacts/readiness-first.json \
+            --source-revision "$SOURCE_REVISION"
+          cargo run --locked --quiet --package xtask -- release-readiness \
+            --output artifacts/readiness-second.json \
+            --source-revision "$SOURCE_REVISION"
+          cmp artifacts/readiness-first.json artifacts/readiness-second.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("artifacts/readiness-first.json").read_bytes())
+          decision = report["decision"]
+          if decision not in {"ready", "blocked"}:
+              raise SystemExit(f"unsupported readiness decision: {decision}")
+          if decision == "blocked" and not report["blockers"]:
+              raise SystemExit("blocked readiness report has no actionable blockers")
+          if decision == "ready" and report["blockers"]:
+              raise SystemExit("ready readiness report retains blockers")
+          PY
+      - name: Upload readiness evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-release-readiness-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/readiness-first.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
   supply-chain:
     name: supply chain / linux
     runs-on: ubuntu-24.04
@@ -1286,7 +1331,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fast, msrv, current-stable, platform, vertical-slice, package-evidence, incident-evidence, dataset-evidence, supply-chain, offline, commit-hygiene, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, acceptance-evidence]
+    needs: [fast, msrv, current-stable, platform, vertical-slice, package-evidence, incident-evidence, dataset-evidence, readiness-evidence, supply-chain, offline, commit-hygiene, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, acceptance-evidence]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

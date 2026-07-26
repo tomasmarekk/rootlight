@@ -24,6 +24,7 @@ mod mcp_vertical;
 mod package;
 mod policy;
 mod protobuf_compatibility;
+mod release_readiness;
 mod response_profile_evidence;
 mod schemas;
 mod source_hygiene;
@@ -100,6 +101,10 @@ fn run() -> Result<(), XtaskError> {
         Some("response-profile-check") => {
             let options = response_profile_evidence::Options::parse(&mut args)?;
             response_profile_evidence::check(&options)?;
+        }
+        Some("release-readiness") => {
+            let options = release_readiness::Options::parse(&mut args)?;
+            release_readiness::evaluate(&options)?;
         }
         Some("policy-check") | Some("policy") => policy::check()?,
         Some("license-check") => license::check()?,
@@ -224,7 +229,7 @@ fn git_metadata_command(args: &mut impl Iterator<Item = String>) -> Result<(), X
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|budget-conformance-check [--fixture-root PATH] [--refresh] [--runtime-report PATH --cancellation-report PATH --output PATH]|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|contract-matrix <--output PATH|--verify PATH> --source-revision REV|daemon-lifecycle-check --bin-dir PATH|dataset-check|dataset-cache --cache-dir PATH --output PATH --source-revision REV|gate3 <--input-dir PATH --bin-dir PATH --output PATH|--verify PATH> --source-revision REV|incident-tabletop --output PATH --source-revision REV|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|package-check|package-build --target TARGET --version VERSION --source-revision REV --bin-dir PATH --output-dir PATH|package-smoke --target TARGET|response-profile-check [--fixture-root PATH] [--refresh]|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|budget-conformance-check [--fixture-root PATH] [--refresh] [--runtime-report PATH --cancellation-report PATH --output PATH]|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|contract-matrix <--output PATH|--verify PATH> --source-revision REV|daemon-lifecycle-check --bin-dir PATH|dataset-check|dataset-cache --cache-dir PATH --output PATH --source-revision REV|gate3 <--input-dir PATH --bin-dir PATH --output PATH|--verify PATH> --source-revision REV|incident-tabletop --output PATH --source-revision REV|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|package-check|package-build --target TARGET --version VERSION --source-revision REV --bin-dir PATH --output-dir PATH|package-smoke --target TARGET|release-readiness --output PATH --source-revision REV [--require-ready]|response-profile-check [--fixture-root PATH] [--refresh]|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -279,6 +284,8 @@ enum XtaskError {
     Policy(#[from] policy::PolicyError),
     #[error(transparent)]
     ResponseProfile(#[from] response_profile_evidence::ResponseProfileEvidenceError),
+    #[error(transparent)]
+    ReleaseReadiness(#[from] release_readiness::ReadinessError),
     #[error(transparent)]
     ToolDiscovery(#[from] tool_discovery::DiscoveryError),
     #[error(transparent)]

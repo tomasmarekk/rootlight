@@ -114,6 +114,16 @@ pub(crate) fn check() -> Result<(), PackageError> {
     Ok(())
 }
 
+pub(crate) fn verify_ownership_contract() -> Result<(), PackageError> {
+    let workspace = workspace_root()?;
+    let spec = load_spec(&workspace)?;
+    validate_spec(&workspace, &spec)?;
+    for platform in &spec.platforms {
+        exercise_install_lifecycle(&spec, platform)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn build(options: &BuildOptions) -> Result<(), PackageError> {
     let workspace = workspace_root()?;
     let spec = load_spec(&workspace)?;
