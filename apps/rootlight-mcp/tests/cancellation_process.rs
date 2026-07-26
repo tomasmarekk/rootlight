@@ -31,7 +31,7 @@ const ADVANCED_FOLLOW_UP_ID: &str = "status-after-advanced-cancel";
 
 #[test]
 fn cancellation_reaches_active_daemon_analyses_without_emitting_responses() {
-    let fixture = tempfile::tempdir().expect("isolated process fixture is available");
+    let fixture = private_tempdir();
     let repository_root = fixture.path().join("repository");
     write_large_repository(&repository_root);
 
@@ -107,6 +107,18 @@ fn cancellation_reaches_active_daemon_analyses_without_emitting_responses() {
     mcp.finish();
     daemon.finish();
     write_report(&[cycles, advanced]);
+}
+
+fn private_tempdir() -> tempfile::TempDir {
+    let fixture = tempfile::tempdir().expect("isolated process fixture is available");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
+            .expect("process fixture permissions are private");
+    }
+    fixture
 }
 
 fn assert_cancelled_request(
