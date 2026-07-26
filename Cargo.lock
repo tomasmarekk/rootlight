@@ -2369,6 +2369,7 @@ dependencies = [
  "proptest",
  "rootlight-cancel",
  "rootlight-ids",
+ "rootlight-ir",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

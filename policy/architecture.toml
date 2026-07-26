@@ -356,6 +356,7 @@ name = "rootlight-workspace"
 allowed_internal_dependencies = [
   "rootlight-cancel",
   "rootlight-ids",
+  "rootlight-ir",
 ]
 allow_build_script = false
 
