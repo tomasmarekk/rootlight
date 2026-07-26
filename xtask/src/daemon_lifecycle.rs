@@ -15,7 +15,7 @@ use std::{
 use rootlight_client::{
     Client, ClientError, ConnectPolicy, DaemonLifecycle, Health, OperationState, OwnedDaemon,
 };
-use rootlight_error::{ErrorCode, NextAction, PublicValue};
+use rootlight_error::{ErrorCode, NextAction, PublicError, PublicValue};
 use rootlight_ids::OperationId;
 use rootlight_ipc::{IpcError, connect};
 use rootlight_observability::{
@@ -913,7 +913,7 @@ fn connect_existing_until(
                 require_quota_setup_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
-            Err(error) => return Err(LifecycleError::Client(error)),
+            Err(error) => return Err(client_stage("quota client connection", error)),
         }
     }
 }
@@ -938,7 +938,7 @@ fn wait_for_health_until(
                 );
                 continue;
             }
-            Err(error) => return Err(LifecycleError::Client(error)),
+            Err(error) => return Err(client_stage("quota health observation", error)),
         };
         if Instant::now() >= deadline {
             return Err(LifecycleError::HealthStateTimedOut);
@@ -1066,7 +1066,9 @@ fn submit_quota_operation_until(
                 require_quota_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
-            Err(error) => return Err(LifecycleError::Client(error)),
+            Err(error) => {
+                return Err(client_stage("quota operation submission", error));
+            }
         }
     }
 }
@@ -1087,7 +1089,9 @@ fn require_quota_rejection_until(
                 require_quota_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
-            Err(error) => return Err(LifecycleError::Client(error)),
+            Err(error) => {
+                return Err(client_stage("quota rejection probe", error));
+            }
             Ok(_) => return Err(LifecycleError::ClientOperationQuotaNotEnforced),
         }
     }
@@ -1100,12 +1104,24 @@ fn is_retryable_control_failure(error: &ClientError) -> bool {
         // The daemon can win its own per-request deadline before the frame
         // deadline, and a replay can briefly observe the same durable admission.
         ClientError::Public(error) => {
-            error.code() == ErrorCode::Busy
+            (error.code() == ErrorCode::Busy
                 && error.retryable()
-                && error.message() == "daemon request timed out"
+                && error.message() == "daemon request timed out")
+                || is_client_connection_quota(error)
         }
         _ => false,
     }
+}
+
+fn is_client_connection_quota(error: &PublicError) -> bool {
+    error.code() == ErrorCode::ResourceExhausted
+        && error.retryable()
+        && error.message() == "client connection quota is exhausted"
+        && error.next_actions() == [NextAction::Retry]
+        && error.details().iter().any(|(key, value)| {
+            key.as_str() == "client_connection_limit"
+                && *value == PublicValue::Unsigned(u64::from(EXPECTED_CLIENT_CONNECTION_LIMIT))
+        })
 }
 
 fn is_retryable_operation_failure(error: &ClientError, operation: OperationId) -> bool {
@@ -2248,14 +2264,14 @@ mod tests {
     use std::io;
 
     use rootlight_client::ClientError;
-    use rootlight_error::{ErrorCode, NextAction, PublicError};
+    use rootlight_error::{ErrorCode, NextAction, PublicError, PublicValue};
     use rootlight_ids::OperationId;
     use rootlight_ipc::IpcError;
     use rootlight_observability::CancellationAuditOutcome;
 
     use super::{
-        CancellationAuditEvidence, QuotaDaemonStderr, is_retryable_control_failure,
-        is_retryable_operation_failure, privacy_checked_quota_stderr,
+        CancellationAuditEvidence, EXPECTED_CLIENT_CONNECTION_LIMIT, QuotaDaemonStderr,
+        is_retryable_control_failure, is_retryable_operation_failure, privacy_checked_quota_stderr,
         sequences_are_strictly_increasing,
     };
 
@@ -2303,6 +2319,42 @@ mod tests {
             .expect("closed timeout fixture builds");
         assert!(is_retryable_control_failure(&ClientError::Public(
             Box::new(request_timeout)
+        )));
+        let connection_limit = rootlight_error::DetailKey::parse("client_connection_limit")
+            .expect("closed detail key is valid");
+        let connection_quota = PublicError::builder(
+            ErrorCode::ResourceExhausted,
+            "client connection quota is exhausted",
+        )
+        .retryable()
+        .detail(
+            connection_limit,
+            PublicValue::Unsigned(u64::from(EXPECTED_CLIENT_CONNECTION_LIMIT)),
+        )
+        .next_action(NextAction::Retry)
+        .build()
+        .expect("closed connection quota fixture builds");
+        assert!(is_retryable_control_failure(&ClientError::Public(
+            Box::new(connection_quota)
+        )));
+        let wrong_connection_limit = rootlight_error::DetailKey::parse("client_connection_limit")
+            .expect("closed detail key is valid");
+        let wrong_connection_quota = PublicError::builder(
+            ErrorCode::ResourceExhausted,
+            "client connection quota is exhausted",
+        )
+        .retryable()
+        .detail(
+            wrong_connection_limit,
+            PublicValue::Unsigned(u64::from(
+                EXPECTED_CLIENT_CONNECTION_LIMIT.saturating_sub(1),
+            )),
+        )
+        .next_action(NextAction::Retry)
+        .build()
+        .expect("closed connection quota fixture builds");
+        assert!(!is_retryable_control_failure(&ClientError::Public(
+            Box::new(wrong_connection_quota)
         )));
         let operation = OperationId::from_bytes([1; 16]);
         let admission_pending =
