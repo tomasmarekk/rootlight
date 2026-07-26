@@ -34,13 +34,19 @@ pub const SEMANTIC_EVIDENCE_ENVELOPE_MAX_BYTES: usize = 128 * 1024;
 /// Maximum reviewed expectations accepted by one semantic contract corpus.
 pub const SEMANTIC_EVIDENCE_MAX_EXPECTATIONS: usize = 65_536;
 
-const EXPECTED_PROFILES: [ExpectedProfile; 5] = [
+const EXPECTED_PROFILES: [ExpectedProfile; 11] = [
+    ExpectedProfile::new("c", AnalysisTier::TierB, LanguageSemantics::Static),
+    ExpectedProfile::new("cpp", AnalysisTier::TierB, LanguageSemantics::Static),
+    ExpectedProfile::new("csharp", AnalysisTier::TierB, LanguageSemantics::Static),
     ExpectedProfile::new("go", AnalysisTier::TierA, LanguageSemantics::Static),
+    ExpectedProfile::new("java", AnalysisTier::TierB, LanguageSemantics::Static),
     ExpectedProfile::new(
         "javascript",
         AnalysisTier::TierB,
         LanguageSemantics::Dynamic,
     ),
+    ExpectedProfile::new("kotlin", AnalysisTier::TierB, LanguageSemantics::Static),
+    ExpectedProfile::new("php", AnalysisTier::TierB, LanguageSemantics::Dynamic),
     ExpectedProfile::new("python", AnalysisTier::TierB, LanguageSemantics::Dynamic),
     ExpectedProfile::new("rust", AnalysisTier::TierA, LanguageSemantics::Static),
     ExpectedProfile::new("typescript", AnalysisTier::TierA, LanguageSemantics::Static),
@@ -160,7 +166,7 @@ enum RepositoryOperation {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SemanticEvidenceError {
-    /// The shared registry differs from the reviewed four-language profile.
+    /// The shared registry differs from the reviewed language profile set.
     #[error("Semantic language conformance evidence is invalid")]
     InvalidLanguageEvidence,
     /// Resolver results fail the ambiguity-sensitive quality contract.
@@ -589,7 +595,7 @@ mod tests {
         assert_eq!(first_bytes, repeated_bytes);
         assert_eq!(first.disposition, EvidenceDisposition::ContractFixtureOnly);
         assert!(!first.production_acceptance_eligible);
-        assert_eq!(first.languages.len(), 5);
+        assert_eq!(first.languages.len(), EXPECTED_PROFILES.len());
         assert!(
             first
                 .languages

@@ -709,7 +709,7 @@ mod tests {
             value: grammar_versions,
         } = &environment.grammar_versions
         {
-            assert_eq!(grammar_versions.len(), 6);
+            assert_eq!(grammar_versions.len(), 11);
         }
         assert!(matches!(
             &environment.grammar_source_package_checksums,
@@ -719,7 +719,7 @@ mod tests {
             value: source_package_checksums,
         } = &environment.grammar_source_package_checksums
         {
-            assert_eq!(source_package_checksums.len(), 6);
+            assert_eq!(source_package_checksums.len(), 11);
         }
         assert!(matches!(
             &environment.grammar_hashes,
@@ -729,7 +729,11 @@ mod tests {
             value: grammar_hashes,
         } = &environment.grammar_hashes
         {
-            assert_eq!(grammar_hashes.len(), 10);
+            assert_eq!(grammar_hashes.len(), 19);
+            assert!(grammar_hashes.contains_key("c.parser"));
+            assert!(!grammar_hashes.contains_key("c.scanner"));
+            assert!(grammar_hashes.contains_key("cpp.parser"));
+            assert!(grammar_hashes.contains_key("cpp.scanner"));
             assert!(grammar_hashes.contains_key("java.parser"));
             assert!(!grammar_hashes.contains_key("java.scanner"));
             assert!(grammar_hashes.contains_key("go.parser"));
