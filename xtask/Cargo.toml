@@ -11,6 +11,7 @@ publish = false
 anyhow.workspace = true
 blake3.workspace = true
 cargo_metadata.workspace = true
+data-encoding.workspace = true
 getrandom.workspace = true
 jsonschema.workspace = true
 prost.workspace = true
@@ -33,6 +34,7 @@ rootlight-agent = { path = "../crates/rootlight-agent" }
 rootlight-storage = { path = "../crates/rootlight-storage" }
 rootlight-protocol = { path = "../crates/rootlight-protocol" }
 schemars.workspace = true
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -42,6 +44,7 @@ thiserror.workspace = true
 tiktoken-rs.workspace = true
 toml.workspace = true
 yaml-rust2.workspace = true
+zip.workspace = true
 
 [lints]
 workspace = true

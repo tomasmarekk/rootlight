@@ -1,0 +1,14 @@
+# Rootlight per-user daemon unit installed as an inert package resource.
+# An installer may register it only after explicit user consent.
+
+[Unit]
+Description=Rootlight local code intelligence daemon
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/rootlight/current/bin/rootlight-daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

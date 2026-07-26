@@ -1,0 +1,61 @@
+# Canonical package inventory for deterministic per-user distributions.
+# Every installed path is relative to an installer-selected root, while
+# platform autostart resources remain disabled unless the user opts in.
+
+schema = "rootlight.package-spec/1"
+autostart_default = "disabled"
+user_data_policy = "preserve"
+ownership_manifest = "state/install-manifest.json"
+active_version_file = "state/active-version"
+maximum_binary_bytes = 536870912
+
+[[binaries]]
+name = "rootlight"
+unix_mode = 493
+
+[[binaries]]
+name = "rootlight-adapter-host"
+unix_mode = 493
+
+[[binaries]]
+name = "rootlight-daemon"
+unix_mode = 493
+
+[[binaries]]
+name = "rootlight-mcp"
+unix_mode = 493
+
+[[platforms]]
+target = "aarch64-apple-darwin"
+executable_suffix = ""
+autostart_kind = "launchd_user_agent"
+autostart_resource = "com.rootlight.daemon"
+autostart_source = "packaging/autostart/macos/com.rootlight.daemon.plist"
+
+[[platforms]]
+target = "aarch64-unknown-linux-gnu"
+executable_suffix = ""
+autostart_kind = "systemd_user_unit"
+autostart_resource = "rootlight-daemon.service"
+autostart_source = "packaging/autostart/linux/rootlight-daemon.service"
+
+[[platforms]]
+target = "x86_64-apple-darwin"
+executable_suffix = ""
+autostart_kind = "launchd_user_agent"
+autostart_resource = "com.rootlight.daemon"
+autostart_source = "packaging/autostart/macos/com.rootlight.daemon.plist"
+
+[[platforms]]
+target = "x86_64-pc-windows-msvc"
+executable_suffix = ".exe"
+autostart_kind = "windows_scheduled_task"
+autostart_resource = "RootlightDaemon"
+autostart_source = "packaging/autostart/windows/rootlight-daemon.xml"
+
+[[platforms]]
+target = "x86_64-unknown-linux-gnu"
+executable_suffix = ""
+autostart_kind = "systemd_user_unit"
+autostart_resource = "rootlight-daemon.service"
+autostart_source = "packaging/autostart/linux/rootlight-daemon.service"

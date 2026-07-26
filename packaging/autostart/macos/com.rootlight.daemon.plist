@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Rootlight per-user daemon definition. The package carries this inert template;
+  registration requires explicit user consent.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.rootlight.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${HOME}/Library/Application Support/Rootlight/current/bin/rootlight-daemon</string>
+  </array>
+  <key>KeepAlive</key>
+  <false/>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

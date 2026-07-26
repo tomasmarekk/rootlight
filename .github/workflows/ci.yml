@@ -297,6 +297,68 @@ jobs:
           include-hidden-files: false
           overwrite: false
 
+  package-evidence:
+    name: package / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup show active-toolchain
+      - name: Validate package and ownership contracts
+        shell: bash
+        run: |
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          test -n "$target"
+          cargo run --locked --quiet --package xtask -- package-check
+          cargo run --locked --quiet --package xtask -- package-smoke \
+            --target "$target"
+      - name: Build native release package twice
+        shell: bash
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          version="$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rootlight"))'
+          )"
+          cargo build --locked --release \
+            --package rootlight \
+            --package rootlight-adapter-host \
+            --package rootlight-daemon \
+            --package rootlight-mcp
+          cargo run --locked --quiet --package xtask -- package-build \
+            --target "$target" \
+            --version "$version" \
+            --source-revision "$SOURCE_REVISION" \
+            --bin-dir target/release \
+            --output-dir artifacts/packages-first
+          cargo run --locked --quiet --package xtask -- package-build \
+            --target "$target" \
+            --version "$version" \
+            --source-revision "$SOURCE_REVISION" \
+            --bin-dir target/release \
+            --output-dir artifacts/packages-second
+          diff --recursive artifacts/packages-first artifacts/packages-second
+      - name: Upload native package evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-package-${{ matrix.os }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/packages-first
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
   supply-chain:
     name: supply chain / linux
     runs-on: ubuntu-24.04
@@ -1156,7 +1218,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, commit-hygiene, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, acceptance-evidence]
+    needs: [fast, msrv, current-stable, platform, vertical-slice, package-evidence, supply-chain, offline, commit-hygiene, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, acceptance-evidence]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

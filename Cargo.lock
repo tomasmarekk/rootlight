@@ -3622,6 +3622,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "cargo_metadata",
+ "data-encoding",
  "getrandom 0.3.4",
  "jsonschema",
  "prost",
@@ -3644,6 +3645,7 @@ dependencies = [
  "rootlight-runtime",
  "rootlight-storage",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -3653,6 +3655,7 @@ dependencies = [
  "tiktoken-rs",
  "toml",
  "yaml-rust2",
+ "zip",
 ]
 
 [[package]]
