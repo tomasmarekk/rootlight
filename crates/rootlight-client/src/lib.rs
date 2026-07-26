@@ -17,8 +17,8 @@ use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ipc::{
     Endpoint, FrameCodec, IpcError, connect, connect_async, read_response, read_response_async,
-    read_server_hello, read_server_hello_async, write_client_hello, write_client_hello_async,
-    write_request, write_request_async,
+    read_server_hello, read_server_hello_async, wait_for_peer_close_async, write_client_hello,
+    write_client_hello_async, write_request, write_request_async,
 };
 use rootlight_observability::{
     CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION, ControlMethod, DURATION_BUCKET_UPPER_US,
@@ -5100,6 +5100,7 @@ impl Client {
         )
         .await?;
         let response = read_response_async(codec, &mut stream).await?;
+        wait_for_peer_close_async(&mut stream).await?;
         match correlated_response(response, request_id)? {
             daemon::response_envelope::Response::Error(error) => {
                 Err(ClientError::Public(Box::new(parse_public_error(error)?)))
@@ -10678,6 +10679,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn async_request_completes_after_the_server_releases_its_connection() {
+        let (_temporary, endpoint) = async_test_endpoint("peer-release");
+        let listener = AsyncLocalListener::bind(endpoint.clone()).expect("listener binds");
+        let instance_nonce = [14; 16];
+        let client = Client::new(endpoint, instance_nonce, [15; 16]);
+        let timeout =
+            RequestTimeout::new(Duration::from_secs(5)).expect("request timeout validates");
+        let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, request) = receive_async_request(&listener, instance_nonce).await;
+            write_response_async(
+                FrameCodec::default(),
+                &mut stream,
+                &daemon::ResponseEnvelope {
+                    request_id: request.request_id,
+                    response: Some(daemon::response_envelope::Response::CodeLocate(
+                        wire_code_locate(SymbolId::from_bytes([16; 20]), &test_source(1, 0, 1)),
+                    )),
+                },
+            )
+            .await
+            .expect("server response writes");
+            response_sender
+                .send(())
+                .expect("response observation is delivered");
+            release_receiver
+                .await
+                .expect("server release signal is delivered");
+        });
+
+        let request = tokio::spawn(async move {
+            client
+                .code_locate_async(
+                    test_repository(),
+                    GenerationSelector::Active,
+                    "answer",
+                    LocateMode::Exact,
+                    1,
+                    0,
+                    timeout,
+                )
+                .await
+        });
+        response_receiver
+            .await
+            .expect("server response observation is received");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            !request.is_finished(),
+            "client returned before the server released its connection"
+        );
+
+        release_sender
+            .send(())
+            .expect("server release signal is sent");
+        request
+            .await
+            .expect("client task joins")
+            .expect("request succeeds");
+        server.await.expect("server task joins");
+    }
+
+    #[tokio::test]
     async fn async_request_and_operation_correlation_fail_closed() {
         let (_temporary, endpoint) = async_test_endpoint("correlation");
         let listener = AsyncLocalListener::bind(endpoint.clone()).expect("listener binds");
@@ -10703,6 +10769,7 @@ mod tests {
             )
             .await
             .expect("mismatched response writes");
+            drop(stream);
             requests.push(first);
 
             let (mut stream, second) = receive_async_request(&listener, instance_nonce).await;
