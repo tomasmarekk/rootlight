@@ -1,11 +1,11 @@
 schema_version = "2.0"
-id = "charlie"
+id = "M03"
 title = "Pending dependent stage"
 implementation_status = "not_started"
 acceptance = "pending"
 gate_outcome = "not_applicable"
 source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
-dependencies = ["bravo"]
+dependencies = ["M02"]
 dependents = []
 residual_risks = []
 

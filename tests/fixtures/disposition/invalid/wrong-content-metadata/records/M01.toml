@@ -1,5 +1,5 @@
 schema_version = "2.0"
-id = "alpha"
+id = "M01"
 title = "First synthetic stage"
 implementation_status = "complete"
 acceptance = "pass"
@@ -25,9 +25,9 @@ bytes = 50
 id = "alpha-observation"
 classification = "observed_pass"
 source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
-sha256 = "96af57812e0d1a7ad3cdf80531a94edce34ead57ac980a32d4027fdbe2e9b5c8"
-bytes = 88
-source = { kind = "github_artifact", path = "tests/fixtures/disposition/invalid/arbitrary-artifact-url/attestations/alpha.json", source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec", sha256 = "e544b6cdb0dd96fabb0c6c43d6bfff65446c99cc0abcd0c27ee887d50ee2d9ef", bytes = 564 }
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+bytes = 1
+source = { kind = "local", path = "tests/fixtures/disposition/evidence/alpha.json" }
 
 [[capabilities]]
 id = "alpha.capability"

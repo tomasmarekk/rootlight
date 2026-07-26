@@ -1,3 +1,3 @@
 # Invalid synthetic disposition fixture
 
-[X] delta, Incorrectly accepted stage
+[X] M04, Incorrectly accepted stage

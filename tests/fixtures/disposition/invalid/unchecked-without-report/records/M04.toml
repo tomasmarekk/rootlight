@@ -1,5 +1,5 @@
 schema_version = "2.0"
-id = "delta"
+id = "M04"
 title = "Incorrectly accepted stage"
 implementation_status = "present"
 acceptance = "pass"

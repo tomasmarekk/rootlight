@@ -1,12 +1,12 @@
 schema_version = "2.0"
-id = "alpha"
+id = "M01"
 title = "First synthetic stage"
 implementation_status = "complete"
 acceptance = "pass"
 gate_outcome = "not_applicable"
 source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
 dependencies = []
-dependents = []
+dependents = ["M02"]
 residual_risks = []
 
 [detail]
@@ -25,8 +25,8 @@ bytes = 50
 id = "alpha-observation"
 classification = "observed_pass"
 source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
-bytes = 1
+sha256 = "96af57812e0d1a7ad3cdf80531a94edce34ead57ac980a32d4027fdbe2e9b5c8"
+bytes = 88
 source = { kind = "local", path = "tests/fixtures/disposition/evidence/alpha.json" }
 
 [[capabilities]]

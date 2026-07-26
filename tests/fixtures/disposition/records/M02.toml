@@ -1,13 +1,13 @@
 schema_version = "2.0"
-id = "bravo"
+id = "M02"
 title = "Blocking gate stage"
 implementation_status = "present"
 acceptance = "fallback"
 gate_outcome = "fallback"
 source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
 fallback_boundary = "Bounded synthetic fallback used only to exercise the validator."
-dependencies = ["alpha"]
-dependents = ["charlie"]
+dependencies = ["M01"]
+dependents = ["M03"]
 residual_risks = []
 
 [detail]

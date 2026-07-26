@@ -1,1 +1,1 @@
-[X] alpha, First synthetic stage
+[X] M01, First synthetic stage

@@ -3,6 +3,6 @@
 This fixture exercises the disposition validator with neutral identifiers and
 contains no private planning content.
 
-[X] alpha, First synthetic stage
-[X] bravo, Blocking gate stage
-[ ] charlie, Pending dependent stage
+[X] M01, First synthetic stage
+[X] M02, Blocking gate stage
+[ ] M03, Pending dependent stage
