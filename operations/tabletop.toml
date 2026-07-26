@@ -1,0 +1,79 @@
+# Deterministic control walkthroughs for Rootlight incident response.
+# Tokens are sorted so evidence stays stable and reviewable.
+
+schema = "rootlight.incident-tabletop/1"
+owner = "@tomasmarekk"
+exercise_mode = "deterministic_control_walkthrough"
+privacy = "source_free"
+
+[[scenarios]]
+id = "bad-update"
+severity = "high"
+key_rotation = false
+detection = ["failed_health_check", "metadata_revocation", "rollback_activation"]
+evidence = ["artifact_digest", "health_code", "rollback_result", "signed_metadata"]
+containment = ["revoke_metadata", "stop_rollout"]
+recovery = ["restore_last_good_binary", "verify_catalog_compatibility"]
+communication = ["publish_affected_digests", "publish_safe_rollback"]
+post_incident = ["add_update_regression", "review_rollout_controls"]
+controls = ["restore_last_good_binary", "revoke_metadata", "stop_rollout", "verify_catalog_compatibility"]
+
+[[scenarios]]
+id = "corrupt-catalog"
+severity = "high"
+key_rotation = false
+detection = ["catalog_integrity_failure", "generation_checksum_failure"]
+evidence = ["catalog_identity", "generation_identity", "manifest_digest", "repair_plan"]
+containment = ["preserve_last_good_generation", "quarantine_corrupt_state"]
+recovery = ["rebuild_before_activation", "run_repair_dry_run"]
+communication = ["explain_data_preservation", "publish_rebuild_guidance"]
+post_incident = ["add_corruption_regression", "review_recovery_time"]
+controls = ["preserve_last_good_generation", "quarantine_corrupt_state", "rebuild_before_activation", "run_repair_dry_run"]
+
+[[scenarios]]
+id = "sandbox-escape"
+severity = "critical"
+key_rotation = false
+detection = ["host_boundary_change", "sandbox_policy_failure", "unexpected_child_process"]
+evidence = ["adapter_identity", "exit_status", "policy_digest", "process_tree"]
+containment = ["deny_egress", "revoke_adapter_trust", "terminate_adapter_process_tree"]
+recovery = ["audit_host_boundary", "rerun_platform_negative_controls"]
+communication = ["notify_affected_users", "publish_safe_disablement"]
+post_incident = ["add_escape_regression", "review_adapter_trust"]
+controls = ["audit_host_boundary", "deny_egress", "revoke_adapter_trust", "terminate_adapter_process_tree"]
+
+[[scenarios]]
+id = "service-unavailable"
+severity = "medium"
+key_rotation = false
+detection = ["daemon_health_unavailable", "endpoint_ownership_stale", "startup_failure"]
+evidence = ["health_code", "lifecycle_diagnostic", "package_digest", "protocol_version"]
+containment = ["preserve_local_data", "use_standalone_fallback"]
+recovery = ["collect_source_free_diagnostics", "restore_per_user_daemon"]
+communication = ["publish_availability_scope", "publish_recovery_steps"]
+post_incident = ["add_lifecycle_regression", "review_recovery_time"]
+controls = ["collect_source_free_diagnostics", "preserve_local_data", "restore_per_user_daemon", "use_standalone_fallback"]
+
+[[scenarios]]
+id = "signing-key-compromise"
+severity = "critical"
+key_rotation = true
+detection = ["key_custody_alert", "signature_anomaly", "unexpected_release"]
+evidence = ["affected_artifact_digests", "key_identity", "provenance", "signed_metadata"]
+containment = ["revoke_signing_key", "stop_release_publication"]
+recovery = ["reverify_published_artifacts", "rotate_trust_metadata"]
+communication = ["publish_affected_digests", "publish_replacement_trust"]
+post_incident = ["audit_key_custody", "review_release_permissions"]
+controls = ["reverify_published_artifacts", "revoke_signing_key", "rotate_trust_metadata", "stop_release_publication"]
+
+[[scenarios]]
+id = "source-exfiltration"
+severity = "critical"
+key_rotation = false
+detection = ["source_like_diagnostic_value", "unexpected_egress_attempt", "user_report"]
+evidence = ["artifact_digest", "bounded_event", "source_free_support_bundle"]
+containment = ["disable_suspected_output_path", "preserve_redacted_evidence"]
+recovery = ["verify_no_source_in_support_bundle", "verify_output_boundary"]
+communication = ["notify_affected_users", "state_exposure_confidence"]
+post_incident = ["add_privacy_regression", "review_diagnostic_schema"]
+controls = ["disable_suspected_output_path", "notify_affected_users", "preserve_redacted_evidence", "verify_no_source_in_support_bundle"]

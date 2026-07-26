@@ -15,6 +15,7 @@ mod gate3;
 mod git_metadata;
 mod grammar_lock;
 mod ids;
+mod incident;
 mod license;
 mod markdown_links;
 mod mcp_compatibility;
@@ -59,6 +60,10 @@ fn run() -> Result<(), XtaskError> {
             budget_conformance::check(&options)?;
         }
         Some("id-vectors") => ids::print_vectors()?,
+        Some("incident-tabletop") => {
+            let options = incident::Options::parse(&mut args)?;
+            incident::exercise(&options)?;
+        }
         Some("generate") | Some("schemas") => {
             let mode = parse_generate_mode(&mut args)?;
             schemas::generate(mode)?;
@@ -213,7 +218,7 @@ fn git_metadata_command(args: &mut impl Iterator<Item = String>) -> Result<(), X
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|budget-conformance-check [--fixture-root PATH] [--refresh] [--runtime-report PATH --cancellation-report PATH --output PATH]|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|contract-matrix <--output PATH|--verify PATH> --source-revision REV|daemon-lifecycle-check --bin-dir PATH|gate3 <--input-dir PATH --bin-dir PATH --output PATH|--verify PATH> --source-revision REV|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|package-check|package-build --target TARGET --version VERSION --source-revision REV --bin-dir PATH --output-dir PATH|package-smoke --target TARGET|response-profile-check [--fixture-root PATH] [--refresh]|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|budget-conformance-check [--fixture-root PATH] [--refresh] [--runtime-report PATH --cancellation-report PATH --output PATH]|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|contract-matrix <--output PATH|--verify PATH> --source-revision REV|daemon-lifecycle-check --bin-dir PATH|gate3 <--input-dir PATH --bin-dir PATH --output PATH|--verify PATH> --source-revision REV|incident-tabletop --output PATH --source-revision REV|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|package-check|package-build --target TARGET --version VERSION --source-revision REV --bin-dir PATH --output-dir PATH|package-smoke --target TARGET|response-profile-check [--fixture-root PATH] [--refresh]|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -250,6 +255,8 @@ enum XtaskError {
     GitMetadata(#[from] git_metadata::GitMetadataError),
     #[error(transparent)]
     IdVectors(#[from] ids::IdVectorError),
+    #[error(transparent)]
+    Incident(#[from] incident::IncidentError),
     #[error(transparent)]
     License(#[from] license::LicenseError),
     #[error(transparent)]
