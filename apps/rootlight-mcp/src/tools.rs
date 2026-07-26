@@ -1261,10 +1261,10 @@ fn advanced_invariant_error(input: &QueryAdvancedInput) -> Option<PublicError> {
         Ok(plan) => plan,
         Err(error) => return Some(mapped_public_error(error.into())),
     };
-    (!input
+    input
         .cost_limit
-        .is_none_or(|limit| plan.estimated_cost <= limit))
-    .then(|| mapped_public_error(MappedDomainFailure::cost_limit("cost_limit")))
+        .is_some_and(|limit| plan.estimated_cost > limit)
+        .then(|| mapped_public_error(MappedDomainFailure::cost_limit("cost_limit")))
 }
 
 /// Validates the public batch invariants: unique operation ids, an acyclic
