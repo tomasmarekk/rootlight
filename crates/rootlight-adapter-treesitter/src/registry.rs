@@ -25,6 +25,16 @@ pub enum GrammarFamily {
     Go,
     /// TypeScript grammar.
     TypeScript,
+    /// C grammar.
+    C,
+    /// C++ grammar.
+    Cpp,
+    /// C# grammar.
+    CSharp,
+    /// Kotlin grammar.
+    Kotlin,
+    /// PHP grammar with mixed HTML support.
+    Php,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -104,7 +114,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(6);
+        let mut descriptors = Vec::with_capacity(11);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -112,6 +122,11 @@ impl GrammarRegistry {
             GrammarFamily::Java,
             GrammarFamily::Go,
             GrammarFamily::TypeScript,
+            GrammarFamily::C,
+            GrammarFamily::Cpp,
+            GrammarFamily::CSharp,
+            GrammarFamily::Kotlin,
+            GrammarFamily::Php,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -198,6 +213,11 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Java => tree_sitter_java::LANGUAGE.into(),
         GrammarFamily::Go => tree_sitter_go::LANGUAGE.into(),
         GrammarFamily::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        GrammarFamily::C => tree_sitter_c::LANGUAGE.into(),
+        GrammarFamily::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        GrammarFamily::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        GrammarFamily::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
+        GrammarFamily::Php => tree_sitter_php::LANGUAGE_PHP.into(),
     }
 }
 
@@ -262,6 +282,49 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
                 "9125013b42cb888379d9be909f1d73dfb75a37626c2cdbf4122718a2b431a6d3",
             ),
         },
+        GrammarFamily::C => GrammarIdentity {
+            language_id: "c",
+            grammar_version: "0.24.2",
+            source_package_sha256: "a9b2eb57a55fed6b00812912e730b7a275cf4fe98bfd6a5d76263d4438371728",
+            parser_sha256: "f2883ff9b21f4a5bd5553c1b10366c418947d17a7bc6bf256124a7542f079dd2",
+            scanner_sha256: None,
+        },
+        GrammarFamily::Cpp => GrammarIdentity {
+            language_id: "cpp",
+            grammar_version: "0.23.4",
+            source_package_sha256: "df2196ea9d47b4ab4a31b9297eaa5a5d19a0b121dceb9f118f6790ad0ab94743",
+            parser_sha256: "2a35a43b4af6c9f7b69624ac00c2c50808912591450dc79c05dea03ac1bae814",
+            scanner_sha256: Some(
+                "cf60387d290271f4d2fb558d0569b2b9ef879cb72206a9df5cc73b0b1a4b20ff",
+            ),
+        },
+        GrammarFamily::CSharp => GrammarIdentity {
+            language_id: "csharp",
+            grammar_version: "0.23.5",
+            source_package_sha256: "c1aac67f1ad71de1d6d39708d34811081c26dfa495658de6c14c34200849357c",
+            parser_sha256: "0a2651e49de7c7237c535c41a132a7ec0424da79d12f197f1df3edd7d6ea4427",
+            scanner_sha256: Some(
+                "00920daa0fdf3050d441475e8effe996b60ee8acc1bdbcbbc4c83d56a6987705",
+            ),
+        },
+        GrammarFamily::Kotlin => GrammarIdentity {
+            language_id: "kotlin",
+            grammar_version: "1.1.0",
+            source_package_sha256: "e800ebbda938acfbf224f4d2c34947a31994b1295ee6e819b65226c7b51b4450",
+            parser_sha256: "9ff65161845b9e9c9d62c12e9a4e4b8d8628bdc31c681ec7e6b4bd3bd6444cb3",
+            scanner_sha256: Some(
+                "164c2bb928d23765ed38c3a322deaef9b52d6e147cec7cdf45add90d4fa6101c",
+            ),
+        },
+        GrammarFamily::Php => GrammarIdentity {
+            language_id: "php",
+            grammar_version: "0.24.2",
+            source_package_sha256: "0d8c17c3ab69052c5eeaa7ff5cd972dd1bc25d1b97ee779fec391ad3b5df5592",
+            parser_sha256: "59ad8e5e4fde3fe60687a488ab8420612840cc966b83739af1b3a4317ed27ec6",
+            scanner_sha256: Some(
+                "58c92cafe4ebda509c3ad3864fa6fc0e9877bbac26e17a03d23ea2101c291ad5",
+            ),
+        },
     }
 }
 
@@ -275,7 +338,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 6);
+        assert_eq!(registry.descriptors().len(), 11);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -283,6 +346,11 @@ mod tests {
             GrammarFamily::Java,
             GrammarFamily::Go,
             GrammarFamily::TypeScript,
+            GrammarFamily::C,
+            GrammarFamily::Cpp,
+            GrammarFamily::CSharp,
+            GrammarFamily::Kotlin,
+            GrammarFamily::Php,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -337,6 +405,11 @@ mod tests {
                 "typescript",
                 "tree-sitter-typescript",
             ),
+            (GrammarFamily::C, "c", "tree-sitter-c"),
+            (GrammarFamily::Cpp, "cpp", "tree-sitter-cpp"),
+            (GrammarFamily::CSharp, "csharp", "tree-sitter-c-sharp"),
+            (GrammarFamily::Kotlin, "kotlin", "tree-sitter-kotlin-ng"),
+            (GrammarFamily::Php, "php", "tree-sitter-php"),
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             let (version, source_package_checksum) = locked_package(&lock, package);

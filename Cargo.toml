@@ -78,9 +78,14 @@ tempfile = "3.23.0"
 thiserror = { version = "2.0.18", default-features = false, features = ["std"] }
 tiktoken-rs = { version = "=0.12.0", default-features = false }
 tree-sitter = { version = "=0.26.11", default-features = false, features = ["std"] }
+tree-sitter-c = { version = "=0.24.2", default-features = false }
+tree-sitter-c-sharp = { version = "=0.23.5", default-features = false }
+tree-sitter-cpp = { version = "=0.23.4", default-features = false }
 tree-sitter-go = { version = "=0.25.0", default-features = false }
 tree-sitter-java = { version = "=0.23.5", default-features = false }
 tree-sitter-javascript = { version = "=0.25.0", default-features = false }
+tree-sitter-kotlin-ng = { version = "=1.1.0", default-features = false }
+tree-sitter-php = { version = "=0.24.2", default-features = false }
 tree-sitter-python = { version = "=0.25.0", default-features = false }
 tree-sitter-rust = { version = "=0.24.2", default-features = false }
 tree-sitter-typescript = { version = "=0.23.2", default-features = false }

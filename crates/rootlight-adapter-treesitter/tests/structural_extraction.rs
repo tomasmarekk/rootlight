@@ -32,7 +32,7 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 6] = [
+const CASES: [LanguageCase; 11] = [
     LanguageCase {
         name: "structural.rs",
         language: "rust",
@@ -63,10 +63,35 @@ const CASES: [LanguageCase; 6] = [
         language: "typescript",
         source: include_str!("fixtures/structural/typescript.ts"),
     },
+    LanguageCase {
+        name: "structural.c",
+        language: "c",
+        source: include_str!("fixtures/structural/c.c"),
+    },
+    LanguageCase {
+        name: "structural.cpp",
+        language: "cpp",
+        source: include_str!("fixtures/structural/cpp.cpp"),
+    },
+    LanguageCase {
+        name: "Structural.cs",
+        language: "csharp",
+        source: include_str!("fixtures/structural/csharp.cs"),
+    },
+    LanguageCase {
+        name: "structural.kt",
+        language: "kotlin",
+        source: include_str!("fixtures/structural/kotlin.kt"),
+    },
+    LanguageCase {
+        name: "structural.php",
+        language: "php",
+        source: include_str!("fixtures/structural/php.php"),
+    },
 ];
 
 #[test]
-fn six_language_crlf_unicode_fixtures_match_structural_goldens() {
+fn audited_crlf_unicode_fixtures_match_structural_goldens() {
     let provider = provider();
     let limits = limits(4096, 128);
 
@@ -592,6 +617,88 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("typescript.type_identifier.definition", 3),
             ("typescript.type_identifier.reference", 2),
             ("typescript.variable.declaration", 1),
+        ],
+        "c" => &[
+            ("c.block.scope", 1),
+            ("c.call.call", 1),
+            ("c.comment.documentation", 1),
+            ("c.field_identifier.reference", 1),
+            ("c.file.root", 1),
+            ("c.function.declaration", 1),
+            ("c.identifier.definition", 1),
+            ("c.identifier.reference", 3),
+            ("c.include.import", 1),
+            ("c.include.module", 1),
+            ("c.parameters.signature", 1),
+            ("c.string.string", 1),
+            ("c.struct.declaration", 1),
+            ("c.type_identifier.definition", 1),
+        ],
+        "cpp" => &[
+            ("cpp.block.scope", 1),
+            ("cpp.call.call", 1),
+            ("cpp.class.declaration", 1),
+            ("cpp.comment.documentation", 1),
+            ("cpp.declaration_list.scope", 1),
+            ("cpp.field_identifier.definition", 1),
+            ("cpp.file.root", 1),
+            ("cpp.function.declaration", 1),
+            ("cpp.identifier.reference", 3),
+            ("cpp.include.import", 1),
+            ("cpp.namespace.module", 1),
+            ("cpp.namespace_identifier.definition", 1),
+            ("cpp.namespace_identifier.reference", 2),
+            ("cpp.parameters.signature", 1),
+            ("cpp.string.string", 1),
+            ("cpp.type_identifier.definition", 1),
+            ("cpp.type_identifier.reference", 2),
+        ],
+        "csharp" => &[
+            ("csharp.block.scope", 1),
+            ("csharp.call.call", 1),
+            ("csharp.class.declaration", 1),
+            ("csharp.comment.documentation", 1),
+            ("csharp.file.root", 1),
+            ("csharp.file_namespace.module", 1),
+            ("csharp.identifier.definition", 2),
+            ("csharp.identifier.reference", 5),
+            ("csharp.method.declaration", 1),
+            ("csharp.parameters.signature", 1),
+            ("csharp.string.string", 1),
+            ("csharp.using.import", 1),
+        ],
+        "kotlin" => &[
+            ("kotlin.block.scope", 1),
+            ("kotlin.block_comment.documentation", 1),
+            ("kotlin.call.call", 1),
+            ("kotlin.class.declaration", 1),
+            ("kotlin.class_body.scope", 1),
+            ("kotlin.file.root", 1),
+            ("kotlin.function.declaration", 1),
+            ("kotlin.identifier.definition", 2),
+            ("kotlin.identifier.reference", 9),
+            ("kotlin.import.import", 1),
+            ("kotlin.package.module", 1),
+            ("kotlin.parameters.signature", 1),
+            ("kotlin.qualified_identifier.reference", 2),
+            ("kotlin.string.string", 1),
+        ],
+        "php" => &[
+            ("php.block.scope", 1),
+            ("php.call.call", 1),
+            ("php.comment.documentation", 1),
+            ("php.declaration_list.scope", 1),
+            ("php.encapsed_string.string", 1),
+            ("php.method.declaration", 1),
+            ("php.name.definition", 2),
+            ("php.name.reference", 7),
+            ("php.namespace.module", 1),
+            ("php.namespace_use.import", 1),
+            ("php.parameters.signature", 1),
+            ("php.program.root", 1),
+            ("php.qualified_name.reference", 1),
+            ("php.trait.declaration", 1),
+            ("php.variable_name.reference", 2),
         ],
         _ => panic!("unexpected fixture language"),
     };

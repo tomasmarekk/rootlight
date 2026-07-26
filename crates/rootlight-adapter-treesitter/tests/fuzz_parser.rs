@@ -49,6 +49,11 @@ proptest! {
             ("Fuzz.java", "java"),
             ("fuzz.go", "go"),
             ("fuzz.ts", "typescript"),
+            ("fuzz.c", "c"),
+            ("fuzz.cpp", "cpp"),
+            ("Fuzz.cs", "csharp"),
+            ("fuzz.kt", "kotlin"),
+            ("fuzz.php", "php"),
         ] {
             let provider = provider();
             let fixture = Fixture::new(name, &input);
@@ -224,6 +229,11 @@ fn cleanup_source(language: &str) -> &'static [u8] {
         "java" => b"class Cleanup {}\n",
         "go" => b"package cleanup\nfunc cleanup() {}\n",
         "typescript" => b"function cleanup(): void {}\n",
+        "c" => b"int cleanup(void) { return 0; }\n",
+        "cpp" => b"int cleanup() { return 0; }\n",
+        "csharp" => b"class Cleanup {}\n",
+        "kotlin" => b"class Cleanup\n",
+        "php" => b"<?php class Cleanup {}\n",
         _ => b"",
     }
 }

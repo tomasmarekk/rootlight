@@ -47,7 +47,7 @@ const EXPECTED_DOMAINS: [FactDomain; 8] = [
     FactDomain::Extensions,
 ];
 
-const CASES: [LanguageCase; 6] = [
+const CASES: [LanguageCase; 11] = [
     LanguageCase {
         name: "rust",
         path: "src/lib.rs",
@@ -101,6 +101,51 @@ const CASES: [LanguageCase; 6] = [
         generated: true,
         body_before: "greet(name: string): string {\n    const text: Greeting = \"Hello 🌍\";\n    logger.info(name);\n    return `${text}, ${name}`;\n  }",
         body_after: "greet(name: string): string {\r\n        const text: Greeting = \"Hello 🌍\";\r\n        logger.info(name);\r\n        return `${text}, ${name}`;\r\n  }",
+    },
+    LanguageCase {
+        name: "c",
+        path: "src/structural.c",
+        frontend: "tree-sitter-c-0.24.2",
+        source: include_str!("fixtures/structural/c.c"),
+        generated: false,
+        body_before: "int greet(int value) {\n    puts(\"olá\");\n    return value;\n}",
+        body_after: "int greet(int value) {\r\n        puts(\"olá\");\r\n        return value;\r\n}",
+    },
+    LanguageCase {
+        name: "cpp",
+        path: "src/structural.cpp",
+        frontend: "tree-sitter-cpp-0.23.4",
+        source: include_str!("fixtures/structural/cpp.cpp"),
+        generated: false,
+        body_before: "std::string greet(const std::string &name) {\n        return decorate(\"olá\", name);\n    }",
+        body_after: "std::string greet(const std::string &name) {\r\n            return decorate(\"olá\", name);\r\n    }",
+    },
+    LanguageCase {
+        name: "csharp",
+        path: "src/Structural.cs",
+        frontend: "tree-sitter-c-sharp-0.23.5",
+        source: include_str!("fixtures/structural/csharp.cs"),
+        generated: true,
+        body_before: "public string Greet(string name)\n    {\n        return string.Concat(\"olá\", name);\n    }",
+        body_after: "public string Greet(string name)\r\n    {\r\n            return string.Concat(\"olá\", name);\r\n    }",
+    },
+    LanguageCase {
+        name: "kotlin",
+        path: "src/structural.kt",
+        frontend: "tree-sitter-kotlin-ng-1.1.0",
+        source: include_str!("fixtures/structural/kotlin.kt"),
+        generated: true,
+        body_before: "fun greet(name: String): String {\n        println(\"olá\")\n        return name\n    }",
+        body_after: "fun greet(name: String): String {\r\n            println(\"olá\")\r\n            return name\r\n    }",
+    },
+    LanguageCase {
+        name: "php",
+        path: "src/structural.php",
+        frontend: "tree-sitter-php-0.24.2",
+        source: include_str!("fixtures/structural/php.php"),
+        generated: false,
+        body_before: "public function greet(string $name): string\n    {\n        return Formatter::format(\"olá\", $name);\n    }",
+        body_after: "public function greet(string $name): string\r\n    {\r\n            return Formatter::format(\"olá\", $name);\r\n    }",
     },
 ];
 
@@ -253,7 +298,16 @@ fn reviewed_queries_preserve_explicit_call_sites() {
     for case in CASES.into_iter().filter(|case| {
         matches!(
             case.name,
-            "rust" | "python" | "javascript" | "go" | "typescript"
+            "rust"
+                | "python"
+                | "javascript"
+                | "go"
+                | "typescript"
+                | "c"
+                | "cpp"
+                | "csharp"
+                | "kotlin"
+                | "php"
         )
     }) {
         let fixture = Fixture::new(case, case.source.as_bytes());

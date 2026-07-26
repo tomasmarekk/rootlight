@@ -17,20 +17,40 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "b8fb5302844d496a63deffe884b078e5a3ee9a733d2fb157a27c673c49be9ce0";
+    "0e614273b37dded50d6ed692db765309e6245faa07ad1d700b4233dd37eb9903";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
 const TYPESCRIPT_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-typescript-0.23.2-LICENSE";
 const TYPESCRIPT_LICENSE_SHA256: &str =
     "49bf33cf78ef5897e4e161ce1517df7de1ae5042a65b6bcfd44401e0fc606559";
+const CPP_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-cpp-0.23.4-LICENSE";
+const CPP_LICENSE_SHA256: &str = "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1";
+const KOTLIN_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-kotlin-ng-1.1.0-LICENSE";
+const KOTLIN_LICENSE_SHA256: &str =
+    "0eea8dc45e89deeb03c7799bbbc7b4688f365fb274562f4540ecfebdea82e727";
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
-const EXPECTED_PACKAGES: [(&str, &str, &str); 7] = [
+const EXPECTED_PACKAGES: [(&str, &str, &str); 12] = [
     (
         "tree-sitter",
         "0.26.11",
         "af1c71c1c4cc0920b20d6b0f6572e7682cd07a6a2faec71067a31fa394c586df",
+    ),
+    (
+        "tree-sitter-c",
+        "0.24.2",
+        "a9b2eb57a55fed6b00812912e730b7a275cf4fe98bfd6a5d76263d4438371728",
+    ),
+    (
+        "tree-sitter-c-sharp",
+        "0.23.5",
+        "c1aac67f1ad71de1d6d39708d34811081c26dfa495658de6c14c34200849357c",
+    ),
+    (
+        "tree-sitter-cpp",
+        "0.23.4",
+        "df2196ea9d47b4ab4a31b9297eaa5a5d19a0b121dceb9f118f6790ad0ab94743",
     ),
     (
         "tree-sitter-go",
@@ -46,6 +66,16 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 7] = [
         "tree-sitter-javascript",
         "0.25.0",
         "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5",
+    ),
+    (
+        "tree-sitter-kotlin-ng",
+        "1.1.0",
+        "e800ebbda938acfbf224f4d2c34947a31994b1295ee6e819b65226c7b51b4450",
+    ),
+    (
+        "tree-sitter-php",
+        "0.24.2",
+        "0d8c17c3ab69052c5eeaa7ff5cd972dd1bc25d1b97ee779fec391ad3b5df5592",
     ),
     (
         "tree-sitter-python",
@@ -85,6 +115,8 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
 
     validate_local_license(root, JAVA_LICENSE_PATH, JAVA_LICENSE_SHA256)?;
     validate_local_license(root, TYPESCRIPT_LICENSE_PATH, TYPESCRIPT_LICENSE_SHA256)?;
+    validate_local_license(root, CPP_LICENSE_PATH, CPP_LICENSE_SHA256)?;
+    validate_local_license(root, KOTLIN_LICENSE_PATH, KOTLIN_LICENSE_SHA256)?;
     Ok(())
 }
 
@@ -105,7 +137,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 6 {
+    if manifest.grammars.len() != 11 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -125,8 +157,19 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
             ),
         );
     }
-    let expected_languages =
-        BTreeSet::from(["go", "java", "javascript", "python", "rust", "typescript"]);
+    let expected_languages = BTreeSet::from([
+        "c",
+        "cpp",
+        "csharp",
+        "go",
+        "java",
+        "javascript",
+        "kotlin",
+        "php",
+        "python",
+        "rust",
+        "typescript",
+    ]);
     if languages != expected_languages {
         return Err(GrammarLockError::LanguageSet);
     }
@@ -159,7 +202,8 @@ fn validate_runtime(runtime: &RuntimeEvidence) -> Result<(), GrammarLockError> {
     validate_sha256("runtime license", &runtime.license_sha256)?;
     require_nonempty("runtime license_source", &runtime.license_source)?;
     require_nonempty("runtime offline_behavior", &runtime.offline_behavior)?;
-    require_nonempty_collection("runtime capabilities", &runtime.capabilities)
+    require_nonempty_collection("runtime capabilities", &runtime.capabilities)?;
+    require_nonempty_collection("runtime parser_limits", &runtime.parser_limits)
 }
 
 fn validate_grammar(grammar: &GrammarEvidence) -> Result<(), GrammarLockError> {
@@ -176,6 +220,8 @@ fn validate_grammar(grammar: &GrammarEvidence) -> Result<(), GrammarLockError> {
         ("test_corpus", grammar.test_corpus.as_str()),
         ("msrv", grammar.msrv.as_str()),
         ("offline_behavior", grammar.offline_behavior.as_str()),
+        ("analysis_tier", grammar.analysis_tier.as_str()),
+        ("semantic_depth", grammar.semantic_depth.as_str()),
     ] {
         require_nonempty(field, value)?;
     }
@@ -191,6 +237,11 @@ fn validate_grammar(grammar: &GrammarEvidence) -> Result<(), GrammarLockError> {
             abi: grammar.abi,
         });
     }
+    if grammar.analysis_tier != "D" {
+        return Err(GrammarLockError::InvalidAnalysisTier {
+            language: grammar.language.clone(),
+        });
+    }
     require_nonempty_collection("grammar capabilities", &grammar.capabilities)?;
     if grammar.language == "rust" && grammar.audit_notes.len() != 2 {
         return Err(GrammarLockError::MissingAuditCaveat("rust"));
@@ -204,6 +255,16 @@ fn validate_grammar(grammar: &GrammarEvidence) -> Result<(), GrammarLockError> {
         && (grammar.audit_notes.len() != 2 || grammar.license_source != TYPESCRIPT_LICENSE_PATH)
     {
         return Err(GrammarLockError::MissingAuditCaveat("typescript"));
+    }
+    if grammar.language == "cpp"
+        && (grammar.audit_notes.len() != 3 || grammar.license_source != CPP_LICENSE_PATH)
+    {
+        return Err(GrammarLockError::MissingAuditCaveat("cpp"));
+    }
+    if grammar.language == "kotlin"
+        && (grammar.audit_notes.len() != 3 || grammar.license_source != KOTLIN_LICENSE_PATH)
+    {
+        return Err(GrammarLockError::MissingAuditCaveat("kotlin"));
     }
     Ok(())
 }
@@ -420,6 +481,7 @@ struct RuntimeEvidence {
     msrv: String,
     offline_behavior: String,
     capabilities: Vec<String>,
+    parser_limits: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -435,6 +497,7 @@ struct GrammarEvidence {
     parser_sha256: String,
     scanner_sha256: String,
     abi: usize,
+    analysis_tier: String,
     license: String,
     license_source: String,
     license_sha256: String,
@@ -443,6 +506,7 @@ struct GrammarEvidence {
     msrv: String,
     offline_behavior: String,
     capabilities: Vec<String>,
+    semantic_depth: String,
     audit_notes: Vec<String>,
 }
 
@@ -491,7 +555,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of six")]
+    #[error("grammar lock contains {0} grammars instead of eleven")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -503,6 +567,8 @@ pub(crate) enum GrammarLockError {
     PackageEvidence { package: String },
     #[error("grammar ABI {abi} is unsupported for {language}")]
     GrammarAbi { language: String, abi: usize },
+    #[error("grammar {language} must remain at structural analysis tier D")]
+    InvalidAnalysisTier { language: String },
     #[error("grammar lock omits the {0} audit caveat")]
     MissingAuditCaveat(&'static str),
     #[error("workspace metadata omits rootlight-adapter-treesitter")]
