@@ -1209,11 +1209,26 @@ fn cancel_and_wait(client: &Client, operation: OperationId) -> Result<(), Lifecy
                 require_operation_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
+            Err(error) if is_cleanup_cancellation_conflict(&error, operation) => {
+                require_operation_window(deadline)?;
+                return wait_for_cleanup_terminal_until(client, operation, deadline);
+            }
             Err(error) => {
                 return Err(client_stage("quota cleanup cancellation", error));
             }
         }
     }
+}
+
+fn is_cleanup_cancellation_conflict(error: &ClientError, operation: OperationId) -> bool {
+    let Some(error) = error.as_public_error() else {
+        return false;
+    };
+    error.code() == ErrorCode::Conflict
+        && !error.retryable()
+        && error.message() == "operation state conflicts with request"
+        && error.operation() == Some(operation)
+        && error.next_actions() == [NextAction::InspectOperation]
 }
 
 fn deterministic_client_identity(index: usize) -> Result<[u8; 16], LifecycleError> {
@@ -1345,7 +1360,7 @@ fn wait_for_client_terminal_until(
         require_operation_window(deadline)?;
         let status = match client.operation_status(operation) {
             Ok(status) => status,
-            Err(error) if is_retryable_control_failure(&error) => {
+            Err(error) if is_retryable_operation_failure(&error, operation) => {
                 require_operation_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
                 continue;
@@ -1366,6 +1381,40 @@ fn wait_for_client_terminal_until(
         }
         require_operation_window(deadline)?;
         thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn wait_for_cleanup_terminal_until(
+    client: &Client,
+    operation: OperationId,
+    deadline: Instant,
+) -> Result<(), LifecycleError> {
+    loop {
+        require_operation_window(deadline)?;
+        let status = match client.operation_status(operation) {
+            Ok(status) => status,
+            Err(error) if is_retryable_operation_failure(&error, operation) => {
+                require_operation_window(deadline)?;
+                thread::sleep(POLL_INTERVAL);
+                continue;
+            }
+            Err(error) => {
+                return Err(client_stage("quota cleanup status", error));
+            }
+        };
+        match status.state {
+            OperationState::Succeeded | OperationState::Cancelled => {
+                require_operation_window(deadline)?;
+                return Ok(());
+            }
+            OperationState::Failed | OperationState::Interrupted => {
+                return Err(LifecycleError::UnexpectedCancellationState);
+            }
+            OperationState::Queued | OperationState::Running | OperationState::Cancelling => {
+                require_operation_window(deadline)?;
+                thread::sleep(POLL_INTERVAL);
+            }
+        }
     }
 }
 
@@ -2282,7 +2331,8 @@ mod tests {
 
     use super::{
         CancellationAuditEvidence, EXPECTED_CLIENT_CONNECTION_LIMIT, QuotaDaemonStderr,
-        is_retryable_control_failure, is_retryable_operation_failure, privacy_checked_quota_stderr,
+        is_cleanup_cancellation_conflict, is_retryable_control_failure,
+        is_retryable_operation_failure, privacy_checked_quota_stderr,
         sequences_are_strictly_increasing,
     };
 
@@ -2413,6 +2463,22 @@ mod tests {
         assert!(!is_retryable_operation_failure(
             &ClientError::Public(Box::new(unknown_transient)),
             operation
+        ));
+        let cleanup_conflict = PublicError::builder(
+            ErrorCode::Conflict,
+            "operation state conflicts with request",
+        )
+        .operation(operation)
+        .next_action(NextAction::InspectOperation)
+        .build()
+        .expect("closed cleanup conflict fixture builds");
+        assert!(is_cleanup_cancellation_conflict(
+            &ClientError::Public(Box::new(cleanup_conflict.clone())),
+            operation
+        ));
+        assert!(!is_cleanup_cancellation_conflict(
+            &ClientError::Public(Box::new(cleanup_conflict)),
+            OperationId::from_bytes([2; 16])
         ));
         let semantic_busy =
             PublicError::builder(ErrorCode::Busy, "daemon is not accepting operations")
