@@ -34,6 +34,7 @@ workspace_members = [
   "rootlight-source",
   "rootlight-storage",
   "rootlight-vfs",
+  "rootlight-workspace",
   "xtask",
 ]
 dev_only_members = ["rootlight-bench", "xtask"]
@@ -348,6 +349,14 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-vfs"
 allowed_internal_dependencies = ["rootlight-cancel", "rootlight-ids", "rootlight-ir"]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-workspace"
+allowed_internal_dependencies = [
+  "rootlight-cancel",
+  "rootlight-ids",
+]
 allow_build_script = false
 
 [[crates]]

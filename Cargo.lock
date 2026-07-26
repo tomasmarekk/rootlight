@@ -2363,6 +2363,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootlight-workspace"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "rootlight-cancel",
+ "rootlight-ids",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "rsqlite-vfs"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
