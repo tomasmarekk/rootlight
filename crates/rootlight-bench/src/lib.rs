@@ -11,6 +11,7 @@ mod bundle;
 mod ci;
 mod decode;
 mod integrity;
+mod language_workspace;
 mod model;
 mod parser;
 mod performance;
@@ -45,6 +46,11 @@ pub use ci::{
     encode_parser_ci_evidence, verify_parser_ci_evidence,
 };
 pub use decode::{DecodeError, decode_benchmark_command, decode_dataset_manifest};
+pub use language_workspace::{
+    LANGUAGE_WORKSPACE_EVIDENCE_MAX_BYTES, LANGUAGE_WORKSPACE_EVIDENCE_SCHEMA,
+    LanguageWorkspaceEvidence, LanguageWorkspaceEvidenceError, build_language_workspace_evidence,
+    encode_language_workspace_evidence, verify_language_workspace_evidence,
+};
 pub use model::{
     AgentTrajectory, Availability, BenchmarkCommand, BuildProvenance, CoverageEvidence,
     DatasetEntry, DatasetManifest, EnvironmentEvidence, EvidenceValue,

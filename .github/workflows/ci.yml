@@ -517,8 +517,14 @@ jobs:
 
           languages = evidence.get("languages")
           expected_languages = [
+              "c",
+              "cpp",
+              "csharp",
               "go",
+              "java",
               "javascript",
+              "kotlin",
+              "php",
               "python",
               "rust",
               "typescript",
@@ -585,6 +591,108 @@ jobs:
         run: |
           {
             echo "### Semantic fallback evidence"
+            echo
+            echo "- artifact id: \`$ARTIFACT_ID\`"
+            echo "- artifact url: $ARTIFACT_URL"
+            echo "- artifact digest: \`$ARTIFACT_DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  language-workspace-evidence:
+    name: language and workspace fallback evidence / linux
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Generate and independently reproduce bounded fallback evidence
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          TOOLCHAIN="$(rustc -V)"
+          cargo build --locked --release --package rootlight-bench \
+            --bin language-workspace-evidence
+          target/release/language-workspace-evidence \
+            --source-revision "$SOURCE_REVISION" \
+            --toolchain "$TOOLCHAIN" \
+            > target/rootlight-language-workspace-evidence-v1.json
+          target/release/language-workspace-evidence \
+            --source-revision "$SOURCE_REVISION" \
+            --toolchain "$TOOLCHAIN" \
+            > target/rootlight-language-workspace-evidence-v1.second.json
+          cmp \
+            target/rootlight-language-workspace-evidence-v1.json \
+            target/rootlight-language-workspace-evidence-v1.second.json
+          target/release/language-workspace-evidence \
+            --verify \
+            --source-revision "$SOURCE_REVISION" \
+            --toolchain "$TOOLCHAIN" \
+            < target/rootlight-language-workspace-evidence-v1.json
+          if grep --fixed-strings --binary-files=without-match "$PWD" \
+            target/rootlight-language-workspace-evidence-v1.json; then
+            echo "language and workspace evidence contains the checkout path" >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("target/rootlight-language-workspace-evidence-v1.json")
+          encoded = path.read_bytes()
+          evidence = json.loads(encoded)
+          if evidence.get("schema") != "rootlight.language-workspace-evidence/1":
+              raise SystemExit("language and workspace evidence schema differs")
+          if evidence.get("source_revision") != os.environ["SOURCE_REVISION"]:
+              raise SystemExit("language and workspace evidence revision differs")
+          if evidence.get("disposition", {}).get("outcome") != "fallback":
+              raise SystemExit("language and workspace evidence overstates its outcome")
+          language = evidence.get("language", {})
+          expanded = language.get("expanded_languages", [])
+          if [item.get("language") for item in expanded] != [
+              "c", "cpp", "csharp", "java", "kotlin", "php"
+          ]:
+              raise SystemExit("expanded language evidence differs")
+          if any(item.get("production_promotion_eligible") is not False for item in expanded):
+              raise SystemExit("expanded language evidence promotes an unsupported tier")
+          workspace = evidence.get("workspace", {})
+          scales = workspace.get("scale_samples", [])
+          if [item.get("repositories") for item in scales] != [1, 10, 100]:
+              raise SystemExit("workspace scale evidence differs")
+          if any(item.get("complete") is not True for item in scales):
+              raise SystemExit("workspace scale evidence is incomplete")
+          if workspace.get("partial_snapshot", {}).get("explicit_failures") != 1:
+              raise SystemExit("workspace partial failure evidence differs")
+          if len(encoded) > 256 * 1024:
+              raise SystemExit("language and workspace evidence exceeds its ceiling")
+          print(
+              "verified language and workspace fallback evidence "
+              f"bytes={len(encoded)} sha256={hashlib.sha256(encoded).hexdigest()}"
+          )
+          PY
+      - name: Upload immutable language and workspace fallback evidence
+        id: evidence-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-language-workspace-evidence-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/rootlight-language-workspace-evidence-v1.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+      - name: Record immutable artifact identity
+        env:
+          ARTIFACT_ID: ${{ steps.evidence-upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.evidence-upload.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.evidence-upload.outputs.artifact-digest }}
+        run: |
+          {
+            echo "### Language and workspace fallback evidence"
             echo
             echo "- artifact id: \`$ARTIFACT_ID\`"
             echo "- artifact url: $ARTIFACT_URL"
@@ -1048,7 +1156,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, commit-hygiene, parser-evidence, semantic-evidence, capability-evidence, adapter-isolation, budget-evidence, acceptance-evidence]
+    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, commit-hygiene, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, acceptance-evidence]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1072,6 +1180,12 @@ jobs:
               else "skipped"
           )
           expected["semantic-evidence"] = (
+              "success"
+              if os.environ["EVENT_NAME"] == "push"
+              and os.environ["EVENT_REF"] == "refs/heads/main"
+              else "skipped"
+          )
+          expected["language-workspace-evidence"] = (
               "success"
               if os.environ["EVENT_NAME"] == "push"
               and os.environ["EVENT_REF"] == "refs/heads/main"

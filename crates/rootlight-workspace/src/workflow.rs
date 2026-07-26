@@ -304,6 +304,15 @@ impl WorkflowResult {
         &self.repository_failures
     }
 
+    /// Returns source bytes read while producing this page.
+    ///
+    /// Workspace workflows currently operate on immutable facts only, so this
+    /// value is always zero and remains explicit in evidence artifacts.
+    #[must_use]
+    pub const fn source_bytes(&self) -> usize {
+        self.source_bytes
+    }
+
     /// Returns the number of unique reachable edges examined.
     #[must_use]
     pub const fn edges_scanned(&self) -> usize {
