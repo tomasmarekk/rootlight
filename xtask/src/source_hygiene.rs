@@ -13,6 +13,7 @@ use std::{
 const MAX_TRACKED_PATH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TRACKED_PATHS: usize = 100_000;
 const MAX_TRACKED_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const DISPOSITION_FIXTURE_ROOT: &str = "tests/fixtures/disposition/";
 
 pub(crate) fn check(workspace_root: &Path) -> Result<(), SourceHygieneError> {
     let output = Command::new("git")
@@ -53,7 +54,9 @@ pub(crate) fn check(workspace_root: &Path) -> Result<(), SourceHygieneError> {
                 rule: ForbiddenRule::InternalSupportDocument,
             });
         }
-        if let Some(rule) = forbidden_reference(relative_path.as_bytes()) {
+        if let Some(rule) = forbidden_reference(relative_path.as_bytes())
+            && !allows_disposition_fixture_identifier(&relative_path, rule)
+        {
             return Err(SourceHygieneError::ForbiddenReference {
                 path: PathBuf::from(&relative_path),
                 line: None,
@@ -114,11 +117,13 @@ fn check_file(workspace_root: &Path, relative_path: &str) -> Result<(), SourceHy
     };
 
     for (line_index, line) in text.lines().enumerate() {
-        let rule = forbidden_reference(line.as_bytes()).or_else(|| {
-            line.chars()
-                .any(is_czech_specific_letter)
-                .then_some(ForbiddenRule::NonEnglishText)
-        });
+        let rule = forbidden_reference(line.as_bytes())
+            .filter(|rule| !allows_disposition_fixture_identifier(relative_path, *rule))
+            .or_else(|| {
+                line.chars()
+                    .any(is_czech_specific_letter)
+                    .then_some(ForbiddenRule::NonEnglishText)
+            });
         if let Some(rule) = rule {
             let line = line_index
                 .checked_add(1)
@@ -131,6 +136,12 @@ fn check_file(workspace_root: &Path, relative_path: &str) -> Result<(), SourceHy
         }
     }
     Ok(())
+}
+
+fn allows_disposition_fixture_identifier(relative_path: &str, rule: ForbiddenRule) -> bool {
+    // Disposition records intentionally exercise the production identifier
+    // schema; all other hygiene rules still apply within the fixture tree.
+    rule == ForbiddenRule::NumberedPlanLabel && relative_path.starts_with(DISPOSITION_FIXTURE_ROOT)
 }
 
 const fn is_czech_specific_letter(character: char) -> bool {
@@ -381,6 +392,24 @@ mod tests {
             Some(ForbiddenRule::NumberedPlanLabel)
         );
         assert_eq!(forbidden_reference(b"bm25 arm64"), None);
+    }
+
+    #[test]
+    fn disposition_fixture_identifiers_are_a_narrow_exception() {
+        let fixture = [DISPOSITION_FIXTURE_ROOT, "records/", "M", "01.toml"].concat();
+        assert!(allows_disposition_fixture_identifier(
+            &fixture,
+            ForbiddenRule::NumberedPlanLabel
+        ));
+        let source_path = ["src/", "M", "01.rs"].concat();
+        assert!(!allows_disposition_fixture_identifier(
+            &source_path,
+            ForbiddenRule::NumberedPlanLabel
+        ));
+        assert!(!allows_disposition_fixture_identifier(
+            &fixture,
+            ForbiddenRule::PlanningTerm
+        ));
     }
 
     #[test]
