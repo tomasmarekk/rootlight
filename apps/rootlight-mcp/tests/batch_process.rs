@@ -6,6 +6,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    sync::{Mutex, MutexGuard, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -19,7 +20,8 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
 fn every_advertised_batch_subtool_reaches_its_production_adapter() {
-    let fixture = tempfile::tempdir().expect("isolated process fixture is available");
+    let _guard = process_test_guard();
+    let fixture = process_fixture();
     let repository_root = fixture.path().join("repository");
     fs::create_dir_all(repository_root.join("src")).expect("fixture source directory is created");
     fs::write(
@@ -141,7 +143,8 @@ fn every_advertised_batch_subtool_reaches_its_production_adapter() {
 
 #[test]
 fn positive_retrievals_match_standalone_semantics_in_production_processes() {
-    let fixture = tempfile::tempdir().expect("isolated process fixture is available");
+    let _guard = process_test_guard();
+    let fixture = process_fixture();
     let repository_root = fixture.path().join("repository");
     fs::create_dir_all(repository_root.join("src")).expect("fixture source directory is created");
     fs::write(
@@ -241,7 +244,8 @@ fn positive_retrievals_match_standalone_semantics_in_production_processes() {
 
 #[test]
 fn process_preflight_rejects_non_subtools_and_profile_hidden_members() {
-    let fixture = tempfile::tempdir().expect("isolated process fixture is available");
+    let _guard = process_test_guard();
+    let fixture = process_fixture();
     let mut developer = McpProcess::spawn(
         true,
         &fixture.path().join("state-developer"),
@@ -495,7 +499,8 @@ fn process_preflight_rejects_non_subtools_and_profile_hidden_members() {
 
 #[test]
 fn ordered_runtime_outcomes_match_the_public_process_golden() {
-    let fixture = tempfile::tempdir().expect("isolated process fixture is available");
+    let _guard = process_test_guard();
+    let fixture = process_fixture();
     let repository_root = fixture.path().join("repository");
     fs::create_dir_all(repository_root.join("src")).expect("fixture source directory is created");
     fs::write(
@@ -816,6 +821,37 @@ fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str)
         }
     }
     panic!("fixture indexing did not publish within the bounded wait");
+}
+
+fn process_test_guard() -> MutexGuard<'static, ()> {
+    static PROCESS_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    PROCESS_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn process_fixture() -> tempfile::TempDir {
+    #[cfg(target_os = "macos")]
+    let fixture = {
+        // Keep authenticated Unix endpoints within macOS `sun_path`.
+        tempfile::Builder::new()
+            .prefix("rl-batch-")
+            .tempdir_in("/private/tmp")
+            .expect("isolated process fixture is available")
+    };
+    #[cfg(not(target_os = "macos"))]
+    let fixture = tempfile::tempdir().expect("isolated process fixture is available");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
+            .expect("process fixture permissions are private");
+    }
+    fixture
 }
 
 fn assert_success(response: &Value, tool: &str) {
