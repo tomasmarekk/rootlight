@@ -12,6 +12,8 @@ rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
 rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
+protobuf.workspace = true
+scip.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

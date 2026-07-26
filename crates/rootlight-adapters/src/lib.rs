@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod project_context;
+mod scip_import;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,6 +28,10 @@ pub use project_context::{
     PhpProjectContext, ProjectContext, ProjectContextCoverage, ProjectContextCoverageStatus,
     ProjectContextError, ProjectContextEvidence, ProjectContextFile, ProjectContextLanguage,
     ProjectContextMetadata, ProjectContextSkip,
+};
+pub use scip_import::{
+    ScipImportError, ScipImportLimits, ScipImportOutcome, ScipImportReport, ScipImportRequest,
+    ScipImportSource, ScipResource, import_scip_index,
 };
 
 const CANCELLATION_CHECK_INTERVAL: usize = 64;
