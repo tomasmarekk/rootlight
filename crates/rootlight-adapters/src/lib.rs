@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+mod project_context;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use rootlight_adapter_sdk::{
@@ -17,6 +19,14 @@ use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageStatus, ExtensionSupport, FactDomain, IrLimits,
     IrValidationError, NormalizedIrDocument, ProducerIdentity, ProducerKind,
     canonicalize_ir_document,
+};
+
+pub use project_context::{
+    CxxProjectContext, DotnetProjectContext, JvmProjectContext, MAX_PROJECT_CONTEXT_BYTES,
+    MAX_PROJECT_CONTEXT_ITEMS, MAX_PROJECT_CONTEXT_STRING_BYTES, PROJECT_CONTEXT_SCHEMA_VERSION,
+    PhpProjectContext, ProjectContext, ProjectContextCoverage, ProjectContextCoverageStatus,
+    ProjectContextError, ProjectContextEvidence, ProjectContextFile, ProjectContextLanguage,
+    ProjectContextMetadata, ProjectContextSkip,
 };
 
 const CANCELLATION_CHECK_INTERVAL: usize = 64;
@@ -239,10 +249,54 @@ pub enum LanguageRegistryError {
 pub fn initial_semantic_registry() -> Result<LanguageAdapterRegistry, InitialRegistryError> {
     let profiles = [
         (
+            "c",
+            AnalysisTier::TierB,
+            LanguageSemantics::Static,
+            &[
+                "conditional_compilation",
+                "generated_code",
+                "macro_expansion",
+            ][..],
+        ),
+        (
+            "cpp",
+            AnalysisTier::TierB,
+            LanguageSemantics::Static,
+            &[
+                "conditional_compilation",
+                "generated_code",
+                "macro_expansion",
+                "overload_resolution",
+                "template_instantiation",
+            ][..],
+        ),
+        (
+            "csharp",
+            AnalysisTier::TierB,
+            LanguageSemantics::Static,
+            &[
+                "generated_code",
+                "reflection",
+                "runtime_registration",
+                "source_generators",
+            ][..],
+        ),
+        (
             "go",
             AnalysisTier::TierA,
             LanguageSemantics::Static,
             &["build_tags", "code_generation", "runtime_registration"][..],
+        ),
+        (
+            "java",
+            AnalysisTier::TierB,
+            LanguageSemantics::Static,
+            &[
+                "annotation_processing",
+                "generated_code",
+                "reflection",
+                "runtime_registration",
+            ][..],
         ),
         (
             "javascript",
@@ -252,6 +306,28 @@ pub fn initial_semantic_registry() -> Result<LanguageAdapterRegistry, InitialReg
                 "dynamic_imports",
                 "generated_code",
                 "prototype_mutation",
+                "reflection",
+                "runtime_registration",
+            ][..],
+        ),
+        (
+            "kotlin",
+            AnalysisTier::TierB,
+            LanguageSemantics::Static,
+            &[
+                "compiler_plugins",
+                "generated_code",
+                "reflection",
+                "runtime_registration",
+            ][..],
+        ),
+        (
+            "php",
+            AnalysisTier::TierB,
+            LanguageSemantics::Dynamic,
+            &[
+                "dynamic_calls",
+                "generated_code",
                 "reflection",
                 "runtime_registration",
             ][..],

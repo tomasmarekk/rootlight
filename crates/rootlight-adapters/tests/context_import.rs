@@ -110,12 +110,18 @@ fn shared_registry_keeps_language_profiles_bounded_and_independent() {
     assert_eq!(
         observed,
         vec![
+            ("c", AnalysisTier::TierB, LanguageSemantics::Static),
+            ("cpp", AnalysisTier::TierB, LanguageSemantics::Static),
+            ("csharp", AnalysisTier::TierB, LanguageSemantics::Static),
             ("go", AnalysisTier::TierA, LanguageSemantics::Static),
+            ("java", AnalysisTier::TierB, LanguageSemantics::Static),
             (
                 "javascript",
                 AnalysisTier::TierB,
                 LanguageSemantics::Dynamic,
             ),
+            ("kotlin", AnalysisTier::TierB, LanguageSemantics::Static),
+            ("php", AnalysisTier::TierB, LanguageSemantics::Dynamic),
             ("python", AnalysisTier::TierB, LanguageSemantics::Dynamic,),
             ("rust", AnalysisTier::TierA, LanguageSemantics::Static),
             ("typescript", AnalysisTier::TierA, LanguageSemantics::Static,),
@@ -137,8 +143,44 @@ fn shared_registry_keeps_language_profiles_bounded_and_independent() {
         uncertainties,
         vec![
             (
+                "c",
+                vec![
+                    "conditional_compilation",
+                    "generated_code",
+                    "macro_expansion"
+                ]
+            ),
+            (
+                "cpp",
+                vec![
+                    "conditional_compilation",
+                    "generated_code",
+                    "macro_expansion",
+                    "overload_resolution",
+                    "template_instantiation",
+                ]
+            ),
+            (
+                "csharp",
+                vec![
+                    "generated_code",
+                    "reflection",
+                    "runtime_registration",
+                    "source_generators",
+                ]
+            ),
+            (
                 "go",
                 vec!["build_tags", "code_generation", "runtime_registration"]
+            ),
+            (
+                "java",
+                vec![
+                    "annotation_processing",
+                    "generated_code",
+                    "reflection",
+                    "runtime_registration",
+                ]
             ),
             (
                 "javascript",
@@ -146,6 +188,24 @@ fn shared_registry_keeps_language_profiles_bounded_and_independent() {
                     "dynamic_imports",
                     "generated_code",
                     "prototype_mutation",
+                    "reflection",
+                    "runtime_registration",
+                ]
+            ),
+            (
+                "kotlin",
+                vec![
+                    "compiler_plugins",
+                    "generated_code",
+                    "reflection",
+                    "runtime_registration",
+                ]
+            ),
+            (
+                "php",
+                vec![
+                    "dynamic_calls",
+                    "generated_code",
                     "reflection",
                     "runtime_registration",
                 ]

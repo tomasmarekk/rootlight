@@ -1859,6 +1859,8 @@ dependencies = [
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-vfs",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

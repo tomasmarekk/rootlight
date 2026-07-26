@@ -101,6 +101,7 @@ name = "rootlight-adapters"
 allowed_internal_dependencies = [
   "rootlight-adapter-sdk",
   "rootlight-cancel",
+  "rootlight-ids",
   "rootlight-ir",
 ]
 allow_build_script = false
