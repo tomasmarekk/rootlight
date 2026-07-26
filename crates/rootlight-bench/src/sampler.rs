@@ -10,7 +10,6 @@ use crate::EvidenceValue;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
-    path::Path,
     process::Command,
     sync::{
         Arc,

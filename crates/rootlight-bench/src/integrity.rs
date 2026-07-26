@@ -1639,13 +1639,12 @@ fn validate_trajectory_counters(
             resource: "trajectory_counter",
         });
     }
-    if (require_nonzero_budget
-        && (counters.tool_calls == 0
-            || counters.elapsed_ns == 0
-            || counters.result_items == 0
-            || counters.source_bytes == 0
-            || counters.tokens == 0))
-        || (!require_nonzero_budget && counters.tool_calls == 0)
+    if counters.tool_calls == 0
+        || (require_nonzero_budget
+            && (counters.elapsed_ns == 0
+                || counters.result_items == 0
+                || counters.source_bytes == 0
+                || counters.tokens == 0))
     {
         return Err(BundleError::ArtifactInvariantViolation);
     }
