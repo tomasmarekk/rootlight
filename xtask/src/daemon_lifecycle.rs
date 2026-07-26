@@ -1062,7 +1062,7 @@ fn submit_quota_operation_until(
                 require_quota_window(deadline)?;
                 return Ok(status);
             }
-            Err(error) if is_retryable_control_failure(&error) => {
+            Err(error) if is_retryable_operation_failure(&error, operation) => {
                 require_quota_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
@@ -1108,7 +1108,7 @@ fn is_retryable_control_failure(error: &ClientError) -> bool {
     }
 }
 
-fn is_retryable_cancellation_failure(error: &ClientError, operation: OperationId) -> bool {
+fn is_retryable_operation_failure(error: &ClientError, operation: OperationId) -> bool {
     if is_retryable_control_failure(error) {
         return true;
     }
@@ -1182,7 +1182,7 @@ fn cancel_and_wait(client: &Client, operation: OperationId) -> Result<(), Lifecy
                 return Ok(());
             }
             Ok(_) => return Err(LifecycleError::UnexpectedCancellationState),
-            Err(error) if is_retryable_cancellation_failure(&error, operation) => {
+            Err(error) if is_retryable_operation_failure(&error, operation) => {
                 require_operation_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
@@ -2254,8 +2254,8 @@ mod tests {
     use rootlight_observability::CancellationAuditOutcome;
 
     use super::{
-        CancellationAuditEvidence, QuotaDaemonStderr, is_retryable_cancellation_failure,
-        is_retryable_control_failure, privacy_checked_quota_stderr,
+        CancellationAuditEvidence, QuotaDaemonStderr, is_retryable_control_failure,
+        is_retryable_operation_failure, privacy_checked_quota_stderr,
         sequences_are_strictly_increasing,
     };
 
@@ -2287,7 +2287,7 @@ mod tests {
     }
 
     #[test]
-    fn control_retry_accepts_only_bounded_timeout_failures() {
+    fn operation_retry_requires_timeout_or_correlated_pending_state() {
         assert!(is_retryable_control_failure(&ClientError::Ipc(
             IpcError::TimedOut
         )));
@@ -2315,11 +2315,11 @@ mod tests {
         assert!(!is_retryable_control_failure(&ClientError::Public(
             Box::new(admission_pending.clone())
         )));
-        assert!(is_retryable_cancellation_failure(
+        assert!(is_retryable_operation_failure(
             &ClientError::Public(Box::new(admission_pending.clone())),
             operation
         ));
-        assert!(!is_retryable_cancellation_failure(
+        assert!(!is_retryable_operation_failure(
             &ClientError::Public(Box::new(admission_pending)),
             OperationId::from_bytes([2; 16])
         ));
@@ -2329,8 +2329,12 @@ mod tests {
                 .build()
                 .expect("closed busy fixture builds");
         assert!(!is_retryable_control_failure(&ClientError::Public(
-            Box::new(semantic_busy)
+            Box::new(semantic_busy.clone())
         )));
+        assert!(!is_retryable_operation_failure(
+            &ClientError::Public(Box::new(semantic_busy)),
+            operation
+        ));
         assert!(!is_retryable_control_failure(&ClientError::Ipc(
             IpcError::Transport(io::Error::new(io::ErrorKind::ConnectionReset, "fixture"))
         )));
