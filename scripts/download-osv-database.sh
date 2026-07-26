@@ -3,8 +3,8 @@
 
 set -euo pipefail
 
-generation="1784055228546157"
-expected_sha256="d53bbd8a1a90fb78a803ad2877b7295dc175e6f121e5970e5646cd7a3f7e9d90"
+generation="1784973224262642"
+expected_sha256="262342741503d223cffd2f9473ba6299bc4bd41aa16071c4f5279caef3a43988"
 cache_root="${1:-artifacts/osv-db}"
 destination="$cache_root/osv-scanner/crates.io/all.zip"
 digest_path="$cache_root/osv-scanner/crates.io/all.zip.sha256"
