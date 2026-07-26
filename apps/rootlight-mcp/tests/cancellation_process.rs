@@ -110,7 +110,17 @@ fn cancellation_reaches_active_daemon_analyses_without_emitting_responses() {
 }
 
 fn private_tempdir() -> tempfile::TempDir {
+    #[cfg(target_os = "macos")]
+    let fixture = {
+        // Keep authenticated Unix endpoints within macOS `sun_path`.
+        tempfile::Builder::new()
+            .prefix("rl-cancel-")
+            .tempdir_in("/private/tmp")
+            .expect("isolated process fixture is available")
+    };
+    #[cfg(not(target_os = "macos"))]
     let fixture = tempfile::tempdir().expect("isolated process fixture is available");
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;

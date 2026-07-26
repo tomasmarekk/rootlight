@@ -1009,14 +1009,14 @@ jobs:
             --source-revision "$SOURCE_REVISION"
       - name: Produce workflow and blinded quality evidence
         env:
-          ROOTLIGHT_TRAJECTORY_REPORT: artifacts/acceptance-input/trajectory-evidence.json
-          ROOTLIGHT_ABLATION_REPORT: artifacts/acceptance-input/ablation-evidence.json
+          ROOTLIGHT_TRAJECTORY_REPORT: ${{ github.workspace }}/artifacts/acceptance-input/trajectory-evidence.json
+          ROOTLIGHT_ABLATION_REPORT: ${{ github.workspace }}/artifacts/acceptance-input/ablation-evidence.json
         run: |
           cargo test --locked --package rootlight-mcp --test trajectory_process \
             -- --ignored --exact preregistered_trajectories_run_through_daemon_and_mcp_processes
       - name: Produce performance and resource evidence
         env:
-          ROOTLIGHT_PERFORMANCE_EVIDENCE: artifacts/acceptance-input/performance-evidence.json
+          ROOTLIGHT_PERFORMANCE_EVIDENCE: ${{ github.workspace }}/artifacts/acceptance-input/performance-evidence.json
         run: |
           cargo test --locked --package rootlight-mcp --test performance_process \
             -- --ignored --exact real_daemon_mcp_produces_all_tool_performance_evidence
