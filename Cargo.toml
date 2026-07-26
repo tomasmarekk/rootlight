@@ -54,6 +54,7 @@ cap-std = { version = "3.4.5", default-features = false }
 cargo_metadata = { version = "0.23.1", default-features = false }
 data-encoding = { version = "2.9.0", default-features = false, features = ["std"] }
 directories = { version = "6.0.0", default-features = false }
+ed25519-compact = { version = "=2.3.1", default-features = false }
 getrandom = { version = "0.3.4", default-features = false }
 ignore = { version = "0.4.29", default-features = false }
 interprocess = { version = "=2.2.3", default-features = false, features = ["tokio"] }
@@ -69,6 +70,7 @@ protobuf = { version = "=3.7.2", default-features = false }
 rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled", "column_decltype", "hooks", "limits", "modern_sqlite"] }
 schemars = { version = "1.2.1", default-features = false, features = ["derive", "std"] }
 scip = { version = "=0.9.0" }
+semver = { version = "1.0.28", default-features = false, features = ["std"] }
 serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1.0.150", default-features = false, features = ["std"] }
 sha2 = { version = "0.11.0", default-features = false }

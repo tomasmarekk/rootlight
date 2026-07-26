@@ -8,12 +8,14 @@ license.workspace = true
 publish = false
 
 [dependencies]
+ed25519-compact.workspace = true
 rootlight-error = { path = "../rootlight-error" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ipc = { path = "../rootlight-ipc" }
 rootlight-observability = { path = "../rootlight-observability" }
 rootlight-protocol = { path = "../rootlight-protocol" }
 rootlight-runtime = { path = "../rootlight-runtime" }
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

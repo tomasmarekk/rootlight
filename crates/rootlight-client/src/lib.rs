@@ -6,6 +6,16 @@
 
 #![forbid(unsafe_code)]
 
+mod update;
+
+pub use update::{
+    ArtifactMetadata, DetachedUpdateSignature, MAX_UPDATE_ARTIFACT_BYTES,
+    MAX_UPDATE_METADATA_BYTES, ReproducibilityLevel, UPDATE_METADATA_SCHEMA_VERSION,
+    UpdateApplyError, UpdateApplyOutcome, UpdateCompatibility, UpdateContext, UpdateError,
+    UpdateInstallError, UpdateInstaller, UpdateMetadata, UpdatePlan, UpdatePublicKey, UpdateStep,
+    VerifiedUpdate, apply_verified_update, verify_update,
+};
+
 use std::{
     io::{self, Cursor, Read as _, Write as _},
     process::{Child, Command, Stdio},

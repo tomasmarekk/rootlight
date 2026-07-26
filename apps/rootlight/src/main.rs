@@ -15,10 +15,12 @@ use std::{
 };
 
 use rootlight_client::{
-    Client, ClientError, ConnectPolicy, DaemonLifecycle as ClientDaemonLifecycle, DiagnosticsQuick,
-    Health, HealthStatus as ClientHealthStatus, OperationKind, OperationStage, OperationStatus,
-    RecoveryClass, ResourcePressure as ClientResourcePressure,
-    SupportBundle as ClientSupportBundle,
+    Client, ClientError, ConnectPolicy, DaemonLifecycle as ClientDaemonLifecycle,
+    DetachedUpdateSignature, DiagnosticsQuick, Health, HealthStatus as ClientHealthStatus,
+    MAX_UPDATE_ARTIFACT_BYTES, MAX_UPDATE_METADATA_BYTES, OperationKind, OperationStage,
+    OperationStatus, RecoveryClass, ResourcePressure as ClientResourcePressure,
+    SupportBundle as ClientSupportBundle, UpdateContext, UpdatePublicKey, VerifiedUpdate,
+    verify_update,
 };
 use rootlight_daemon_core::{
     ControlRequest, ControlResponse, ControlService, DaemonLifecycle, DaemonLimits,
@@ -52,6 +54,8 @@ const CLI_CLIENT_INSTANCE_ID: [u8; 16] = *b"rootlight-cli-v1";
 const FIRST_SLICE_DEMO_CONTRACT_VERSION: &str = "1.0";
 const HARD_MAX_CLI_JSON_BYTES: usize = 4 * 1024 * 1024;
 const MAX_REPAIR_INVENTORY_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_UPDATE_CONTEXT_BYTES: u64 = 64 * 1024;
+const MAX_UPDATE_KEY_FILE_BYTES: u64 = 256;
 const FIRST_SLICE_SOURCE_BEFORE: &str = "pub fn answer() -> u32 {\n    42\n}\n";
 const FIRST_SLICE_SOURCE_AFTER: &str = "pub fn answer() -> u32 {\n    43\n}\n";
 
@@ -147,6 +151,9 @@ fn run() -> Result<CommandResult, CliError> {
     }
     if command == "repair" {
         return execute_repair(&runtime_paths()?, &trailing);
+    }
+    if command == "update" {
+        return execute_update(&trailing);
     }
 
     dispatch_after_command_preflight(standalone, &command, &trailing, |standalone| {
@@ -253,6 +260,97 @@ fn read_repair_inventory(path: &Path) -> Result<Vec<GenerationRepairCandidate>, 
 struct RepairInventory {
     schema_version: String,
     candidates: Vec<GenerationRepairCandidate>,
+}
+
+fn execute_update(arguments: &[std::ffi::OsString]) -> Result<CommandResult, CliError> {
+    let [
+        verify,
+        metadata_flag,
+        metadata_path,
+        signature_flag,
+        signature_path,
+        artifact_flag,
+        artifact_path,
+        public_key_flag,
+        public_key_path,
+        context_flag,
+        context_path,
+    ] = arguments
+    else {
+        return Err(CliError::Usage);
+    };
+    if verify != "verify"
+        || metadata_flag != "--metadata"
+        || signature_flag != "--signature"
+        || artifact_flag != "--artifact"
+        || public_key_flag != "--public-key"
+        || context_flag != "--context"
+    {
+        return Err(CliError::Usage);
+    }
+
+    let metadata = read_bounded_update_input(
+        Path::new(metadata_path),
+        u64::try_from(MAX_UPDATE_METADATA_BYTES).map_err(|_| CliError::UpdateInputTooLarge)?,
+    )?;
+    let signature = read_update_hex(Path::new(signature_path), MAX_UPDATE_KEY_FILE_BYTES)?;
+    let public_key = read_update_hex(Path::new(public_key_path), MAX_UPDATE_KEY_FILE_BYTES)?;
+    let context_bytes =
+        read_bounded_update_input(Path::new(context_path), MAX_UPDATE_CONTEXT_BYTES)?;
+    let context: UpdateContext =
+        serde_json::from_slice(&context_bytes).map_err(|_| CliError::InvalidUpdateInput)?;
+    let artifact_path = Path::new(artifact_path);
+    let artifact_metadata =
+        fs::symlink_metadata(artifact_path).map_err(CliError::UpdateInputRead)?;
+    if !artifact_metadata.file_type().is_file() {
+        return Err(CliError::InvalidUpdateInput);
+    }
+    if artifact_metadata.len() > MAX_UPDATE_ARTIFACT_BYTES {
+        return Err(CliError::UpdateInputTooLarge);
+    }
+    let mut artifact = fs::File::open(artifact_path).map_err(CliError::UpdateInputRead)?;
+    let verified = verify_update(
+        &metadata,
+        DetachedUpdateSignature::from_hex(&signature)?,
+        UpdatePublicKey::from_hex(&public_key)?,
+        &mut artifact,
+        &context,
+    )?;
+    Ok(CommandResult::UpdateVerified(verified))
+}
+
+fn read_update_hex(path: &Path, maximum: u64) -> Result<String, CliError> {
+    let bytes = read_bounded_update_input(path, maximum)?;
+    let value = std::str::from_utf8(&bytes).map_err(|_| CliError::InvalidUpdateInput)?;
+    let value = value.trim_end_matches(['\r', '\n']);
+    if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return Err(CliError::InvalidUpdateInput);
+    }
+    Ok(value.to_owned())
+}
+
+fn read_bounded_update_input(path: &Path, maximum: u64) -> Result<Vec<u8>, CliError> {
+    let metadata = fs::symlink_metadata(path).map_err(CliError::UpdateInputRead)?;
+    if !metadata.file_type().is_file() {
+        return Err(CliError::InvalidUpdateInput);
+    }
+    if metadata.len() > maximum {
+        return Err(CliError::UpdateInputTooLarge);
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(CliError::UpdateInputRead)?
+        .take(
+            maximum
+                .checked_add(1)
+                .ok_or(CliError::UpdateInputTooLarge)?,
+        )
+        .read_to_end(&mut bytes)
+        .map_err(CliError::UpdateInputRead)?;
+    if u64::try_from(bytes.len()).map_or(true, |length| length > maximum) {
+        return Err(CliError::UpdateInputTooLarge);
+    }
+    Ok(bytes)
 }
 
 fn dispatch_after_command_preflight<T>(
@@ -995,6 +1093,7 @@ enum CommandResult {
     DiagnosticsQuick(DiagnosticsQuick),
     SupportBundle(SupportBundleReceipt),
     RepairPlan(RepairPlan),
+    UpdateVerified(VerifiedUpdate),
     OperationSubmit(OperationStatus),
     OperationStatus(OperationStatus),
     OperationCancel {
@@ -1093,7 +1192,7 @@ impl ExitFamily {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: rootlight [--standalone] first-slice-demo|health [--json]|diagnostics quick|support-bundle --output <file>|repair --dry-run <verify-catalog|verify-generation-headers|full-scrub|select-last-good-generation|rebuild-lexical-index|rebuild-derived-overlays|rebuild-repository|reconstruct-catalog|purge-quarantine> [--inventory <file>]|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
+        "usage: rootlight [--standalone] first-slice-demo|health [--json]|diagnostics quick|support-bundle --output <file>|repair --dry-run <verify-catalog|verify-generation-headers|full-scrub|select-last-good-generation|rebuild-lexical-index|rebuild-derived-overlays|rebuild-repository|reconstruct-catalog|purge-quarantine> [--inventory <file>]|update verify --metadata <file> --signature <file> --artifact <file> --public-key <file> --context <file>|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
     )]
     Usage,
     #[error("daemon path overrides must provide both state and runtime directories")]
@@ -1118,6 +1217,14 @@ enum CliError {
     RepairInventoryRead(#[source] std::io::Error),
     #[error("repair planning failed")]
     Repair(#[from] rootlight_operations::RepairError),
+    #[error("update input is invalid")]
+    InvalidUpdateInput,
+    #[error("update input exceeds its byte limit")]
+    UpdateInputTooLarge,
+    #[error("update input could not be read")]
+    UpdateInputRead(#[source] std::io::Error),
+    #[error("update verification failed")]
+    Update(#[from] rootlight_client::UpdateError),
     #[error("secure random source is unavailable")]
     RandomUnavailable,
     #[error("daemon runtime setup failed")]
@@ -1162,6 +1269,8 @@ impl CliError {
             | Self::SupportOutputExists
             | Self::InvalidRepairInventory
             | Self::RepairInventoryTooLarge
+            | Self::InvalidUpdateInput
+            | Self::UpdateInputTooLarge
             | Self::InvalidOperation
             | Self::InvalidTimeout => ExitFamily::Usage,
             Self::MacosSupportOutputUnavailable => ExitFamily::Degraded,
@@ -1177,6 +1286,7 @@ impl CliError {
             | Self::Operations(rootlight_operations::OperationError::WindowsSecurityPolicy) => {
                 ExitFamily::SecurityPolicy
             }
+            Self::Update(_) => ExitFamily::SecurityPolicy,
             Self::Client(ClientError::DaemonUnavailable)
             | Self::Client(ClientError::DaemonExecutableMissing)
             | Self::Client(ClientError::DaemonLaunchFailed)
@@ -1762,6 +1872,59 @@ mod tests {
         assert!(matches!(
             execute_repair(&paths, &arguments),
             Err(CliError::InvalidRepairInventory)
+        ));
+    }
+
+    #[test]
+    fn update_verification_rejects_unsigned_inputs_without_runtime_dispatch() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let metadata = temporary.path().join("update.json");
+        let signature = temporary.path().join("update.sig");
+        let artifact = temporary.path().join("rootlight.zip");
+        let public_key = temporary.path().join("release.pub");
+        let context = temporary.path().join("context.json");
+        fs::write(&metadata, b"{}").expect("metadata writes");
+        fs::write(&signature, "0".repeat(128)).expect("signature writes");
+        fs::write(&artifact, b"untrusted artifact").expect("artifact writes");
+        fs::write(&public_key, "0".repeat(64)).expect("public key writes");
+        fs::write(
+            &context,
+            serde_json::to_vec(&serde_json::json!({
+                "updates_enabled": true,
+                "current_version": "1.0.0",
+                "last_good_version": "1.0.0",
+                "channel": "stable",
+                "platform": "windows",
+                "architecture": "x86_64",
+                "now_unix_seconds": 2000,
+                "catalog_schema": 3,
+                "protocol_major": 1,
+                "protocol_minor": 7,
+                "available_disk_bytes": 67108864,
+                "rollout_bucket": 0
+            }))
+            .expect("context serializes"),
+        )
+        .expect("context writes");
+        let arguments = [
+            std::ffi::OsString::from("verify"),
+            std::ffi::OsString::from("--metadata"),
+            metadata.into_os_string(),
+            std::ffi::OsString::from("--signature"),
+            signature.into_os_string(),
+            std::ffi::OsString::from("--artifact"),
+            artifact.into_os_string(),
+            std::ffi::OsString::from("--public-key"),
+            public_key.into_os_string(),
+            std::ffi::OsString::from("--context"),
+            context.into_os_string(),
+        ];
+
+        assert!(matches!(
+            execute_update(&arguments),
+            Err(CliError::Update(
+                rootlight_client::UpdateError::InvalidSignature
+            ))
         ));
     }
 }
