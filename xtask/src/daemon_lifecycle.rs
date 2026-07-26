@@ -1224,11 +1224,18 @@ fn is_cleanup_cancellation_conflict(error: &ClientError, operation: OperationId)
     let Some(error) = error.as_public_error() else {
         return false;
     };
+    // Core control IPC preserves the operation and inspection action, while the
+    // first-slice service boundary can omit both. The caller re-correlates
+    // either closed form by polling this exact operation to a terminal state.
+    let metadata_matches = match (error.operation(), error.next_actions()) {
+        (Some(candidate), [NextAction::InspectOperation]) => candidate == operation,
+        (None, []) => true,
+        _ => false,
+    };
     error.code() == ErrorCode::Conflict
         && !error.retryable()
         && error.message() == "operation state conflicts with request"
-        && error.operation() == Some(operation)
-        && error.next_actions().is_empty()
+        && metadata_matches
 }
 
 fn deterministic_client_identity(index: usize) -> Result<[u8; 16], LifecycleError> {
@@ -2469,8 +2476,9 @@ mod tests {
             "operation state conflicts with request",
         )
         .operation(operation)
+        .next_action(NextAction::InspectOperation)
         .build()
-        .expect("closed cleanup conflict fixture builds");
+        .expect("correlated cleanup conflict fixture builds");
         assert!(is_cleanup_cancellation_conflict(
             &ClientError::Public(Box::new(cleanup_conflict.clone())),
             operation
@@ -2478,6 +2486,16 @@ mod tests {
         assert!(!is_cleanup_cancellation_conflict(
             &ClientError::Public(Box::new(cleanup_conflict)),
             OperationId::from_bytes([2; 16])
+        ));
+        let boundary_cleanup_conflict = PublicError::builder(
+            ErrorCode::Conflict,
+            "operation state conflicts with request",
+        )
+        .build()
+        .expect("boundary cleanup conflict fixture builds");
+        assert!(is_cleanup_cancellation_conflict(
+            &ClientError::Public(Box::new(boundary_cleanup_conflict)),
+            operation
         ));
         let semantic_busy =
             PublicError::builder(ErrorCode::Busy, "daemon is not accepting operations")
