@@ -1,0 +1,43 @@
+# Immutable, repository-local benchmark inputs.
+# Pins bind the exact canonical tree hash, and acquisition copies only regular
+# files into a fresh cache without executing repository content.
+
+schema = "rootlight.benchmark-datasets/1"
+cache_schema = "rootlight.benchmark-cache/1"
+maximum_dataset_bytes = 536870912
+maximum_file_bytes = 16777216
+maximum_files = 4096
+maximum_depth = 32
+
+[[datasets]]
+id = "agent-budget-v1"
+source = "tests/fixtures/mcp/budget-runtime/repository"
+pin = "tree-sha256:edfaf7127fab8d69ad72ed405929be187d40a188fb25655c3980359863db790f"
+tree_sha256 = "edfaf7127fab8d69ad72ed405929be187d40a188fb25655c3980359863db790f"
+license = "AGPL-3.0-only"
+scope = "bounded_mcp_agent_workflow"
+generated_policy = "exclude_generated_files"
+acquisition = "workspace_copy"
+cache_path = "datasets/agent-budget-v1"
+
+[[datasets]]
+id = "language-structural-v1"
+source = "crates/rootlight-adapter-treesitter/tests/fixtures/structural"
+pin = "tree-sha256:7f7da4a035cf1c7455998c17b386ebf38588550c83205a6b65925638675b5f88"
+tree_sha256 = "7f7da4a035cf1c7455998c17b386ebf38588550c83205a6b65925638675b5f88"
+license = "AGPL-3.0-only"
+scope = "eleven_language_structural_parsing"
+generated_policy = "exclude_generated_files"
+acquisition = "workspace_copy"
+cache_path = "datasets/language-structural-v1"
+
+[[datasets]]
+id = "vertical-slice-v1"
+source = "tests/fixtures/vertical-slice/first-slice/v1"
+pin = "tree-sha256:6b2384b6365d675770296e9735fb442f151b18475c88afe4c7b8b5dabd50448f"
+tree_sha256 = "6b2384b6365d675770296e9735fb442f151b18475c88afe4c7b8b5dabd50448f"
+license = "AGPL-3.0-only"
+scope = "vertical_index_query_workflow"
+generated_policy = "exclude_generated_files"
+acquisition = "workspace_copy"
+cache_path = "datasets/vertical-slice-v1"

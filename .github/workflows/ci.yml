@@ -391,6 +391,42 @@ jobs:
           overwrite: false
           include-hidden-files: false
 
+  dataset-evidence:
+    name: benchmark datasets / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Acquire immutable datasets twice
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          cargo run --locked --quiet --package xtask -- dataset-check
+          cargo run --locked --quiet --package xtask -- dataset-cache \
+            --cache-dir target/dataset-cache-first \
+            --output artifacts/dataset-first.json \
+            --source-revision "$SOURCE_REVISION"
+          cargo run --locked --quiet --package xtask -- dataset-cache \
+            --cache-dir target/dataset-cache-second \
+            --output artifacts/dataset-second.json \
+            --source-revision "$SOURCE_REVISION"
+          diff --recursive target/dataset-cache-first target/dataset-cache-second
+          cmp artifacts/dataset-first.json artifacts/dataset-second.json
+      - name: Upload dataset acquisition evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-dataset-cache-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/dataset-first.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
   supply-chain:
     name: supply chain / linux
     runs-on: ubuntu-24.04
@@ -1250,7 +1286,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fast, msrv, current-stable, platform, vertical-slice, package-evidence, incident-evidence, supply-chain, offline, commit-hygiene, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, acceptance-evidence]
+    needs: [fast, msrv, current-stable, platform, vertical-slice, package-evidence, incident-evidence, dataset-evidence, supply-chain, offline, commit-hygiene, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, acceptance-evidence]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
