@@ -42,7 +42,6 @@ use rootlight_workspace::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tempfile::tempdir;
 
 /// Schema written by the language and workspace evidence generator.
 pub const LANGUAGE_WORKSPACE_EVIDENCE_SCHEMA: &str = "rootlight.language-workspace-evidence/2";
@@ -576,7 +575,7 @@ fn observe_language(
     semantic_policy_maximum_tier: &str,
     uncertainty_codes: Vec<String>,
 ) -> Result<ExpandedLanguageEvidence, LanguageWorkspaceEvidenceError> {
-    let temporary = tempdir().map_err(|_| LanguageWorkspaceEvidenceError::FilesystemObservation)?;
+    let temporary = observation_tempdir()?;
     fs::write(temporary.path().join(case.file_name), case.source)
         .map_err(|_| LanguageWorkspaceEvidenceError::FilesystemObservation)?;
     let relative = RelativePath::parse(Path::new(case.file_name))
@@ -795,7 +794,7 @@ fn workspace_evidence() -> Result<WorkspaceEvidence, LanguageWorkspaceEvidenceEr
 fn scale_sample(
     repositories: usize,
 ) -> Result<WorkspaceScaleSample, LanguageWorkspaceEvidenceError> {
-    let temporary = tempdir().map_err(|_| LanguageWorkspaceEvidenceError::FilesystemObservation)?;
+    let temporary = observation_tempdir()?;
     let provider = production_parser()?;
     let limits = observation_limits()?;
     let cancellation = Cancellation::new();
@@ -924,6 +923,22 @@ fn capture_source(
         None,
     );
     Ok((snapshot, source))
+}
+
+fn observation_tempdir() -> Result<tempfile::TempDir, LanguageWorkspaceEvidenceError> {
+    #[cfg(target_os = "macos")]
+    {
+        // The default macOS TMPDIR resolves through `/var`, which the VFS
+        // correctly rejects as a symlinked repository-root component.
+        tempfile::Builder::new()
+            .prefix("rl-language-")
+            .tempdir_in("/private/tmp")
+            .map_err(|_| LanguageWorkspaceEvidenceError::FilesystemObservation)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        tempfile::tempdir().map_err(|_| LanguageWorkspaceEvidenceError::FilesystemObservation)
+    }
 }
 
 fn physical_line_count(source: &[u8]) -> usize {

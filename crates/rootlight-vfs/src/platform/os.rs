@@ -848,10 +848,13 @@ fn metadata_identity(metadata: &Metadata) -> PlatformFileIdentity {
 fn harden_private_directory(directory: &mut Dir) -> Result<(), PlatformError> {
     use std::os::unix::fs::PermissionsExt as _;
 
+    // cap-std may retain an O_PATH descriptor on Linux. Updating "." keeps the
+    // mutation handle-relative without requiring fchmod on that descriptor.
     directory
-        .try_clone()
-        .map(Dir::into_std_file)
-        .and_then(|file| file.set_permissions(std::fs::Permissions::from_mode(0o700)))
+        .set_permissions(
+            Path::new("."),
+            cap_std::fs::Permissions::from_std(std::fs::Permissions::from_mode(0o700)),
+        )
         .map_err(|source| platform_io("protect_directory", source))?;
     #[cfg(target_os = "macos")]
     clear_macos_extended_acl(directory)?;
@@ -959,7 +962,24 @@ fn harden_private_file(file: &mut CapFile) -> Result<(), PlatformError> {
     validate_private_file_metadata(&metadata).map(|_| ())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+fn sync_dir_handle(directory: &Dir) -> Result<(), PlatformError> {
+    use rustix::fs::{Mode, OFlags};
+
+    // cap-std may retain an O_PATH descriptor on Linux. Reopening "." through
+    // that capability yields a directory descriptor that fsync can flush.
+    let sync_handle = rustix::fs::openat(
+        directory,
+        Path::new("."),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|source| platform_io("open_directory_for_sync", io::Error::from(source)))?;
+    rustix::fs::fsync(&sync_handle)
+        .map_err(|source| platform_io("sync_directory", io::Error::from(source)))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 fn sync_dir_handle(directory: &Dir) -> Result<(), PlatformError> {
     directory
         .try_clone()
@@ -970,41 +990,55 @@ fn sync_dir_handle(directory: &Dir) -> Result<(), PlatformError> {
 
 #[cfg(target_os = "macos")]
 const MACOS_ACL_TYPE_EXTENDED: u32 = 256;
+#[cfg(target_os = "macos")]
+const MACOS_FILESEC_ACL: std::ffi::c_int = 5;
+#[cfg(target_os = "macos")]
+const MACOS_FILESEC_REMOVE_ACL_ADDRESS: usize = 1;
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
-    fn acl_init(count: std::ffi::c_int) -> *mut c_void;
     fn acl_free(object: *mut c_void) -> std::ffi::c_int;
     fn acl_get_fd_np(fd: std::ffi::c_int, acl_type: u32) -> *mut c_void;
-    fn acl_set_fd_np(fd: std::ffi::c_int, acl: *mut c_void, acl_type: u32) -> std::ffi::c_int;
+    fn fchmodx_np(fd: std::ffi::c_int, file_security: *mut c_void) -> std::ffi::c_int;
+    fn filesec_free(file_security: *mut c_void);
+    fn filesec_init() -> *mut c_void;
+    fn filesec_set_property(
+        file_security: *mut c_void,
+        property: std::ffi::c_int,
+        value: *const c_void,
+    ) -> std::ffi::c_int;
 }
 
 #[cfg(target_os = "macos")]
 fn clear_macos_extended_acl<H: std::os::fd::AsRawFd>(handle: &H) -> Result<(), PlatformError> {
-    // SAFETY: `acl_init` creates a process-owned opaque ACL allocation. A
-    // non-null result is released exactly once below with `acl_free`.
-    let empty_acl = unsafe { acl_init(1) };
-    if empty_acl.is_null() {
-        return Err(platform_io("create_empty_acl", io::Error::last_os_error()));
-    }
-
-    // SAFETY: the descriptor is retained by `handle`, `empty_acl` is the live
-    // allocation returned above, and the ACL type is the Darwin extended ACL.
-    let set_result =
-        unsafe { acl_set_fd_np(handle.as_raw_fd(), empty_acl, MACOS_ACL_TYPE_EXTENDED) };
-    let set_error = (set_result != 0).then(io::Error::last_os_error);
-
-    // SAFETY: `empty_acl` is still the same live allocation returned by
-    // `acl_init`, and this is its single release.
-    let free_result = unsafe { acl_free(empty_acl) };
-    if let Some(source) = set_error {
-        return Err(platform_io("remove_extended_acl", source));
-    }
-    if free_result != 0 {
+    // SAFETY: `filesec_init` creates a process-owned opaque allocation. A
+    // non-null result is released exactly once below with `filesec_free`.
+    let file_security = unsafe { filesec_init() };
+    if file_security.is_null() {
         return Err(platform_io(
-            "release_extended_acl",
+            "create_file_security",
             io::Error::last_os_error(),
         ));
+    }
+
+    let remove_acl = std::ptr::without_provenance::<c_void>(MACOS_FILESEC_REMOVE_ACL_ADDRESS);
+    // SAFETY: `file_security` is the live allocation returned above. Darwin
+    // defines pointer value 1 as the non-dereferenced ACL-removal sentinel for
+    // `FILESEC_ACL`; the descriptor is retained by `handle` for `fchmodx_np`.
+    let removal_error = unsafe {
+        let set_result = filesec_set_property(file_security, MACOS_FILESEC_ACL, remove_acl);
+        let error = if set_result != 0 {
+            Some(io::Error::last_os_error())
+        } else if fchmodx_np(handle.as_raw_fd(), file_security) != 0 {
+            Some(io::Error::last_os_error())
+        } else {
+            None
+        };
+        filesec_free(file_security);
+        error
+    };
+    if let Some(source) = removal_error {
+        return Err(platform_io("remove_extended_acl", source));
     }
     verify_no_macos_extended_acl(handle)
 }

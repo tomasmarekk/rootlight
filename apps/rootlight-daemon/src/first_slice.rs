@@ -4220,6 +4220,21 @@ mod tests {
     use std::{fs, time::Duration};
     use tempfile::TempDir;
 
+    fn durable_test_tempdir() -> TempDir {
+        #[cfg(target_os = "macos")]
+        {
+            // Avoid the default `/var` alias rejected by repository-root VFS checks.
+            tempfile::Builder::new()
+                .prefix("rl-daemon-durable-")
+                .tempdir_in("/private/tmp")
+                .expect("durable daemon test directory is available")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            TempDir::new().expect("durable daemon test directory is available")
+        }
+    }
+
     #[test]
     fn first_slice_budget_exhaustion_keeps_its_public_error_code() {
         let error = service_error(FirstSliceError::BudgetExceeded);
@@ -4265,16 +4280,16 @@ mod tests {
         }
     }
 
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
     fn durable_marker_reconciles_the_journal_after_publication_crash() {
-        let storage = TempDir::new().expect("storage root exists");
+        let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("test runtime paths are valid");
         paths
             .prepare_owner()
             .expect("account-private runtime paths prepare");
-        let fixture = TempDir::new().expect("fixture root exists");
+        let fixture = durable_test_tempdir();
         fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
         fs::write(
             fixture.path().join("src/lib.rs"),
@@ -4423,16 +4438,16 @@ mod tests {
         actor.join().expect("journal actor joins");
     }
 
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
     fn durable_generation_survives_pruned_operation_history() {
-        let storage = TempDir::new().expect("storage root exists");
+        let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("test runtime paths are valid");
         paths
             .prepare_owner()
             .expect("account-private runtime paths prepare");
-        let fixture = TempDir::new().expect("fixture root exists");
+        let fixture = durable_test_tempdir();
         fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
         fs::write(
             fixture.path().join("src/lib.rs"),

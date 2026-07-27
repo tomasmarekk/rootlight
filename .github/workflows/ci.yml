@@ -333,13 +333,19 @@ jobs:
             cargo metadata --locked --no-deps --format-version 1 |
               python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rootlight"))'
           )"
-          CARGO_TARGET_DIR="$PWD/target/repro-first" cargo build --locked --release \
+          reproducible_rustflags=""
+          if [[ "$target" == *windows* ]]; then
+            reproducible_rustflags="-C link-arg=/Brepro -C link-arg=/PDBALTPATH:%_PDB%"
+          fi
+          RUSTFLAGS="$reproducible_rustflags" \
+            CARGO_TARGET_DIR="$PWD/target/repro-first" cargo build --locked --release \
             --package rootlight \
             --package rootlight-adapter-host \
             --package rootlight-daemon \
             --package rootlight-launcher \
             --package rootlight-mcp
-          CARGO_TARGET_DIR="$PWD/target/repro-second" cargo build --locked --release \
+          RUSTFLAGS="$reproducible_rustflags" \
+            CARGO_TARGET_DIR="$PWD/target/repro-second" cargo build --locked --release \
             --package rootlight \
             --package rootlight-adapter-host \
             --package rootlight-daemon \
@@ -432,14 +438,20 @@ jobs:
               python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rootlight"))'
           )"
           cargo run --locked --quiet --package xtask -- package-check
-          CARGO_TARGET_DIR="$PWD/target/repro-first" cargo build \
+          reproducible_rustflags=""
+          if [[ "$TARGET_TRIPLE" == *windows* ]]; then
+            reproducible_rustflags="-C link-arg=/Brepro -C link-arg=/PDBALTPATH:%_PDB%"
+          fi
+          RUSTFLAGS="$reproducible_rustflags" \
+            CARGO_TARGET_DIR="$PWD/target/repro-first" cargo build \
             --locked --release --target "$TARGET_TRIPLE" \
             --package rootlight \
             --package rootlight-adapter-host \
             --package rootlight-daemon \
             --package rootlight-launcher \
             --package rootlight-mcp
-          CARGO_TARGET_DIR="$PWD/target/repro-second" cargo build \
+          RUSTFLAGS="$reproducible_rustflags" \
+            CARGO_TARGET_DIR="$PWD/target/repro-second" cargo build \
             --locked --release --target "$TARGET_TRIPLE" \
             --package rootlight \
             --package rootlight-adapter-host \
@@ -928,7 +940,7 @@ jobs:
   supply-chain:
     name: supply chain / linux
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:

@@ -14,7 +14,7 @@
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
-      "blake3": "5325acc6d88afc2493e4042199adee3dd5b44815636824ac1d5c1085272c7175"
+      "blake3": "ef346c8c6fb94e0ca00ad205fc52d567d8a9d4707641bc52445558dd0582b2e4"
     },
     {
       "path": "crates/rootlight-config/src/lib.rs",

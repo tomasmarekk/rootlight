@@ -1072,6 +1072,21 @@ mod tests {
     use std::{fs, time::Duration};
     use tempfile::TempDir;
 
+    fn durable_test_tempdir() -> TempDir {
+        #[cfg(target_os = "macos")]
+        {
+            // Avoid the default `/var` alias rejected by repository-root VFS checks.
+            tempfile::Builder::new()
+                .prefix("rl-quarantine-")
+                .tempdir_in("/private/tmp")
+                .expect("durable test directory is available")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            TempDir::new().expect("durable test directory is available")
+        }
+    }
+
     #[test]
     fn activation_names_round_trip_exact_sequence_and_generation() {
         let repository = derive_repository(b"durable-activation").id();
@@ -1089,16 +1104,16 @@ mod tests {
         assert!(parse_activation_name("activation-42-invalid").is_none());
     }
 
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
     fn corrupt_newest_generation_is_quarantined_and_predecessor_becomes_active() {
-        let storage = TempDir::new().expect("storage root exists");
+        let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("runtime paths are valid");
         paths
             .prepare_owner()
             .expect("account-private runtime paths prepare");
-        let fixture = TempDir::new().expect("fixture root exists");
+        let fixture = durable_test_tempdir();
         fs::create_dir(fixture.path().join("src")).expect("source directory exists");
         let source = fixture.path().join("src/lib.rs");
         fs::write(&source, "pub fn quarantine_target() -> u32 { 1 }\n")

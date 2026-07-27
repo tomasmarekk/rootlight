@@ -1,15 +1,15 @@
 //! Production-configuration proof for the native private-file boundary.
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 use rootlight_cancel::Cancellation;
 use rootlight_catalog::{CATALOG_FILENAME, Catalog, ORACLE_FILENAME, OracleWriter};
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 use rootlight_catalog::{CatalogErrorKind, OracleReader};
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 use rootlight_storage::{GenerationBudget, GenerationContext};
 use tempfile::TempDir;
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[test]
 fn supported_path_entry_points_create_private_databases() {
     let control_directory = TempDir::new().expect("temporary control parent exists");
@@ -26,9 +26,9 @@ fn supported_path_entry_points_create_private_databases() {
     assert!(generation_directory.path().join(ORACLE_FILENAME).is_file());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn linux_control_catalog_rejects_a_final_symlink() {
+fn supported_unix_control_catalog_rejects_a_final_symlink() {
     use std::os::unix::fs::symlink;
 
     let target_directory = TempDir::new().expect("temporary target parent exists");
@@ -47,7 +47,30 @@ fn linux_control_catalog_rejects_a_final_symlink() {
     );
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_control_catalog_rejects_an_extended_acl() {
+    let directory = TempDir::new().expect("temporary catalog parent exists");
+    let catalog_path = directory.path().join(CATALOG_FILENAME);
+    drop(Catalog::open_in(directory.path()).expect("catalog initializes"));
+
+    let status = std::process::Command::new("/bin/chmod")
+        .arg("+a")
+        .arg("everyone allow read")
+        .arg(&catalog_path)
+        .status()
+        .expect("macOS chmod executes");
+    assert!(status.success(), "macOS test ACL is installed");
+
+    let error = Catalog::open_in(directory.path())
+        .expect_err("an extended ACL must fail before SQLite opens");
+    assert_eq!(
+        error.kind(),
+        rootlight_catalog::CatalogErrorKind::InsecureFile
+    );
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 #[test]
 fn unsupported_path_entry_points_fail_before_filesystem_mutation_or_inspection() {
     let directory = TempDir::new().expect("temporary parent exists");

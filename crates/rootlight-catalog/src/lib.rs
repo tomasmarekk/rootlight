@@ -4,7 +4,7 @@
 //! leases, and retention. This crate owns each private SQLite file and its
 //! normalized schema, defensive configuration, and integrity verification.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod codec;
 mod indexed_read;
@@ -110,9 +110,9 @@ impl Catalog {
     ///
     /// # Errors
     ///
-    /// Linux and Windows require an account-private caller-owned state root and
-    /// enforce a no-link, owner-only database file. Other targets fail closed
-    /// until their native ACL boundary is implemented.
+    /// Linux, macOS, and Windows require an account-private caller-owned state
+    /// root and enforce a no-link, owner-only database file. Other targets fail
+    /// closed until their native access-control boundary is implemented.
     pub fn open_in(state_root: &Path) -> Result<Self, CatalogError> {
         let path = state_root.join(CATALOG_FILENAME);
         let connection = schema::open_control(&path)?;
@@ -150,9 +150,10 @@ impl OracleWriter {
     ///
     /// # Errors
     ///
-    /// Linux and Windows require an account-private caller-owned generation
-    /// directory and enforce a no-link, owner-only database file. Other targets
-    /// fail closed until their native ACL boundary is implemented.
+    /// Linux, macOS, and Windows require an account-private caller-owned
+    /// generation directory and enforce a no-link, owner-only database file.
+    /// Other targets fail closed until their native access-control boundary is
+    /// implemented.
     pub fn create_in(generation_directory: &Path) -> Result<Self, CatalogError> {
         let path = generation_directory.join(ORACLE_FILENAME);
         let connection = schema::create_oracle(&path)?;
@@ -238,9 +239,10 @@ impl OracleReader {
     ///
     /// # Errors
     ///
-    /// Linux and Windows require an account-private caller-owned generation
-    /// directory and enforce a no-link, owner-only database file. Other targets
-    /// fail closed until their native ACL boundary is implemented.
+    /// Linux, macOS, and Windows require an account-private caller-owned
+    /// generation directory and enforce a no-link, owner-only database file.
+    /// Other targets fail closed until their native access-control boundary is
+    /// implemented.
     pub fn open_in(
         generation_directory: &Path,
         context: &GenerationContext<'_>,

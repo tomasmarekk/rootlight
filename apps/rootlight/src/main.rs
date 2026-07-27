@@ -1678,7 +1678,7 @@ mod tests {
 
     fn support_tempdir() -> SupportTempdir {
         let temporary = tempfile::tempdir().expect("temporary directory is available");
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
 

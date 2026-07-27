@@ -16,7 +16,7 @@ rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 rustix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
@@ -32,5 +32,17 @@ rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-vfs = { path = "../rootlight-vfs" }
 tempfile.workspace = true
 
-[lints]
-workspace = true
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+unreachable_pub = "warn"
+
+[lints.clippy]
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+dbg_macro = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"

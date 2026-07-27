@@ -9,5 +9,17 @@ source = "crates/rootlight-vfs/src/platform/os.rs"
 status = "enabled"
 owner = "@tomasmarekk"
 reason = "native handle APIs are required for private-at-birth creation, exact identity, atomic no-replace publication, and identity-bound cleanup"
-expected_source_tokens = 6
-expected_geiger_count = 7
+expected_source_tokens = 5
+expected_geiger_count = 17
+
+[[boundaries]]
+package = "rootlight-catalog"
+package_version = "0.1.0"
+manifest = "crates/rootlight-catalog/Cargo.toml"
+module = "rootlight_catalog::schema::macos_acl"
+source = "crates/rootlight-catalog/src/schema/macos_acl.rs"
+status = "enabled"
+owner = "@tomasmarekk"
+reason = "Darwin descriptor ACL APIs are required to remove inherited access and verify account-private SQLite files without a path race"
+expected_source_tokens = 5
+expected_geiger_count = 17

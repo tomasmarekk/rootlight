@@ -25,6 +25,8 @@ use crate::{
     SchemaCompatibility,
 };
 
+mod macos_acl;
+
 const CONTROL_APPLICATION_ID: u32 = 0x524c_4354;
 const ORACLE_APPLICATION_ID: u32 = 0x524c_4f52;
 const CONTROL_SCHEMA_VERSION: u32 = 2;
@@ -1182,7 +1184,7 @@ fn pragma_u32(connection: &Connection, pragma: &str) -> Result<u32, CatalogError
 }
 
 fn require_private_file_boundary() -> Result<(), CatalogError> {
-    if cfg!(any(target_os = "linux", windows)) {
+    if cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         Ok(())
     } else {
         Err(CatalogError::new(
@@ -1192,11 +1194,11 @@ fn require_private_file_boundary() -> Result<(), CatalogError> {
 }
 
 fn private_sqlite_flags(flags: OpenFlags) -> OpenFlags {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         flags | OpenFlags::SQLITE_OPEN_NOFOLLOW
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         flags
     }
@@ -1241,7 +1243,7 @@ fn create_private_file(path: &Path, exclusive: bool) -> Result<bool, CatalogErro
 }
 
 fn validate_private_file(path: &Path) -> Result<(), CatalogError> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let file = {
         use rustix::fs::{Mode, OFlags, open};
 
@@ -1262,7 +1264,7 @@ fn validate_private_file(path: &Path) -> Result<(), CatalogError> {
         })?;
         fs::File::from(descriptor)
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let file = {
         let mut options = OpenOptions::new();
         options.read(true);
@@ -1287,7 +1289,7 @@ fn validate_private_file(path: &Path) -> Result<(), CatalogError> {
     if !metadata.file_type().is_file() {
         return Err(CatalogError::new(CatalogErrorKind::InsecureFile));
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use std::os::unix::fs::MetadataExt as _;
         if metadata.uid() != rustix::process::geteuid().as_raw()
@@ -1297,6 +1299,8 @@ fn validate_private_file(path: &Path) -> Result<(), CatalogError> {
             return Err(CatalogError::new(CatalogErrorKind::InsecureFile));
         }
     }
+    #[cfg(target_os = "macos")]
+    macos_acl::verify_no_extended_acl(&file)?;
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt as _;
@@ -1311,12 +1315,15 @@ fn validate_private_file(path: &Path) -> Result<(), CatalogError> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn harden_private_file(file: &mut fs::File) -> Result<(), CatalogError> {
     use std::os::unix::fs::PermissionsExt as _;
 
     file.set_permissions(fs::Permissions::from_mode(0o600))
-        .map_err(|error| CatalogError::io(CatalogErrorKind::Storage, error))
+        .map_err(|error| CatalogError::io(CatalogErrorKind::Storage, error))?;
+    #[cfg(target_os = "macos")]
+    macos_acl::clear_extended_acl(file)?;
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1325,7 +1332,7 @@ fn harden_private_file(file: &mut fs::File) -> Result<(), CatalogError> {
     verify_private_windows_dacl(file)
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn harden_private_file(_file: &mut fs::File) -> Result<(), CatalogError> {
     Err(CatalogError::new(
         CatalogErrorKind::UnsupportedPrivateFileBoundary,
@@ -1477,7 +1484,7 @@ mod tests {
     #[test]
     fn private_file_boundary_matches_platform_support() {
         let result = require_private_file_boundary();
-        if cfg!(any(target_os = "linux", windows)) {
+        if cfg!(any(target_os = "linux", target_os = "macos", windows)) {
             result.expect("native private-file boundary is supported");
         } else {
             assert_eq!(
