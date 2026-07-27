@@ -806,6 +806,9 @@ fn sum_peak_rss(daemon: ProcessTreeMeasurement, mcp: ProcessTreeMeasurement) -> 
 fn observed(value: EvidenceValue<u64>) -> u64 {
     match value {
         EvidenceValue::Observed { value } => value,
+        EvidenceValue::Target { .. } => {
+            panic!("mandatory Linux resource measurement cannot be a target")
+        }
         EvidenceValue::Unavailable { reason_code } => {
             panic!("mandatory Linux resource measurement is unavailable: {reason_code}")
         }

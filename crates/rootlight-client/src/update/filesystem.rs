@@ -49,9 +49,12 @@ const INSTALL_MANIFEST_SCHEMA_V1: &str = "rootlight.install-ownership/1";
 const INSTALL_MANIFEST_SCHEMA_V2: &str = "rootlight.install-ownership/2";
 const PACKAGE_MANIFEST_SCHEMA: &str = "rootlight.package-manifest/1";
 const PACKAGE_MANIFEST_NAME: &str = "package-manifest.json";
+#[cfg(windows)]
 const DEFERRED_UNINSTALL_SCHEMA: &str = "rootlight.deferred-uninstall/1";
 const DEFERRED_UNINSTALL_FILE: &str = "deferred-uninstall.json";
+#[cfg(windows)]
 const DEFERRED_UNINSTALL_TOKEN_ENV: &str = "ROOTLIGHT_DEFERRED_UNINSTALL_TOKEN";
+#[cfg(windows)]
 const DEFERRED_UNINSTALL_LAUNCHER_PID_ENV: &str = "ROOTLIGHT_DEFERRED_UNINSTALL_LAUNCHER_PID";
 const VERSIONS_DIRECTORY: &str = "versions";
 const LAUNCHER_DIRECTORY: &str = "current/bin";
