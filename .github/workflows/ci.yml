@@ -1197,7 +1197,6 @@ jobs:
           SOURCE_REVISION: ${{ github.sha }}
         run: |
           identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/ci.yml@refs/heads/main"
-          signer="$GITHUB_REPOSITORY/.github/workflows/ci.yml"
           mkdir -p artifacts/release-verification
           for archive in artifacts/release-candidates/*.zip; do
             name="$(basename "$archive" .zip)"
@@ -1215,7 +1214,6 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --cert-identity "$identity" \
               --deny-self-hosted-runners \
-              --signer-workflow "$signer" \
               --source-digest "$SOURCE_REVISION" \
               --source-ref refs/heads/main \
               --format json \
@@ -1224,7 +1222,6 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --cert-identity "$identity" \
               --deny-self-hosted-runners \
-              --signer-workflow "$signer" \
               --source-digest "$SOURCE_REVISION" \
               --source-ref refs/heads/main \
               --predicate-type https://cyclonedx.org/bom \
