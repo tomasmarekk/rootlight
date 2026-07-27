@@ -959,7 +959,7 @@ fn context_evidence_options_use_the_reserved_json_envelope_for_daemon_tokens() {
 }
 
 #[test]
-fn relationship_evidence_divides_traversal_work_across_composite_calls() {
+fn relationship_evidence_reserves_an_additive_share_for_each_composite_stage() {
     let reservation = BudgetCharge {
         rows: 1_856,
         results: 40,
@@ -974,26 +974,98 @@ fn relationship_evidence_divides_traversal_work_across_composite_calls() {
         time_ms: 2_000,
     };
     let direct = context_evidence::relationship_evidence_options(reservation, 0)
-        .expect("direct symbol evidence has two transport calls");
+        .expect("direct symbol evidence reserves discovery and explanation shares");
     let with_three_lookups = context_evidence::relationship_evidence_options(reservation, 3)
         .expect("path evidence also budgets each anchor lookup");
+    let direct = direct.effective_budget().expect("direct budget").limits();
+    let with_three_lookups = with_three_lookups
+        .effective_budget()
+        .expect("lookup budget")
+        .limits();
 
-    assert_eq!(
-        direct
-            .effective_budget()
-            .expect("direct budget")
-            .limits()
-            .edges,
-        192
+    assert_eq!(direct.rows, 928);
+    assert_eq!(direct.results, 20);
+    assert_eq!(direct.source_bytes, 2_048);
+    assert_eq!(direct.edges, 192);
+    assert_eq!(direct.paths, Some(8));
+    assert_eq!(direct.json_bytes, 81_920);
+    assert_eq!(direct.estimated_tokens, 81_920);
+    assert_eq!(direct.memory_bytes, 81_920);
+    assert_eq!(direct.depth, Some(4));
+    assert_eq!(direct.duration, Duration::from_millis(2_000));
+
+    assert_eq!(with_three_lookups.rows, 371);
+    assert_eq!(with_three_lookups.results, 8);
+    assert_eq!(with_three_lookups.source_bytes, 819);
+    assert_eq!(with_three_lookups.edges, 76);
+    assert_eq!(with_three_lookups.paths, Some(3));
+    assert_eq!(with_three_lookups.json_bytes, 32_768);
+    assert_eq!(with_three_lookups.estimated_tokens, 32_768);
+    assert_eq!(with_three_lookups.memory_bytes, 32_768);
+    assert_eq!(with_three_lookups.depth, Some(4));
+    assert_eq!(with_three_lookups.duration, Duration::from_millis(2_000));
+}
+
+#[test]
+fn context_evidence_budget_share_reclaims_unused_additive_capacity() {
+    let reservation = BudgetCharge {
+        rows: 1_856,
+        results: 40,
+        tokens: 4_096,
+        actual_tokens: 0,
+        source_bytes: 4_096,
+        traversal_facts: 384,
+        depth: 4,
+        paths: 16,
+        json_bytes: 163_840,
+        memory_bytes: 163_840,
+        time_ms: 2_000,
+    };
+    let discovery_usage = BudgetCharge {
+        rows: 131,
+        results: 3,
+        tokens: 512,
+        actual_tokens: 0,
+        source_bytes: 0,
+        traversal_facts: 131,
+        depth: 2,
+        paths: 0,
+        json_bytes: 16_384,
+        memory_bytes: 8_192,
+        time_ms: 25,
+    };
+    let first = context_evidence::context_evidence_budget_share(reservation, discovery_usage, 3)
+        .expect("three explanations receive positive shares");
+    assert_eq!(first.traversal_facts, 84);
+    assert_eq!(first.depth, reservation.depth);
+    assert_eq!(first.time_ms, reservation.time_ms);
+
+    let after_underuse = BudgetCharge {
+        rows: discovery_usage.rows + 100,
+        results: discovery_usage.results + 1,
+        tokens: discovery_usage.tokens + 128,
+        actual_tokens: 0,
+        source_bytes: discovery_usage.source_bytes,
+        traversal_facts: discovery_usage.traversal_facts + 40,
+        depth: reservation.depth,
+        paths: discovery_usage.paths,
+        json_bytes: discovery_usage.json_bytes + 4_096,
+        memory_bytes: discovery_usage.memory_bytes + 2_048,
+        time_ms: 40,
+    };
+    let second = context_evidence::context_evidence_budget_share(reservation, after_underuse, 2)
+        .expect("later explanations reclaim unused capacity");
+    assert_eq!(second.traversal_facts, 106);
+    assert!(second.traversal_facts > first.traversal_facts);
+    assert!(after_underuse.rows + second.rows * 2 <= reservation.rows);
+    assert!(after_underuse.results + second.results * 2 <= reservation.results);
+    assert!(after_underuse.source_bytes + second.source_bytes * 2 <= reservation.source_bytes);
+    assert!(
+        after_underuse.traversal_facts + second.traversal_facts * 2 <= reservation.traversal_facts
     );
-    assert_eq!(
-        with_three_lookups
-            .effective_budget()
-            .expect("lookup budget")
-            .limits()
-            .edges,
-        76
-    );
+    assert!(after_underuse.paths + second.paths * 2 <= reservation.paths);
+    assert!(after_underuse.json_bytes + second.json_bytes * 2 <= reservation.json_bytes);
+    assert!(after_underuse.memory_bytes + second.memory_bytes * 2 <= reservation.memory_bytes);
 }
 
 #[test]

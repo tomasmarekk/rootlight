@@ -345,20 +345,14 @@ pub(super) fn relationship_evidence_options(
     reservation: BudgetCharge,
     anchor_lookups: usize,
 ) -> Result<client::RequestOptions, ContextEvidencePortError> {
-    // The same transport limit is reused by every bounded call in this
-    // composite provider, so divide additive traversal work across all calls.
+    // Anchor resolution and relationship discovery must leave one share for
+    // dynamically partitioned explanations of the discovered symbols.
     let maximum_calls = u64::try_from(anchor_lookups)
         .unwrap_or(u64::MAX)
         .saturating_add(2);
-    let traversal_facts = reservation
-        .traversal_facts
-        .checked_div(maximum_calls)
-        .filter(|value| *value > 0)
-        .ok_or_else(invalid_context_evidence_response)?;
-    context_evidence_options(BudgetCharge {
-        traversal_facts,
-        ..reservation
-    })
+    let share = context_evidence_budget_share(reservation, BudgetCharge::default(), maximum_calls)
+        .map_err(|_| invalid_context_evidence_response())?;
+    context_evidence_options(share)
 }
 
 pub(super) fn source_evidence_options(
@@ -475,6 +469,102 @@ fn add_context_evidence_usage(left: BudgetCharge, right: BudgetCharge) -> Budget
         memory_bytes: left.memory_bytes.saturating_add(right.memory_bytes),
         time_ms: left.time_ms.max(right.time_ms),
     }
+}
+
+pub(super) fn context_evidence_budget_share(
+    reservation: BudgetCharge,
+    usage: BudgetCharge,
+    remaining_calls: u64,
+) -> Result<BudgetCharge, ContractLimitingResourceKind> {
+    if remaining_calls == 0 {
+        return Err(ContractLimitingResourceKind::Results);
+    }
+    let share = BudgetCharge {
+        rows: reservation
+            .rows
+            .saturating_sub(usage.rows)
+            .checked_div(remaining_calls)
+            .unwrap_or(0),
+        results: reservation
+            .results
+            .saturating_sub(usage.results)
+            .checked_div(remaining_calls)
+            .unwrap_or(0),
+        tokens: reservation
+            .tokens
+            .saturating_sub(usage.tokens)
+            .checked_div(remaining_calls)
+            .unwrap_or(0),
+        actual_tokens: reservation
+            .actual_tokens
+            .saturating_sub(usage.actual_tokens)
+            .checked_div(remaining_calls)
+            .unwrap_or(0),
+        source_bytes: reservation
+            .source_bytes
+            .saturating_sub(usage.source_bytes)
+            .checked_div(remaining_calls)
+            .unwrap_or(0),
+        traversal_facts: reservation
+            .traversal_facts
+            .saturating_sub(usage.traversal_facts)
+            .checked_div(remaining_calls)
+            .unwrap_or(0),
+        depth: reservation.depth,
+        paths: reservation
+            .paths
+            .saturating_sub(usage.paths)
+            .checked_div(remaining_calls)
+            .unwrap_or(0),
+        json_bytes: reservation
+            .json_bytes
+            .saturating_sub(usage.json_bytes)
+            .checked_div(remaining_calls)
+            .unwrap_or(0),
+        memory_bytes: reservation
+            .memory_bytes
+            .saturating_sub(usage.memory_bytes)
+            .checked_div(remaining_calls)
+            .unwrap_or(0),
+        time_ms: reservation.time_ms,
+    };
+    for (value, resource) in [
+        (share.rows, ContractLimitingResourceKind::Rows),
+        (share.results, ContractLimitingResourceKind::Results),
+        (
+            share.source_bytes,
+            ContractLimitingResourceKind::SourceBytes,
+        ),
+        (share.traversal_facts, ContractLimitingResourceKind::Edges),
+        (share.paths, ContractLimitingResourceKind::Paths),
+        (
+            share.json_bytes,
+            ContractLimitingResourceKind::ResponseBytes,
+        ),
+        (
+            share.memory_bytes,
+            ContractLimitingResourceKind::MemoryBytes,
+        ),
+        (share.depth, ContractLimitingResourceKind::Depth),
+        (share.time_ms, ContractLimitingResourceKind::Deadline),
+    ] {
+        if value == 0 {
+            return Err(resource);
+        }
+    }
+    Ok(share)
+}
+
+fn context_evidence_budget_truncation(
+    resource: ContractLimitingResourceKind,
+) -> Result<ResultCompleteness, ContextEvidencePortError> {
+    ResultCompleteness::new(
+        CompletenessState::Truncated,
+        vec![ContractLimitingResource::kind(resource)],
+        ContinuationAvailability::Unavailable,
+        vec![ContinuationGuidance::SplitRequest],
+    )
+    .map_err(|_| invalid_context_evidence_response())
 }
 
 fn merge_context_evidence_completeness(
@@ -672,6 +762,60 @@ where
             .symbol_explain(
                 symbol_explain_request(invocation, vec![symbol]),
                 options,
+                cancellation.clone(),
+            )
+            .await
+            .map_err(map_context_evidence_client_error)?;
+        validate_context_evidence_identity(invocation, &response.result.context)?;
+        usage = add_context_evidence_usage(usage, context_evidence_usage(&response.result.context));
+        completeness = merge_context_evidence_completeness(
+            completeness,
+            context_evidence_completeness(response.result.execution_completeness.clone())?,
+        )?;
+        explanations.extend(response.result.symbols);
+    }
+    Ok(ContextSymbolExplanations {
+        symbols: explanations,
+        completeness,
+        usage,
+    })
+}
+
+async fn explain_context_symbols_within_budget<P>(
+    port: Arc<P>,
+    invocation: &EvidenceProviderInvocation,
+    symbols: Vec<SymbolId>,
+    prior_usage: BudgetCharge,
+    cancellation: RequestCancellation,
+) -> Result<ContextSymbolExplanations, ContextEvidencePortError>
+where
+    P: FirstSliceClientPort,
+{
+    let mut explanations = Vec::with_capacity(symbols.len());
+    let mut completeness = ResultCompleteness::complete();
+    let mut usage = BudgetCharge::default();
+    for (index, symbol) in symbols.iter().copied().enumerate() {
+        let calls_remaining =
+            u64::try_from(symbols.len().saturating_sub(index)).unwrap_or(u64::MAX);
+        let consumed = add_context_evidence_usage(prior_usage, usage);
+        let share = match context_evidence_budget_share(
+            invocation.reservation(),
+            consumed,
+            calls_remaining,
+        ) {
+            Ok(share) => share,
+            Err(resource) => {
+                completeness = merge_context_evidence_completeness(
+                    completeness,
+                    context_evidence_budget_truncation(resource)?,
+                )?;
+                break;
+            }
+        };
+        let response = port
+            .symbol_explain(
+                symbol_explain_request(invocation, vec![symbol]),
+                context_evidence_options(share)?,
                 cancellation.clone(),
             )
             .await
@@ -944,11 +1088,11 @@ where
     related_symbols.dedup();
     let mut task_relevance = std::collections::BTreeMap::new();
     if !related_symbols.is_empty() {
-        let explained = explain_context_symbols(
+        let explained = explain_context_symbols_within_budget(
             Arc::clone(&port),
             &invocation,
             related_symbols,
-            options,
+            usage,
             cancellation,
         )
         .await?;

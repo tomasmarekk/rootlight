@@ -4385,17 +4385,20 @@ mod tests {
         assert_eq!(reconciled.stage, OperationStage::Cleanup);
         assert_eq!(reconciled.recovery_class, RecoveryClass::NotApplicable);
 
-        let status = execute(
+        let status = execute_retrying_busy(
             &daemon,
-            FirstSliceIpcRequest::RepositoryOperationStatus(
-                daemon::RepositoryOperationStatusRequest {
-                    schema_version: Some(schema_version()),
-                    operation: Some(operation_to_wire(operation)),
-                    action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
-                    wait_ms: None,
-                    after_revision: None,
-                },
-            ),
+            || {
+                FirstSliceIpcRequest::RepositoryOperationStatus(
+                    daemon::RepositoryOperationStatusRequest {
+                        schema_version: Some(schema_version()),
+                        operation: Some(operation_to_wire(operation)),
+                        action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                        wait_ms: None,
+                        after_revision: None,
+                    },
+                )
+            },
+            "operation status becomes visible after terminalization",
         );
         let FirstSliceIpcResponse::RepositoryOperationStatus(status) = status else {
             panic!("repository operation status response expected");
@@ -5835,20 +5838,21 @@ mod tests {
         };
         let published = status.published_generation.is_some();
         if prove_lane_reusable {
-            let follow_up = execute_with_timeout(
+            let follow_up = execute_retrying_busy(
                 &daemon,
-                FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
-                    schema_version: Some(schema_version()),
-                    root: follow_up_root,
-                    operation: Some(operation_to_wire(OperationId::from_bytes(
-                        [operation_byte.wrapping_add(64); 16],
-                    ))),
-                    detached: true,
-                }),
+                || {
+                    FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+                        schema_version: Some(schema_version()),
+                        root: follow_up_root.clone(),
+                        operation: Some(operation_to_wire(OperationId::from_bytes(
+                            [operation_byte.wrapping_add(64); 16],
+                        ))),
+                        detached: true,
+                    })
+                },
+                "fresh index completes on the released work lane",
             );
-            let FirstSliceIpcResponse::RepositoryIndex(follow_up) =
-                follow_up.expect("fresh index completes on the released work lane")
-            else {
+            let FirstSliceIpcResponse::RepositoryIndex(follow_up) = follow_up else {
                 panic!("fresh repository index response expected");
             };
             assert!(
@@ -5976,14 +5980,17 @@ mod tests {
         assert!(first.published_generation.is_none());
         assert!(first.estimated_disk_bytes > 0);
         wait_for_terminal_operation(&journal, OperationId::from_bytes([1; 16]));
-        let retry = execute(
+        let retry = execute_retrying_busy(
             &daemon,
-            FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
-                schema_version: Some(schema_version()),
-                root: fixture.path().to_string_lossy().into_owned(),
-                operation: Some(operation_to_wire(OperationId::from_bytes([1; 16]))),
-                detached: true,
-            }),
+            || {
+                FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+                    schema_version: Some(schema_version()),
+                    root: fixture.path().to_string_lossy().into_owned(),
+                    operation: Some(operation_to_wire(OperationId::from_bytes([1; 16]))),
+                    detached: true,
+                })
+            },
+            "terminal operation retry becomes visible",
         );
         let FirstSliceIpcResponse::RepositoryIndex(retry) = retry else {
             panic!("retry index response expected");
@@ -6105,17 +6112,20 @@ mod tests {
         assert!(indexed.published_generation.is_none());
         let repository = indexed.repository.clone().expect("repository is returned");
         wait_for_terminal_operation(&journal, operation);
-        let status = execute(
+        let status = execute_retrying_busy(
             &daemon,
-            FirstSliceIpcRequest::RepositoryOperationStatus(
-                daemon::RepositoryOperationStatusRequest {
-                    schema_version: Some(schema_version()),
-                    operation: Some(operation_to_wire(operation)),
-                    action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
-                    wait_ms: None,
-                    after_revision: None,
-                },
-            ),
+            || {
+                FirstSliceIpcRequest::RepositoryOperationStatus(
+                    daemon::RepositoryOperationStatusRequest {
+                        schema_version: Some(schema_version()),
+                        operation: Some(operation_to_wire(operation)),
+                        action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                        wait_ms: None,
+                        after_revision: None,
+                    },
+                )
+            },
+            "committed operation status becomes visible",
         );
         let FirstSliceIpcResponse::RepositoryOperationStatus(status) = status else {
             panic!("committed operation status response expected");
@@ -6217,17 +6227,20 @@ mod tests {
         ));
         wait_for_terminal_operation(&journal, operation);
 
-        let status = execute(
+        let status = execute_retrying_busy(
             &daemon,
-            FirstSliceIpcRequest::RepositoryOperationStatus(
-                daemon::RepositoryOperationStatusRequest {
-                    schema_version: Some(schema_version()),
-                    operation: Some(operation_to_wire(operation)),
-                    action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
-                    wait_ms: None,
-                    after_revision: None,
-                },
-            ),
+            || {
+                FirstSliceIpcRequest::RepositoryOperationStatus(
+                    daemon::RepositoryOperationStatusRequest {
+                        schema_version: Some(schema_version()),
+                        operation: Some(operation_to_wire(operation)),
+                        action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                        wait_ms: None,
+                        after_revision: None,
+                    },
+                )
+            },
+            "failed operation status becomes visible",
         );
         let FirstSliceIpcResponse::RepositoryOperationStatus(status) = status else {
             panic!("failed-closed operation status response expected");
@@ -6238,27 +6251,18 @@ mod tests {
         assert_eq!(error.code, common::ErrorCode::IndexCorrupt as i32);
         assert!(status.published_generation.is_none());
 
-        let retry_deadline = Instant::now() + Duration::from_secs(5);
-        let follow_up = loop {
-            let response = execute_with_timeout(
-                &daemon,
+        let follow_up = execute_retrying_busy(
+            &daemon,
+            || {
                 FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
                     schema_version: Some(schema_version()),
                     root: retry_root.clone(),
                     operation: Some(operation_to_wire(OperationId::from_bytes([46; 16]))),
                     detached: true,
-                }),
-            );
-            match response {
-                Ok(response) => break response,
-                Err(error)
-                    if error.code() == ErrorCode::Busy && Instant::now() < retry_deadline =>
-                {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => panic!("reindex after failed publication succeeds: {error:?}"),
-            }
-        };
+                })
+            },
+            "reindex after failed publication succeeds",
+        );
         let FirstSliceIpcResponse::RepositoryIndex(follow_up) = follow_up else {
             panic!("reindex after failed publication succeeds");
         };
@@ -6596,6 +6600,28 @@ mod tests {
         runtime
             .block_on(daemon.dispatch(request, context))
             .expect("request succeeds")
+    }
+
+    fn execute_retrying_busy(
+        daemon: &FirstSliceDaemon,
+        mut request: impl FnMut() -> FirstSliceIpcRequest,
+        expectation: &str,
+    ) -> FirstSliceIpcResponse {
+        // A terminal journal record can become visible immediately before the
+        // public metadata lane is released. Only that documented transition is
+        // retryable; every other response remains an immediate test failure.
+        let retry_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match execute_with_timeout(daemon, request()) {
+                Ok(response) => return response,
+                Err(error)
+                    if error.code() == ErrorCode::Busy && Instant::now() < retry_deadline =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("{expectation}: {error:?}"),
+            }
+        }
     }
 
     fn execute_with_timeout(
