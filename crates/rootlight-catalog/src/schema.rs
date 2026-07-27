@@ -1467,6 +1467,7 @@ impl JournalMode {
 mod tests {
     use rootlight_cancel::Cancellation;
     use rootlight_storage::GenerationBudget;
+    #[cfg(not(target_os = "macos"))]
     use tempfile::TempDir;
 
     use super::*;
@@ -1498,6 +1499,12 @@ mod tests {
 
     #[test]
     fn oracle_integrity_scan_rejects_files_above_its_physical_budget() {
+        #[cfg(target_os = "macos")]
+        let directory = tempfile::Builder::new()
+            .prefix("rootlight-catalog-")
+            .tempdir_in("/private/tmp")
+            .expect("temporary oracle directory is created");
+        #[cfg(not(target_os = "macos"))]
         let directory = TempDir::new().expect("temporary oracle directory is created");
         let connection =
             create_oracle(&directory.path().join("bounded.sqlite3")).expect("oracle initializes");

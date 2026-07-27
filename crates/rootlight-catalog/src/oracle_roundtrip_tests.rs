@@ -46,7 +46,31 @@ use rootlight_storage::{
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot};
 use rusqlite::Connection;
-use tempfile::TempDir;
+use tempfile::TempDir as RawTempDir;
+
+struct TempDir(RawTempDir);
+
+impl TempDir {
+    fn new() -> std::io::Result<Self> {
+        #[cfg(target_os = "macos")]
+        {
+            // The default macOS temp path starts at the `/var` alias, which the
+            // no-follow SQLite boundary deliberately rejects.
+            tempfile::Builder::new()
+                .prefix("rootlight-catalog-")
+                .tempdir_in("/private/tmp")
+                .map(Self)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            RawTempDir::new().map(Self)
+        }
+    }
+
+    fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
 
 fn create_private_test_file(path: &Path) {
     let mut options = fs::OpenOptions::new();

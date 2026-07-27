@@ -7,7 +7,31 @@ use rootlight_catalog::{CATALOG_FILENAME, Catalog, ORACLE_FILENAME, OracleWriter
 use rootlight_catalog::{CatalogErrorKind, OracleReader};
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 use rootlight_storage::{GenerationBudget, GenerationContext};
-use tempfile::TempDir;
+use tempfile::TempDir as RawTempDir;
+
+struct TempDir(RawTempDir);
+
+impl TempDir {
+    fn new() -> std::io::Result<Self> {
+        #[cfg(target_os = "macos")]
+        {
+            // The default macOS temp path starts at the `/var` alias, which the
+            // no-follow SQLite boundary deliberately rejects.
+            tempfile::Builder::new()
+                .prefix("rootlight-catalog-")
+                .tempdir_in("/private/tmp")
+                .map(Self)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            RawTempDir::new().map(Self)
+        }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[test]

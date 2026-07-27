@@ -252,10 +252,7 @@ impl CandidateHealthCheck for ProcessCandidateHealthCheck {
             .join("bin")
             .join(platform_executable_name("rootlight"));
         validate_regular_payload(&binary).map_err(|_| CandidateHealthError)?;
-        let probe = tempfile::Builder::new()
-            .prefix("rootlight-update-catalog-probe-")
-            .tempdir()
-            .map_err(|_| CandidateHealthError)?;
+        let probe = candidate_health_tempdir()?;
         let cloned_state = probe.path().join("state");
         clone_candidate_state(catalog_state_root, &cloned_state)?;
         let mut child = Command::new(binary)
@@ -284,6 +281,23 @@ impl CandidateHealthCheck for ProcessCandidateHealthCheck {
             }
             std::thread::sleep(HEALTH_POLL_INTERVAL);
         }
+    }
+}
+
+fn candidate_health_tempdir() -> Result<tempfile::TempDir, CandidateHealthError> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("rootlight-update-catalog-probe-");
+    #[cfg(target_os = "macos")]
+    {
+        // The isolated clone is opened through the same no-follow boundary as
+        // live state, so avoid macOS's symlinked default `/var` temp path.
+        builder
+            .tempdir_in(Path::new("/private/tmp"))
+            .map_err(|_| CandidateHealthError)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder.tempdir().map_err(|_| CandidateHealthError)
     }
 }
 
@@ -2995,6 +3009,18 @@ mod tests {
         ) -> Result<(), CandidateHealthError> {
             Err(CandidateHealthError)
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn candidate_health_state_uses_a_canonical_temp_root() {
+        let probe = candidate_health_tempdir().expect("candidate probe directory is available");
+
+        assert!(probe.path().starts_with("/private/tmp"));
+        assert_eq!(
+            fs::canonicalize(probe.path()).expect("candidate probe path canonicalizes"),
+            probe.path()
+        );
     }
 
     #[test]

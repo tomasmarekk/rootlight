@@ -536,17 +536,15 @@ fn installed_root_for_executable(executable: &Path) -> Result<PathBuf, CliError>
 }
 
 fn execute_update_health_probe() -> Result<CommandResult, CliError> {
-    let temporary = tempfile::Builder::new()
-        .prefix("rootlight-update-health-")
-        .tempdir()
-        .map_err(CliError::HealthProbeIo)?;
+    let temporary = update_health_state_tempdir()?;
+    let runtime = update_health_runtime_tempdir()?;
     let state_dir = env::var_os(UPDATE_HEALTH_STATE_DIR_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|| temporary.path().join("state"));
     if !state_dir.is_absolute() {
         return Err(CliError::InvalidUpdateInput);
     }
-    let paths = RuntimePaths::new(state_dir, temporary.path().join("runtime"))?;
+    let paths = RuntimePaths::new(state_dir, runtime.path().to_path_buf())?;
     paths.prepare_owner()?;
     let mut identity = [0_u8; 16];
     getrandom::fill(&mut identity).map_err(|_| CliError::RandomUnavailable)?;
@@ -560,6 +558,47 @@ fn execute_update_health_probe() -> Result<CommandResult, CliError> {
     drop(client);
     owned.shutdown()?;
     Ok(CommandResult::UpdateHealthProbe { ready: true })
+}
+
+fn update_health_state_tempdir() -> Result<tempfile::TempDir, CliError> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("rootlight-update-health-");
+    #[cfg(target_os = "macos")]
+    {
+        // macOS exposes its default temporary directory through the `/var`
+        // alias, which the no-follow state boundary intentionally rejects.
+        builder
+            .tempdir_in(Path::new("/private/tmp"))
+            .map_err(CliError::HealthProbeIo)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder.tempdir().map_err(CliError::HealthProbeIo)
+    }
+}
+
+fn update_health_runtime_tempdir() -> Result<tempfile::TempDir, CliError> {
+    #[cfg(unix)]
+    {
+        // Unix-domain socket paths have a small platform limit. A package can
+        // run from an arbitrarily deep install or CI directory, so keep this
+        // isolated, owner-private runtime namespace under a bounded root.
+        #[cfg(target_os = "macos")]
+        let root = Path::new("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let root = Path::new("/tmp");
+        tempfile::Builder::new()
+            .prefix("rlh-")
+            .tempdir_in(root)
+            .map_err(CliError::HealthProbeIo)
+    }
+    #[cfg(windows)]
+    {
+        tempfile::Builder::new()
+            .prefix("rootlight-update-health-runtime-")
+            .tempdir()
+            .map_err(CliError::HealthProbeIo)
+    }
 }
 
 fn read_update_hex(path: &Path, maximum: u64) -> Result<String, CliError> {
@@ -1724,6 +1763,23 @@ mod tests {
         assert_eq!(json["contract_version"], "1.0");
         assert_eq!(json["result"]["type"], "operation_status");
         assert_eq!(json["result"]["data"]["kind"], "control_probe");
+    }
+
+    #[test]
+    fn update_health_runtime_supports_a_nonce_specific_endpoint() {
+        let state =
+            update_health_state_tempdir().expect("bounded health state directory is available");
+        let runtime =
+            update_health_runtime_tempdir().expect("bounded health runtime directory is available");
+        let paths = RuntimePaths::new(state.path().join("state"), runtime.path().to_path_buf())
+            .expect("health runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("health runtime paths become owner-private");
+
+        paths
+            .endpoint([7; 16])
+            .expect("health runtime endpoint is representable");
     }
 
     #[test]
