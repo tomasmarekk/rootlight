@@ -1011,6 +1011,12 @@ unsafe extern "C" {
 
 #[cfg(target_os = "macos")]
 fn clear_macos_extended_acl<H: std::os::fd::AsRawFd>(handle: &H) -> Result<(), PlatformError> {
+    match verify_no_macos_extended_acl(handle) {
+        Ok(()) => return Ok(()),
+        Err(PlatformError::SecurityPolicy) => {}
+        Err(error) => return Err(error),
+    }
+
     // SAFETY: `filesec_init` creates a process-owned opaque allocation. A
     // non-null result is released exactly once below with `filesec_free`.
     let file_security = unsafe { filesec_init() };

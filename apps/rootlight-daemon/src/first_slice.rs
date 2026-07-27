@@ -6238,15 +6238,27 @@ mod tests {
         assert_eq!(error.code, common::ErrorCode::IndexCorrupt as i32);
         assert!(status.published_generation.is_none());
 
-        let follow_up = execute(
-            &daemon,
-            FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
-                schema_version: Some(schema_version()),
-                root: retry_root,
-                operation: Some(operation_to_wire(OperationId::from_bytes([46; 16]))),
-                detached: true,
-            }),
-        );
+        let retry_deadline = Instant::now() + Duration::from_secs(5);
+        let follow_up = loop {
+            let response = execute_with_timeout(
+                &daemon,
+                FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+                    schema_version: Some(schema_version()),
+                    root: retry_root.clone(),
+                    operation: Some(operation_to_wire(OperationId::from_bytes([46; 16]))),
+                    detached: true,
+                }),
+            );
+            match response {
+                Ok(response) => break response,
+                Err(error)
+                    if error.code() == ErrorCode::Busy && Instant::now() < retry_deadline =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("reindex after failed publication succeeds: {error:?}"),
+            }
+        };
         let FirstSliceIpcResponse::RepositoryIndex(follow_up) = follow_up else {
             panic!("reindex after failed publication succeeds");
         };

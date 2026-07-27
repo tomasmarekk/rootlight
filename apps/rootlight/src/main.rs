@@ -547,6 +547,7 @@ fn execute_update_health_probe() -> Result<CommandResult, CliError> {
         return Err(CliError::InvalidUpdateInput);
     }
     let paths = RuntimePaths::new(state_dir, temporary.path().join("runtime"))?;
+    paths.prepare_owner()?;
     let mut identity = [0_u8; 16];
     getrandom::fill(&mut identity).map_err(|_| CliError::RandomUnavailable)?;
     let (client, owned) =

@@ -944,22 +944,17 @@ where
     related_symbols.dedup();
     let mut task_relevance = std::collections::BTreeMap::new();
     if !related_symbols.is_empty() {
-        let explained = port
-            .symbol_explain(
-                symbol_explain_request(&invocation, related_symbols),
-                options,
-                cancellation,
-            )
-            .await
-            .map_err(map_context_evidence_client_error)?;
-        validate_context_evidence_identity(&invocation, &explained.result.context)?;
-        usage =
-            add_context_evidence_usage(usage, context_evidence_usage(&explained.result.context));
-        completeness = merge_context_evidence_completeness(
-            completeness,
-            context_evidence_completeness(explained.result.execution_completeness.clone())?,
-        )?;
-        for explanation in explained.result.symbols {
+        let explained = explain_context_symbols(
+            Arc::clone(&port),
+            &invocation,
+            related_symbols,
+            options,
+            cancellation,
+        )
+        .await?;
+        usage = add_context_evidence_usage(usage, explained.usage);
+        completeness = merge_context_evidence_completeness(completeness, explained.completeness)?;
+        for explanation in explained.symbols {
             if task_mentions_identifier(invocation.task(), &explanation.display_name) {
                 task_relevance.insert(explanation.symbol, 1_000);
             }

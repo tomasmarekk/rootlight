@@ -34,6 +34,12 @@ unsafe extern "C" {
 
 #[cfg(target_os = "macos")]
 pub(super) fn clear_extended_acl<H: std::os::fd::AsRawFd>(handle: &H) -> Result<(), CatalogError> {
+    match verify_no_extended_acl(handle) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == CatalogErrorKind::InsecureFile => {}
+        Err(error) => return Err(error),
+    }
+
     // SAFETY: `filesec_init` creates a process-owned opaque allocation. A
     // non-null result is released exactly once below with `filesec_free`.
     let file_security = unsafe { filesec_init() };
@@ -91,4 +97,30 @@ pub(super) fn verify_no_extended_acl<H: std::os::fd::AsRawFd>(
 #[cfg(target_os = "macos")]
 fn storage_error() -> CatalogError {
     CatalogError::io(CatalogErrorKind::Storage, io::Error::last_os_error())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use std::{fs, process::Command};
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn clear_extended_acl_removes_an_attached_acl() {
+        let directory = TempDir::new().expect("temporary ACL directory is created");
+        let path = directory.path().join("private.sqlite3");
+        let file = fs::File::create(&path).expect("temporary ACL file is created");
+        let status = Command::new("/bin/chmod")
+            .arg("+a")
+            .arg("everyone allow read")
+            .arg(&path)
+            .status()
+            .expect("macOS chmod executes");
+        assert!(status.success(), "macOS test ACL is installed");
+
+        clear_extended_acl(&file).expect("attached ACL is removed");
+        verify_no_extended_acl(&file).expect("removed ACL remains absent");
+    }
 }
