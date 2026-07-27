@@ -2194,7 +2194,6 @@ dependencies = [
  "rootlight-ir",
  "rootlight-mcp-contract",
  "rootlight-runtime",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",

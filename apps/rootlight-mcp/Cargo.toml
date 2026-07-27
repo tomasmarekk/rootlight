@@ -31,7 +31,6 @@ unicode-normalization.workspace = true
 proptest.workspace = true
 rootlight-bench = { path = "../../crates/rootlight-bench" }
 rootlight-ipc = { path = "../../crates/rootlight-ipc" }
-rusqlite.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true

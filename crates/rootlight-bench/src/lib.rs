@@ -16,7 +16,6 @@ mod model;
 mod parser;
 mod performance;
 mod sampler;
-mod scalability;
 mod semantic_contract;
 mod token_accounting;
 mod trajectory;
@@ -88,15 +87,6 @@ pub use sampler::{LinuxProcTreeSample, LinuxProcTreeSampler, LinuxProcTreeSample
 pub use sampler::{
     ProcessTreeMeasurement, ProcessTreeSample, ProcessTreeSampler, UnavailableProcessTreeSample,
     UnavailableProcessTreeSampler,
-};
-pub use scalability::{
-    ColdIndexEvidence, DURABLE_CONTROL_OVERHEAD_BYTES, FreshnessEvidence,
-    MAX_DURABLE_NON_SOURCE_SIZE_PPM, MAX_SCALABILITY_EVIDENCE_BYTES, MAX_STRUCTURAL_INDEX_SIZE_PPM,
-    MAX_TEN_MILLION_LOC_RSS_BYTES, MIN_STRUCTURAL_LOC_PER_SECOND, SCALABILITY_EVIDENCE_SCHEMA,
-    ScalabilityClass, ScalabilityDisposition, ScalabilityEnvironment, ScalabilityEvidence,
-    ScalabilityEvidenceError, ScalabilityFixture, StructuralFactCounts, StructuralResourceEvidence,
-    StructuralThroughput, decode_scalability_evidence, encode_scalability_evidence,
-    scalability_distribution, scalability_evidence_sha256, structural_durable_total_bound,
 };
 pub use semantic_contract::{
     SEMANTIC_EVIDENCE_ENVELOPE_MAX_BYTES, SEMANTIC_EVIDENCE_ENVELOPE_SCHEMA,
