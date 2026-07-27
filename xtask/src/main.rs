@@ -1,4 +1,4 @@
-//! Repository tooling for Rootlight's architecture and evidence contracts.
+//! Repository tooling for Rootlight's architecture and validation contracts.
 //!
 //! `cargo xtask` keeps checks in Rust so the same behavior runs on every
 //! supported developer and CI platform.
@@ -12,24 +12,20 @@ mod contract_matrix;
 mod daemon_lifecycle;
 mod datasets;
 mod disposition;
-mod gate3;
-mod git_metadata;
 mod grammar_lock;
 mod ids;
 mod incident;
 mod license;
-mod markdown_links;
 mod mcp_compatibility;
 mod mcp_vertical;
 mod package;
 mod policy;
 mod protobuf_compatibility;
-mod release_readiness;
 mod response_profile_evidence;
 mod schemas;
-mod source_hygiene;
 mod token_accounting;
 mod tool_discovery;
+mod update_release;
 
 use std::{env, error::Error as _, process::ExitCode};
 
@@ -38,12 +34,10 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
-            if let XtaskError::DaemonLifecycle(lifecycle) = &error {
-                let mut source = lifecycle.source();
-                while let Some(cause) = source {
-                    eprintln!("caused by: {cause}");
-                    source = cause.source();
-                }
+            let mut source = error.source();
+            while let Some(cause) = source {
+                eprintln!("caused by: {cause}");
+                source = cause.source();
             }
             ExitCode::FAILURE
         }
@@ -98,28 +92,23 @@ fn run() -> Result<(), XtaskError> {
             let options = package::SmokeOptions::parse(&mut args)?;
             package::smoke(&options)?;
         }
+        Some("package-verify") => {
+            let options = package::VerifyOptions::parse(&mut args)?;
+            package::verify(&options)?;
+        }
+        Some("update-release-metadata") => {
+            let options = update_release::Options::parse(&mut args)?;
+            update_release::build(&options)?;
+        }
         Some("response-profile-check") => {
             let options = response_profile_evidence::Options::parse(&mut args)?;
             response_profile_evidence::check(&options)?;
         }
-        Some("release-readiness") => {
-            let options = release_readiness::Options::parse(&mut args)?;
-            release_readiness::evaluate(&options)?;
-        }
         Some("policy-check") | Some("policy") => policy::check()?,
         Some("license-check") => license::check()?,
-        Some("markdown-link-check") => {
-            let root = parse_required_root(&mut args)?;
-            markdown_links::check(&root)?;
-        }
-        Some("internal-id-check") => git_metadata_command(&mut args)?,
         Some("disposition-check") => {
             let root = parse_required_root(&mut args)?;
             disposition::check(&root)?;
-        }
-        Some("gate3") => {
-            let options = gate3::Options::parse(&mut args)?;
-            gate3::run(&options)?;
         }
         Some("capability-check") => {
             let options = capability::Options::parse(&mut args)?;
@@ -206,30 +195,10 @@ fn parse_required_root(
     }
 }
 
-fn git_metadata_command(args: &mut impl Iterator<Item = String>) -> Result<(), XtaskError> {
-    let flag = args.next().ok_or(XtaskError::MissingInternalIdMode)?;
-    let value = args.next().ok_or(XtaskError::MissingInternalIdValue)?;
-    match flag.as_str() {
-        "--commit-msg-file" => {
-            git_metadata::check_commit_msg_file(std::path::Path::new(&value))?;
-        }
-        "--range" => {
-            let workspace_root = std::env::current_dir().map_err(XtaskError::WorkingDir)?;
-            git_metadata::check_range(&workspace_root, &value)?;
-        }
-        "--event" => {
-            let workspace_root = std::env::current_dir().map_err(XtaskError::WorkingDir)?;
-            git_metadata::check_event(&workspace_root, std::path::Path::new(&value))?;
-        }
-        other => return Err(XtaskError::UnexpectedArgument(other.to_owned())),
-    }
-    Ok(())
-}
-
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|budget-conformance-check [--fixture-root PATH] [--refresh] [--runtime-report PATH --cancellation-report PATH --output PATH]|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|contract-matrix <--output PATH|--verify PATH> --source-revision REV|daemon-lifecycle-check --bin-dir PATH|dataset-check|dataset-cache --cache-dir PATH --output PATH --source-revision REV|gate3 <--input-dir PATH --bin-dir PATH --output PATH|--verify PATH> --source-revision REV|incident-tabletop --output PATH --source-revision REV|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|package-check|package-build --target TARGET --version VERSION --source-revision REV --bin-dir PATH --output-dir PATH|package-smoke --target TARGET|release-readiness --output PATH --source-revision REV [--require-ready]|response-profile-check [--fixture-root PATH] [--refresh]|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|budget-conformance-check [--fixture-root PATH] [--refresh] [--runtime-report PATH --cancellation-report PATH --output PATH]|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|contract-matrix <--output PATH|--verify PATH> --source-revision REV|daemon-lifecycle-check --bin-dir PATH|dataset-check|dataset-cache --cache-dir PATH --output PATH --source-revision REV|incident-tabletop --output PATH --source-revision REV|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|package-check|package-build --target TARGET --version VERSION --source-revision REV --bin-dir PATH --output-dir PATH|package-smoke --baseline-archive PATH --archive PATH --source-revision REV --output PATH|package-verify --archive PATH|update-release-metadata --archive PATH --sbom PATH --provenance PATH --license-bundle PATH --target TARGET --version VERSION --key-id ID [--private-seed PATH --public-key-hex HEX] --valid-from UNIX --expires UNIX --rollout-percentage PERCENT --catalog-schema VERSION --protocol-major VERSION --protocol-minor VERSION --output-dir PATH|response-profile-check [--fixture-root PATH] [--refresh]|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|license-check|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -242,12 +211,6 @@ enum XtaskError {
     MissingBinDir,
     #[error("--root requires a path")]
     MissingRoot,
-    #[error("internal-id-check requires --commit-msg-file, --range, or --event")]
-    MissingInternalIdMode,
-    #[error("internal-id-check flag requires a value")]
-    MissingInternalIdValue,
-    #[error("failed to determine the working directory")]
-    WorkingDir(#[source] std::io::Error),
     #[error(transparent)]
     Architecture(#[from] architecture::ArchitectureError),
     #[error(transparent)]
@@ -263,17 +226,11 @@ enum XtaskError {
     #[error(transparent)]
     Disposition(#[from] disposition::DispositionError),
     #[error(transparent)]
-    Gate3(#[from] gate3::Gate3Error),
-    #[error(transparent)]
-    GitMetadata(#[from] git_metadata::GitMetadataError),
-    #[error(transparent)]
     IdVectors(#[from] ids::IdVectorError),
     #[error(transparent)]
     Incident(#[from] incident::IncidentError),
     #[error(transparent)]
     License(#[from] license::LicenseError),
-    #[error(transparent)]
-    MarkdownLinks(#[from] markdown_links::MarkdownLinkError),
     #[error(transparent)]
     McpCompatibility(#[from] mcp_compatibility::CompatibilityError),
     #[error(transparent)]
@@ -281,11 +238,11 @@ enum XtaskError {
     #[error(transparent)]
     Package(#[from] package::PackageError),
     #[error(transparent)]
+    ReleaseUpdate(#[from] update_release::ReleaseUpdateError),
+    #[error(transparent)]
     Policy(#[from] policy::PolicyError),
     #[error(transparent)]
     ResponseProfile(#[from] response_profile_evidence::ResponseProfileEvidenceError),
-    #[error(transparent)]
-    ReleaseReadiness(#[from] release_readiness::ReadinessError),
     #[error(transparent)]
     ToolDiscovery(#[from] tool_discovery::DiscoveryError),
     #[error(transparent)]

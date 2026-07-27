@@ -21,6 +21,171 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const UNINDEXED_REPOSITORY: &str = "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v";
 
 #[test]
+fn repository_generation_and_source_queries_survive_daemon_restart() {
+    let fixture = process_support::private_process_tempdir("rl-restart-");
+    let repository_root = fixture.path().join("repository");
+    write_repository(&repository_root, 1);
+    let state_dir = fixture.path().join("state");
+    let runtime_dir = fixture.path().join("runtime");
+    let daemon_binary = build_default_daemon();
+
+    let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
+    daemon.wait_until_ready(&runtime_dir);
+    let mut mcp = McpProcess::spawn(&state_dir, &runtime_dir);
+    let indexed = index_repository(&mut mcp, "restart-index", &repository_root);
+    let repository_id = required_text(
+        &indexed,
+        &["result", "structuredContent", "data", "repository_id"],
+    );
+    let generation = required_text(
+        &indexed,
+        &[
+            "result",
+            "structuredContent",
+            "data",
+            "published_generation",
+        ],
+    );
+    let operation_id = required_text(
+        &indexed,
+        &["result", "structuredContent", "data", "operation_id"],
+    );
+    mcp.finish();
+    daemon.finish();
+
+    let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
+    daemon.wait_until_ready(&runtime_dir);
+    let mut mcp = McpProcess::spawn(&state_dir, &runtime_dir);
+
+    let listed = mcp.call("restart-list", "repo.list", json!({}));
+    assert_success(&listed, "repo.list");
+    assert_eq!(
+        listed["result"]["structuredContent"]["data"]["repositories"][0]["repository_id"],
+        repository_id
+    );
+    assert_eq!(
+        listed["result"]["structuredContent"]["data"]["repositories"][0]["active_generation"],
+        generation
+    );
+
+    let status = mcp.call(
+        "restart-status",
+        "repo.status",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "generation": generation,
+            "include_operations": true
+        }),
+    );
+    assert_success(&status, "repo.status");
+    assert_eq!(
+        status["result"]["structuredContent"]["data"]["resolved_generation"],
+        generation
+    );
+    assert_eq!(
+        status["result"]["structuredContent"]["data"]["operations"][0]["operation_id"],
+        operation_id
+    );
+    let operation = mcp.call(
+        "restart-operation",
+        "operation.status",
+        json!({"operation_id": operation_id}),
+    );
+    assert_success(&operation, "operation.status");
+    assert_eq!(
+        operation["result"]["structuredContent"]["data"]["published_generation"],
+        generation
+    );
+
+    let located = mcp.call(
+        "restart-locate",
+        "code.locate",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "generation": generation,
+            "query": "answer",
+            "search_modes": ["exact"],
+            "response_profile": "evidence"
+        }),
+    );
+    assert_success(&located, "code.locate");
+    let source_ref =
+        located["result"]["structuredContent"]["data"]["matches"][0]["source_ref"].clone();
+    assert!(source_ref.is_object(), "restored match has source evidence");
+    let source = mcp.call(
+        "restart-source",
+        "source.read",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "generation": generation,
+            "references": [{"source_ref": source_ref}],
+            "encoding": "utf8_lossless_when_valid"
+        }),
+    );
+    assert_success(&source, "source.read");
+    assert!(
+        source["result"]["structuredContent"]["data"]["chunks"][0]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("answer"))
+    );
+
+    write_repository(&repository_root, 2);
+    let successor = index_repository(&mut mcp, "restart-successor", &repository_root);
+    let successor_generation = required_text(
+        &successor,
+        &[
+            "result",
+            "structuredContent",
+            "data",
+            "published_generation",
+        ],
+    );
+    assert_eq!(
+        successor["result"]["structuredContent"]["data"]["repository_id"],
+        repository_id
+    );
+    assert_eq!(
+        successor["result"]["structuredContent"]["data"]["accepted_plan"]["parent_generation"],
+        generation
+    );
+    assert_ne!(successor_generation, generation);
+
+    mcp.finish();
+    daemon.finish();
+
+    let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
+    daemon.wait_until_ready(&runtime_dir);
+    let mut mcp = McpProcess::spawn(&state_dir, &runtime_dir);
+    let successor_status = mcp.call(
+        "successor-restart-status",
+        "repo.status",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "generation": "active",
+            "include_operations": true
+        }),
+    );
+    assert_success(&successor_status, "repo.status");
+    assert_eq!(
+        successor_status["result"]["structuredContent"]["data"]["resolved_generation"],
+        successor_generation
+    );
+    assert_eq!(
+        successor_status["result"]["structuredContent"]["generation"]["parent_generation"],
+        generation
+    );
+    assert_eq!(
+        successor_status["result"]["structuredContent"]["data"]["operations"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+
+    mcp.finish();
+    daemon.finish();
+}
+
+#[test]
 fn repository_lifecycle_is_generation_exact_and_preflights_unsupported_controls() {
     let fixture = process_support::private_process_tempdir("rl-repo-");
     let repository_root = fixture.path().join("repository");
@@ -395,7 +560,7 @@ impl DaemonProcess {
             .env("ROOTLIGHT_RUNTIME_DIR", runtime_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("isolated daemon process starts");
         let input = child.stdin.take().expect("daemon stdin is piped");
@@ -420,7 +585,16 @@ impl DaemonProcess {
                 .expect("daemon status is readable")
                 .is_some()
             {
-                panic!("daemon exited before publishing discovery");
+                let mut stderr = String::new();
+                self.child
+                    .as_mut()
+                    .expect("daemon child is retained")
+                    .stderr
+                    .take()
+                    .expect("daemon stderr is piped")
+                    .read_to_string(&mut stderr)
+                    .expect("daemon stderr is readable");
+                panic!("daemon exited before publishing discovery: {stderr}");
             }
             thread::sleep(Duration::from_millis(25));
         }

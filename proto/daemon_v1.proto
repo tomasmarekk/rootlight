@@ -348,6 +348,7 @@ message RepositoryIndexResponse {
   uint64 indexed_files = 9;
   uint64 entities = 10;
   uint64 elapsed_micros = 11;
+  uint64 estimated_disk_bytes = 12;
 }
 
 // Action accepted by the first-slice operation status request.
@@ -795,6 +796,7 @@ message FlowTraceRequest {
   optional uint32 max_depth = 8;
   optional uint32 max_paths = 9;
   optional uint32 min_confidence = 10;
+  bool cross_repository = 11;
 }
 
 // One evidence-bearing edge within a traced path.

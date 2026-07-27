@@ -9,7 +9,7 @@
             "budget": "none",
             "contractVersion": "1.0",
             "explainSupported": false,
-            "fallbackSummary": "bounded attached process-local structural generation creation",
+            "fallbackSummary": "bounded attached durable structural generation creation",
             "generation": "creates_generation",
             "inputShapeHash": "ca3b1fcc7237dea36cfb927003b8a97b39baeefe2ef08cd0c8f116d6381f160d",
             "lifecycle": {
@@ -17,26 +17,19 @@
                 "auto",
                 "structural"
               ],
-              "detached": false,
+              "detached": true,
               "internalOperationRetry": true,
               "maxWaitMs": 30000,
               "publicIdempotency": "none",
-              "publication": "atomic_on_terminal_success",
-              "restartBehavior": "reindex_required",
+              "publication": "durable_atomic_on_terminal_success",
+              "restartBehavior": "status_and_generation_recovered",
               "scope": "whole_repository",
-              "statePersistence": "process_local",
+              "statePersistence": "durable",
               "synchronousTerminal": true,
               "updateByRepositoryId": false,
               "version": "1.0"
             },
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "detached",
-                "status": "unsupported_stable_error",
-                "summary": "detached indexing is not served because operation handles are process-local",
-                "value": "true"
-              },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "repository_id",
@@ -99,7 +92,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use bounded attached process-local structural generation creation for one whole repository in auto or structural mode; the call terminates within 30 seconds, each public call creates a fresh operation, internal retries reuse an operation, success is atomically queryable, and restart requires reindexing.",
+        "description": "Use bounded attached durable structural generation creation for one whole repository in auto or structural mode; the call terminates within 30 seconds, each public call creates a fresh operation, internal retries reuse an operation, and successful operation and generation state remains atomically queryable after restart.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -1117,7 +1110,7 @@
             "budget": "unsupported",
             "contractVersion": "1.0",
             "explainSupported": true,
-            "fallbackSummary": "bounded process-local active or exact-generation status with coverage, operations, and freshness gates",
+            "fallbackSummary": "bounded durable active or exact-generation status with coverage, operations, and freshness conditions",
             "generation": "selects_generation",
             "inputShapeHash": "4c74ff8e95f44eb590430a3a603fbb6248a18e590fc6026989d99ed8d696796e",
             "limitations": [
@@ -1185,7 +1178,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded process-local active or exact-generation status with coverage, operations, and freshness gates; coverage is compact summary or language detail, operation projection is bounded, and custom budgets and expanded response profiles are unsupported.",
+        "description": "Use bounded durable active or exact-generation status with coverage, operations, and freshness conditions; coverage is compact summary or language detail, operation projection is bounded, and custom budgets and expanded response profiles are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -11619,13 +11612,6 @@
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "cross_repository",
-                "status": "unsupported_stable_error",
-                "summary": "cross-repository traversal is not served",
-                "value": "true"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "path_policy",
                 "status": "unsupported_stable_error",
                 "summary": "explicit path selection policy is not served"
@@ -21510,8 +21496,8 @@
                   "items": {
                     "type": "string"
                   },
-                  "maxItems": 65,
-                  "minItems": 3,
+                  "maxItems": 1000001,
+                  "minItems": 2,
                   "type": "array"
                 }
               },
@@ -22254,8 +22240,8 @@
                   "items": {
                     "type": "string"
                   },
-                  "maxItems": 1000,
-                  "minItems": 2,
+                  "maxItems": 1000000,
+                  "minItems": 1,
                   "type": "array"
                 },
                 "size": {

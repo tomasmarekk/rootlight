@@ -58,6 +58,10 @@ install_archive \
     fb8dbee9f182173e062a64a387b21a0badc6fab8b2abf9294973f012972bf6d8 \
     tar.xz \
     cargo-cyclonedx-x86_64-unknown-linux-gnu/cargo-cyclonedx
+install_binary \
+    cyclonedx \
+    https://github.com/CycloneDX/cyclonedx-cli/releases/download/v0.33.1/cyclonedx-linux-x64 \
+    bfc8b2538da86fe239bc53658bbb63c1c8c510a293c1e6891aa5bea5d3c58746
 install_archive \
     gitleaks \
     https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \

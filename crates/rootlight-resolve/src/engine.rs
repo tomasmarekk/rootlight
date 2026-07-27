@@ -28,6 +28,7 @@ const SAME_FILE_BONUS: u16 = 300;
 const IMPORTABLE_BONUS: u16 = 300;
 const ANCESTOR_SCOPE_BASE_BONUS: u16 = 340;
 const ANCESTOR_SCOPE_STEP_PENALTY: u16 = 20;
+const UNIQUE_SCOPED_CALL_BONUS: u16 = 400;
 const CROSS_FILE_PENALTY: u16 = 100;
 const REPOSITORY_SCOPE_PENALTY: u16 = 50;
 const MAX_SCOPE_DEPTH: usize = 64;
@@ -144,16 +145,42 @@ impl ResolutionEngine {
                 }
                 continue;
             }
-            let mut candidate = score_candidate(occurrence, entity, indexed.name_match, index)?;
-            if occurrence.role == OccurrenceRole::CallSite
-                && !self.policy.allows_exact_call(language)
-            {
+            let candidate = score_candidate(occurrence, entity, indexed.name_match, index)?;
+            candidates.push(candidate);
+        }
+
+        if candidates.len() == 1 && is_scoped_call_syntax(&occurrence.syntax_kind) {
+            let candidate = &mut candidates[0];
+            let entity = index
+                .entities
+                .get(&candidate.symbol)
+                .copied()
+                .ok_or(ResolutionError::InvalidScore)?;
+            let occurrence_tier = index
+                .provenance
+                .get(&occurrence.provenance)
+                .map(|provenance| provenance.tier)
+                .ok_or(ResolutionError::InvalidScore)?;
+            let tier_ceiling =
+                confidence_ceiling(occurrence_tier).min(confidence_ceiling(entity.tier));
+            candidate.score = confidence(
+                candidate
+                    .score
+                    .get()
+                    .saturating_add(UNIQUE_SCOPED_CALL_BONUS)
+                    .min(tier_ceiling),
+            )?;
+            candidate
+                .positive_signals
+                .push(ResolutionSignal::UniqueScopedCallCandidate);
+        }
+        if occurrence.role == OccurrenceRole::CallSite && !self.policy.allows_exact_call(language) {
+            for candidate in &mut candidates {
                 candidate.score = confidence(candidate.score.get().min(899))?;
                 candidate
                     .penalties
                     .push(ResolutionPenalty::DynamicCallUncalibrated);
             }
-            candidates.push(candidate);
         }
 
         candidates.sort_unstable_by(|left, right| {
@@ -358,6 +385,10 @@ fn score_candidate(
         positive_signals,
         penalties,
     })
+}
+
+fn is_scoped_call_syntax(syntax_kind: &str) -> bool {
+    syntax_kind.ends_with(".scoped_call")
 }
 
 impl NameMatch {

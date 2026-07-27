@@ -1,7 +1,8 @@
 //! Defensive SQLite ownership for Rootlight control and oracle databases.
 //!
-//! This slice limits control storage to schema identity; a future generation
-//! manager retains staging, publication, fsync, lease, and retention ownership.
+//! The caller owns private-directory creation, generation publication, fsync,
+//! leases, and retention. This crate owns each private SQLite file and its
+//! normalized schema, defensive configuration, and integrity verification.
 
 #![forbid(unsafe_code)]
 
@@ -109,10 +110,9 @@ impl Catalog {
     ///
     /// # Errors
     ///
-    /// Production builds return
-    /// [`CatalogErrorKind::UnsupportedPrivateFileBoundary`] before filesystem
-    /// mutation while the native private-file boundary is disabled. Test builds additionally
-    /// exercise the schema scaffold.
+    /// Linux and Windows require an account-private caller-owned state root and
+    /// enforce a no-link, owner-only database file. Other targets fail closed
+    /// until their native ACL boundary is implemented.
     pub fn open_in(state_root: &Path) -> Result<Self, CatalogError> {
         let path = state_root.join(CATALOG_FILENAME);
         let connection = schema::open_control(&path)?;
@@ -150,10 +150,9 @@ impl OracleWriter {
     ///
     /// # Errors
     ///
-    /// Production builds return
-    /// [`CatalogErrorKind::UnsupportedPrivateFileBoundary`] before filesystem
-    /// mutation while the native private-file boundary is disabled. Test builds additionally
-    /// exercise existing-file, SQLite, and schema failures.
+    /// Linux and Windows require an account-private caller-owned generation
+    /// directory and enforce a no-link, owner-only database file. Other targets
+    /// fail closed until their native ACL boundary is implemented.
     pub fn create_in(generation_directory: &Path) -> Result<Self, CatalogError> {
         let path = generation_directory.join(ORACLE_FILENAME);
         let connection = schema::create_oracle(&path)?;
@@ -239,15 +238,25 @@ impl OracleReader {
     ///
     /// # Errors
     ///
-    /// Production builds return
-    /// [`CatalogErrorKind::UnsupportedPrivateFileBoundary`] before filesystem
-    /// inspection while the native private-file boundary is disabled. Test builds additionally
-    /// exercise cancellation, compatibility, integrity, and metadata failures.
+    /// Linux and Windows require an account-private caller-owned generation
+    /// directory and enforce a no-link, owner-only database file. Other targets
+    /// fail closed until their native ACL boundary is implemented.
     pub fn open_in(
         generation_directory: &Path,
         context: &GenerationContext<'_>,
     ) -> Result<Self, CatalogError> {
         Self::open_path(generation_directory.join(ORACLE_FILENAME), context)
+    }
+
+    /// Returns SQLite bytes allocated by the sealed on-disk database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] for cancellation, an invalid private-file
+    /// boundary, or unavailable or inconsistent page accounting.
+    pub fn allocated_bytes(&self, context: &GenerationContext<'_>) -> Result<u64, CatalogError> {
+        let connection = schema::open_oracle_reader(&self.path, context)?;
+        schema::oracle_allocated_bytes(&connection)
     }
 
     fn open_path(path: PathBuf, context: &GenerationContext<'_>) -> Result<Self, CatalogError> {
@@ -747,7 +756,7 @@ pub enum CatalogErrorKind {
     UnsupportedCriticalExtensions,
     /// The generation does not carry an accepted, validated identity proof.
     IdentityProofRequired,
-    /// the native boundary has no enabled handle-bound SQLite file implementation.
+    /// The native boundary has no enabled private SQLite file implementation.
     UnsupportedPrivateFileBoundary,
     /// The database file is linked, non-regular, or not private.
     InsecureFile,

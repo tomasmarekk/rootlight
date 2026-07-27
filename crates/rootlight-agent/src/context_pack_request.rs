@@ -814,6 +814,7 @@ mod tests {
         changed.sections = Some(vec![
             ContextSection::Definitions,
             ContextSection::Source,
+            ContextSection::Callers,
             ContextSection::Tests,
         ]);
         digests.push(canonical(&changed).digest_bytes());
@@ -970,7 +971,7 @@ mod tests {
         let request = canonical(&input());
         assert_eq!(
             request.request_digest(),
-            "ctxreq1_ff1d38f951697a25f45bf734d4fa15b409471051e9286fafc18c442ef0207a55"
+            "ctxreq1_46580bf665df899a47c667ff2ebaa508810cb3bdded69a9d10d9cb0caf6d921c"
         );
         assert_eq!(
             request.pack_id().as_str(),

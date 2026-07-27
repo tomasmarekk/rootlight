@@ -86,15 +86,6 @@ pub(crate) fn exercise(options: &Options) -> Result<(), IncidentError> {
     Ok(())
 }
 
-pub(crate) fn verify_contract() -> Result<(), IncidentError> {
-    let workspace = workspace_root()?;
-    let tabletop_bytes = read_regular_bounded(&workspace.join(TABLETOP_PATH), MAX_TABLETOP_BYTES)?;
-    let runbook_bytes = read_regular_bounded(&workspace.join(RUNBOOK_PATH), MAX_RUNBOOK_BYTES)?;
-    let tabletop = parse_tabletop(&tabletop_bytes)?;
-    validate_tabletop(&tabletop)?;
-    validate_runbook(&runbook_bytes)
-}
-
 fn assign_once<T>(slot: &mut Option<T>, value: T, flag: &'static str) -> Result<(), IncidentError> {
     if slot.replace(value).is_some() {
         return Err(IncidentError::DuplicateFlag(flag));

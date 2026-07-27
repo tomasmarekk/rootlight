@@ -1,4 +1,4 @@
-; Reviewed Tier C/D structural evidence for the pinned Rust grammar.
+; Reviewed structural evidence for the pinned Rust grammar.
 ; Captures are a closed Rootlight contract, not public Tree-sitter identities.
 
 (source_file) @root
@@ -39,6 +39,11 @@
     (field_expression
       field: (field_identifier))
   ] @call)
+(call_expression
+  function: (scoped_identifier
+    name: (identifier) @scoped_call))
+((attribute_item) @test_attribute
+  (#match? @test_attribute "^#\\[\\s*test\\s*\\]$"))
 (identifier) @reference
 (type_identifier) @reference
 [(line_comment) (block_comment)] @comment

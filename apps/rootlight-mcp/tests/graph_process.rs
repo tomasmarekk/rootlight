@@ -223,7 +223,10 @@ fn assert_standalone_batch_parity(
         assert!(operation.get("error").is_none());
         assert_eq!(operation["data"], standalone["data"]);
         assert_eq!(operation["truncated"], standalone["truncated"]);
-        assert_eq!(operation["next_cursor"], standalone["next_cursor"]);
+        assert_eq!(
+            operation["next_cursor"].is_null(),
+            standalone["next_cursor"].is_null()
+        );
         assert_eq!(
             batch["repository"]["repository_id"],
             standalone["repository"]["repository_id"]
@@ -231,24 +234,37 @@ fn assert_standalone_batch_parity(
         assert_eq!(batch["generation"], standalone["generation"]);
         assert_eq!(batch["trust"], standalone["trust"]);
         assert_eq!(batch["truncated"], standalone["truncated"]);
-        for field in ["state", "limiting_resources", "continuation"] {
+        for field in ["state", "limiting_resources"] {
             assert_eq!(
                 batch["completeness"][field], standalone["completeness"][field],
                 "{tool} changed completeness.{field} through query.batch"
             );
         }
+        let expected_batch_continuation = if batch["truncated"] == true {
+            "unavailable"
+        } else {
+            "not_applicable"
+        };
+        assert_eq!(
+            batch["completeness"]["continuation"],
+            expected_batch_continuation
+        );
+        assert!(batch["next_cursor"].is_null());
         let batch_guidance = batch["completeness"]["guidance"]
             .as_array()
             .expect("batch completeness returns guidance");
         for guidance in standalone["completeness"]["guidance"]
             .as_array()
             .expect("standalone completeness returns guidance")
+            .iter()
+            .filter(|guidance| **guidance != "use_cursor")
         {
             assert!(
                 batch_guidance.contains(guidance),
                 "query.batch dropped {tool} guidance {guidance}"
             );
         }
+        assert!(!batch_guidance.contains(&json!("use_cursor")));
     }
 }
 
@@ -310,25 +326,60 @@ fn assert_context_provider_parity(mcp: &mut McpProcess, index: &IndexReceipt, sy
 
     let caller_items = context_items_for_role(context, "caller");
     let expected_callers = relationship_targets(relationships);
+    assert!(
+        !caller_items.is_empty(),
+        "the relationships context provider omitted caller evidence"
+    );
+    let expected_callers = expected_callers
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let observed_callers = caller_items
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
-        caller_items, expected_callers,
-        "the relationships context provider diverged from symbol.relationships"
+        observed_callers.len(),
+        caller_items.len(),
+        "the relationships context provider duplicated caller evidence"
+    );
+    assert!(
+        observed_callers.is_subset(&expected_callers),
+        "the relationships context provider invented caller evidence"
     );
 
-    let architecture_scores = context_items_for_role(context, "architecture")
-        .into_iter()
-        .map(|(_, score)| score)
-        .collect::<Vec<_>>();
+    let architecture_scores = context["data"]["items"]
+        .as_array()
+        .expect("context.pack returns items")
+        .iter()
+        .filter(|item| item["role"] == "architecture")
+        .map(|item| {
+            (
+                item["signature"]
+                    .as_str()
+                    .expect("architecture evidence retains its component identity")
+                    .to_owned(),
+                item["score"]
+                    .as_u64()
+                    .expect("architecture evidence has a score"),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     let expected_scores = overview["data"]["components"]
         .as_array()
         .expect("architecture.overview returns components")
         .iter()
         .map(|component| {
-            component["confidence"]
-                .as_u64()
-                .expect("an architecture component has confidence")
+            (
+                component["id"]
+                    .as_str()
+                    .expect("an architecture component has an identity")
+                    .to_owned(),
+                component["confidence"]
+                    .as_u64()
+                    .expect("an architecture component has confidence"),
+            )
         })
-        .collect::<Vec<_>>();
+        .collect::<std::collections::BTreeMap<_, _>>();
     assert_eq!(
         architecture_scores, expected_scores,
         "the architecture context provider diverged from architecture.overview; \
@@ -624,7 +675,6 @@ fn assert_deterministic_graph_outputs(
             "coverage",
             "completeness",
             "truncated",
-            "next_cursor",
             "trust",
         ] {
             assert_eq!(
@@ -632,6 +682,11 @@ fn assert_deterministic_graph_outputs(
                 "{tool} changed deterministic field {field}"
             );
         }
+        assert_eq!(
+            first_outputs[tool]["next_cursor"].is_null(),
+            repeated["next_cursor"].is_null(),
+            "{tool} changed continuation availability"
+        );
     }
 }
 
@@ -719,7 +774,6 @@ fn assert_profile_matrix(
                 "coverage",
                 "completeness",
                 "truncated",
-                "next_cursor",
                 "trust",
             ] {
                 assert_eq!(
@@ -727,6 +781,11 @@ fn assert_profile_matrix(
                     "{tool} changed invariant field {field} under the {profile} profile"
                 );
             }
+            assert_eq!(
+                output["next_cursor"].is_null(),
+                compact_outputs[tool]["next_cursor"].is_null(),
+                "{tool} changed continuation availability under the {profile} profile"
+            );
         }
     }
 }

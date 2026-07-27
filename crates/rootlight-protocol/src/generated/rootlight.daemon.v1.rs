@@ -631,6 +631,9 @@ pub struct RepositoryIndexResponse {
     #[prost(uint64, tag = "11")]
     #[allow(missing_docs)]
     pub elapsed_micros: u64,
+    #[prost(uint64, tag = "12")]
+    #[allow(missing_docs)]
+    pub estimated_disk_bytes: u64,
 }
 /// Reads or cooperatively cancels one operation created by repository indexing.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1454,6 +1457,9 @@ pub struct FlowTraceRequest {
     #[prost(uint32, optional, tag = "10")]
     #[allow(missing_docs)]
     pub min_confidence: ::core::option::Option<u32>,
+    #[prost(bool, tag = "11")]
+    #[allow(missing_docs)]
+    pub cross_repository: bool,
 }
 /// One evidence-bearing edge within a traced path.
 #[derive(Clone, PartialEq, ::prost::Message)]

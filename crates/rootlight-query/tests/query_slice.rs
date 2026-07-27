@@ -867,6 +867,24 @@ fn source_plan_reads_only_verified_generation_bound_bytes() {
             resource: QueryResource::SourceBytes,
         })
     ));
+    let bounded = query
+        .plan_source_read(
+            vec![selected.clone()],
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0),
+            SourceBudget::new()
+                .with_max_source_bytes(32)
+                .with_max_response_memory_bytes(1024),
+            QueryBudget::new()
+                .with_max_source_bytes(32)
+                .with_max_memory_bytes(1024),
+        )
+        .expect("source plan reserves chunk metadata inside the query memory ceiling");
+    let bounded_result = query
+        .execute_source_read(&bounded, &source, &Cancellation::new())
+        .expect("source query respects the shared memory ceiling");
+    assert_eq!(bounded_result.data.chunks[0].bytes, b"beta");
     let plan = query
         .plan_source_read(
             vec![selected],

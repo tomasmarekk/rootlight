@@ -2713,7 +2713,7 @@ mod tests {
             ],
             "review any new generated-rule exclusion"
         );
-        assert_eq!((declared, covered, exclusions.len()), (155, 153, 2));
+        assert_eq!((declared, covered, exclusions.len()), (153, 151, 2));
     }
 
     #[tokio::test]
@@ -2926,12 +2926,12 @@ mod tests {
                 "scope": "whole_repository",
                 "synchronousTerminal": true,
                 "maxWaitMs": 30_000,
-                "detached": false,
+                "detached": true,
                 "publicIdempotency": "none",
                 "internalOperationRetry": true,
-                "statePersistence": "process_local",
-                "restartBehavior": "reindex_required",
-                "publication": "atomic_on_terminal_success"
+                "statePersistence": "durable",
+                "restartBehavior": "status_and_generation_recovered",
+                "publication": "durable_atomic_on_terminal_success"
             })
         );
         assert_eq!(tools[2]["annotations"]["readOnlyHint"], true);
@@ -3090,16 +3090,16 @@ mod tests {
             observed,
             [
                 (
-                    229_886,
-                    "de23b7ee42ad4674700993d68ca96d5c7c0a6a868aee53c26604ca5ac8b2e369".to_owned(),
+                    229_884,
+                    "c6edf27e3f08839a2da400e086791e6fca3fc01522fa815aeee1575b8c631f12".to_owned(),
                 ),
                 (
-                    501_310,
-                    "6793660ea8a728fca0bbbecf874f06d3b63d6fa037d4bfb5122e44a3a163bc5a".to_owned(),
+                    501_146,
+                    "e29d3dc15bbe21a38da3b463ea9db192efed6e1216a5170d15b1bd61ad061aae".to_owned(),
                 ),
                 (
-                    677_857,
-                    "5bc45735daae754317baa47b49bf71a57512ccb26610387df5b8cff5cc3d8d93".to_owned(),
+                    677_524,
+                    "f33d12fd54b0e82ce3e0185135ad1dfd940e5282bdf21a6d2045a6d92d97c576".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"

@@ -180,7 +180,9 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
                 })
             });
         }
-        let candidate_count = self.definition_candidates;
+        let candidate_count = self
+            .definition_candidates
+            .min(usize::from(invocation.max_candidates()));
         let observations = (0..candidate_count)
             .map(|index| {
                 let mut hasher =
@@ -214,6 +216,7 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
                     observed_score: Some(
                         900_u16.saturating_sub(u16::try_from(index).unwrap_or(u16::MAX)),
                     ),
+                    observed_relevance: None,
                     estimated_tokens: self.candidate_tokens,
                     source_bytes: 0,
                     source_refs: vec![definition],
@@ -264,13 +267,14 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
             .filter_map(|material| material.signature.as_ref())
             .map(|signature| u64::try_from(signature.len()).unwrap_or(u64::MAX))
             .sum();
+        let result_count = u64::try_from(materials.len()).unwrap_or(u64::MAX);
         let output = ContextSourceOutput {
             repository: request.repository,
             generation: request.generation,
             materials,
             completeness: rootlight_mcp_contract::completeness::ResultCompleteness::complete(),
             usage: BudgetCharge {
-                results: u64::try_from(self.definition_candidates).unwrap_or(u64::MAX),
+                results: result_count,
                 source_bytes,
                 ..BudgetCharge::default()
             },
@@ -504,6 +508,12 @@ fn input(generation_id: GenerationId) -> ContextPackInput {
     }
 }
 
+fn continuation_input(generation_id: GenerationId) -> ContextPackInput {
+    let mut request = input(generation_id);
+    request.seeds.symbols = Some(vec![symbol(), SymbolId::from_bytes([6; 20])]);
+    request
+}
+
 #[derive(Debug)]
 struct ObjectiveFixture {
     task: &'static str,
@@ -519,12 +529,14 @@ fn objective_fixtures() -> Vec<ObjectiveFixture> {
             sections: vec![
                 ContextSection::Definitions,
                 ContextSection::Source,
+                ContextSection::Callers,
                 ContextSection::Tests,
             ],
             objective: ContextPackObjective::BugFix,
             required_roles: vec![
                 EvidenceRole::Definition,
                 EvidenceRole::Implementation,
+                EvidenceRole::Caller,
                 EvidenceRole::Test,
             ],
         },
@@ -691,11 +703,13 @@ async fn execution_propagates_policy_and_shapes_child_response() {
         Ok(identity(generation(2))),
         Some(Ok(child_response(generation(2), response_data))),
     ));
+    let mut request = input(generation(2));
+    request.token_budget = 20_000;
 
     let output = ContextPackService
         .execute(
             Arc::clone(&port),
-            input(generation(2)),
+            request,
             repository(),
             TestCancellation(false),
         )
@@ -831,7 +845,13 @@ async fn every_objective_resumes_across_authenticated_pages_without_duplicates()
         let mut request = input(generation(2));
         request.task = fixture.task.to_owned();
         request.sections = Some(fixture.sections);
-        request.token_budget = 2_500;
+        // Bug fixes require four independently materialized roles, while the
+        // other fixtures keep the tighter budget that forces continuation.
+        request.token_budget = if fixture.objective == ContextPackObjective::BugFix {
+            6_000
+        } else {
+            4_500
+        };
         let mut cursor = None;
         let mut page_count = 0_usize;
         let mut pack_id = None;
@@ -843,8 +863,8 @@ async fn every_objective_resumes_across_authenticated_pages_without_duplicates()
                 .execute(
                     Arc::new(FakePort::complete_paged(
                         Ok(identity(generation(2))),
-                        2,
-                        600,
+                        3,
+                        1_200,
                     )),
                     request.clone(),
                     repository(),
@@ -857,8 +877,10 @@ async fn every_objective_resumes_across_authenticated_pages_without_duplicates()
             assert_eq!(output.data.role_coverage.objective(), fixture.objective);
             assert!(
                 output.data.role_coverage.complete(),
-                "first cumulative page must cover every required role: {}",
-                fixture.task
+                "first cumulative page must cover every required role: {}; coverage={:?}, accounting={:?}",
+                fixture.task,
+                output.data.role_coverage,
+                output.data.token_accounting
             );
             if let Some(expected) = &pack_id {
                 assert_eq!(&output.data.pack_id, expected);
@@ -991,8 +1013,10 @@ async fn unsupported_providers_preserve_omission_reasons_and_section_accounting(
     request.sections = Some(vec![
         ContextSection::Definitions,
         ContextSection::Source,
+        ContextSection::Callers,
         ContextSection::Tests,
     ]);
+    request.token_budget = 20_000;
     let port = Arc::new(FakePort::new(Ok(identity(generation(2))), None));
 
     let output = ContextPackService
@@ -1005,7 +1029,11 @@ async fn unsupported_providers_preserve_omission_reasons_and_section_accounting(
         output.completeness.state,
         CompletenessState::UnsupportedPartial
     );
-    for role in [EvidenceRole::Implementation, EvidenceRole::Test] {
+    for role in [
+        EvidenceRole::Implementation,
+        EvidenceRole::Caller,
+        EvidenceRole::Test,
+    ] {
         let coverage = output
             .data
             .role_coverage
@@ -1065,7 +1093,7 @@ async fn unsupported_providers_preserve_omission_reasons_and_section_accounting(
 #[tokio::test]
 async fn authenticated_continuation_resumes_without_duplicates_and_preserves_partial_truth() {
     let token_budget = 1_550;
-    let mut request = input(generation(2));
+    let mut request = continuation_input(generation(2));
     request.token_budget = token_budget;
     let port = Arc::new(FakePort::paged(
         Ok(identity(generation(2))),
@@ -1095,7 +1123,7 @@ async fn authenticated_continuation_resumes_without_duplicates_and_preserves_par
         .filter_map(|item| item.symbol_id)
         .collect::<Vec<_>>();
 
-    let mut resume = input(generation(2));
+    let mut resume = continuation_input(generation(2));
     resume.token_budget = token_budget;
     resume.continuation = Some(cursor.clone());
     let resume_port = Arc::new(FakePort::paged(
@@ -1132,7 +1160,7 @@ async fn authenticated_continuation_resumes_without_duplicates_and_preserves_par
         900,
         vec![1],
     ));
-    let mut retired_resume = input(generation(2));
+    let mut retired_resume = continuation_input(generation(2));
     retired_resume.token_budget = token_budget;
     retired_resume.continuation = Some(cursor);
     assert_eq!(
@@ -1151,7 +1179,7 @@ async fn authenticated_continuation_resumes_without_duplicates_and_preserves_par
 #[tokio::test]
 async fn continuation_rejects_every_changed_canonical_binding_before_provider_work() {
     let token_budget = 1_550;
-    let mut request = input(generation(2));
+    let mut request = continuation_input(generation(2));
     request.token_budget = token_budget;
     let first = ContextPackService
         .execute(
@@ -1173,22 +1201,22 @@ async fn continuation_rejects_every_changed_canonical_binding_before_provider_wo
         .expect("first page exposes an authenticated cursor");
 
     let mut variants = Vec::new();
-    let mut changed = input(generation(2));
+    let mut changed = continuation_input(generation(2));
     changed.token_budget = token_budget;
     changed.task = "review request admission".to_owned();
     variants.push((changed, generation(2)));
 
-    let mut changed = input(generation(2));
+    let mut changed = continuation_input(generation(2));
     changed.token_budget = token_budget;
     changed.seeds.symbols = Some(vec![SymbolId::from_bytes([9; 20])]);
     variants.push((changed, generation(2)));
 
-    let mut changed = input(generation(2));
+    let mut changed = continuation_input(generation(2));
     changed.token_budget = token_budget;
     changed.source_policy = Some(SourcePolicy::Signatures);
     variants.push((changed, generation(2)));
 
-    let mut changed = input(generation(2));
+    let mut changed = continuation_input(generation(2));
     changed.token_budget = token_budget;
     changed.sections = Some(vec![
         ContextSection::Architecture,
@@ -1196,30 +1224,30 @@ async fn continuation_rejects_every_changed_canonical_binding_before_provider_wo
     ]);
     variants.push((changed, generation(2)));
 
-    let mut changed = input(generation(2));
+    let mut changed = continuation_input(generation(2));
     changed.token_budget = token_budget;
     changed.diversity = Some(Diversity::Tests);
     variants.push((changed, generation(2)));
 
-    let mut changed = input(generation(2));
+    let mut changed = continuation_input(generation(2));
     changed.token_budget = token_budget;
     changed.min_confidence = Some(701);
     variants.push((changed, generation(2)));
 
-    let mut changed = input(generation(2));
+    let mut changed = continuation_input(generation(2));
     changed.token_budget = token_budget;
     changed.response_profile = Some(ResponseProfile::Standard);
     variants.push((changed, generation(2)));
 
-    let mut increased_budget = input(generation(2));
+    let mut increased_budget = continuation_input(generation(2));
     increased_budget.token_budget = token_budget + 1;
     variants.push((increased_budget, generation(2)));
 
-    let mut decreased_budget = input(generation(2));
+    let mut decreased_budget = continuation_input(generation(2));
     decreased_budget.token_budget = token_budget - 1;
     variants.push((decreased_budget, generation(2)));
 
-    let mut changed_generation = input(generation(3));
+    let mut changed_generation = continuation_input(generation(3));
     changed_generation.token_budget = token_budget;
     variants.push((changed_generation, generation(3)));
 
@@ -1260,11 +1288,13 @@ async fn pinned_identity_path_skips_resolution_and_preserves_child_behavior() {
         Some(Ok(child_response(generation(2), response_data))),
     ));
     let deadline = Instant::now() + std::time::Duration::from_secs(1);
+    let mut request = input(generation(2));
+    request.token_budget = 20_000;
 
     let output = ContextPackService
         .execute_with_identity(
             Arc::clone(&port),
-            input(generation(2)),
+            request,
             repository(),
             identity(generation(2)),
             TestCancellation(false),

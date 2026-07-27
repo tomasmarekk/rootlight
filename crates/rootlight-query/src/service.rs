@@ -1914,8 +1914,22 @@ where
                 .checked_mul(mem::size_of::<SourceChunkResult>())
                 .ok_or(QueryError::MemoryUnavailable)?,
         )?;
+        // The query ceiling includes chunk metadata, so only the remaining
+        // memory can be delegated to source response materialization.
+        let response_memory = budget
+            .max_memory_bytes
+            .checked_sub(chunk_memory)
+            .filter(|remaining| *remaining > 0)
+            .ok_or(QueryError::PlanRejected {
+                resource: QueryResource::MemoryBytes,
+            })?
+            .min(checked_usize_to_u64(
+                source_budget.max_response_memory_bytes,
+            )?);
+        source_budget.max_response_memory_bytes =
+            usize::try_from(response_memory).map_err(|_| QueryError::MemoryUnavailable)?;
         let memory_bytes = checked_add(
-            checked_usize_to_u64(source_budget.max_response_memory_bytes)?,
+            response_memory,
             chunk_memory,
             QueryResource::MemoryBytes,
             u64::MAX,
@@ -6124,12 +6138,21 @@ fn build_dead_graph(
         .iter()
         .flat_map(|family| family.predicates().iter().copied())
         .collect();
-    // The first-slice oracle records direct calls as dispatch candidates; admit
-    // them explicitly so a served call graph can form when the oracle provides
-    // entity-to-entity dispatch relations.
+    // Ambiguous direct calls remain explicit dispatch candidates. They stay in
+    // the partial reachability model without being promoted to exact calls.
     allowed.insert(RelationPredicate::DispatchCandidate);
 
     let mut graph = DeadGraph::default();
+    for entity in &document.entities {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            graph.truncated = true;
+            break;
+        }
+        tracker.add_rows(1)?;
+        graph.nodes.insert(entity.id);
+    }
     for relation in &document.relations {
         control.check()?;
         if !tracker.can_add(QueryResource::Rows, 1) {

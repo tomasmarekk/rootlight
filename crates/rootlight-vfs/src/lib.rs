@@ -3,7 +3,7 @@
 //! Repository paths are untrusted. Callers can address only validated relative
 //! paths beneath an opened root, and every source read verifies file stability.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 use std::{
     ffi::{OsStr, OsString},
@@ -21,7 +21,9 @@ use cap_std::{
     fs::{Dir, File, Metadata, OpenOptions},
 };
 use rootlight_cancel::{Cancellation, CancellationReason};
-use rootlight_ids::{ContentHash, FileId, FileIdentity, RepositoryId, derive_file};
+use rootlight_ids::{
+    ContentHash, FileId, FileIdentity, RepositoryId, content_hash as hash_content, derive_file,
+};
 use rootlight_ir::{
     FilePathLocator, FilePathLocatorEncoding, MAX_FILE_PATH_LOCATOR_COMPONENTS, SourceRef,
 };
@@ -265,6 +267,56 @@ pub struct SourceSnapshot {
 }
 
 impl SourceSnapshot {
+    /// Reconstructs a snapshot from identity-verified persisted source bytes.
+    ///
+    /// The repository and canonical relative path must derive the expected file
+    /// identity, and the bytes must hash to the expected content identity. The
+    /// reconstructed metadata intentionally omits live filesystem change
+    /// tokens, so it can never authorize metadata-only hash reuse.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed size or persisted-identity mismatch.
+    pub fn from_persisted(
+        repository: RepositoryId,
+        path: RelativePath,
+        expected_file: FileId,
+        expected_content_hash: ContentHash,
+        content: Vec<u8>,
+    ) -> Result<Self, VfsError> {
+        let length = u64::try_from(content.len()).unwrap_or(u64::MAX);
+        if length > MAX_SNAPSHOT_BYTES {
+            return Err(VfsError::FileTooLarge {
+                maximum: MAX_SNAPSHOT_BYTES,
+            });
+        }
+        let file = derive_file(FileIdentity {
+            repository,
+            path_identity: path.identity_bytes(),
+        })
+        .id();
+        if file != expected_file {
+            return Err(VfsError::PersistedFileIdentityMismatch);
+        }
+        let content_hash = hash_content(&content);
+        if content_hash != expected_content_hash {
+            return Err(VfsError::PersistedContentHashMismatch);
+        }
+        Ok(Self {
+            file,
+            path,
+            content,
+            content_hash,
+            metadata: SnapshotMetadata {
+                length,
+                modified_ns: None,
+                change_token: None,
+                volume: None,
+                file_index: None,
+            },
+        })
+    }
+
     /// Returns the stable repository-scoped file identity.
     #[must_use]
     pub const fn file(&self) -> FileId {
@@ -1144,6 +1196,12 @@ pub enum VfsError {
     /// The source reference span lies outside the captured bytes.
     #[error("source reference span is outside captured content")]
     InvalidSourceSpan,
+    /// Persisted path and repository inputs did not derive the expected file.
+    #[error("persisted source file identity does not match its canonical path")]
+    PersistedFileIdentityMismatch,
+    /// Persisted bytes did not match their recorded content hash.
+    #[error("persisted source content hash does not match its recorded identity")]
+    PersistedContentHashMismatch,
 }
 
 #[cfg(test)]
@@ -1185,6 +1243,48 @@ mod tests {
                 .as_str(),
             "src/lib.rs"
         );
+    }
+
+    #[test]
+    fn persisted_snapshots_reverify_file_and_content_identity() {
+        let repository = derive_repository(b"persisted-snapshot").id();
+        let path = RelativePath::parse(Path::new("src/lib.rs")).expect("fixture path is valid");
+        let file = derive_file(FileIdentity {
+            repository,
+            path_identity: path.identity_bytes(),
+        })
+        .id();
+        let content = b"pub fn restored() {}\n".to_vec();
+        let expected_hash = hash_content(&content);
+
+        let restored =
+            SourceSnapshot::from_persisted(repository, path.clone(), file, expected_hash, content)
+                .expect("matching persisted identity restores");
+        assert_eq!(restored.file(), file);
+        assert_eq!(restored.content_hash(), expected_hash);
+        assert!(!restored.metadata().supports_hash_reuse());
+
+        let other_repository = derive_repository(b"other-repository").id();
+        assert!(matches!(
+            SourceSnapshot::from_persisted(
+                other_repository,
+                path.clone(),
+                file,
+                expected_hash,
+                Vec::new(),
+            ),
+            Err(VfsError::PersistedFileIdentityMismatch)
+        ));
+        assert!(matches!(
+            SourceSnapshot::from_persisted(
+                repository,
+                path,
+                file,
+                expected_hash,
+                b"tampered".to_vec(),
+            ),
+            Err(VfsError::PersistedContentHashMismatch)
+        ));
     }
 
     #[test]

@@ -2131,6 +2131,40 @@ mod tests {
     }
 
     #[test]
+    fn architecture_cycles_schema_accepts_bounded_large_and_self_cycles() {
+        let schema: Value =
+            serde_json::from_str(VerticalTool::ArchitectureCycles.output_schema_json())
+                .expect("architecture cycles output schema is valid");
+        let validator =
+            jsonschema::draft202012::new(&schema).expect("architecture cycles schema compiles");
+        let symbol = json!("sym1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v");
+        let mut output = retained_tool_output("architecture.cycles");
+        output["data"]["components"] = json!([{
+            "size": 128,
+            "members": vec![symbol.clone(); 128],
+            "internal_edges": 128
+        }]);
+        output["data"]["cycles"] = json!([{
+            "nodes": vec![symbol.clone(); 129],
+            "edge_evidence": [],
+            "confidence": 900
+        }]);
+        assert!(validator.is_valid(&output));
+
+        output["data"]["components"] = json!([{
+            "size": 1,
+            "members": [symbol.clone()],
+            "internal_edges": 1
+        }]);
+        output["data"]["cycles"] = json!([{
+            "nodes": [symbol.clone(), symbol],
+            "edge_evidence": [],
+            "confidence": 900
+        }]);
+        assert!(validator.is_valid(&output));
+    }
+
+    #[test]
     fn every_tool_accepts_only_the_checked_versioned_error_envelope() {
         let error = json!({
             "schema_version": "1.0",

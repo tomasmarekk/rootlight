@@ -1,13 +1,37 @@
-name: release authorization
+name: release
 
 on:
   workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Successful CI run ID for this exact source revision
+        required: true
+        type: string
+      ci_run_attempt:
+        description: CI run attempt containing the signed release candidates
+        required: true
+        type: string
+      tag_name:
+        description: Release tag matching the workspace version, for example v0.1.0
+        required: true
+        type: string
+      prerelease:
+        description: Publish as a prerelease
+        required: true
+        default: true
+        type: boolean
+      rollout_percentage:
+        description: Percentage of opted-in installations eligible for this update
+        required: true
+        default: 100
+        type: number
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: release-authorization-${{ github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -15,33 +39,599 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
-  authorize:
-    name: require complete candidate evidence
+  prepare:
+    name: prepare exact native release
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    permissions:
+      actions: read
+      contents: read
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.update_metadata.outputs.version }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Install pinned Rust
-        run: rustup show active-toolchain
-      - name: Require production readiness
+      - name: Verify successful exact-revision CI run and release tag
+        env:
+          CI_RUN_ATTEMPT: ${{ inputs.ci_run_attempt }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REVISION: ${{ github.sha }}
+          TAG_NAME: ${{ inputs.tag_name }}
+        run: |
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          mkdir -p artifacts
+          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID" \
+            > artifacts/ci-run.json
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          run = json.loads(Path("artifacts/ci-run.json").read_bytes())
+          expected = {
+              "conclusion": "success",
+              "head_sha": os.environ["SOURCE_REVISION"],
+              "path": ".github/workflows/ci.yml",
+              "run_attempt": int(os.environ["CI_RUN_ATTEMPT"]),
+          }
+          observed = {key: run.get(key) for key in expected}
+          if observed != expected:
+              raise SystemExit(
+                  f"CI run does not authorize this source revision: {observed!r}"
+              )
+          if run.get("event") not in {"push", "workflow_dispatch"}:
+              raise SystemExit(f"unsupported CI event: {run.get('event')!r}")
+
+          metadata = json.loads(
+              subprocess.check_output(
+                  ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"]
+              )
+          )
+          version = next(
+              package["version"]
+              for package in metadata["packages"]
+              if package["name"] == "rootlight"
+          )
+          expected_tag = f"v{version}"
+          if os.environ["TAG_NAME"] != expected_tag:
+              raise SystemExit(
+                  f"release tag must match the workspace version: {expected_tag}"
+              )
+          PY
+      - name: Download exact native candidates
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rootlight-release-candidate-*-${{ github.sha }}-${{ inputs.ci_run_id }}-${{ inputs.ci_run_attempt }}
+          path: artifacts/release-candidates
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.ci_run_id }}
+      - name: Download signature and attestation bundles
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rootlight-release-trust-${{ github.sha }}-${{ inputs.ci_run_id }}-${{ inputs.ci_run_attempt }}
+          path: artifacts/release-trust
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.ci_run_id }}
+      - name: Download target-specific SBOMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rootlight-release-sbom-${{ github.sha }}-${{ inputs.ci_run_id }}-${{ inputs.ci_run_attempt }}
+          path: artifacts/release-sbom
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.ci_run_id }}
+      - name: Verify exact candidates and source binding
         env:
           SOURCE_REVISION: ${{ github.sha }}
         run: |
-          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
-          cargo run --locked --quiet --package xtask -- release-readiness \
-            --output artifacts/release-authorization.json \
-            --source-revision "$SOURCE_REVISION" \
-            --require-ready
-      - name: Upload authorization evidence
-        if: always()
+          version="$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rootlight"))'
+          )"
+          for target in \
+            aarch64-apple-darwin \
+            aarch64-unknown-linux-gnu \
+            x86_64-apple-darwin \
+            x86_64-pc-windows-msvc \
+            x86_64-unknown-linux-gnu; do
+            archive="artifacts/release-candidates/rootlight-$version-$target.zip"
+            cargo run --locked --quiet --package xtask -- package-verify \
+              --archive "$archive"
+            test -f "artifacts/release-candidates/$target.candidate.json"
+            find artifacts/release-trust \
+              -type f -name "rootlight-$version-$target.zip.sigstore.json" \
+              -print -quit | grep --quiet .
+          done
+          VERSION="$version" python - <<'PY'
+          import json
+          import hashlib
+          import os
+          from pathlib import Path
+
+          root = Path("artifacts/release-candidates")
+          for target in (
+              "aarch64-apple-darwin",
+              "aarch64-unknown-linux-gnu",
+              "x86_64-apple-darwin",
+              "x86_64-pc-windows-msvc",
+              "x86_64-unknown-linux-gnu",
+          ):
+              record = json.loads((root / f"{target}.candidate.json").read_bytes())
+              expected = {
+                  "lifecycle_report": f"{target}.lifecycle.json",
+                  "source_revision": os.environ["SOURCE_REVISION"],
+                  "target": target,
+                  "version": os.environ["VERSION"],
+              }
+              if {key: record.get(key) for key in expected} != expected:
+                  raise SystemExit(f"candidate record differs for {target}: {record!r}")
+              lifecycle_path = root / f"{target}.lifecycle.json"
+              lifecycle_bytes = lifecycle_path.read_bytes()
+              if (
+                  record.get("lifecycle_sha256")
+                  != hashlib.sha256(lifecycle_bytes).hexdigest()
+              ):
+                  raise SystemExit(f"candidate lifecycle digest differs for {target}")
+              archive = f"rootlight-{os.environ['VERSION']}-{target}.zip"
+              archive_sha256 = (
+                  root / f"{archive}.sha256"
+              ).read_text(encoding="utf-8").split("  ", 1)[0]
+              lifecycle = json.loads(lifecycle_bytes)
+              lifecycle_expected = {
+                  "baseline_archive": f"rootlight-0.0.0-{target}.zip",
+                  "baseline_version": "0.0.0",
+                  "candidate_archive": archive,
+                  "candidate_sha256": archive_sha256,
+                  "candidate_target": target,
+                  "candidate_version": os.environ["VERSION"],
+                  "committed_active_version": os.environ["VERSION"],
+                  "committed_last_good_version": "0.0.0",
+                  "rollback_active_version": "0.0.0",
+                  "schema": "rootlight.package-lifecycle/1",
+                  "source_revision": os.environ["SOURCE_REVISION"],
+              }
+              if {
+                  key: lifecycle.get(key) for key in lifecycle_expected
+              } != lifecycle_expected:
+                  raise SystemExit(f"candidate lifecycle differs for {target}: {lifecycle!r}")
+              observations = (
+                  "candidate_health_observed",
+                  "clean_recovery_observed",
+                  "failed_health_rollback_observed",
+                  "launcher_probe_observed",
+                  "unowned_data_preserved",
+                  "user_data_preserved",
+              )
+              if any(lifecycle.get(field) is not True for field in observations):
+                  raise SystemExit(f"candidate lifecycle is incomplete for {target}")
+              if lifecycle.get("bootstrap_owned_files", 0) < 1:
+                  raise SystemExit(f"candidate bootstrap owned no files for {target}")
+              if lifecycle.get("uninstall_removed_versions") != 2:
+                  raise SystemExit(f"candidate uninstall differs for {target}")
+          if not any(Path("artifacts/release-sbom").rglob("*.cdx.json")):
+              raise SystemExit("release SBOM set is empty")
+          PY
+      - name: Create exact unsigned update metadata
+        id: update_metadata
+        shell: bash
+        env:
+          EXPIRES_AFTER_SECONDS: "15552000"
+          ROOTLIGHT_UPDATE_KEY_ID: ${{ vars.ROOTLIGHT_UPDATE_KEY_ID }}
+          ROLLOUT_PERCENTAGE: ${{ inputs.rollout_percentage }}
+        run: |
+          test "$ROOTLIGHT_UPDATE_KEY_ID" != ""
+          [[ "$ROLLOUT_PERCENTAGE" =~ ^[0-9]+$ ]]
+          test "$ROLLOUT_PERCENTAGE" -ge 1
+          test "$ROLLOUT_PERCENTAGE" -le 100
+          mapfile -t provenance_bundles < <(
+            find artifacts/release-trust \
+              -type f \
+              -name slsa-provenance.sigstore.json \
+              -print
+          )
+          test "${#provenance_bundles[@]}" -eq 1
+          umask 077
+          valid_from="$(date +%s)"
+          expires="$((valid_from + EXPIRES_AFTER_SECONDS))"
+          version="$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rootlight"))'
+          )"
+          for target in \
+            aarch64-apple-darwin \
+            aarch64-unknown-linux-gnu \
+            x86_64-apple-darwin \
+            x86_64-pc-windows-msvc \
+            x86_64-unknown-linux-gnu; do
+            archive="artifacts/release-candidates/rootlight-$version-$target.zip"
+            output="artifacts/update-release/$target"
+            mkdir -p "$output"
+            ARCHIVE="$archive" OUTPUT="$output/licenses.zip" python - <<'PY'
+          import os
+          from pathlib import Path
+          import zipfile
+
+          source_path = Path(os.environ["ARCHIVE"])
+          output_path = Path(os.environ["OUTPUT"])
+          with zipfile.ZipFile(source_path) as source:
+              names = sorted(
+                  name
+                  for name in source.namelist()
+                  if name in {"LICENSE", "NOTICE"} or name.startswith("licenses/")
+              )
+              if len(names) < 3:
+                  raise SystemExit("candidate license and notice inventory is incomplete")
+              with zipfile.ZipFile(
+                  output_path, "x", compression=zipfile.ZIP_STORED
+              ) as bundle:
+                  for name in names:
+                      info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                      info.compress_type = zipfile.ZIP_STORED
+                      info.create_system = 3
+                      info.external_attr = 0o100644 << 16
+                      bundle.writestr(info, source.read(name))
+          PY
+            cargo run --locked --quiet --package xtask -- update-release-metadata \
+              --archive "$archive" \
+              --sbom "artifacts/release-sbom/$target/rootlight-distribution.cdx.json" \
+              --provenance "${provenance_bundles[0]}" \
+              --license-bundle "$output/licenses.zip" \
+              --target "$target" \
+              --version "$version" \
+              --key-id "$ROOTLIGHT_UPDATE_KEY_ID" \
+              --valid-from "$valid_from" \
+              --expires "$expires" \
+              --rollout-percentage "$ROLLOUT_PERCENTAGE" \
+              --catalog-schema 3 \
+              --protocol-major 1 \
+              --protocol-minor 7 \
+              --output-dir "$output"
+          done
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          test "$(
+            find artifacts/update-release -type f | wc -l
+          )" -eq 10
+      - name: Upload exact unsigned update inputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rootlight-release-authorization-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/release-authorization.json
+          name: rootlight-update-release-unsigned-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/update-release
           if-no-files-found: error
-          retention-days: 90
-          overwrite: false
-          include-hidden-files: false
+          retention-days: 1
+
+  sign-update-metadata:
+    name: sign update metadata and artifacts with protected identity
+    needs: prepare
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    environment: release-signing
+    permissions:
+      actions: read
+      contents: none
+      id-token: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download unsigned update inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rootlight-update-release-unsigned-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/update-release
+      - name: Sign exact metadata and artifact identities outside repository-built code
+        shell: bash
+        env:
+          ROOTLIGHT_UPDATE_KEY_ID: ${{ vars.ROOTLIGHT_UPDATE_KEY_ID }}
+          ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX: ${{ vars.ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX }}
+          ROOTLIGHT_UPDATE_SIGNER_AUDIENCE: ${{ vars.ROOTLIGHT_UPDATE_SIGNER_AUDIENCE }}
+          ROOTLIGHT_UPDATE_SIGNER_URL: ${{ vars.ROOTLIGHT_UPDATE_SIGNER_URL }}
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$ROOTLIGHT_UPDATE_KEY_ID" != ""
+          [[ "$ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX" =~ ^[0-9a-f]{64}$ ]]
+          test "$ROOTLIGHT_UPDATE_SIGNER_AUDIENCE" != ""
+          [[ "$ROOTLIGHT_UPDATE_SIGNER_URL" == https://* ]]
+          test "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" != ""
+          test "$ACTIONS_ID_TOKEN_REQUEST_URL" != ""
+
+          oidc_response="$(
+            curl --fail-with-body --silent --show-error \
+              --header "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              --get \
+              --data-urlencode "audience=$ROOTLIGHT_UPDATE_SIGNER_AUDIENCE" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL"
+          )"
+          oidc_token="$(
+            OIDC_RESPONSE="$oidc_response" python - <<'PY'
+          import json
+          import os
+
+          response = json.loads(os.environ["OIDC_RESPONSE"])
+          if set(response) != {"value"} or not isinstance(response["value"], str):
+              raise SystemExit("GitHub OIDC response has an unexpected shape")
+          if response["value"].count(".") != 2:
+              raise SystemExit("GitHub OIDC response is not a JWT")
+          print(response["value"], end="")
+          PY
+          )"
+          unset oidc_response
+
+          temporary="$(mktemp -d)"
+          trap 'rm -rf "$temporary"' EXIT
+          printf '302a300506032b6570032100%s' "$ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX" |
+            xxd -r -p > "$temporary/public-key.der"
+          openssl pkey \
+            -pubin \
+            -inform DER \
+            -in "$temporary/public-key.der" \
+            -out "$temporary/public-key.pem"
+
+          sign_payload() {
+            local payload="$1"
+            local signature="$2"
+            local payload_sha256
+            local response="$temporary/response.json"
+            payload_sha256="$(sha256sum "$payload" | cut -d ' ' -f 1)"
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Authorization: Bearer $oidc_token" \
+              --header "Content-Type: application/octet-stream" \
+              --header "X-Rootlight-Key-Id: $ROOTLIGHT_UPDATE_KEY_ID" \
+              --header "X-Rootlight-Payload-Sha256: $payload_sha256" \
+              --header "X-Rootlight-Source-Revision: $SOURCE_REVISION" \
+              --data-binary "@$payload" \
+              --output "$response" \
+              "$ROOTLIGHT_UPDATE_SIGNER_URL"
+            PAYLOAD="$payload" \
+              PAYLOAD_SHA256="$payload_sha256" \
+              RESPONSE="$response" \
+              ROOTLIGHT_UPDATE_KEY_ID="$ROOTLIGHT_UPDATE_KEY_ID" \
+              ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX="$ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX" \
+              SIGNATURE="$signature" \
+              python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          payload = Path(os.environ["PAYLOAD"]).read_bytes()
+          if hashlib.sha256(payload).hexdigest() != os.environ["PAYLOAD_SHA256"]:
+              raise SystemExit("payload changed across the protected signing request")
+          response = json.loads(Path(os.environ["RESPONSE"]).read_bytes())
+          expected_keys = {
+              "key_id",
+              "payload_sha256",
+              "public_key_hex",
+              "schema",
+              "signature_hex",
+          }
+          if set(response) != expected_keys:
+              raise SystemExit("protected signer response has an unexpected shape")
+          expected = {
+              "key_id": os.environ["ROOTLIGHT_UPDATE_KEY_ID"],
+              "payload_sha256": os.environ["PAYLOAD_SHA256"],
+              "public_key_hex": os.environ["ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX"],
+              "schema": "rootlight.protected-signature/1",
+          }
+          if {key: response.get(key) for key in expected} != expected:
+              raise SystemExit("protected signer identity or payload binding differs")
+          signature = response["signature_hex"]
+          if (
+              not isinstance(signature, str)
+              or len(signature) != 128
+              or any(character not in "0123456789abcdef" for character in signature)
+          ):
+              raise SystemExit("protected signer returned a non-canonical signature")
+          Path(os.environ["SIGNATURE"]).write_text(
+              f"{signature}\n", encoding="ascii", newline="\n"
+          )
+          PY
+            xxd -r -p < "$signature" > "$temporary/signature.bin"
+            openssl pkeyutl \
+              -verify \
+              -pubin \
+              -inkey "$temporary/public-key.pem" \
+              -rawin \
+              -in "$payload" \
+              -sigfile "$temporary/signature.bin"
+          }
+
+          mapfile -d '' metadata_files < <(
+            find artifacts/update-release \
+              -type f \
+              -name '*.update.json' \
+              -print0 |
+              sort --zero-terminated
+          )
+          test "${#metadata_files[@]}" -eq 5
+          for metadata in "${metadata_files[@]}"; do
+            signature="${metadata%.json}.sig"
+            sign_payload "$metadata" "$signature"
+            artifact_message="$temporary/artifact-message.bin"
+            METADATA="$metadata" ARTIFACT_MESSAGE="$artifact_message" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          metadata = json.loads(Path(os.environ["METADATA"]).read_bytes())
+          artifact = metadata.get("artifact", {})
+          digest = artifact.get("sha256")
+          size = artifact.get("size_bytes")
+          if (
+              not isinstance(digest, str)
+              or len(digest) != 64
+              or any(character not in "0123456789abcdef" for character in digest)
+              or not isinstance(size, int)
+              or isinstance(size, bool)
+              or not 0 < size <= 2 * 1024 * 1024 * 1024
+          ):
+              raise SystemExit("signed metadata has an invalid artifact identity")
+          message = (
+              b"rootlight.release-artifact-signature/1\0"
+              + bytes.fromhex(digest)
+              + size.to_bytes(8, "big")
+          )
+          Path(os.environ["ARTIFACT_MESSAGE"]).write_bytes(message)
+          PY
+            artifact_signature="${metadata%.update.json}.artifact.sig"
+            sign_payload "$artifact_message" "$artifact_signature"
+          done
+          unset oidc_token
+          printf '%s\n' "$ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX" \
+            > artifacts/update-release/rootlight-update-public-key.txt
+          test "$(
+            find artifacts/update-release -type f | wc -l
+          )" -eq 21
+      - name: Upload signed update release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-update-release-signed-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/update-release
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: publish signed native release
+    needs: [prepare, sign-update-metadata]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    permissions:
+      actions: read
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download exact native candidates
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rootlight-release-candidate-*-${{ github.sha }}-${{ inputs.ci_run_id }}-${{ inputs.ci_run_attempt }}
+          path: artifacts/release-candidates
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.ci_run_id }}
+      - name: Download signature and attestation bundles
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rootlight-release-trust-${{ github.sha }}-${{ inputs.ci_run_id }}-${{ inputs.ci_run_attempt }}
+          path: artifacts/release-trust
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.ci_run_id }}
+      - name: Download target-specific SBOMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rootlight-release-sbom-${{ github.sha }}-${{ inputs.ci_run_id }}-${{ inputs.ci_run_attempt }}
+          path: artifacts/release-sbom
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.ci_run_id }}
+      - name: Download protected update signatures
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rootlight-update-release-signed-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/update-release
+      - name: Stage uniquely named release assets
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import shutil
+
+          assets = Path("artifacts/release-assets")
+          assets.mkdir()
+          sources: list[tuple[Path, str]] = []
+
+          for path in sorted(Path("artifacts/release-candidates").iterdir()):
+              if path.is_file():
+                  sources.append((path, path.name))
+          for path in sorted(Path("artifacts/release-trust").rglob("*")):
+              if path.is_file() and "release-verification" not in path.parts:
+                  sources.append((path, path.name))
+
+          sboms = Path("artifacts/release-sbom")
+          sources.append((sboms / "SHA256SUMS", "rootlight-release-sbom-SHA256SUMS"))
+          for target in (
+              "aarch64-apple-darwin",
+              "aarch64-unknown-linux-gnu",
+              "x86_64-apple-darwin",
+              "x86_64-pc-windows-msvc",
+              "x86_64-unknown-linux-gnu",
+          ):
+              sources.append(
+                  (
+                      sboms / target / "rootlight-distribution.cdx.json",
+                      f"rootlight-distribution-{target}.cdx.json",
+                  )
+              )
+
+          updates = Path("artifacts/update-release")
+          metadata = sorted(updates.rglob("*.update.json"))
+          signatures = sorted(updates.rglob("*.update.sig"))
+          artifact_signatures = sorted(updates.rglob("*.artifact.sig"))
+          expected_prefix = f"rootlight-{os.environ['VERSION']}-"
+          if (
+              len(metadata) != 5
+              or len(signatures) != 5
+              or len(artifact_signatures) != 5
+          ):
+              raise SystemExit("signed update asset set is incomplete")
+          if any(
+              not path.name.startswith(expected_prefix)
+              for path in metadata + signatures + artifact_signatures
+          ):
+              raise SystemExit("signed update assets differ from the authorized version")
+          sources.append(
+              (
+                  updates / "rootlight-update-public-key.txt",
+                  "rootlight-update-public-key.txt",
+              )
+          )
+          for target_dir in sorted(path for path in updates.iterdir() if path.is_dir()):
+              target = target_dir.name
+              for path in sorted(target_dir.iterdir()):
+                  name = (
+                      f"rootlight-{target}-licenses.zip"
+                      if path.name == "licenses.zip"
+                      else path.name
+                  )
+                  sources.append((path, name))
+
+          destinations = [name for _, name in sources]
+          if len(destinations) != len(set(destinations)):
+              duplicates = sorted(
+                  name for name in set(destinations) if destinations.count(name) > 1
+              )
+              raise SystemExit(f"release asset names collide: {duplicates!r}")
+          if any(not source.is_file() for source, _ in sources):
+              missing = sorted(str(source) for source, _ in sources if not source.is_file())
+              raise SystemExit(f"release asset source is missing: {missing!r}")
+          for source, name in sources:
+              shutil.copyfile(source, assets / name)
+          if {path.name for path in assets.iterdir()} != set(destinations):
+              raise SystemExit("staged release asset set differs")
+          PY
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          SOURCE_REVISION: ${{ github.sha }}
+          TAG_NAME: ${{ inputs.tag_name }}
+        run: |
+          mapfile -d '' assets < <(
+            find artifacts/release-assets -type f -print0 |
+              sort --zero-terminated
+          )
+          test "${#assets[@]}" -gt 0
+          prerelease_flag=()
+          if [[ "$PRERELEASE" == "true" ]]; then
+            prerelease_flag=(--prerelease)
+          fi
+          gh release create "$TAG_NAME" \
+            --target "$SOURCE_REVISION" \
+            --title "Rootlight $TAG_NAME" \
+            --generate-notes \
+            "${prerelease_flag[@]}" \
+            "${assets[@]}"

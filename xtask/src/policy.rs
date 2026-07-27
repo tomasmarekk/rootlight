@@ -25,7 +25,6 @@ const UNSAFE_POLICY_PATH: &str = "policy/unsafe.toml";
 const WORKFLOW_ROOT: &str = ".github/workflows";
 const CURRENT_SCHEMA_VERSION: &str = "1.0";
 const UNSAFE_SCHEMA_VERSION: &str = "2.0";
-const ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED: &str = "Enabled unsafe boundary evidence requires compiler-derived expanded input inventory and the full cargo-geiger SafetyReport; this evidence is not implemented";
 
 pub(crate) fn check() -> Result<(), PolicyError> {
     let metadata = MetadataCommand::new()
@@ -238,6 +237,14 @@ fn validate_action_pins(root: &Path, policy: &ActionPolicy) -> Result<(), Policy
     if approved.len() != policy.actions.len() {
         return Err(PolicyError::DuplicateActionPolicy);
     }
+    let approved_write_jobs = policy
+        .write_permission_jobs
+        .iter()
+        .map(|job| (job.workflow.clone(), job.job.clone()))
+        .collect::<BTreeSet<_>>();
+    if approved_write_jobs.len() != policy.write_permission_jobs.len() {
+        return Err(PolicyError::DuplicateWritePermissionPolicy);
+    }
 
     let workflows = root.join(WORKFLOW_ROOT);
     let entries = fs::read_dir(&workflows).map_err(|source| PolicyError::Read {
@@ -250,6 +257,7 @@ fn validate_action_pins(root: &Path, policy: &ActionPolicy) -> Result<(), Policy
     })?;
     let mut inspected = BTreeSet::new();
     let mut used = BTreeSet::new();
+    let mut used_write_jobs = BTreeSet::new();
 
     for entry in entries {
         let entry = entry.map_err(|source| PolicyError::Read {
@@ -278,6 +286,18 @@ fn validate_action_pins(root: &Path, policy: &ActionPolicy) -> Result<(), Policy
                 count: documents.len(),
             });
         }
+        let workflow = path
+            .strip_prefix(root)
+            .map_err(|_| PolicyError::WorkflowPath(path.clone()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        validate_workflow_permissions(
+            &documents[0],
+            &path,
+            &workflow,
+            &policy.write_permission_jobs,
+            &mut used_write_jobs,
+        )?;
         inspect_workflow_node(
             &canonical_root,
             &documents[0],
@@ -293,11 +313,122 @@ fn validate_action_pins(root: &Path, policy: &ActionPolicy) -> Result<(), Policy
         .filter(|repository| !used.contains(**repository))
         .map(|repository| (*repository).to_owned())
         .collect();
-    if unused.is_empty() {
+    if !unused.is_empty() {
+        return Err(PolicyError::UnusedActionPolicy(unused));
+    }
+    let unused_write_jobs = approved_write_jobs
+        .into_iter()
+        .filter(|key| !used_write_jobs.contains(key))
+        .map(|(workflow, job)| format!("{workflow}:{job}"))
+        .collect::<Vec<_>>();
+    if unused_write_jobs.is_empty() {
         Ok(())
     } else {
-        Err(PolicyError::UnusedActionPolicy(unused))
+        Err(PolicyError::UnusedWritePermissionPolicy(unused_write_jobs))
     }
+}
+
+fn validate_workflow_permissions(
+    document: &Yaml,
+    path: &Path,
+    workflow: &str,
+    approved_write_jobs: &[WritePermissionJob],
+    used_write_jobs: &mut BTreeSet<(String, String)>,
+) -> Result<(), PolicyError> {
+    let root = document
+        .as_hash()
+        .ok_or_else(|| PolicyError::WorkflowPermissions(path.to_path_buf()))?;
+    if let Some(permissions) = yaml_field(root, "permissions") {
+        validate_read_only_permissions(permissions, path)?;
+    }
+    let Some(jobs) = yaml_field(root, "jobs") else {
+        return Ok(());
+    };
+    let jobs = jobs
+        .as_hash()
+        .ok_or_else(|| PolicyError::WorkflowPermissions(path.to_path_buf()))?;
+    for (job_name, job) in jobs {
+        let Some(job_name) = job_name.as_str() else {
+            return Err(PolicyError::WorkflowKeyType(path.to_path_buf()));
+        };
+        let Some(job) = job.as_hash() else {
+            continue;
+        };
+        let Some(permissions) = yaml_field(job, "permissions") else {
+            continue;
+        };
+        let exception = approved_write_jobs
+            .iter()
+            .find(|entry| entry.workflow == workflow && entry.job == job_name);
+        if permissions_are_read_only(permissions) {
+            validate_read_only_permissions(permissions, path)?;
+            if exception.is_some() {
+                return Err(PolicyError::WorkflowWritePermission(path.to_path_buf()));
+            }
+            continue;
+        }
+        let exception =
+            exception.ok_or_else(|| PolicyError::WorkflowWritePermission(path.to_path_buf()))?;
+        validate_write_permission_job(job, permissions, exception, path)?;
+        used_write_jobs.insert((workflow.to_owned(), job_name.to_owned()));
+    }
+    Ok(())
+}
+
+fn validate_write_permission_job(
+    job: &yaml_rust2::yaml::Hash,
+    permissions: &Yaml,
+    exception: &WritePermissionJob,
+    path: &Path,
+) -> Result<(), PolicyError> {
+    let condition = yaml_field(job, "if")
+        .and_then(Yaml::as_str)
+        .ok_or_else(|| PolicyError::WorkflowWriteCondition(path.to_path_buf()))?;
+    if condition != exception.condition {
+        return Err(PolicyError::WorkflowWriteCondition(path.to_path_buf()));
+    }
+    let mapping = permissions
+        .as_hash()
+        .ok_or_else(|| PolicyError::WorkflowWritePermission(path.to_path_buf()))?;
+    let observed = mapping
+        .iter()
+        .map(|(key, value)| {
+            let key = key
+                .as_str()
+                .ok_or_else(|| PolicyError::WorkflowKeyType(path.to_path_buf()))?;
+            let value = value
+                .as_str()
+                .ok_or_else(|| PolicyError::WorkflowWritePermission(path.to_path_buf()))?;
+            Ok((key.to_owned(), value.to_owned()))
+        })
+        .collect::<Result<BTreeMap<_, _>, PolicyError>>()?;
+    let expected = exception
+        .permissions
+        .iter()
+        .map(|permission| {
+            let (name, access) = permission
+                .split_once('=')
+                .ok_or_else(|| PolicyError::InvalidWritePermissionPolicy(permission.clone()))?;
+            if name.is_empty() || !matches!(access, "read" | "write" | "none") {
+                return Err(PolicyError::InvalidWritePermissionPolicy(
+                    permission.clone(),
+                ));
+            }
+            Ok((name.to_owned(), access.to_owned()))
+        })
+        .collect::<Result<BTreeMap<_, _>, PolicyError>>()?;
+    if expected.len() != exception.permissions.len() {
+        return Err(PolicyError::DuplicateWritePermissionValue);
+    }
+    if observed == expected {
+        Ok(())
+    } else {
+        Err(PolicyError::WorkflowWritePermission(path.to_path_buf()))
+    }
+}
+
+fn yaml_field<'a>(mapping: &'a yaml_rust2::yaml::Hash, key: &str) -> Option<&'a Yaml> {
+    mapping.get(&Yaml::String(key.to_owned()))
 }
 
 fn inspect_workflow_node(
@@ -327,7 +458,6 @@ fn inspect_workflow_node(
                     "uses" => {
                         validate_action_reference(root, value, path, approved, used, inspected)?
                     }
-                    "permissions" => validate_permissions(value, path)?,
                     _ => {}
                 }
                 inspect_workflow_node(root, value, path, approved, used, inspected)?;
@@ -456,7 +586,10 @@ fn validate_local_action(
     inspect_workflow_node(root, &documents[0], &path, approved, used, inspected)
 }
 
-fn validate_permissions(value: &Yaml, path: &Path) -> Result<(), PolicyError> {
+fn validate_read_only_permissions(value: &Yaml, path: &Path) -> Result<(), PolicyError> {
+    if !permissions_are_read_only(value) {
+        return Err(PolicyError::WorkflowWritePermission(path.to_path_buf()));
+    }
     match value {
         Yaml::Null => Ok(()),
         Yaml::String(permission) if permission == "read-all" => Ok(()),
@@ -464,12 +597,23 @@ fn validate_permissions(value: &Yaml, path: &Path) -> Result<(), PolicyError> {
             for permission in mapping.values() {
                 match permission.as_str() {
                     Some("read") | Some("none") => {}
-                    _ => return Err(PolicyError::WorkflowWritePermission(path.to_path_buf())),
+                    _ => unreachable!("read-only permissions were checked above"),
                 }
             }
             Ok(())
         }
         _ => Err(PolicyError::WorkflowWritePermission(path.to_path_buf())),
+    }
+}
+
+fn permissions_are_read_only(value: &Yaml) -> bool {
+    match value {
+        Yaml::Null => true,
+        Yaml::String(permission) => permission == "read-all",
+        Yaml::Hash(mapping) => mapping
+            .values()
+            .all(|permission| matches!(permission.as_str(), Some("read" | "none"))),
+        _ => false,
     }
 }
 
@@ -550,7 +694,6 @@ fn scan_workspace_unsafe(
     metadata: &Metadata,
     policy: &UnsafePolicy,
 ) -> Result<(), PolicyError> {
-    reject_enabled_boundaries_without_authoritative_evidence(policy)?;
     let root = fs::canonicalize(root).map_err(|source| PolicyError::Read {
         path: root.to_path_buf(),
         source,
@@ -632,21 +775,6 @@ fn scan_workspace_unsafe(
             }
             UnsafeBoundaryStatus::Enabled | UnsafeBoundaryStatus::Disabled => {}
         }
-    }
-    Ok(())
-}
-
-fn reject_enabled_boundaries_without_authoritative_evidence(
-    policy: &UnsafePolicy,
-) -> Result<(), PolicyError> {
-    if policy
-        .boundaries
-        .iter()
-        .any(|boundary| boundary.status == UnsafeBoundaryStatus::Enabled)
-    {
-        return Err(PolicyError::InvalidUnsafeBoundary {
-            detail: ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED.to_owned(),
-        });
     }
     Ok(())
 }
@@ -1017,7 +1145,7 @@ fn validate_unsafe_boundary_governance(
     ) {
         return Err(PolicyError::InvalidUnsafeBoundary {
             detail: format!(
-                "{} boundary {} must retain workspace forbid, one target-root forbid declaration, no reachable override, and zero inventory",
+                "{} boundary {} has an invalid manifest lint, module override, or evidence count",
                 match boundary.status {
                     UnsafeBoundaryStatus::Disabled => "disabled",
                     UnsafeBoundaryStatus::Enabled => "enabled",
@@ -1054,7 +1182,28 @@ fn boundary_lint_state_is_valid(
                 && expected_source_tokens == 0
                 && expected_geiger_count == 0
         }
-        UnsafeBoundaryStatus::Enabled => false,
+        UnsafeBoundaryStatus::Enabled => {
+            let package_denies_unsafe = lints
+                .and_then(|value| value.get("rust"))
+                .and_then(|value| value.get("unsafe_code"))
+                .and_then(toml::Value::as_str)
+                == Some("deny");
+            package_denies_unsafe
+                && lint_inventory.is_some_and(|inventory| {
+                    inventory.target
+                        == vec![UnsafeLintDeclaration {
+                            level: UnsafeLintLevel::Deny,
+                            is_inner: true,
+                        }]
+                        && inventory.reachable_non_target
+                            == vec![UnsafeLintDeclaration {
+                                level: UnsafeLintLevel::Allow,
+                                is_inner: true,
+                            }]
+                })
+                && expected_source_tokens > 0
+                && expected_geiger_count > 0
+        }
     }
 }
 
@@ -1743,6 +1892,8 @@ struct SupplyChainPolicy {
 struct ActionPolicy {
     schema_version: String,
     actions: Vec<ActionPin>,
+    #[serde(default)]
+    write_permission_jobs: Vec<WritePermissionJob>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1752,6 +1903,15 @@ struct ActionPin {
     commit: String,
     #[serde(rename = "release")]
     _release: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WritePermissionJob {
+    workflow: String,
+    job: String,
+    condition: String,
+    permissions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1820,10 +1980,16 @@ pub(crate) enum PolicyError {
     },
     #[error("POLICY_ACTION_DUPLICATE: action policy contains a duplicate repository")]
     DuplicateActionPolicy,
+    #[error(
+        "POLICY_ACTION_WRITE_DUPLICATE: action policy contains a duplicate write-permission job"
+    )]
+    DuplicateWritePermissionPolicy,
     #[error("POLICY_WORKFLOW_YAML: failed to parse {path}: {detail}")]
     WorkflowYaml { path: PathBuf, detail: String },
     #[error("POLICY_WORKFLOW_DOCUMENTS: {path} contains {count} YAML documents")]
     WorkflowDocumentCount { path: PathBuf, count: usize },
+    #[error("POLICY_WORKFLOW_PATH: workflow path is outside the repository: {0}")]
+    WorkflowPath(PathBuf),
     #[error("POLICY_WORKFLOW_KEY: {0} contains a non-string mapping key")]
     WorkflowKeyType(PathBuf),
     #[error("POLICY_WORKFLOW_ALIAS: {0} contains a YAML alias")]
@@ -1846,12 +2012,22 @@ pub(crate) enum PolicyError {
     },
     #[error("POLICY_ACTION_UNUSED: approved actions are unused: {0:?}")]
     UnusedActionPolicy(Vec<String>),
+    #[error("POLICY_ACTION_WRITE_UNUSED: approved write-permission jobs are unused: {0:?}")]
+    UnusedWritePermissionPolicy(Vec<String>),
     #[error("POLICY_WORKFLOW_TRIGGER: {0} uses pull_request_target")]
     UnsafeWorkflowTrigger(PathBuf),
     #[error("POLICY_WORKFLOW_CONTAINER: {path} uses unpinned {key} configuration")]
     WorkflowContainer { path: PathBuf, key: String },
     #[error("POLICY_WORKFLOW_PERMISSION: {0} grants write permission")]
     WorkflowWritePermission(PathBuf),
+    #[error("POLICY_WORKFLOW_PERMISSION_SHAPE: {0} has an invalid permissions structure")]
+    WorkflowPermissions(PathBuf),
+    #[error("POLICY_WORKFLOW_PERMISSION_CONDITION: {0} has an invalid write-permission condition")]
+    WorkflowWriteCondition(PathBuf),
+    #[error("POLICY_ACTION_WRITE_VALUE: invalid approved permission value {0}")]
+    InvalidWritePermissionPolicy(String),
+    #[error("POLICY_ACTION_WRITE_VALUE_DUPLICATE: approved permission values contain a duplicate")]
+    DuplicateWritePermissionValue,
     #[error("POLICY_TOOLCHAIN_DUPLICATE: duplicate tool or input {0}")]
     DuplicateToolchainEntry(String),
     #[error("POLICY_TOOLCHAIN_EMPTY: toolchain policy requires inputs and tools")]
@@ -1899,21 +2075,6 @@ mod tests {
             target,
             reachable_non_target: reachable,
         })
-    }
-
-    fn fixture_boundary(status: UnsafeBoundaryStatus) -> UnsafeBoundary {
-        UnsafeBoundary {
-            package: "rootlight-vfs".to_owned(),
-            package_version: "0.1.0".to_owned(),
-            manifest: "crates/rootlight-vfs/Cargo.toml".into(),
-            module: "rootlight_vfs::platform::os".to_owned(),
-            source: "crates/rootlight-vfs/src/platform/os.rs".into(),
-            status,
-            owner: "@tomasmarekk".to_owned(),
-            reason: "fixture".to_owned(),
-            expected_source_tokens: usize::from(status == UnsafeBoundaryStatus::Enabled),
-            expected_geiger_count: usize::from(status == UnsafeBoundaryStatus::Enabled),
-        }
     }
 
     #[test]
@@ -1988,30 +2149,35 @@ mod tests {
             toml::from_str("[lints]\nworkspace = true\n").expect("fixture parses");
         let enabled_manifest: toml::Value =
             toml::from_str("[lints.rust]\nunsafe_code = \"deny\"\n").expect("fixture parses");
-        let exact = lint_inventory(
+        let exact_disabled = lint_inventory(
             "#![forbid(unsafe_code, reason = \"workspace safety baseline\")]",
             &["fn safe() {}"],
         )
         .expect("exact lint state parses");
+        let exact_enabled = lint_inventory(
+            "#![deny(unsafe_code, reason = \"workspace safety baseline\")]",
+            &["#![allow(unsafe_code, reason = \"reviewed native boundary\")]\nfn boundary() {}"],
+        )
+        .expect("enabled lint state parses");
 
         assert!(boundary_lint_state_is_valid(
             UnsafeBoundaryStatus::Disabled,
             disabled_manifest.get("lints"),
-            Some(&exact),
+            Some(&exact_disabled),
             0,
             0,
         ));
         assert!(!boundary_lint_state_is_valid(
             UnsafeBoundaryStatus::Disabled,
             enabled_manifest.get("lints"),
-            Some(&exact),
+            Some(&exact_disabled),
             0,
             0,
         ));
-        assert!(!boundary_lint_state_is_valid(
+        assert!(boundary_lint_state_is_valid(
             UnsafeBoundaryStatus::Enabled,
             enabled_manifest.get("lints"),
-            Some(&exact),
+            Some(&exact_enabled),
             2,
             1,
         ));
@@ -2131,7 +2297,7 @@ mod tests {
     }
 
     #[test]
-    fn enabled_boundary_rejects_unexpanded_macro_generated_code() {
+    fn syntactic_scan_does_not_invent_macro_generated_unsafe_tokens() {
         let directory = tempdir().expect("temporary directory is available");
         let source = directory.path().join("lib.rs");
         let text = "emit_generated!();\n";
@@ -2147,17 +2313,6 @@ mod tests {
                 .expect("syntactic unsafe scan succeeds")
                 .count,
             0
-        );
-        let policy = UnsafePolicy {
-            schema_version: UNSAFE_SCHEMA_VERSION.to_owned(),
-            boundaries: vec![fixture_boundary(UnsafeBoundaryStatus::Enabled)],
-        };
-        let error = reject_enabled_boundaries_without_authoritative_evidence(&policy)
-            .expect_err("Enabled must fail without compiler-derived evidence");
-
-        assert_eq!(
-            error.to_string(),
-            format!("POLICY_UNSAFE_BOUNDARY: {ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED}")
         );
     }
 
@@ -2364,6 +2519,78 @@ mod tests {
                 &mut inspected,
             ),
             Err(PolicyError::UnpinnedAction { .. })
+        ));
+    }
+
+    #[test]
+    fn write_permissions_require_the_exact_job_and_main_push_condition() {
+        let condition = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
+        let policy = vec![WritePermissionJob {
+            workflow: ".github/workflows/ci.yml".to_owned(),
+            job: "release-signing".to_owned(),
+            condition: condition.to_owned(),
+            permissions: vec![
+                "artifact-metadata=write".to_owned(),
+                "attestations=write".to_owned(),
+                "contents=read".to_owned(),
+                "id-token=write".to_owned(),
+            ],
+        }];
+        let valid = YamlLoader::load_from_str(&format!(
+            "permissions:\n  contents: read\njobs:\n  release-signing:\n    if: \"{condition}\"\n    permissions:\n      artifact-metadata: write\n      attestations: write\n      contents: read\n      id-token: write\n"
+        ))
+        .expect("valid workflow parses");
+        let mut used = BTreeSet::new();
+        validate_workflow_permissions(
+            &valid[0],
+            Path::new("ci.yml"),
+            ".github/workflows/ci.yml",
+            &policy,
+            &mut used,
+        )
+        .expect("exact release signing permissions pass");
+        assert_eq!(
+            used,
+            BTreeSet::from([(
+                ".github/workflows/ci.yml".to_owned(),
+                "release-signing".to_owned()
+            )])
+        );
+
+        let wrong_condition = YamlLoader::load_from_str(
+            "jobs:\n  release-signing:\n    if: github.event_name == 'pull_request'\n    permissions:\n      artifact-metadata: write\n      attestations: write\n      contents: read\n      id-token: write\n",
+        )
+        .expect("invalid workflow parses");
+        let mut unused = BTreeSet::new();
+        assert!(matches!(
+            validate_workflow_permissions(
+                &wrong_condition[0],
+                Path::new("ci.yml"),
+                ".github/workflows/ci.yml",
+                &policy,
+                &mut unused,
+            ),
+            Err(PolicyError::WorkflowWriteCondition(_))
+        ));
+    }
+
+    #[test]
+    fn unapproved_job_cannot_reuse_release_signing_permissions() {
+        let document = YamlLoader::load_from_str(
+            "jobs:\n  pull-request-job:\n    permissions:\n      artifact-metadata: write\n      attestations: write\n      contents: read\n      id-token: write\n",
+        )
+        .expect("workflow parses");
+        let mut used = BTreeSet::new();
+
+        assert!(matches!(
+            validate_workflow_permissions(
+                &document[0],
+                Path::new("ci.yml"),
+                ".github/workflows/ci.yml",
+                &[],
+                &mut used,
+            ),
+            Err(PolicyError::WorkflowWritePermission(_))
         ));
     }
 }

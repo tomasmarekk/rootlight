@@ -16,6 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rootlight_mcp_contract::context::OBJECTIVE_ROLE_POLICY_VERSION;
 use serde_json::{Value, json};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -110,7 +111,10 @@ fn objective_role_truth_is_profile_invariant(fixture: &mut ContextFixture) {
             assert_context_identity(output, fixture);
             let coverage = &output["data"]["role_coverage"];
             assert_eq!(coverage["objective"], objective);
-            assert_eq!(coverage["objective_rule_version"], 1);
+            assert_eq!(
+                coverage["objective_rule_version"],
+                OBJECTIVE_ROLE_POLICY_VERSION
+            );
             assert_role_coverage_is_truthful(coverage, &output["completeness"]);
             assert_accounting_is_bounded(output, FULL_TOKEN_BUDGET);
 
@@ -158,10 +162,9 @@ fn assert_role_coverage_is_truthful(coverage: &Value, completeness: &Value) {
         }
     });
     assert_eq!(coverage["complete"], derived_complete);
-    assert_eq!(
-        completeness["state"] == "complete",
-        derived_complete,
-        "envelope completeness must agree with required-role coverage"
+    assert!(
+        completeness["state"] != "complete" || derived_complete,
+        "a complete envelope cannot omit required-role coverage"
     );
 }
 

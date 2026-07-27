@@ -95,6 +95,49 @@ fn preserves_cross_file_import_ambiguity() {
 }
 
 #[test]
+fn resolves_a_unique_scoped_cross_file_call() {
+    let mut fixture = Fixture::new();
+    let target_file = fixture.add_file(4, "src/service.rs");
+    let target = fixture.add_entity(13, "transform", target_file, EntityKind::Function, None);
+    fixture.add_occurrence(
+        22,
+        "transform",
+        fixture.primary_file,
+        OccurrenceRole::CallSite,
+        None,
+    );
+    fixture
+        .document
+        .occurrences
+        .last_mut()
+        .expect("scoped call occurrence exists")
+        .syntax_kind = "rust.scoped_call.scoped_call".to_owned();
+    fixture.validate();
+
+    let batch = ResolutionEngine::default()
+        .resolve(&fixture.document, &Cancellation::new())
+        .expect("valid scoped call resolves");
+
+    assert_eq!(
+        batch.decisions[0].outcome,
+        ResolutionOutcome::Resolved {
+            symbol: target,
+            confidence: Confidence::new(900).expect("fixture confidence is valid"),
+        }
+    );
+    assert!(
+        batch.decisions[0].explanation.candidates[0]
+            .positive_signals
+            .contains(&ResolutionSignal::UniqueScopedCallCandidate)
+    );
+    assert!(
+        batch.decisions[0].explanation.candidates[0]
+            .penalties
+            .contains(&ResolutionPenalty::CrossFile)
+    );
+}
+
+#[test]
 fn validates_candidate_bounds() {
     assert!(ResolutionLimits::new(0).is_err());
     assert!(ResolutionLimits::new(4_096).is_ok());

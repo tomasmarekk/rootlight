@@ -2043,7 +2043,7 @@ mod tests {
     }
 
     #[test]
-    fn production_publication_fails_at_vfs_preflight_without_filesystem_effects() {
+    fn production_publication_stays_disabled_without_filesystem_effects() {
         let temporary = tempfile::tempdir().expect("temporary parent is available");
         let destination = temporary.path().join("result");
         let mut invalid = fixture();
@@ -2054,14 +2054,9 @@ mod tests {
         };
 
         let error = publish_bundle_with_limits(&invalid, &destination, invalid_limits)
-            .expect_err("unaccepted private-tree publication is blocked first");
+            .expect_err("production bundle publication remains disabled");
 
-        assert!(matches!(
-            error,
-            BundleError::PublicationUnavailable(
-                rootlight_vfs::platform::PlatformError::UnsupportedPlatform
-            )
-        ));
+        assert!(matches!(error, BundleError::PublicationDisabled));
         assert!(!destination.exists());
         assert_eq!(
             fs::read_dir(temporary.path())

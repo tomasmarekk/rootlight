@@ -695,8 +695,8 @@
           "items": {
             "type": "string"
           },
-          "maxItems": 65,
-          "minItems": 3
+          "maxItems": 1000001,
+          "minItems": 2
         }
       },
       "additionalProperties": false,
@@ -1439,8 +1439,8 @@
           "items": {
             "type": "string"
           },
-          "maxItems": 1000,
-          "minItems": 2
+          "maxItems": 1000000,
+          "minItems": 1
         },
         "size": {
           "description": "Number of nodes in the component.",

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Create and validate fail-closed cargo-geiger evidence.
 
-The evidence contract binds each QuickSafetyReport to the installed scanner,
-the Rust toolchain, and every repository input that the current gate can name.
+The evidence contract binds each full SafetyReport to the installed scanner,
+the Rust toolchain, the unsafe-boundary policy, and workspace source inputs.
 """
 
 from __future__ import annotations
@@ -27,17 +27,12 @@ SCHEMA_VERSION = "1.0"
 UNSAFE_POLICY_SCHEMA_VERSION = "2.0"
 SUPPORTED_CARGO_GEIGER_VERSION = "cargo-geiger 0.13.0"
 SUPPORTED_CARGO_GEIGER_POLICY_VERSION = "0.13.0"
-ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED = (
-    "Enabled unsafe boundary evidence requires compiler-derived expanded input "
-    "inventory and the full cargo-geiger SafetyReport; this evidence is not implemented"
-)
-SOURCE_INPUT_MODE = "workspace-rust-source-placeholder-v1"
-REPORT_FORMAT = "cargo-geiger QuickSafetyReport"
+SOURCE_INPUT_MODE = "workspace-rust-source-digest-v1"
+REPORT_FORMAT = "cargo-geiger SafetyReport"
 CARGO_GEIGER_REPORT_ARGUMENTS = (
     "--all-features",
     "--all-targets",
     "--all-dependencies",
-    "--forbid-only",
     "--locked",
     "--offline",
     "--output-format",
@@ -119,8 +114,21 @@ EVIDENCE_REPORT_KEYS = {
     "required_workspace_package_id",
     "sha256",
 }
-QUICK_REPORT_KEYS = {"packages", "packages_without_metrics"}
-QUICK_ENTRY_KEYS = {"package", "forbids_unsafe"}
+SAFETY_REPORT_KEYS = {
+    "packages",
+    "packages_without_metrics",
+    "used_but_not_scanned_files",
+}
+SAFETY_ENTRY_KEYS = {"package", "unsafety", "forbids_unsafe"}
+UNSAFETY_KEYS = {"used", "unused"}
+UNSAFETY_SCOPE_KEYS = {
+    "functions",
+    "exprs",
+    "item_impls",
+    "item_traits",
+    "methods",
+}
+UNSAFETY_COUNT_KEYS = {"safe", "unsafe_"}
 PACKAGE_INFO_KEYS = {
     "id",
     "dependencies",
@@ -343,14 +351,13 @@ def load_approved_counts(
         boundary = require_object(boundary_value, "unsafe boundary")
         require_exact_keys(boundary, UNSAFE_BOUNDARY_KEYS, "unsafe boundary")
         normalized_boundaries.append(boundary)
-        if boundary["status"] == "enabled":
-            raise fail(ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED)
 
     policy_root = workspace_root_from_unsafe_policy(policy_path)
     by_identity = {
         (package.name, package.version, package.manifest): cargo_id
         for cargo_id, package in inventory.items()
     }
+    approved_counts: dict[str, int] = {}
     for boundary in normalized_boundaries:
         package_name = require_string(boundary["package"], "boundary package")
         package_version = require_string(
@@ -375,23 +382,34 @@ def load_approved_counts(
             ("reason", "boundary reason"),
         ):
             require_string(boundary[key], description)
-        require_safe_relative_path(boundary["source"], "boundary source")
-        if boundary["status"] != "disabled":
+        source_relative = require_safe_relative_path(
+            boundary["source"], "boundary source"
+        )
+        source = canonical_file(
+            policy_root.joinpath(*source_relative.parts), "boundary source"
+        )
+        package_root = inventory[cargo_id].root
+        if not source.is_relative_to(package_root):
+            raise fail("unsafe boundary source escapes its exact package")
+        status = require_string(boundary["status"], "boundary status")
+        if status not in {"disabled", "enabled"}:
             raise fail("unsafe inventory policy contains an invalid boundary status")
-        if (
-            require_nonnegative_integer(
-                boundary["expected_source_tokens"], "expected source token count"
-            )
-            != 0
-            or require_nonnegative_integer(
-                boundary["expected_geiger_count"], "expected cargo-geiger count"
-            )
-            != 0
-        ):
+        source_count = require_nonnegative_integer(
+            boundary["expected_source_tokens"], "expected source token count"
+        )
+        geiger_count = require_nonnegative_integer(
+            boundary["expected_geiger_count"], "expected cargo-geiger count"
+        )
+        if status == "disabled" and (source_count != 0 or geiger_count != 0):
             raise fail("disabled unsafe boundaries must retain zero evidence counts")
+        if status == "enabled" and (source_count == 0 or geiger_count == 0):
+            raise fail("enabled unsafe boundaries must retain nonzero evidence counts")
+        if status == "enabled":
+            if cargo_id in approved_counts:
+                raise fail(f"workspace package has multiple enabled boundaries: {cargo_id}")
+            approved_counts[cargo_id] = geiger_count
 
-    # QuickSafetyReport is deliberately non-authoritative for enabled boundaries.
-    return {}
+    return approved_counts
 
 
 def package_root_from_uri(value: Any) -> pathlib.Path:
@@ -462,6 +480,40 @@ def validate_package_info(value: Any) -> dict[str, Any]:
     return package
 
 
+def validate_unsafety(value: Any) -> int:
+    unsafety = require_object(value, "cargo-geiger unsafety metrics")
+    require_exact_keys(unsafety, UNSAFETY_KEYS, "cargo-geiger unsafety metrics")
+    used_unsafe = 0
+    for scope_name in ("used", "unused"):
+        scope = require_object(
+            unsafety[scope_name], f"cargo-geiger {scope_name} metrics"
+        )
+        require_exact_keys(
+            scope, UNSAFETY_SCOPE_KEYS, f"cargo-geiger {scope_name} metrics"
+        )
+        for category_name in sorted(UNSAFETY_SCOPE_KEYS):
+            counts = require_object(
+                scope[category_name],
+                f"cargo-geiger {scope_name} {category_name} metrics",
+            )
+            require_exact_keys(
+                counts,
+                UNSAFETY_COUNT_KEYS,
+                f"cargo-geiger {scope_name} {category_name} metrics",
+            )
+            require_nonnegative_integer(
+                counts["safe"],
+                f"cargo-geiger {scope_name} {category_name} safe count",
+            )
+            unsafe_count = require_nonnegative_integer(
+                counts["unsafe_"],
+                f"cargo-geiger {scope_name} {category_name} unsafe count",
+            )
+            if scope_name == "used":
+                used_unsafe += unsafe_count
+    return used_unsafe
+
+
 def validate_report(
     report: dict[str, Any],
     required_cargo_id: str,
@@ -470,9 +522,12 @@ def validate_report(
     cargo_geiger_version: Any,
 ) -> int:
     validate_tool_version(cargo_geiger_version)
-    if approved_counts:
-        raise fail(ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED)
-    require_exact_keys(report, QUICK_REPORT_KEYS, "cargo-geiger QuickSafetyReport")
+    require_exact_keys(report, SAFETY_REPORT_KEYS, "cargo-geiger SafetyReport")
+    unscanned_files = require_array(
+        report["used_but_not_scanned_files"], "used_but_not_scanned_files"
+    )
+    for path in unscanned_files:
+        require_string(path, "cargo-geiger unscanned file")
     packages_without_metrics = require_array(
         report["packages_without_metrics"], "packages_without_metrics"
     )
@@ -494,10 +549,11 @@ def validate_report(
     observed_ids: set[str] = set()
     for raw_entry in package_entries:
         entry = require_object(raw_entry, "cargo-geiger package entry")
-        require_exact_keys(entry, QUICK_ENTRY_KEYS, "cargo-geiger package entry")
+        require_exact_keys(entry, SAFETY_ENTRY_KEYS, "cargo-geiger package entry")
         forbids_unsafe = require_bool(
             entry["forbids_unsafe"], "cargo-geiger forbids_unsafe"
         )
+        used_unsafe = validate_unsafety(entry["unsafety"])
         package = validate_package_info(entry["package"])
         identifier = package["id"]
         source = identifier["source"]
@@ -516,8 +572,16 @@ def validate_report(
             raise fail(f"cargo-geiger duplicated workspace package {cargo_id}")
         observed_ids.add(cargo_id)
 
-        if not forbids_unsafe:
-            raise fail(f"workspace package {cargo_id} permits or uses unsafe code")
+        expected_unsafe = approved_counts.get(cargo_id, 0)
+        if used_unsafe != expected_unsafe:
+            raise fail(
+                f"workspace package {cargo_id} expected {expected_unsafe} used unsafe "
+                f"items, observed {used_unsafe}"
+            )
+        if forbids_unsafe != (expected_unsafe == 0):
+            raise fail(
+                f"workspace package {cargo_id} reports an inconsistent unsafe lint state"
+            )
 
     if required_cargo_id not in inventory:
         raise fail(
@@ -1149,7 +1213,7 @@ def build_evidence_envelope(
         },
         "report": {
             "format": REPORT_FORMAT,
-            "authoritative_for_enabled_boundary": False,
+            "authoritative_for_enabled_boundary": True,
             "required_workspace_package_id": required_id,
             "sha256": sha256_file(report_file, "cargo-geiger report"),
         },
@@ -1207,7 +1271,7 @@ def validate_evidence_envelope(document: dict[str, Any]) -> None:
         source_inputs["authoritative_for_enabled_boundary"],
         "enabled source evidence authority",
     ):
-        raise fail(ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED)
+        raise fail("workspace source digest cannot claim compiler-expansion authority")
     require_nonnegative_integer(source_inputs["file_count"], "source input file count")
     require_sha256(source_inputs["sha256"], "source input SHA-256")
 
@@ -1254,10 +1318,10 @@ def validate_evidence_envelope(document: dict[str, Any]) -> None:
     require_exact_keys(report, EVIDENCE_REPORT_KEYS, "cargo-geiger report evidence")
     if report["format"] != REPORT_FORMAT:
         raise fail("cargo-geiger report evidence uses an unsupported format")
-    if require_bool(
+    if not require_bool(
         report["authoritative_for_enabled_boundary"], "enabled report evidence authority"
     ):
-        raise fail(ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED)
+        raise fail("full cargo-geiger report must authorize enabled boundary evidence")
     require_string(report["required_workspace_package_id"], "required Cargo package ID")
     require_sha256(report["sha256"], "cargo-geiger report SHA-256")
 
@@ -1417,7 +1481,7 @@ def main() -> int:
         if args.command == "prepare":
             write_evidence_envelope(pathlib.Path(args.evidence_envelope), expected)
             print(
-                "cargo-geiger QuickSafetyReport evidence prepared for "
+                "cargo-geiger SafetyReport evidence prepared for "
                 f"{args.required_workspace_package_id}"
             )
             return 0

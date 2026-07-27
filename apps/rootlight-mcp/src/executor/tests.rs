@@ -103,6 +103,7 @@ enum FakeOutcome {
     CodeLocateSequence(Arc<Mutex<VecDeque<Result<CodeLocatePortResponse, ClientPortError>>>>),
     PendingCodeLocate,
     SymbolExplain(Result<SymbolExplainPortResponse, ClientPortError>),
+    SymbolExplainPerRequest(Result<SymbolExplainPortResponse, ClientPortError>),
     SourceRead(Result<SourceReadPortResponse, ClientPortError>),
     RepositoryList(Result<RepositoryList, ClientPortError>),
     RepositoryCatalogPageSequence(
@@ -495,11 +496,23 @@ impl FirstSliceClientPort for FakePort {
         options: client::RequestOptions,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<SymbolExplainPortResponse> {
+        let requested_symbols = request.symbols().to_vec();
         self.record(ObservedCall::SymbolExplain(ObservedAnalyticCall::new(
             request, options,
         )));
         let outcome = match &self.outcome {
             FakeOutcome::SymbolExplain(outcome) => outcome.clone(),
+            FakeOutcome::SymbolExplainPerRequest(outcome) => outcome.clone().map(|mut response| {
+                response
+                    .result
+                    .symbols
+                    .retain(|explanation| requested_symbols.contains(&explanation.symbol));
+                response
+                    .result
+                    .unresolved_symbols
+                    .retain(|symbol| requested_symbols.contains(symbol));
+                response
+            }),
             FakeOutcome::BatchContextPack { explain, .. } => explain.clone(),
             _ => Err(ClientPortError::Executor),
         };
@@ -559,7 +572,9 @@ impl FirstSliceClientPort for FakePort {
             FakeOutcome::BatchContextPack { status, .. } => status.as_ref().clone(),
             FakeOutcome::BatchSourceRead { status, .. } => status.as_ref().clone(),
             FakeOutcome::BatchPendingLocate { status } => status.as_ref().clone(),
-            FakeOutcome::SymbolExplain(Ok(_)) => Ok(repository_status_response()),
+            FakeOutcome::SymbolExplain(Ok(_)) | FakeOutcome::SymbolExplainPerRequest(Ok(_)) => {
+                Ok(repository_status_response())
+            }
             FakeOutcome::PlanChange(Ok(_)) => Ok(repository_status_response()),
             _ => Err(ClientPortError::Executor),
         };
@@ -897,7 +912,7 @@ fn analytical_budget_lowers_every_public_resource_dimension() {
 }
 
 #[test]
-fn context_evidence_options_never_widen_parent_reservation() {
+fn context_evidence_options_use_the_reserved_json_envelope_for_daemon_tokens() {
     let reservation = BudgetCharge {
         rows: 23,
         results: 7,
@@ -923,7 +938,10 @@ fn context_evidence_options_never_widen_parent_reservation() {
     assert_eq!(transported.results, reservation.results);
     assert_eq!(transported.source_bytes, reservation.source_bytes);
     assert_eq!(transported.json_bytes, reservation.json_bytes);
-    assert_eq!(transported.estimated_tokens, reservation.tokens);
+    assert_eq!(
+        transported.estimated_tokens,
+        reservation.tokens.max(reservation.json_bytes)
+    );
     assert_eq!(transported.memory_bytes, reservation.memory_bytes);
     assert_eq!(
         transported.duration,
@@ -937,6 +955,82 @@ fn context_evidence_options_never_widen_parent_reservation() {
             .expect("child request carries a bounded transport deadline")
             .duration(),
         Duration::from_millis(reservation.time_ms) + ANALYTICAL_TRANSPORT_OVERHEAD
+    );
+}
+
+#[test]
+fn relationship_evidence_divides_traversal_work_across_composite_calls() {
+    let reservation = BudgetCharge {
+        rows: 1_856,
+        results: 40,
+        tokens: 4_096,
+        actual_tokens: 0,
+        source_bytes: 4_096,
+        traversal_facts: 384,
+        depth: 4,
+        paths: 16,
+        json_bytes: 163_840,
+        memory_bytes: 163_840,
+        time_ms: 2_000,
+    };
+    let direct = context_evidence::relationship_evidence_options(reservation, 0)
+        .expect("direct symbol evidence has two transport calls");
+    let with_three_lookups = context_evidence::relationship_evidence_options(reservation, 3)
+        .expect("path evidence also budgets each anchor lookup");
+
+    assert_eq!(
+        direct
+            .effective_budget()
+            .expect("direct budget")
+            .limits()
+            .edges,
+        192
+    );
+    assert_eq!(
+        with_three_lookups
+            .effective_budget()
+            .expect("lookup budget")
+            .limits()
+            .edges,
+        76
+    );
+}
+
+#[test]
+fn source_evidence_divides_scanned_rows_across_composite_calls() {
+    let reservation = BudgetCharge {
+        rows: 225,
+        results: 4,
+        tokens: 512,
+        actual_tokens: 0,
+        source_bytes: 2_048,
+        traversal_facts: 16,
+        depth: 4,
+        paths: 1,
+        json_bytes: 16_384,
+        memory_bytes: 16_384,
+        time_ms: 2_000,
+    };
+    let direct = context_evidence::source_evidence_options(reservation, 0)
+        .expect("direct symbol evidence has two transport calls");
+    let with_three_lookups = context_evidence::source_evidence_options(reservation, 3)
+        .expect("path evidence also budgets each anchor lookup");
+
+    assert_eq!(
+        direct
+            .effective_budget()
+            .expect("direct budget")
+            .limits()
+            .rows,
+        112
+    );
+    assert_eq!(
+        with_three_lookups
+            .effective_budget()
+            .expect("lookup budget")
+            .limits()
+            .rows,
+        45
     );
 }
 
@@ -2726,6 +2820,7 @@ async fn maps_repository_index_without_replacing_stable_identities() {
             indexed_files: 3,
             entities: 12,
             elapsed_micros: 500,
+            estimated_disk_bytes: 4_096,
         },
         IndexPlanSummary {
             scope: IndexPlanScope::Repository,
@@ -2744,7 +2839,7 @@ async fn maps_repository_index_without_replacing_stable_identities() {
             json!({
                 "root": "C:/fixture",
                 "mode": "structural",
-                "detached": false
+                "detached": true
             }),
         )
         .await
@@ -2763,7 +2858,7 @@ async fn maps_repository_index_without_replacing_stable_identities() {
         harness.only_call(),
         ObservedCall::RepositoryIndex(RepositoryIndexPortRequest {
             mode: IndexMode::Structural,
-            detached: false,
+            detached: true,
             ..
         })
     ));
@@ -2783,6 +2878,7 @@ async fn repository_auto_mode_reports_the_selected_structural_plan() {
             indexed_files: 3,
             entities: 12,
             elapsed_micros: 500,
+            estimated_disk_bytes: 4_096,
         },
         IndexPlanSummary {
             scope: IndexPlanScope::Repository,
@@ -2833,6 +2929,7 @@ async fn identical_index_inputs_may_use_fresh_operations_but_converge_generation
                 indexed_files: 3,
                 entities: 12,
                 elapsed_micros: 500,
+                estimated_disk_bytes: 4_096,
             },
             IndexPlanSummary {
                 scope: IndexPlanScope::Repository,
@@ -4805,7 +4902,12 @@ async fn maps_truncated_symbol_explain_without_reclassifying_omitted_ids() {
 
 #[tokio::test]
 async fn context_pack_assembles_definition_evidence_under_budget() {
-    let response = explain_response(source_reference(4, 12, 2, 2));
+    let mut response = explain_response(source_reference(4, 12, 2, 2));
+    // The daemon's rich response can exceed the compact pack reservation even
+    // when its projected definition is small enough for the caller's budget.
+    response.result.context.usage.estimated_tokens = 2_914;
+    response.result.context.usage.json_bytes = 2_914;
+    response.result.context.usage.memory_bytes = Some(2_050);
     let harness = Harness::new(FakeOutcome::SymbolExplain(Ok(response)));
     let arguments = json!({
         "repository": {"repository_id": repository()},
@@ -8179,10 +8281,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         (
             VerticalTool::RepoIndex,
             json!({"root": "C:/fixture", "wait_ms": 0}),
-        ),
-        (
-            VerticalTool::RepoIndex,
-            json!({"root": "C:/fixture", "detached": true}),
         ),
         (
             VerticalTool::CodeLocate,
@@ -11659,6 +11757,7 @@ async fn accepted_effect_defaults_match_omitted_values() {
                         indexed_files: 1,
                         entities: 1,
                         elapsed_micros: 1,
+                        estimated_disk_bytes: 1,
                     },
                     IndexPlanSummary {
                         scope: IndexPlanScope::Repository,
@@ -12078,12 +12177,12 @@ async fn context_pack_public_cursor_resumes_once_without_duplicate_evidence() {
     response.result.symbols.push(second);
     response.result.unresolved_symbols.clear();
 
-    let harness = Harness::new(FakeOutcome::SymbolExplain(Ok(response)));
+    let harness = Harness::new(FakeOutcome::SymbolExplainPerRequest(Ok(response)));
     let base = json!({
         "repository": {"repository_id": repository()},
         "task": "explain the publishing path",
         "seeds": {"symbols": [symbol(), second_symbol]},
-        "token_budget": 1550
+        "token_budget": 1_530
     });
     let first: ContextPackOutput = decode(
         execute(&harness.executor, VerticalTool::ContextPack, base.clone())

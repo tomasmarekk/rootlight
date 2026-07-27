@@ -6,6 +6,7 @@
 //! constrained by one shared token ledger.
 
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
     time::{Duration, Instant},
@@ -67,6 +68,9 @@ const STANDARD_EVIDENCE_HEAVY_BYTES: u32 = 4_096;
 const EVIDENCE_SNIPPET_BYTES: u32 = 8_192;
 const SIGNATURE_BYTES: u32 = 1_024;
 const SOURCE_METADATA_BYTES: u64 = 256;
+const SOURCE_LANGUAGE_BYTES: u64 = 64;
+const SOURCE_PROVIDER_ENVELOPE_BYTES: u64 = 2_048;
+const MIN_SOURCE_MATERIAL_BYTES: u32 = 64;
 
 /// Maximum omission summary entries.
 pub const MAX_OMISSIONS: usize = 32;
@@ -146,6 +150,7 @@ impl PackObjective {
             Self::BugFix => &[
                 EvidenceRole::Definition,
                 EvidenceRole::Implementation,
+                EvidenceRole::Caller,
                 EvidenceRole::Test,
             ],
             Self::Refactor => &[
@@ -185,7 +190,7 @@ pub struct EvidenceCandidate {
     pub source_path: String,
     /// Stable evidence-provider domain used for diversity.
     pub provider_key: String,
-    /// Stable coarse byte-region bucket within the source file.
+    /// Stable source-start coordinate used for within-file diversity.
     pub source_region: u32,
 }
 
@@ -573,9 +578,10 @@ impl DefaultContextPackPlanner {
             return Ok(planned);
         }
 
-        let (include_snippets, max_bytes_per_snippet) =
+        let (include_snippets, configured_max_bytes_per_snippet) =
             source_materialization_limits(request.source_policy(), request.response_profile());
-        let mut selected = selected_source_targets(&planned, &corpus, max_bytes_per_snippet);
+        let mut selected =
+            selected_source_targets(&planned, &corpus, configured_max_bytes_per_snippet);
         if selected.is_empty() {
             return Ok(planned);
         }
@@ -584,31 +590,41 @@ impl DefaultContextPackPlanner {
         budget
             .charge(planned.usage)
             .map_err(ContextPackPlanningError::from)?;
-        let target_count = affordable_source_target_count(
+        let materialization = affordable_source_materialization(
             budget.remaining(),
             selected.len(),
-            max_bytes_per_snippet,
+            configured_max_bytes_per_snippet,
             include_snippets,
         );
-        if target_count < selected.len() {
+        if materialization.target_count < selected.len() {
             mark_source_omission(
                 &mut planned,
                 "source_budget",
-                selected.len().saturating_sub(target_count),
+                selected.len().saturating_sub(materialization.target_count),
                 source_completeness(ContextEvidencePortErrorKind::Unavailable, true)?,
             )?;
-            selected.truncate(target_count);
+            selected.truncate(materialization.target_count);
         }
         if selected.is_empty() {
             planned.usage = budget.consumed();
             return Ok(planned);
         }
+        for target in &mut selected {
+            target.target.source_ref = bounded_source_ref(
+                &target.target.source_ref,
+                materialization.max_bytes_per_snippet,
+            );
+        }
 
         let provider_reservation =
-            source_provider_reservation(selected.len(), max_bytes_per_snippet);
+            source_provider_reservation(selected.len(), materialization.max_bytes_per_snippet);
         let combined_reservation = add_budget_charge(
             provider_reservation,
-            source_shaping_reservation(selected.len(), max_bytes_per_snippet, include_snippets),
+            source_shaping_reservation(
+                selected.len(),
+                materialization.max_bytes_per_snippet,
+                include_snippets,
+            ),
         );
         let reservation = budget
             .reserve(combined_reservation)
@@ -618,7 +634,7 @@ impl DefaultContextPackPlanner {
             generation: request.generation(),
             source_policy: request.source_policy(),
             include_snippets,
-            max_bytes_per_snippet,
+            max_bytes_per_snippet: materialization.max_bytes_per_snippet,
             targets: selected
                 .iter()
                 .map(|target| target.target.clone())
@@ -748,15 +764,17 @@ impl DefaultContextPackPlanner {
                 |source| source.span().file().to_string(),
             );
             let source_region = source_ref.as_ref().map_or(0, |source| {
-                u32::try_from(source.span().start_byte() / 4_096).unwrap_or(u32::MAX)
+                u32::try_from(source.span().start_byte()).unwrap_or(u32::MAX)
             });
+            let signature = (candidate.symbol_id().is_none() && source_ref.is_none())
+                .then(|| candidate.identity().to_owned());
             metadata.insert(
                 identity.clone(),
                 ContextCandidateMetadata {
                     symbol_id: candidate.symbol_id(),
                     source_ref,
                     trust: candidate.trust(),
-                    signature: None,
+                    signature,
                     snippet: None,
                 },
             );
@@ -774,6 +792,7 @@ impl DefaultContextPackPlanner {
 
         let mut budget = corpus.budget().clone();
         let available_tokens = u32::try_from(budget.remaining().tokens).unwrap_or(u32::MAX);
+        let explicit_seed_anchors = explicit_symbol_anchor_ids(request, corpus);
         let (pack, next_continuation, continuation_frontier, cumulative_roles) =
             if candidates.is_empty() {
                 if continuation.is_some() {
@@ -801,6 +820,7 @@ impl DefaultContextPackPlanner {
                     &mut candidates,
                     available_tokens,
                     request.diversity(),
+                    &explicit_seed_anchors,
                     continuation,
                 )?;
                 (pack, continuation, Some(frontier), cumulative_roles)
@@ -898,6 +918,54 @@ fn selected_source_targets(
         .collect()
 }
 
+fn explicit_symbol_anchor_ids(
+    request: &CanonicalContextPackRequest,
+    corpus: &ContextEvidenceCorpus,
+) -> BTreeSet<String> {
+    let mut seeds = request
+        .seeds()
+        .symbols()
+        .iter()
+        .chain(request.seeds().tests())
+        .copied()
+        .collect::<Vec<_>>();
+    seeds.sort_unstable();
+    seeds.dedup();
+
+    seeds
+        .into_iter()
+        .filter_map(|seed| {
+            corpus
+                .candidates
+                .iter()
+                .filter(|candidate| {
+                    candidate.symbol_id() == Some(seed) && !candidate.source_refs().is_empty()
+                })
+                .min_by(|left, right| {
+                    explicit_anchor_role_rank(left.role())
+                        .cmp(&explicit_anchor_role_rank(right.role()))
+                        .then_with(|| right.relevance().cmp(&left.relevance()))
+                        .then_with(|| right.confidence().cmp(&left.confidence()))
+                        .then_with(|| left.cost().tokens.cmp(&right.cost().tokens))
+                        .then_with(|| left.id().cmp(right.id()))
+                })
+                .map(|candidate| candidate.id().as_str().to_owned())
+        })
+        .collect()
+}
+
+const fn explicit_anchor_role_rank(role: EvidenceRole) -> u8 {
+    match role {
+        EvidenceRole::Definition => 0,
+        EvidenceRole::Implementation => 1,
+        EvidenceRole::Caller => 2,
+        EvidenceRole::Test => 3,
+        EvidenceRole::Architecture => 4,
+        EvidenceRole::Change => 5,
+        EvidenceRole::Risk => 6,
+    }
+}
+
 fn bounded_source_ref(source: &rootlight_ir::SourceRef, max_bytes: u32) -> rootlight_ir::SourceRef {
     let span = source.span();
     let end_byte = span
@@ -911,20 +979,30 @@ fn bounded_source_ref(source: &rootlight_ir::SourceRef, max_bytes: u32) -> rootl
         source.generation(),
         bounded_span,
         source.content_hash(),
-        (end_byte == span.end_byte())
-            .then(|| source.line_hint())
-            .flatten(),
+        None,
     )
 }
 
 fn source_provider_reservation(targets: usize, max_bytes: u32) -> BudgetCharge {
     let targets = u64::try_from(targets).unwrap_or(u64::MAX);
-    let bytes = targets.saturating_mul(u64::from(max_bytes));
+    let source_bytes_per_target = u64::from(max_bytes);
+    let source_bytes = targets.saturating_mul(source_bytes_per_target);
+    // One batched source request has one transport envelope. Charging it once
+    // preserves a conservative payload bound without multiplying fixed
+    // protocol overhead by the number of explicit targets.
+    let json_bytes = source_bytes.saturating_add(SOURCE_PROVIDER_ENVELOPE_BYTES);
+    let tokens = source_bytes.max(json_bytes.div_ceil(4));
     BudgetCharge {
+        rows: targets,
         results: targets,
-        tokens: bytes,
-        source_bytes: bytes,
-        memory_bytes: bytes,
+        tokens,
+        source_bytes,
+        traversal_facts: targets.saturating_mul(8),
+        // Transport budgets require a nonzero depth even for a direct source read.
+        depth: 1,
+        paths: targets,
+        json_bytes,
+        memory_bytes: json_bytes.saturating_add(source_bytes),
         time_ms: u64::from(CONTEXT_PACK_TIMEOUT_MS),
         ..BudgetCharge::default()
     }
@@ -936,10 +1014,13 @@ fn source_shaping_reservation(
     include_snippets: bool,
 ) -> BudgetCharge {
     let targets = u64::try_from(targets).unwrap_or(u64::MAX);
+    let signature_bytes = u64::from(SIGNATURE_BYTES.min(max_bytes));
     let represented_bytes = if include_snippets {
         u64::from(max_bytes)
+            .saturating_add(signature_bytes)
+            .saturating_add(SOURCE_LANGUAGE_BYTES)
     } else {
-        u64::from(SIGNATURE_BYTES.min(max_bytes))
+        signature_bytes
     };
     let bytes = targets.saturating_mul(represented_bytes.saturating_add(SOURCE_METADATA_BYTES));
     BudgetCharge {
@@ -966,22 +1047,59 @@ fn add_budget_charge(left: BudgetCharge, right: BudgetCharge) -> BudgetCharge {
     }
 }
 
-fn affordable_source_target_count(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceMaterializationPlan {
+    target_count: usize,
+    max_bytes_per_snippet: u32,
+}
+
+fn affordable_source_materialization(
     remaining: BudgetCharge,
     requested: usize,
+    configured_max_bytes: u32,
+    include_snippets: bool,
+) -> SourceMaterializationPlan {
+    let minimum_bytes = MIN_SOURCE_MATERIAL_BYTES.min(configured_max_bytes);
+    for target_count in (1..=requested).rev() {
+        let minimum_charge =
+            source_materialization_reservation(target_count, minimum_bytes, include_snippets);
+        if !budget_charge_fits(minimum_charge, remaining) {
+            continue;
+        }
+
+        let mut lower = minimum_bytes;
+        let mut upper = configured_max_bytes;
+        while lower < upper {
+            let candidate = lower.saturating_add(upper.saturating_sub(lower).div_ceil(2));
+            let charge =
+                source_materialization_reservation(target_count, candidate, include_snippets);
+            if budget_charge_fits(charge, remaining) {
+                lower = candidate;
+            } else {
+                upper = candidate.saturating_sub(1);
+            }
+        }
+        return SourceMaterializationPlan {
+            target_count,
+            max_bytes_per_snippet: lower,
+        };
+    }
+
+    SourceMaterializationPlan {
+        target_count: 0,
+        max_bytes_per_snippet: 0,
+    }
+}
+
+fn source_materialization_reservation(
+    targets: usize,
     max_bytes: u32,
     include_snippets: bool,
-) -> usize {
-    (0..=requested)
-        .rev()
-        .find(|count| {
-            let charge = add_budget_charge(
-                source_provider_reservation(*count, max_bytes),
-                source_shaping_reservation(*count, max_bytes, include_snippets),
-            );
-            budget_charge_fits(charge, remaining)
-        })
-        .unwrap_or(0)
+) -> BudgetCharge {
+    add_budget_charge(
+        source_provider_reservation(targets, max_bytes),
+        source_shaping_reservation(targets, max_bytes, include_snippets),
+    )
 }
 
 fn budget_charge_fits(charge: BudgetCharge, remaining: BudgetCharge) -> bool {
@@ -1002,10 +1120,16 @@ fn validate_source_output(
     request: &ContextSourceRequest,
     output: &ContextSourceOutput,
 ) -> Result<(), ContextEvidenceCollectionError> {
+    let mut material_sources = Vec::new();
+    for material in &output.materials {
+        if !material_sources.contains(&material.source_ref) {
+            material_sources.push(material.source_ref.clone());
+        }
+    }
     if output.repository != request.repository
         || output.generation != request.generation
         || output.materials.len() > request.targets.len()
-        || output.usage.results < u64::try_from(output.materials.len()).unwrap_or(u64::MAX)
+        || output.usage.results < u64::try_from(material_sources.len()).unwrap_or(u64::MAX)
         || !matches!(
             output.completeness.state,
             CompletenessState::Complete | CompletenessState::Truncated
@@ -1017,6 +1141,7 @@ fn validate_source_output(
     }
 
     let mut observed = std::collections::BTreeSet::new();
+    let mut observed_sources = Vec::new();
     let mut returned_source_bytes = 0u64;
     for material in &output.materials {
         if !observed.insert(material.candidate_id.clone()) {
@@ -1032,10 +1157,12 @@ fn validate_source_output(
         {
             return Err(ContextEvidenceCollectionError::IdentityMismatch);
         }
-        let valid_signature = material
-            .signature
-            .as_ref()
-            .is_none_or(|signature| !signature.is_empty() && signature.len() <= 4_096);
+        let valid_signature = material.signature.as_ref().is_none_or(|signature| {
+            !signature.is_empty()
+                && signature.len()
+                    <= usize::try_from(SIGNATURE_BYTES.min(request.max_bytes_per_snippet))
+                        .unwrap_or(usize::MAX)
+        });
         if !valid_signature {
             return Err(ContextEvidenceCollectionError::InvalidProviderResponse);
         }
@@ -1056,8 +1183,11 @@ fn validate_source_output(
         let signature_bytes = material.signature.as_ref().map_or(0, |signature| {
             u64::try_from(signature.len()).unwrap_or(u64::MAX)
         });
-        returned_source_bytes =
-            returned_source_bytes.saturating_add(signature_bytes.max(snippet_bytes));
+        if !observed_sources.contains(&material.source_ref) {
+            observed_sources.push(material.source_ref.clone());
+            returned_source_bytes =
+                returned_source_bytes.saturating_add(signature_bytes.max(snippet_bytes));
+        }
         if request.source_policy == SourcePolicy::Signatures && material.signature.is_none() {
             return Err(ContextEvidenceCollectionError::InvalidProviderResponse);
         }
@@ -1797,12 +1927,13 @@ fn optimize_context_page(
     candidates: &mut [EvidenceCandidate],
     token_budget: u32,
     diversity: Diversity,
+    explicit_seed_anchors: &BTreeSet<String>,
     continuation: Option<ContextContinuationState>,
 ) -> Result<ContextPageSelection, ContextPackPlanningError> {
     if candidates.is_empty() {
         return Err(PackError::NoTargets.into());
     }
-    rank_candidates(objective, candidates, diversity);
+    rank_candidates(objective, candidates, diversity, explicit_seed_anchors);
     let corpus_digest = candidate_corpus_digest(candidates);
     let target_page = continuation
         .as_ref()
@@ -1820,8 +1951,14 @@ fn optimize_context_page(
     let mut emitted_order = Vec::new();
     let mut cumulative_roles = Vec::new();
     for page_index in 0..target_page {
-        let mut prior =
-            select_remaining_page(objective, candidates, &emitted, token_budget, diversity)?;
+        let mut prior = select_remaining_page(
+            objective,
+            candidates,
+            &emitted,
+            token_budget,
+            diversity,
+            explicit_seed_anchors,
+        )?;
         let authenticated_count = page_item_counts
             .get(usize::from(page_index))
             .copied()
@@ -1865,7 +2002,14 @@ fn optimize_context_page(
     let page_start_digest = emitted_identity_digest(&emitted_order);
     let page_start_count = u16::try_from(emitted_order.len())
         .map_err(|_| ContextPackPlanningError::InvalidContinuation)?;
-    let mut pack = select_remaining_page(objective, candidates, &emitted, token_budget, diversity)?;
+    let mut pack = select_remaining_page(
+        objective,
+        candidates,
+        &emitted,
+        token_budget,
+        diversity,
+        explicit_seed_anchors,
+    )?;
     append_emitted(
         &pack,
         &mut emitted,
@@ -1916,6 +2060,7 @@ fn select_remaining_page(
     emitted: &BTreeSet<String>,
     token_budget: u32,
     diversity: Diversity,
+    explicit_seed_anchors: &BTreeSet<String>,
 ) -> Result<PackResult, PackError> {
     let mut remaining = candidates
         .iter()
@@ -1930,7 +2075,13 @@ fn select_remaining_page(
             truncated: false,
         });
     }
-    optimize_admitted_pack(objective, &mut remaining, token_budget, diversity)
+    optimize_admitted_pack(
+        objective,
+        &mut remaining,
+        token_budget,
+        diversity,
+        explicit_seed_anchors,
+    )
 }
 
 fn append_emitted(
@@ -2007,7 +2158,13 @@ pub fn optimize_pack(
     if !(MIN_PACK_TOKENS..=MAX_PACK_TOKENS).contains(&token_budget) {
         return Err(PackError::InvalidBudget);
     }
-    optimize_admitted_pack(objective, candidates, token_budget, Diversity::Balanced)
+    optimize_admitted_pack(
+        objective,
+        candidates,
+        token_budget,
+        Diversity::Balanced,
+        &BTreeSet::new(),
+    )
 }
 
 /// Optimizes a context pack with an explicit deterministic diversity bias.
@@ -2024,7 +2181,13 @@ pub fn optimize_pack_with_diversity(
     if !(MIN_PACK_TOKENS..=MAX_PACK_TOKENS).contains(&token_budget) {
         return Err(PackError::InvalidBudget);
     }
-    optimize_admitted_pack(objective, candidates, token_budget, diversity)
+    optimize_admitted_pack(
+        objective,
+        candidates,
+        token_budget,
+        diversity,
+        &BTreeSet::new(),
+    )
 }
 
 fn optimize_admitted_pack(
@@ -2032,6 +2195,7 @@ fn optimize_admitted_pack(
     candidates: &mut [EvidenceCandidate],
     token_budget: u32,
     diversity: Diversity,
+    explicit_seed_anchors: &BTreeSet<String>,
 ) -> Result<PackResult, PackError> {
     if token_budget > MAX_PACK_TOKENS {
         return Err(PackError::InvalidBudget);
@@ -2040,34 +2204,58 @@ fn optimize_admitted_pack(
         return Err(PackError::NoTargets);
     }
 
-    rank_candidates(objective, candidates, diversity);
+    rank_candidates(objective, candidates, diversity, explicit_seed_anchors);
     let required = objective.required_roles();
 
-    // Minimum representation: reserve one fitting candidate per required role
-    // before the remaining budget is handed to greedy filling. Without this
-    // reservation a run of high-relevance items from the first required role
-    // can consume the whole budget and starve the other required roles even
-    // though one item per role would have fit. Candidates are visited in ranked
-    // order, so roles are reserved in role-priority order and each role keeps
-    // its best candidate that still fits.
+    // Explicit symbol and test seeds are user-selected subjects, so each
+    // source-bearing anchor gets first claim on the page budget. This prevents
+    // role diversity from preserving the requested identities while dropping
+    // the semantic material for every subject except the highest-ranked one.
     let mut reserved = vec![false; candidates.len()];
     let mut reserved_tokens = 0u32;
-    let mut reserved_paths: Vec<&str> = Vec::new();
-    let mut represented: Vec<EvidenceRole> = Vec::new();
-    for (index, candidate) in candidates.iter().enumerate() {
-        if represented.len() == required.len() {
-            break;
-        }
-        if !required.contains(&candidate.role) || represented.contains(&candidate.role) {
-            continue;
-        }
-        if reserved_tokens.saturating_add(candidate.estimated_tokens) <= token_budget
-            && path_count(&reserved_paths, &candidate.source_path) < 2
-        {
+    let mut anchor_indices = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| explicit_seed_anchors.contains(&candidate.identity))
+        .collect::<Vec<_>>();
+    anchor_indices.sort_by(|(_, left), (_, right)| {
+        left.estimated_tokens
+            .cmp(&right.estimated_tokens)
+            .then_with(|| Reverse(left.relevance).cmp(&Reverse(right.relevance)))
+            .then_with(|| Reverse(left.confidence).cmp(&Reverse(right.confidence)))
+            .then_with(|| left.identity.cmp(&right.identity))
+    });
+    for (index, candidate) in anchor_indices {
+        if reserved_tokens.saturating_add(candidate.estimated_tokens) <= token_budget {
             reserved[index] = true;
             reserved_tokens = reserved_tokens.saturating_add(candidate.estimated_tokens);
-            reserved_paths.push(candidate.source_path.as_str());
-            represented.push(candidate.role);
+        }
+    }
+
+    // Reserve one fitting candidate per remaining required role. Required
+    // coverage may legitimately place several distinct symbols in one file,
+    // so the per-source diversity cap applies only to optional greedy fill.
+    // Candidates are already ranked by task relevance and confidence; source
+    // diversity must not displace an explicitly task-relevant required item.
+    for required_role in required {
+        if candidates
+            .iter()
+            .enumerate()
+            .any(|(index, candidate)| reserved[index] && candidate.role == *required_role)
+        {
+            continue;
+        }
+        let fits = |candidate: &EvidenceCandidate| {
+            candidate.role == *required_role
+                && reserved_tokens.saturating_add(candidate.estimated_tokens) <= token_budget
+        };
+        let selected = candidates
+            .iter()
+            .enumerate()
+            .find(|(index, candidate)| !reserved[*index] && fits(candidate));
+        if let Some((index, candidate)) = selected {
+            reserved[index] = true;
+            reserved_tokens = reserved_tokens.saturating_add(candidate.estimated_tokens);
         }
     }
 
@@ -2151,13 +2339,17 @@ fn rank_candidates(
     objective: PackObjective,
     candidates: &mut [EvidenceCandidate],
     diversity: Diversity,
+    explicit_seed_anchors: &BTreeSet<String>,
 ) {
     let required = objective.required_roles();
     candidates.sort_by(|a, b| {
+        let a_anchor = explicit_seed_anchors.contains(&a.identity);
+        let b_anchor = explicit_seed_anchors.contains(&b.identity);
         let a_required = required.contains(&a.role);
         let b_required = required.contains(&b.role);
-        b_required
-            .cmp(&a_required)
+        b_anchor
+            .cmp(&a_anchor)
+            .then_with(|| b_required.cmp(&a_required))
             .then_with(|| diversity_rank(diversity, a.role).cmp(&diversity_rank(diversity, b.role)))
             .then_with(|| a.role.priority().cmp(&b.role.priority()))
             .then_with(|| b.relevance.cmp(&a.relevance))
@@ -2905,17 +3097,21 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::{
+        collections::BTreeSet,
+        time::{Duration, Instant},
+    };
 
     use super::{
         ContextPackPlanRequest, ContextPackPlanner, ContextPackPlanningError,
         DefaultContextPackPlanner, EvidenceCandidate, EvidenceRole, MAX_PACK_TOKENS,
-        MIN_PACK_TOKENS, PackError, PackObjective, add_budget_charge,
-        affordable_source_target_count, append_role_followups, context_pack_completeness,
-        context_pack_id, contract_role, evaluate_role_coverage, objective_for_task,
-        optimize_context_page, optimize_pack, optimize_pack_with_diversity,
-        reconcile_final_envelope, reconcile_final_envelope_with_budget, resumable_completeness,
-        role_coverage_completeness, source_materialization_limits, source_provider_reservation,
+        MIN_PACK_TOKENS, PackError, PackObjective, SourceMaterializationPlan,
+        affordable_source_materialization, append_role_followups, bounded_source_ref,
+        context_pack_completeness, context_pack_id, contract_role, evaluate_role_coverage,
+        objective_for_task, optimize_admitted_pack, optimize_context_page, optimize_pack,
+        optimize_pack_with_diversity, reconcile_final_envelope,
+        reconcile_final_envelope_with_budget, resumable_completeness, role_coverage_completeness,
+        source_materialization_limits, source_materialization_reservation,
         source_shaping_reservation, usage_summary, validate_source_output,
     };
     use crate::{
@@ -2983,6 +3179,13 @@ mod tests {
                 ContentHash::from_bytes([file_byte; 32]),
                 None,
             );
+            // A single materializable item isolates response-profile shaping
+            // from the independent target-count tradeoff in the shared budget.
+            let source_refs = if invocation.role() == EvidenceRole::Definition {
+                vec![source_ref]
+            } else {
+                Vec::new()
+            };
             let output = EvidenceProviderOutput {
                 repository: invocation.repository(),
                 generation: invocation.generation(),
@@ -2992,9 +3195,10 @@ mod tests {
                     symbol_id: None,
                     identity: format!("profile-role-{}", invocation.role().priority()),
                     observed_score: Some(900),
+                    observed_relevance: None,
                     estimated_tokens: 1,
                     source_bytes: 0,
-                    source_refs: vec![source_ref],
+                    source_refs,
                 }],
                 completeness: ResultCompleteness::complete(),
                 usage: BudgetCharge {
@@ -3145,6 +3349,18 @@ mod tests {
     }
 
     #[test]
+    fn source_materialization_refs_use_byte_identity_without_line_metadata() {
+        let generation = GenerationId::from_bytes([2; 20]);
+        let source = explanation(SymbolId::from_bytes([3; 20]), generation).definition;
+
+        let bounded = bounded_source_ref(&source, 20);
+
+        assert_eq!(bounded.span().start_byte(), source.span().start_byte());
+        assert_eq!(bounded.span().end_byte(), 30);
+        assert_eq!(bounded.line_hint(), None);
+    }
+
+    #[test]
     fn invalid_budget_is_rejected() {
         let mut candidates = vec![candidate("a", EvidenceRole::Definition, 900, 100)];
         assert_eq!(
@@ -3204,7 +3420,7 @@ mod tests {
         ];
         let result =
             optimize_pack(PackObjective::BugFix, &mut candidates, 1000).expect("valid pack");
-        // BugFix requires Definition, Implementation, Test
+        // BugFix requires Definition, Implementation, Caller, and Test.
         let roles: Vec<EvidenceRole> = result.items.iter().map(|i| i.candidate.role).collect();
         let def_pos = roles
             .iter()
@@ -3231,12 +3447,13 @@ mod tests {
             candidate("def2", EvidenceRole::Definition, 940, 300),
             candidate("def3", EvidenceRole::Definition, 930, 300),
             candidate("impl1", EvidenceRole::Implementation, 500, 300),
+            candidate("caller1", EvidenceRole::Caller, 450, 300),
             candidate("test1", EvidenceRole::Test, 400, 300),
         ];
-        // Budget fits exactly one of each required role (3 * 300) but not all
-        // five candidates.
+        // Budget fits exactly one of each required role (4 * 300) but not all
+        // six candidates.
         let result =
-            optimize_pack(PackObjective::BugFix, &mut candidates, 900).expect("valid pack");
+            optimize_pack(PackObjective::BugFix, &mut candidates, 1_200).expect("valid pack");
         let roles: Vec<EvidenceRole> = result.items.iter().map(|i| i.candidate.role).collect();
         assert!(
             roles.contains(&EvidenceRole::Definition),
@@ -3246,8 +3463,101 @@ mod tests {
             roles.contains(&EvidenceRole::Implementation),
             "implementation represented"
         );
+        assert!(roles.contains(&EvidenceRole::Caller), "caller represented");
         assert!(roles.contains(&EvidenceRole::Test), "test represented");
-        assert!(result.total_tokens <= 900, "budget respected");
+        assert!(result.total_tokens <= 1_200, "budget respected");
+    }
+
+    #[test]
+    fn explicit_seed_anchors_precede_role_diversity() {
+        let mut first = candidate("seed-first", EvidenceRole::Definition, 950, 250);
+        first.source_path = "src/lib.rs".to_owned();
+        first.source_region = 10;
+        let mut second = candidate("seed-second", EvidenceRole::Definition, 940, 250);
+        second.source_path = "src/lib.rs".to_owned();
+        second.source_region = 20;
+        let mut architecture = candidate("architecture", EvidenceRole::Architecture, 999, 250);
+        architecture.source_path = "src/architecture.rs".to_owned();
+        let mut candidates = vec![architecture, second, first];
+        let anchors = BTreeSet::from(["seed-first".to_owned(), "seed-second".to_owned()]);
+
+        let result = optimize_admitted_pack(
+            PackObjective::Explanation,
+            &mut candidates,
+            500,
+            Diversity::Architecture,
+            &anchors,
+        )
+        .expect("explicit seed anchors fit exactly");
+        let identities = result
+            .items
+            .iter()
+            .map(|item| item.candidate.identity.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(identities, vec!["seed-first", "seed-second"]);
+        assert_eq!(result.total_tokens, 500);
+    }
+
+    #[test]
+    fn required_role_reservations_prioritize_relevance_in_one_file() {
+        let mut definition_helper =
+            candidate("definition-helper", EvidenceRole::Definition, 950, 200);
+        definition_helper.source_path = "src/lib.rs".to_owned();
+        definition_helper.source_region = 10;
+        let mut definition_entry =
+            candidate("definition-entry", EvidenceRole::Definition, 940, 200);
+        definition_entry.source_path = "src/lib.rs".to_owned();
+        definition_entry.source_region = 20;
+        let mut implementation_helper = candidate(
+            "implementation-helper",
+            EvidenceRole::Implementation,
+            950,
+            200,
+        );
+        implementation_helper.source_path = "src/lib.rs".to_owned();
+        implementation_helper.source_region = 10;
+        let mut implementation_entry = candidate(
+            "implementation-entry",
+            EvidenceRole::Implementation,
+            940,
+            200,
+        );
+        implementation_entry.source_path = "src/lib.rs".to_owned();
+        implementation_entry.source_region = 20;
+        let mut caller = candidate("caller", EvidenceRole::Caller, 920, 200);
+        caller.source_path = "src/lib.rs".to_owned();
+        caller.source_region = 40;
+        let mut test = candidate("test", EvidenceRole::Test, 900, 200);
+        test.source_path = "tests/integration.rs".to_owned();
+        test.source_region = 30;
+        let mut candidates = vec![
+            definition_helper,
+            definition_entry,
+            implementation_helper,
+            implementation_entry,
+            caller,
+            test,
+        ];
+
+        let result =
+            optimize_pack(PackObjective::BugFix, &mut candidates, 800).expect("valid pack");
+        let identities = result
+            .items
+            .iter()
+            .map(|item| item.candidate.identity.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            identities,
+            vec![
+                "definition-helper",
+                "implementation-helper",
+                "caller",
+                "test"
+            ],
+            "required roles retain the highest-ranked evidence in a shared file"
+        );
     }
 
     #[test]
@@ -3276,6 +3586,7 @@ mod tests {
                     &mut candidates,
                     500,
                     Diversity::Balanced,
+                    &BTreeSet::new(),
                     continuation,
                 )
                 .expect("page is valid");
@@ -3340,6 +3651,7 @@ mod tests {
             &mut candidates,
             500,
             Diversity::Balanced,
+            &BTreeSet::new(),
             None,
         )
         .expect("all candidates initially fit");
@@ -3559,20 +3871,30 @@ mod tests {
     }
 
     #[test]
-    fn deduplication_limits_same_path_items() {
+    fn deduplication_limits_optional_same_path_items() {
         let mut candidates = vec![
             EvidenceCandidate {
-                identity: "a".to_owned(),
+                identity: "definition".to_owned(),
                 role: EvidenceRole::Definition,
                 relevance: 900,
                 confidence: 800,
                 estimated_tokens: 100,
-                source_path: "src/shared.rs".to_owned(),
+                source_path: "src/definition.rs".to_owned(),
                 provider_key: "fixture".to_owned(),
                 source_region: 0,
             },
             EvidenceCandidate {
-                identity: "b".to_owned(),
+                identity: "architecture".to_owned(),
+                role: EvidenceRole::Architecture,
+                relevance: 900,
+                confidence: 800,
+                estimated_tokens: 100,
+                source_path: "src/architecture.rs".to_owned(),
+                provider_key: "fixture".to_owned(),
+                source_region: 0,
+            },
+            EvidenceCandidate {
+                identity: "implementation".to_owned(),
                 role: EvidenceRole::Implementation,
                 relevance: 850,
                 confidence: 800,
@@ -3582,7 +3904,7 @@ mod tests {
                 source_region: 1,
             },
             EvidenceCandidate {
-                identity: "c".to_owned(),
+                identity: "caller".to_owned(),
                 role: EvidenceRole::Caller,
                 relevance: 800,
                 confidence: 800,
@@ -3592,18 +3914,18 @@ mod tests {
                 source_region: 2,
             },
             EvidenceCandidate {
-                identity: "d".to_owned(),
+                identity: "test".to_owned(),
                 role: EvidenceRole::Test,
                 relevance: 750,
                 confidence: 800,
                 estimated_tokens: 100,
-                source_path: "src/other.rs".to_owned(),
+                source_path: "src/shared.rs".to_owned(),
                 provider_key: "fixture".to_owned(),
-                source_region: 0,
+                source_region: 3,
             },
         ];
         let result =
-            optimize_pack(PackObjective::BugFix, &mut candidates, 5000).expect("valid pack");
+            optimize_pack(PackObjective::Explanation, &mut candidates, 5_000).expect("valid pack");
         let shared_count = result
             .items
             .iter()
@@ -3777,6 +4099,10 @@ mod tests {
                     EvidenceProviderOmissionReason::Unsupported,
                 ),
                 omission(
+                    EvidenceRole::Caller,
+                    EvidenceProviderOmissionReason::Unsupported,
+                ),
+                omission(
                     EvidenceRole::Test,
                     EvidenceProviderOmissionReason::LowConfidence,
                 ),
@@ -3801,7 +4127,7 @@ mod tests {
 
         let mut followups = Vec::new();
         append_role_followups(&mut followups, &coverage);
-        assert_eq!(followups.len(), 2);
+        assert_eq!(followups.len(), 3);
         assert!(
             followups
                 .iter()
@@ -3811,6 +4137,11 @@ mod tests {
             followups
                 .iter()
                 .any(|followup| followup.tool == "tests.select")
+        );
+        assert!(
+            followups
+                .iter()
+                .any(|followup| followup.tool == "symbol.relationships")
         );
     }
 
@@ -3972,24 +4303,49 @@ mod tests {
         let shaping = source_shaping_reservation(1, 2_048, true);
         assert_eq!(
             shaping.json_bytes,
-            2_048 + super::SOURCE_METADATA_BYTES,
-            "serialization metadata is reserved in addition to source bytes"
+            2_048
+                + u64::from(super::SIGNATURE_BYTES)
+                + super::SOURCE_LANGUAGE_BYTES
+                + super::SOURCE_METADATA_BYTES,
+            "the serialized snippet, signature, language, and metadata are all reserved"
         );
-        let exact_capacity = add_budget_charge(
-            source_provider_reservation(1, 2_048),
-            source_shaping_reservation(1, 2_048, true),
-        );
+        let exact_capacity = source_materialization_reservation(1, 2_048, true);
         assert_eq!(
-            affordable_source_target_count(exact_capacity, 2, 2_048, true),
-            1
+            affordable_source_materialization(exact_capacity, 2, 2_048, true),
+            SourceMaterializationPlan {
+                target_count: 1,
+                max_bytes_per_snippet: 2_048,
+            }
+        );
+        let minimum_capacity =
+            source_materialization_reservation(1, super::MIN_SOURCE_MATERIAL_BYTES, true);
+        assert_eq!(
+            affordable_source_materialization(minimum_capacity, 2, 2_048, true),
+            SourceMaterializationPlan {
+                target_count: 1,
+                max_bytes_per_snippet: super::MIN_SOURCE_MATERIAL_BYTES,
+            }
+        );
+        let two_target_capacity =
+            source_materialization_reservation(2, super::MIN_SOURCE_MATERIAL_BYTES, true);
+        assert_eq!(
+            affordable_source_materialization(two_target_capacity, 2, 2_048, true),
+            SourceMaterializationPlan {
+                target_count: 2,
+                max_bytes_per_snippet: super::MIN_SOURCE_MATERIAL_BYTES,
+            },
+            "snippet size shrinks before an explicit target is dropped"
         );
         let insufficient = BudgetCharge {
-            tokens: exact_capacity.tokens.saturating_sub(1),
-            ..exact_capacity
+            tokens: minimum_capacity.tokens.saturating_sub(1),
+            ..minimum_capacity
         };
         assert_eq!(
-            affordable_source_target_count(insufficient, 1, 2_048, true),
-            0
+            affordable_source_materialization(insufficient, 1, 2_048, true),
+            SourceMaterializationPlan {
+                target_count: 0,
+                max_bytes_per_snippet: 0,
+            }
         );
 
         let mut stale_output = focused_output;
@@ -4077,23 +4433,22 @@ mod tests {
             semantic_projection(&evidence),
             "response profiles cannot change evidence identity or ranking"
         );
-        assert_eq!(
-            standard.data.items[0]
-                .snippet
-                .as_ref()
-                .expect("standard snippet")
-                .content
-                .len(),
-            4_096
-        );
-        assert_eq!(
-            evidence.data.items[0]
-                .snippet
-                .as_ref()
-                .expect("evidence snippet")
-                .content
-                .len(),
-            8_192
+        let standard_snippet_bytes = standard.data.items[0]
+            .snippet
+            .as_ref()
+            .expect("standard snippet")
+            .content
+            .len();
+        let evidence_snippet_bytes = evidence.data.items[0]
+            .snippet
+            .as_ref()
+            .expect("evidence snippet")
+            .content
+            .len();
+        assert_eq!(standard_snippet_bytes, 4_096);
+        assert!(
+            evidence_snippet_bytes > standard_snippet_bytes && evidence_snippet_bytes <= 8_192,
+            "evidence uses the larger profile allowance within the shared live budget"
         );
         assert!(
             evidence.data.items[0].tokens > standard.data.items[0].tokens,

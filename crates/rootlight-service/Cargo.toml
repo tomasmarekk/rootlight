@@ -9,7 +9,9 @@ publish = false
 
 [dependencies]
 blake3.workspace = true
+cap-std.workspace = true
 getrandom.workspace = true
+fs2.workspace = true
 rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
 rootlight-adapter-treesitter = { path = "../rootlight-adapter-treesitter" }
 rootlight-cancel = { path = "../rootlight-cancel" }
@@ -26,13 +28,14 @@ rootlight-source = { path = "../rootlight-source" }
 rootlight-storage = { path = "../rootlight-storage" }
 rootlight-vfs = { path = "../rootlight-vfs" }
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 unicode-casefold.workspace = true
 unicode-normalization.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-serde_json.workspace = true
+rootlight-runtime = { path = "../rootlight-runtime" }
 tempfile.workspace = true
 
 [lints]

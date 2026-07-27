@@ -1073,6 +1073,20 @@ enum JournalCommand {
         claim: Option<MutationClaim>,
         reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
+    AuthorizePublication {
+        operation: OperationId,
+        admission: Option<FirstSliceAdmission>,
+        claim: Option<MutationClaim>,
+        reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
+    },
+    FinishAuthorizedPublication {
+        operation: OperationId,
+        reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
+    },
+    ReconcileCommittedPublication {
+        operation: OperationId,
+        reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
+    },
     FinishOperation {
         operation: OperationId,
         cancellation_reason: Option<rootlight_operations::CancellationReason>,
@@ -1498,6 +1512,76 @@ impl JournalActorHandle {
             },
         )?;
         await_claimed_mutation(receiver, claim).await
+    }
+
+    /// Closes publication cancellation admission before a cross-store commit.
+    ///
+    /// The returned operation remains running at cleanup. The caller must write
+    /// its durable external publication marker and then call
+    /// [`Self::finish_authorized_publication`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, actor, cancellation-race, admission, or
+    /// journal failure.
+    pub async fn authorize_publication_until(
+        &self,
+        operation: OperationId,
+        admission: Option<FirstSliceAdmission>,
+        deadline: Instant,
+    ) -> Result<OperationRecord, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::AuthorizePublication {
+                operation,
+                admission,
+                claim: Some(claim.clone()),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
+    }
+
+    /// Finalizes a journal operation after its external commit marker exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, actor, lifecycle, or journal failure.
+    pub async fn finish_authorized_publication(
+        &self,
+        operation: OperationId,
+    ) -> Result<OperationRecord, ServiceError> {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::FinishAuthorizedPublication { operation, reply },
+        )?;
+        receiver
+            .await
+            .map_err(|_| ServiceError::ChannelClosed)?
+            .map_err(ServiceError::Operations)
+    }
+
+    /// Reconciles one validated durable publication marker during startup.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, actor, lifecycle, or journal failure.
+    pub async fn reconcile_committed_publication(
+        &self,
+        operation: OperationId,
+    ) -> Result<OperationRecord, ServiceError> {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Control,
+            JournalCommand::ReconcileCommittedPublication { operation, reply },
+        )?;
+        receiver
+            .await
+            .map_err(|_| ServiceError::ChannelClosed)?
+            .map_err(ServiceError::Operations)
     }
 
     /// Persists synthetic completion or cooperative cancellation.
@@ -2124,6 +2208,41 @@ fn execute_journal_command(
                 journal.complete_repository_publication(operation)
             });
             let _ = reply.send(result);
+        }
+        JournalCommand::AuthorizePublication {
+            operation,
+            admission,
+            claim,
+            reply,
+        } => {
+            let result = execute_claimed(claim.as_ref(), || {
+                if let Some(admission) = admission {
+                    match admission.claim_publication() {
+                        PublicationAdmission::Claimed => {}
+                        PublicationAdmission::Cancelled => {
+                            cancel_operation_with_audit(
+                                journal,
+                                telemetry,
+                                operation,
+                                CancellationAuthority::Internal(
+                                    InternalCancellationAuthority::ClientDisconnect,
+                                ),
+                            )?;
+                        }
+                        PublicationAdmission::NotInserted => {
+                            return Err(OperationError::CorruptState);
+                        }
+                    }
+                }
+                journal.authorize_repository_publication(operation)
+            });
+            let _ = reply.send(result);
+        }
+        JournalCommand::FinishAuthorizedPublication { operation, reply } => {
+            let _ = reply.send(journal.finish_authorized_repository_publication(operation));
+        }
+        JournalCommand::ReconcileCommittedPublication { operation, reply } => {
+            let _ = reply.send(journal.reconcile_committed_repository_publication(operation));
         }
         JournalCommand::FinishOperation {
             operation,
@@ -5948,21 +6067,35 @@ fn first_slice_response_correlates(
             FirstSliceIpcRequest::RepositoryIndex(request),
             FirstSliceIpcResponse::RepositoryIndex(response),
         ) => {
+            let state = daemon::OperationState::try_from(response.state);
             first_slice_schema_matches(response.schema_version.as_ref())
                 && wire_id_has_len(response.repository.as_ref().map(|id| &id.value), 16)
                 && wire_id_equals(
                     response.operation.as_ref().map(|id| &id.value),
                     request.operation.as_ref().map(|id| &id.value),
                 )
-                && response.state == daemon::OperationState::Succeeded as i32
                 && optional_wire_id_has_len(
                     response.parent_generation.as_ref().map(|id| &id.value),
                     20,
                 )
-                && wire_id_has_len(
-                    response.published_generation.as_ref().map(|id| &id.value),
-                    20,
-                )
+                && match state {
+                    Ok(daemon::OperationState::Succeeded) => wire_id_has_len(
+                        response.published_generation.as_ref().map(|id| &id.value),
+                        20,
+                    ),
+                    Ok(
+                        daemon::OperationState::Queued
+                        | daemon::OperationState::Running
+                        | daemon::OperationState::Cancelling,
+                    ) => response.published_generation.is_none(),
+                    Ok(
+                        daemon::OperationState::Failed
+                        | daemon::OperationState::Interrupted
+                        | daemon::OperationState::Cancelled
+                        | daemon::OperationState::Unspecified,
+                    )
+                    | Err(_) => false,
+                }
                 && !wire_id_equals(
                     response.parent_generation.as_ref().map(|id| &id.value),
                     response.published_generation.as_ref().map(|id| &id.value),
@@ -6255,6 +6388,16 @@ fn first_slice_response_correlates(
                     total.checked_add(u64::try_from(group.items.len()).ok()?)
                 })
                 .unwrap_or(u64::MAX);
+            let returned_end = request.page_offset.saturating_add(response.returned_edges);
+            let result_shape_correlates = if response.truncated {
+                response.next_page_offset.map_or(!response.exact, |next| {
+                    response.exact && next == returned_end && next < response.total_edges
+                })
+            } else {
+                response.exact
+                    && response.next_page_offset.is_none()
+                    && returned_end == response.total_edges
+            };
             first_slice_schema_matches(response.schema_version.as_ref())
                 && query_context_correlates(
                     context,
@@ -6268,8 +6411,7 @@ fn first_slice_response_correlates(
                     .all(|seed| wire_id_has_len(Some(&seed.value), 20))
                 && response.returned_edges == returned_items
                 && response.returned_edges <= response.total_edges
-                && response.exact != response.truncated
-                && (response.truncated || response.returned_edges == response.total_edges)
+                && result_shape_correlates
                 && response.groups.iter().all(|group| {
                     wire_id_has_len(group.seed.as_ref().map(|id| &id.value), 20)
                         && !group.relation.is_empty()
@@ -10488,9 +10630,10 @@ mod tests {
             .with_diagnostic_actor()
             .expect("diagnostic actor starts");
 
-        let first = run_diagnostic_request(service.clone(), DiagnosticKind::Quick, Some(100)).await;
-        let daemon::response_envelope::Response::DiagnosticsQuick(first) = first else {
-            panic!("first diagnostics response expected");
+        let first =
+            run_diagnostic_request(service.clone(), DiagnosticKind::Quick, Some(5_000)).await;
+        let daemon::response_envelope::Response::DiagnosticsQuick(first) = &first else {
+            panic!("first diagnostics response expected, got {first:?}");
         };
         assert_eq!(first.results.len(), 1);
         assert_eq!(
@@ -10498,9 +10641,9 @@ mod tests {
             daemon::DiagnosticOutcome::Passed as i32
         );
 
-        let next = run_diagnostic_request(service, DiagnosticKind::Quick, Some(100)).await;
-        let daemon::response_envelope::Response::DiagnosticsQuick(next) = next else {
-            panic!("second diagnostics response expected");
+        let next = run_diagnostic_request(service, DiagnosticKind::Quick, Some(5_000)).await;
+        let daemon::response_envelope::Response::DiagnosticsQuick(next) = &next else {
+            panic!("second diagnostics response expected, got {next:?}");
         };
         assert_eq!(next.results.len(), 1);
         assert_eq!(
@@ -14923,6 +15066,61 @@ mod tests {
     }
 
     #[test]
+    fn relationship_correlation_accepts_exact_pagination() {
+        let schema = common::ContractVersion { major: 1, minor: 0 };
+        let repository = common::RepositoryId { value: vec![1; 16] };
+        let generation = common::GenerationId { value: vec![2; 20] };
+        let seed = common::SymbolId { value: vec![3; 20] };
+        let target = common::SymbolId { value: vec![4; 20] };
+        let request =
+            FirstSliceIpcRequest::SymbolRelationships(daemon::SymbolRelationshipsRequest {
+                schema_version: Some(schema),
+                repository: Some(repository.clone()),
+                generation: Some(daemon::GenerationSelector {
+                    selector: Some(daemon::generation_selector::Selector::Active(true)),
+                }),
+                seeds: vec![seed.clone()],
+                relations: vec!["calls".to_owned()],
+                direction: Some("outbound".to_owned()),
+                min_confidence: None,
+                max_results: Some(1),
+                page_offset: 0,
+            });
+        let response = daemon::SymbolRelationshipsResponse {
+            schema_version: Some(schema),
+            context: Some(correlation_context(&repository, &generation, 1, 0)),
+            groups: vec![daemon::FirstSliceRelationshipGroup {
+                seed: Some(seed),
+                relation: "calls".to_owned(),
+                direction: "outbound".to_owned(),
+                items: vec![daemon::FirstSliceRelationshipTarget {
+                    symbol: Some(target),
+                    confidence: 1_000,
+                    source_refs: Vec::new(),
+                }],
+                total_count: 2,
+            }],
+            returned_edges: 1,
+            total_edges: 2,
+            exact: true,
+            truncated: true,
+            next_page_offset: Some(1),
+            completeness: None,
+        };
+        assert!(first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::SymbolRelationships(response.clone())
+        ));
+
+        let mut invalid_cursor = response;
+        invalid_cursor.next_page_offset = Some(2);
+        assert!(!first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::SymbolRelationships(invalid_cursor)
+        ));
+    }
+
+    #[test]
     fn code_dead_correlation_accepts_the_longest_stable_classification() {
         let repository = common::RepositoryId { value: vec![1; 16] };
         let generation = common::GenerationId { value: vec![2; 20] };
@@ -14990,10 +15188,34 @@ mod tests {
             indexed_files: 2,
             entities: 2,
             elapsed_micros: 1,
+            estimated_disk_bytes: 4_096,
         };
         assert!(first_slice_response_correlates(
             &index_request,
             &FirstSliceIpcResponse::RepositoryIndex(index_response.clone())
+        ));
+        let mut pending_index = index_response.clone();
+        pending_index.state = daemon::OperationState::Queued as i32;
+        pending_index.published_generation = None;
+        pending_index.discovered_inputs = 0;
+        pending_index.indexed_files = 0;
+        pending_index.entities = 0;
+        pending_index.elapsed_micros = 0;
+        assert!(first_slice_response_correlates(
+            &index_request,
+            &FirstSliceIpcResponse::RepositoryIndex(pending_index.clone())
+        ));
+        pending_index.published_generation = Some(generation.clone());
+        assert!(!first_slice_response_correlates(
+            &index_request,
+            &FirstSliceIpcResponse::RepositoryIndex(pending_index)
+        ));
+        let mut failed_index = index_response.clone();
+        failed_index.state = daemon::OperationState::Failed as i32;
+        failed_index.published_generation = None;
+        assert!(!first_slice_response_correlates(
+            &index_request,
+            &FirstSliceIpcResponse::RepositoryIndex(failed_index)
         ));
         let mut self_parent = index_response.clone();
         self_parent.parent_generation = self_parent.published_generation.clone();

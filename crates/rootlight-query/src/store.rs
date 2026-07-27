@@ -6,13 +6,13 @@ use rootlight_storage::{GenerationSnapshot, IdentityVerifiedGeneration};
 
 use crate::{QueryError, QueryService};
 
-const HARD_MAX_RETAINED_GENERATIONS: usize = 64;
+const HARD_MAX_RETAINED_GENERATIONS: usize = 8_193;
 
 /// Bounded in-memory first-slice registry for immutable query generations.
 ///
-/// This registry proves pinned old-generation reads without claiming the
-/// durable publication, lease, recovery, or reclamation semantics scheduled
-/// for later storage integrations.
+/// The registry retains identity-verified immutable generations for pinned
+/// reads. Durable publication and recovery are coordinated by the service
+/// layer; this type owns only bounded in-memory query state.
 pub struct GenerationSet<Search> {
     maximum: usize,
     active: Option<GenerationId>,
@@ -176,6 +176,32 @@ where
         }
         self.active = Some(generation);
         Ok(())
+    }
+
+    /// Removes one committed generation that is no longer selected globally.
+    ///
+    /// Repository-aware callers must additionally ensure the generation is
+    /// not active for its owning repository before invoking this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError::GenerationNotFound`] when the generation is not
+    /// retained, or [`QueryError::InvalidGenerationSet`] when it is the global
+    /// active selection.
+    pub fn remove(&mut self, generation: GenerationId) -> Result<(), QueryError> {
+        if self.active == Some(generation) {
+            return Err(QueryError::InvalidGenerationSet);
+        }
+        self.generations
+            .remove(&generation)
+            .map(|_| ())
+            .ok_or(QueryError::GenerationNotFound)
+    }
+
+    /// Returns whether one committed generation is retained.
+    #[must_use]
+    pub fn contains(&self, generation: GenerationId) -> bool {
+        self.generations.contains_key(&generation)
     }
 
     /// Returns a retained normalized generation for source-service binding.

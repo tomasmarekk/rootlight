@@ -9,7 +9,6 @@ import importlib.util
 import json
 import os
 import pathlib
-import re
 import subprocess
 import sys
 import tempfile
@@ -192,6 +191,11 @@ class GeigerValidationTests(unittest.TestCase):
         version: str = "0.1.0",
     ) -> dict[str, object]:
         package_root = root or self.package_root
+        zero_counts = {"safe": 0, "unsafe_": 0}
+        scope = {
+            name: dict(zero_counts)
+            for name in ("functions", "exprs", "item_impls", "item_traits", "methods")
+        }
         return {
             "packages": [
                 {
@@ -205,10 +209,15 @@ class GeigerValidationTests(unittest.TestCase):
                         "dev_dependencies": [],
                         "build_dependencies": [],
                     },
+                    "unsafety": {
+                        "used": copy.deepcopy(scope),
+                        "unused": copy.deepcopy(scope),
+                    },
                     "forbids_unsafe": True,
                 }
             ],
             "packages_without_metrics": [],
+            "used_but_not_scanned_files": [],
         }
 
     def write_report(self, report: dict[str, object] | None = None) -> None:
@@ -252,20 +261,44 @@ class GeigerValidationTests(unittest.TestCase):
     def test_exact_workspace_identity_passes(self) -> None:
         self.assertEqual(self.validate(), 1)
 
-    def test_enabled_boundary_requires_unimplemented_authoritative_evidence(
-        self,
-    ) -> None:
+    def test_enabled_boundary_returns_the_exact_approved_count(self) -> None:
         self.policy_path.write_text(
             self.policy_path.read_text(encoding="utf-8")
             .replace('status = "disabled"', 'status = "enabled"')
+            .replace("expected_source_tokens = 0", "expected_source_tokens = 1")
             .replace("expected_geiger_count = 0", "expected_geiger_count = 1"),
             encoding="utf-8",
         )
-        with self.assertRaisesRegex(
-            ValueError,
-            "^" + re.escape(VALIDATOR.ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED) + "$",
-        ):
-            VALIDATOR.load_approved_counts(self.policy_path, self.inventory)
+        self.assertEqual(
+            VALIDATOR.load_approved_counts(self.policy_path, self.inventory),
+            {self.cargo_id: 1},
+        )
+
+    def test_enabled_boundary_requires_the_exact_full_report_count(self) -> None:
+        report = self.report()
+        entry = report["packages"][0]
+        entry["forbids_unsafe"] = False
+        entry["unsafety"]["used"]["exprs"]["unsafe_"] = 1
+
+        self.assertEqual(
+            VALIDATOR.validate_report(
+                report,
+                self.cargo_id,
+                self.inventory,
+                {self.cargo_id: 1},
+                VALIDATOR.SUPPORTED_CARGO_GEIGER_VERSION,
+            ),
+            1,
+        )
+        entry["unsafety"]["used"]["exprs"]["unsafe_"] = 2
+        with self.assertRaisesRegex(ValueError, "expected 1 used unsafe items"):
+            VALIDATOR.validate_report(
+                report,
+                self.cargo_id,
+                self.inventory,
+                {self.cargo_id: 1},
+                VALIDATOR.SUPPORTED_CARGO_GEIGER_VERSION,
+            )
 
     def test_same_name_outside_workspace_is_rejected(self) -> None:
         outside = self.root / "outside"
@@ -273,9 +306,9 @@ class GeigerValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside the exact workspace"):
             self.validate(self.report(root=outside, version="999.0.0"))
 
-    def test_quick_report_rejects_full_report_only_and_unknown_fields(self) -> None:
+    def test_safety_report_rejects_unknown_fields(self) -> None:
         report = self.report()
-        report["used_but_not_scanned_files"] = []
+        report["unknown"] = []
         with self.assertRaisesRegex(ValueError, "missing or unknown fields"):
             self.validate(report)
 
@@ -337,6 +370,14 @@ class GeigerValidationTests(unittest.TestCase):
                 "null packages_without_metrics",
                 lambda report: report.update(packages_without_metrics=None),
             ),
+            (
+                "missing used_but_not_scanned_files",
+                lambda report: report.pop("used_but_not_scanned_files"),
+            ),
+            (
+                "null used_but_not_scanned_files",
+                lambda report: report.update(used_but_not_scanned_files=None),
+            ),
             ("unknown top-level", lambda report: report.update(safe=True)),
         )
         for name, mutate in mutations:
@@ -355,7 +396,9 @@ class GeigerValidationTests(unittest.TestCase):
                 "renamed forbids",
                 lambda entry: entry.update(forbidsUnsafe=entry.pop("forbids_unsafe")),
             ),
-            ("unknown entry", lambda entry: entry.update(unsafety={})),
+            ("missing unsafety", lambda entry: entry.pop("unsafety")),
+            ("null unsafety", lambda entry: entry.update(unsafety=None)),
+            ("unknown entry", lambda entry: entry.update(unknown={})),
         )
         for name, mutate in mutations:
             with self.subTest(name=name):
@@ -441,9 +484,9 @@ class GeigerValidationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "missing or unknown fields"):
                     VALIDATOR.validate_evidence_envelope(candidate)
 
-    def test_quick_report_evidence_is_never_authoritative_for_enabled_boundary(self) -> None:
+    def test_full_report_evidence_is_authoritative_for_enabled_boundary(self) -> None:
         envelope = self.build_envelope()
-        self.assertFalse(envelope["report"]["authoritative_for_enabled_boundary"])
+        self.assertTrue(envelope["report"]["authoritative_for_enabled_boundary"])
         self.assertFalse(envelope["source_inputs"]["authoritative_for_enabled_boundary"])
         self.assertFalse(envelope["source_inputs"]["compiler_expanded"])
 
@@ -636,7 +679,6 @@ class GeigerValidationTests(unittest.TestCase):
             "--all-features",
             "--all-targets",
             "--all-dependencies",
-            "--forbid-only",
             "--locked",
             "--offline",
             "--output-format",

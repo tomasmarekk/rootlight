@@ -85,7 +85,18 @@ pub(crate) fn check(options: &Options) -> Result<(), CompatibilityError> {
 }
 
 fn default_fixture_root() -> PathBuf {
-    PathBuf::from("tests/fixtures/mcp/compatibility")
+    let relative = Path::new("tests/fixtures/mcp/compatibility");
+    let mut candidate = std::env::current_dir().unwrap_or_default();
+    for _ in 0..8 {
+        let fixture = candidate.join(relative);
+        if fixture.is_dir() {
+            return fixture;
+        }
+        if !candidate.pop() {
+            break;
+        }
+    }
+    relative.to_path_buf()
 }
 
 fn refresh_current(root: &Path) -> Result<(), CompatibilityError> {

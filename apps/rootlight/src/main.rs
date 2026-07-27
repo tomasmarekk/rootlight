@@ -16,11 +16,16 @@ use std::{
 
 use rootlight_client::{
     Client, ClientError, ConnectPolicy, DaemonLifecycle as ClientDaemonLifecycle,
-    DetachedUpdateSignature, DiagnosticsQuick, Health, HealthStatus as ClientHealthStatus,
-    MAX_UPDATE_ARTIFACT_BYTES, MAX_UPDATE_METADATA_BYTES, OperationKind, OperationStage,
-    OperationStatus, RecoveryClass, ResourcePressure as ClientResourcePressure,
-    SupportBundle as ClientSupportBundle, UpdateContext, UpdatePublicKey, VerifiedUpdate,
-    verify_update,
+    DetachedArtifactSignature, DetachedUpdateSignature, DiagnosticsQuick, FilesystemUpdateError,
+    FilesystemUpdateOutcome, Health, HealthStatus as ClientHealthStatus, MAX_UPDATE_ARTIFACT_BYTES,
+    MAX_UPDATE_LICENSE_BUNDLE_BYTES, MAX_UPDATE_METADATA_BYTES, MAX_UPDATE_PROVENANCE_BYTES,
+    MAX_UPDATE_SBOM_BYTES, OperationKind, OperationStage, OperationStatus, PackageInstallOutcome,
+    PackageUninstallOutcome, ProcessCandidateHealthCheck, RecoveryClass,
+    ResourcePressure as ClientResourcePressure, SupportBundle as ClientSupportBundle,
+    TrustedUpdatePolicy, UPDATE_HEALTH_STATE_DIR_ENV, UpdateContext, UpdateInputPaths,
+    UpdatePublicKey, UpdateRuntimeStatus, UpdateSignatures, UpdateSupportingEvidence,
+    VerifiedUpdate, apply_update_package, install_package_with_policy, recover_update,
+    uninstall_package, update_runtime_status, verify_update_with_evidence,
 };
 use rootlight_daemon_core::{
     ControlRequest, ControlResponse, ControlService, DaemonLifecycle, DaemonLimits,
@@ -29,7 +34,7 @@ use rootlight_daemon_core::{
     OperationPreparationError, PreparedOperationSubmission,
     ResourcePressure as DomainResourcePressure, ServiceError, SupportBundle as DomainSupportBundle,
 };
-use rootlight_error::{DetailKey, ErrorCode, PublicError, PublicValue, SafeLabel};
+use rootlight_error::{ErrorCode, PublicError};
 use rootlight_ids::OperationId;
 use rootlight_operations::{
     CancellationAuthority, CatalogWriterLock, ClientInstanceId, GenerationRepairCandidate,
@@ -56,6 +61,11 @@ const HARD_MAX_CLI_JSON_BYTES: usize = 4 * 1024 * 1024;
 const MAX_REPAIR_INVENTORY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_UPDATE_CONTEXT_BYTES: u64 = 64 * 1024;
 const MAX_UPDATE_KEY_FILE_BYTES: u64 = 256;
+const MAX_UPDATE_CHECKSUM_FILE_BYTES: u64 = 512;
+const UPDATE_CATALOG_SCHEMA: u32 = 3;
+const UPDATE_PROTOCOL_MAJOR: u32 = 1;
+const UPDATE_PROTOCOL_MINOR: u32 = 7;
+const INSTALL_VERSIONS_DIRECTORY: &str = "versions";
 const FIRST_SLICE_SOURCE_BEFORE: &str = "pub fn answer() -> u32 {\n    42\n}\n";
 const FIRST_SLICE_SOURCE_AFTER: &str = "pub fn answer() -> u32 {\n    43\n}\n";
 
@@ -146,6 +156,9 @@ fn run() -> Result<CommandResult, CliError> {
     };
     let trailing = arguments.collect::<Vec<_>>();
 
+    if command == "--update-health-probe" && trailing.is_empty() && !standalone {
+        return execute_update_health_probe();
+    }
     if command == "first-slice-demo" {
         return execute_first_slice_demo(&trailing);
     }
@@ -263,14 +276,161 @@ struct RepairInventory {
 }
 
 fn execute_update(arguments: &[std::ffi::OsString]) -> Result<CommandResult, CliError> {
+    match arguments {
+        [
+            install,
+            root_flag,
+            install_root,
+            artifact_flag,
+            artifact_path,
+            checksum_flag,
+            checksum_path,
+            public_key_flag,
+            public_key_path,
+            key_id_flag,
+            key_id,
+            channel_flag,
+            channel,
+        ] if install == "install"
+            && root_flag == "--root"
+            && artifact_flag == "--artifact"
+            && checksum_flag == "--checksum"
+            && public_key_flag == "--public-key"
+            && key_id_flag == "--key-id"
+            && channel_flag == "--channel" =>
+        {
+            let artifact = PathBuf::from(artifact_path);
+            let checksum = read_package_checksum(Path::new(checksum_path), artifact.as_path())?;
+            let public_key =
+                read_update_hex(Path::new(public_key_path), MAX_UPDATE_KEY_FILE_BYTES)?;
+            let policy = TrustedUpdatePolicy::new(
+                true,
+                key_id
+                    .to_str()
+                    .ok_or(CliError::InvalidUpdateInput)?
+                    .to_owned(),
+                UpdatePublicKey::from_hex(&public_key)?,
+                channel
+                    .to_str()
+                    .ok_or(CliError::InvalidUpdateInput)?
+                    .to_owned(),
+                UPDATE_CATALOG_SCHEMA,
+                UPDATE_PROTOCOL_MAJOR,
+                UPDATE_PROTOCOL_MINOR,
+                0,
+            )?;
+            Ok(CommandResult::UpdateInstalled(install_package_with_policy(
+                Path::new(install_root),
+                &artifact,
+                &checksum,
+                &policy,
+            )?))
+        }
+        [uninstall, root_flag, install_root]
+            if uninstall == "uninstall" && root_flag == "--root" =>
+        {
+            Ok(CommandResult::UpdateUninstalled(uninstall_package(
+                Path::new(install_root),
+            )?))
+        }
+        [status] if status == "status" => {
+            let install_root = installed_root_from_current_executable()?;
+            Ok(CommandResult::UpdateStatus(update_runtime_status(
+                &install_root,
+            )?))
+        }
+        [recover] if recover == "recover" => {
+            let install_root = installed_root_from_current_executable()?;
+            Ok(CommandResult::UpdateRecovered(recover_update(
+                &install_root,
+            )?))
+        }
+        [
+            apply,
+            metadata_flag,
+            metadata_path,
+            metadata_signature_flag,
+            metadata_signature_path,
+            artifact_signature_flag,
+            artifact_signature_path,
+            artifact_flag,
+            artifact_path,
+            sbom_flag,
+            sbom_path,
+            provenance_flag,
+            provenance_path,
+            license_bundle_flag,
+            license_bundle_path,
+        ] if apply == "apply"
+            && metadata_flag == "--metadata"
+            && metadata_signature_flag == "--metadata-signature"
+            && artifact_signature_flag == "--artifact-signature"
+            && artifact_flag == "--artifact"
+            && sbom_flag == "--sbom"
+            && provenance_flag == "--provenance"
+            && license_bundle_flag == "--license-bundle" =>
+        {
+            let install_root = installed_root_from_current_executable()?;
+            let inputs = UpdateInputPaths::new(
+                PathBuf::from(metadata_path),
+                PathBuf::from(metadata_signature_path),
+                PathBuf::from(artifact_signature_path),
+                PathBuf::from(artifact_path),
+                PathBuf::from(sbom_path),
+                PathBuf::from(provenance_path),
+                PathBuf::from(license_bundle_path),
+            );
+            let mut health = ProcessCandidateHealthCheck;
+            let paths = runtime_paths()?;
+            Ok(CommandResult::UpdateApplied(apply_update_package(
+                &install_root,
+                paths.state_dir(),
+                &inputs,
+                &mut health,
+            )?))
+        }
+        _ => execute_update_verify(arguments),
+    }
+}
+
+fn read_package_checksum(path: &Path, artifact: &Path) -> Result<String, CliError> {
+    let bytes = read_bounded_update_input(path, MAX_UPDATE_CHECKSUM_FILE_BYTES)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| CliError::InvalidUpdateInput)?;
+    let line = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(text);
+    if line.contains(['\r', '\n']) {
+        return Err(CliError::InvalidUpdateInput);
+    }
+    let (digest, file_name) = line.split_once("  ").ok_or(CliError::InvalidUpdateInput)?;
+    let expected_name = artifact
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or(CliError::InvalidUpdateInput)?;
+    if file_name != expected_name {
+        return Err(CliError::InvalidUpdateInput);
+    }
+    Ok(digest.to_owned())
+}
+
+fn execute_update_verify(arguments: &[std::ffi::OsString]) -> Result<CommandResult, CliError> {
     let [
         verify,
         metadata_flag,
         metadata_path,
-        signature_flag,
-        signature_path,
+        metadata_signature_flag,
+        metadata_signature_path,
+        artifact_signature_flag,
+        artifact_signature_path,
         artifact_flag,
         artifact_path,
+        sbom_flag,
+        sbom_path,
+        provenance_flag,
+        provenance_path,
+        license_bundle_flag,
+        license_bundle_path,
         public_key_flag,
         public_key_path,
         context_flag,
@@ -281,8 +441,12 @@ fn execute_update(arguments: &[std::ffi::OsString]) -> Result<CommandResult, Cli
     };
     if verify != "verify"
         || metadata_flag != "--metadata"
-        || signature_flag != "--signature"
+        || metadata_signature_flag != "--metadata-signature"
+        || artifact_signature_flag != "--artifact-signature"
         || artifact_flag != "--artifact"
+        || sbom_flag != "--sbom"
+        || provenance_flag != "--provenance"
+        || license_bundle_flag != "--license-bundle"
         || public_key_flag != "--public-key"
         || context_flag != "--context"
     {
@@ -293,7 +457,14 @@ fn execute_update(arguments: &[std::ffi::OsString]) -> Result<CommandResult, Cli
         Path::new(metadata_path),
         u64::try_from(MAX_UPDATE_METADATA_BYTES).map_err(|_| CliError::UpdateInputTooLarge)?,
     )?;
-    let signature = read_update_hex(Path::new(signature_path), MAX_UPDATE_KEY_FILE_BYTES)?;
+    let metadata_signature = read_update_hex(
+        Path::new(metadata_signature_path),
+        MAX_UPDATE_KEY_FILE_BYTES,
+    )?;
+    let artifact_signature = read_update_hex(
+        Path::new(artifact_signature_path),
+        MAX_UPDATE_KEY_FILE_BYTES,
+    )?;
     let public_key = read_update_hex(Path::new(public_key_path), MAX_UPDATE_KEY_FILE_BYTES)?;
     let context_bytes =
         read_bounded_update_input(Path::new(context_path), MAX_UPDATE_CONTEXT_BYTES)?;
@@ -309,14 +480,85 @@ fn execute_update(arguments: &[std::ffi::OsString]) -> Result<CommandResult, Cli
         return Err(CliError::UpdateInputTooLarge);
     }
     let mut artifact = fs::File::open(artifact_path).map_err(CliError::UpdateInputRead)?;
-    let verified = verify_update(
+    let mut sbom = open_bounded_update_input(Path::new(sbom_path), MAX_UPDATE_SBOM_BYTES)?;
+    let mut provenance =
+        open_bounded_update_input(Path::new(provenance_path), MAX_UPDATE_PROVENANCE_BYTES)?;
+    let mut license_bundle = open_bounded_update_input(
+        Path::new(license_bundle_path),
+        MAX_UPDATE_LICENSE_BUNDLE_BYTES,
+    )?;
+    let mut supporting =
+        UpdateSupportingEvidence::new(&mut sbom, &mut provenance, &mut license_bundle);
+    let verified = verify_update_with_evidence(
         &metadata,
-        DetachedUpdateSignature::from_hex(&signature)?,
-        UpdatePublicKey::from_hex(&public_key)?,
+        UpdateSignatures::new(
+            DetachedUpdateSignature::from_hex(&metadata_signature)?,
+            DetachedArtifactSignature::from_hex(&artifact_signature)?,
+            UpdatePublicKey::from_hex(&public_key)?,
+        ),
         &mut artifact,
+        &mut supporting,
         &context,
     )?;
     Ok(CommandResult::UpdateVerified(verified))
+}
+
+fn installed_root_from_current_executable() -> Result<PathBuf, CliError> {
+    let executable = env::current_exe().map_err(CliError::CurrentExecutable)?;
+    installed_root_for_executable(&executable)
+}
+
+fn installed_root_for_executable(executable: &Path) -> Result<PathBuf, CliError> {
+    let bin = executable
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "bin"))
+        .ok_or(CliError::InvalidInstalledLayout)?;
+    let version_root = bin.parent().ok_or(CliError::InvalidInstalledLayout)?;
+    let version = version_root
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or(CliError::InvalidInstalledLayout)?;
+    let parsed = semver::Version::parse(version).map_err(|_| CliError::InvalidInstalledLayout)?;
+    if parsed.to_string() != version {
+        return Err(CliError::InvalidInstalledLayout);
+    }
+    let versions = version_root
+        .parent()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name == INSTALL_VERSIONS_DIRECTORY)
+        })
+        .ok_or(CliError::InvalidInstalledLayout)?;
+    versions
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or(CliError::InvalidInstalledLayout)
+}
+
+fn execute_update_health_probe() -> Result<CommandResult, CliError> {
+    let temporary = tempfile::Builder::new()
+        .prefix("rootlight-update-health-")
+        .tempdir()
+        .map_err(CliError::HealthProbeIo)?;
+    let state_dir = env::var_os(UPDATE_HEALTH_STATE_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| temporary.path().join("state"));
+    if !state_dir.is_absolute() {
+        return Err(CliError::InvalidUpdateInput);
+    }
+    let paths = RuntimePaths::new(state_dir, temporary.path().join("runtime"))?;
+    let mut identity = [0_u8; 16];
+    getrandom::fill(&mut identity).map_err(|_| CliError::RandomUnavailable)?;
+    let (client, owned) =
+        Client::connect_or_start_owned(&paths, identity, ConnectPolicy::StartIfMissing)?;
+    let health = client.health()?;
+    if !health.ready {
+        return Err(CliError::HealthProbeNotReady);
+    }
+    let owned = owned.ok_or(CliError::HealthProbeOwnership)?;
+    drop(client);
+    owned.shutdown()?;
+    Ok(CommandResult::UpdateHealthProbe { ready: true })
 }
 
 fn read_update_hex(path: &Path, maximum: u64) -> Result<String, CliError> {
@@ -351,6 +593,17 @@ fn read_bounded_update_input(path: &Path, maximum: u64) -> Result<Vec<u8>, CliEr
         return Err(CliError::UpdateInputTooLarge);
     }
     Ok(bytes)
+}
+
+fn open_bounded_update_input(path: &Path, maximum: u64) -> Result<fs::File, CliError> {
+    let metadata = fs::symlink_metadata(path).map_err(CliError::UpdateInputRead)?;
+    if !metadata.file_type().is_file() {
+        return Err(CliError::InvalidUpdateInput);
+    }
+    if metadata.len() > maximum {
+        return Err(CliError::UpdateInputTooLarge);
+    }
+    fs::File::open(path).map_err(CliError::UpdateInputRead)
 }
 
 fn dispatch_after_command_preflight<T>(
@@ -958,11 +1211,6 @@ fn map_support_output_error(error: RuntimeError) -> CliError {
             CliError::SupportOutputExists
         }
         RuntimeError::Io(source) => CliError::SupportWrite(source),
-        RuntimeError::PrivateOutputSecurityPolicy(Some(source))
-            if source.kind() == std::io::ErrorKind::Unsupported =>
-        {
-            CliError::MacosSupportOutputUnavailable
-        }
         error @ RuntimeError::PrivateOutputCleanup(_) => CliError::SupportCleanup(error),
         error => CliError::Runtime(error),
     }
@@ -1094,6 +1342,14 @@ enum CommandResult {
     SupportBundle(SupportBundleReceipt),
     RepairPlan(RepairPlan),
     UpdateVerified(VerifiedUpdate),
+    UpdateInstalled(PackageInstallOutcome),
+    UpdateUninstalled(PackageUninstallOutcome),
+    UpdateApplied(FilesystemUpdateOutcome),
+    UpdateRecovered(UpdateRuntimeStatus),
+    UpdateStatus(UpdateRuntimeStatus),
+    UpdateHealthProbe {
+        ready: bool,
+    },
     OperationSubmit(OperationStatus),
     OperationStatus(OperationStatus),
     OperationCancel {
@@ -1192,15 +1448,13 @@ impl ExitFamily {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: rootlight [--standalone] first-slice-demo|health [--json]|diagnostics quick|support-bundle --output <file>|repair --dry-run <verify-catalog|verify-generation-headers|full-scrub|select-last-good-generation|rebuild-lexical-index|rebuild-derived-overlays|rebuild-repository|reconstruct-catalog|purge-quarantine> [--inventory <file>]|update verify --metadata <file> --signature <file> --artifact <file> --public-key <file> --context <file>|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
+        "usage: rootlight [--standalone] first-slice-demo|health [--json]|diagnostics quick|support-bundle --output <file>|repair --dry-run <verify-catalog|verify-generation-headers|full-scrub|select-last-good-generation|rebuild-lexical-index|rebuild-derived-overlays|rebuild-repository|reconstruct-catalog|purge-quarantine> [--inventory <file>]|update install --root <dir> --artifact <file> --checksum <file> --public-key <file> --key-id <id> --channel <channel>|update uninstall --root <dir>|update apply --metadata <file> --metadata-signature <file> --artifact-signature <file> --artifact <file> --sbom <file> --provenance <file> --license-bundle <file>|update recover|update status|update verify --metadata <file> --metadata-signature <file> --artifact-signature <file> --artifact <file> --sbom <file> --provenance <file> --license-bundle <file> --public-key <file> --context <file>|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
     )]
     Usage,
     #[error("daemon path overrides must provide both state and runtime directories")]
     IncompletePathOverride,
     #[error("support bundle output path is invalid")]
     InvalidSupportPath,
-    #[error("support-bundle output is unavailable on macOS")]
-    MacosSupportOutputUnavailable,
     #[error("support bundle output already exists")]
     SupportOutputExists,
     #[error("support bundle output failed")]
@@ -1225,6 +1479,18 @@ enum CliError {
     UpdateInputRead(#[source] std::io::Error),
     #[error("update verification failed")]
     Update(#[from] rootlight_client::UpdateError),
+    #[error("update installation operation failed")]
+    FilesystemUpdate(#[from] FilesystemUpdateError),
+    #[error("current executable is unavailable")]
+    CurrentExecutable(#[source] std::io::Error),
+    #[error("current executable is outside an installed version")]
+    InvalidInstalledLayout,
+    #[error("candidate health probe filesystem setup failed")]
+    HealthProbeIo(#[source] std::io::Error),
+    #[error("candidate health probe did not reach ready state")]
+    HealthProbeNotReady,
+    #[error("candidate health probe did not own its isolated daemon")]
+    HealthProbeOwnership,
     #[error("secure random source is unavailable")]
     RandomUnavailable,
     #[error("daemon runtime setup failed")]
@@ -1271,9 +1537,17 @@ impl CliError {
             | Self::RepairInventoryTooLarge
             | Self::InvalidUpdateInput
             | Self::UpdateInputTooLarge
+            | Self::FilesystemUpdate(
+                FilesystemUpdateError::InvalidInput
+                | FilesystemUpdateError::InputTooLarge
+                | FilesystemUpdateError::InvalidSignature,
+            )
             | Self::InvalidOperation
             | Self::InvalidTimeout => ExitFamily::Usage,
-            Self::MacosSupportOutputUnavailable => ExitFamily::Degraded,
+            Self::FilesystemUpdate(
+                FilesystemUpdateError::Health(_) | FilesystemUpdateError::UnsupportedPlatform,
+            )
+            | Self::HealthProbeNotReady => ExitFamily::Degraded,
             Self::Runtime(rootlight_runtime::RuntimeError::InsecureDirectory)
             | Self::Runtime(rootlight_runtime::RuntimeError::InvalidDiscovery)
             | Self::Runtime(rootlight_runtime::RuntimeError::InsecureEndpointArtifact)
@@ -1286,7 +1560,11 @@ impl CliError {
             | Self::Operations(rootlight_operations::OperationError::WindowsSecurityPolicy) => {
                 ExitFamily::SecurityPolicy
             }
-            Self::Update(_) => ExitFamily::SecurityPolicy,
+            Self::FilesystemUpdate(FilesystemUpdateError::Busy) => ExitFamily::Unavailable,
+            Self::Update(_)
+            | Self::FilesystemUpdate(_)
+            | Self::InvalidInstalledLayout
+            | Self::HealthProbeOwnership => ExitFamily::SecurityPolicy,
             Self::Client(ClientError::DaemonUnavailable)
             | Self::Client(ClientError::DaemonExecutableMissing)
             | Self::Client(ClientError::DaemonLaunchFailed)
@@ -1317,9 +1595,6 @@ impl CliError {
     }
 
     fn public_error(&self) -> Result<PublicError, rootlight_error::PublicErrorBuildError> {
-        if matches!(self, Self::MacosSupportOutputUnavailable) {
-            return macos_support_output_public_error();
-        }
         if let Some(error) = self.embedded_public_error() {
             return Ok(error.clone());
         }
@@ -1364,22 +1639,6 @@ impl CliError {
             _ => None,
         }
     }
-}
-
-fn macos_support_output_public_error() -> Result<PublicError, rootlight_error::PublicErrorBuildError>
-{
-    let capability = DetailKey::parse("capability")?;
-    let capability_name = SafeLabel::parse("support_bundle_output")?;
-    let platform = DetailKey::parse("platform")?;
-    let platform_name = SafeLabel::parse("macos")?;
-
-    PublicError::builder(
-        ErrorCode::UnsupportedCapability,
-        "support-bundle output is unavailable on macos",
-    )
-    .detail(capability, PublicValue::Label(capability_name))
-    .detail(platform, PublicValue::Label(platform_name))
-    .build()
 }
 
 const fn exit_family_for_code(code: ErrorCode) -> ExitFamily {
@@ -1466,7 +1725,6 @@ mod tests {
         assert_eq!(json["result"]["data"]["kind"], "control_probe");
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn support_command_preflight_preserves_supported_dispatch() {
         let arguments = [
@@ -1489,7 +1747,6 @@ mod tests {
         assert!(dispatched);
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn support_bundle_write_is_private_and_refuses_overwrite() {
         let temporary = support_tempdir();
@@ -1577,7 +1834,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn support_bundle_write_failure_leaves_private_reserved_output() {
         let temporary = support_tempdir();
@@ -1596,165 +1852,6 @@ mod tests {
             write_support_bundle(&output, b"replacement"),
             Err(CliError::SupportOutputExists)
         ));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn support_command_preflight_stops_all_downstream_effects() {
-        #[derive(Debug, Default, PartialEq, Eq)]
-        struct ObservedEffects {
-            runtime_resolution: bool,
-            random_generation: bool,
-            client_connection: bool,
-            standalone_preparation: bool,
-            service_generation: bool,
-            writer_callback: bool,
-        }
-
-        let arguments = [
-            std::ffi::OsString::from("--output"),
-            std::ffi::OsString::from("path-that-must-not-be-inspected/support.zip"),
-        ];
-        let expected = unsupported_support_output_signature(
-            &preflight_support_output().expect_err("macOS support output preflight fails closed"),
-        );
-
-        for standalone in [false, true] {
-            let mut effects = ObservedEffects::default();
-            let error = dispatch_after_command_preflight(
-                standalone,
-                std::ffi::OsStr::new("support-bundle"),
-                &arguments,
-                |standalone| {
-                    effects.runtime_resolution = true;
-                    effects.random_generation = true;
-                    if standalone {
-                        effects.standalone_preparation = true;
-                    } else {
-                        effects.client_connection = true;
-                    }
-                    effects.service_generation = true;
-                    effects.writer_callback = true;
-                    Ok(())
-                },
-            )
-            .expect_err("macOS support command fails before dispatch");
-
-            assert_eq!(effects, ObservedEffects::default());
-            assert_eq!(unsupported_support_output_signature(&error), expected);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn support_writer_preflight_does_not_inspect_any_path_class() {
-        use std::os::unix::fs::{PermissionsExt as _, symlink};
-
-        let temporary = support_tempdir();
-        let existing = temporary.path().join("existing.zip");
-        std::fs::write(&existing, b"existing").expect("existing output writes");
-        let symlinked = temporary.path().join("symlinked.zip");
-        symlink(&existing, &symlinked).expect("output symlink creates");
-        let unreadable_parent = temporary.path().join("unreadable");
-        std::fs::create_dir(&unreadable_parent).expect("unreadable parent creates");
-        let unreadable = unreadable_parent.join("support.zip");
-        std::fs::set_permissions(&unreadable_parent, std::fs::Permissions::from_mode(0o000))
-            .expect("unreadable parent permissions apply");
-        let nonexistent = temporary
-            .path()
-            .join("nonexistent-parent")
-            .join("support.zip");
-        let invalid = PathBuf::new();
-        let paths = [&invalid, &nonexistent, &unreadable, &symlinked, &existing];
-        let expected = unsupported_support_output_signature(
-            &preflight_support_output().expect_err("macOS support output preflight fails closed"),
-        );
-        assert_eq!(expected.0, ExitFamily::Degraded);
-        assert_eq!(expected.1, ErrorCode::UnsupportedCapability);
-        assert!(
-            !expected
-                .2
-                .contains(temporary.path().to_string_lossy().as_ref())
-        );
-
-        for path in paths {
-            let mut writer_called = false;
-            let error = write_support_bundle_with_writer(path, b"bundle", |_, _| {
-                writer_called = true;
-                Ok(())
-            })
-            .expect_err("macOS support publication fails before path validation");
-
-            assert!(!writer_called);
-            assert_eq!(unsupported_support_output_signature(&error), expected);
-        }
-        std::fs::set_permissions(&unreadable_parent, std::fs::Permissions::from_mode(0o700))
-            .expect("unreadable parent permissions restore");
-        assert_eq!(
-            std::fs::read(&existing).expect("existing output reads"),
-            b"existing"
-        );
-        assert!(
-            std::fs::symlink_metadata(&symlinked)
-                .expect("output symlink metadata reads")
-                .file_type()
-                .is_symlink()
-        );
-        assert!(!nonexistent.exists());
-        assert!(!unreadable.exists());
-    }
-
-    #[cfg(target_os = "macos")]
-    fn unsupported_support_output_signature(error: &CliError) -> (ExitFamily, ErrorCode, String) {
-        match error {
-            CliError::MacosSupportOutputUnavailable => {
-                let public = error
-                    .public_error()
-                    .expect("closed macOS capability template is valid");
-                (
-                    error.exit_family(),
-                    public.code(),
-                    serde_json::to_string(&public).expect("public error serializes"),
-                )
-            }
-            other => panic!("unexpected macOS support error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn macos_support_output_error_is_stable_capability_specific_and_path_redacted() {
-        let path_marker = "private/secret/support.zip";
-        let error = map_support_output_error(RuntimeError::PrivateOutputSecurityPolicy(Some(
-            std::io::Error::new(std::io::ErrorKind::Unsupported, path_marker),
-        )));
-        assert!(matches!(error, CliError::MacosSupportOutputUnavailable));
-        let envelope = CliEnvelope::failure(
-            error.exit_family(),
-            error
-                .public_error()
-                .expect("closed macOS capability template is valid"),
-        );
-        let json = serde_json::to_value(envelope).expect("CLI envelope serializes");
-        let encoded = serde_json::to_string(&json).expect("CLI envelope renders");
-
-        assert_eq!(json["contract_version"], "1.0");
-        assert_eq!(json["ok"], false);
-        assert_eq!(json["exit_family"], "degraded");
-        assert_eq!(json["error"]["code"], "UNSUPPORTED_CAPABILITY");
-        assert_eq!(
-            json["error"]["message"],
-            "support-bundle output is unavailable on macos"
-        );
-        assert_eq!(json["error"]["retryable"], false);
-        assert_eq!(json["error"]["details"]["capability"]["type"], "label");
-        assert_eq!(
-            json["error"]["details"]["capability"]["value"],
-            "support_bundle_output"
-        );
-        assert_eq!(json["error"]["details"]["platform"]["type"], "label");
-        assert_eq!(json["error"]["details"]["platform"]["value"], "macos");
-        assert!(!encoded.contains(path_marker));
-        assert!(json.get("result").is_none());
     }
 
     #[test]
@@ -1879,13 +1976,21 @@ mod tests {
     fn update_verification_rejects_unsigned_inputs_without_runtime_dispatch() {
         let temporary = tempfile::tempdir().expect("temporary directory is available");
         let metadata = temporary.path().join("update.json");
-        let signature = temporary.path().join("update.sig");
+        let metadata_signature = temporary.path().join("update.sig");
+        let artifact_signature = temporary.path().join("artifact.sig");
         let artifact = temporary.path().join("rootlight.zip");
+        let sbom = temporary.path().join("rootlight.cdx.json");
+        let provenance = temporary.path().join("rootlight.intoto.jsonl");
+        let license_bundle = temporary.path().join("rootlight.licenses.zip");
         let public_key = temporary.path().join("release.pub");
         let context = temporary.path().join("context.json");
         fs::write(&metadata, b"{}").expect("metadata writes");
-        fs::write(&signature, "0".repeat(128)).expect("signature writes");
+        fs::write(&metadata_signature, "0".repeat(128)).expect("metadata signature writes");
+        fs::write(&artifact_signature, "0".repeat(128)).expect("artifact signature writes");
         fs::write(&artifact, b"untrusted artifact").expect("artifact writes");
+        fs::write(&sbom, b"{}").expect("SBOM writes");
+        fs::write(&provenance, b"{}").expect("provenance writes");
+        fs::write(&license_bundle, b"not a zip").expect("license bundle writes");
         fs::write(&public_key, "0".repeat(64)).expect("public key writes");
         fs::write(
             &context,
@@ -1910,10 +2015,18 @@ mod tests {
             std::ffi::OsString::from("verify"),
             std::ffi::OsString::from("--metadata"),
             metadata.into_os_string(),
-            std::ffi::OsString::from("--signature"),
-            signature.into_os_string(),
+            std::ffi::OsString::from("--metadata-signature"),
+            metadata_signature.into_os_string(),
+            std::ffi::OsString::from("--artifact-signature"),
+            artifact_signature.into_os_string(),
             std::ffi::OsString::from("--artifact"),
             artifact.into_os_string(),
+            std::ffi::OsString::from("--sbom"),
+            sbom.into_os_string(),
+            std::ffi::OsString::from("--provenance"),
+            provenance.into_os_string(),
+            std::ffi::OsString::from("--license-bundle"),
+            license_bundle.into_os_string(),
             std::ffi::OsString::from("--public-key"),
             public_key.into_os_string(),
             std::ffi::OsString::from("--context"),
@@ -1925,6 +2038,39 @@ mod tests {
             Err(CliError::Update(
                 rootlight_client::UpdateError::InvalidSignature
             ))
+        ));
+    }
+
+    #[test]
+    fn installed_update_root_requires_the_versioned_payload_layout() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let root = temporary.path().join("install");
+        let executable = root.join("versions/1.2.3/bin").join(if cfg!(windows) {
+            "rootlight.exe"
+        } else {
+            "rootlight"
+        });
+
+        assert_eq!(
+            installed_root_for_executable(&executable).expect("installed layout resolves"),
+            root
+        );
+    }
+
+    #[test]
+    fn installed_update_root_rejects_launcher_and_noncanonical_paths() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let root = temporary.path().join("install");
+        let launcher = root.join("current/bin/rootlight");
+        let noncanonical = root.join("versions/1.2.3.0/bin/rootlight");
+
+        assert!(matches!(
+            installed_root_for_executable(&launcher),
+            Err(CliError::InvalidInstalledLayout)
+        ));
+        assert!(matches!(
+            installed_root_for_executable(&noncanonical),
+            Err(CliError::InvalidInstalledLayout)
         ));
     }
 }

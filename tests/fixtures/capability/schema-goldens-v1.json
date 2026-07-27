@@ -3,7 +3,7 @@
   "tools": {
     "architecture.cycles": {
       "inputSha256": "2be1760b95e1498f6cc996bb43bfdfae49f921cbd2a406c63d65033ae8a1305d",
-      "outputSha256": "fde4344083bda4feea65620f67a091bb061f5bd4ffbdc4f8f7f866d51032ef8c"
+      "outputSha256": "795cf18e480678391be146f6a1c0ef54ac38747f7160149fd5e0669363cf6525"
     },
     "architecture.overview": {
       "inputSha256": "1c3427879f0d2d92db588d115127c34a37a54371e896e52dcc935ad34b1d30b6",

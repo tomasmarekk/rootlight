@@ -1332,6 +1332,249 @@ impl OperationJournal {
         self.status(operation)
     }
 
+    /// Durably closes cancellation admission before external publication.
+    ///
+    /// This is the prepare phase for publication that spans the operation
+    /// journal and another durable store. A caller must publish its external
+    /// commit marker and then call
+    /// [`Self::finish_authorized_repository_publication`]. If the process
+    /// stops first, ordinary journal recovery leaves this operation
+    /// interrupted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::CancellationWon`] after persisting an elapsed
+    /// deadline or cancellation, or a typed state/storage failure.
+    pub fn authorize_repository_publication(
+        &self,
+        operation: OperationId,
+    ) -> Result<OperationRecord, OperationError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
+        let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        if current.kind != OperationKind::RepositoryIndex {
+            return Err(OperationError::InvalidStage);
+        }
+        if matches!(
+            current.state,
+            OperationState::Cancelled | OperationState::Interrupted
+        ) {
+            return Err(OperationError::CancellationWon);
+        }
+        if current.state.is_terminal() {
+            return if current.state == OperationState::Succeeded {
+                Ok(current)
+            } else {
+                Err(OperationError::InvalidStage)
+            };
+        }
+        if current.state == OperationState::Running
+            && current.stage == OperationStage::Cleanup
+            && !current.cancellation_requested
+        {
+            return Ok(current);
+        }
+
+        let mut cancellations = self.lock_cancellations()?;
+        let cancellation = cancellations
+            .get(&operation)
+            .ok_or(OperationError::CorruptState)?;
+        if let Some(reason) = cancellation.reason() {
+            match reason {
+                CancellationReason::DeadlineExceeded => {
+                    if update_interrupted(&transaction, operation, RecoveryClass::DeadlineElapsed)?
+                        != 1
+                    {
+                        return Err(OperationError::ConcurrentUpdate);
+                    }
+                }
+                CancellationReason::ClientRequest
+                | CancellationReason::ParentCancelled
+                | CancellationReason::Shutdown
+                | CancellationReason::ResourceLimit => {
+                    if !matches!(
+                        current.state,
+                        OperationState::Running | OperationState::Cancelling
+                    ) || current.stage != OperationStage::Executing
+                    {
+                        return Err(OperationError::InvalidStage);
+                    }
+                    let revision = if current.state == OperationState::Cancelling {
+                        next_revision(next_revision(current.revision)?)?
+                    } else {
+                        next_revision(next_revision(next_revision(current.revision)?)?)?
+                    };
+                    let updated = transaction
+                        .execute(
+                            "UPDATE operations
+                             SET state = 'cancelled', stage = 'cleanup',
+                                 cancellation_requested = 1,
+                                 cancellation_reason = ?1, revision = ?2
+                             WHERE operation = ?3 AND revision = ?4
+                               AND state IN ('running', 'cancelling')
+                               AND stage = 'executing'",
+                            params![
+                                cancellation_reason_as_str(reason)?,
+                                u64_to_i64(revision)?,
+                                operation.as_bytes().as_slice(),
+                                u64_to_i64(current.revision)?,
+                            ],
+                        )
+                        .map_err(map_sqlite_error)?;
+                    if updated != 1 {
+                        return Err(OperationError::ConcurrentUpdate);
+                    }
+                }
+                _ => return Err(OperationError::UnsupportedCancellationReason),
+            }
+            transaction.commit().map_err(map_sqlite_error)?;
+            cancellations.remove(&operation);
+            drop(cancellations);
+            drop(connection);
+            self.prune_to(MAX_OPERATION_HISTORY)?;
+            return Err(OperationError::CancellationWon);
+        }
+        if current.state != OperationState::Running
+            || current.stage != OperationStage::Executing
+            || current.cancellation_requested
+        {
+            return Err(OperationError::CancellationWon);
+        }
+
+        let revision = next_revision(current.revision)?;
+        let updated = transaction
+            .execute(
+                "UPDATE operations
+                 SET stage = 'cleanup', revision = ?1
+                 WHERE operation = ?2 AND revision = ?3
+                   AND kind = 'repository_index'
+                   AND state = 'running' AND stage = 'executing'
+                   AND cancellation_requested = 0",
+                params![
+                    u64_to_i64(revision)?,
+                    operation.as_bytes().as_slice(),
+                    u64_to_i64(current.revision)?,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        if updated != 1 {
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        transaction.commit().map_err(map_sqlite_error)?;
+        cancellations.remove(&operation);
+        drop(cancellations);
+        drop(connection);
+        self.status(operation)
+    }
+
+    /// Finishes a repository publication whose external commit marker exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed lifecycle or storage failure when publication was not
+    /// authorized or another terminal outcome already won.
+    pub fn finish_authorized_repository_publication(
+        &self,
+        operation: OperationId,
+    ) -> Result<OperationRecord, OperationError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
+        let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        if current.kind != OperationKind::RepositoryIndex {
+            return Err(OperationError::InvalidStage);
+        }
+        if current.state == OperationState::Succeeded {
+            return Ok(current);
+        }
+        if current.state != OperationState::Running
+            || current.stage != OperationStage::Cleanup
+            || current.cancellation_requested
+        {
+            return Err(OperationError::InvalidStage);
+        }
+        let revision = next_revision(next_revision(current.revision)?)?;
+        let updated = transaction
+            .execute(
+                "UPDATE operations
+                 SET state = 'succeeded', completed = 1, total = 1,
+                     revision = ?1
+                 WHERE operation = ?2 AND revision = ?3
+                   AND kind = 'repository_index'
+                   AND state = 'running' AND stage = 'cleanup'
+                   AND cancellation_requested = 0",
+                params![
+                    u64_to_i64(revision)?,
+                    operation.as_bytes().as_slice(),
+                    u64_to_i64(current.revision)?,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        if updated != 1 {
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        transaction.commit().map_err(map_sqlite_error)?;
+        drop(connection);
+        self.prune_to(MAX_OPERATION_HISTORY)?;
+        self.status(operation)
+    }
+
+    /// Reconciles a durable external publication after process restart.
+    ///
+    /// The caller may invoke this only for an operation identity recovered
+    /// from a validated immutable publication marker. That marker is the
+    /// external commit proof for the operation interrupted between prepare and
+    /// journal finalization.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed lifecycle or storage failure when the operation is not
+    /// the interrupted cleanup phase of repository publication.
+    pub fn reconcile_committed_repository_publication(
+        &self,
+        operation: OperationId,
+    ) -> Result<OperationRecord, OperationError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
+        let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        if current.kind != OperationKind::RepositoryIndex {
+            return Err(OperationError::InvalidStage);
+        }
+        if current.state == OperationState::Succeeded {
+            return Ok(current);
+        }
+        if current.state != OperationState::Interrupted
+            || current.stage != OperationStage::Cleanup
+            || current.cancellation_requested
+            || current.error.is_some()
+        {
+            return Err(OperationError::InvalidStage);
+        }
+        let revision = next_revision(next_revision(current.revision)?)?;
+        let updated = transaction
+            .execute(
+                "UPDATE operations
+                 SET state = 'succeeded', completed = 1, total = 1,
+                     recovery_class = 'not_applicable', revision = ?1
+                 WHERE operation = ?2 AND revision = ?3
+                   AND kind = 'repository_index'
+                   AND state = 'interrupted' AND stage = 'cleanup'
+                   AND cancellation_requested = 0 AND error_json IS NULL",
+                params![
+                    u64_to_i64(revision)?,
+                    operation.as_bytes().as_slice(),
+                    u64_to_i64(current.revision)?,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        if updated != 1 {
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        transaction.commit().map_err(map_sqlite_error)?;
+        drop(connection);
+        self.prune_to(MAX_OPERATION_HISTORY)?;
+        self.status(operation)
+    }
+
     /// Requests authenticated client cancellation and returns state.
     ///
     /// # Errors
@@ -1426,7 +1669,11 @@ impl OperationJournal {
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
-        if current.state.is_terminal() || current.cancellation_requested {
+        if current.state.is_terminal()
+            || current.cancellation_requested
+            || current.kind == OperationKind::RepositoryIndex
+                && current.stage == OperationStage::Cleanup
+        {
             transaction.commit().map_err(map_sqlite_error)?;
             return Ok(current);
         }
@@ -1462,6 +1709,8 @@ impl OperationJournal {
         if current.state.is_terminal()
             || current.cancellation_requested
             || current.lease_expires_unix_ms != Some(expected_expiry_unix_ms)
+            || current.kind == OperationKind::RepositoryIndex
+                && current.stage == OperationStage::Cleanup
         {
             transaction.commit().map_err(map_sqlite_error)?;
             return Ok(current);
@@ -4365,6 +4614,119 @@ mod tests {
                 .transition(operation, OperationState::Succeeded, None)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn authorized_publication_reconciles_only_with_external_commit_proof() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let operation = operation(77);
+        {
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            journal
+                .submit(
+                    OperationSubmission::new(
+                        operation,
+                        OperationKind::RepositoryIndex,
+                        PlanHash::from_bytes([77; 32]),
+                        ClientInstanceId::new([77; 16]).expect("client identity is valid"),
+                        true,
+                        None,
+                        None,
+                    )
+                    .expect("submission is valid"),
+                )
+                .expect("operation submits");
+            journal
+                .start_execution(operation)
+                .expect("operation starts");
+            let authorized = journal
+                .authorize_repository_publication(operation)
+                .expect("publication is authorized");
+            assert_eq!(authorized.state, OperationState::Running);
+            assert_eq!(authorized.stage, OperationStage::Cleanup);
+            assert_eq!(
+                authorized.progress,
+                Progress::new(0, 0).expect("empty progress is valid")
+            );
+            assert_eq!(
+                journal
+                    .interrupt_deadline(operation)
+                    .expect("late deadline cannot preempt authorized publication"),
+                authorized
+            );
+            assert!(matches!(
+                journal.request_cancellation(
+                    operation,
+                    CancellationAuthority::Internal(
+                        InternalCancellationAuthority::ClientDisconnect,
+                    ),
+                ),
+                Err(OperationError::CancellationTooLate)
+            ));
+        }
+
+        let journal = OperationJournal::open(&path).expect("journal reopens");
+        let recovered = journal.status(operation).expect("recovered state loads");
+        assert_eq!(recovered.state, OperationState::Interrupted);
+        assert_eq!(recovered.stage, OperationStage::Cleanup);
+        assert_eq!(
+            recovered.recovery_class,
+            RecoveryClass::InterruptedByRestart
+        );
+
+        let reconciled = journal
+            .reconcile_committed_repository_publication(operation)
+            .expect("validated external marker reconciles publication");
+        assert_eq!(reconciled.state, OperationState::Succeeded);
+        assert_eq!(reconciled.stage, OperationStage::Cleanup);
+        assert_eq!(reconciled.recovery_class, RecoveryClass::NotApplicable);
+        assert_eq!(
+            reconciled.progress,
+            Progress::new(1, 1).expect("fixed progress is valid")
+        );
+        assert_eq!(
+            journal
+                .reconcile_committed_repository_publication(operation)
+                .expect("reconciliation replay is idempotent"),
+            reconciled
+        );
+    }
+
+    #[test]
+    fn interrupted_unprepared_work_cannot_be_reconciled_as_published() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let operation = operation(78);
+        {
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            journal
+                .submit(
+                    OperationSubmission::new(
+                        operation,
+                        OperationKind::RepositoryIndex,
+                        PlanHash::from_bytes([78; 32]),
+                        ClientInstanceId::new([78; 16]).expect("client identity is valid"),
+                        true,
+                        None,
+                        None,
+                    )
+                    .expect("submission is valid"),
+                )
+                .expect("operation submits");
+            journal
+                .start_execution(operation)
+                .expect("operation starts");
+        }
+
+        let journal = OperationJournal::open(&path).expect("journal reopens");
+        let interrupted = journal.status(operation).expect("recovered state loads");
+        assert_eq!(interrupted.state, OperationState::Interrupted);
+        assert_eq!(interrupted.stage, OperationStage::Executing);
+        assert!(matches!(
+            journal.reconcile_committed_repository_publication(operation),
+            Err(OperationError::InvalidStage)
+        ));
     }
 
     #[test]

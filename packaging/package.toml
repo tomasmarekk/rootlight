@@ -7,6 +7,12 @@ autostart_default = "disabled"
 user_data_policy = "preserve"
 ownership_manifest = "state/install-manifest.json"
 active_version_file = "state/active-version"
+launcher_binary = "rootlight-launcher"
+versions_directory = "versions"
+launcher_directory = "current/bin"
+update_lock_file = "state/update.lock"
+update_transaction_file = "state/update-transaction.json"
+retained_versions = 2
 maximum_binary_bytes = 536870912
 
 [[binaries]]

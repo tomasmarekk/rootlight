@@ -6,7 +6,7 @@
 mod process_support;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{BufRead as _, BufReader, Read as _, Write as _},
     path::{Path, PathBuf},
@@ -17,11 +17,12 @@ use std::{
 };
 
 use rootlight_bench::{
-    CacheState, CancellationClassPlan, EvidenceValue, FixtureScale, MIN_PRIMARY_SUCCESS_SAMPLES,
-    PERFORMANCE_EVIDENCE_SCHEMA_VERSION, PUBLIC_MCP_TOOLS, PerformanceCondition,
-    PerformanceDimensions, PerformanceEnvironmentManifest, PerformanceProtocol,
-    PerformanceRawSample, PerformanceSampleOutcome, ProcessState, ResourceMeasurementMethod,
-    ResultCompleteness, SamplePhase, ToolMeasurementPlan, build_performance_evidence,
+    CacheState, CancellationClassPlan, EvidenceValue, FixtureScale, GateDisposition,
+    MIN_PRIMARY_SUCCESS_SAMPLES, PERFORMANCE_EVIDENCE_SCHEMA_VERSION, PUBLIC_MCP_TOOLS,
+    PerformanceCondition, PerformanceDimensions, PerformanceEnvironmentManifest,
+    PerformanceProtocol, PerformanceRawSample, PerformanceSampleOutcome, PerformanceThreshold,
+    ProcessState, ResourceMeasurementMethod, ResultCompleteness, SamplePhase, ThresholdClass,
+    ThresholdMetric, ToolMeasurementPlan, UnavailablePolicy, build_performance_evidence,
     encode_performance_evidence, performance_protocol_sha256, sha256_hex,
 };
 #[cfg(target_os = "linux")]
@@ -38,8 +39,25 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+const LARGE_FIXTURE_SOURCE_FILES: usize = 100;
+const LARGE_FIXTURE_PHYSICAL_LOC: usize = 1_000_000;
 const WARMUP_SAMPLES: u64 = 5;
+const SECONDARY_SUCCESS_SAMPLES: u64 = 100;
 const MAX_MEASURED_ATTEMPTS_PER_TOOL: u64 = 600;
+const REPO_STATUS_P95_NS: u64 = 10_000_000;
+const CODE_LOCATE_P95_NS: u64 = 20_000_000;
+const SOURCE_READ_P95_NS: u64 = 30_000_000;
+const RELATIONSHIPS_P95_NS: u64 = 40_000_000;
+const FAST_P95_NS: u64 = 50_000_000;
+const FLOW_P95_NS: u64 = 100_000_000;
+const INTERACTIVE_P95_NS: u64 = 150_000_000;
+const TEST_SELECTION_P95_NS: u64 = 300_000_000;
+const IMPACT_P95_NS: u64 = 500_000_000;
+const CONTEXT_PACK_P95_NS: u64 = 750_000_000;
+const ARCHITECTURE_P95_NS: u64 = 750_000_000;
+const CYCLES_P95_NS: u64 = 1_000_000_000;
+#[cfg(target_os = "linux")]
+const PROCESS_TREE_RSS_P99_BYTES: u64 = 1024 * 1024 * 1024;
 const TOKENIZER_ASSET_SHA256: &str =
     "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d";
 
@@ -62,11 +80,68 @@ fn synthetic_wire_counter_calibration_matches_exact_input() {
 }
 
 #[test]
-#[ignore = "runs 1,995 calls through persistent release-like daemon and MCP processes"]
+fn public_tool_protocol_preregisters_enforced_slos() {
+    let protocol = protocol();
+    let primary_thresholds_per_tool = if cfg!(target_os = "linux") { 5 } else { 4 };
+
+    assert_eq!(protocol.conditions.len(), 4);
+    assert_eq!(
+        protocol.thresholds.len(),
+        PUBLIC_MCP_TOOLS.len() * primary_thresholds_per_tool + 12
+    );
+    for tool in PUBLIC_MCP_TOOLS {
+        let thresholds = protocol
+            .thresholds
+            .iter()
+            .filter(|threshold| {
+                threshold.subject_id == tool && threshold.condition_id == "warm-small-complete"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(thresholds.len(), primary_thresholds_per_tool, "{tool}");
+        assert!(
+            thresholds
+                .iter()
+                .all(|threshold| threshold.class == ThresholdClass::Gate
+                    && threshold.unavailable_policy == UnavailablePolicy::Block)
+        );
+        assert!(
+            thresholds
+                .iter()
+                .any(|threshold| threshold.metric == ThresholdMetric::WallLatencyP50Ns)
+        );
+        assert!(
+            thresholds
+                .iter()
+                .any(|threshold| threshold.metric == ThresholdMetric::WallLatencyP95Ns)
+        );
+        assert!(
+            thresholds
+                .iter()
+                .any(|threshold| threshold.metric == ThresholdMetric::WallLatencyP99Ns)
+        );
+        assert!(
+            thresholds
+                .iter()
+                .any(|threshold| threshold.metric == ThresholdMetric::ReliabilityFailureRatePpm)
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            thresholds
+                .iter()
+                .any(|threshold| threshold.metric == ThresholdMetric::PeakRssP99Bytes)
+        );
+    }
+    performance_protocol_sha256(&protocol).expect("performance protocol validates");
+}
+
+#[test]
+#[ignore = "runs release-profile cold, warm, large, and truncated MCP distributions"]
 fn real_daemon_mcp_produces_all_tool_performance_evidence() {
     let fixture = process_support::private_process_tempdir("rl-perf-");
     let repository_root = fixture.path().join("repository");
-    write_repository(&repository_root, 64);
+    write_repository(&repository_root, 128);
+    let large_repository_root = fixture.path().join("large-repository");
+    write_large_repository(&large_repository_root);
     let state_dir = fixture.path().join("state");
     let runtime_dir = fixture.path().join("runtime");
     let daemon_binary = daemon_binary();
@@ -87,6 +162,7 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
     let base = index_repository(&mut mcp, &repository_root, "setup-base");
     append_head_change(&repository_root);
     let head = index_repository(&mut mcp, &repository_root, "setup-head");
+    let large = index_repository(&mut mcp, &large_repository_root, "setup-large");
     let located = locate_symbol(&mut mcp, &head, "answer");
     let protocol = protocol();
     let cases = tool_cases(&repository_root, &base, &head, &located);
@@ -105,6 +181,7 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
     for case in &cases {
         let mut successful_measured = 0_u64;
         let mut next_context_session_rotation = 20_u64;
+        let mut failure_details = Vec::new();
         for ordinal in 0..WARMUP_SAMPLES + MAX_MEASURED_ATTEMPTS_PER_TOOL {
             if case.tool == "context.pack" && successful_measured == next_context_session_rotation {
                 mcp.finish();
@@ -124,6 +201,10 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
                 case.arguments.clone(),
             );
             let outcome = response_outcome(&response);
+            if !matches!(outcome, PerformanceSampleOutcome::Succeeded) && failure_details.len() < 3
+            {
+                failure_details.push(response.clone());
+            }
             if case.tool == "repo.index" && matches!(outcome, PerformanceSampleOutcome::Succeeded) {
                 wait_for_index_response(&mut mcp, &response);
             }
@@ -165,15 +246,114 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
                 thread::sleep(Duration::from_millis(2));
             }
         }
+        let failure_codes = samples
+            .iter()
+            .filter(|sample| sample.tool_id == case.tool)
+            .filter_map(|sample| match &sample.outcome {
+                PerformanceSampleOutcome::Failed { error_code } => Some(error_code.as_str()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         assert_eq!(
             successful_measured, MIN_PRIMARY_SUCCESS_SAMPLES,
-            "{} did not retain the preregistered successful denominator",
-            case.tool
+            "{} did not retain the preregistered successful denominator; failures={failure_codes:?}; details={failure_details:#?}",
+            case.tool,
         );
     }
 
-    let environment =
-        environment_manifest(&protocol, &daemon_binary, &mcp_binary, &repository_root);
+    let mut cold_successes = 0_u64;
+    for ordinal in 0..WARMUP_SAMPLES + MAX_MEASURED_ATTEMPTS_PER_TOOL {
+        mcp.finish();
+        mcp = McpProcess::spawn(&mcp_binary, &state_dir, &runtime_dir);
+        let phase = if ordinal < WARMUP_SAMPLES {
+            SamplePhase::Warmup
+        } else {
+            SamplePhase::Measured
+        };
+        let query_index = ordinal % 128;
+        let (sample, response) = measure_call(
+            &daemon,
+            &mut mcp,
+            &tokenizer,
+            "code.locate",
+            "cold-small-complete",
+            ordinal,
+            phase,
+            json!({
+                "repository": {"repository_id": head.repository_id},
+                "generation": head.generation_id,
+                "query": format!("helper_{query_index:03}"),
+                "search_modes": ["exact"],
+                "max_results": 10,
+                "response_profile": "compact"
+            }),
+        );
+        let succeeded = matches!(sample.outcome, PerformanceSampleOutcome::Succeeded);
+        assert_success(&response, "cold code.locate");
+        samples.push(sample);
+        if phase == SamplePhase::Measured && succeeded {
+            cold_successes = cold_successes.saturating_add(1);
+            if cold_successes == SECONDARY_SUCCESS_SAMPLES {
+                break;
+            }
+        }
+    }
+    assert_eq!(cold_successes, SECONDARY_SUCCESS_SAMPLES);
+
+    let large_arguments = json!({
+        "repository": {"repository_id": large.repository_id},
+        "generation": large.generation_id,
+        "query": "helper_4095",
+        "search_modes": ["exact"],
+        "max_results": 10,
+        "response_profile": "compact"
+    });
+    let large_warmup =
+        mcp.call_success("large-cache-prime", "code.locate", large_arguments.clone());
+    assert_success(&large_warmup, "large code.locate cache prime");
+    collect_secondary_distribution(
+        &daemon,
+        &mut mcp,
+        &tokenizer,
+        "code.locate",
+        "warm-large-complete",
+        large_arguments,
+        |response| assert_success(response, "large code.locate"),
+        &mut samples,
+    );
+
+    let truncated_arguments = json!({
+        "repository": {"repository_id": head.repository_id},
+        "generation": head.generation_id,
+        "query": "helper",
+        "search_modes": ["lexical"],
+        "max_results": 1,
+        "response_profile": "compact"
+    });
+    let truncated_warmup = mcp.call_success(
+        "truncated-cache-prime",
+        "code.locate",
+        truncated_arguments.clone(),
+    );
+    assert_truncated_locate(&truncated_warmup);
+    collect_secondary_distribution(
+        &daemon,
+        &mut mcp,
+        &tokenizer,
+        "code.locate",
+        "warm-small-truncated",
+        truncated_arguments,
+        assert_truncated_locate,
+        &mut samples,
+    );
+
+    let environment = environment_manifest(
+        &protocol,
+        &daemon_binary,
+        &mcp_binary,
+        &repository_root,
+        &large_repository_root,
+    );
     let package = build_performance_evidence(
         protocol,
         environment,
@@ -183,7 +363,7 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
         platform_limitations(),
     )
     .expect("real-process performance package validates");
-    assert_eq!(package.aggregates.len(), PUBLIC_MCP_TOOLS.len());
+    assert_eq!(package.aggregates.len(), PUBLIC_MCP_TOOLS.len() + 3);
     assert!(
         package
             .aggregates
@@ -194,9 +374,116 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
         let bytes = encode_performance_evidence(&package).expect("package encodes");
         fs::write(PathBuf::from(output), bytes).expect("performance evidence writes");
     }
+    let blocked_thresholds = package
+        .threshold_evaluations
+        .iter()
+        .filter(|evaluation| evaluation.disposition != GateDisposition::Pass)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        package.disposition,
+        GateDisposition::Pass,
+        "blocked performance thresholds: {blocked_thresholds:#?}"
+    );
+    assert!(blocked_thresholds.is_empty());
 
     mcp.finish();
     daemon.finish();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_call(
+    daemon: &DaemonProcess,
+    mcp: &mut McpProcess,
+    tokenizer: &tiktoken_rs::CoreBPE,
+    tool: &str,
+    condition_id: &str,
+    ordinal: u64,
+    phase: SamplePhase,
+    arguments: Value,
+) -> (PerformanceRawSample, Value) {
+    let measurement = ResourceIntervals::begin(daemon, mcp);
+    let started = Instant::now();
+    let response = mcp.call(
+        &format!("perf-{}-{}-{ordinal}", condition_id, tool.replace('.', "-")),
+        tool,
+        arguments,
+    );
+    let elapsed_ns = duration_ns(started.elapsed());
+    let resources = measurement.finish();
+    let encoded = serde_json::to_vec(&response).expect("response serializes");
+    let actual_tokens = u64::try_from(
+        tokenizer
+            .encode_ordinary(std::str::from_utf8(&encoded).expect("JSON is UTF-8"))
+            .len(),
+    )
+    .expect("token count fits u64");
+    let structured = &response["result"]["structuredContent"];
+    (
+        PerformanceRawSample {
+            schema_version: PERFORMANCE_EVIDENCE_SCHEMA_VERSION.to_owned(),
+            tool_id: tool.to_owned(),
+            condition_id: condition_id.to_owned(),
+            ordinal,
+            phase,
+            elapsed_ns: elapsed_ns.max(1),
+            process_tree_cpu_ns: resources.cpu_ns,
+            process_tree_peak_rss_bytes: resources.peak_rss_bytes,
+            dimensions: response_dimensions(structured, encoded.len(), actual_tokens),
+            outcome: response_outcome(&response),
+        },
+        response,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_secondary_distribution(
+    daemon: &DaemonProcess,
+    mcp: &mut McpProcess,
+    tokenizer: &tiktoken_rs::CoreBPE,
+    tool: &str,
+    condition_id: &str,
+    arguments: Value,
+    validate: impl Fn(&Value),
+    samples: &mut Vec<PerformanceRawSample>,
+) {
+    let mut successes = 0_u64;
+    for ordinal in 0..WARMUP_SAMPLES + MAX_MEASURED_ATTEMPTS_PER_TOOL {
+        let phase = if ordinal < WARMUP_SAMPLES {
+            SamplePhase::Warmup
+        } else {
+            SamplePhase::Measured
+        };
+        let (sample, response) = measure_call(
+            daemon,
+            mcp,
+            tokenizer,
+            tool,
+            condition_id,
+            ordinal,
+            phase,
+            arguments.clone(),
+        );
+        let succeeded = matches!(sample.outcome, PerformanceSampleOutcome::Succeeded);
+        validate(&response);
+        samples.push(sample);
+        if phase == SamplePhase::Measured && succeeded {
+            successes = successes.saturating_add(1);
+            if successes == SECONDARY_SUCCESS_SAMPLES {
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        successes, SECONDARY_SUCCESS_SAMPLES,
+        "{tool} did not retain the secondary {condition_id} denominator"
+    );
+}
+
+fn assert_truncated_locate(response: &Value) {
+    assert_success(response, "truncated code.locate");
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["truncated"], true);
+    assert_eq!(structured["completeness"]["state"], "truncated");
 }
 
 fn wait_until_connections_released(client: &Client) {
@@ -229,14 +516,6 @@ fn protocol() -> PerformanceProtocol {
         concurrency: 1,
         conditions: vec![
             PerformanceCondition {
-                condition_id: "warm-small-complete".to_owned(),
-                process_state: ProcessState::Warm,
-                fixture_scale: FixtureScale::Small,
-                completeness: ResultCompleteness::Complete,
-                cache_state: CacheState::Warm,
-                concurrency: 1,
-            },
-            PerformanceCondition {
                 condition_id: "cold-small-complete".to_owned(),
                 process_state: ProcessState::Cold,
                 fixture_scale: FixtureScale::Small,
@@ -245,11 +524,19 @@ fn protocol() -> PerformanceProtocol {
                 concurrency: 1,
             },
             PerformanceCondition {
+                condition_id: "warm-small-complete".to_owned(),
+                process_state: ProcessState::Warm,
+                fixture_scale: FixtureScale::Small,
+                completeness: ResultCompleteness::Complete,
+                cache_state: CacheState::Warm,
+                concurrency: 1,
+            },
+            PerformanceCondition {
                 condition_id: "warm-large-complete".to_owned(),
                 process_state: ProcessState::Warm,
                 fixture_scale: FixtureScale::Large,
                 completeness: ResultCompleteness::Complete,
-                cache_state: CacheState::Cold,
+                cache_state: CacheState::Warm,
                 concurrency: 1,
             },
             PerformanceCondition {
@@ -283,11 +570,131 @@ fn protocol() -> PerformanceProtocol {
                 reviewer_role: "performance-evidence-owner".to_owned(),
             },
         ],
-        thresholds: Vec::new(),
+        thresholds: performance_thresholds(),
         exclusion_reason_codes: vec![
             "host_interference".to_owned(),
             "thermal_or_power_state_changed".to_owned(),
         ],
+    }
+}
+
+fn performance_thresholds() -> Vec<PerformanceThreshold> {
+    let primary_thresholds_per_tool = if cfg!(target_os = "linux") { 5 } else { 4 };
+    let mut thresholds =
+        Vec::with_capacity(PUBLIC_MCP_TOOLS.len() * primary_thresholds_per_tool + 12);
+    for tool in PUBLIC_MCP_TOOLS {
+        let latency_budget = wall_latency_p95_budget_ns(tool);
+        thresholds.push(PerformanceThreshold {
+            threshold_id: format!("{tool}-warm-p50"),
+            subject_id: tool.to_owned(),
+            condition_id: "warm-small-complete".to_owned(),
+            class: ThresholdClass::Gate,
+            metric: ThresholdMetric::WallLatencyP50Ns,
+            upper_bound: latency_budget,
+            unavailable_policy: UnavailablePolicy::Block,
+        });
+        thresholds.push(PerformanceThreshold {
+            threshold_id: format!("{tool}-warm-p95"),
+            subject_id: tool.to_owned(),
+            condition_id: "warm-small-complete".to_owned(),
+            class: ThresholdClass::Gate,
+            metric: ThresholdMetric::WallLatencyP95Ns,
+            upper_bound: latency_budget,
+            unavailable_policy: UnavailablePolicy::Block,
+        });
+        thresholds.push(PerformanceThreshold {
+            threshold_id: format!("{tool}-warm-p99"),
+            subject_id: tool.to_owned(),
+            condition_id: "warm-small-complete".to_owned(),
+            class: ThresholdClass::Gate,
+            metric: ThresholdMetric::WallLatencyP99Ns,
+            upper_bound: latency_budget.saturating_mul(2),
+            unavailable_policy: UnavailablePolicy::Block,
+        });
+        thresholds.push(PerformanceThreshold {
+            threshold_id: format!("{tool}-warm-reliability"),
+            subject_id: tool.to_owned(),
+            condition_id: "warm-small-complete".to_owned(),
+            class: ThresholdClass::Gate,
+            metric: ThresholdMetric::ReliabilityFailureRatePpm,
+            // One failed attempt in this protocol is at least 10,000 ppm, so
+            // the smallest valid positive threshold enforces zero failures.
+            upper_bound: 1,
+            unavailable_policy: UnavailablePolicy::Block,
+        });
+        #[cfg(target_os = "linux")]
+        thresholds.push(PerformanceThreshold {
+            threshold_id: format!("{tool}-warm-rss-p99"),
+            subject_id: tool.to_owned(),
+            condition_id: "warm-small-complete".to_owned(),
+            class: ThresholdClass::Gate,
+            metric: ThresholdMetric::PeakRssP99Bytes,
+            upper_bound: PROCESS_TREE_RSS_P99_BYTES,
+            unavailable_policy: UnavailablePolicy::Block,
+        });
+    }
+    for (condition_id, budget) in [
+        ("cold-small-complete", 300_000_000),
+        ("warm-large-complete", CODE_LOCATE_P95_NS),
+        ("warm-small-truncated", CODE_LOCATE_P95_NS.saturating_mul(2)),
+    ] {
+        thresholds.push(PerformanceThreshold {
+            threshold_id: format!("code-locate-{condition_id}-p50"),
+            subject_id: "code.locate".to_owned(),
+            condition_id: condition_id.to_owned(),
+            class: ThresholdClass::Gate,
+            metric: ThresholdMetric::WallLatencyP50Ns,
+            upper_bound: budget,
+            unavailable_policy: UnavailablePolicy::Block,
+        });
+        thresholds.push(PerformanceThreshold {
+            threshold_id: format!("code-locate-{condition_id}-p95"),
+            subject_id: "code.locate".to_owned(),
+            condition_id: condition_id.to_owned(),
+            class: ThresholdClass::Gate,
+            metric: ThresholdMetric::WallLatencyP95Ns,
+            upper_bound: budget,
+            unavailable_policy: UnavailablePolicy::Block,
+        });
+        thresholds.push(PerformanceThreshold {
+            threshold_id: format!("code-locate-{condition_id}-p99"),
+            subject_id: "code.locate".to_owned(),
+            condition_id: condition_id.to_owned(),
+            class: ThresholdClass::Gate,
+            metric: ThresholdMetric::WallLatencyP99Ns,
+            upper_bound: budget.saturating_mul(2),
+            unavailable_policy: UnavailablePolicy::Block,
+        });
+        thresholds.push(PerformanceThreshold {
+            threshold_id: format!("code-locate-{condition_id}-reliability"),
+            subject_id: "code.locate".to_owned(),
+            condition_id: condition_id.to_owned(),
+            class: ThresholdClass::Gate,
+            metric: ThresholdMetric::ReliabilityFailureRatePpm,
+            upper_bound: 1,
+            unavailable_policy: UnavailablePolicy::Block,
+        });
+    }
+    thresholds
+}
+
+fn wall_latency_p95_budget_ns(tool: &str) -> u64 {
+    match tool {
+        "repo.status" => REPO_STATUS_P95_NS,
+        "code.locate" => CODE_LOCATE_P95_NS,
+        "source.read" => SOURCE_READ_P95_NS,
+        "symbol.relationships" => RELATIONSHIPS_P95_NS,
+        "operation.status" | "repo.list" => FAST_P95_NS,
+        "flow.trace" => FLOW_P95_NS,
+        "history.compare" | "plan.change" | "query.advanced" | "query.batch" | "symbol.explain" => {
+            INTERACTIVE_P95_NS
+        }
+        "tests.select" => TEST_SELECTION_P95_NS,
+        "change.impact" | "code.dead" | "repo.index" => IMPACT_P95_NS,
+        "architecture.overview" => ARCHITECTURE_P95_NS,
+        "context.pack" => CONTEXT_PACK_P95_NS,
+        "architecture.cycles" => CYCLES_P95_NS,
+        _ => panic!("public performance tool {tool:?} has no latency budget"),
     }
 }
 
@@ -426,7 +833,6 @@ fn tool_cases(
             arguments: json!({
                 "repository": repository(),
                 "generation": generation(),
-                "include_operations": true,
                 "response_profile": "compact"
             }),
         },
@@ -621,7 +1027,7 @@ fn index_repository(mcp: &mut McpProcess, root: &Path, id: &str) -> IndexReceipt
     let response = mcp.call_success(
         id,
         "repo.index",
-        json!({"root": root, "mode": "auto", "detached": false}),
+        json!({"root": root, "mode": "auto", "detached": true}),
     );
     assert_success(&response, "repo.index");
     wait_for_index_response(mcp, &response);
@@ -656,11 +1062,11 @@ fn wait_for_index_response(mcp: &mut McpProcess, response: &Value) {
         &response["result"]["structuredContent"]["data"]["operation_id"],
         "operation identity",
     );
-    for attempt in 0..30 {
+    for attempt in 0..1_800 {
         let status = mcp.call_success(
             &format!("publication-{operation_id}-{attempt}"),
             "operation.status",
-            json!({"operation_id": operation_id, "wait_ms": 1_000}),
+            json!({"operation_id": operation_id, "wait_ms": 0}),
         );
         assert_success(&status, "operation.status");
         match status["result"]["structuredContent"]["data"]["operation"]["state"].as_str() {
@@ -670,8 +1076,9 @@ fn wait_for_index_response(mcp: &mut McpProcess, response: &Value) {
             }
             _ => {}
         }
+        thread::sleep(Duration::from_millis(100));
     }
-    panic!("fixture indexing did not publish within the bounded wait");
+    panic!("fixture indexing did not publish within the three-minute bounded wait");
 }
 
 fn locate_symbol(mcp: &mut McpProcess, index: &IndexReceipt, query: &str) -> LocatedSymbol {
@@ -735,6 +1142,55 @@ fn write_repository(root: &Path, function_count: usize) {
     fs::write(root.join("src").join("lib.rs"), source).expect("fixture source is written");
 }
 
+fn write_large_repository(root: &Path) {
+    fs::create_dir_all(root.join("src")).expect("large fixture source directory is created");
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"large_performance_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("large fixture manifest is written");
+    let lines_per_file = LARGE_FIXTURE_PHYSICAL_LOC / LARGE_FIXTURE_SOURCE_FILES;
+    for file_index in 0..LARGE_FIXTURE_SOURCE_FILES {
+        let mut source = String::with_capacity(lines_per_file.saturating_mul(32));
+        let mut written_lines = 0;
+        if file_index == 0 {
+            source.push_str("pub fn answer() -> usize { helper_000() }\n");
+            written_lines += 1;
+        }
+        let first_helper = file_index.saturating_mul(4_096) / LARGE_FIXTURE_SOURCE_FILES;
+        let helper_end =
+            (file_index.saturating_add(1)).saturating_mul(4_096) / LARGE_FIXTURE_SOURCE_FILES;
+        for function_index in first_helper..helper_end {
+            let next = (function_index + 1) % 4_096;
+            source.push_str(&format!(
+                "pub fn helper_{function_index:03}() -> usize {{ if false {{ helper_{next:03}() }} else {{ {function_index} }} }}\n"
+            ));
+            written_lines += 1;
+        }
+        if file_index != 0 {
+            source.push_str(&format!(
+                "pub fn shard_{file_index:03}() -> usize {{ {file_index} }}\n"
+            ));
+            written_lines += 1;
+        }
+        let retained_lines = lines_per_file.saturating_sub(written_lines);
+        if retained_lines >= 2 {
+            source.push_str("/*\n");
+            for _ in 2..retained_lines {
+                source.push_str("retained physical source line\n");
+            }
+            source.push_str("*/\n");
+            written_lines = written_lines.saturating_add(retained_lines);
+        }
+        assert_eq!(written_lines, lines_per_file);
+        fs::write(
+            root.join("src").join(format!("shard_{file_index:03}.rs")),
+            source,
+        )
+        .expect("large fixture source file is written");
+    }
+}
+
 fn append_head_change(root: &Path) {
     let path = root.join("src").join("lib.rs");
     let mut source = fs::read_to_string(&path).expect("fixture source reads");
@@ -747,6 +1203,7 @@ fn environment_manifest(
     daemon_binary: &Path,
     mcp_binary: &Path,
     repository_root: &Path,
+    large_repository_root: &Path,
 ) -> PerformanceEnvironmentManifest {
     let rustc_verbose = command_output("rustc", &["-Vv"]);
     let target_triple = rustc_verbose
@@ -774,16 +1231,23 @@ fn environment_manifest(
             .try_into()
             .expect("CPU count fits u32"),
         memory_bytes: system_memory_bytes(),
-        build_profile: "cargo-test-profile".to_owned(),
+        build_profile: if cfg!(debug_assertions) {
+            "development-test".to_owned()
+        } else {
+            "release".to_owned()
+        },
         features: vec!["default".to_owned()],
         binary_sha256: BTreeMap::from([
             ("rootlight-daemon".to_owned(), sha256_file(daemon_binary)),
             ("rootlight-mcp".to_owned(), sha256_file(mcp_binary)),
         ]),
-        fixture_sha256: BTreeMap::from([(
-            "small".to_owned(),
-            sha256_regular_tree(repository_root),
-        )]),
+        fixture_sha256: BTreeMap::from([
+            (
+                "large".to_owned(),
+                sha256_regular_tree(large_repository_root),
+            ),
+            ("small".to_owned(), sha256_regular_tree(repository_root)),
+        ]),
         tokenizer_id: "o200k_base-tiktoken_rs-0.12.0".to_owned(),
         tokenizer_sha256: TOKENIZER_ASSET_SHA256.to_owned(),
         monotonic_clock: "std-instant".to_owned(),
@@ -908,7 +1372,6 @@ fn platform_limitations() -> Vec<String> {
     {
         vec![
             "rss_polling_may_miss_short_spikes".to_owned(),
-            "cold_large_and_truncated_conditions_are_separate_unexecuted_protocol_cells".to_owned(),
             "cancellation_samples_are_retained_by_separate_process_artifact".to_owned(),
         ]
     }
@@ -916,7 +1379,6 @@ fn platform_limitations() -> Vec<String> {
     {
         vec![
             "cpu_rss_unavailable_without_safe_process_tree_api".to_owned(),
-            "cold_large_and_truncated_conditions_are_separate_unexecuted_protocol_cells".to_owned(),
             "cancellation_samples_are_retained_by_separate_process_artifact".to_owned(),
         ]
     }
@@ -1249,6 +1711,7 @@ impl McpProcess {
     fn call_success(&mut self, id: &str, tool: &str, arguments: Value) -> Value {
         const MAX_ATTEMPTS: u64 = 10;
 
+        let mut failures = Vec::with_capacity(3);
         for attempt in 1..=MAX_ATTEMPTS {
             let response = self.call(&format!("{id}-attempt-{attempt}"), tool, arguments.clone());
             if matches!(
@@ -1257,9 +1720,12 @@ impl McpProcess {
             ) {
                 return response;
             }
+            if failures.len() < failures.capacity() {
+                failures.push(response);
+            }
             thread::yield_now();
         }
-        panic!("{tool} did not return a successful setup response");
+        panic!("{tool} did not return a successful setup response: {failures:#?}");
     }
 
     fn write(&mut self, message: &Value) {

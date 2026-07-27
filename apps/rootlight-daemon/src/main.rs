@@ -90,7 +90,8 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
         state.telemetry(),
     )?;
     let actor_handle = actor.handle();
-    let (first_slice, first_slice_workers) = FirstSliceDaemon::start(actor_handle.clone())?;
+    let (first_slice, first_slice_workers) =
+        FirstSliceDaemon::start_durable(actor_handle.clone(), paths.state_dir()).await?;
     let first_slice: Arc<dyn FirstSliceIpcHandler> = Arc::new(first_slice);
     let mut orchestrator =
         DaemonOrchestrator::new(actor_handle.clone(), Arc::clone(&state), limits)?;
@@ -101,10 +102,10 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     let service = Arc::new(service);
     let listener = Arc::new(AsyncLocalListener::bind(endpoint.clone())?);
     let discovery = DiscoveryRecord::new(&paths, std::process::id(), &endpoint, nonce)?;
-    paths.publish(&discovery)?;
-    let discovery = DiscoveryGuard::new(paths, nonce);
     state.set_endpoint_status(HealthStatus::Healthy);
     state.set_lifecycle(DaemonLifecycle::Ready);
+    paths.publish(&discovery)?;
+    let discovery = DiscoveryGuard::new(paths, nonce);
 
     let connection_slots = Arc::new(tokio::sync::Semaphore::new(
         usize::try_from(limits.connection_limit()).map_err(|_| DaemonError::InvalidLimits)?,

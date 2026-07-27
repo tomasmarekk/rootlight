@@ -357,6 +357,7 @@ impl ContextEvidenceProviderRegistry {
             for role in &roles {
                 push_invocation(
                     request,
+                    kind,
                     provider_for(kind, *role),
                     *role,
                     &grouped,
@@ -367,6 +368,7 @@ impl ContextEvidenceProviderRegistry {
             if request.sections().contains(&ContextSection::History) {
                 push_invocation(
                     request,
+                    kind,
                     EvidenceProvider::History,
                     EvidenceRole::Change,
                     &grouped,
@@ -378,6 +380,7 @@ impl ContextEvidenceProviderRegistry {
             {
                 push_invocation(
                     request,
+                    kind,
                     EvidenceProvider::Planning,
                     EvidenceRole::Change,
                     &grouped,
@@ -430,8 +433,10 @@ pub struct EvidenceProviderObservation {
     pub symbol_id: Option<SymbolId>,
     /// Canonical source-free identity supplied by the provider.
     pub identity: String,
-    /// Fixed-point score reported by the provider, when one exists.
+    /// Fixed-point confidence reported by the provider, when one exists.
     pub observed_score: Option<u16>,
+    /// Provider-native relevance when it differs from evidence confidence.
+    pub observed_relevance: Option<u16>,
     /// Material size observed by the adapter.
     pub estimated_tokens: u64,
     /// Exact source bytes observed by the adapter.
@@ -1188,6 +1193,11 @@ fn shape_provider_observation(
         None => return Err(ContextEvidenceCollectionError::InvalidProviderResponse),
     };
 
+    let relevance = observation.observed_relevance.unwrap_or(confidence);
+    if confidence > 1_000 || relevance > 1_000 {
+        return Err(ContextEvidenceCollectionError::InvalidProviderResponse);
+    }
+
     Ok(EvidenceCandidateDraft {
         repository: request.repository(),
         generation: request.generation(),
@@ -1197,7 +1207,7 @@ fn shape_provider_observation(
         provenance: provider_provenance(invocation.provider()),
         symbol_id: observation.symbol_id,
         identity: observation.identity,
-        relevance: confidence,
+        relevance,
         confidence,
         cost: candidate_cost(observation.estimated_tokens, observation.source_bytes),
         source_refs: observation.source_refs,
@@ -1463,6 +1473,7 @@ const fn provider_for(kind: EvidenceSeedKind, role: EvidenceRole) -> EvidencePro
 
 fn push_invocation(
     request: &CanonicalContextPackRequest,
+    seed_kind: EvidenceSeedKind,
     provider: EvidenceProvider,
     role: EvidenceRole,
     anchors: &[EvidenceAnchor],
@@ -1480,7 +1491,7 @@ fn push_invocation(
 
     let anchor_count = u16::try_from(anchors.len()).unwrap_or(u16::MAX);
     let max_candidates = anchor_count
-        .saturating_mul(provider_results_per_anchor(provider))
+        .saturating_mul(provider_results_per_anchor(provider, seed_kind))
         .clamp(1, MAX_CANDIDATES_PER_PROVIDER);
     let reservation = provider_reservation(provider, max_candidates);
     let id = provider_invocation_id(request, provider, role, anchors);
@@ -1499,12 +1510,21 @@ fn push_invocation(
     Ok(())
 }
 
-const fn provider_results_per_anchor(provider: EvidenceProvider) -> u16 {
+const fn provider_results_per_anchor(
+    provider: EvidenceProvider,
+    seed_kind: EvidenceSeedKind,
+) -> u16 {
     match provider {
-        EvidenceProvider::Locate
-        | EvidenceProvider::Definition
-        | EvidenceProvider::Implementation
-        | EvidenceProvider::Source => 2,
+        EvidenceProvider::Definition => 1,
+        EvidenceProvider::Locate => 2,
+        EvidenceProvider::Implementation | EvidenceProvider::Source => match seed_kind {
+            EvidenceSeedKind::Path | EvidenceSeedKind::Route => 2,
+            EvidenceSeedKind::Symbol
+            | EvidenceSeedKind::Test
+            | EvidenceSeedKind::Located
+            | EvidenceSeedKind::Change
+            | EvidenceSeedKind::Plan => 1,
+        },
         EvidenceProvider::Relationships | EvidenceProvider::Tests => 8,
         EvidenceProvider::Architecture
         | EvidenceProvider::ChangeImpact
@@ -1515,12 +1535,24 @@ const fn provider_results_per_anchor(provider: EvidenceProvider) -> u16 {
 
 fn provider_reservation(provider: EvidenceProvider, max_candidates: u16) -> BudgetCharge {
     let results = max_candidates as u64;
+    // Symbol explanation accounts the entity, provenance, and bounded related
+    // evidence as four internal results in the minimum useful response. The
+    // provider still projects one pack candidate.
+    let transport_results = match provider {
+        EvidenceProvider::Definition
+        | EvidenceProvider::Source
+        | EvidenceProvider::Implementation => results.saturating_mul(4),
+        // Relationship retrieval also explains every bounded target once so
+        // task-mentioned symbols can be ranked without inventing hidden seeds.
+        EvidenceProvider::Relationships => results.saturating_mul(5),
+        _ => results,
+    };
     let per_result_tokens = match provider {
         EvidenceProvider::Source | EvidenceProvider::Implementation => 512,
         // Architecture rows include component, responsibility, connection, and
         // derived-view envelopes even though each row yields one pack candidate.
         EvidenceProvider::Architecture => 512,
-        EvidenceProvider::Relationships => 128,
+        EvidenceProvider::Relationships => 512,
         EvidenceProvider::Tests
         | EvidenceProvider::ChangeImpact
         | EvidenceProvider::History
@@ -1530,15 +1562,22 @@ fn provider_reservation(provider: EvidenceProvider, max_candidates: u16) -> Budg
     };
     let source_bytes = match provider {
         EvidenceProvider::Source | EvidenceProvider::Implementation => results * 2_048,
+        EvidenceProvider::Relationships => results * 512,
         _ => results * 256,
     };
     let rows_per_result = match provider {
-        // Component discovery accounts a small fixed repository scan in
+        // Component discovery scans bounded entity and relation prefixes in
         // addition to the rows represented by returned components.
-        EvidenceProvider::Architecture => 9,
+        EvidenceProvider::Architecture => 64,
         // Definition lookup scans the bounded symbol index before projecting
         // the requested explanations, so returned candidates understate rows.
         EvidenceProvider::Definition => 224,
+        // Source evidence resolves definitions before reading their exact
+        // spans, so its reservation must cover both bounded operations.
+        EvidenceProvider::Source | EvidenceProvider::Implementation => 225,
+        // Bidirectional relationship traversal is followed by one bounded
+        // symbol-explanation batch for task relevance.
+        EvidenceProvider::Relationships => 232,
         _ => 8,
     };
     // Every daemon response may account structural edges even when the
@@ -1546,20 +1585,37 @@ fn provider_reservation(provider: EvidenceProvider, max_candidates: u16) -> Budg
     // maximum per returned candidate so measured child usage cannot exceed the
     // parent allocation merely because identity resolution traversed edges.
     let traversal_facts_per_result = match provider {
-        EvidenceProvider::Definition => 16,
+        EvidenceProvider::Definition
+        | EvidenceProvider::Source
+        | EvidenceProvider::Implementation => 16,
+        // Relationship evidence performs one bounded graph traversal and one
+        // bounded explanation pass over the resulting symbols.
+        EvidenceProvider::Relationships => 48,
         _ => 8,
     };
     let traversal_facts = results * traversal_facts_per_result;
+    let envelope_bytes_per_result = match provider {
+        EvidenceProvider::Definition
+        | EvidenceProvider::Source
+        | EvidenceProvider::Implementation => 16_384,
+        EvidenceProvider::Relationships => 20_480,
+        _ => 4_096,
+    };
+    let paths_per_result = if provider == EvidenceProvider::Relationships {
+        2
+    } else {
+        1
+    };
     BudgetCharge {
         rows: results.saturating_mul(rows_per_result),
-        results,
+        results: transport_results,
         tokens: results.saturating_mul(per_result_tokens),
         source_bytes,
         traversal_facts,
         depth: 4,
-        paths: results,
-        json_bytes: results.saturating_mul(4_096),
-        memory_bytes: results.saturating_mul(4_096),
+        paths: results.saturating_mul(paths_per_result),
+        json_bytes: results.saturating_mul(envelope_bytes_per_result),
+        memory_bytes: results.saturating_mul(envelope_bytes_per_result),
         time_ms: 2_000,
         ..BudgetCharge::default()
     }
@@ -1847,6 +1903,7 @@ mod tests {
                 symbol_id: Some(SymbolId::from_bytes([3; 20])),
                 identity: identity.to_owned(),
                 observed_score: Some(900),
+                observed_relevance: None,
                 estimated_tokens: 64,
                 source_bytes: 0,
                 source_refs: vec![source_ref(REPOSITORY, GENERATION)],
@@ -1895,9 +1952,23 @@ mod tests {
 
         assert_eq!(reservation.results, 4);
         assert_eq!(reservation.tokens, 2_048);
-        assert_eq!(reservation.rows, 36);
+        assert_eq!(reservation.rows, 256);
         assert_eq!(reservation.json_bytes, 16_384);
         assert_eq!(reservation.traversal_facts, 32);
+    }
+
+    #[test]
+    fn relationship_provider_reserves_traversal_and_task_ranking() {
+        let reservation = provider_reservation(EvidenceProvider::Relationships, 8);
+
+        assert_eq!(reservation.results, 40);
+        assert_eq!(reservation.tokens, 4_096);
+        assert_eq!(reservation.rows, 1_856);
+        assert_eq!(reservation.source_bytes, 4_096);
+        assert_eq!(reservation.traversal_facts, 384);
+        assert_eq!(reservation.paths, 16);
+        assert_eq!(reservation.json_bytes, 163_840);
+        assert_eq!(reservation.memory_bytes, 163_840);
     }
 
     #[test]
@@ -2067,6 +2138,62 @@ mod tests {
             definition.reservation().traversal_facts,
             u64::from(definition.max_candidates()).saturating_mul(16)
         );
+        assert_eq!(
+            definition.reservation().results,
+            u64::from(definition.max_candidates()).saturating_mul(4)
+        );
+        assert_eq!(
+            definition.reservation().json_bytes,
+            u64::from(definition.max_candidates()).saturating_mul(16_384)
+        );
+    }
+
+    #[test]
+    fn explicit_symbols_reserve_one_definition_and_implementation_each() {
+        let request = symbol_request(vec![
+            SymbolId::from_bytes([3; 20]),
+            SymbolId::from_bytes([4; 20]),
+        ]);
+        let plan = ContextEvidenceProviderRegistry
+            .plan(&request)
+            .expect("symbol provider plan");
+
+        for provider in [
+            EvidenceProvider::Definition,
+            EvidenceProvider::Implementation,
+        ] {
+            let invocation = plan
+                .invocations()
+                .iter()
+                .find(|invocation| invocation.provider() == provider)
+                .expect("symbol provider invocation");
+            assert_eq!(invocation.max_candidates(), 2);
+        }
+    }
+
+    #[test]
+    fn implementation_reservation_covers_definition_and_source_reads() {
+        let plan = ContextEvidenceProviderRegistry
+            .plan(&request("inspect parser source"))
+            .expect("implementation provider plan");
+        let implementation = plan
+            .invocations()
+            .iter()
+            .find(|invocation| invocation.provider() == EvidenceProvider::Implementation)
+            .expect("implementation invocation");
+
+        assert_eq!(
+            implementation.reservation().rows,
+            u64::from(implementation.max_candidates()).saturating_mul(225)
+        );
+        assert_eq!(
+            implementation.reservation().results,
+            u64::from(implementation.max_candidates()).saturating_mul(4)
+        );
+        assert_eq!(
+            implementation.reservation().traversal_facts,
+            u64::from(implementation.max_candidates()).saturating_mul(16)
+        );
     }
 
     #[test]
@@ -2124,6 +2251,7 @@ mod tests {
                 symbol_id: Some(SymbolId::from_bytes([3; 20])),
                 identity: "parser".to_owned(),
                 observed_score: Some(875),
+                observed_relevance: None,
                 estimated_tokens: 40_000,
                 source_bytes: 128,
                 source_refs: vec![source.clone()],
@@ -2210,6 +2338,7 @@ mod tests {
                     symbol_id: None,
                     identity: provider.name().to_owned(),
                     observed_score: None,
+                    observed_relevance: None,
                     estimated_tokens: 1,
                     source_bytes: 0,
                     source_refs: Vec::new(),
@@ -2235,6 +2364,7 @@ mod tests {
                     symbol_id: None,
                     identity: "unscored-definition".to_owned(),
                     observed_score: None,
+                    observed_relevance: None,
                     estimated_tokens: 1,
                     source_bytes: 0,
                     source_refs: Vec::new(),
@@ -2391,13 +2521,6 @@ mod tests {
         let invocation = &plan.invocations()[0];
         let mut output = complete_output(invocation, "threshold");
         output.observations[0].observed_score = Some(700);
-        let mut below = output.observations[0].clone();
-        below.identity = "below".to_owned();
-        below.symbol_id = Some(SymbolId::from_bytes([9; 20]));
-        below.source_refs = vec![ranged_source_ref(REPOSITORY, GENERATION, 100, 120)];
-        below.observed_score = Some(699);
-        output.observations.push(below);
-        output.usage.results = 2;
         let corpus = ContextEvidenceCollector
             .collect(
                 &FakeEvidencePort::with_responses([Ok(output)]),
@@ -2410,7 +2533,24 @@ mod tests {
             .expect("boundary collection succeeds");
         assert_eq!(corpus.candidates.len(), 1);
         assert_eq!(corpus.candidates[0].confidence(), 700);
-        assert!(corpus.omissions.iter().any(|omission| {
+
+        let mut below = complete_output(invocation, "below");
+        below.observations[0].symbol_id = Some(SymbolId::from_bytes([9; 20]));
+        below.observations[0].source_refs =
+            vec![ranged_source_ref(REPOSITORY, GENERATION, 100, 120)];
+        below.observations[0].observed_score = Some(699);
+        let below_corpus = ContextEvidenceCollector
+            .collect(
+                &FakeEvidencePort::with_responses([Ok(below)]),
+                &request,
+                &plan,
+                NeverCancelled,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("below-boundary collection succeeds");
+        assert!(below_corpus.candidates.is_empty());
+        assert!(below_corpus.omissions.iter().any(|omission| {
             omission.reason == EvidenceProviderOmissionReason::LowConfidence && omission.count == 1
         }));
 

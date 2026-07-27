@@ -1,6 +1,7 @@
 schema_version = "1.0"
 workspace_members = [
   "rootlight",
+  "rootlight-launcher",
   "rootlight-mcp",
   "rootlight-adapter-host",
   "rootlight-adapter-sdk",
@@ -63,6 +64,11 @@ allowed_internal_dependencies = [
   "rootlight-runtime",
   "rootlight-service",
 ]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-launcher"
+allowed_internal_dependencies = []
 allow_build_script = false
 
 [[crates]]
@@ -154,6 +160,7 @@ allowed_internal_dependencies = [
   "rootlight-observability",
   "rootlight-protocol",
   "rootlight-runtime",
+  "rootlight-vfs",
 ]
 allow_build_script = false
 
@@ -286,7 +293,11 @@ allow_build_script = false
 
 [[crates]]
 name = "rootlight-runtime"
-allowed_internal_dependencies = ["rootlight-ipc", "rootlight-protocol"]
+allowed_internal_dependencies = [
+  "rootlight-ipc",
+  "rootlight-protocol",
+  "rootlight-vfs",
+]
 allow_build_script = false
 
 [[crates]]

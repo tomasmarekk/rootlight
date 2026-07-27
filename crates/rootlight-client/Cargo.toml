@@ -8,25 +8,35 @@ license.workspace = true
 publish = false
 
 [dependencies]
+cap-std.workspace = true
+data-encoding.workspace = true
 ed25519-compact.workspace = true
+fs2.workspace = true
 rootlight-error = { path = "../rootlight-error" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ipc = { path = "../rootlight-ipc" }
 rootlight-observability = { path = "../rootlight-observability" }
 rootlight-protocol = { path = "../rootlight-protocol" }
 rootlight-runtime = { path = "../rootlight-runtime" }
+rootlight-vfs = { path = "../rootlight-vfs" }
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 unicode-casefold.workspace = true
 unicode-normalization.workspace = true
 zip.workspace = true
 
-[dev-dependencies]
-tempfile.workspace = true
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+nt-token.workspace = true
+windows.workspace = true
+windows-permissions.workspace = true
 
 [lints]
 workspace = true

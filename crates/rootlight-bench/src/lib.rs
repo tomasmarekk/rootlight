@@ -16,9 +16,11 @@ mod model;
 mod parser;
 mod performance;
 mod sampler;
+mod scalability;
 mod semantic_contract;
 mod token_accounting;
 mod trajectory;
+mod trajectory_quality;
 
 pub use ablation::{
     ABLATION_SCHEMA_VERSION, AblationAggregateReport, AblationBlindingKey, AblationDecision,
@@ -87,6 +89,15 @@ pub use sampler::{
     ProcessTreeMeasurement, ProcessTreeSample, ProcessTreeSampler, UnavailableProcessTreeSample,
     UnavailableProcessTreeSampler,
 };
+pub use scalability::{
+    ColdIndexEvidence, DURABLE_CONTROL_OVERHEAD_BYTES, FreshnessEvidence,
+    MAX_DURABLE_NON_SOURCE_SIZE_PPM, MAX_SCALABILITY_EVIDENCE_BYTES, MAX_STRUCTURAL_INDEX_SIZE_PPM,
+    MAX_TEN_MILLION_LOC_RSS_BYTES, MIN_STRUCTURAL_LOC_PER_SECOND, SCALABILITY_EVIDENCE_SCHEMA,
+    ScalabilityClass, ScalabilityDisposition, ScalabilityEnvironment, ScalabilityEvidence,
+    ScalabilityEvidenceError, ScalabilityFixture, StructuralFactCounts, StructuralResourceEvidence,
+    StructuralThroughput, decode_scalability_evidence, encode_scalability_evidence,
+    scalability_distribution, scalability_evidence_sha256, structural_durable_total_bound,
+};
 pub use semantic_contract::{
     SEMANTIC_EVIDENCE_ENVELOPE_MAX_BYTES, SEMANTIC_EVIDENCE_ENVELOPE_SCHEMA,
     SEMANTIC_EVIDENCE_MAX_BYTES, SEMANTIC_EVIDENCE_MAX_EXPECTATIONS,
@@ -98,17 +109,29 @@ pub use token_accounting::{
     TokenMeasurement, TokenTotals, WorkflowTokenAccounting, sha256_hex,
 };
 pub use trajectory::{
-    AdapterAvailabilityPolicy, BoundedFileExplorationAdapter, MAX_ATTEMPTS_PER_CONDITION,
-    MAX_TRAJECTORY_PACKAGE_BYTES, MIN_PREREGISTERED_WORKFLOWS, O200kTrajectoryTokenizer,
-    RawTrajectoryAttempt, RawTrajectoryCall, TRAJECTORY_PROTOCOL_SCHEMA_VERSION,
-    TRAJECTORY_RUNNER_ID, TrajectoryAdapter, TrajectoryAttemptOutcome, TrajectoryAttemptRecord,
-    TrajectoryCallRecord, TrajectoryClaimSignals, TrajectoryCondition, TrajectoryConditionProtocol,
+    AdapterAvailabilityPolicy, BoundedFileExplorationAdapter, BoundedFileObservation,
+    MAX_ATTEMPTS_PER_CONDITION, MAX_TRAJECTORY_PACKAGE_BYTES, MIN_PREREGISTERED_WORKFLOWS,
+    O200kTrajectoryTokenizer, RawTrajectoryAttempt, RawTrajectoryCall,
+    TRAJECTORY_PROTOCOL_SCHEMA_VERSION, TRAJECTORY_RUNNER_ID, TrajectoryAdapter,
+    TrajectoryAttemptOutcome, TrajectoryAttemptRecord, TrajectoryCallRecord,
+    TrajectoryClaimSignals, TrajectoryCondition, TrajectoryConditionProtocol,
     TrajectoryDenominator, TrajectoryError, TrajectoryEvidencePackage, TrajectoryExecutionBoundary,
     TrajectoryExecutionInput, TrajectoryProtocol, TrajectoryProtocolDigests, TrajectoryRetryPolicy,
     TrajectorySharedBounds, TrajectoryStoppingPolicy, TrajectoryTokenizer,
     TrajectoryWorkflowFamily, TrajectoryWorkflowProtocol, UnavailableTrajectoryAdapter,
     decode_trajectory_evidence, encode_trajectory_evidence, preregistered_trajectory_protocol,
-    run_trajectory_suite,
+    run_trajectory_suite, trajectory_task_prompt,
+};
+pub use trajectory_quality::{
+    MAX_WORKFLOW_QUALITY_EVIDENCE_BYTES, MAX_WORKFLOW_QUALITY_SCORE_CENTIPOINTS,
+    WORKFLOW_QUALITY_RUNNER_ID, WORKFLOW_QUALITY_SCHEMA_VERSION, WorkflowQualityCandidate,
+    WorkflowQualityCandidateMeasurement, WorkflowQualityDenominator, WorkflowQualityDimension,
+    WorkflowQualityDimensionScore, WorkflowQualityEfficiency, WorkflowQualityError,
+    WorkflowQualityEvidence, WorkflowQualityPair, WorkflowQualityPairMeasurement,
+    WorkflowQualityProtocol, WorkflowQualitySummary, WorkflowQualityTaskProtocol,
+    WorkflowQualityTaskRegistration, build_workflow_quality_evidence,
+    decode_workflow_quality_evidence, encode_workflow_quality_evidence,
+    preregister_workflow_quality_protocol,
 };
 
 /// Result-bundle schema version written and verified by this crate.

@@ -30,7 +30,8 @@ const EXPECTED_CAPTURES: [&str; 12] = [
     "signature",
     "string",
 ];
-const RUST_SCOPE_CAPTURES: [&str; 2] = ["scope_trait", "scope_type"];
+const RUST_SPECIAL_CAPTURES: [&str; 4] =
+    ["scope_trait", "scope_type", "scoped_call", "test_attribute"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum StructuralRole {
@@ -44,10 +45,12 @@ pub(crate) enum StructuralRole {
     ScopeType,
     Definition,
     Call,
+    ScopedCall,
     Reference,
     Comment,
     Documentation,
     StringLiteral,
+    TestAttribute,
 }
 
 impl StructuralRole {
@@ -63,10 +66,12 @@ impl StructuralRole {
             "scope_type" => Some(Self::ScopeType),
             "definition" => Some(Self::Definition),
             "call" => Some(Self::Call),
+            "scoped_call" => Some(Self::ScopedCall),
             "reference" => Some(Self::Reference),
             "comment" => Some(Self::Comment),
             "documentation" => Some(Self::Documentation),
             "string" => Some(Self::StringLiteral),
+            "test_attribute" => Some(Self::TestAttribute),
             _ => None,
         }
     }
@@ -76,10 +81,14 @@ impl StructuralRole {
             Self::Root => SyntaxFactKind::Root,
             Self::Module => SyntaxFactKind::Module,
             Self::Declaration => SyntaxFactKind::Declaration,
-            Self::Signature | Self::ScopeTrait | Self::ScopeType => SyntaxFactKind::Signature,
+            Self::Signature | Self::ScopeTrait | Self::ScopeType | Self::TestAttribute => {
+                SyntaxFactKind::Signature
+            }
             Self::Import => SyntaxFactKind::Import,
             Self::Scope => SyntaxFactKind::Scope,
-            Self::Definition | Self::Call | Self::Reference => SyntaxFactKind::Occurrence,
+            Self::Definition | Self::Call | Self::ScopedCall | Self::Reference => {
+                SyntaxFactKind::Occurrence
+            }
             Self::Comment | Self::Documentation => SyntaxFactKind::Comment,
             Self::StringLiteral => SyntaxFactKind::StringLiteral,
         }
@@ -97,10 +106,12 @@ impl StructuralRole {
             Self::ScopeType => "scope_type",
             Self::Definition => "definition",
             Self::Call => "call",
+            Self::ScopedCall => "scoped_call",
             Self::Reference => "reference",
             Self::Comment => "comment",
             Self::Documentation => "documentation",
             Self::StringLiteral => "string",
+            Self::TestAttribute => "test_attribute",
         }
     }
 
@@ -147,7 +158,7 @@ impl QueryPack {
         let query = Query::new(&language_for(family), source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
         if family == GrammarFamily::Rust {
-            expected.extend(RUST_SCOPE_CAPTURES);
+            expected.extend(RUST_SPECIAL_CAPTURES);
             expected.sort_unstable();
         }
         let mut observed = query.capture_names().to_vec();
@@ -253,6 +264,8 @@ impl QueryPack {
                 let syntax = match role {
                     StructuralRole::ScopeTrait => "rust.impl_trait",
                     StructuralRole::ScopeType => "rust.impl_type",
+                    StructuralRole::TestAttribute => "rust.test_attribute",
+                    StructuralRole::ScopedCall => "rust.scoped_call",
                     StructuralRole::Call => match family {
                         GrammarFamily::Rust => "rust.call",
                         GrammarFamily::Python => "python.call",
@@ -609,7 +622,7 @@ mod tests {
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
             if family == GrammarFamily::Rust {
-                expected.extend(RUST_SCOPE_CAPTURES);
+                expected.extend(RUST_SPECIAL_CAPTURES);
                 expected.sort_unstable();
             }
             assert_eq!(names, expected);

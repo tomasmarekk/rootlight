@@ -76,7 +76,7 @@ const MATRIX_STATES: [&str; 10] = [
     "unsupported_capability",
     "truncated",
     "cancelled",
-    "restart_unavailable",
+    "restart_recovered",
     "corrupt_persisted_state",
     "incompatible_persisted_schema",
 ];
@@ -170,7 +170,7 @@ pub(crate) fn check(options: &Options) -> Result<(), VerticalError> {
             evidence.write_summary(&summary)?;
             evidence.remove_failure()?;
             println!(
-                "MCP vertical check completed with documented fallback: volatile process-local first-slice state; evidence={}",
+                "MCP vertical check completed with durable restart recovery; evidence={}",
                 evidence.root.display()
             );
             Ok(())
@@ -401,50 +401,51 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         &mut transcript,
         &v2_index.operation,
     )?;
-    if !restarted_operation.is_error
-        || restarted_operation.structured["error"]["code"] != "UNSUPPORTED_CAPABILITY"
+    require_tool_success(&restarted_operation, "operation.status")?;
+    if restarted_operation.structured["data"]["operation"]["state"] != "published"
+        || restarted_operation.structured["data"]["published_generation"] != v2_index.generation
     {
         return Err(VerticalError::Invariant(
-            "MCP operation status did not fail closed after losing process-local metadata",
+            "MCP operation status did not restore its durable published identity",
         ));
     }
-    let restart_query = call_tool(
-        "restart.code-locate",
+    let restarted_snapshot = query_snapshot(
+        "restart",
         &mut restarted_mcp,
         &restarted_catalog,
         &mut transcript,
-        "code.locate",
-        json!({
-            "repository": {"repository_id": v2_index.repository},
-            "generation": v2_index.generation,
-            "query": "answer",
-            "search_modes": ["exact"],
-            "max_results": 10,
-            "response_profile": "compact"
-        }),
+        &repository_root,
+        &v2_index.repository,
+        &v2_index.generation,
+        Value::String("active".to_owned()),
+        43,
+        42,
     )?;
-    if !restart_query.is_error || restart_query.structured["error"]["code"] != "NOT_FOUND" {
+    if restarted_snapshot.symbol != v2.symbol || restarted_snapshot.source_ref != v2.source_ref {
         return Err(VerticalError::Invariant(
-            "daemon restart did not reproduce the volatile first-slice fallback",
+            "daemon restart did not restore the active generation query evidence",
         ));
     }
-    assert_control_value_omits_sentinels(&restart_query.structured)?;
-    record_matrix_error(
-        &mut tool_matrix.cells,
+    tool_matrix.cells.push(ToolMatrixCell::executed(
         "operation.status",
-        "restart_unavailable",
-        restarted_operation,
-        "UNSUPPORTED_CAPABILITY",
-        "process-local operation metadata is unavailable after daemon restart",
-    )?;
-    record_matrix_error(
-        &mut tool_matrix.cells,
+        "restart_recovered",
+        "success",
+        "durable terminal operation metadata survives daemon restart",
+        "matched_published_generation",
+        "not_applicable_operational_contract",
+        "not_applicable_operational_contract",
+        None,
+    ));
+    tool_matrix.cells.push(ToolMatrixCell::executed(
         "code.locate",
-        "restart_unavailable",
-        restart_query,
-        "NOT_FOUND",
-        "process-local query generations are unavailable after daemon restart",
-    )?;
+        "restart_recovered",
+        "success",
+        "durable active generation remains queryable after daemon restart",
+        "matched_exact_repository_generation",
+        "validated",
+        "measured_nonplaceholder",
+        None,
+    ));
     finalize_tool_matrix(&mut tool_matrix)?;
     let restart_mcp_stderr = restarted_mcp.shutdown()?;
     assert_private_source_absent("restart MCP stderr", &restart_mcp_stderr)?;
@@ -560,15 +561,12 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     Ok(Summary {
         schema_version: EVIDENCE_SCHEMA_VERSION,
         run_status: "completed",
-        gate_decision: "fallback",
-        fallback: FallbackEvidence {
-            code: "volatile_process_local_first_slice",
+        restart: RestartEvidence {
             base_operation_journal_survived_restart: true,
-            mcp_operation_metadata_survived_restart: false,
-            observed_operation_status_error: "UNSUPPORTED_CAPABILITY",
-            query_state_survived_restart: false,
-            observed_query_error: "NOT_FOUND",
-            claim: "first-slice query state is process-local and is rebuilt after restart",
+            mcp_operation_metadata_survived_restart: true,
+            query_state_survived_restart: true,
+            active_generation_restored: true,
+            claim: "durable operation and generation state remains queryable after restart",
         },
         protocol: ProtocolEvidence {
             mcp_version: MCP_SPECIFICATION_DATE,
@@ -606,10 +604,10 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
             malformed_file_coverage_observed_through_mcp: false,
             observed_valid_query_coverage_status: "complete",
             observed_valid_query_rust_coverage_status: "complete",
-            observed_valid_query_rust_coverage_tier: "D",
+            observed_valid_query_rust_coverage_tier: "B",
             observed_source_read_coverage_status: "bounded",
             observed_source_read_rust_coverage_status: "bounded",
-            observed_source_read_rust_coverage_tier: "D",
+            observed_source_read_rust_coverage_tier: "B",
             expected_syntax_diagnostic_code: SYNTAX_RECOVERY_DIAGNOSTIC,
             syntax_recovery_diagnostic_observed,
             syntax_diagnostic_acceptance_met: syntax_recovery_diagnostic_observed,
@@ -1737,7 +1735,7 @@ fn query_snapshot(
     require_trust_labels(&locate.structured)?;
     assert_control_value_omits_sentinels(&locate.structured)?;
     assert_read_correlation(&locate.structured, repository, expected_generation)?;
-    assert_complete_tier_d_rust_coverage(&locate.structured)?;
+    assert_complete_tier_b_rust_coverage(&locate.structured)?;
     let matches =
         locate.structured["data"]["matches"]
             .as_array()
@@ -1778,7 +1776,7 @@ fn query_snapshot(
     require_trust_labels(&lexical.structured)?;
     assert_control_value_omits_sentinels(&lexical.structured)?;
     assert_read_correlation(&lexical.structured, repository, expected_generation)?;
-    assert_complete_tier_d_rust_coverage(&lexical.structured)?;
+    assert_complete_tier_b_rust_coverage(&lexical.structured)?;
     let lexical_matches =
         lexical.structured["data"]["matches"]
             .as_array()
@@ -1815,7 +1813,7 @@ fn query_snapshot(
     require_trust_labels(&explain.structured)?;
     assert_control_value_omits_sentinels(&explain.structured)?;
     assert_read_correlation(&explain.structured, repository, expected_generation)?;
-    assert_complete_tier_d_rust_coverage(&explain.structured)?;
+    assert_complete_tier_b_rust_coverage(&explain.structured)?;
     let symbols =
         explain.structured["data"]["symbols"]
             .as_array()
@@ -1863,7 +1861,7 @@ fn query_snapshot(
     require_tool_success(&source, "source.read")?;
     require_trust_labels(&source.structured)?;
     assert_read_correlation(&source.structured, repository, expected_generation)?;
-    assert_bounded_tier_d_rust_coverage(&source.structured)?;
+    assert_bounded_tier_b_rust_coverage(&source.structured)?;
     assert_absent(&source.structured, IGNORED_SENTINEL)?;
     assert_absent(&source.structured, OUTSIDE_SENTINEL)?;
     let chunks = source.structured["data"]["chunks"]
@@ -2938,7 +2936,7 @@ fn matrix_not_applicable_reason(tool: &str, state: &str) -> Option<&'static str>
         ),
         "truncated" => matches!(tool, "repo.list" | "architecture.overview"),
         "cancelled" => tool == "repo.index",
-        "restart_unavailable" => matches!(tool, "operation.status" | "code.locate"),
+        "restart_recovered" => matches!(tool, "operation.status" | "code.locate"),
         "corrupt_persisted_state" | "incompatible_persisted_schema" => false,
         _ => false,
     };
@@ -2958,11 +2956,11 @@ fn matrix_not_applicable_reason(tool: &str, state: &str) -> Option<&'static str>
         "cancelled" => {
             Some("core harness has no deterministic admission hook for this tool operation")
         }
-        "restart_unavailable" => Some(
-            "tool does not consume the process-local metadata exercised by the restart scenario",
+        "restart_recovered" => Some(
+            "tool does not consume durable generation or operation metadata exercised by the restart scenario",
         ),
         "corrupt_persisted_state" | "incompatible_persisted_schema" => Some(
-            "the accepted process-local single-stage fallback retains no externally mutable generation database or persisted generation schema",
+            "storage corruption and schema incompatibility are exercised by the dedicated durable-storage boundary",
         ),
         _ => None,
     }
@@ -3036,7 +3034,7 @@ fn exercise_nested_ignore_policy(
     require_trust_labels(&kept.structured)?;
     assert_control_value_omits_sentinels(&kept.structured)?;
     assert_read_correlation(&kept.structured, repository, generation)?;
-    assert_complete_tier_d_rust_coverage(&kept.structured)?;
+    assert_complete_tier_b_rust_coverage(&kept.structured)?;
     let kept_matches =
         kept.structured["data"]["matches"]
             .as_array()
@@ -3075,7 +3073,7 @@ fn exercise_nested_ignore_policy(
     require_tool_success(&kept_source, "source.read")?;
     require_trust_labels(&kept_source.structured)?;
     assert_read_correlation(&kept_source.structured, repository, generation)?;
-    assert_bounded_tier_d_rust_coverage(&kept_source.structured)?;
+    assert_bounded_tier_b_rust_coverage(&kept_source.structured)?;
     assert_control_value_omits_sentinels(&kept_source.structured)?;
     let chunks =
         kept_source.structured["data"]["chunks"]
@@ -3215,23 +3213,23 @@ fn assert_read_correlation(
     }
 }
 
-fn assert_complete_tier_d_rust_coverage(structured: &Value) -> Result<(), VerticalError> {
-    assert_tier_d_rust_coverage(
+fn assert_complete_tier_b_rust_coverage(structured: &Value) -> Result<(), VerticalError> {
+    assert_tier_b_rust_coverage(
         structured,
         "complete",
-        "valid first-slice query did not report complete Tier-D Rust coverage",
+        "valid first-slice query did not report complete Tier-B Rust coverage",
     )
 }
 
-fn assert_bounded_tier_d_rust_coverage(structured: &Value) -> Result<(), VerticalError> {
-    assert_tier_d_rust_coverage(
+fn assert_bounded_tier_b_rust_coverage(structured: &Value) -> Result<(), VerticalError> {
+    assert_tier_b_rust_coverage(
         structured,
         "bounded",
-        "source.read did not report bounded Tier-D Rust coverage",
+        "source.read did not report bounded Tier-B Rust coverage",
     )
 }
 
-fn assert_tier_d_rust_coverage(
+fn assert_tier_b_rust_coverage(
     structured: &Value,
     expected_status: &str,
     failure: &'static str,
@@ -3246,7 +3244,7 @@ fn assert_tier_d_rust_coverage(
         && languages.len() == 1
         && languages[0]["language"] == "rust"
         && languages[0]["status"] == expected_status
-        && languages[0]["tier"] == "D"
+        && languages[0]["tier"] == "B"
     {
         Ok(())
     } else {
@@ -4942,7 +4940,6 @@ impl EvidencePaths {
             &FailureEvidence {
                 schema_version: EVIDENCE_SCHEMA_VERSION,
                 run_status: "failed",
-                gate_decision: "unresolved",
                 error_category: category,
                 transcript_path: "transcript.jsonl",
             },
@@ -4990,7 +4987,6 @@ fn write_json_file(path: &Path, value: &impl Serialize) -> Result<(), VerticalEr
 struct FailureEvidence {
     schema_version: &'static str,
     run_status: &'static str,
-    gate_decision: &'static str,
     error_category: &'static str,
     transcript_path: &'static str,
 }
@@ -4999,8 +4995,7 @@ struct FailureEvidence {
 struct Summary {
     schema_version: &'static str,
     run_status: &'static str,
-    gate_decision: &'static str,
-    fallback: FallbackEvidence,
+    restart: RestartEvidence,
     protocol: ProtocolEvidence,
     environment: EnvironmentEvidence,
     fixture: FixtureEvidence,
@@ -5013,13 +5008,11 @@ struct Summary {
 }
 
 #[derive(Serialize)]
-struct FallbackEvidence {
-    code: &'static str,
+struct RestartEvidence {
     base_operation_journal_survived_restart: bool,
     mcp_operation_metadata_survived_restart: bool,
-    observed_operation_status_error: &'static str,
     query_state_survived_restart: bool,
-    observed_query_error: &'static str,
+    active_generation_restored: bool,
     claim: &'static str,
 }
 
@@ -5231,7 +5224,7 @@ fn matrix_requested_profile(tool: &str, state: &str) -> &'static str {
                 "not_applicable_capability_selector"
             }
         }
-        "truncated" | "restart_unavailable" => {
+        "truncated" | "restart_recovered" => {
             if tool == "operation.status" {
                 "not_applicable_by_input_schema"
             } else {
@@ -5688,7 +5681,7 @@ impl VerticalError {
 mod tests {
     use super::{
         CANCELLATION_FIXTURE_FILES, EXPECTED_TOOLS, MATRIX_STATES, Options, ToolMatrixCell,
-        VerticalError, assert_bounded_tier_d_rust_coverage, assert_complete_tier_d_rust_coverage,
+        VerticalError, assert_bounded_tier_b_rust_coverage, assert_complete_tier_b_rust_coverage,
         canonicalize_known_identities, diagnostic_code_is_present, estimated_tokens,
         matrix_not_applicable_reason, modify_fixture_to_v2, nearest_rank, normalize_read_response,
         observe_rust_coverage, prepare_cancellation_repository, redact_request_for_evidence,
@@ -5814,22 +5807,22 @@ mod tests {
             "coverage": {
                 "status": "complete",
                 "languages": [
-                    {"language": "rust", "tier": "D", "status": "complete"}
+                    {"language": "rust", "tier": "B", "status": "complete"}
                 ]
             }
         });
-        assert!(assert_complete_tier_d_rust_coverage(&complete).is_ok());
-        assert!(assert_bounded_tier_d_rust_coverage(&complete).is_err());
+        assert!(assert_complete_tier_b_rust_coverage(&complete).is_ok());
+        assert!(assert_bounded_tier_b_rust_coverage(&complete).is_err());
         let bounded = json!({
             "coverage": {
                 "status": "bounded",
                 "languages": [
-                    {"language": "rust", "tier": "D", "status": "bounded"}
+                    {"language": "rust", "tier": "B", "status": "bounded"}
                 ]
             }
         });
-        assert!(assert_bounded_tier_d_rust_coverage(&bounded).is_ok());
-        assert!(assert_complete_tier_d_rust_coverage(&bounded).is_err());
+        assert!(assert_bounded_tier_b_rust_coverage(&bounded).is_ok());
+        assert!(assert_complete_tier_b_rust_coverage(&bounded).is_err());
         let semantic = json!({
             "coverage": {
                 "status": "complete",
@@ -5838,7 +5831,7 @@ mod tests {
                 ]
             }
         });
-        assert!(assert_complete_tier_d_rust_coverage(&semantic).is_err());
+        assert!(assert_complete_tier_b_rust_coverage(&semantic).is_err());
         let observed = observe_rust_coverage(&json!({
             "coverage": {
                 "status": "unknown",
@@ -5989,13 +5982,13 @@ mod tests {
     }
 
     #[test]
-    fn persisted_failure_states_follow_the_accepted_process_local_fallback() {
+    fn persisted_failure_states_are_owned_by_the_durable_storage_boundary() {
         for state in ["corrupt_persisted_state", "incompatible_persisted_schema"] {
             for tool in EXPECTED_TOOLS {
                 assert_eq!(
                     matrix_not_applicable_reason(tool, state),
                     Some(
-                        "the accepted process-local single-stage fallback retains no externally mutable generation database or persisted generation schema"
+                        "storage corruption and schema incompatibility are exercised by the dedicated durable-storage boundary"
                     )
                 );
             }

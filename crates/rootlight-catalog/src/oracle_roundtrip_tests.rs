@@ -51,17 +51,28 @@ use tempfile::TempDir;
 fn create_private_test_file(path: &Path) {
     let mut options = fs::OpenOptions::new();
     options.read(true).write(true).create_new(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, WRITE_DAC,
+        };
+
+        options
+            .access_mode((FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC).0)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
 
         options.mode(0o600);
     }
-    drop(
-        options
-            .open(path)
-            .expect("private test database is created"),
-    );
+    let mut file = options
+        .open(path)
+        .expect("private test database is created");
+    crate::schema::protect_private_test_file(&mut file).expect("test database is protected");
 }
 
 fn canonical_test_root(directory: &TempDir) -> PathBuf {

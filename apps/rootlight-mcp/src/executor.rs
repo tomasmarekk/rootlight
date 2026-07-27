@@ -777,6 +777,7 @@ pub struct FlowTracePortRequest {
     max_depth: Option<u8>,
     max_paths: Option<u16>,
     min_confidence: Option<u16>,
+    cross_repository: bool,
 }
 
 impl FlowTracePortRequest {
@@ -832,6 +833,12 @@ impl FlowTracePortRequest {
     #[must_use]
     pub const fn min_confidence(&self) -> Option<u16> {
         self.min_confidence
+    }
+
+    /// Returns whether target-directed active-catalog stitching is enabled.
+    #[must_use]
+    pub const fn cross_repository(&self) -> bool {
+        self.cross_repository
     }
 }
 
@@ -4493,10 +4500,7 @@ fn normalize_flow_trace(
     unsupported: &PublicError,
 ) -> Result<FlowTracePortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Cross-repository traversal and explicit path policies are not served by
-    // this slice.
-    if input.cross_repository == Some(true)
-        || input.path_policy.is_some()
+    if input.path_policy.is_some()
         || input
             .relations
             .iter()
@@ -4539,6 +4543,7 @@ fn normalize_flow_trace(
         max_depth: input.max_depth,
         max_paths: input.max_paths,
         min_confidence: input.min_confidence,
+        cross_repository: input.cross_repository.unwrap_or(false),
     })
 }
 
@@ -6315,7 +6320,6 @@ fn normalize_repository_index(
             .as_ref()
             .is_some_and(|patch| !patch.is_empty())
         || input.wait_ms.is_some()
-        || input.detached == Some(true)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -6328,7 +6332,7 @@ fn normalize_repository_index(
     Ok(RepositoryIndexPortRequest {
         root,
         mode: input.mode.unwrap_or(IndexMode::Auto),
-        detached: false,
+        detached: input.detached.unwrap_or(false),
     })
 }
 

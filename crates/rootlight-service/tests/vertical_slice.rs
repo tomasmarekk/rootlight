@@ -794,13 +794,7 @@ fn repository_status_keeps_exact_resolution_when_active_advances() {
 }
 
 #[test]
-fn symbol_relationships_reports_honest_results_for_a_known_symbol() {
-    // The first-slice oracle records a direct call as a `DispatchCandidate`
-    // occurrence (not a resolved `Calls` relation) and structural containment
-    // as a file-to-entity `Contains` relation. Neither predicate belongs to a
-    // served relation family, so an honest `symbol.relationships` expansion of
-    // the caller reports no fabricated call edges while still proving the
-    // generation-pinned query path, exact counts, and mandatory trust labeling.
+fn symbol_relationships_returns_a_resolved_rust_call() {
     let source =
         "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
     let fixture = fixture(source);
@@ -825,20 +819,29 @@ fn symbol_relationships_reports_honest_results_for_a_known_symbol() {
         .next()
         .expect("caller is located")
         .symbol;
+    let callee = service
+        .code_locate(
+            indexed.generation,
+            "callee".to_owned(),
+            LocateMode::Exact,
+            8,
+            0,
+            &cancellation,
+        )
+        .expect("locate callee")
+        .data
+        .hits
+        .into_iter()
+        .next()
+        .expect("callee is located")
+        .symbol;
 
     let relationships = service
         .symbol_relationships(
             indexed.generation,
             BTreeSet::from([caller]),
-            vec![
-                RelationFamily::Calls,
-                RelationFamily::CalledBy,
-                RelationFamily::References,
-                RelationFamily::Types,
-                RelationFamily::Implements,
-                RelationFamily::Imports,
-            ],
-            Some(RelationDirection::Both),
+            vec![RelationFamily::Calls],
+            Some(RelationDirection::Outbound),
             0,
             100,
             0,
@@ -846,14 +849,20 @@ fn symbol_relationships_reports_honest_results_for_a_known_symbol() {
         )
         .expect("symbol relationships query succeeds");
 
-    // The expansion is exact and unbudgeted: every served family is honestly
-    // empty for this fixture, so returned and total edge counts agree at zero
-    // and no candidate or containment edge leaks into a served family.
     assert!(relationships.data.exact);
     assert!(!relationships.data.truncated);
-    assert_eq!(relationships.data.returned_edges, 0);
-    assert_eq!(relationships.data.total_edges, 0);
-    assert!(relationships.data.groups.is_empty());
+    assert_eq!(relationships.data.returned_edges, 1);
+    assert_eq!(relationships.data.total_edges, 1);
+    assert_eq!(relationships.data.groups.len(), 1);
+    let group = &relationships.data.groups[0];
+    assert_eq!(group.seed, caller);
+    assert_eq!(group.family, RelationFamily::Calls);
+    assert_eq!(group.direction, RelationDirection::Outbound);
+    assert_eq!(group.total_count, 1);
+    assert_eq!(group.items.len(), 1);
+    assert_eq!(group.items[0].symbol, callee);
+    assert!(group.items[0].confidence >= 900);
+    assert!(!group.items[0].source_refs.is_empty());
     assert_eq!(
         relationships.data.trust,
         RepositoryDataTrust::UntrustedRepositoryData
@@ -861,13 +870,7 @@ fn symbol_relationships_reports_honest_results_for_a_known_symbol() {
 }
 
 #[test]
-fn flow_trace_reports_an_honest_empty_trace_for_a_known_symbol() {
-    // The first-slice oracle records a direct call as a `DispatchCandidate`
-    // occurrence and structural containment as a file-to-entity `Contains`
-    // relation. Neither predicate belongs to a served relation family, so an
-    // honest `flow.trace` from the caller reports no fabricated paths while
-    // still proving the generation-pinned query path, the echoed projection, a
-    // sane frontier bounded to the source node, and mandatory trust labeling.
+fn flow_trace_returns_a_resolved_rust_call_path() {
     let source =
         "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
     let fixture = fixture(source);
@@ -892,21 +895,30 @@ fn flow_trace_reports_an_honest_empty_trace_for_a_known_symbol() {
         .next()
         .expect("caller is located")
         .symbol;
+    let callee = service
+        .code_locate(
+            indexed.generation,
+            "callee".to_owned(),
+            LocateMode::Exact,
+            8,
+            0,
+            &cancellation,
+        )
+        .expect("locate callee")
+        .data
+        .hits
+        .into_iter()
+        .next()
+        .expect("callee is located")
+        .symbol;
 
     let trace = service
         .flow_trace(
             indexed.generation,
             caller,
             None,
-            vec![
-                RelationFamily::Calls,
-                RelationFamily::CalledBy,
-                RelationFamily::References,
-                RelationFamily::Types,
-                RelationFamily::Implements,
-                RelationFamily::Imports,
-            ],
-            Some(RelationDirection::Both),
+            vec![RelationFamily::Calls],
+            Some(RelationDirection::Outbound),
             0,
             3,
             10,
@@ -914,25 +926,18 @@ fn flow_trace_reports_an_honest_empty_trace_for_a_known_symbol() {
         )
         .expect("flow trace query succeeds");
 
-    // The trace is exact and unbudgeted: no served family yields an
-    // entity-to-entity edge for this fixture, so no path is fabricated. The
-    // frontier still honestly reports the single reached source node.
-    assert!(trace.data.paths.is_empty());
-    assert_eq!(trace.data.frontier.reached_nodes, 1);
-    assert_eq!(trace.data.frontier.examined_edges, 0);
+    assert_eq!(trace.data.paths.len(), 1);
+    assert_eq!(trace.data.paths[0].nodes, vec![caller, callee]);
+    assert_eq!(trace.data.paths[0].edges.len(), 1);
+    assert_eq!(trace.data.paths[0].edges[0].family, RelationFamily::Calls);
+    assert!(trace.data.paths[0].edges[0].confidence >= 900);
+    assert!(!trace.data.paths[0].edges[0].source_refs.is_empty());
+    assert!(!trace.data.paths[0].cyclic);
+    assert_eq!(trace.data.frontier.reached_nodes, 2);
+    assert_eq!(trace.data.frontier.examined_edges, 1);
     assert!(!trace.data.frontier.truncated);
     assert_eq!(trace.data.frontier.unresolved_boundaries, 0);
-    assert_eq!(
-        trace.data.projection.families,
-        vec![
-            RelationFamily::Calls,
-            RelationFamily::CalledBy,
-            RelationFamily::References,
-            RelationFamily::Types,
-            RelationFamily::Implements,
-            RelationFamily::Imports,
-        ]
-    );
+    assert_eq!(trace.data.projection.families, vec![RelationFamily::Calls]);
     assert_eq!(trace.data.projection.min_confidence, 0);
     assert_eq!(
         trace.data.trust,
@@ -1000,21 +1005,27 @@ fn architecture_cycles_reports_an_honest_empty_result_for_a_known_fixture() {
 }
 
 #[test]
-fn code_dead_reports_an_honest_partial_result_for_a_known_fixture() {
-    // The first-slice oracle records a direct call as a `DispatchCandidate`
-    // occurrence and structural containment as a file-to-entity `Contains`
-    // relation. Neither yields a served entity-to-entity reachability edge, so
-    // an honest `code.dead` over the fixture reports no fabricated candidates
-    // while still proving the generation-pinned query path, a partial
-    // entry-point model, blind spots, and mandatory trust labeling.
-    let source =
-        "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
+fn code_dead_includes_an_isolated_rust_symbol() {
+    let source = "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n\nfn isolated() -> u32 {\n    7\n}\n";
     let fixture = fixture(source);
     let cancellation = deadline();
     let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
     let indexed = service
         .index_rust_fixture(fixture.path(), &cancellation)
         .expect("fixture generation indexes");
+    let isolated = service
+        .code_locate(
+            indexed.generation,
+            "isolated".to_owned(),
+            LocateMode::Exact,
+            8,
+            0,
+            &cancellation,
+        )
+        .expect("locate isolated symbol")
+        .data
+        .hits[0]
+        .symbol;
 
     let dead = service
         .code_dead(
@@ -1028,14 +1039,6 @@ fn code_dead_reports_an_honest_partial_result_for_a_known_fixture() {
         )
         .expect("code dead query succeeds");
 
-    // No served reachability predicate yields an entity-to-entity edge for this
-    // fixture, so no dead-code candidate is fabricated.
-    // The lexical oracle serves only a partial reachability graph and resolves
-    // no exported entry points for this fixture, so the honest model reports a
-    // partial entry-point summary and discloses blind spots rather than
-    // claiming a complete dead-code verdict. Any candidate it does surface is a
-    // well-formed, source-free reachability observation under that partial
-    // model, not a fabricated dead-code claim.
     assert_eq!(
         dead.data.entry_points.policy,
         CodeDeadEntryPointPolicy::Standard
@@ -1043,9 +1046,20 @@ fn code_dead_reports_an_honest_partial_result_for_a_known_fixture() {
     assert!(!dead.data.entry_points.complete);
     assert!(!dead.data.blind_spots.is_empty());
     assert!(!dead.data.suppression_rules.is_empty());
+    let isolated_candidate = dead
+        .data
+        .candidates
+        .iter()
+        .find(|candidate| candidate.symbol_id == isolated)
+        .expect("an isolated entity remains visible to dead-code analysis");
+    assert!(
+        isolated_candidate
+            .why
+            .contains(&"no_incoming_references".to_owned())
+    );
+    assert_eq!(isolated_candidate.confidence, 1_000);
     let mut last_symbol = None;
     for candidate in &dead.data.candidates {
-        // Candidates are deterministically ordered by stable symbol identity.
         if let Some(previous) = last_symbol {
             assert!(previous <= candidate.symbol_id);
         }
@@ -1059,7 +1073,6 @@ fn code_dead_reports_an_honest_partial_result_for_a_known_fixture() {
         assert!(!candidate.suppressions_checked.is_empty());
         assert!(candidate.source_refs.len() <= 8);
     }
-    // The first-slice entry-point model is honest about being partial.
     assert_eq!(
         dead.data.trust,
         RepositoryDataTrust::UntrustedRepositoryData
@@ -1126,16 +1139,8 @@ fn architecture_overview_reports_an_honest_file_granularity_result_for_a_known_f
 }
 
 #[test]
-fn tests_select_reports_an_honest_partial_result_for_a_known_fixture() {
-    // The first-slice oracle records a direct call as a `DispatchCandidate`
-    // occurrence and structural containment as a file-to-entity `Contains`
-    // relation, and it marks no test entity for this fixture. An honest
-    // `tests.select` over the fixture therefore selects no fabricated tests:
-    // every coverage signal stays unused and the seed scope is reported as an
-    // honest gap, while still proving the generation-pinned query path and
-    // mandatory trust labeling.
-    let source =
-        "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
+fn tests_select_returns_a_direct_rust_test() {
+    let source = "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n\n#[test]\nfn caller_works() {\n    assert_eq!(caller(), 42);\n}\n";
     let fixture = fixture(source);
     let cancellation = deadline();
     let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
@@ -1155,6 +1160,19 @@ fn tests_select_reports_an_honest_partial_result_for_a_known_fixture() {
         .expect("locate query succeeds");
     assert_eq!(located.data.hits.len(), 1);
     let seed = located.data.hits[0].symbol;
+    let test = service
+        .code_locate(
+            indexed.generation,
+            "caller_works".to_owned(),
+            LocateMode::Exact,
+            8,
+            0,
+            &cancellation,
+        )
+        .expect("locate test")
+        .data
+        .hits[0]
+        .symbol;
 
     let selection = service
         .tests_select(
@@ -1167,17 +1185,24 @@ fn tests_select_reports_an_honest_partial_result_for_a_known_fixture() {
         )
         .expect("tests select query succeeds");
 
-    // The fixture marks no test entity, so no test is fabricated and no
-    // coverage signal is reported used.
-    assert!(selection.data.tests.is_empty());
-    assert!(!selection.data.coverage_strategy.direct_edges);
+    assert_eq!(selection.data.tests.len(), 1);
+    assert_eq!(selection.data.tests[0].test_id, test);
+    assert!(
+        selection.data.tests[0]
+            .why
+            .contains(&"direct_test_edge".to_owned())
+    );
+    assert!(
+        selection.data.tests[0]
+            .why
+            .iter()
+            .any(|reason| reason.starts_with("via:"))
+    );
+    assert!(selection.data.coverage_strategy.direct_edges);
     assert!(!selection.data.coverage_strategy.transitive_signals);
     assert!(!selection.data.coverage_strategy.history_signals);
-    assert!(!selection.data.coverage_strategy.file_colocation_signals);
-    // The seed scope has no related test, so it is reported as an honest gap.
-    assert_eq!(selection.data.gaps.len(), 1);
-    assert_eq!(selection.data.gaps[0].scope, seed.to_string());
-    assert_eq!(selection.data.gaps[0].reason, "no_related_test");
+    assert!(selection.data.coverage_strategy.file_colocation_signals);
+    assert!(selection.data.gaps.is_empty());
     assert_eq!(
         selection.data.trust,
         RepositoryDataTrust::UntrustedRepositoryData
@@ -1185,17 +1210,7 @@ fn tests_select_reports_an_honest_partial_result_for_a_known_fixture() {
 }
 
 #[test]
-fn change_impact_reports_an_honest_result_for_a_known_fixture() {
-    // The first-slice oracle records a direct call as a `DispatchCandidate`
-    // occurrence and structural containment as a file-to-entity `Contains`
-    // relation, and it resolves no public visibility for this fixture, so no
-    // served relation family yields an entity-to-entity impact edge and no
-    // public surface is proven. An honest `change.impact` over an explicit
-    // symbol change therefore resolves the changed symbol as a body change but
-    // fabricates no dependents: the impact group stays empty, the fanout is
-    // zero, the breaking surface stays unset, and the risk level is none, while
-    // still proving the generation-pinned query path and mandatory trust
-    // labeling.
+fn change_impact_returns_a_resolved_rust_caller() {
     let source =
         "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
     let fixture = fixture(source);
@@ -1217,6 +1232,19 @@ fn change_impact_reports_an_honest_result_for_a_known_fixture() {
         .expect("locate query succeeds");
     assert_eq!(located.data.hits.len(), 1);
     let changed = located.data.hits[0].symbol;
+    let caller = service
+        .code_locate(
+            indexed.generation,
+            "caller".to_owned(),
+            LocateMode::Exact,
+            8,
+            0,
+            &cancellation,
+        )
+        .expect("locate caller")
+        .data
+        .hits[0]
+        .symbol;
 
     let impact = service
         .change_impact(
@@ -1239,16 +1267,17 @@ fn change_impact_reports_an_honest_result_for_a_known_fixture() {
         impact.data.resolved_changes[0].classification,
         ChangeImpactClassification::Body
     );
-    // The lexical oracle serves no entity-to-entity impact edge, so no dependent
-    // is fabricated.
     assert_eq!(impact.data.impacted.len(), 1);
-    assert!(impact.data.impacted[0].dependents.is_empty());
+    assert_eq!(impact.data.impacted[0].dependents.len(), 1);
+    let dependent = &impact.data.impacted[0].dependents[0];
+    assert_eq!(dependent.symbol_id, caller);
+    assert_eq!(dependent.distance, 1);
+    assert!(dependent.confidence >= 900);
+    assert_eq!(dependent.via, vec!["calls"]);
     assert!(impact.data.tests.is_empty());
-    // The honest risk summary reflects zero measured fanout, no proven public
-    // surface, and unknown coverage.
     assert!(!impact.data.risk_summary.breaking_surface);
-    assert_eq!(impact.data.risk_summary.fanout, 0);
-    assert_eq!(impact.data.risk_summary.level, ChangeImpactRiskLevel::None);
+    assert_eq!(impact.data.risk_summary.fanout, 1);
+    assert_eq!(impact.data.risk_summary.level, ChangeImpactRiskLevel::Low);
     assert_eq!(impact.data.risk_summary.coverage, CoverageStatus::Unknown);
     assert!(impact.data.risk_summary.dynamic_blind_spots);
     assert_eq!(
@@ -1283,18 +1312,7 @@ fn change_impact_requires_an_explicit_change_set() {
 }
 
 #[test]
-fn plan_change_reports_an_honest_result_for_a_known_fixture() {
-    // The first-slice oracle records a direct call as a `DispatchCandidate`
-    // occurrence and containment as a file-to-entity `Contains` relation, and it
-    // resolves no public visibility for this fixture, so no served relation
-    // family yields an entity-to-entity impact edge and no public surface is
-    // proven. An honest `plan.change` over an explicit symbol target therefore
-    // builds its ordered steps from the target alone: the impact closure stays
-    // empty, the affected scope counts only the target symbol and its declaring
-    // file, no public surface is touched, the risk level is none, the
-    // verification test plan is empty, and no open decision is fabricated, while
-    // still proving the generation-pinned query path and mandatory trust
-    // labeling.
+fn plan_change_includes_a_resolved_rust_caller() {
     let source =
         "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
     let fixture = fixture(source);
@@ -1316,6 +1334,19 @@ fn plan_change_reports_an_honest_result_for_a_known_fixture() {
         .expect("locate query succeeds");
     assert_eq!(located.data.hits.len(), 1);
     let target = located.data.hits[0].symbol;
+    let caller = service
+        .code_locate(
+            indexed.generation,
+            "caller".to_owned(),
+            LocateMode::Exact,
+            8,
+            0,
+            &cancellation,
+        )
+        .expect("locate caller")
+        .data
+        .hits[0]
+        .symbol;
 
     let plan = service
         .plan_change(
@@ -1328,29 +1359,30 @@ fn plan_change_reports_an_honest_result_for_a_known_fixture() {
         )
         .expect("plan change query succeeds");
 
-    // A modification objective emits its ordered source-free steps from the
-    // target; the lexical oracle serves no impact edge, so no dependent is
-    // fabricated and every dependency references an earlier ordinal.
     assert!(!plan.data.plan.is_empty());
     assert_eq!(plan.data.plan[0].targets, vec![target]);
     for step in &plan.data.plan {
         assert!(!step.action.is_empty());
         assert!(step.depends_on.iter().all(|dep| *dep < step.step));
     }
-    // The honest affected scope counts only the target symbol and its declaring
-    // file; no public surface is proven for this fixture.
-    assert_eq!(plan.data.affected_scope.affected_symbols, 1);
+    assert_eq!(plan.data.affected_scope.affected_symbols, 2);
     assert_eq!(plan.data.affected_scope.affected_files, 1);
     assert!(!plan.data.affected_scope.touches_public_surface);
     assert_eq!(
         plan.data.affected_scope.risk_level,
-        ChangeImpactRiskLevel::None
+        ChangeImpactRiskLevel::Low
     );
     // No related test entity and no fabricated open decision.
     assert!(plan.data.test_plan.is_empty());
     assert!(plan.data.open_decisions.is_empty());
-    // The context pack carries the target symbol.
-    assert_eq!(plan.data.context_pack_request.symbols, vec![target]);
+    assert_eq!(
+        plan.data.context_pack_request.symbols,
+        [target, caller]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         plan.data.trust,
         RepositoryDataTrust::UntrustedRepositoryData

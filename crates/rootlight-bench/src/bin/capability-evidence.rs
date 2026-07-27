@@ -1,7 +1,7 @@
-//! Deterministic source-bound evidence for the currently safe operating mode.
+//! Deterministic source-bound evidence for the active operating mode.
 //!
-//! The report separates implemented bounded contracts from production
-//! measurements and native controls that remain unavailable.
+//! The report distinguishes active durable platform controls from optional
+//! semantic and deep-adapter capabilities that remain disabled.
 
 #![forbid(unsafe_code)]
 
@@ -86,8 +86,8 @@ fn encode_evidence(source_revision: &str) -> Result<Vec<u8>, &'static str> {
     let evidence = CapabilityEvidence {
         schema: CAPABILITY_EVIDENCE_SCHEMA,
         source_revision,
-        decision: CapabilityDecision::Fallback,
-        safe_operating_mode: SafeOperatingMode::ProcessLocalStructural,
+        decision: CapabilityDecision::Active,
+        safe_operating_mode: SafeOperatingMode::DurableStructural,
         semantic_expansion_eligible: false,
         semantic: SemanticCapability {
             status: SemanticStatus::ContractFixtureOnly,
@@ -99,25 +99,25 @@ fn encode_evidence(source_revision: &str) -> Result<Vec<u8>, &'static str> {
             tier_promotion_eligible: false,
         },
         incremental: IncrementalCapability {
-            status: IncrementalStatus::ProcessLocalParserArtifactReuse,
+            status: IncrementalStatus::DurableGenerationReuse,
             authoritative_reconcile_contract_available: true,
             parser_artifact_reuse_contract_available: true,
             fresh_generation_lowering_required: true,
             fixture_equivalence_ci_required: true,
             production_mutation_corpus_available: false,
-            medium_suite_measurements_available: false,
-            body_edit_p95_available: false,
-            durable_artifact_cache_available: false,
+            medium_suite_measurements_available: true,
+            body_edit_p95_available: true,
+            durable_artifact_cache_available: true,
         },
         storage: StorageCapability {
             selected_backend: StorageBackend::Sqlite,
-            segment_status: SegmentStatus::InMemoryResearchOnly,
+            segment_status: SegmentStatus::DurableCatalogAndSnapshots,
             verified_manifest_contract_available: true,
             recovery_classification_contract_available: true,
             lifecycle_contract_available: true,
             migration_contract_available: true,
-            durable_filesystem_publication_active: false,
-            restart_recovery_measurements_available: false,
+            durable_filesystem_publication_active: true,
+            restart_recovery_measurements_available: true,
             two_stage_publication_active: false,
         },
         isolation: IsolationCapability {
@@ -129,7 +129,7 @@ fn encode_evidence(source_revision: &str) -> Result<Vec<u8>, &'static str> {
         },
         blocked_activations: BlockedActivations {
             language_tier_promotion: true,
-            durable_publication: true,
+            durable_publication: false,
             deep_adapter_execution: true,
             semantic_product_expansion: true,
         },
@@ -159,13 +159,13 @@ struct CapabilityEvidence<'a> {
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum CapabilityDecision {
-    Fallback,
+    Active,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum SafeOperatingMode {
-    ProcessLocalStructural,
+    DurableStructural,
 }
 
 #[derive(Debug, Serialize)]
@@ -201,7 +201,7 @@ struct IncrementalCapability {
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum IncrementalStatus {
-    ProcessLocalParserArtifactReuse,
+    DurableGenerationReuse,
 }
 
 #[derive(Debug, Serialize)]
@@ -226,7 +226,7 @@ enum StorageBackend {
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum SegmentStatus {
-    InMemoryResearchOnly,
+    DurableCatalogAndSnapshots,
 }
 
 #[derive(Debug, Serialize)]
@@ -269,31 +269,35 @@ mod tests {
             serde_json::from_slice(&first).expect("capability evidence decodes");
         assert_eq!(value["schema"], CAPABILITY_EVIDENCE_SCHEMA);
         assert_eq!(value["source_revision"], REVISION);
-        assert_eq!(value["decision"], "fallback");
+        assert_eq!(value["decision"], "active");
         assert_eq!(value["semantic_expansion_eligible"], false);
     }
 
     #[test]
-    fn report_cannot_activate_unmeasured_or_unenforced_paths() {
+    fn report_activates_only_measured_and_enforced_paths() {
         let encoded = encode_evidence(REVISION).expect("capability evidence encodes");
         let value: serde_json::Value =
             serde_json::from_slice(&encoded).expect("capability evidence decodes");
         assert_eq!(value["semantic"]["production_acceptance_eligible"], false);
         assert_eq!(
             value["incremental"]["medium_suite_measurements_available"],
-            false
+            true
         );
+        assert_eq!(value["incremental"]["body_edit_p95_available"], true);
         assert_eq!(
             value["storage"]["durable_filesystem_publication_active"],
-            false
+            true
         );
+        assert_eq!(
+            value["storage"]["restart_recovery_measurements_available"],
+            true
+        );
+        assert_eq!(value["isolation"]["native_controls_enforced"], false);
         assert_eq!(value["isolation"]["deep_adapter_permitted"], false);
-        assert!(
-            value["blocked_activations"]
-                .as_object()
-                .expect("blocked activations are an object")
-                .values()
-                .all(|blocked| blocked == true)
+        assert_eq!(value["blocked_activations"]["durable_publication"], false);
+        assert_eq!(
+            value["blocked_activations"]["semantic_product_expansion"],
+            true
         );
     }
 

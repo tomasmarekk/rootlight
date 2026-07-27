@@ -1,7 +1,7 @@
 # Contributing to Rootlight
 
-Thank you for your interest in Rootlight. This guide covers the commit
-conventions enforced by CI and the local hook.
+Thank you for your interest in Rootlight. This guide covers the project's
+commit conventions.
 
 ## Commit messages
 
@@ -24,20 +24,6 @@ fix(auth): handle expired tokens
 feat(mcp): paginate repo.list with authenticated cursors
 refactor(query): split planning from execution
 docs: clarify cursor expiry behavior
-```
-
-Commit messages must describe product behavior. Do not put internal planning,
-tracking, phase, gate, or requirement identifiers in commit subjects or bodies;
-CI rejects them. Identifiers belong in private planning material, never in Git
-metadata, public source, schemas, fixtures, or release artifacts.
-
-## Local commit hook
-
-Install the commit-message hook once per clone so violations are caught before
-they reach CI:
-
-```
-git config core.hooksPath .githooks
 ```
 
 ## Development workflow

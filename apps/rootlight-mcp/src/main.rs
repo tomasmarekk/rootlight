@@ -2,13 +2,20 @@
 
 #![forbid(unsafe_code)]
 
-use std::{env, ffi::OsString, path::PathBuf, process::ExitCode, sync::Arc};
+use std::{
+    env,
+    ffi::OsString,
+    path::PathBuf,
+    process::ExitCode,
+    sync::{Arc, Mutex, OnceLock},
+};
 
-use rootlight_client::{Client, ConnectPolicy};
+use rootlight_client::{Client, ClientError, ConnectPolicy};
 use rootlight_mcp::{
-    FirstSliceClientPort, FirstSliceToolExecutor, NativeFirstSliceClientPort, RequestHandler,
-    Session, StdioLimits, ToolExecutorBuildError, ToolRegistryError, ToolRouter,
-    UnavailableFirstSliceClientPort, serve,
+    BoundedBlockingPool, FirstSliceClientPort, FirstSliceToolExecutor, HandlerCapabilities,
+    HandlerFuture, HandlerResponse, NativeFirstSliceClientPort, OperatingRequest,
+    RequestCancellation, RequestHandler, Session, StdioLimits, ToolExecutorBuildError,
+    ToolRegistryError, ToolRouter, UnavailableFirstSliceClientPort, serve,
 };
 use rootlight_mcp_contract::ExposureProfile;
 use rootlight_runtime::RuntimePaths;
@@ -19,6 +26,8 @@ const STATE_DIR_ENV: &str = "ROOTLIGHT_STATE_DIR";
 const RUNTIME_DIR_ENV: &str = "ROOTLIGHT_RUNTIME_DIR";
 const PROFILE_CEILING_ENV: &str = "ROOTLIGHT_MCP_PROFILE_CEILING";
 const PROFILE_ENV: &str = "ROOTLIGHT_MCP_PROFILE";
+const INTERNAL_ERROR: i32 = -32_603;
+const ASYNC_WORKER_THREADS: usize = 2;
 
 fn main() -> ExitCode {
     let mode = match bridge_mode() {
@@ -47,6 +56,9 @@ fn main() -> ExitCode {
         }
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
+        // MCP request work is I/O-bound and separately capped at eight in-flight
+        // calls, so a fixed pair avoids host-core-count startup amplification.
+        .worker_threads(ASYNC_WORKER_THREADS)
         .enable_all()
         .build()
     {
@@ -85,26 +97,31 @@ fn request_handler(
     profile: watch::Receiver<ExposureProfile>,
     ceiling: ExposureProfile,
 ) -> Result<Arc<dyn RequestHandler>, BridgeInitializationError> {
-    match mode {
-        BridgeMode::Production => match native_port() {
-            Ok(port) => tool_handler(port, profile, ceiling),
-            Err(()) => tool_handler(UnavailableFirstSliceClientPort, profile, ceiling),
-        },
+    let blocking_pool = StdioLimits::default()
+        .blocking_pool()
+        .map_err(|_| BridgeInitializationError)?;
+    // `initialize` needs only the stable capability bit. Schema compilation
+    // moves to the first operating request and never occupies the async worker.
+    let factory = move || match mode {
+        BridgeMode::Production => tool_handler(native_port(), profile.clone(), ceiling),
         BridgeMode::TransportOnly => {
             // Transport conformance must never attach to or launch a user's daemon.
-            tool_handler(UnavailableFirstSliceClientPort, profile, ceiling)
+            tool_handler(UnavailableFirstSliceClientPort, profile.clone(), ceiling)
         }
-    }
+    };
+    Ok(Arc::new(DeferredRequestHandler::new(
+        blocking_pool,
+        factory,
+    )))
 }
 
-fn native_port() -> Result<NativeFirstSliceClientPort, ()> {
-    let paths = runtime_paths()?;
-    let mut client_instance_id = [0_u8; 16];
-    getrandom::fill(&mut client_instance_id).map_err(|_| ())?;
-    let client =
+fn native_port() -> NativeFirstSliceClientPort {
+    NativeFirstSliceClientPort::connect_on_first_request(|| {
+        let paths = runtime_paths().map_err(|()| ClientError::DaemonUnavailable)?;
+        let mut client_instance_id = [0_u8; 16];
+        getrandom::fill(&mut client_instance_id).map_err(|_| ClientError::RequestIdExhausted)?;
         Client::connect_or_start(&paths, client_instance_id, ConnectPolicy::StartIfMissing)
-            .map_err(|_| ())?;
-    Ok(NativeFirstSliceClientPort::new(client))
+    })
 }
 
 fn runtime_paths() -> Result<RuntimePaths, ()> {
@@ -169,6 +186,92 @@ where
     )?))
 }
 
+type HandlerFactory =
+    dyn Fn() -> Result<Arc<dyn RequestHandler>, BridgeInitializationError> + Send + Sync + 'static;
+
+struct DeferredHandlerState {
+    handler: OnceLock<Arc<dyn RequestHandler>>,
+    initialization: Mutex<()>,
+    factory: Arc<HandlerFactory>,
+}
+
+impl DeferredHandlerState {
+    fn resolve_blocking(&self) -> Result<Arc<dyn RequestHandler>, BridgeInitializationError> {
+        if let Some(handler) = self.handler.get() {
+            return Ok(Arc::clone(handler));
+        }
+        let _initialization = self
+            .initialization
+            .lock()
+            .map_err(|_| BridgeInitializationError)?;
+        if let Some(handler) = self.handler.get() {
+            return Ok(Arc::clone(handler));
+        }
+        let handler = (self.factory)()?;
+        self.handler
+            .set(Arc::clone(&handler))
+            .map_err(|_| BridgeInitializationError)?;
+        Ok(handler)
+    }
+}
+
+struct DeferredRequestHandler {
+    blocking_pool: BoundedBlockingPool,
+    state: Arc<DeferredHandlerState>,
+}
+
+impl DeferredRequestHandler {
+    fn new(
+        blocking_pool: BoundedBlockingPool,
+        factory: impl Fn() -> Result<Arc<dyn RequestHandler>, BridgeInitializationError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            blocking_pool,
+            state: Arc::new(DeferredHandlerState {
+                handler: OnceLock::new(),
+                initialization: Mutex::new(()),
+                factory: Arc::new(factory),
+            }),
+        }
+    }
+}
+
+impl RequestHandler for DeferredRequestHandler {
+    fn capabilities(&self) -> HandlerCapabilities {
+        HandlerCapabilities::tools()
+    }
+
+    fn handle(
+        &self,
+        request: OperatingRequest,
+        cancellation: RequestCancellation,
+    ) -> HandlerFuture {
+        let blocking_pool = self.blocking_pool.clone();
+        let state = Arc::clone(&self.state);
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return HandlerResponse::Cancelled;
+            }
+            let mut cancellation_wait = cancellation.clone();
+            tokio::select! {
+                resolution = blocking_pool.run(move || state.resolve_blocking()) => {
+                    match resolution {
+                        Ok(Ok(handler)) => handler.handle(request, cancellation).await,
+                        Ok(Err(_)) | Err(_) => HandlerResponse::error(
+                            INTERNAL_ERROR,
+                            "handler initialization failed",
+                        ),
+                    }
+                }
+                () = cancellation_wait.cancelled() => HandlerResponse::Cancelled,
+            }
+        })
+    }
+}
+
 async fn serve_stdio(
     handler: Arc<dyn RequestHandler>,
     ceiling: ExposureProfile,
@@ -197,7 +300,41 @@ impl From<ToolRegistryError> for BridgeInitializationError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use rootlight_mcp::NoopRequestHandler;
+
     use super::*;
+
+    #[test]
+    fn deferred_handler_initializes_once_and_retries_a_failed_attempt() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let factory_attempts = Arc::clone(&attempts);
+        let handler = DeferredRequestHandler::new(
+            StdioLimits::default()
+                .blocking_pool()
+                .expect("default blocking limits are valid"),
+            move || {
+                if factory_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(BridgeInitializationError);
+                }
+                Ok(Arc::new(NoopRequestHandler))
+            },
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        assert!(handler.state.resolve_blocking().is_err());
+
+        let initialized = handler
+            .state
+            .resolve_blocking()
+            .expect("second attempt initializes");
+        let reused = handler
+            .state
+            .resolve_blocking()
+            .expect("initialized handler is reused");
+        assert!(Arc::ptr_eq(&initialized, &reused));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn complete_runtime_path_override_selects_both_directories() {

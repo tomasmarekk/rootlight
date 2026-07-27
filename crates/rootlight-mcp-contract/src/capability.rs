@@ -462,12 +462,16 @@ const fn accepted_fallback(path: &'static str) -> CapabilityRule {
 const REPO_INDEX_RULES: &[CapabilityRule] = &[
     accepted_fallback("root"),
     accepted_fallback("mode"),
-    implemented("detached", "omission or false selects attached execution"),
-    unsupported_value(
+    implemented(
+        "detached",
+        "selects attached execution or durable work independent of the requesting transport",
+    ),
+    implemented_value(
         "detached",
         "true",
-        "detached indexing is not served because operation handles are process-local",
+        "continues durable indexing after the requesting transport disconnects",
     ),
+    implemented_value("detached", "false", "selects attached execution"),
     unsupported(
         "repository_id",
         "updating a registered repository is not served",
@@ -749,7 +753,10 @@ const FLOW_TRACE_RULES: &[CapabilityRule] = &[
     accepted_fallback("max_depth"),
     accepted_fallback("max_paths"),
     accepted_fallback("min_confidence"),
-    accepted_fallback("cross_repository"),
+    implemented(
+        "cross_repository",
+        "stitches target-directed paths across active repository generations",
+    ),
     implemented(
         "response_profile",
         "selects compact, standard, or bounded evidence representation",
@@ -758,11 +765,6 @@ const FLOW_TRACE_RULES: &[CapabilityRule] = &[
     unsupported(
         "repository.alias",
         "only stable repository identifiers are served",
-    ),
-    unsupported_value(
-        "cross_repository",
-        "true",
-        "cross-repository traversal is not served",
     ),
     unsupported(
         "path_policy",
@@ -1431,12 +1433,12 @@ fn lifecycle_metadata(tool: McpTool) -> Option<DiscoveryLifecycleMetadata> {
         scope: "whole_repository",
         synchronous_terminal: true,
         max_wait_ms: 30_000,
-        detached: false,
+        detached: true,
         public_idempotency: "none",
         internal_operation_retry: true,
-        state_persistence: "process_local",
-        restart_behavior: "reindex_required",
-        publication: "atomic_on_terminal_success",
+        state_persistence: "durable",
+        restart_behavior: "status_and_generation_recovered",
+        publication: "durable_atomic_on_terminal_success",
     })
 }
 
@@ -1691,9 +1693,9 @@ const fn input_shape_hash(tool: McpTool) -> &'static str {
 
 const fn tool_fallback_summary(tool: McpTool) -> &'static str {
     match tool {
-        McpTool::RepoIndex => "bounded attached process-local structural generation creation",
+        McpTool::RepoIndex => "bounded attached durable structural generation creation",
         McpTool::RepoStatus => {
-            "bounded process-local active or exact-generation status with coverage, operations, and freshness gates"
+            "bounded durable active or exact-generation status with coverage, operations, and freshness conditions"
         }
         McpTool::RepoList => {
             "immutable catalog snapshot with bounded display-name or alias and lifecycle-state filters"
@@ -2091,14 +2093,8 @@ mod tests {
             Some(ErrorCode::UnsupportedCapability)
         );
         let detached_index = repo_index.disposition("detached", Some("true"));
-        assert_eq!(
-            detached_index.status,
-            CapabilityStatus::UnsupportedStableError
-        );
-        assert_eq!(
-            detached_index.error_code,
-            Some(ErrorCode::UnsupportedCapability)
-        );
+        assert_eq!(detached_index.status, CapabilityStatus::Implemented);
+        assert_eq!(detached_index.error_code, None);
         assert_eq!(
             repo_index.disposition("detached", Some("false")).status,
             CapabilityStatus::Implemented
@@ -2260,12 +2256,15 @@ mod tests {
         assert_eq!(lifecycle.scope, "whole_repository");
         assert!(lifecycle.synchronous_terminal);
         assert_eq!(lifecycle.max_wait_ms, 30_000);
-        assert!(!lifecycle.detached);
+        assert!(lifecycle.detached);
         assert_eq!(lifecycle.public_idempotency, "none");
         assert!(lifecycle.internal_operation_retry);
-        assert_eq!(lifecycle.state_persistence, "process_local");
-        assert_eq!(lifecycle.restart_behavior, "reindex_required");
-        assert_eq!(lifecycle.publication, "atomic_on_terminal_success");
+        assert_eq!(lifecycle.state_persistence, "durable");
+        assert_eq!(
+            lifecycle.restart_behavior,
+            "status_and_generation_recovered"
+        );
+        assert_eq!(lifecycle.publication, "durable_atomic_on_terminal_success");
         assert!(
             repo_index
                 .limitations
@@ -2273,12 +2272,12 @@ mod tests {
                 .all(|limitation| limitation.field != "root"),
             "accepted allowlist ancestors are not public limitations"
         );
-        assert!(repo_index.limitations.iter().any(|limitation| {
-            limitation.field == "detached"
-                && limitation.value == Some("true")
-                && limitation.status == "unsupported_stable_error"
-                && limitation.error_code == Some(ErrorCode::UnsupportedCapability)
-        }));
+        assert!(
+            repo_index
+                .limitations
+                .iter()
+                .all(|limitation| limitation.field != "detached")
+        );
         for tool in McpTool::ALL {
             if tool != McpTool::RepoIndex {
                 assert!(discovery_metadata(tool).lifecycle.is_none());

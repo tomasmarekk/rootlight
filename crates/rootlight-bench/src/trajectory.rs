@@ -82,56 +82,56 @@ pub enum TrajectoryExecutionBoundary {
     UnavailableAdapter,
 }
 
-/// Required representative workflow families.
+/// Closed workflow families exercised by the controlled agent benchmark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrajectoryWorkflowFamily {
-    /// Locate a symbol and explain its definition.
-    LocateExplain,
-    /// Retrieve exact source evidence.
-    SourceRetrieval,
-    /// Explore typed relationships.
-    RelationshipExploration,
-    /// Trace a bounded flow.
-    FlowTracing,
-    /// Summarize architecture.
+    /// Locate an implementation from a concept.
+    LocateImplementation,
+    /// Explain an unfamiliar symbol.
+    ExplainSymbol,
+    /// Find callers and callees.
+    CallRelationships,
+    /// Prepare minimal context for a bug fix.
+    BugFixContext,
+    /// Assess change impact before editing.
+    AssessChangeImpact,
+    /// Select tests after an edit.
+    SelectTests,
+    /// Build an architecture overview.
     ArchitectureOverview,
-    /// Investigate dependency cycles.
+    /// Find cyclic dependencies and a safe break point.
     CycleInvestigation,
-    /// Investigate possible dead code.
+    /// Find dead-code candidates.
     DeadCodeInvestigation,
-    /// Analyze change impact.
-    ChangeImpact,
-    /// Select relevant tests.
-    TestSelection,
-    /// Compare generations or revisions.
+    /// Trace a request across service boundaries.
+    CrossServiceTrace,
+    /// Prepare a refactoring boundary.
+    RefactoringBoundary,
+    /// Compare two Git states.
     HistoryComparison,
-    /// Plan a bounded change.
-    ChangePlanning,
-    /// Assemble a context pack.
-    ContextPack,
-    /// Compose dependent calls in one batch.
-    BatchComposition,
-    /// Execute a bounded typed advanced query.
-    AdvancedQuery,
+    /// Create a dependent API-migration plan in one batch.
+    ApiMigrationBatch,
+    /// Coordinate a multi-repository migration.
+    MultiRepositoryMigration,
 }
 
 impl TrajectoryWorkflowFamily {
     const ALL: [Self; 14] = [
-        Self::LocateExplain,
-        Self::SourceRetrieval,
-        Self::RelationshipExploration,
-        Self::FlowTracing,
+        Self::LocateImplementation,
+        Self::ExplainSymbol,
+        Self::CallRelationships,
+        Self::BugFixContext,
+        Self::AssessChangeImpact,
+        Self::SelectTests,
         Self::ArchitectureOverview,
         Self::CycleInvestigation,
         Self::DeadCodeInvestigation,
-        Self::ChangeImpact,
-        Self::TestSelection,
+        Self::CrossServiceTrace,
+        Self::RefactoringBoundary,
         Self::HistoryComparison,
-        Self::ChangePlanning,
-        Self::ContextPack,
-        Self::BatchComposition,
-        Self::AdvancedQuery,
+        Self::ApiMigrationBatch,
+        Self::MultiRepositoryMigration,
     ];
 }
 
@@ -245,7 +245,7 @@ pub struct TrajectoryWorkflowProtocol {
     pub task_id: String,
     /// Source-free expected evidence identities used only for later grading.
     pub expected_evidence: Vec<String>,
-    /// Rootlight tools preregistered for this workflow.
+    /// Exact Rootlight call sequence preregistered for this workflow.
     pub rootlight_tools: Vec<String>,
     /// Whether a status preflight is semantically necessary for this task.
     pub allows_status_preflight: bool,
@@ -353,7 +353,12 @@ impl TrajectoryProtocol {
             validate_label(&workflow.workflow_id)?;
             validate_label(&workflow.task_id)?;
             validate_sorted_labels(&workflow.expected_evidence)?;
-            validate_sorted_labels(&workflow.rootlight_tools)?;
+            if workflow.rootlight_tools.len() > MAX_WORKFLOW_CALLS {
+                return Err(TrajectoryError::InvalidProtocol);
+            }
+            for tool in &workflow.rootlight_tools {
+                validate_label(tool)?;
+            }
             if workflow.expected_evidence.is_empty()
                 || workflow.rootlight_tools.is_empty()
                 || !families.insert(workflow.family)
@@ -1616,13 +1621,49 @@ impl TrajectoryAdapter for UnavailableTrajectoryAdapter {
 #[derive(Debug, Clone)]
 pub struct BoundedFileExplorationAdapter {
     root: PathBuf,
+    observations: Vec<BoundedFileObservation>,
+}
+
+/// Ephemeral task-driven baseline observation available to benchmark graders.
+///
+/// This type intentionally has no serialization implementation. Callers must
+/// consume its source-bearing fields before publishing source-free evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedFileObservation {
+    /// Workflow identity from the execution input.
+    pub workflow_id: String,
+    /// Digest of the exact trajectory task.
+    pub task_sha256: String,
+    /// Digest of the exact fixture tree.
+    pub fixture_sha256: String,
+    /// Zero-based attempt index.
+    pub attempt_index: u16,
+    /// Deterministic seed used for target and tie-break selection.
+    pub deterministic_seed: u64,
+    /// Digest of the exact prompt shared with the Rootlight candidate.
+    pub prompt_sha256: String,
+    /// Task-selected root-relative regular-file paths.
+    pub selected_paths: Vec<String>,
+    /// Source-bearing response consumed only by the benchmark grader.
+    pub response: serde_json::Value,
+    /// Exact selected source bytes consumed only by the benchmark grader.
+    pub source_frame: Vec<u8>,
 }
 
 impl BoundedFileExplorationAdapter {
     /// Creates the local baseline over a fixture root.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            observations: Vec::new(),
+        }
+    }
+
+    /// Removes and returns source-bearing observations for immediate grading.
+    #[must_use]
+    pub fn take_observations(&mut self) -> Vec<BoundedFileObservation> {
+        std::mem::take(&mut self.observations)
     }
 }
 
@@ -1637,26 +1678,54 @@ impl TrajectoryAdapter for BoundedFileExplorationAdapter {
 
     fn execute(&mut self, input: TrajectoryExecutionInput<'_>) -> RawTrajectoryAttempt {
         let started = Instant::now();
+        let prompt = trajectory_task_prompt(input.workflow.family, input.seed);
+        let prompt_sha256 = sha256_hex(prompt.as_bytes());
         let request_frame = serde_json::to_vec(&json!({
             "workflow_id": input.workflow.workflow_id,
             "task_sha256": input.task_sha256,
             "fixture_sha256": input.fixture_sha256,
             "attempt_index": input.attempt_index,
             "seed": input.seed,
+            "prompt_sha256": prompt_sha256,
             "bounds": input.bounds,
         }))
         .unwrap_or_else(|_| b"{\"status\":\"serialization_failed\"}".to_vec());
-        match collect_bounded_source(&self.root, input.bounds) {
-            Ok((source_frame, result_items, truncated)) => {
+        match collect_bounded_source(
+            &self.root,
+            input.workflow.family,
+            input.seed,
+            &prompt,
+            input.bounds,
+        ) {
+            Ok(selection) => {
+                let source_frame = selection.source_frame;
+                let result_items = u64::try_from(selection.paths.len()).unwrap_or(u64::MAX);
+                let truncated = selection.truncated;
                 let aggregate_sha256 = sha256_hex(&source_frame);
-                let response_frame = serde_json::to_vec(&json!({
+                let response = json!({
                     "status": "succeeded",
+                    "workflow_id": input.workflow.workflow_id,
+                    "task_sha256": input.task_sha256,
+                    "prompt_sha256": prompt_sha256,
                     "result_items": result_items,
                     "source_sha256": aggregate_sha256,
                     "source": String::from_utf8_lossy(&source_frame),
+                    "source_references": selection.paths,
                     "truncated": truncated,
-                }))
-                .unwrap_or_else(|_| b"{\"status\":\"serialization_failed\"}".to_vec());
+                });
+                let response_frame = serde_json::to_vec(&response)
+                    .unwrap_or_else(|_| b"{\"status\":\"serialization_failed\"}".to_vec());
+                self.observations.push(BoundedFileObservation {
+                    workflow_id: input.workflow.workflow_id.clone(),
+                    task_sha256: input.task_sha256.to_owned(),
+                    fixture_sha256: input.fixture_sha256.to_owned(),
+                    attempt_index: input.attempt_index,
+                    deterministic_seed: input.seed,
+                    prompt_sha256,
+                    selected_paths: selection.paths,
+                    response,
+                    source_frame: source_frame.clone(),
+                });
                 RawTrajectoryAttempt {
                     outcome: TrajectoryAttemptOutcome::Succeeded,
                     calls: vec![RawTrajectoryCall {
@@ -1675,11 +1744,7 @@ impl TrajectoryAdapter for BoundedFileExplorationAdapter {
                         result_items,
                         truncated,
                         continuation_available: false,
-                        claim_signals: TrajectoryClaimSignals {
-                            missing_source_references: u32::from(result_items > 0),
-                            ignored_truncation: u32::from(truncated),
-                            ..TrajectoryClaimSignals::default()
-                        },
+                        claim_signals: TrajectoryClaimSignals::default(),
                     }],
                 }
             }
@@ -1717,10 +1782,19 @@ impl TrajectoryAdapter for BoundedFileExplorationAdapter {
     }
 }
 
+struct BoundedSourceSelection {
+    paths: Vec<String>,
+    source_frame: Vec<u8>,
+    truncated: bool,
+}
+
 fn collect_bounded_source(
     root: &Path,
+    family: TrajectoryWorkflowFamily,
+    seed: u64,
+    prompt: &str,
     bounds: TrajectorySharedBounds,
-) -> Result<(Vec<u8>, u64, bool), String> {
+) -> Result<BoundedSourceSelection, String> {
     let metadata = fs::symlink_metadata(root).map_err(|_| "fixture_unavailable".to_owned())?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err("fixture_unavailable".to_owned());
@@ -1744,24 +1818,88 @@ fn collect_bounded_source(
             }
         }
     }
-    files.sort();
+    let prompt_terms = prompt
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|term| term.len() >= 4)
+        .map(str::to_ascii_lowercase)
+        .collect::<BTreeSet<_>>();
+    let mut ranked = Vec::new();
+    let discovery_truncated = files.len() > 512;
+    for path in files.into_iter().take(512) {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| "fixture_unavailable".to_owned())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let metadata = fs::metadata(&path).map_err(|_| "fixture_unavailable".to_owned())?;
+        let mut preview = Vec::new();
+        fs::File::open(&path)
+            .map_err(|_| "fixture_unavailable".to_owned())?
+            .take(metadata.len().min(64 * 1024))
+            .read_to_end(&mut preview)
+            .map_err(|_| "fixture_unavailable".to_owned())?;
+        let Ok(preview) = std::str::from_utf8(&preview) else {
+            continue;
+        };
+        let score = baseline_file_score(family, &relative, preview, &prompt_terms);
+        let mut tie_hasher = Sha256::new();
+        tie_hasher.update(b"rootlight.bounded-file-selection.v1");
+        tie_hasher.update(seed.to_le_bytes());
+        tie_hasher.update(relative.as_bytes());
+        ranked.push((
+            std::cmp::Reverse(score),
+            tie_hasher.finalize(),
+            path,
+            relative,
+        ));
+    }
+    ranked.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.as_slice().cmp(right.1.as_slice()))
+            .then_with(|| left.3.cmp(&right.3))
+    });
+    let selected_file_limit = match family {
+        TrajectoryWorkflowFamily::ArchitectureOverview
+        | TrajectoryWorkflowFamily::CycleInvestigation
+        | TrajectoryWorkflowFamily::CrossServiceTrace
+        | TrajectoryWorkflowFamily::MultiRepositoryMigration => 3,
+        TrajectoryWorkflowFamily::AssessChangeImpact
+        | TrajectoryWorkflowFamily::SelectTests
+        | TrajectoryWorkflowFamily::BugFixContext
+        | TrajectoryWorkflowFamily::RefactoringBoundary
+        | TrajectoryWorkflowFamily::HistoryComparison
+        | TrajectoryWorkflowFamily::ApiMigrationBatch => 2,
+        TrajectoryWorkflowFamily::LocateImplementation
+        | TrajectoryWorkflowFamily::ExplainSymbol
+        | TrajectoryWorkflowFamily::CallRelationships
+        | TrajectoryWorkflowFamily::DeadCodeInvestigation => 1,
+    };
     let mut source = Vec::new();
-    let mut result_items = 0_u64;
-    let mut truncated = false;
+    let mut paths = Vec::new();
+    let mut truncated = discovery_truncated || ranked.len() > selected_file_limit;
     let source_limit = usize::try_from(bounds.source_bytes).unwrap_or(usize::MAX);
-    for path in files {
-        if result_items >= bounds.result_items || source.len() >= source_limit {
+    for (_, _, path, relative) in ranked.into_iter().take(selected_file_limit) {
+        if u64::try_from(paths.len()).unwrap_or(u64::MAX) >= bounds.result_items
+            || source.len() >= source_limit
+        {
             truncated = true;
             break;
         }
         let remaining = source_limit.saturating_sub(source.len());
+        let header = format!("--- {relative} ---\n");
+        let content_limit = remaining.saturating_sub(header.len().saturating_add(1));
+        if content_limit == 0 {
+            truncated = true;
+            break;
+        }
         let file_length = fs::metadata(&path)
             .map_err(|_| "fixture_unavailable".to_owned())?
             .len();
         let mut file = fs::File::open(&path).map_err(|_| "fixture_unavailable".to_owned())?;
-        let mut bytes = Vec::with_capacity(remaining.min(8 * 1024));
+        let mut bytes = Vec::with_capacity(content_limit.min(8 * 1024));
         file.by_ref()
-            .take(u64::try_from(remaining).unwrap_or(u64::MAX))
+            .take(u64::try_from(content_limit).unwrap_or(u64::MAX))
             .read_to_end(&mut bytes)
             .map_err(|_| "fixture_unavailable".to_owned())?;
         match std::str::from_utf8(&bytes) {
@@ -1769,13 +1907,143 @@ fn collect_bounded_source(
             Err(error) if error.error_len().is_none() => bytes.truncate(error.valid_up_to()),
             Err(_) => continue,
         }
+        source.extend_from_slice(header.as_bytes());
         source.extend_from_slice(&bytes);
         source.push(b'\n');
-        result_items = result_items.saturating_add(1);
+        paths.push(relative);
         truncated |= u64::try_from(bytes.len()).unwrap_or(u64::MAX) < file_length;
     }
     source.truncate(source_limit);
-    Ok((source, result_items, truncated))
+    Ok(BoundedSourceSelection {
+        paths,
+        source_frame: source,
+        truncated,
+    })
+}
+
+fn baseline_file_score(
+    family: TrajectoryWorkflowFamily,
+    relative_path: &str,
+    content: &str,
+    prompt_terms: &BTreeSet<String>,
+) -> u64 {
+    let path = relative_path.to_ascii_lowercase();
+    let content = content.to_ascii_lowercase();
+    let term_score = prompt_terms.iter().fold(0_u64, |score, term| {
+        score.saturating_add(u64::from(content.contains(term)) * 20)
+    });
+    let role_score = match family {
+        TrajectoryWorkflowFamily::SelectTests if path.contains("test") => 120,
+        TrajectoryWorkflowFamily::ArchitectureOverview
+        | TrajectoryWorkflowFamily::CycleInvestigation
+            if path == "cargo.toml" =>
+        {
+            100
+        }
+        TrajectoryWorkflowFamily::ArchitectureOverview
+        | TrajectoryWorkflowFamily::CycleInvestigation
+            if path.starts_with("src/") =>
+        {
+            80
+        }
+        TrajectoryWorkflowFamily::AssessChangeImpact
+        | TrajectoryWorkflowFamily::BugFixContext
+        | TrajectoryWorkflowFamily::RefactoringBoundary
+        | TrajectoryWorkflowFamily::ApiMigrationBatch
+            if path.contains("test") =>
+        {
+            70
+        }
+        TrajectoryWorkflowFamily::MultiRepositoryMigration
+            if path.contains("consumer-service")
+                || content.contains("rootlight_budget_runtime_fixture") =>
+        {
+            180
+        }
+        TrajectoryWorkflowFamily::CrossServiceTrace
+            if content.contains("submit_budget_request")
+                || content.contains("handle_budget_message") =>
+        {
+            160
+        }
+        TrajectoryWorkflowFamily::LocateImplementation
+        | TrajectoryWorkflowFamily::ExplainSymbol
+        | TrajectoryWorkflowFamily::CallRelationships
+        | TrajectoryWorkflowFamily::DeadCodeInvestigation
+        | TrajectoryWorkflowFamily::HistoryComparison
+        | TrajectoryWorkflowFamily::BugFixContext
+        | TrajectoryWorkflowFamily::AssessChangeImpact
+        | TrajectoryWorkflowFamily::SelectTests
+        | TrajectoryWorkflowFamily::RefactoringBoundary
+        | TrajectoryWorkflowFamily::ApiMigrationBatch
+            if path == "src/lib.rs" =>
+        {
+            100
+        }
+        _ if path.ends_with(".rs") => 20,
+        _ => 0,
+    };
+    term_score.saturating_add(role_score)
+}
+
+/// Returns the exact deterministic prompt shared by compared candidates.
+#[must_use]
+pub fn trajectory_task_prompt(family: TrajectoryWorkflowFamily, seed: u64) -> String {
+    let (primary, secondary) = if seed % 5 >= 3 {
+        ("budget_helper", "budget_entry")
+    } else {
+        ("budget_entry", "budget_helper")
+    };
+    match family {
+        TrajectoryWorkflowFamily::LocateImplementation => {
+            format!("locate the implementation of the concept {primary} and explain the exact symbol")
+        }
+        TrajectoryWorkflowFamily::ExplainSymbol => {
+            format!("explain the unfamiliar symbol {primary}, including its definition and evidence")
+        }
+        TrajectoryWorkflowFamily::CallRelationships => {
+            format!("find the exact callers and callees that connect {primary} with {secondary}")
+        }
+        TrajectoryWorkflowFamily::BugFixContext => {
+            format!("prepare the minimal context needed to fix {primary} without breaking {secondary}")
+        }
+        TrajectoryWorkflowFamily::AssessChangeImpact => {
+            format!("assess the impact of changing {primary}, select tests, and produce a safe change plan")
+        }
+        TrajectoryWorkflowFamily::SelectTests => {
+            format!("select the exact tests required after editing {primary} and explain each selection")
+        }
+        TrajectoryWorkflowFamily::ArchitectureOverview => {
+            "build a repository architecture overview with concrete components and dependency edges"
+                .to_owned()
+        }
+        TrajectoryWorkflowFamily::CycleInvestigation => {
+            "find the cycle between cycle_alpha and cycle_beta, trace it, and plan a break point"
+                .to_owned()
+        }
+        TrajectoryWorkflowFamily::DeadCodeInvestigation => {
+            "identify budget_unused as a dead-code candidate and explain its exact definition"
+                .to_owned()
+        }
+        TrajectoryWorkflowFamily::CrossServiceTrace => {
+            "trace submit_budget_request through handle_budget_message to transform and pack the evidence"
+                .to_owned()
+        }
+        TrajectoryWorkflowFamily::RefactoringBoundary => {
+            format!("prepare a refactoring boundary around {primary} using relationships, impact, context, and a plan")
+        }
+        TrajectoryWorkflowFamily::HistoryComparison => {
+            "compare the two indexed states and assess the impact of the added trajectory_added API"
+                .to_owned()
+        }
+        TrajectoryWorkflowFamily::ApiMigrationBatch => {
+            format!("create an API migration plan for {primary} with one dependent locate-impact-plan batch")
+        }
+        TrajectoryWorkflowFamily::MultiRepositoryMigration => {
+            "coordinate the migrate_budget_api migration across runtime-service and consumer-service with cross-repository evidence"
+                .to_owned()
+        }
+    }
 }
 
 /// Builds the frozen 14-workflow comparison protocol for an exact fixture.
@@ -1791,94 +2059,125 @@ pub fn preregistered_trajectory_protocol(
     validate_sha256(&fixture_sha256)?;
     let workflows = vec![
         workflow(
-            "workflow-01-locate-explain",
-            TrajectoryWorkflowFamily::LocateExplain,
-            &["definition_ref", "symbol_identity"],
+            "locate-implementation",
+            TrajectoryWorkflowFamily::LocateImplementation,
+            &["definition_evidence", "implementation_identity"],
             &["code.locate", "symbol.explain"],
         ),
         workflow(
-            "workflow-02-source-retrieval",
-            TrajectoryWorkflowFamily::SourceRetrieval,
-            &["content_digest", "source_ref"],
-            &["source.read"],
+            "explain-symbol",
+            TrajectoryWorkflowFamily::ExplainSymbol,
+            &["definition_evidence", "symbol_identity"],
+            &["symbol.explain"],
         ),
         workflow(
-            "workflow-03-relationships",
-            TrajectoryWorkflowFamily::RelationshipExploration,
-            &["relation_path", "source_ref"],
+            "callers-callees",
+            TrajectoryWorkflowFamily::CallRelationships,
+            &["caller_identity", "callee_identity", "relation_evidence"],
             &["symbol.relationships"],
         ),
         workflow(
-            "workflow-04-flow-trace",
-            TrajectoryWorkflowFamily::FlowTracing,
-            &["flow_path", "source_ref"],
-            &["flow.trace"],
+            "bug-fix-context",
+            TrajectoryWorkflowFamily::BugFixContext,
+            &["context_roles", "implementation_identity", "test_identity"],
+            &["code.locate", "context.pack"],
         ),
         workflow(
-            "workflow-05-architecture",
+            "change-impact",
+            TrajectoryWorkflowFamily::AssessChangeImpact,
+            &["impact_edge", "plan_target", "test_identity"],
+            &["change.impact", "tests.select", "plan.change"],
+        ),
+        workflow(
+            "select-tests",
+            TrajectoryWorkflowFamily::SelectTests,
+            &["selection_rationale", "test_identity"],
+            &["tests.select"],
+        ),
+        workflow(
+            "architecture-overview",
             TrajectoryWorkflowFamily::ArchitectureOverview,
             &["component_identity", "dependency_edge"],
             &["architecture.overview"],
         ),
         workflow(
-            "workflow-06-cycles",
+            "cyclic-dependencies",
             TrajectoryWorkflowFamily::CycleInvestigation,
-            &["cycle_identity", "witness_path"],
-            &["architecture.cycles"],
+            &["break_plan", "cycle_identity", "witness_path"],
+            &["architecture.cycles", "flow.trace", "plan.change"],
         ),
         workflow(
-            "workflow-07-dead-code",
+            "dead-code",
             TrajectoryWorkflowFamily::DeadCodeInvestigation,
-            &["candidate_identity", "reachability_reason"],
-            &["code.dead"],
+            &[
+                "candidate_identity",
+                "definition_evidence",
+                "reachability_reason",
+            ],
+            &["code.dead", "symbol.explain"],
         ),
         workflow(
-            "workflow-08-change-impact",
-            TrajectoryWorkflowFamily::ChangeImpact,
-            &["impact_path", "risk_identity"],
-            &["change.impact"],
+            "cross-service-trace",
+            TrajectoryWorkflowFamily::CrossServiceTrace,
+            &["context_roles", "cross_service_path", "route_identity"],
+            &["code.locate", "flow.trace", "context.pack"],
         ),
         workflow(
-            "workflow-09-test-selection",
-            TrajectoryWorkflowFamily::TestSelection,
-            &["test_identity", "selection_reason"],
-            &["tests.select"],
+            "refactoring-boundary",
+            TrajectoryWorkflowFamily::RefactoringBoundary,
+            &[
+                "context_roles",
+                "impact_edge",
+                "plan_target",
+                "relation_evidence",
+            ],
+            &[
+                "symbol.relationships",
+                "change.impact",
+                "context.pack",
+                "plan.change",
+            ],
         ),
         workflow(
-            "workflow-10-history",
+            "history-comparison",
             TrajectoryWorkflowFamily::HistoryComparison,
-            &["change_identity", "generation_identity"],
-            &["history.compare"],
+            &["change_identity", "generation_identity", "impact_edge"],
+            &["history.compare", "change.impact"],
         ),
         workflow(
-            "workflow-11-change-plan",
-            TrajectoryWorkflowFamily::ChangePlanning,
-            &["plan_step", "target_identity"],
-            &["plan.change"],
-        ),
-        workflow(
-            "workflow-12-context-pack",
-            TrajectoryWorkflowFamily::ContextPack,
-            &["pack_identity", "role_coverage"],
-            &["context.pack"],
-        ),
-        workflow(
-            "workflow-13-batch",
-            TrajectoryWorkflowFamily::BatchComposition,
-            &["operation_outcome", "ordered_result"],
+            "api-migration-batch",
+            TrajectoryWorkflowFamily::ApiMigrationBatch,
+            &[
+                "impact_edge",
+                "operation_outcome",
+                "ordered_result",
+                "plan_target",
+            ],
             &["query.batch"],
         ),
         workflow(
-            "workflow-14-advanced-query",
-            TrajectoryWorkflowFamily::AdvancedQuery,
-            &["query_plan", "typed_row"],
-            &["query.advanced"],
+            "multi-repository-migration",
+            TrajectoryWorkflowFamily::MultiRepositoryMigration,
+            &[
+                "context_per_repository",
+                "cross_repository_path",
+                "repository_identity",
+            ],
+            &[
+                "repo.list",
+                "code.locate",
+                "code.locate",
+                "flow.trace",
+                "change.impact",
+                "context.pack",
+                "context.pack",
+            ],
         ),
     ];
     let protocol = TrajectoryProtocol {
         schema: TRAJECTORY_PROTOCOL_SCHEMA_VERSION.to_owned(),
-        experiment_id: "agent-workflow-comparison-v1".to_owned(),
-        fixture_id: "budget-runtime-repository-v1".to_owned(),
+        experiment_id: "agent-workflow-comparison-v2".to_owned(),
+        fixture_id: "cross-service-multi-repository-v2".to_owned(),
         fixture_sha256,
         runner_id: TRAJECTORY_RUNNER_ID.to_owned(),
         attempt_seeds: vec![17, 43],
@@ -1908,6 +2207,7 @@ pub fn preregistered_trajectory_protocol(
                     "plan.change".to_owned(),
                     "query.advanced".to_owned(),
                     "query.batch".to_owned(),
+                    "repo.list".to_owned(),
                     "source.read".to_owned(),
                     "symbol.explain".to_owned(),
                     "symbol.relationships".to_owned(),
@@ -1946,11 +2246,10 @@ fn workflow(
         .map(|value| (*value).to_owned())
         .collect::<Vec<_>>();
     expected_evidence.sort();
-    let mut rootlight_tools = rootlight_tools
+    let rootlight_tools = rootlight_tools
         .iter()
         .map(|value| (*value).to_owned())
         .collect::<Vec<_>>();
-    rootlight_tools.sort();
     TrajectoryWorkflowProtocol {
         workflow_id: workflow_id.to_owned(),
         family,
@@ -2301,13 +2600,22 @@ mod tests {
         }
 
         fn execute(&mut self, input: TrajectoryExecutionInput<'_>) -> RawTrajectoryAttempt {
-            let ordinal = input
-                .workflow
-                .workflow_id
-                .split('-')
-                .nth(1)
-                .and_then(|value| value.parse::<u8>().ok())
-                .unwrap_or(0);
+            let ordinal = match input.workflow.family {
+                TrajectoryWorkflowFamily::LocateImplementation => 1,
+                TrajectoryWorkflowFamily::ExplainSymbol => 2,
+                TrajectoryWorkflowFamily::CallRelationships => 3,
+                TrajectoryWorkflowFamily::BugFixContext => 4,
+                TrajectoryWorkflowFamily::AssessChangeImpact => 5,
+                TrajectoryWorkflowFamily::SelectTests => 6,
+                TrajectoryWorkflowFamily::ArchitectureOverview => 7,
+                TrajectoryWorkflowFamily::CycleInvestigation
+                | TrajectoryWorkflowFamily::DeadCodeInvestigation
+                | TrajectoryWorkflowFamily::CrossServiceTrace
+                | TrajectoryWorkflowFamily::RefactoringBoundary
+                | TrajectoryWorkflowFamily::HistoryComparison
+                | TrajectoryWorkflowFamily::ApiMigrationBatch
+                | TrajectoryWorkflowFamily::MultiRepositoryMigration => 0,
+            };
             let (outcome, status, retry, signals, tool) = match ordinal {
                 1 => (
                     TrajectoryAttemptOutcome::Succeeded,
@@ -2494,6 +2802,90 @@ mod tests {
                 .iter()
                 .all(|workflow| !workflow.allows_status_preflight)
         );
+        let observed = protocol
+            .workflows
+            .iter()
+            .map(|workflow| {
+                (
+                    workflow.workflow_id.as_str(),
+                    workflow.rootlight_tools.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            vec![
+                (
+                    "locate-implementation",
+                    vec!["code.locate".to_owned(), "symbol.explain".to_owned()],
+                ),
+                ("explain-symbol", vec!["symbol.explain".to_owned()],),
+                ("callers-callees", vec!["symbol.relationships".to_owned()],),
+                (
+                    "bug-fix-context",
+                    vec!["code.locate".to_owned(), "context.pack".to_owned()],
+                ),
+                (
+                    "change-impact",
+                    vec![
+                        "change.impact".to_owned(),
+                        "tests.select".to_owned(),
+                        "plan.change".to_owned(),
+                    ],
+                ),
+                ("select-tests", vec!["tests.select".to_owned()]),
+                (
+                    "architecture-overview",
+                    vec!["architecture.overview".to_owned()],
+                ),
+                (
+                    "cyclic-dependencies",
+                    vec![
+                        "architecture.cycles".to_owned(),
+                        "flow.trace".to_owned(),
+                        "plan.change".to_owned(),
+                    ],
+                ),
+                (
+                    "dead-code",
+                    vec!["code.dead".to_owned(), "symbol.explain".to_owned()],
+                ),
+                (
+                    "cross-service-trace",
+                    vec![
+                        "code.locate".to_owned(),
+                        "flow.trace".to_owned(),
+                        "context.pack".to_owned(),
+                    ],
+                ),
+                (
+                    "refactoring-boundary",
+                    vec![
+                        "symbol.relationships".to_owned(),
+                        "change.impact".to_owned(),
+                        "context.pack".to_owned(),
+                        "plan.change".to_owned(),
+                    ],
+                ),
+                (
+                    "history-comparison",
+                    vec!["history.compare".to_owned(), "change.impact".to_owned()],
+                ),
+                ("api-migration-batch", vec!["query.batch".to_owned()],),
+                (
+                    "multi-repository-migration",
+                    vec![
+                        "repo.list".to_owned(),
+                        "code.locate".to_owned(),
+                        "code.locate".to_owned(),
+                        "flow.trace".to_owned(),
+                        "change.impact".to_owned(),
+                        "context.pack".to_owned(),
+                        "context.pack".to_owned(),
+                    ],
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -2674,8 +3066,16 @@ mod tests {
             retry: &protocol.retry,
         });
         assert_eq!(attempt.outcome, TrajectoryAttemptOutcome::Succeeded);
-        assert_eq!(attempt.calls[0].result_items, 2);
+        assert_eq!(attempt.calls[0].result_items, 1);
         assert!(!attempt.calls[0].source_frame.is_empty());
+        let observations = adapter.take_observations();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].workflow_id, workflow.workflow_id);
+        assert_eq!(
+            observations[0].prompt_sha256,
+            sha256_hex(trajectory_task_prompt(workflow.family, 17).as_bytes())
+        );
+        assert_eq!(observations[0].selected_paths.len(), 1);
         let encoded = serde_json::to_vec(&attempt.calls[0].response_frame)
             .expect("ephemeral response is serializable");
         assert!(!encoded.is_empty());

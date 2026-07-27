@@ -529,9 +529,10 @@ pub(crate) fn oracle_compatibility() -> SchemaCompatibility {
 }
 
 pub(crate) fn open_control(path: &Path) -> Result<Connection, CatalogError> {
-    require_private_file_boundary(cfg!(test))?;
+    require_private_file_boundary()?;
     let created = create_private_file(path, false)?;
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let flags =
+        private_sqlite_flags(OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX);
     let connection = Connection::open_with_flags(path, flags).map_err(CatalogError::sqlite)?;
     configure_limits(&connection)?;
     verify_sqlite(&connection)?;
@@ -552,9 +553,10 @@ pub(crate) fn open_control(path: &Path) -> Result<Connection, CatalogError> {
 }
 
 pub(crate) fn create_oracle(path: &Path) -> Result<Connection, CatalogError> {
-    require_private_file_boundary(cfg!(test))?;
+    require_private_file_boundary()?;
     create_private_file(path, true)?;
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let flags =
+        private_sqlite_flags(OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX);
     let connection = Connection::open_with_flags(path, flags).map_err(CatalogError::sqlite)?;
     configure_limits(&connection)?;
     verify_sqlite(&connection)?;
@@ -591,9 +593,10 @@ pub(crate) fn open_oracle_reader(
     path: &Path,
     context: &GenerationContext<'_>,
 ) -> Result<Connection, CatalogError> {
-    require_private_file_boundary(cfg!(test))?;
+    require_private_file_boundary()?;
     validate_private_file(path)?;
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let flags =
+        private_sqlite_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX);
     let connection = Connection::open_with_flags(path, flags).map_err(|error| {
         if matches!(&error, rusqlite::Error::SqliteFailure(source, _)
             if source.code == rusqlite::ffi::ErrorCode::CannotOpen)
@@ -1178,8 +1181,8 @@ fn pragma_u32(connection: &Connection, pragma: &str) -> Result<u32, CatalogError
     u32::try_from(value).map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
 }
 
-fn require_private_file_boundary(test_scaffold: bool) -> Result<(), CatalogError> {
-    if test_scaffold {
+fn require_private_file_boundary() -> Result<(), CatalogError> {
+    if cfg!(any(target_os = "linux", windows)) {
         Ok(())
     } else {
         Err(CatalogError::new(
@@ -1188,16 +1191,40 @@ fn require_private_file_boundary(test_scaffold: bool) -> Result<(), CatalogError
     }
 }
 
+fn private_sqlite_flags(flags: OpenFlags) -> OpenFlags {
+    #[cfg(target_os = "linux")]
+    {
+        flags | OpenFlags::SQLITE_OPEN_NOFOLLOW
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        flags
+    }
+}
+
 fn create_private_file(path: &Path, exclusive: bool) -> Result<bool, CatalogError> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create_new(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, WRITE_DAC,
+        };
+
+        options
+            .access_mode((FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC).0)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
     match options.open(path) {
-        Ok(file) => {
+        Ok(mut file) => {
+            harden_private_file(&mut file)?;
             drop(file);
             validate_private_file(path)?;
             Ok(true)
@@ -1214,19 +1241,194 @@ fn create_private_file(path: &Path, exclusive: bool) -> Result<bool, CatalogErro
 }
 
 fn validate_private_file(path: &Path) -> Result<(), CatalogError> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| CatalogError::io(CatalogErrorKind::NotFound, error))?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+    #[cfg(target_os = "linux")]
+    let file = {
+        use rustix::fs::{Mode, OFlags, open};
+
+        let descriptor = open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|error| {
+            let kind = if error == rustix::io::Errno::LOOP {
+                CatalogErrorKind::InsecureFile
+            } else if error == rustix::io::Errno::NOENT {
+                CatalogErrorKind::NotFound
+            } else {
+                CatalogErrorKind::Storage
+            };
+            CatalogError::io(kind, error.into())
+        })?;
+        fs::File::from(descriptor)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let file = {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            use windows::Win32::Storage::FileSystem::{
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+
+            options
+                .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0);
+        }
+        options
+            .open(path)
+            .map_err(|error| CatalogError::io(CatalogErrorKind::NotFound, error))?
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|error| CatalogError::io(CatalogErrorKind::Storage, error))?;
+    if !metadata.file_type().is_file() {
         return Err(CatalogError::new(CatalogErrorKind::InsecureFile));
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt as _;
-        if metadata.mode() & 0o077 != 0 {
+        if metadata.uid() != rustix::process::geteuid().as_raw()
+            || metadata.mode() & 0o077 != 0
+            || metadata.nlink() != 1
+        {
             return Err(CatalogError::new(CatalogErrorKind::InsecureFile));
         }
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+
+        let information = winapi_util::file::information(&file)
+            .map_err(|error| CatalogError::io(CatalogErrorKind::Storage, error))?;
+        if metadata.file_attributes() & 0x400 != 0 || information.number_of_links() != 1 {
+            return Err(CatalogError::new(CatalogErrorKind::InsecureFile));
+        }
+        verify_private_windows_dacl(&file)?;
+    }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn harden_private_file(file: &mut fs::File) -> Result<(), CatalogError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|error| CatalogError::io(CatalogErrorKind::Storage, error))
+}
+
+#[cfg(windows)]
+fn harden_private_file(file: &mut fs::File) -> Result<(), CatalogError> {
+    apply_private_windows_dacl(file)?;
+    verify_private_windows_dacl(file)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn harden_private_file(_file: &mut fs::File) -> Result<(), CatalogError> {
+    Err(CatalogError::new(
+        CatalogErrorKind::UnsupportedPrivateFileBoundary,
+    ))
+}
+
+#[cfg(test)]
+pub(crate) fn protect_private_test_file(file: &mut fs::File) -> Result<(), CatalogError> {
+    harden_private_file(file)
+}
+
+#[cfg(windows)]
+fn apply_private_windows_dacl<H: std::os::windows::io::AsRawHandle>(
+    handle: &mut H,
+) -> Result<(), CatalogError> {
+    use windows_permissions::{
+        constants::{SeObjectType, SecurityInformation},
+        wrappers::SetSecurityInfo,
+    };
+
+    let descriptor = private_windows_descriptor()?;
+    let dacl = descriptor
+        .dacl()
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::InsecureFile))?;
+    SetSecurityInfo(
+        handle,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        None,
+        None,
+        Some(dacl),
+        None,
+    )
+    .map_err(|error| CatalogError::io(CatalogErrorKind::Storage, error))
+}
+
+#[cfg(windows)]
+fn verify_private_windows_dacl<H: std::os::windows::io::AsRawHandle>(
+    handle: &H,
+) -> Result<(), CatalogError> {
+    use windows_permissions::{
+        constants::{AccessRights, AceType, SeObjectType, SecurityInformation},
+        wrappers::{ConvertSecurityDescriptorToStringSecurityDescriptor, GetSecurityInfo},
+    };
+
+    let expected_sid = current_windows_user_sid()?;
+    let descriptor = GetSecurityInfo(
+        handle,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+    )
+    .map_err(|error| CatalogError::io(CatalogErrorKind::Storage, error))?;
+    let dacl = descriptor
+        .dacl()
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::InsecureFile))?;
+    if dacl.len() != 1 {
+        return Err(CatalogError::new(CatalogErrorKind::InsecureFile));
+    }
+    let ace = dacl
+        .get_ace(0)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::InsecureFile))?;
+    if ace.ace_type() != AceType::ACCESS_ALLOWED_ACE_TYPE
+        || ace.mask() != AccessRights::FileAllAccess
+        || !ace.flags().is_empty()
+        || ace
+            .sid()
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::InsecureFile))?
+            .to_string()
+            != expected_sid
+    {
+        return Err(CatalogError::new(CatalogErrorKind::InsecureFile));
+    }
+    let sddl =
+        ConvertSecurityDescriptorToStringSecurityDescriptor(&descriptor, SecurityInformation::Dacl)
+            .map_err(|error| CatalogError::io(CatalogErrorKind::Storage, error))?;
+    if !sddl.to_string_lossy().starts_with("D:P") {
+        return Err(CatalogError::new(CatalogErrorKind::InsecureFile));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn private_windows_descriptor()
+-> Result<windows_permissions::LocalBox<windows_permissions::SecurityDescriptor>, CatalogError> {
+    use windows_permissions::{LocalBox, SecurityDescriptor};
+
+    let sddl = format!("D:P(A;;FA;;;{})", current_windows_user_sid()?);
+    let descriptor: LocalBox<SecurityDescriptor> = sddl
+        .parse()
+        .map_err(|_| CatalogError::new(CatalogErrorKind::InsecureFile))?;
+    Ok(descriptor)
+}
+
+#[cfg(windows)]
+fn current_windows_user_sid() -> Result<String, CatalogError> {
+    use nt_token::OwnedToken;
+    use windows::Win32::Security::TOKEN_QUERY;
+
+    OwnedToken::from_current_process(TOKEN_QUERY)
+        .map_err(|_| CatalogError::new(CatalogErrorKind::InsecureFile))?
+        .user()
+        .and_then(|sid| sid.to_string())
+        .map_err(|_| CatalogError::new(CatalogErrorKind::InsecureFile))
 }
 
 #[derive(Clone, Copy)]
@@ -1273,14 +1475,18 @@ mod tests {
     }
 
     #[test]
-    fn proposed_private_file_boundary_fails_closed() {
-        let error =
-            require_private_file_boundary(false).expect_err("disabled boundary is unavailable");
-
-        assert_eq!(
-            error.kind(),
-            CatalogErrorKind::UnsupportedPrivateFileBoundary
-        );
+    fn private_file_boundary_matches_platform_support() {
+        let result = require_private_file_boundary();
+        if cfg!(any(target_os = "linux", windows)) {
+            result.expect("native private-file boundary is supported");
+        } else {
+            assert_eq!(
+                result
+                    .expect_err("unsupported boundary fails closed")
+                    .kind(),
+                CatalogErrorKind::UnsupportedPrivateFileBoundary
+            );
+        }
     }
 
     #[test]

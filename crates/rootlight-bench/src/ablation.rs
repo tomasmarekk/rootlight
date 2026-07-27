@@ -29,7 +29,7 @@ pub const MAX_CHECKS_PER_DIMENSION: usize = 16;
 /// Maximum encoded public-plus-restricted evidence bytes.
 pub const MAX_ABLATION_EVIDENCE_BYTES: usize = 8 * 1024 * 1024;
 
-const CONTEXT_WORKFLOW_ID: &str = "workflow-12-context-pack";
+const CONTEXT_WORKFLOW_ID: &str = "bug-fix-context";
 const AUTOMATED_GRADER_A_ID: &str = "automated-check-mean-v1";
 const AUTOMATED_GRADER_B_ID: &str = "automated-strict-conjunction-v1";
 const AUTOMATED_ADJUDICATOR_ID: &str = "automated-conservative-adjudicator-v1";
@@ -87,9 +87,9 @@ impl AblationVariant {
 pub struct AblationVariantProtocol {
     /// Closed variant identity.
     pub variant: AblationVariant,
-    /// Task 47 workflow identity that must remain equivalent across variants.
+    /// Workflow identity that must remain equivalent across variants.
     pub workflow_id: String,
-    /// Required Task 47 condition, when the variant is representable there.
+    /// Required trajectory condition, when the variant is representable there.
     pub condition: TrajectoryCondition,
     /// Canonically ordered tools proving the intended execution mode.
     pub required_tools: Vec<String>,
@@ -176,7 +176,7 @@ pub struct AblationProtocol {
     pub experiment_id: String,
     /// Exact source revision supplied by the evidence orchestrator.
     pub source_revision: String,
-    /// Digest of the immutable Task 47 protocol.
+    /// Digest of the immutable trajectory protocol.
     pub trajectory_protocol_sha256: String,
     /// Digest of the exact task definition subset.
     pub task_subset_sha256: String,
@@ -188,11 +188,11 @@ pub struct AblationProtocol {
     pub blinding_key_sha256: String,
     /// Deterministic seed for candidate ordering and bootstrap draws.
     pub randomization_seed: u64,
-    /// Shared total resource bounds copied from Task 47.
+    /// Shared total resource bounds copied from the trajectory protocol.
     pub shared_bounds: TrajectorySharedBounds,
-    /// Shared stopping policy copied from Task 47.
+    /// Shared stopping policy copied from the trajectory protocol.
     pub stopping: TrajectoryStoppingPolicy,
-    /// Shared retry-policy digest copied from Task 47.
+    /// Shared retry-policy digest copied from the trajectory protocol.
     pub retry_policy_sha256: String,
     /// Fixed attempt seeds defining paired task instances.
     pub attempt_seeds: Vec<u64>,
@@ -256,7 +256,7 @@ impl AblationProtocol {
         let files = &self.variants[3];
         if context.condition != TrajectoryCondition::Rootlight
             || context.optional
-            || context.required_tools != ["context.pack"]
+            || context.required_tools != ["code.locate", "context.pack"]
             || direct.condition != TrajectoryCondition::Rootlight
             || direct.optional
             || direct.required_tools.contains(&"context.pack".to_owned())
@@ -309,7 +309,7 @@ impl AblationRubricProtocol {
     }
 }
 
-/// Creates the immutable ablation protocol from one validated Task 47 package.
+/// Creates the immutable ablation protocol from one validated trajectory package.
 ///
 /// # Errors
 ///
@@ -362,7 +362,7 @@ pub fn preregister_context_pack_ablation(
                 variant: AblationVariant::ContextPack,
                 workflow_id: CONTEXT_WORKFLOW_ID.to_owned(),
                 condition: TrajectoryCondition::Rootlight,
-                required_tools: vec!["context.pack".to_owned()],
+                required_tools: vec!["code.locate".to_owned(), "context.pack".to_owned()],
                 optional: false,
             },
             AblationVariantProtocol {
@@ -500,7 +500,7 @@ pub struct RestrictedPair {
     pub pair_id: String,
     /// Exact task digest shared by all members.
     pub task_sha256: String,
-    /// Exact deterministic Task 47 seed.
+    /// Exact deterministic trajectory seed.
     pub deterministic_seed: u64,
     /// Digest of shared bounds, stopping, and retry rules.
     pub budget_sha256: String,
@@ -516,7 +516,7 @@ pub struct RestrictedPairingEntry {
     pub blind_id: String,
     /// Opaque paired-input identity.
     pub pair_id: String,
-    /// Original source-free Task 47 attempt identity.
+    /// Original source-free trajectory attempt identity.
     pub attempt_id: String,
     /// Condition identity hidden during grading.
     pub variant: AblationVariant,
@@ -1697,7 +1697,7 @@ pub struct EfficiencyAlongsideQuality {
     pub direct_quality_centipoints: u16,
 }
 
-/// Explicit context-pack gate disposition.
+/// Explicit context-pack evaluation disposition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "disposition", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AblationDecision {
@@ -1708,7 +1708,7 @@ pub enum AblationDecision {
         /// Canonically ordered source-free failure reasons.
         reason_codes: Vec<String>,
     },
-    /// Evidence cannot support a truthful gate result.
+    /// Evidence cannot support a truthful evaluation result.
     Blocked {
         /// Canonically ordered source-free blocking reasons.
         reason_codes: Vec<String>,
@@ -1739,7 +1739,7 @@ pub struct AblationAggregateReport {
     pub variants: Vec<VariantAggregate>,
     /// Efficiency values, present only when corresponding quality is complete.
     pub efficiency_alongside_quality: Option<EfficiencyAlongsideQuality>,
-    /// Explicit gate result.
+    /// Explicit evaluation result.
     pub decision: AblationDecision,
 }
 
@@ -2697,36 +2697,39 @@ mod tests {
         }
 
         fn execute(&mut self, input: TrajectoryExecutionInput<'_>) -> RawTrajectoryAttempt {
-            let tool_id = match self.condition {
-                TrajectoryCondition::Rootlight => input
-                    .workflow
-                    .rootlight_tools
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "query.advanced".to_owned()),
-                TrajectoryCondition::BoundedFileExploration => "bounded_file.explore".to_owned(),
-                TrajectoryCondition::CodebaseMemory => "codebase_memory_process_v1".to_owned(),
+            let tool_ids = match self.condition {
+                TrajectoryCondition::Rootlight => input.workflow.rootlight_tools.clone(),
+                TrajectoryCondition::BoundedFileExploration => {
+                    vec!["bounded_file.explore".to_owned()]
+                }
+                TrajectoryCondition::CodebaseMemory => {
+                    vec!["codebase_memory_process_v1".to_owned()]
+                }
             };
             RawTrajectoryAttempt {
                 outcome: TrajectoryAttemptOutcome::Succeeded,
-                calls: vec![RawTrajectoryCall {
-                    operation_id: "operation".to_owned(),
-                    tool: TrajectoryToolIdentity {
-                        tool_id,
-                        tool_version: "v1".to_owned(),
-                    },
-                    exposure_profile: TrajectoryExposureProfile::Analysis,
-                    operation_status: TrajectoryOperationStatus::Succeeded,
-                    retry_ordinal: 0,
-                    request_frame: br#"{"request":"fixture"}"#.to_vec(),
-                    response_frame: br#"{"response":"fixture"}"#.to_vec(),
-                    source_frame: b"fixture".to_vec(),
-                    elapsed_ns: 10,
-                    result_items: 1,
-                    truncated: false,
-                    continuation_available: false,
-                    claim_signals: TrajectoryClaimSignals::default(),
-                }],
+                calls: tool_ids
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, tool_id)| RawTrajectoryCall {
+                        operation_id: format!("operation-{index:02}"),
+                        tool: TrajectoryToolIdentity {
+                            tool_id,
+                            tool_version: "v1".to_owned(),
+                        },
+                        exposure_profile: TrajectoryExposureProfile::Analysis,
+                        operation_status: TrajectoryOperationStatus::Succeeded,
+                        retry_ordinal: 0,
+                        request_frame: br#"{"request":"fixture"}"#.to_vec(),
+                        response_frame: br#"{"response":"fixture"}"#.to_vec(),
+                        source_frame: b"fixture".to_vec(),
+                        elapsed_ns: 10,
+                        result_items: 1,
+                        truncated: false,
+                        continuation_available: false,
+                        claim_signals: TrajectoryClaimSignals::default(),
+                    })
+                    .collect(),
             }
         }
     }
@@ -2948,7 +2951,7 @@ mod tests {
             "codebase_memory",
             "bounded_file",
             "context.pack",
-            "workflow-12",
+            "bug-fix-context",
         ] {
             assert!(!encoded.contains(forbidden));
         }

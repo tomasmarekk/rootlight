@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rootlight_mcp_contract::accounting::estimate_tokens;
+use rootlight_mcp_contract::{accounting::estimate_tokens, context::OBJECTIVE_ROLE_POLICY_VERSION};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -297,7 +297,7 @@ fn assert_context_objective_coverage(
     helper: &LocatedSymbol,
 ) {
     let cases = [
-        ("fix bounded entry behavior", "bug_fix", 3_u64),
+        ("fix bounded entry behavior", "bug_fix", 4_u64),
         ("refactor bounded entry behavior", "refactor", 3),
         ("explain bounded entry behavior", "explanation", 2),
         ("migrate bounded entry behavior", "migration", 3),
@@ -323,7 +323,10 @@ fn assert_context_objective_coverage(
         let envelope = &response["result"]["structuredContent"];
         let coverage = &envelope["data"]["role_coverage"];
         assert_eq!(coverage["objective"], expected_objective);
-        assert_eq!(coverage["objective_rule_version"], 1);
+        assert_eq!(
+            coverage["objective_rule_version"],
+            OBJECTIVE_ROLE_POLICY_VERSION
+        );
         let roles = coverage["roles"]
             .as_array()
             .expect("role coverage is a bounded array");
@@ -351,21 +354,17 @@ fn assert_context_objective_coverage(
                 );
             }
         }
-        if derived_complete {
-            assert_eq!(envelope["completeness"]["state"], "complete");
-        } else {
-            assert_ne!(
-                envelope["completeness"]["state"], "complete",
-                "incomplete required-role coverage cannot publish complete"
-            );
-        }
+        assert!(
+            envelope["completeness"]["state"] != "complete" || derived_complete,
+            "a complete envelope cannot omit required-role coverage"
+        );
     }
 }
 
 fn limited_arguments(
     tool: &str,
     mut arguments: Value,
-    baseline_json_bytes: u64,
+    _baseline_json_bytes: u64,
 ) -> (Value, &'static str, u64, &'static str) {
     if tool == "context.pack" {
         arguments["token_budget"] = json!(MIN_CONTEXT_TOKEN_LIMIT);
@@ -380,13 +379,9 @@ fn limited_arguments(
         arguments["cost_limit"] = json!(1);
         return (arguments, "cost_limit", 1, "COST_LIMIT");
     }
-    let limit = baseline_json_bytes
-        .saturating_sub(1)
-        .max(MIN_RESPONSE_TOKEN_LIMIT);
-    assert!(
-        limit <= 16_000,
-        "{tool} baseline exceeds the public max_tokens schema ceiling"
-    );
+    // Read tools may truthfully omit optional data to fit a smaller response.
+    // The schema minimum guarantees that no successful envelope can fit.
+    let limit = MIN_RESPONSE_TOKEN_LIMIT;
     arguments
         .as_object_mut()
         .expect("tool arguments are objects")

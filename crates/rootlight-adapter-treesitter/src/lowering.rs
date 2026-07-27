@@ -36,7 +36,8 @@ use rootlight_ir::{
     new_symbol_identity_claim_envelope,
 };
 
-const ANALYZER_TIER: AnalysisTier = AnalysisTier::TierD;
+const SYNTAX_FALLBACK_TIER: AnalysisTier = AnalysisTier::TierD;
+const RUST_STRUCTURAL_TIER: AnalysisTier = AnalysisTier::TierB;
 const SYNTAX_CONFIDENCE: u16 = 900;
 const CONTAINMENT_CONFIDENCE: u16 = 1_000;
 const CANCELLATION_CHECK_INTERVAL: usize = 64;
@@ -117,6 +118,9 @@ pub enum TreeSitterAnalyzerConfigError {
         "Tree-sitter frontend version must be a safe 1..={MAX_FRONTEND_VERSION_BYTES}-byte label"
     )]
     InvalidFrontendVersion,
+    /// The reviewed Rust structural profile was requested for another language.
+    #[error("the reviewed Rust structural profile requires the rust language identity")]
+    UnsupportedRustStructuralLanguage,
 }
 
 impl TreeSitterAnalyzer {
@@ -137,6 +141,55 @@ impl TreeSitterAnalyzer {
         frontend_version: &str,
         binary_digest: ContentHash,
     ) -> Result<Self, TreeSitterAnalyzerConfigError> {
+        Self::new_with_tier(
+            parser,
+            producer,
+            language,
+            frontend_version,
+            binary_digest,
+            SYNTAX_FALLBACK_TIER,
+        )
+    }
+
+    /// Creates the reviewed Rust Tier B structural analyzer.
+    ///
+    /// This profile combines Rootlight's audited Rust query pack, stable
+    /// lexical-scope lowering, and the separate resolver. It does not claim
+    /// compiler or build-context precision and therefore cannot advertise
+    /// Tier A.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TreeSitterAnalyzerConfigError`] for an invalid frontend label
+    /// or a language identity other than `rust`.
+    pub fn new_rust_structural(
+        parser: Arc<dyn ParseProvider>,
+        producer: ProducerIdentity,
+        language: rootlight_adapter_sdk::LanguageId,
+        frontend_version: &str,
+        binary_digest: ContentHash,
+    ) -> Result<Self, TreeSitterAnalyzerConfigError> {
+        if language.as_str() != "rust" {
+            return Err(TreeSitterAnalyzerConfigError::UnsupportedRustStructuralLanguage);
+        }
+        Self::new_with_tier(
+            parser,
+            producer,
+            language,
+            frontend_version,
+            binary_digest,
+            RUST_STRUCTURAL_TIER,
+        )
+    }
+
+    fn new_with_tier(
+        parser: Arc<dyn ParseProvider>,
+        producer: ProducerIdentity,
+        language: rootlight_adapter_sdk::LanguageId,
+        frontend_version: &str,
+        binary_digest: ContentHash,
+        tier: AnalysisTier,
+    ) -> Result<Self, TreeSitterAnalyzerConfigError> {
         if frontend_version.is_empty()
             || frontend_version.len() > MAX_FRONTEND_VERSION_BYTES
             || !frontend_version.bytes().all(|byte| {
@@ -149,7 +202,7 @@ impl TreeSitterAnalyzer {
             producer,
             ProducerKind::Parser,
             language,
-            ANALYZER_TIER,
+            tier,
             MemoryEnforcement::Unavailable,
             true,
         );
@@ -269,7 +322,7 @@ impl TreeSitterAnalyzer {
         let usage = sink.staged_usage();
         let parse_resources = parse_output.report().resources();
         let coverage = CoverageReport::new(
-            ANALYZER_TIER,
+            self.descriptor.tier(),
             lowered.coverage_status,
             request.source().bytes().len(),
             parse_output.report().coverage().covered_source_bytes(),
@@ -711,6 +764,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 self.full_source,
                 self.request.build_context(),
                 provenance_id,
+                self.analyzer.descriptor.tier(),
                 self.request.limits().ir().max_string_bytes,
                 &materialized,
             )?;
@@ -1048,7 +1102,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
             CoverageStatus::Bounded
         };
         let domain_coverage = stats.domain_coverage(parse_status)?;
-        let coverage_records = coverage_records(self.full_source, provenance_id, &domain_coverage)?;
+        let coverage_records = coverage_records(
+            self.full_source,
+            provenance_id,
+            self.analyzer.descriptor.tier(),
+            &domain_coverage,
+        )?;
 
         let mut records = Vec::new();
         records.push(IrRecord::File(file));
@@ -1080,7 +1139,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             binary_digest: self.analyzer.binary_digest,
             frontend_version: Some(self.analyzer.frontend_version.clone()),
             language: self.request.language().as_str().to_owned(),
-            tier: ANALYZER_TIER,
+            tier: self.analyzer.descriptor.tier(),
             build_context: self.request.build_context(),
             input_sources: vec![self.full_source.clone()],
             evidence_sources: vec![self.full_source.clone()],
@@ -1135,6 +1194,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     right.syntax_kind().as_str(),
                 ))
         });
+        let rust_test_declarations = rust_test_declarations(&ordered_facts);
         let mut nearest_declaration = HashMap::new();
         let mut captures = HashMap::<u64, AssociatedCaptures>::new();
         let mut scope_identity_captures = HashMap::<u64, ScopeIdentityCaptures>::new();
@@ -1328,6 +1388,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .and_then(|scope| scope.collision_guard),
                     qualified_prefix: qualified_prefix.map(str::to_owned),
                     synthetic: definition_local_id.is_none(),
+                    is_test: rust_test_declarations.contains(&fact.local_id()),
                     definition_local_id,
                     span: definition_span,
                     depth: fact.depth(),
@@ -1471,6 +1532,7 @@ struct EntityDraft {
     scope_collision_guard: Option<[u8; 32]>,
     qualified_prefix: Option<String>,
     synthetic: bool,
+    is_test: bool,
     definition_local_id: Option<u64>,
     span: SourceSpan,
     depth: usize,
@@ -1541,6 +1603,7 @@ fn materialize_entity(
     full_source: &SourceRef,
     build_context: rootlight_ir::BuildContextIdentity,
     provenance: FactId,
+    tier: AnalysisTier,
     maximum_string_bytes: usize,
     materialized: &HashMap<u64, MaterializedEntity>,
 ) -> Result<MaterializedEntity, AdapterError> {
@@ -1618,23 +1681,26 @@ fn materialize_entity(
     })
     .id();
     let source = source_for_span(full_source, draft.span);
+    let mut flags = BTreeSet::new();
+    if draft.synthetic {
+        flags.insert(EntityFlag::Synthetic);
+    }
+    if draft.is_test {
+        flags.insert(EntityFlag::Test);
+    }
     let record = EntityRecord {
         id,
         repository: full_source.repository(),
         generation: full_source.generation(),
         kind: draft.kind,
         language: draft.language.clone(),
-        tier: ANALYZER_TIER,
+        tier,
         canonical_name: draft.name.clone(),
         display_name: draft.name.clone(),
         qualified_name,
         container: Some(container),
         visibility: EntityVisibility::Unknown,
-        flags: if draft.synthetic {
-            vec![EntityFlag::Synthetic]
-        } else {
-            Vec::new()
-        },
+        flags: flags.into_iter().collect(),
         provenance,
         evidence: direct_evidence(source),
     };
@@ -1933,6 +1999,7 @@ fn skipped_region(
 fn coverage_records(
     source: &SourceRef,
     provenance: FactId,
+    tier: AnalysisTier,
     coverage: &[DomainCoverage],
 ) -> Result<Vec<CoverageRecord>, AdapterError> {
     coverage
@@ -1950,7 +2017,7 @@ fn coverage_records(
                 generation: source.generation(),
                 scope: CoverageScope::File(source.span().file()),
                 domain: domain.domain(),
-                tier: ANALYZER_TIER,
+                tier,
                 status: domain.status(),
                 discovered,
                 indexed,
@@ -2168,6 +2235,39 @@ fn containing_range(
     let insertion = ranges.partition_point(|range| range.span().start_byte() <= span.start_byte());
     let candidate = ranges.get(insertion.checked_sub(1)?)?;
     (span.end_byte() <= candidate.span().end_byte()).then_some(candidate)
+}
+
+fn rust_test_declarations(facts: &[&SyntaxFact]) -> BTreeSet<u64> {
+    let mut source_order = facts.to_vec();
+    source_order.sort_unstable_by(|left, right| {
+        (
+            left.span().start_byte(),
+            left.span().end_byte(),
+            left.depth(),
+            left.local_id(),
+        )
+            .cmp(&(
+                right.span().start_byte(),
+                right.span().end_byte(),
+                right.depth(),
+                right.local_id(),
+            ))
+    });
+    let mut pending_parents = BTreeSet::new();
+    let mut tests = BTreeSet::new();
+    for fact in source_order {
+        if fact.syntax_kind().as_str() == "rust.test_attribute.test_attribute" {
+            pending_parents.insert(fact.parent());
+            continue;
+        }
+        if entity_kind(fact).is_some()
+            && pending_parents.remove(&fact.parent())
+            && fact.syntax_kind().as_str() == "rust.function.declaration"
+        {
+            tests.insert(fact.local_id());
+        }
+    }
+    tests
 }
 
 fn entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {

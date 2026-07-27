@@ -9,11 +9,21 @@
 mod update;
 
 pub use update::{
-    ArtifactMetadata, DetachedUpdateSignature, MAX_UPDATE_ARTIFACT_BYTES,
-    MAX_UPDATE_METADATA_BYTES, ReproducibilityLevel, UPDATE_METADATA_SCHEMA_VERSION,
-    UpdateApplyError, UpdateApplyOutcome, UpdateCompatibility, UpdateContext, UpdateError,
-    UpdateInstallError, UpdateInstaller, UpdateMetadata, UpdatePlan, UpdatePublicKey, UpdateStep,
-    VerifiedUpdate, apply_verified_update, verify_update,
+    ACTIVE_VERSION_FILE, ArtifactMetadata, CandidateHealthCheck, CandidateHealthError,
+    DetachedArtifactSignature, DetachedUpdateSignature, FilesystemUpdateError,
+    FilesystemUpdateOutcome, INSTALL_MANIFEST_FILE, MAX_UPDATE_ARTIFACT_BYTES,
+    MAX_UPDATE_LICENSE_BUNDLE_BYTES, MAX_UPDATE_METADATA_BYTES, MAX_UPDATE_PROVENANCE_BYTES,
+    MAX_UPDATE_SBOM_BYTES, PackageInstallOutcome, PackageUninstallOutcome,
+    ProcessCandidateHealthCheck, ReproducibilityLevel, TrustedUpdatePolicy,
+    UPDATE_HEALTH_STATE_DIR_ENV, UPDATE_LOCK_FILE, UPDATE_METADATA_SCHEMA_VERSION,
+    UPDATE_POLICY_FILE, UPDATE_TRANSACTION_FILE, UpdateApplyError, UpdateApplyOutcome,
+    UpdateCompatibility, UpdateContext, UpdateError, UpdateInputPaths, UpdateInstallError,
+    UpdateInstaller, UpdateMetadata, UpdatePlan, UpdatePublicKey, UpdateRuntimeStatus,
+    UpdateSignatures, UpdateStep, UpdateSupportingEvidence, UpdateTransactionPhase, VerifiedUpdate,
+    apply_update_package, apply_update_package_with_policy, apply_verified_update,
+    canonical_artifact_signature_message, canonical_update_metadata_bytes,
+    install_package_with_policy, recover_update, uninstall_package, update_runtime_status,
+    verify_update, verify_update_with_evidence,
 };
 
 use std::{
@@ -665,6 +675,8 @@ pub struct RepositoryIndex {
     pub entities: u64,
     /// Monotonic indexing duration.
     pub elapsed_micros: u64,
+    /// Conservative durable staging reservation, including safety margin.
+    pub estimated_disk_bytes: u64,
 }
 
 /// Durable repository-index operation state and process-local evidence.
@@ -3587,6 +3599,7 @@ impl Client {
                 max_depth,
                 max_paths,
                 min_confidence,
+                false,
             )?,
             options,
         )? {
@@ -3684,6 +3697,63 @@ impl Client {
                     max_depth,
                     max_paths,
                     min_confidence,
+                    false,
+                )?,
+                options,
+            )
+            .await?
+        {
+            daemon::response_envelope::Response::FlowTrace(response) => {
+                parse_flow_trace(response, repository, generation, from, to)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously traces paths across active repository generations.
+    ///
+    /// Cross-repository stitching remains target-directed and evidence-backed;
+    /// the daemon never expands an unbounded catalog-wide frontier.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid trace dimensions, unavailable
+    /// evidence, transport failure, timeout, or malformed response data.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded cross-repository trace dimension"
+    )]
+    pub async fn flow_trace_async_with_options_cross_repository(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        from: SymbolId,
+        to: Option<SymbolId>,
+        relations: &[String],
+        direction: Option<&str>,
+        max_depth: Option<u8>,
+        max_paths: Option<u16>,
+        min_confidence: Option<u16>,
+        cross_repository: bool,
+        options: RequestOptions,
+    ) -> Result<FlowTrace, ClientError> {
+        match self
+            .request_async_with_options(
+                build_flow_trace_request(
+                    repository,
+                    generation,
+                    from,
+                    to,
+                    relations,
+                    direction,
+                    max_depth,
+                    max_paths,
+                    min_confidence,
+                    cross_repository,
                 )?,
                 options,
             )
@@ -6680,6 +6750,7 @@ fn parse_repository_index(
         indexed_files: response.indexed_files,
         entities: response.entities,
         elapsed_micros: response.elapsed_micros,
+        estimated_disk_bytes: response.estimated_disk_bytes,
     })
 }
 
@@ -7274,6 +7345,7 @@ fn build_flow_trace_request(
     max_depth: Option<u8>,
     max_paths: Option<u16>,
     min_confidence: Option<u16>,
+    cross_repository: bool,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
     if relations.is_empty()
         || relations.len() > 16
@@ -7313,6 +7385,7 @@ fn build_flow_trace_request(
             max_depth: max_depth.map(u32::from),
             max_paths: max_paths.map(u32::from),
             min_confidence: min_confidence.map(u32::from),
+            cross_repository,
         },
     ))
 }
@@ -10083,6 +10156,7 @@ mod tests {
             indexed_files: 1,
             entities: 1,
             elapsed_micros: 10,
+            estimated_disk_bytes: 128 * 1024 * 1024,
         }
     }
 
@@ -11803,6 +11877,7 @@ mod tests {
             indexed_files: 3,
             entities: 2,
             elapsed_micros: 10,
+            estimated_disk_bytes: 128 * 1024 * 1024,
         };
         assert!(parse_repository_index(index.clone(), operation).is_ok());
         let mut wrong_schema = index.clone();

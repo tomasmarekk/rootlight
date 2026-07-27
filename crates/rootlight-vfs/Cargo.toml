@@ -16,8 +16,29 @@ rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 thiserror.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+nt-token.workspace = true
+windows.workspace = true
+windows-permissions.workspace = true
+winx.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 
-[lints]
-workspace = true
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+unreachable_pub = "warn"
+
+[lints.clippy]
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+dbg_macro = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"

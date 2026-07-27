@@ -1,7 +1,7 @@
-//! Source-bound language and workspace fallback evidence generator.
+//! Source-bound language and workspace measurement generator.
 //!
 //! Generation writes canonical JSON to standard output. Verification reads the
-//! artifact from standard input and independently recomputes every observation.
+//! artifact from standard input and repeats every candidate-bound observation.
 
 #![forbid(unsafe_code)]
 

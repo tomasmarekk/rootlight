@@ -3,7 +3,10 @@
 //! A typed fake pins exact client calls while the real executor validates the
 //! complete five-tool output contract and source-free failure classes.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    Arc, Mutex, OnceLock,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use rootlight_client::{
     AdvancedColumn, AdvancedQuery, AnalysisTier as ClientAnalysisTier, ArchitectureCycles,
@@ -107,6 +110,7 @@ enum Call {
         max_depth: Option<u8>,
         max_paths: Option<u16>,
         min_confidence: Option<u16>,
+        cross_repository: bool,
         options: RequestOptions,
     },
     ArchitectureCycles {
@@ -237,6 +241,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 indexed_files: 1,
                 entities: 1,
                 elapsed_micros: 10,
+                estimated_disk_bytes: 4_096,
             })
         })
     }
@@ -498,6 +503,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         max_depth: Option<u8>,
         max_paths: Option<u16>,
         min_confidence: Option<u16>,
+        cross_repository: bool,
         options: RequestOptions,
     ) -> AsyncClientFuture<FlowTrace> {
         self.record(Call::FlowTrace {
@@ -510,6 +516,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             max_depth,
             max_paths,
             min_confidence,
+            cross_repository,
             options,
         });
         Box::pin(async move {
@@ -848,7 +855,7 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
         panic!("index succeeds");
     };
     assert_eq!(index.data.accepted_plan.providers, [FIRST_SLICE_PROVIDER]);
-    assert_eq!(index.data.accepted_plan.estimated_disk_bytes, 0);
+    assert_eq!(index.data.accepted_plan.estimated_disk_bytes, 4_096);
     assert_eq!(
         index.data.accepted_plan.parent_generation.0,
         Some(parent_generation())
@@ -1046,6 +1053,27 @@ async fn native_port_forwards_the_typed_catalog_continuation() {
             ..
         }] if observed == &request
     ));
+}
+
+#[tokio::test]
+async fn deferred_port_connects_only_for_tool_calls_and_retries_transient_failures() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let connector_attempts = Arc::clone(&attempts);
+    let port = NativeFirstSliceClientPort::connect_on_first_request(move || {
+        connector_attempts.fetch_add(1, Ordering::SeqCst);
+        Err(ClientError::DaemonUnavailable)
+    });
+    assert_eq!(attempts.load(Ordering::SeqCst), 0);
+
+    let request =
+        RepositoryCatalogPageRequest::new(1, None, None, None, None).expect("request is valid");
+    for expected_attempts in 1..=2 {
+        let result =
+            FirstSliceClientPort::repository_catalog_page(&port, request.clone(), cancellation())
+                .await;
+        assert!(matches!(result, Err(crate::ClientPortError::Transport)));
+        assert_eq!(attempts.load(Ordering::SeqCst), expected_attempts);
+    }
 }
 
 #[tokio::test]

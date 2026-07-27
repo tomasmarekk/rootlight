@@ -328,6 +328,130 @@ fn reviewed_queries_preserve_explicit_call_sites() {
 }
 
 #[test]
+fn reviewed_rust_structural_profile_reports_tier_b_without_tier_a_claims() {
+    let case = CASES[0];
+    let rust_provider = Arc::new(provider());
+    let parser: Arc<dyn ParseProvider> = rust_provider;
+    let analyzer = TreeSitterAnalyzer::new_rust_structural(
+        parser,
+        producer_identity(),
+        language(case),
+        case.frontend,
+        content_hash(BINARY_SEED),
+    )
+    .expect("reviewed Rust structural profile is valid");
+    let limits = limits();
+    let fixture = Fixture::new(case, case.source.as_bytes());
+    let request = AnalysisRequest::new_with_parse_context(
+        GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source)
+            .expect("snapshot binds to source"),
+        language(case),
+        EncodingId::utf8(),
+        Vec::new(),
+        AnalysisTier::TierB,
+        build_context(),
+        &limits,
+    )
+    .expect("Tier B Rust request is valid")
+    .with_generated_status(case.generated);
+
+    let output = analyze(&analyzer, &request, &ExtensionSupport::default());
+
+    assert_eq!(analyzer.descriptor().tier(), AnalysisTier::TierB);
+    assert!(
+        output
+            .document()
+            .provenance
+            .iter()
+            .all(|record| record.tier == AnalysisTier::TierB)
+    );
+    assert!(
+        output
+            .document()
+            .entities
+            .iter()
+            .all(|entity| entity.tier == AnalysisTier::TierB)
+    );
+    assert!(
+        output
+            .document()
+            .coverage_records
+            .iter()
+            .all(|record| record.tier == AnalysisTier::TierB)
+    );
+
+    let parser: Arc<dyn ParseProvider> = Arc::new(provider());
+    assert!(matches!(
+        TreeSitterAnalyzer::new_rust_structural(
+            parser,
+            producer_identity(),
+            language(CASES[1]),
+            CASES[1].frontend,
+            content_hash(BINARY_SEED),
+        ),
+        Err(
+            rootlight_adapter_treesitter::TreeSitterAnalyzerConfigError::UnsupportedRustStructuralLanguage
+        )
+    ));
+}
+
+#[test]
+fn reviewed_rust_structural_profile_marks_tests_and_scoped_calls() {
+    const SOURCE: &str =
+        "#[test]\nfn checks_handler() { crate::worker::handle(); }\nfn handle() {}\n";
+    let case = CASES[0];
+    let fixture = Fixture::new(case, SOURCE.as_bytes());
+    let parser: Arc<dyn ParseProvider> = Arc::new(provider());
+    let analyzer = TreeSitterAnalyzer::new_rust_structural(
+        parser,
+        producer_identity(),
+        language(case),
+        case.frontend,
+        content_hash(BINARY_SEED),
+    )
+    .expect("reviewed Rust structural profile is valid");
+    let limits = limits();
+    let request = AnalysisRequest::new_with_parse_context(
+        GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source)
+            .expect("snapshot binds to source"),
+        language(case),
+        EncodingId::utf8(),
+        Vec::new(),
+        AnalysisTier::TierB,
+        build_context(),
+        &limits,
+    )
+    .expect("Tier B Rust request is valid")
+    .with_generated_status(false);
+
+    let output = analyze(&analyzer, &request, &ExtensionSupport::default());
+    let test = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "checks_handler")
+        .expect("test function is indexed");
+    assert!(test.flags.contains(&EntityFlag::Test));
+    let scoped_call = output
+        .document()
+        .occurrences
+        .iter()
+        .find(|occurrence| {
+            occurrence.role == OccurrenceRole::CallSite
+                && occurrence.syntactic_text_hash == content_hash(b"handle")
+        })
+        .expect("terminal name of the scoped call is captured");
+    assert_eq!(
+        scoped_call.syntax_kind, "rust.scoped_call.scoped_call",
+        "the reviewed Rust profile preserves scoped-call evidence for resolution"
+    );
+    assert_eq!(
+        scoped_call.source.span().end_byte() - scoped_call.source.span().start_byte(),
+        u64::try_from("handle".len()).expect("fixture length fits")
+    );
+}
+
+#[test]
 fn real_analyzer_reports_invalid_utf8_without_source_material() {
     const SECRET: &str = "do-not-leak-this-source-material";
     let case = CASES[0];

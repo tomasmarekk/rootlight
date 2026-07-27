@@ -14,6 +14,8 @@ use std::{
 use directories::ProjectDirs;
 use rootlight_ipc::Endpoint;
 use rootlight_protocol::{CURRENT_PROTOCOL_MINOR, MINIMUM_PROTOCOL_MINOR};
+#[cfg(unix)]
+use rootlight_vfs::platform::{PlatformError, PrivateDirectory, PrivateStandaloneFile};
 use serde::{Deserialize, Serialize};
 
 /// Maximum serialized discovery record accepted from disk.
@@ -227,51 +229,31 @@ impl RuntimePaths {
         self.endpoint_from_id(&self.endpoint_id(nonce), nonce)
     }
 
-    /// Applies and verifies the account-private policy on an exclusively opened output file.
+    /// Applies and verifies the account-private policy on an exclusively opened Windows output.
     ///
     /// The caller must keep the handle open until content synchronization completes. On
-    /// Windows the handle must deny read, write, and delete sharing from creation onward so
-    /// inherited directory permissions cannot expose or replace the object before its protected
-    /// DACL is installed. On macOS, sensitive new content must use [`PrivateOutputFile`], which
-    /// fails closed until an enabled native boundary can remove and verify inherited ACLs through
-    /// retained descriptors and publish the same verified identity without replacement. Mode
-    /// hardening alone cannot revoke a descriptor opened through an ACL inherited at creation.
+    /// The handle must deny read, write, and delete sharing from creation onward so inherited
+    /// directory permissions cannot expose or replace the object before its protected DACL is
+    /// installed. Unix output creation is owned by the descriptor-bound VFS boundary.
     ///
     /// # Errors
     ///
     /// Returns [`RuntimeError`] when handle metadata, ownership, permissions, reparse-point,
     /// or Windows DACL validation fails.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     fn secure_private_output_file(file: &mut File) -> Result<(), RuntimeError> {
         let metadata = file.metadata().map_err(RuntimeError::Io)?;
         if !metadata.file_type().is_file() {
             return Err(RuntimeError::InsecureOutputFile);
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        use std::os::windows::fs::MetadataExt as _;
+        use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
-            file.set_permissions(fs::Permissions::from_mode(0o600))
-                .map_err(RuntimeError::Io)?;
-            let metadata = file.metadata().map_err(RuntimeError::Io)?;
-            if metadata.uid() != effective_user_id()
-                || metadata.nlink() != 1
-                || metadata.mode() & 0o077 != 0
-            {
-                return Err(RuntimeError::InsecureOutputFile);
-            }
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return Err(RuntimeError::InsecureOutputFile);
         }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt as _;
-            use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-
-            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
-                return Err(RuntimeError::InsecureOutputFile);
-            }
-            apply_private_windows_dacl_to_file(file, PrivateScope::Account)?;
-            verify_private_windows_file_dacl(file, PrivateScope::Account)?;
-        }
+        apply_private_windows_dacl_to_file(file, PrivateScope::Account)?;
+        verify_private_windows_file_dacl(file, PrivateScope::Account)?;
         Ok(())
     }
 
@@ -412,18 +394,20 @@ impl RuntimePaths {
 
 /// An owner-private output publication handle.
 ///
-/// On supported implementation platforms, the final path is created exclusively and is visible
-/// immediately; a write or commit failure can leave a partial owner-private file at that path.
-/// macOS construction fails closed before creating an object. Apple platforms expose
-/// directory-relative `RENAME_EXCL`, but Rootlight has no enabled native boundary that first
-/// removes and verifies inherited ACLs through retained descriptors and then publishes the same
-/// verified identity without replacement. The native private-tree boundary remains disabled.
+/// The final path is created exclusively and is visible immediately; a write
+/// or commit failure can leave a partial owner-private file at that path. Unix
+/// creation is handle-relative beneath a verified account-private parent.
 #[derive(Debug)]
 pub struct PrivateOutputFile {
+    #[cfg(unix)]
+    file: PrivateStandaloneFile,
+    #[cfg(windows)]
     file: File,
+    #[cfg(windows)]
     state: PrivateOutputState,
 }
 
+#[cfg(windows)]
 #[derive(Debug)]
 struct PrivateOutputState {
     parent: PathBuf,
@@ -437,15 +421,12 @@ impl PrivateOutputFile {
     ///
     /// # Errors
     ///
-    /// On macOS, returns [`RuntimeError::PrivateOutputSecurityPolicy`] with an unsupported source
-    /// while descriptor-bound inherited-ACL removal and verification plus identity-safe
-    /// publication remain unavailable.
     pub fn preflight() -> Result<(), RuntimeError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         {
-            macos_private_output_unavailable()
+            PrivateDirectory::require_supported().map_err(map_private_output_boundary)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
         {
             Ok(())
         }
@@ -455,44 +436,43 @@ impl PrivateOutputFile {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::Io`] when the destination cannot be created exclusively. On macOS,
-    /// returns [`RuntimeError::PrivateOutputSecurityPolicy`] with an unsupported source before any
-    /// path inspection or filesystem mutation because the descriptor-bound ACL and identity-safe
-    /// publication boundary remains unavailable.
+    /// Returns [`RuntimeError::Io`] when the destination cannot be created exclusively, or a
+    /// private-output policy error when the retained parent is not account-private.
     pub fn create(path: &Path) -> Result<Self, RuntimeError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         {
-            let _ = path;
-            macos_private_output_unavailable()
+            use cap_std::{ambient_authority, fs::Dir};
+
+            let parent = output_parent(path)?;
+            let parent =
+                Dir::open_ambient_dir(parent, ambient_authority()).map_err(RuntimeError::Io)?;
+            PrivateDirectory::verify_parent(&parent).map_err(map_private_output_boundary)?;
+            let name = path
+                .file_name()
+                .ok_or_else(private_output_security_policy)?;
+            let file = PrivateStandaloneFile::create(&parent, name)
+                .map_err(map_private_output_boundary)?;
+            Ok(Self { file })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
         {
             Self::create_direct(path)
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     fn create_direct(path: &Path) -> Result<Self, RuntimeError> {
         let parent = output_parent(path)?.to_path_buf();
         let mut options = fs::OpenOptions::new();
         options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_GENERIC_READ, FILE_GENERIC_WRITE, WRITE_DAC,
+        };
 
-            options.mode(0o600);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt as _;
-            use windows::Win32::Storage::FileSystem::{
-                FILE_GENERIC_READ, FILE_GENERIC_WRITE, WRITE_DAC,
-            };
-
-            options
-                .access_mode((FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC).0)
-                .share_mode(0);
-        }
+        options
+            .access_mode((FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC).0)
+            .share_mode(0);
         let mut file = options.open(path).map_err(RuntimeError::Io)?;
         RuntimePaths::secure_private_output_file(&mut file)?;
         Ok(Self {
@@ -506,19 +486,25 @@ impl PrivateOutputFile {
     /// # Errors
     ///
     /// Returns [`RuntimeError`] when file or parent-directory synchronization fails. The
-    /// destination is visible from [`Self::create`]; macOS callers cannot construct this handle
-    /// while the descriptor-bound ACL and identity-safe publication boundary remains
-    /// unavailable.
-    pub fn commit(mut self) -> Result<(), RuntimeError> {
-        self.file.flush().map_err(RuntimeError::Io)?;
-        self.file.sync_all().map_err(RuntimeError::Io)?;
-        sync_directory(&self.state.parent)
+    /// destination is visible from [`Self::create`].
+    pub fn commit(self) -> Result<(), RuntimeError> {
+        #[cfg(unix)]
+        {
+            self.file.commit().map_err(map_private_output_boundary)
+        }
+        #[cfg(windows)]
+        {
+            let mut this = self;
+            this.file.flush().map_err(RuntimeError::Io)?;
+            this.file.sync_all().map_err(RuntimeError::Io)?;
+            sync_directory(&this.state.parent)
+        }
     }
 
     /// Abandons the output handle.
     ///
     /// Publication happens during [`Self::create`], so abort cannot retract the already-visible
-    /// final inode. macOS callers cannot construct this handle.
+    /// final inode.
     ///
     /// # Errors
     ///
@@ -538,7 +524,6 @@ impl Write for PrivateOutputFile {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
 fn output_parent(path: &Path) -> Result<&Path, RuntimeError> {
     if path.file_name().is_none() {
         return Err(private_output_security_policy());
@@ -549,19 +534,19 @@ fn output_parent(path: &Path) -> Result<&Path, RuntimeError> {
         .unwrap_or_else(|| Path::new(".")))
 }
 
-#[cfg(not(target_os = "macos"))]
 fn private_output_security_policy() -> RuntimeError {
     RuntimeError::PrivateOutputSecurityPolicy(None)
 }
 
-#[cfg(target_os = "macos")]
-fn macos_private_output_unavailable<T>() -> Result<T, RuntimeError> {
-    Err(RuntimeError::PrivateOutputSecurityPolicy(Some(
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            "macOS private output requires descriptor-bound inherited-ACL removal and verification plus identity-safe no-replace publication",
-        ),
-    )))
+#[cfg(unix)]
+fn map_private_output_boundary(error: PlatformError) -> RuntimeError {
+    match error {
+        PlatformError::Io { source, .. } => RuntimeError::Io(source),
+        other => RuntimeError::PrivateOutputSecurityPolicy(Some(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            other,
+        ))),
+    }
 }
 
 /// Exclusive short-lived authority for coordinating one daemon launch.
@@ -728,6 +713,15 @@ fn prepare_private_directory(path: &Path, scope: PrivateScope) -> Result<(), Run
     }
     #[cfg(unix)]
     fs::set_permissions(path, unix_private_directory_permissions()).map_err(RuntimeError::Io)?;
+    #[cfg(target_os = "macos")]
+    {
+        use cap_std::{ambient_authority, fs::Dir};
+
+        let mut directory =
+            Dir::open_ambient_dir(path, ambient_authority()).map_err(RuntimeError::Io)?;
+        PrivateDirectory::secure_new_parent(&mut directory)
+            .map_err(|_| RuntimeError::InsecureDirectory)?;
+    }
     #[cfg(windows)]
     {
         if windows_path_has_reparse_component(path)? {
@@ -749,6 +743,15 @@ fn validate_private_directory(path: &Path, scope: PrivateScope) -> Result<(), Ru
         use std::os::unix::fs::MetadataExt as _;
         if metadata.uid() != effective_user_id() || metadata.mode() & 0o077 != 0 {
             return Err(RuntimeError::InsecureDirectory);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use cap_std::{ambient_authority, fs::Dir};
+
+            let directory =
+                Dir::open_ambient_dir(path, ambient_authority()).map_err(RuntimeError::Io)?;
+            PrivateDirectory::verify_parent(&directory)
+                .map_err(|_| RuntimeError::InsecureDirectory)?;
         }
     }
     #[cfg(windows)]
@@ -1164,7 +1167,7 @@ pub enum RuntimeError {
     /// A private output cleanup boundary failed.
     ///
     /// Retained for compatibility with callers that classify cleanup separately from publication;
-    /// the current macOS implementation fails before creating a staging object.
+    /// the current output owner normally abandons a partial private file by closing its handle.
     #[error("protected output cleanup failed")]
     PrivateOutputCleanup(#[source] io::Error),
     /// Another process currently owns startup authority.
@@ -1208,7 +1211,6 @@ mod tests {
         temporary
     }
 
-    #[cfg(not(target_os = "macos"))]
     fn private_output_path(temporary: &tempfile::TempDir, name: &str) -> PathBuf {
         temporary.path().join(name)
     }
@@ -1222,7 +1224,7 @@ mod tests {
         (temporary, paths)
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     #[test]
     fn private_output_policy_validates_the_open_regular_file() {
         let temporary = private_tempdir();
@@ -1243,37 +1245,26 @@ mod tests {
 
         RuntimePaths::secure_private_output_file(&mut file).expect("output policy applies");
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            let metadata = file.metadata().expect("output metadata reads");
-            assert_eq!(metadata.mode() & 0o077, 0);
-            assert_eq!(metadata.nlink(), 1);
-        }
-        #[cfg(windows)]
         verify_private_windows_file_dacl(&file, PrivateScope::Account)
             .expect("output account DACL verifies through its handle");
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(unix)]
     #[test]
     fn private_output_policy_rejects_hard_linked_files() {
         let temporary = private_tempdir();
         let path = private_output_path(&temporary, "support.zip");
         let alias = temporary.path().join("support-alias.zip");
-        let mut options = fs::OpenOptions::new();
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.read(true).write(true).create_new(true).mode(0o600);
-        let mut file = options.open(&path).expect("output file creates");
+        let output = PrivateOutputFile::create(&path).expect("private output creates");
         fs::hard_link(&path, &alias).expect("hard link creates");
 
         assert!(matches!(
-            RuntimePaths::secure_private_output_file(&mut file),
-            Err(RuntimeError::InsecureOutputFile)
+            output.commit(),
+            Err(RuntimeError::PrivateOutputSecurityPolicy(Some(source)))
+                if source.kind() == io::ErrorKind::PermissionDenied
         ));
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn private_output_transaction_refuses_overwrite() {
         let temporary = private_tempdir();
@@ -1295,49 +1286,17 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn private_output_fails_closed_before_mutating_the_filesystem() {
+    fn private_output_uses_the_descriptor_bound_macos_boundary() {
         let temporary = private_tempdir();
         let parent = fs::canonicalize(temporary.path()).expect("temporary path canonicalizes");
         let path = parent.join("support.zip");
 
-        let preflight = PrivateOutputFile::preflight()
-            .expect_err("macOS private output preflight fails closed");
-        let error = PrivateOutputFile::create(&path)
-            .expect_err("macOS private output fails closed before creation");
+        PrivateOutputFile::preflight().expect("macOS private output preflight succeeds");
+        let mut output = PrivateOutputFile::create(&path).expect("macOS private output creates");
+        output.write_all(b"private").expect("private output writes");
+        output.commit().expect("private output commits durably");
 
-        let error_signature = |error: &RuntimeError| match error {
-            RuntimeError::PrivateOutputSecurityPolicy(Some(source)) => {
-                (source.kind(), source.to_string())
-            }
-            other => panic!("unexpected macOS publication error: {other:?}"),
-        };
-        let expected = error_signature(&preflight);
-        assert_eq!(expected.0, io::ErrorKind::Unsupported);
-        assert_eq!(error_signature(&error), expected);
-        assert!(
-            !error_signature(&error)
-                .1
-                .contains(parent.to_string_lossy().as_ref())
-        );
-        assert!(!path.exists());
-        assert_eq!(
-            fs::read_dir(&parent).expect("output parent reads").count(),
-            0
-        );
-
-        fs::write(&path, b"existing").expect("existing output writes");
-        let second = PrivateOutputFile::create(&path)
-            .expect_err("existing destination still fails at the unsupported boundary");
-        assert!(matches!(
-            second,
-            RuntimeError::PrivateOutputSecurityPolicy(Some(source))
-                if source.kind() == io::ErrorKind::Unsupported
-        ));
-        assert_eq!(fs::read(&path).expect("existing output reads"), b"existing");
-        assert_eq!(
-            fs::read_dir(&parent).expect("output parent reads").count(),
-            1
-        );
+        assert_eq!(fs::read(path).expect("private output reads"), b"private");
     }
 
     #[test]

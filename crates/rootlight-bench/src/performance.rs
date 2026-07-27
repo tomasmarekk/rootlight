@@ -574,7 +574,7 @@ pub struct PerformanceEvidencePackage {
     pub cancellation_aggregates: Vec<CancellationAggregate>,
     /// Canonically ordered target evaluations.
     pub threshold_evaluations: Vec<ThresholdEvaluation>,
-    /// Overall gate result.
+    /// Overall performance evaluation result.
     pub disposition: GateDisposition,
     /// Optional prior-baseline comparison.
     pub regression: Option<RegressionComparison>,
@@ -1780,7 +1780,7 @@ mod tests {
     fn protocol(minimum: u64) -> PerformanceProtocol {
         PerformanceProtocol {
             schema_version: PERFORMANCE_EVIDENCE_SCHEMA_VERSION.to_owned(),
-            protocol_id: "gate3-performance-v1".to_owned(),
+            protocol_id: "mcp-performance-test-v1".to_owned(),
             warmup_samples: 5,
             timeout_ms: 30_000,
             concurrency: 1,

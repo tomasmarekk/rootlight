@@ -185,7 +185,8 @@ pub enum EvidenceRole {
 ///
 /// A policy change alters pack completeness and is therefore bound into the
 /// canonical request digest and pack identity.
-pub const OBJECTIVE_ROLE_POLICY_VERSION: u32 = 1;
+pub const OBJECTIVE_ROLE_POLICY_VERSION: u32 = 2;
+const LEGACY_OBJECTIVE_ROLE_POLICY_VERSION: u32 = 1;
 
 /// Task class inferred from the normalized `context.pack` objective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -211,6 +212,7 @@ impl ContextPackObjective {
             Self::BugFix => &[
                 EvidenceRole::Definition,
                 EvidenceRole::Implementation,
+                EvidenceRole::Caller,
                 EvidenceRole::Test,
             ],
             Self::Refactor => &[
@@ -237,7 +239,6 @@ impl ContextPackObjective {
     pub const fn optional_roles(self) -> &'static [EvidenceRole] {
         match self {
             Self::BugFix => &[
-                EvidenceRole::Caller,
                 EvidenceRole::Risk,
                 EvidenceRole::Architecture,
                 EvidenceRole::Change,
@@ -383,7 +384,7 @@ impl RoleCoverageSummary {
         objective: ContextPackObjective,
         roles: Vec<RoleCoverageEntry>,
     ) -> Result<Self, RoleCoverageError> {
-        validate_role_entries(objective, &roles)?;
+        validate_role_entries(objective, OBJECTIVE_ROLE_POLICY_VERSION, &roles)?;
         let complete = roles.iter().all(|entry| {
             entry.requirement != RoleRequirement::Required
                 || entry.status == RoleCoverageStatus::Satisfied
@@ -425,14 +426,12 @@ impl TryFrom<UncheckedRoleCoverageSummary> for RoleCoverageSummary {
     type Error = RoleCoverageError;
 
     fn try_from(value: UncheckedRoleCoverageSummary) -> Result<Self, Self::Error> {
-        validate_role_entries(value.objective, &value.roles)?;
+        validate_role_entries(value.objective, value.objective_rule_version, &value.roles)?;
         let derived = value.roles.iter().all(|entry| {
             entry.requirement != RoleRequirement::Required
                 || entry.status == RoleCoverageStatus::Satisfied
         });
-        if value.complete != derived
-            || value.objective_rule_version != OBJECTIVE_ROLE_POLICY_VERSION
-        {
+        if value.complete != derived {
             return Err(RoleCoverageError::InconsistentCompleteness);
         }
         Ok(Self {
@@ -446,6 +445,7 @@ impl TryFrom<UncheckedRoleCoverageSummary> for RoleCoverageSummary {
 
 fn validate_role_entries(
     objective: ContextPackObjective,
+    objective_rule_version: u32,
     entries: &[RoleCoverageEntry],
 ) -> Result<(), RoleCoverageError> {
     const ALL_ROLES: [EvidenceRole; 7] = [
@@ -460,8 +460,13 @@ fn validate_role_entries(
     if entries.len() != ALL_ROLES.len() {
         return Err(RoleCoverageError::PolicyMismatch);
     }
+    let required_roles = match objective_rule_version {
+        LEGACY_OBJECTIVE_ROLE_POLICY_VERSION => legacy_required_roles(objective),
+        OBJECTIVE_ROLE_POLICY_VERSION => objective.required_roles(),
+        _ => return Err(RoleCoverageError::PolicyMismatch),
+    };
     for (entry, expected_role) in entries.iter().zip(ALL_ROLES) {
-        let requirement = if objective.required_roles().contains(&expected_role) {
+        let requirement = if required_roles.contains(&expected_role) {
             RoleRequirement::Required
         } else {
             RoleRequirement::Optional
@@ -490,6 +495,34 @@ fn validate_role_entries(
         }
     }
     Ok(())
+}
+
+const fn legacy_required_roles(objective: ContextPackObjective) -> &'static [EvidenceRole] {
+    match objective {
+        ContextPackObjective::BugFix => &[
+            EvidenceRole::Definition,
+            EvidenceRole::Implementation,
+            EvidenceRole::Test,
+        ],
+        ContextPackObjective::Refactor => &[
+            EvidenceRole::Definition,
+            EvidenceRole::Caller,
+            EvidenceRole::Test,
+        ],
+        ContextPackObjective::Explanation => {
+            &[EvidenceRole::Definition, EvidenceRole::Architecture]
+        }
+        ContextPackObjective::Migration => &[
+            EvidenceRole::Definition,
+            EvidenceRole::Caller,
+            EvidenceRole::Change,
+        ],
+        ContextPackObjective::Review => &[
+            EvidenceRole::Change,
+            EvidenceRole::Definition,
+            EvidenceRole::Risk,
+        ],
+    }
 }
 
 /// A bounded source snippet wrapped as untrusted repository data.
@@ -1399,7 +1432,7 @@ pub struct PlanExplanation {
 ///
 /// Bumped whenever plan construction changes meaningfully so fingerprints taken
 /// under different planner versions never collide.
-pub const PLANNER_VERSION: u32 = 2;
+pub const PLANNER_VERSION: u32 = 4;
 
 impl PlanExplanation {
     /// Creates a plan explanation carrying the current planner version and an
@@ -1504,7 +1537,7 @@ mod tests {
     fn new_plans_carry_the_current_planner_version() {
         let plan = PlanExplanation::new(1, vec!["catalog_snapshot".to_owned()], Vec::new());
 
-        assert_eq!(PLANNER_VERSION, 2);
+        assert_eq!(PLANNER_VERSION, 4);
         assert_eq!(plan.planner_version, PLANNER_VERSION);
     }
 
@@ -1525,10 +1558,10 @@ mod tests {
                 vec![
                     EvidenceRole::Definition,
                     EvidenceRole::Implementation,
+                    EvidenceRole::Caller,
                     EvidenceRole::Test,
                 ],
                 vec![
-                    EvidenceRole::Caller,
                     EvidenceRole::Risk,
                     EvidenceRole::Architecture,
                     EvidenceRole::Change,
@@ -1607,7 +1640,7 @@ mod tests {
                 all_roles
             );
         }
-        assert_eq!(OBJECTIVE_ROLE_POLICY_VERSION, 1);
+        assert_eq!(OBJECTIVE_ROLE_POLICY_VERSION, 2);
     }
 
     #[test]

@@ -3,7 +3,14 @@
 //! This boundary enriches checked client DTOs only with facts Rootlight can
 //! prove locally; unavailable startup remains a source-free transport failure.
 
-use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex, OnceLock},
+    time::Duration,
+};
 
 use rootlight_client::{
     AdvancedQuery, AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview,
@@ -138,6 +145,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         max_depth: Option<u8>,
         max_paths: Option<u16>,
         min_confidence: Option<u16>,
+        cross_repository: bool,
         options: RequestOptions,
     ) -> AsyncClientFuture<FlowTrace>;
 
@@ -263,8 +271,70 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
     ) -> AsyncClientFuture<AdvancedQuery>;
 }
 
+type ClientConnector = dyn Fn() -> Result<Client, ClientError> + Send + Sync + 'static;
+
+struct ClientProvider {
+    client: OnceLock<Arc<Client>>,
+    connector: Option<Arc<ClientConnector>>,
+    initialization: Mutex<()>,
+}
+
+impl ClientProvider {
+    fn ready(client: Client) -> Self {
+        let ready = OnceLock::new();
+        let initialized = ready.set(Arc::new(client));
+        debug_assert!(initialized.is_ok());
+        Self {
+            client: ready,
+            connector: None,
+            initialization: Mutex::new(()),
+        }
+    }
+
+    fn deferred(
+        connector: impl Fn() -> Result<Client, ClientError> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            client: OnceLock::new(),
+            connector: Some(Arc::new(connector)),
+            initialization: Mutex::new(()),
+        }
+    }
+
+    async fn resolve(self: Arc<Self>) -> Result<Arc<Client>, ClientError> {
+        if let Some(client) = self.client.get() {
+            return Ok(Arc::clone(client));
+        }
+        tokio::task::spawn_blocking(move || self.resolve_blocking())
+            .await
+            .map_err(|_| ClientError::UnexpectedResponse)?
+    }
+
+    fn resolve_blocking(&self) -> Result<Arc<Client>, ClientError> {
+        if let Some(client) = self.client.get() {
+            return Ok(Arc::clone(client));
+        }
+        let _initialization = self
+            .initialization
+            .lock()
+            .map_err(|_| ClientError::UnexpectedResponse)?;
+        if let Some(client) = self.client.get() {
+            return Ok(Arc::clone(client));
+        }
+        let connector = self
+            .connector
+            .as_ref()
+            .ok_or(ClientError::UnexpectedResponse)?;
+        let client = Arc::new(connector()?);
+        self.client
+            .set(Arc::clone(&client))
+            .map_err(|_| ClientError::UnexpectedResponse)?;
+        Ok(client)
+    }
+}
+
 struct LiveAsyncFirstSliceClient {
-    client: Arc<Client>,
+    client: Arc<ClientProvider>,
 }
 
 impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
@@ -277,6 +347,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<RepositoryIndex> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .repository_index_async(&root, operation, detached, timeout)
                 .await
@@ -293,6 +364,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<RepositoryOperationStatus> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .repository_operation_status_async(
                     operation,
@@ -317,6 +389,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<CodeLocate> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .code_locate_async_with_options(
                     repository,
@@ -340,6 +413,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<SymbolExplain> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .symbol_explain_async_with_options(repository, generation, &symbols, options)
                 .await
@@ -356,6 +430,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<SourceRead> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .source_read_projected_async_with_options(
                     repository,
@@ -375,6 +450,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<RepositoryCatalogPage> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .repository_catalog_page_async(&request, timeout)
                 .await
@@ -388,6 +464,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<RepositoryStatus> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .repository_status_with_options_async(request, timeout)
                 .await
@@ -408,6 +485,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<SymbolRelationships> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .symbol_relationships_async_with_options(
                     repository,
@@ -435,12 +513,14 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         max_depth: Option<u8>,
         max_paths: Option<u16>,
         min_confidence: Option<u16>,
+        cross_repository: bool,
         options: RequestOptions,
     ) -> AsyncClientFuture<FlowTrace> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
-                .flow_trace_async_with_options(
+                .flow_trace_async_with_options_cross_repository(
                     repository,
                     generation,
                     from,
@@ -450,6 +530,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     max_depth,
                     max_paths,
                     min_confidence,
+                    cross_repository,
                     options,
                 )
                 .await
@@ -468,6 +549,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<ArchitectureCycles> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .architecture_cycles_async_with_options(
                     repository,
@@ -495,6 +577,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<CodeDead> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .code_dead_async_with_options(
                     repository,
@@ -522,6 +605,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<ArchitectureOverview> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .architecture_overview_async_with_options(
                     repository,
@@ -548,6 +632,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<TestsSelect> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .tests_select_async_with_options(
                     repository,
@@ -576,6 +661,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<ChangeImpact> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .change_impact_async_with_options(
                     repository,
@@ -605,6 +691,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<PlanChange> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .plan_change_async_with_options(
                     repository,
@@ -631,6 +718,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<HistoryCompare> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             let kind_labels: Vec<&str> = change_kinds.iter().map(String::as_str).collect();
             client
                 .history_compare_async_with_options(
@@ -659,6 +747,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     ) -> AsyncClientFuture<AdvancedQuery> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let client = client.resolve().await?;
             client
                 .advanced_query_async_with_options(
                     repository,
@@ -690,7 +779,22 @@ impl NativeFirstSliceClientPort {
     pub fn new(client: Client) -> Self {
         Self {
             client: Arc::new(LiveAsyncFirstSliceClient {
-                client: Arc::new(client),
+                client: Arc::new(ClientProvider::ready(client)),
+            }),
+        }
+    }
+
+    /// Creates a native port that resolves its daemon client on the first tool call.
+    ///
+    /// The connector is serialized and a successful client is reused. Failures
+    /// are not cached, so a later tool call may recover from transient startup.
+    #[must_use]
+    pub fn connect_on_first_request(
+        connector: impl Fn() -> Result<Client, ClientError> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            client: Arc::new(LiveAsyncFirstSliceClient {
+                client: Arc::new(ClientProvider::deferred(connector)),
             }),
         }
     }
@@ -735,9 +839,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 mode: IndexMode::Structural,
                 providers: vec![FIRST_SLICE_PROVIDER.to_owned()],
                 parent_generation: RequiredNullable(result.parent_generation),
-                // The current fallback publishes SQLite and lexical state only
-                // in memory, so generation staging writes no disk bytes.
-                estimated_disk_bytes: 0,
+                estimated_disk_bytes: result.estimated_disk_bytes,
             };
             Ok(RepositoryIndexPortResponse::new(
                 result,
@@ -940,6 +1042,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.max_depth(),
                     request.max_paths(),
                     request.min_confidence(),
+                    request.cross_repository(),
                     options,
                 )
                 .await

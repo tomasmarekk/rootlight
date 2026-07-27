@@ -1,6 +1,6 @@
 {
   "schema": "rootlight.mcp-budget-conformance/1",
-  "source_revision": "84b07d3478b887ec55530c3a2d9c5723f9c7add4",
+  "source_revision": "54252a1894028d9a08326dbb68adabe985e484d2",
   "tools": [
     {
       "tool": "repo.index",
@@ -538,7 +538,7 @@
     },
     {
       "file": "crates/rootlight-query/tests/query_slice.rs",
-      "sha256": "7a32f0746f95896e7f7f48ac0d317a1be497a88cab02e6267f5229214ccaea31",
+      "sha256": "300289a83e63303b4ef74f28827e930d16874b8ffb0ce385b737da8e5e71ef2c",
       "symbols": [
         "execution_enforces_cancellation_and_exact_output_bounds",
         "plans_and_execution_enforce_all_query_resource_families",
@@ -547,7 +547,7 @@
     },
     {
       "file": "apps/rootlight-mcp/src/executor/tests.rs",
-      "sha256": "bd7fcc6490aec144444a04b7f93bdd1b8683c0ace53461349aff25aea0ee83f3",
+      "sha256": "8ee4717d0d1113bbd2d85e96bcc9f9a9661e4f1d67eb2d2058c7b0069fcf9619",
       "symbols": [
         "analytical_budget_lowers_every_public_resource_dimension",
         "omitted_analytical_budget_transports_the_complete_server_ceiling",
@@ -559,7 +559,7 @@
     },
     {
       "file": "apps/rootlight-daemon/src/first_slice.rs",
-      "sha256": "4fac3ad9b5bcf16f48770b00ef5409f58099300384efb11896b9168069cf517b",
+      "sha256": "fcb3d6bfd1d725917b87436003e7dd9cc09e0093c0bd28ec985feeffc226352d",
       "symbols": [
         "peer_cancellation_leaves_work_lane_reusable_before_publication",
         "commit_boundary_failure_reports_failed_and_publishes_nothing"
@@ -593,10 +593,10 @@
       "asset_sha256": "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
     },
     "input_schema": "rootlight.mcp-budget-conformance-input/1",
-    "input_sha256": "edd04db9af8393c23c9b38ba5c54cc246143b306e0bc22deffe55503ee18727a",
+    "input_sha256": "a66157f7ed06885b6c6a48c8fb3cbfbbc632790055a9d1b84ee19bc6c8647c17",
     "serialized_bytes": 13143,
     "deterministic_estimated_tokens": 3286,
-    "actual_tokens": 2985,
+    "actual_tokens": 2991,
     "normalization": "none_exact_utf8",
     "framing": "canonical_compact_json_without_accounting_measurement"
   },

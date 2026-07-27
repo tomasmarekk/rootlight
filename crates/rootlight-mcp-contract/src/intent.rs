@@ -647,7 +647,7 @@ pub struct StronglyConnectedComponent {
     /// Number of nodes in the component.
     pub size: u32,
     /// Member node identifiers.
-    #[schemars(length(min = 2, max = 1000))]
+    #[schemars(length(min = 1, max = 1_000_000))]
     pub members: Vec<String>,
     /// Internal edge count.
     pub internal_edges: u32,
@@ -658,7 +658,7 @@ pub struct StronglyConnectedComponent {
 #[serde(deny_unknown_fields)]
 pub struct MinimalCycle {
     /// Ordered node identifiers forming the cycle, first repeated at end.
-    #[schemars(length(min = 3, max = 65))]
+    #[schemars(length(min = 2, max = 1_000_001))]
     pub nodes: Vec<String>,
     /// Source evidence for each edge in the cycle.
     #[schemars(length(max = 64))]

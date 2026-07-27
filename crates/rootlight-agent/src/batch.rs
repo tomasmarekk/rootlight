@@ -840,8 +840,8 @@ fn materialize_template(
             let resolved =
                 extract_typed_source(&envelope.data, binding.source_slot, &binding.source_indices)?
                     .clone();
-            validate_runtime_binding(
-                &resolved,
+            let resolved = materialize_runtime_binding(
+                resolved,
                 binding.source_slot,
                 binding.target_slot,
                 expected_repository,
@@ -1424,11 +1424,14 @@ fn aggregate_completeness(
             BatchOperationStatus::SkippedDependency | BatchOperationStatus::NotRunFailFast
         )
     });
-    if results.iter().any(|result| result.truncated) || has_budget_nonexecution {
+    let has_truncated_result = results.iter().any(|result| result.truncated);
+    if has_truncated_result || has_budget_nonexecution {
         state = state.max(CompletenessState::Truncated);
-        resources.push(LimitingResource::kind(
-            limiting_resource.unwrap_or(LimitingResourceKind::Results),
-        ));
+        if has_budget_nonexecution || resources.is_empty() {
+            resources.push(LimitingResource::kind(
+                limiting_resource.unwrap_or(LimitingResourceKind::Results),
+            ));
+        }
         guidance.push(ContinuationGuidance::IncreaseBudgetWithinLimit);
     }
     if has_cancellation {
@@ -1586,8 +1589,8 @@ impl BindingResolver<'_> {
                     validate_binding_pair(source.slot, target)?;
                     let resolved =
                         extract_typed_source(&envelope.data, source.slot, &source.indices)?.clone();
-                    validate_runtime_binding(
-                        &resolved,
+                    let resolved = materialize_runtime_binding(
+                        resolved,
                         source.slot,
                         target,
                         self.expected_repository,
@@ -1848,10 +1851,8 @@ fn validate_binding_pair(
     source: &BatchBindingSourceSlot,
     target: &BatchBindingTargetSlot,
 ) -> Result<(), BatchExecutionError> {
-    if !source.composable
-        || source.value_type != target.value_type
-        || !target.accepted_trust.contains(&source.trust)
-        || !matches!(
+    let exact_shape = source.value_type == target.value_type
+        && matches!(
             (source.cardinality, target.cardinality),
             (
                 BatchBindingCardinality::Scalar,
@@ -1860,7 +1861,24 @@ fn validate_binding_pair(
                 BatchBindingCardinality::Collection { .. },
                 BatchBindingCardinality::Collection { .. }
             )
+        );
+    let singleton_promotion = matches!(
+        (source.value_type, target.value_type),
+        (
+            BatchBindingValueType::SymbolId,
+            BatchBindingValueType::SymbolIds
+        ) | (
+            BatchBindingValueType::SourceRef,
+            BatchBindingValueType::SourceRefs
         )
+    ) && matches!(source.cardinality, BatchBindingCardinality::Scalar)
+        && matches!(
+            target.cardinality,
+            BatchBindingCardinality::Collection { min, max } if min <= 1 && max >= 1
+        );
+    if !source.composable
+        || !target.accepted_trust.contains(&source.trust)
+        || !(exact_shape || singleton_promotion)
     {
         return Err(BatchExecutionError::InvalidBinding);
     }
@@ -1898,16 +1916,44 @@ fn extract_typed_source<'a>(
     Ok(current)
 }
 
-fn validate_runtime_binding(
-    value: &Value,
+fn materialize_runtime_binding(
+    value: Value,
     source: &BatchBindingSourceSlot,
     target: &BatchBindingTargetSlot,
     expected_repository: RepositoryId,
     expected_generation: GenerationId,
+) -> Result<Value, BatchExecutionError> {
+    validate_cardinality(&value, source.cardinality)?;
+    validate_binding_value(
+        &value,
+        source.value_type,
+        expected_repository,
+        expected_generation,
+    )?;
+    let materialized = match (source.value_type, target.value_type) {
+        (BatchBindingValueType::SymbolId, BatchBindingValueType::SymbolIds)
+        | (BatchBindingValueType::SourceRef, BatchBindingValueType::SourceRefs) => {
+            Value::Array(vec![value])
+        }
+        _ => value,
+    };
+    validate_cardinality(&materialized, target.cardinality)?;
+    validate_binding_value(
+        &materialized,
+        target.value_type,
+        expected_repository,
+        expected_generation,
+    )?;
+    Ok(materialized)
+}
+
+fn validate_binding_value(
+    value: &Value,
+    value_type: BatchBindingValueType,
+    expected_repository: RepositoryId,
+    expected_generation: GenerationId,
 ) -> Result<(), BatchExecutionError> {
-    validate_cardinality(value, source.cardinality)?;
-    validate_cardinality(value, target.cardinality)?;
-    match source.value_type {
+    match value_type {
         BatchBindingValueType::SymbolId => {
             serde_json::from_value::<SymbolId>(value.clone())
                 .map_err(|_| BatchExecutionError::BindingTypeMismatch)?;
@@ -3166,10 +3212,26 @@ mod tests {
                                 BatchBindingCardinality::Collection { .. }
                             )
                         );
+                        let singleton_promotion =
+                            matches!(
+                            (source.value_type, target.value_type),
+                            (
+                                rootlight_mcp_contract::batch::BatchBindingValueType::SymbolId,
+                                rootlight_mcp_contract::batch::BatchBindingValueType::SymbolIds
+                            ) | (
+                                rootlight_mcp_contract::batch::BatchBindingValueType::SourceRef,
+                                rootlight_mcp_contract::batch::BatchBindingValueType::SourceRefs
+                            )
+                        ) && matches!(source.cardinality, BatchBindingCardinality::Scalar)
+                                && matches!(
+                                    target.cardinality,
+                                    BatchBindingCardinality::Collection { min, max }
+                                        if min <= 1 && max >= 1
+                                );
                         let expected = source.composable
-                            && source.value_type == target.value_type
                             && target.accepted_trust.contains(&source.trust)
-                            && same_cardinality_class;
+                            && ((source.value_type == target.value_type && same_cardinality_class)
+                                || singleton_promotion);
                         assert_eq!(
                             validate_binding_pair(source, target).is_ok(),
                             expected,

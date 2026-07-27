@@ -3,12 +3,28 @@
 //! Metadata signatures cover the exact bounded JSON bytes. Artifact hashing is
 //! streamed, and activation remains behind a platform installer boundary.
 
-use std::io::{self, Read};
+use std::{
+    collections::BTreeSet,
+    io::{self, Cursor, Read},
+};
 
+use data_encoding::BASE64;
 use ed25519_compact::{PublicKey, Signature};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+
+mod filesystem;
+
+pub use filesystem::{
+    ACTIVE_VERSION_FILE, CandidateHealthCheck, CandidateHealthError, FilesystemUpdateError,
+    FilesystemUpdateOutcome, INSTALL_MANIFEST_FILE, PackageInstallOutcome, PackageUninstallOutcome,
+    ProcessCandidateHealthCheck, TrustedUpdatePolicy, UPDATE_HEALTH_STATE_DIR_ENV,
+    UPDATE_LOCK_FILE, UPDATE_POLICY_FILE, UPDATE_TRANSACTION_FILE, UpdateInputPaths,
+    UpdateRuntimeStatus, UpdateTransactionPhase, apply_update_package,
+    apply_update_package_with_policy, install_package_with_policy, recover_update,
+    uninstall_package, update_runtime_status,
+};
 
 /// Schema version for signed update metadata.
 pub const UPDATE_METADATA_SCHEMA_VERSION: &str = "1.0";
@@ -16,6 +32,12 @@ pub const UPDATE_METADATA_SCHEMA_VERSION: &str = "1.0";
 pub const MAX_UPDATE_METADATA_BYTES: usize = 64 * 1024;
 /// Maximum accepted update artifact size.
 pub const MAX_UPDATE_ARTIFACT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Maximum accepted artifact-specific CycloneDX SBOM size.
+pub const MAX_UPDATE_SBOM_BYTES: u64 = 64 * 1024 * 1024;
+/// Maximum accepted signed provenance bundle size.
+pub const MAX_UPDATE_PROVENANCE_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum accepted license and notice bundle size.
+pub const MAX_UPDATE_LICENSE_BUNDLE_BYTES: u64 = 128 * 1024 * 1024;
 
 const SHA256_HEX_BYTES: usize = 64;
 const PUBLIC_KEY_HEX_BYTES: usize = 64;
@@ -26,6 +48,12 @@ const MAX_HEALTH_TIMEOUT_SECONDS: u32 = 300;
 const MIN_HEALTH_TIMEOUT_SECONDS: u32 = 1;
 const UPDATE_STAGING_OVERHEAD_BYTES: u64 = 16 * 1024 * 1024;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
+const ARTIFACT_SIGNATURE_DOMAIN: &[u8] = b"rootlight.release-artifact-signature/1\0";
+const CYCLONEDX_TARGET_PROPERTY: &str = "cdx:rustc:sbom:target:triple";
+const ROOTLIGHT_SOURCE_REVISION_PROPERTY: &str = "rootlight:source:revision";
+const ROOTLIGHT_TARGET_PROPERTY: &str = "rootlight:target:triple";
+const SLSA_PROVENANCE_V1: &str = "https://slsa.dev/provenance/v1";
+const IN_TOTO_STATEMENT_V1: &str = "https://in-toto.io/Statement/v1";
 
 /// Trusted Ed25519 public key used to verify update metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +98,77 @@ impl DetachedUpdateSignature {
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 64] {
         &self.0
+    }
+}
+
+/// Detached Ed25519 signature over the domain-separated release artifact identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetachedArtifactSignature([u8; 64]);
+
+impl DetachedArtifactSignature {
+    /// Decodes an exact lowercase hexadecimal artifact signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UpdateError::InvalidArtifactSignatureEncoding`] for
+    /// non-canonical input.
+    pub fn from_hex(value: &str) -> Result<Self, UpdateError> {
+        decode_hex_array::<64>(value, SIGNATURE_HEX_BYTES)
+            .map(Self)
+            .ok_or(UpdateError::InvalidArtifactSignatureEncoding)
+    }
+
+    /// Returns the raw signature bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 64] {
+        &self.0
+    }
+}
+
+/// Signatures and trusted key that authorize one release update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateSignatures {
+    metadata: DetachedUpdateSignature,
+    artifact: DetachedArtifactSignature,
+    public_key: UpdatePublicKey,
+}
+
+impl UpdateSignatures {
+    /// Creates the signature set used by complete release verification.
+    #[must_use]
+    pub const fn new(
+        metadata: DetachedUpdateSignature,
+        artifact: DetachedArtifactSignature,
+        public_key: UpdatePublicKey,
+    ) -> Self {
+        Self {
+            metadata,
+            artifact,
+            public_key,
+        }
+    }
+}
+
+/// Bounded supporting release evidence consumed during update verification.
+pub struct UpdateSupportingEvidence<'a> {
+    sbom: &'a mut dyn Read,
+    provenance: &'a mut dyn Read,
+    license_bundle: &'a mut dyn Read,
+}
+
+impl<'a> UpdateSupportingEvidence<'a> {
+    /// Groups the artifact-specific SBOM, provenance, and license streams.
+    #[must_use]
+    pub fn new(
+        sbom: &'a mut dyn Read,
+        provenance: &'a mut dyn Read,
+        license_bundle: &'a mut dyn Read,
+    ) -> Self {
+        Self {
+            sbom,
+            provenance,
+            license_bundle,
+        }
     }
 }
 
@@ -255,12 +354,18 @@ pub enum UpdateError {
     /// The detached signature encoding is not canonical.
     #[error("update signature encoding is invalid")]
     InvalidSignatureEncoding,
+    /// The detached artifact-signature encoding is not canonical.
+    #[error("update artifact signature encoding is invalid")]
+    InvalidArtifactSignatureEncoding,
     /// The metadata exceeds its hard byte limit.
     #[error("update metadata exceeds its byte limit")]
     MetadataTooLarge,
     /// The metadata signature does not verify.
     #[error("update metadata signature is invalid")]
     InvalidSignature,
+    /// The artifact signature does not verify against the trusted update key.
+    #[error("update artifact signature is invalid")]
+    InvalidArtifactSignature,
     /// The signed JSON cannot be decoded under the strict schema.
     #[error("update metadata is malformed")]
     MalformedMetadata,
@@ -318,6 +423,167 @@ pub enum UpdateError {
     /// Artifact digest differs from signed metadata.
     #[error("update artifact digest does not match")]
     ArtifactDigestMismatch,
+    /// The artifact-specific SBOM exceeds its hard byte limit.
+    #[error("update SBOM exceeds its byte limit")]
+    SbomTooLarge,
+    /// The signed provenance bundle exceeds its hard byte limit.
+    #[error("update provenance exceeds its byte limit")]
+    ProvenanceTooLarge,
+    /// The license and notice bundle exceeds its hard byte limit.
+    #[error("update license bundle exceeds its byte limit")]
+    LicenseBundleTooLarge,
+    /// The artifact-specific SBOM could not be read.
+    #[error("update SBOM read failed")]
+    SbomRead(#[source] io::Error),
+    /// The signed provenance bundle could not be read.
+    #[error("update provenance read failed")]
+    ProvenanceRead(#[source] io::Error),
+    /// The license and notice bundle could not be read.
+    #[error("update license bundle read failed")]
+    LicenseBundleRead(#[source] io::Error),
+    /// The artifact-specific SBOM digest differs from signed metadata.
+    #[error("update SBOM digest does not match")]
+    SbomDigestMismatch,
+    /// The signed provenance digest differs from signed metadata.
+    #[error("update provenance digest does not match")]
+    ProvenanceDigestMismatch,
+    /// The license and notice digest differs from signed metadata.
+    #[error("update license bundle digest does not match")]
+    LicenseBundleDigestMismatch,
+    /// The artifact-specific CycloneDX document violates update policy.
+    #[error("update SBOM policy is not satisfied")]
+    InvalidSbom,
+    /// The signed SLSA provenance bundle violates update policy.
+    #[error("update provenance policy is not satisfied")]
+    InvalidProvenance,
+    /// The license and notice bundle violates update policy.
+    #[error("update license bundle is invalid")]
+    InvalidLicenseBundle,
+    /// Canonical metadata JSON could not be serialized.
+    #[error("update metadata serialization failed")]
+    MetadataSerialization(#[source] serde_json::Error),
+}
+
+/// Serializes validated signable metadata to the exact canonical JSON bytes.
+///
+/// Canonical bytes are compact UTF-8 JSON in [`UpdateMetadata`] field order
+/// with no trailing newline. Release signing and runtime verification must use
+/// these exact returned bytes without parsing and reserializing them.
+///
+/// # Errors
+///
+/// Returns [`UpdateError::InvalidMetadata`] for an invalid signable contract,
+/// [`UpdateError::UnsupportedSchema`] for an unsupported schema, or
+/// [`UpdateError::MetadataSerialization`] if serialization fails.
+pub fn canonical_update_metadata_bytes(metadata: &UpdateMetadata) -> Result<Vec<u8>, UpdateError> {
+    validate_metadata_contract(metadata)?;
+    let bytes = serde_json::to_vec(metadata).map_err(UpdateError::MetadataSerialization)?;
+    if bytes.is_empty() || bytes.len() > MAX_UPDATE_METADATA_BYTES {
+        return Err(UpdateError::MetadataTooLarge);
+    }
+    Ok(bytes)
+}
+
+/// Builds the canonical domain-separated message signed for exact artifact bytes.
+///
+/// The message contains the raw SHA-256 digest and unsigned 64-bit artifact
+/// length. Metadata and artifact signatures therefore remain distinct even
+/// when the same protected Ed25519 identity authorizes both.
+///
+/// # Errors
+///
+/// Returns [`UpdateError`] when the metadata contract or artifact digest is
+/// invalid.
+pub fn canonical_artifact_signature_message(
+    metadata: &UpdateMetadata,
+) -> Result<Vec<u8>, UpdateError> {
+    validate_metadata_contract(metadata)?;
+    let digest = decode_sha256(&metadata.artifact.sha256)?;
+    let mut message = Vec::with_capacity(ARTIFACT_SIGNATURE_DOMAIN.len() + 32 + 8);
+    message.extend_from_slice(ARTIFACT_SIGNATURE_DOMAIN);
+    message.extend_from_slice(&digest);
+    message.extend_from_slice(&metadata.artifact.size_bytes.to_be_bytes());
+    Ok(message)
+}
+
+/// Verifies the complete offline update evidence chain before installation.
+///
+/// This stricter production entry point verifies signed metadata, exact
+/// artifact bytes, a distinct artifact signature, the artifact-specific
+/// CycloneDX SBOM, SLSA provenance, and the license/notice bundle. Supporting
+/// artifacts are streamed under fixed caps and their digests are bound by the
+/// signed metadata.
+///
+/// # Errors
+///
+/// Returns [`UpdateError`] for any metadata, signature, artifact, supporting
+/// digest, SBOM, provenance, license, compatibility, or resource-policy
+/// failure.
+pub fn verify_update_with_evidence(
+    metadata_bytes: &[u8],
+    signatures: UpdateSignatures,
+    artifact: &mut impl Read,
+    supporting: &mut UpdateSupportingEvidence<'_>,
+    context: &UpdateContext,
+) -> Result<VerifiedUpdate, UpdateError> {
+    let verified = verify_update(
+        metadata_bytes,
+        signatures.metadata,
+        signatures.public_key,
+        artifact,
+        context,
+    )?;
+    let metadata: UpdateMetadata =
+        serde_json::from_slice(metadata_bytes).map_err(|_| UpdateError::MalformedMetadata)?;
+    let public_key = PublicKey::from_slice(signatures.public_key.as_bytes())
+        .map_err(|_| UpdateError::InvalidPublicKey)?;
+    let signature = Signature::from_slice(signatures.artifact.as_bytes())
+        .map_err(|_| UpdateError::InvalidArtifactSignatureEncoding)?;
+    let artifact_message = canonical_artifact_signature_message(&metadata)?;
+    public_key
+        .verify(&artifact_message, &signature)
+        .map_err(|_| UpdateError::InvalidArtifactSignature)?;
+
+    let sbom_bytes = read_bounded_supporting_artifact(
+        supporting.sbom,
+        MAX_UPDATE_SBOM_BYTES,
+        UpdateError::SbomRead,
+        UpdateError::SbomTooLarge,
+    )?;
+    require_supporting_digest(
+        &sbom_bytes,
+        &metadata.artifact.sbom_sha256,
+        UpdateError::SbomDigestMismatch,
+    )?;
+    let sbom_identity = validate_release_sbom(&sbom_bytes, &metadata)?;
+
+    let provenance_bytes = read_bounded_supporting_artifact(
+        supporting.provenance,
+        MAX_UPDATE_PROVENANCE_BYTES,
+        UpdateError::ProvenanceRead,
+        UpdateError::ProvenanceTooLarge,
+    )?;
+    require_supporting_digest(
+        &provenance_bytes,
+        &metadata.artifact.provenance_sha256,
+        UpdateError::ProvenanceDigestMismatch,
+    )?;
+    validate_release_provenance(&provenance_bytes, &metadata, &sbom_identity.source_revision)?;
+
+    let license_bytes = read_bounded_supporting_artifact(
+        supporting.license_bundle,
+        MAX_UPDATE_LICENSE_BUNDLE_BYTES,
+        UpdateError::LicenseBundleRead,
+        UpdateError::LicenseBundleTooLarge,
+    )?;
+    require_supporting_digest(
+        &license_bytes,
+        &metadata.artifact.license_bundle_sha256,
+        UpdateError::LicenseBundleDigestMismatch,
+    )?;
+    validate_license_bundle(&license_bytes)?;
+
+    Ok(verified)
 }
 
 /// Verifies signed metadata and a bounded artifact stream without network access.
@@ -388,33 +654,271 @@ pub fn verify_update(
     })
 }
 
+#[derive(Debug)]
+struct ReleaseSbomIdentity {
+    source_revision: String,
+}
+
+fn read_bounded_supporting_artifact(
+    reader: &mut (impl Read + ?Sized),
+    limit: u64,
+    read_error: fn(io::Error) -> UpdateError,
+    too_large: UpdateError,
+) -> Result<Vec<u8>, UpdateError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(read_error)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+        return Err(too_large);
+    }
+    Ok(bytes)
+}
+
+fn require_supporting_digest(
+    bytes: &[u8],
+    expected: &str,
+    mismatch: UpdateError,
+) -> Result<(), UpdateError> {
+    let expected = decode_sha256(expected)?;
+    let observed: [u8; 32] = Sha256::digest(bytes).into();
+    if observed != expected {
+        return Err(mismatch);
+    }
+    Ok(())
+}
+
+fn validate_release_sbom(
+    bytes: &[u8],
+    update: &UpdateMetadata,
+) -> Result<ReleaseSbomIdentity, UpdateError> {
+    let document: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| UpdateError::InvalidSbom)?;
+    if document["bomFormat"] != "CycloneDX"
+        || document["specVersion"] != "1.5"
+        || document["version"] != 1
+    {
+        return Err(UpdateError::InvalidSbom);
+    }
+    let metadata = document["metadata"]
+        .as_object()
+        .ok_or(UpdateError::InvalidSbom)?;
+    let target = update_target_triple(update)?;
+    if property_value(metadata.get("properties"), CYCLONEDX_TARGET_PROPERTY) != Some(target)
+        || property_value(metadata.get("properties"), "rootlight:build:profile") != Some("release")
+    {
+        return Err(UpdateError::InvalidSbom);
+    }
+    let source_revision = property_value(
+        metadata.get("properties"),
+        ROOTLIGHT_SOURCE_REVISION_PROPERTY,
+    )
+    .ok_or(UpdateError::InvalidSbom)?;
+    if !is_canonical_source_revision(source_revision) {
+        return Err(UpdateError::InvalidSbom);
+    }
+    let component = metadata
+        .get("component")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(UpdateError::InvalidSbom)?;
+    if component.get("name").and_then(serde_json::Value::as_str) != Some("rootlight-distribution")
+        || component.get("version").and_then(serde_json::Value::as_str)
+            != Some(update.version.as_str())
+        || property_value(component.get("properties"), ROOTLIGHT_TARGET_PROPERTY) != Some(target)
+        || property_value(
+            component.get("properties"),
+            ROOTLIGHT_SOURCE_REVISION_PROPERTY,
+        ) != Some(source_revision)
+    {
+        return Err(UpdateError::InvalidSbom);
+    }
+    let child_names = component
+        .get("components")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(UpdateError::InvalidSbom)?
+        .iter()
+        .filter_map(|child| child.get("name").and_then(serde_json::Value::as_str))
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "rootlight",
+        "rootlight-adapter-host",
+        "rootlight-daemon",
+        "rootlight-launcher",
+        "rootlight-mcp",
+        "LICENSE",
+        "NOTICE",
+    ] {
+        if !child_names.contains(required) {
+            return Err(UpdateError::InvalidSbom);
+        }
+    }
+    Ok(ReleaseSbomIdentity {
+        source_revision: source_revision.to_owned(),
+    })
+}
+
+fn property_value<'a>(
+    properties: Option<&'a serde_json::Value>,
+    expected_name: &str,
+) -> Option<&'a str> {
+    properties?
+        .as_array()?
+        .iter()
+        .find(|property| property["name"] == expected_name)?
+        .get("value")?
+        .as_str()
+}
+
+fn update_target_triple(update: &UpdateMetadata) -> Result<&'static str, UpdateError> {
+    match (update.platform.as_str(), update.architecture.as_str()) {
+        ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
+        ("linux", "aarch64") => Ok("aarch64-unknown-linux-gnu"),
+        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
+        ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc"),
+        ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu"),
+        _ => Err(UpdateError::InvalidMetadata),
+    }
+}
+
+fn is_canonical_source_revision(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_release_provenance(
+    bytes: &[u8],
+    update: &UpdateMetadata,
+    source_revision: &str,
+) -> Result<(), UpdateError> {
+    let bundle: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| UpdateError::InvalidProvenance)?;
+    let envelope = bundle
+        .get("dsseEnvelope")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(UpdateError::InvalidProvenance)?;
+    let payload = envelope
+        .get("payload")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(UpdateError::InvalidProvenance)?;
+    let payload = BASE64
+        .decode(payload.as_bytes())
+        .map_err(|_| UpdateError::InvalidProvenance)?;
+    if payload.is_empty()
+        || u64::try_from(payload.len()).unwrap_or(u64::MAX) > MAX_UPDATE_PROVENANCE_BYTES
+    {
+        return Err(UpdateError::InvalidProvenance);
+    }
+    let statement: serde_json::Value =
+        serde_json::from_slice(&payload).map_err(|_| UpdateError::InvalidProvenance)?;
+    if statement["_type"] != IN_TOTO_STATEMENT_V1
+        || statement["predicateType"] != SLSA_PROVENANCE_V1
+        || !provenance_subject_matches(&statement, update)
+        || !json_contains_exact_string(&statement["predicate"], source_revision)
+        || !contains_nonempty_array(&bundle, "tlogEntries")
+    {
+        return Err(UpdateError::InvalidProvenance);
+    }
+    Ok(())
+}
+
+fn provenance_subject_matches(statement: &serde_json::Value, update: &UpdateMetadata) -> bool {
+    statement["subject"].as_array().is_some_and(|subjects| {
+        subjects.iter().any(|subject| {
+            subject["name"] == update.artifact.file_name
+                && subject["digest"]["sha256"] == update.artifact.sha256
+        })
+    })
+}
+
+fn json_contains_exact_string(value: &serde_json::Value, expected: &str) -> bool {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_exact_string(value, expected)),
+        serde_json::Value::Object(values) => values
+            .values()
+            .any(|value| json_contains_exact_string(value, expected)),
+        serde_json::Value::String(value) => value == expected,
+        _ => false,
+    }
+}
+
+fn contains_nonempty_array(value: &serde_json::Value, key: &str) -> bool {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| contains_nonempty_array(value, key)),
+        serde_json::Value::Object(values) => {
+            values
+                .get(key)
+                .is_some_and(|value| value.as_array().is_some_and(|entries| !entries.is_empty()))
+                || values
+                    .values()
+                    .any(|value| contains_nonempty_array(value, key))
+        }
+        _ => false,
+    }
+}
+
+fn validate_license_bundle(bytes: &[u8]) -> Result<(), UpdateError> {
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| UpdateError::InvalidLicenseBundle)?;
+    if archive.is_empty() || archive.len() > 512 {
+        return Err(UpdateError::InvalidLicenseBundle);
+    }
+    let mut names = BTreeSet::new();
+    let mut uncompressed_bytes = 0_u64;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|_| UpdateError::InvalidLicenseBundle)?;
+        let name = entry.name();
+        if name.is_empty()
+            || name.contains('\\')
+            || name.starts_with('/')
+            || name
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | ".."))
+            || !names.insert(name.to_owned())
+        {
+            return Err(UpdateError::InvalidLicenseBundle);
+        }
+        if entry.is_dir()
+            || entry
+                .unix_mode()
+                .is_some_and(|mode| mode & 0o170_000 == 0o120_000)
+        {
+            return Err(UpdateError::InvalidLicenseBundle);
+        }
+        uncompressed_bytes = uncompressed_bytes
+            .checked_add(entry.size())
+            .ok_or(UpdateError::InvalidLicenseBundle)?;
+        if uncompressed_bytes > MAX_UPDATE_LICENSE_BUNDLE_BYTES {
+            return Err(UpdateError::InvalidLicenseBundle);
+        }
+    }
+    if !names.contains("LICENSE")
+        || !names.contains("NOTICE")
+        || names
+            .iter()
+            .filter(|name| name.starts_with("licenses/"))
+            .count()
+            < 4
+    {
+        return Err(UpdateError::InvalidLicenseBundle);
+    }
+    Ok(())
+}
+
 fn validate_metadata(
     metadata: &UpdateMetadata,
     context: &UpdateContext,
 ) -> Result<u64, UpdateError> {
-    if metadata.schema_version != UPDATE_METADATA_SCHEMA_VERSION {
-        return Err(UpdateError::UnsupportedSchema);
-    }
-    if !valid_label(&metadata.key_id)
-        || !valid_label(&metadata.channel)
-        || !valid_label(&metadata.platform)
-        || !valid_label(&metadata.architecture)
-        || !valid_artifact_name(&metadata.artifact.file_name)
-        || decode_sha256(&metadata.artifact.sha256).is_err()
-        || decode_sha256(&metadata.artifact.sbom_sha256).is_err()
-        || decode_sha256(&metadata.artifact.provenance_sha256).is_err()
-        || decode_sha256(&metadata.artifact.license_bundle_sha256).is_err()
-        || metadata.valid_from_unix_seconds >= metadata.expires_unix_seconds
-        || metadata.rollout_percentage == 0
-        || metadata.rollout_percentage > 100
-        || context.rollout_bucket >= 100
-        || metadata.compatibility.minimum_catalog_schema
-            > metadata.compatibility.maximum_catalog_schema
-        || metadata.compatibility.minimum_protocol_minor
-            > metadata.compatibility.maximum_protocol_minor
-        || !(MIN_HEALTH_TIMEOUT_SECONDS..=MAX_HEALTH_TIMEOUT_SECONDS)
-            .contains(&metadata.compatibility.health_timeout_seconds)
-    {
+    validate_metadata_contract(metadata)?;
+    if context.rollout_bucket >= 100 {
         return Err(UpdateError::InvalidMetadata);
     }
     if context.now_unix_seconds < metadata.valid_from_unix_seconds {
@@ -453,15 +957,8 @@ fn validate_metadata(
     {
         return Err(UpdateError::ProtocolIncompatible);
     }
-    if !metadata.compatibility.rollback_supported {
-        return Err(UpdateError::RollbackUnavailable);
-    }
     if context.rollout_bucket >= metadata.rollout_percentage {
         return Err(UpdateError::RolloutDeferred);
-    }
-    if metadata.artifact.size_bytes == 0 || metadata.artifact.size_bytes > MAX_UPDATE_ARTIFACT_BYTES
-    {
-        return Err(UpdateError::ArtifactTooLarge);
     }
 
     let required_disk_bytes = metadata
@@ -475,6 +972,45 @@ fn validate_metadata(
         return Err(UpdateError::InsufficientDisk);
     }
     Ok(required_disk_bytes)
+}
+
+fn validate_metadata_contract(metadata: &UpdateMetadata) -> Result<(), UpdateError> {
+    if metadata.schema_version != UPDATE_METADATA_SCHEMA_VERSION {
+        return Err(UpdateError::UnsupportedSchema);
+    }
+    if !valid_label(&metadata.key_id)
+        || !valid_label(&metadata.channel)
+        || !valid_label(&metadata.platform)
+        || !valid_label(&metadata.architecture)
+        || !valid_artifact_name(&metadata.artifact.file_name)
+        || decode_sha256(&metadata.artifact.sha256).is_err()
+        || decode_sha256(&metadata.artifact.sbom_sha256).is_err()
+        || decode_sha256(&metadata.artifact.provenance_sha256).is_err()
+        || decode_sha256(&metadata.artifact.license_bundle_sha256).is_err()
+        || metadata.valid_from_unix_seconds >= metadata.expires_unix_seconds
+        || metadata.rollout_percentage == 0
+        || metadata.rollout_percentage > 100
+        || metadata.compatibility.minimum_catalog_schema
+            > metadata.compatibility.maximum_catalog_schema
+        || metadata.compatibility.minimum_protocol_minor
+            > metadata.compatibility.maximum_protocol_minor
+        || !(MIN_HEALTH_TIMEOUT_SECONDS..=MAX_HEALTH_TIMEOUT_SECONDS)
+            .contains(&metadata.compatibility.health_timeout_seconds)
+    {
+        return Err(UpdateError::InvalidMetadata);
+    }
+    if !metadata.compatibility.rollback_supported {
+        return Err(UpdateError::RollbackUnavailable);
+    }
+    if metadata.artifact.size_bytes == 0 || metadata.artifact.size_bytes > MAX_UPDATE_ARTIFACT_BYTES
+    {
+        return Err(UpdateError::ArtifactTooLarge);
+    }
+    let candidate = Version::parse(&metadata.version).map_err(|_| UpdateError::InvalidMetadata)?;
+    if candidate.to_string() != metadata.version {
+        return Err(UpdateError::InvalidMetadata);
+    }
+    Ok(())
 }
 
 fn hash_exact_artifact(
@@ -697,6 +1233,7 @@ mod tests {
 
     use ed25519_compact::{KeyPair, Seed};
     use serde_json::json;
+    use zip::{ZipWriter, write::SimpleFileOptions};
 
     use super::*;
 
@@ -767,6 +1304,159 @@ mod tests {
         )
     }
 
+    struct ReleaseEvidenceFixture {
+        artifact: Vec<u8>,
+        artifact_signature: DetachedArtifactSignature,
+        context: UpdateContext,
+        license_bundle: Vec<u8>,
+        metadata: Vec<u8>,
+        metadata_signature: DetachedUpdateSignature,
+        provenance: Vec<u8>,
+        public_key: UpdatePublicKey,
+        sbom: Vec<u8>,
+    }
+
+    fn release_evidence_fixture() -> ReleaseEvidenceFixture {
+        let artifact = b"verified release artifact".to_vec();
+        let artifact_sha256 = encode_sha256(Sha256::digest(&artifact).into());
+        let source_revision = "0123456789abcdef0123456789abcdef01234567";
+        let target = "x86_64-pc-windows-msvc";
+        let sbom = serde_json::to_vec(&json!({
+            "bomFormat": "CycloneDX",
+            "components": [],
+            "dependencies": [],
+            "metadata": {
+                "component": {
+                    "bom-ref": "urn:rootlight:distribution:1.3.0:x86_64-pc-windows-msvc",
+                    "components": [
+                        {"name": "rootlight"},
+                        {"name": "rootlight-adapter-host"},
+                        {"name": "rootlight-daemon"},
+                        {"name": "rootlight-launcher"},
+                        {"name": "rootlight-mcp"},
+                        {"name": "LICENSE"},
+                        {"name": "NOTICE"}
+                    ],
+                    "name": "rootlight-distribution",
+                    "properties": [
+                        {"name": ROOTLIGHT_SOURCE_REVISION_PROPERTY, "value": source_revision},
+                        {"name": ROOTLIGHT_TARGET_PROPERTY, "value": target}
+                    ],
+                    "type": "application",
+                    "version": "1.3.0"
+                },
+                "properties": [
+                    {"name": CYCLONEDX_TARGET_PROPERTY, "value": target},
+                    {"name": "rootlight:build:profile", "value": "release"},
+                    {"name": ROOTLIGHT_SOURCE_REVISION_PROPERTY, "value": source_revision}
+                ]
+            },
+            "specVersion": "1.5",
+            "version": 1
+        }))
+        .expect("SBOM fixture serializes");
+        let statement = serde_json::to_vec(&json!({
+            "_type": IN_TOTO_STATEMENT_V1,
+            "subject": [{
+                "name": "rootlight-x86_64-pc-windows-msvc.zip",
+                "digest": {"sha256": artifact_sha256}
+            }],
+            "predicateType": SLSA_PROVENANCE_V1,
+            "predicate": {
+                "buildDefinition": {
+                    "resolvedDependencies": [{
+                        "uri": "git+https://github.com/tomasmarekk/rootlight",
+                        "digest": {"gitCommit": source_revision}
+                    }]
+                }
+            }
+        }))
+        .expect("provenance statement serializes");
+        let provenance = serde_json::to_vec(&json!({
+            "dsseEnvelope": {
+                "payload": BASE64.encode(&statement),
+                "payloadType": "application/vnd.in-toto+json",
+                "signatures": [{"keyid": "", "sig": "fixture"}]
+            },
+            "verificationMaterial": {
+                "tlogEntries": [{"logIndex": "1"}]
+            }
+        }))
+        .expect("provenance bundle serializes");
+        let license_bundle = license_bundle_fixture();
+        let metadata = UpdateMetadata {
+            schema_version: UPDATE_METADATA_SCHEMA_VERSION.to_owned(),
+            key_id: "rootlight-release-2026".to_owned(),
+            version: "1.3.0".to_owned(),
+            channel: "stable".to_owned(),
+            platform: "windows".to_owned(),
+            architecture: "x86_64".to_owned(),
+            valid_from_unix_seconds: 1_000,
+            expires_unix_seconds: 3_000,
+            rollout_percentage: 100,
+            artifact: ArtifactMetadata {
+                file_name: "rootlight-x86_64-pc-windows-msvc.zip".to_owned(),
+                sha256: artifact_sha256,
+                size_bytes: u64::try_from(artifact.len()).expect("artifact length fits"),
+                sbom_sha256: encode_sha256(Sha256::digest(&sbom).into()),
+                provenance_sha256: encode_sha256(Sha256::digest(&provenance).into()),
+                license_bundle_sha256: encode_sha256(Sha256::digest(&license_bundle).into()),
+                reproducibility: ReproducibilityLevel::BitForBit,
+            },
+            compatibility: UpdateCompatibility {
+                minimum_catalog_schema: 2,
+                maximum_catalog_schema: 4,
+                protocol_major: 1,
+                minimum_protocol_minor: 6,
+                maximum_protocol_minor: 8,
+                migration_required_bytes: 4_096,
+                rollback_supported: true,
+                health_timeout_seconds: 30,
+            },
+        };
+        let metadata_bytes =
+            canonical_update_metadata_bytes(&metadata).expect("metadata fixture is canonical");
+        let key_pair = KeyPair::from_seed(Seed::new([7_u8; 32]));
+        let metadata_signature = key_pair.sk.sign(&metadata_bytes, None);
+        let artifact_message =
+            canonical_artifact_signature_message(&metadata).expect("artifact message is canonical");
+        let artifact_signature = key_pair.sk.sign(&artifact_message, None);
+        ReleaseEvidenceFixture {
+            artifact,
+            artifact_signature: DetachedArtifactSignature(*artifact_signature),
+            context: context(),
+            license_bundle,
+            metadata: metadata_bytes,
+            metadata_signature: DetachedUpdateSignature(*metadata_signature),
+            provenance,
+            public_key: UpdatePublicKey(*key_pair.pk),
+            sbom,
+        }
+    }
+
+    fn license_bundle_fixture() -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        for name in [
+            "LICENSE",
+            "NOTICE",
+            "licenses/tree-sitter-cpp-LICENSE",
+            "licenses/tree-sitter-java-LICENSE",
+            "licenses/tree-sitter-kotlin-LICENSE",
+            "licenses/tree-sitter-typescript-LICENSE",
+        ] {
+            writer
+                .start_file(name, options)
+                .expect("license entry starts");
+            std::io::Write::write_all(&mut writer, b"fixture license\n")
+                .expect("license entry writes");
+        }
+        writer
+            .finish()
+            .expect("license fixture finishes")
+            .into_inner()
+    }
+
     #[test]
     fn exact_signed_artifact_produces_a_side_by_side_plan() {
         let artifact = b"verified release artifact";
@@ -793,6 +1483,104 @@ mod tests {
             ]
         );
         assert!(verified.plan.required_disk_bytes > artifact.len() as u64);
+    }
+
+    #[test]
+    fn complete_release_evidence_chain_verifies_before_install() {
+        let fixture = release_evidence_fixture();
+        let mut artifact = Cursor::new(&fixture.artifact);
+        let mut sbom = Cursor::new(&fixture.sbom);
+        let mut provenance = Cursor::new(&fixture.provenance);
+        let mut licenses = Cursor::new(&fixture.license_bundle);
+        let mut supporting =
+            UpdateSupportingEvidence::new(&mut sbom, &mut provenance, &mut licenses);
+
+        let verified = verify_update_with_evidence(
+            &fixture.metadata,
+            UpdateSignatures::new(
+                fixture.metadata_signature,
+                fixture.artifact_signature,
+                fixture.public_key,
+            ),
+            &mut artifact,
+            &mut supporting,
+            &fixture.context,
+        )
+        .expect("complete release evidence verifies");
+
+        assert_eq!(verified.version, "1.3.0");
+        assert_eq!(
+            verified.artifact_sha256,
+            encode_sha256(Sha256::digest(&fixture.artifact).into())
+        );
+    }
+
+    #[test]
+    fn artifact_signature_and_supporting_digests_are_mandatory() {
+        let fixture = release_evidence_fixture();
+        let mut artifact = Cursor::new(&fixture.artifact);
+        let mut sbom = Cursor::new(&fixture.sbom);
+        let mut provenance = Cursor::new(&fixture.provenance);
+        let mut licenses = Cursor::new(&fixture.license_bundle);
+        let mut supporting =
+            UpdateSupportingEvidence::new(&mut sbom, &mut provenance, &mut licenses);
+        assert!(matches!(
+            verify_update_with_evidence(
+                &fixture.metadata,
+                UpdateSignatures::new(
+                    fixture.metadata_signature,
+                    DetachedArtifactSignature([0_u8; 64]),
+                    fixture.public_key,
+                ),
+                &mut artifact,
+                &mut supporting,
+                &fixture.context,
+            ),
+            Err(UpdateError::InvalidArtifactSignature)
+        ));
+
+        let fixture = release_evidence_fixture();
+        let mut tampered_sbom = fixture.sbom.clone();
+        tampered_sbom[0] ^= 1;
+        let mut artifact = Cursor::new(&fixture.artifact);
+        let mut sbom = Cursor::new(tampered_sbom);
+        let mut provenance = Cursor::new(&fixture.provenance);
+        let mut licenses = Cursor::new(&fixture.license_bundle);
+        let mut supporting =
+            UpdateSupportingEvidence::new(&mut sbom, &mut provenance, &mut licenses);
+        assert!(matches!(
+            verify_update_with_evidence(
+                &fixture.metadata,
+                UpdateSignatures::new(
+                    fixture.metadata_signature,
+                    fixture.artifact_signature,
+                    fixture.public_key,
+                ),
+                &mut artifact,
+                &mut supporting,
+                &fixture.context,
+            ),
+            Err(UpdateError::SbomDigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn malformed_release_policy_documents_are_rejected() {
+        let fixture = release_evidence_fixture();
+        let metadata: UpdateMetadata =
+            serde_json::from_slice(&fixture.metadata).expect("metadata fixture decodes");
+        assert!(matches!(
+            validate_release_sbom(b"{}", &metadata),
+            Err(UpdateError::InvalidSbom)
+        ));
+        assert!(matches!(
+            validate_release_provenance(b"{}", &metadata, "0".repeat(40).as_str()),
+            Err(UpdateError::InvalidProvenance)
+        ));
+        assert!(matches!(
+            validate_license_bundle(b"not-a-zip"),
+            Err(UpdateError::InvalidLicenseBundle)
+        ));
     }
 
     #[test]

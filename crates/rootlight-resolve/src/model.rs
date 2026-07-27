@@ -222,6 +222,8 @@ pub enum ResolutionSignal {
     SameFile,
     /// An import-compatible declaration is present in the validated generation.
     ImportableDeclaration,
+    /// A syntactically scoped call has one compatible same-name target.
+    UniqueScopedCallCandidate,
     /// The entity kind is compatible with the occurrence role.
     CompatibleKind,
 }

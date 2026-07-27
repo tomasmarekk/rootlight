@@ -3,6 +3,7 @@ members = [
     "apps/rootlight",
     "apps/rootlight-adapter-host",
     "apps/rootlight-daemon",
+    "apps/rootlight-launcher",
     "apps/rootlight-mcp",
     "crates/rootlight-adapter-sdk",
     "crates/rootlight-adapter-treesitter",
@@ -55,6 +56,7 @@ cargo_metadata = { version = "0.23.1", default-features = false }
 data-encoding = { version = "2.9.0", default-features = false, features = ["std"] }
 directories = { version = "6.0.0", default-features = false }
 ed25519-compact = { version = "=2.3.1", default-features = false }
+fs2 = { version = "=0.4.3", default-features = false }
 getrandom = { version = "0.3.4", default-features = false }
 ignore = { version = "0.4.29", default-features = false }
 interprocess = { version = "=2.2.3", default-features = false, features = ["tokio"] }
@@ -68,6 +70,7 @@ prost-types = { version = "0.14.4", default-features = false, features = ["std"]
 protoc-bin-vendored = { version = "3.2.0", default-features = false }
 protobuf = { version = "=3.7.2", default-features = false }
 rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled", "column_decltype", "hooks", "limits", "modern_sqlite"] }
+rustix = { version = "=1.1.4", default-features = false, features = ["fs", "process"] }
 schemars = { version = "1.2.1", default-features = false, features = ["derive", "std"] }
 scip = { version = "=0.9.0" }
 semver = { version = "1.0.28", default-features = false, features = ["std"] }
@@ -100,6 +103,7 @@ unicode-normalization = { version = "=0.1.25", default-features = false, feature
 widestring = { version = "1.2.1", default-features = false, features = ["std"] }
 windows = { version = "=0.61.3", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
 windows-permissions = { version = "=0.2.4", default-features = false }
+winx = { version = "=0.36.4", default-features = false }
 winapi-util = { version = "=0.1.11", default-features = false }
 yaml-rust2 = { version = "0.10.4", default-features = false }
 zip = { version = "=2.4.2", default-features = false }
