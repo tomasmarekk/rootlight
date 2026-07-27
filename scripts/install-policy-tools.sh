@@ -75,6 +75,7 @@ install_binary \
 
 geiger_archive="$temporary_root/cargo-geiger.crate"
 geiger_source="$temporary_root/cargo-geiger"
+geiger_patch="$(pwd -P)/scripts/cargo-geiger-0.13.0-package-id.patch"
 curl \
     --fail \
     --silent \
@@ -92,11 +93,19 @@ tar -xzf "$geiger_archive" -C "$geiger_source" --strip-components=1
 printf '%s  %s\n' \
     e87104c9738f274e7f20e294027c863556bc9e41a4f60044f8b68898ba97a477 \
     scripts/cargo-geiger-0.13.0.lock | sha256sum --check --status
+printf '%s  %s\n' \
+    0e32a439da0c2bf2954f43a061771dd9d21cd9c11edd37695b57f5055f28f9fb \
+    "$geiger_patch" | sha256sum --check --status
 cp scripts/cargo-geiger-0.13.0.lock "$geiger_source/Cargo.lock"
+git -C "$geiger_source" apply --check --unidiff-zero --whitespace=error-all "$geiger_patch"
+git -C "$geiger_source" apply --unidiff-zero --whitespace=error-all "$geiger_patch"
 cargo install \
     --locked \
     --path "$geiger_source" \
-    --root "$(dirname "$install_root")"
+    --root "$temporary_root/cargo-geiger-install"
+install -m 0755 \
+    "$temporary_root/cargo-geiger-install/bin/cargo-geiger" \
+    "$install_root/cargo-geiger"
 
 geiger_binary="$install_root/cargo-geiger"
 geiger_version="$("$geiger_binary" --version)"
@@ -104,7 +113,7 @@ if [[ "$geiger_version" != "cargo-geiger 0.13.0" ]]; then
     printf 'unsupported installed cargo-geiger version: %s\n' "$geiger_version" >&2
     exit 1
 fi
-python - \
+python3 - \
     "$geiger_binary" \
     "$install_root/cargo-geiger.identity.json" \
     "$geiger_version" <<'PY'
@@ -132,6 +141,10 @@ identity = {
     "lockfile": "scripts/cargo-geiger-0.13.0.lock",
     "lockfile_sha256": (
         "e87104c9738f274e7f20e294027c863556bc9e41a4f60044f8b68898ba97a477"
+    ),
+    "patch": "scripts/cargo-geiger-0.13.0-package-id.patch",
+    "patch_sha256": (
+        "0e32a439da0c2bf2954f43a061771dd9d21cd9c11edd37695b57f5055f28f9fb"
     ),
 }
 identity_path = pathlib.Path(sys.argv[2])

@@ -1,0 +1,88 @@
+diff --git a/src/graph.rs b/src/graph.rs
+index e5eeb71..3f62af8 100644
+--- a/src/graph.rs
++++ b/src/graph.rs
+@@ -8,0 +9 @@ use crate::mapping::{
++    ToCargoMetadataPackage,
+@@ -14 +14,0 @@ use krates::cm::{Dependency, DependencyKind, Package, PackageId};
+-use krates::{Kid, Node};
+@@ -110 +109,0 @@ fn add_package_dependencies_to_graph(
+-    let kid: Kid = package_id.clone().into();
+@@ -112,2 +111 @@ fn add_package_dependencies_to_graph(
+-    let krates_node_option =
+-        cargo_metadata_parameters.krates.node_for_kid(&kid);
++    let package = package_id.to_cargo_metadata_package(cargo_metadata_parameters.metadata);
+@@ -119,2 +117,2 @@ fn add_package_dependencies_to_graph(
+-    match (krates_node_option, dep_not_replaced_option) {
+-        (Some(Node::Krate { krate, .. }), Some(dependencies)) => {
++    match (package, dep_not_replaced_option) {
++        (Some(krate), Some(dependencies)) => {
+@@ -126 +124 @@ fn add_package_dependencies_to_graph(
+-                    krate,
++                    &krate,
+diff --git a/src/mapping.rs b/src/mapping.rs
+index 97e736e..fd3c881 100644
+--- a/src/mapping.rs
++++ b/src/mapping.rs
+@@ -5 +5 @@ mod metadata;
+-use metadata::package_id::ToCargoMetadataPackage;
++pub(crate) use metadata::package_id::ToCargoMetadataPackage;
+diff --git a/src/mapping/krates_mapping.rs b/src/mapping/krates_mapping.rs
+index 983af76..de41217 100644
+--- a/src/mapping/krates_mapping.rs
++++ b/src/mapping/krates_mapping.rs
+@@ -2,0 +3 @@ use crate::mapping::QueryResolve;
++use krates::semver::Version;
+@@ -21,4 +22,2 @@ impl GetPackage for Krates {
+-        let node = self.node_for_kid(&kid)?;
+-        match node {
+-            Node::Krate { krate, .. } => Some(krate),
+-            Node::Feature { .. } => None,
++        if let Some(Node::Krate { krate, .. }) = self.node_for_kid(&kid) {
++            return Some(krate);
+@@ -25,0 +25,11 @@ impl GetPackage for Krates {
++
++        // Embedded Cargo and cargo_metadata can encode the same registry source
++        // differently. Fall back only when name and version select one node.
++        let (_, package) = package_id.repr.rsplit_once('#')?;
++        let (name, version) = package.rsplit_once('@')?;
++        let version = Version::parse(version).ok()?;
++        let mut candidates = self
++            .krates_by_name(name)
++            .filter(|candidate| candidate.krate.version == version);
++        let package = candidates.next()?.krate;
++        candidates.next().is_none().then_some(package)
+diff --git a/src/mapping/metadata/package_id.rs b/src/mapping/metadata/package_id.rs
+index 2c71342..2a12e22 100644
+--- a/src/mapping/metadata/package_id.rs
++++ b/src/mapping/metadata/package_id.rs
+@@ -22,0 +23,11 @@ impl GetPackageIdInformation for PackageId {
++            .or_else(|| {
++                // Cargo 1.77+ encodes package IDs as `<source>#<name>@<version>`.
++                let (_, package) = self.repr.rsplit_once('#')?;
++                let (name, version) = package.rsplit_once('@')?;
++                if name.is_empty() {
++                    return None;
++                }
++                Version::parse(version)
++                    .ok()
++                    .map(|version| (name.to_owned(), version))
++            })
+@@ -55 +66,8 @@ impl ToCargoMetadataPackage for PackageId {
+-        metadata
++        if let Some(package) = metadata.packages.iter().find(|package| package.id == *self) {
++            return Some(package.clone());
++        }
++
++        let (_, package) = self.repr.rsplit_once('#')?;
++        let (name, version) = package.rsplit_once('@')?;
++        let version = Version::parse(version).ok()?;
++        let mut candidates = metadata
+@@ -58,4 +76,3 @@ impl ToCargoMetadataPackage for PackageId {
+-            .filter(|p| p.id == *self)
+-            .cloned()
+-            .collect::<Vec<Package>>()
+-            .pop()
++            .filter(|package| package.name == name && package.version == version);
++        let package = candidates.next()?.clone();
++        candidates.next().is_none().then_some(package)

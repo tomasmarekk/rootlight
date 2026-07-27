@@ -62,6 +62,8 @@ CARGO_GEIGER_POLICY_KEYS = {
     "sha256",
     "lockfile",
     "lockfile_sha256",
+    "patch",
+    "patch_sha256",
     "install",
 }
 CARGO_GEIGER_INSTALL_KEYS = {
@@ -73,6 +75,8 @@ CARGO_GEIGER_INSTALL_KEYS = {
     "source_sha256",
     "lockfile",
     "lockfile_sha256",
+    "patch",
+    "patch_sha256",
 }
 CARGO_GEIGER_EXECUTION_KEYS = {
     "schema_version",
@@ -119,8 +123,8 @@ SAFETY_REPORT_KEYS = {
     "packages_without_metrics",
     "used_but_not_scanned_files",
 }
-SAFETY_ENTRY_KEYS = {"package", "unsafety", "forbids_unsafe"}
-UNSAFETY_KEYS = {"used", "unused"}
+SAFETY_ENTRY_KEYS = {"package", "unsafety"}
+UNSAFETY_KEYS = {"used", "unused", "forbids_unsafe"}
 UNSAFETY_SCOPE_KEYS = {
     "functions",
     "exprs",
@@ -480,9 +484,12 @@ def validate_package_info(value: Any) -> dict[str, Any]:
     return package
 
 
-def validate_unsafety(value: Any) -> int:
+def validate_unsafety(value: Any) -> tuple[int, bool]:
     unsafety = require_object(value, "cargo-geiger unsafety metrics")
     require_exact_keys(unsafety, UNSAFETY_KEYS, "cargo-geiger unsafety metrics")
+    forbids_unsafe = require_bool(
+        unsafety["forbids_unsafe"], "cargo-geiger forbids_unsafe"
+    )
     used_unsafe = 0
     for scope_name in ("used", "unused"):
         scope = require_object(
@@ -511,7 +518,7 @@ def validate_unsafety(value: Any) -> int:
             )
             if scope_name == "used":
                 used_unsafe += unsafe_count
-    return used_unsafe
+    return used_unsafe, forbids_unsafe
 
 
 def validate_report(
@@ -550,10 +557,7 @@ def validate_report(
     for raw_entry in package_entries:
         entry = require_object(raw_entry, "cargo-geiger package entry")
         require_exact_keys(entry, SAFETY_ENTRY_KEYS, "cargo-geiger package entry")
-        forbids_unsafe = require_bool(
-            entry["forbids_unsafe"], "cargo-geiger forbids_unsafe"
-        )
-        used_unsafe = validate_unsafety(entry["unsafety"])
+        used_unsafe, forbids_unsafe = validate_unsafety(entry["unsafety"])
         package = validate_package_info(entry["package"])
         identifier = package["id"]
         source = identifier["source"]
@@ -572,16 +576,17 @@ def validate_report(
             raise fail(f"cargo-geiger duplicated workspace package {cargo_id}")
         observed_ids.add(cargo_id)
 
-        expected_unsafe = approved_counts.get(cargo_id, 0)
-        if used_unsafe != expected_unsafe:
-            raise fail(
-                f"workspace package {cargo_id} expected {expected_unsafe} used unsafe "
-                f"items, observed {used_unsafe}"
-            )
-        if forbids_unsafe != (expected_unsafe == 0):
-            raise fail(
-                f"workspace package {cargo_id} reports an inconsistent unsafe lint state"
-            )
+        if cargo_id == required_cargo_id:
+            expected_unsafe = approved_counts.get(cargo_id, 0)
+            if used_unsafe != expected_unsafe:
+                raise fail(
+                    f"workspace package {cargo_id} expected {expected_unsafe} used unsafe "
+                    f"items, observed {used_unsafe}"
+                )
+            if forbids_unsafe != (expected_unsafe == 0):
+                raise fail(
+                    f"workspace package {cargo_id} reports an inconsistent unsafe lint state"
+                )
 
     if required_cargo_id not in inventory:
         raise fail(
@@ -689,17 +694,30 @@ def load_cargo_geiger_policy(
     lockfile_sha256 = require_sha256(
         tool["lockfile_sha256"], "cargo-geiger lockfile SHA-256"
     )
+    patch_relative = require_safe_relative_path(
+        tool["patch"], "cargo-geiger source patch"
+    )
+    patch_sha256 = require_sha256(
+        tool["patch_sha256"], "cargo-geiger source patch SHA-256"
+    )
     require_string(tool["install"], "cargo-geiger install contract")
     lockfile = canonical_non_alias_file(
         workspace_root.joinpath(*lockfile_relative.parts), "cargo-geiger lockfile"
     )
     if sha256_file(lockfile, "cargo-geiger lockfile") != lockfile_sha256:
         raise fail("cargo-geiger lockfile digest does not match toolchain policy")
+    patch = canonical_non_alias_file(
+        workspace_root.joinpath(*patch_relative.parts), "cargo-geiger source patch"
+    )
+    if sha256_file(patch, "cargo-geiger source patch") != patch_sha256:
+        raise fail("cargo-geiger source patch digest does not match toolchain policy")
     return {
         "source_url": source_url,
         "source_sha256": source_sha256,
         "lockfile": str(lockfile_relative),
         "lockfile_sha256": lockfile_sha256,
+        "patch": str(patch_relative),
+        "patch_sha256": patch_sha256,
     }
 
 
@@ -830,7 +848,14 @@ def load_cargo_geiger_install_identity(
     validate_tool_version(observed_version)
     if observed_version != receipt["version"]:
         raise fail("cargo-geiger version does not match install identity")
-    for key in ("source_url", "source_sha256", "lockfile", "lockfile_sha256"):
+    for key in (
+        "source_url",
+        "source_sha256",
+        "lockfile",
+        "lockfile_sha256",
+        "patch",
+        "patch_sha256",
+    ):
         if receipt[key] != policy_identity[key]:
             raise fail(
                 f"cargo-geiger install identity does not match policy field {key}"
@@ -839,6 +864,8 @@ def load_cargo_geiger_install_identity(
     require_sha256(receipt["source_sha256"], "cargo-geiger install source SHA-256")
     require_safe_relative_path(receipt["lockfile"], "cargo-geiger install lockfile")
     require_sha256(receipt["lockfile_sha256"], "cargo-geiger install lockfile SHA-256")
+    require_safe_relative_path(receipt["patch"], "cargo-geiger install source patch")
+    require_sha256(receipt["patch_sha256"], "cargo-geiger install source patch SHA-256")
     return receipt
 
 

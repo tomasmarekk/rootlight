@@ -652,6 +652,29 @@ fn validate_toolchain_policy(root: &Path, policy: &ToolchainPolicy) -> Result<()
                 item.name.clone(),
             ));
         }
+        if let Some(patch) = &item.patch {
+            let Some(expected) = &item.patch_sha256 else {
+                return Err(PolicyError::MissingToolchainPatchDigest(item.name.clone()));
+            };
+            validate_sha256(expected, &item.name)?;
+            let path = root.join(patch);
+            let bytes = fs::read(&path).map_err(|source| PolicyError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            let observed = sha256_hex(&bytes);
+            if observed != *expected {
+                return Err(PolicyError::ToolchainPatchDigest {
+                    name: item.name.clone(),
+                    expected: expected.clone(),
+                    observed,
+                });
+            }
+        } else if item.patch_sha256.is_some() {
+            return Err(PolicyError::UnexpectedToolchainPatchDigest(
+                item.name.clone(),
+            ));
+        }
     }
     if policy.inputs.is_empty() || policy.tools.is_empty() {
         return Err(PolicyError::EmptyToolchainPolicy);
@@ -1932,6 +1955,10 @@ struct ToolchainItem {
     lockfile: Option<PathBuf>,
     #[serde(default)]
     lockfile_sha256: Option<String>,
+    #[serde(default)]
+    patch: Option<PathBuf>,
+    #[serde(default)]
+    patch_sha256: Option<String>,
     #[serde(default, rename = "version")]
     _version: Option<String>,
     #[serde(default, rename = "revision")]
@@ -2042,6 +2069,16 @@ pub(crate) enum PolicyError {
     UnexpectedToolchainLockDigest(String),
     #[error("POLICY_TOOLCHAIN_LOCK: {name} expected {expected}, observed {observed}")]
     ToolchainLockDigest {
+        name: String,
+        expected: String,
+        observed: String,
+    },
+    #[error("POLICY_TOOLCHAIN_PATCH: {0} is missing its patch digest")]
+    MissingToolchainPatchDigest(String),
+    #[error("POLICY_TOOLCHAIN_PATCH: {0} has a digest without a patch")]
+    UnexpectedToolchainPatchDigest(String),
+    #[error("POLICY_TOOLCHAIN_PATCH: {name} expected {expected}, observed {observed}")]
+    ToolchainPatchDigest {
         name: String,
         expected: String,
         observed: String,

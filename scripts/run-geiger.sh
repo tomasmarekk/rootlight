@@ -5,6 +5,18 @@
 set -euo pipefail
 
 export CARGO_BUILD_JOBS=1
+# Embedded Cargo may execute rustc from dependency source directories that
+# contain their own toolchain files. Keep every scan on the reviewed toolchain.
+pinned_toolchain="$(
+    python3 -c \
+        'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"])'
+)"
+readonly pinned_toolchain
+if [[ ! "$pinned_toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf 'unsupported pinned Rust toolchain: %s\n' "$pinned_toolchain" >&2
+    exit 1
+fi
+export RUSTUP_TOOLCHAIN="$pinned_toolchain"
 if (( $# < 1 || $# > 2 )); then
     printf 'usage: %s ABSOLUTE_CARGO_GEIGER [OUTPUT_ROOT]\n' "$0" >&2
     exit 2
@@ -15,7 +27,7 @@ output_root="${2:-artifacts/geiger}"
 rm -rf "$output_root"
 mkdir -p "$output_root"
 execution_identity="$output_root/cargo-geiger.execution.json"
-python scripts/validate-geiger.py preflight \
+python3 scripts/validate-geiger.py preflight \
     --trusted-cargo-geiger "$trusted_geiger" \
     --cargo-config .cargo/config.toml \
     --unsafe-policy policy/unsafe.toml \
@@ -23,7 +35,7 @@ python scripts/validate-geiger.py preflight \
     --execution-identity "$execution_identity"
 
 cargo metadata --locked --no-deps --format-version 1 > "$output_root/metadata.json"
-python - \
+python3 - \
     "$output_root/metadata.json" \
     "$output_root/workspace-packages.json" \
     "$output_root/workspace-packages.tsv" <<'PY'
@@ -84,13 +96,13 @@ pathlib.Path(sys.argv[3]).write_text(
 PY
 rm "$output_root/metadata.json"
 
-python scripts/test-validate-geiger.py
+python3 scripts/test-validate-geiger.py
 
 while IFS=$'\t' read -r cargo_id package version manifest; do
     report="$output_root/$package-$version.report.json"
     log="$output_root/$package-$version.log"
     evidence="$output_root/$package-$version.evidence.json"
-    python scripts/validate-geiger.py scan \
+    python3 scripts/validate-geiger.py scan \
         --trusted-cargo-geiger "$trusted_geiger" \
         --cargo-config .cargo/config.toml \
         --unsafe-policy policy/unsafe.toml \
@@ -99,7 +111,7 @@ while IFS=$'\t' read -r cargo_id package version manifest; do
         --manifest "$manifest" \
         --report "$report" \
         --log "$log"
-    python scripts/validate-geiger.py prepare \
+    python3 scripts/validate-geiger.py prepare \
         --trusted-cargo-geiger "$trusted_geiger" \
         --required-workspace-package-id "$cargo_id" \
         --workspace-inventory "$output_root/workspace-packages.json" \
@@ -111,7 +123,7 @@ while IFS=$'\t' read -r cargo_id package version manifest; do
         --execution-identity "$execution_identity" \
         --report "$report" \
         --evidence-envelope "$evidence"
-    python scripts/validate-geiger.py validate \
+    python3 scripts/validate-geiger.py validate \
         --trusted-cargo-geiger "$trusted_geiger" \
         --required-workspace-package-id "$cargo_id" \
         --workspace-inventory "$output_root/workspace-packages.json" \

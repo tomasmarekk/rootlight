@@ -85,6 +85,13 @@ class GeigerValidationTests(unittest.TestCase):
         self.geiger_lock_sha256 = hashlib.sha256(
             self.geiger_lock.read_bytes()
         ).hexdigest()
+        self.geiger_patch = (
+            self.root / "scripts" / "cargo-geiger-0.13.0-package-id.patch"
+        )
+        self.geiger_patch.write_text("reviewed package ID patch\n", encoding="utf-8")
+        self.geiger_patch_sha256 = hashlib.sha256(
+            self.geiger_patch.read_bytes()
+        ).hexdigest()
         self.source_sha256 = "a" * 64
         self.toolchain_policy = self.root / "policy" / "toolchain.toml"
         self.toolchain_policy.write_text(
@@ -100,6 +107,8 @@ class GeigerValidationTests(unittest.TestCase):
                     f'sha256 = "{self.source_sha256}"',
                     'lockfile = "scripts/cargo-geiger-0.13.0.lock"',
                     f'lockfile_sha256 = "{self.geiger_lock_sha256}"',
+                    'patch = "scripts/cargo-geiger-0.13.0-package-id.patch"',
+                    f'patch_sha256 = "{self.geiger_patch_sha256}"',
                     'install = "verified source install"',
                     "",
                 )
@@ -124,6 +133,8 @@ class GeigerValidationTests(unittest.TestCase):
                     "source_sha256": self.source_sha256,
                     "lockfile": "scripts/cargo-geiger-0.13.0.lock",
                     "lockfile_sha256": self.geiger_lock_sha256,
+                    "patch": "scripts/cargo-geiger-0.13.0-package-id.patch",
+                    "patch_sha256": self.geiger_patch_sha256,
                 },
                 indent=2,
                 sort_keys=True,
@@ -212,8 +223,8 @@ class GeigerValidationTests(unittest.TestCase):
                     "unsafety": {
                         "used": copy.deepcopy(scope),
                         "unused": copy.deepcopy(scope),
+                        "forbids_unsafe": True,
                     },
-                    "forbids_unsafe": True,
                 }
             ],
             "packages_without_metrics": [],
@@ -277,7 +288,7 @@ class GeigerValidationTests(unittest.TestCase):
     def test_enabled_boundary_requires_the_exact_full_report_count(self) -> None:
         report = self.report()
         entry = report["packages"][0]
-        entry["forbids_unsafe"] = False
+        entry["unsafety"]["forbids_unsafe"] = False
         entry["unsafety"]["used"]["exprs"]["unsafe_"] = 1
 
         self.assertEqual(
@@ -297,6 +308,46 @@ class GeigerValidationTests(unittest.TestCase):
                 self.cargo_id,
                 self.inventory,
                 {self.cargo_id: 1},
+                VALIDATOR.SUPPORTED_CARGO_GEIGER_VERSION,
+            )
+
+    def test_dependency_counts_are_deferred_to_their_authoritative_report(self) -> None:
+        dependency_root = self.root / "dependency"
+        dependency_root.mkdir()
+        dependency_id = f"path+{dependency_root.as_uri()}#dependency@1.0.0"
+        dependency = VALIDATOR.WorkspacePackage(
+            cargo_id=dependency_id,
+            name="dependency",
+            version="1.0.0",
+            manifest=dependency_root / "Cargo.toml",
+        )
+        inventory = {**self.inventory, dependency_id: dependency}
+        report = self.report()
+        dependency_entry = copy.deepcopy(report["packages"][0])
+        dependency_entry["package"]["id"] = {
+            "name": "dependency",
+            "version": "1.0.0",
+            "source": {"Path": f"{dependency_root.as_uri()}%231.0.0"},
+        }
+        report["packages"].append(dependency_entry)
+        approved = {dependency_id: 7}
+
+        self.assertEqual(
+            VALIDATOR.validate_report(
+                report,
+                self.cargo_id,
+                inventory,
+                approved,
+                VALIDATOR.SUPPORTED_CARGO_GEIGER_VERSION,
+            ),
+            2,
+        )
+        with self.assertRaisesRegex(ValueError, "expected 7 used unsafe items"):
+            VALIDATOR.validate_report(
+                report,
+                dependency_id,
+                inventory,
+                approved,
                 VALIDATOR.SUPPORTED_CARGO_GEIGER_VERSION,
             )
 
@@ -389,12 +440,23 @@ class GeigerValidationTests(unittest.TestCase):
 
     def test_entry_security_keys_must_be_present_typed_and_exact(self) -> None:
         mutations = (
-            ("missing forbids", lambda entry: entry.pop("forbids_unsafe")),
-            ("null forbids", lambda entry: entry.update(forbids_unsafe=None)),
-            ("string forbids", lambda entry: entry.update(forbids_unsafe="true")),
+            (
+                "missing forbids",
+                lambda entry: entry["unsafety"].pop("forbids_unsafe"),
+            ),
+            (
+                "null forbids",
+                lambda entry: entry["unsafety"].update(forbids_unsafe=None),
+            ),
+            (
+                "string forbids",
+                lambda entry: entry["unsafety"].update(forbids_unsafe="true"),
+            ),
             (
                 "renamed forbids",
-                lambda entry: entry.update(forbidsUnsafe=entry.pop("forbids_unsafe")),
+                lambda entry: entry["unsafety"].update(
+                    forbidsUnsafe=entry["unsafety"].pop("forbids_unsafe")
+                ),
             ),
             ("missing unsafety", lambda entry: entry.pop("unsafety")),
             ("null unsafety", lambda entry: entry.update(unsafety=None)),
@@ -638,6 +700,11 @@ class GeigerValidationTests(unittest.TestCase):
 
     def test_tool_lock_mutation_fails_closed(self) -> None:
         self.geiger_lock.write_text("version = 4\n# mutated\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "digest does not match"):
+            self.build_envelope()
+
+    def test_tool_patch_mutation_fails_closed(self) -> None:
+        self.geiger_patch.write_text("mutated package ID patch\n", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "digest does not match"):
             self.build_envelope()
 
