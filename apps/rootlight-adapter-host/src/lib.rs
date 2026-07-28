@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+mod process;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use rootlight_cancel::{Cancellation, Cancelled};
@@ -26,6 +28,8 @@ use rootlight_protocol::{
     },
 };
 use serde::Serialize;
+
+pub use process::{IsolatedProjectAnalysis, execute_isolated_project_adapter};
 
 const NORMALIZED_IR_CAPABILITY: &str = "normalized_ir";
 const PROJECT_NORMALIZED_IR_CAPABILITY: &str = "project_normalized_ir";
@@ -936,6 +940,18 @@ pub enum AdapterHostError {
     /// Isolation evidence could not be serialized.
     #[error("adapter isolation evidence encoding failed")]
     Encode,
+    /// The native isolated process could not be created or controlled.
+    #[error("adapter process isolation failed")]
+    Process,
+    /// A bounded adapter pipe or worker thread failed.
+    #[error("adapter process I/O failed")]
+    ProcessIo,
+    /// The isolated adapter exceeded its wall-time limit.
+    #[error("adapter process wall-time limit exceeded")]
+    ProcessTimeout,
+    /// The isolated adapter exited unsuccessfully or emitted diagnostics.
+    #[error("adapter process failed")]
+    ProcessFailed,
 }
 
 #[cfg(test)]
