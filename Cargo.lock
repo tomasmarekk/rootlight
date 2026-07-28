@@ -1848,6 +1848,7 @@ dependencies = [
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-protocol",
+ "rootlight-sandbox",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

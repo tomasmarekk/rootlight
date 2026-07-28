@@ -144,6 +144,55 @@ impl IsolationReport {
         }
     }
 
+    /// Converts enforcement evidence from an exact live Windows process.
+    #[must_use]
+    pub fn from_windows_process(report: &rootlight_sandbox::AdapterIsolationReport) -> Self {
+        use rootlight_sandbox::AdapterControl;
+
+        let controls = [
+            (
+                SandboxControl::FilesystemView,
+                AdapterControl::FilesystemView,
+            ),
+            (
+                SandboxControl::TemporaryDirectory,
+                AdapterControl::TemporaryDirectory,
+            ),
+            (SandboxControl::NetworkEgress, AdapterControl::NetworkEgress),
+            (
+                SandboxControl::ProcessCreation,
+                AdapterControl::ProcessCreation,
+            ),
+            (SandboxControl::Memory, AdapterControl::Memory),
+            (SandboxControl::Cpu, AdapterControl::Cpu),
+            (SandboxControl::Handles, AdapterControl::Handles),
+            (
+                SandboxControl::DynamicLibrarySearch,
+                AdapterControl::DynamicLibrarySearch,
+            ),
+            (
+                SandboxControl::DescendantCleanup,
+                AdapterControl::DescendantCleanup,
+            ),
+        ]
+        .into_iter()
+        .map(|(control, native)| {
+            let evidence = report.control(native);
+            (
+                control,
+                ControlEvidence {
+                    enforced: evidence.is_enforced(),
+                    reason_code: evidence.reason_code(),
+                },
+            )
+        })
+        .collect();
+        Self {
+            platform: HostPlatform::Windows,
+            controls,
+        }
+    }
+
     /// Returns the detected platform family.
     #[must_use]
     pub const fn platform(&self) -> HostPlatform {
