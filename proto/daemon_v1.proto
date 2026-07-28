@@ -981,10 +981,19 @@ message FirstSliceHotspot {
   uint32 score = 6;
 }
 
+// One deterministic structural-affinity community over reported components.
+message FirstSliceArchitectureCommunity {
+  string id = 1;
+  repeated string members = 2;
+  uint64 internal_connection_weight = 3;
+  bool ownership_truth = 4;
+}
+
 // Derived-view algorithm metadata for community or ownership algorithms.
 message FirstSliceDerivedView {
   string view = 1;
   string algorithm_version = 2;
+  map<string, string> parameters = 3;
 }
 
 // Returns bounded architecture components, connections, and hotspots.
@@ -996,6 +1005,7 @@ message ArchitectureOverviewResponse {
   repeated FirstSliceHotspot hotspots = 5;
   repeated FirstSliceDerivedView views = 6;
   FirstSliceCompleteness completeness = 7;
+  repeated FirstSliceArchitectureCommunity communities = 8;
 }
 
 // Requests a bounded test selection for one generation and seed set.

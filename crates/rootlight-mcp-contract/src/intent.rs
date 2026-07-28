@@ -5,7 +5,7 @@
 //! `code.dead`. The schema generator derives checked public artifacts from
 //! these types; transport routing consumes only those generated artifacts.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rootlight_ids::SymbolId;
 use rootlight_ir::SourceRef;
@@ -531,6 +531,22 @@ pub struct Hotspot {
     pub score: u16,
 }
 
+/// One deterministic structural-affinity community.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArchitectureCommunity {
+    /// Stable derived community identity.
+    #[schemars(length(min = 1, max = 512))]
+    pub id: String,
+    /// Component identities assigned to this derived community.
+    #[schemars(length(min = 1, max = 250))]
+    pub members: Vec<String>,
+    /// Sum of weights for connections whose endpoints are both members.
+    pub internal_connection_weight: u64,
+    /// Always false; communities do not establish canonical ownership.
+    pub ownership_truth: bool,
+}
+
 /// Derived view metadata for community or ownership algorithms.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -540,6 +556,10 @@ pub struct DerivedViewInfo {
     /// Algorithm version identifier.
     #[schemars(length(min = 1, max = 128))]
     pub algorithm_version: String,
+    /// Canonically ordered source-free algorithm parameters.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(length(max = 16))]
+    pub parameters: BTreeMap<String, String>,
 }
 
 /// `architecture.overview` result data.
@@ -555,6 +575,10 @@ pub struct ArchitectureOverviewData {
     /// Structural hotspot rankings.
     #[schemars(length(max = 250))]
     pub hotspots: Vec<Hotspot>,
+    /// Deterministic non-canonical architectural communities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 250))]
+    pub communities: Vec<ArchitectureCommunity>,
     /// Derived view algorithm metadata.
     #[schemars(length(max = 8))]
     pub views: Vec<DerivedViewInfo>,

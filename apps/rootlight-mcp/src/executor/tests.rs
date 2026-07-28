@@ -20,6 +20,7 @@ use rootlight_client::{
     AdvancedQuery as ClientAdvancedQuery, AnalysisTier as ClientTier,
     ArchitectureCycles as ClientArchitectureCycles,
     ArchitectureOverview as ClientArchitectureOverview,
+    ArchitectureOverviewCommunity as ClientArchitectureCommunity,
     ArchitectureOverviewComponent as ClientArchitectureComponent,
     ArchitectureOverviewConnection as ClientArchitectureConnection,
     ArchitectureOverviewDerivedView as ClientDerivedView,
@@ -1813,6 +1814,7 @@ fn plan_architecture_response() -> ArchitectureOverviewPortResponse {
             }],
             connections: Vec::new(),
             hotspots: Vec::new(),
+            communities: Vec::new(),
             views: Vec::new(),
             execution_completeness: complete_execution(),
         },
@@ -6772,10 +6774,30 @@ async fn architecture_overview_maps_components_connections_and_hotspots() {
                 complexity: None,
                 score: 1_000,
             }],
-            views: vec![ClientDerivedView {
-                view: "hotspots".to_owned(),
-                algorithm_version: "fan_in_out_v1".to_owned(),
+            communities: vec![ClientArchitectureCommunity {
+                id: "community:file-a".to_owned(),
+                members: vec!["file-a".to_owned(), "file-b".to_owned()],
+                internal_connection_weight: 2,
+                ownership_truth: false,
             }],
+            views: vec![
+                ClientDerivedView {
+                    view: "hotspots".to_owned(),
+                    algorithm_version: "fan_in_out_v1".to_owned(),
+                    parameters: std::collections::BTreeMap::from([(
+                        "score_range".to_owned(),
+                        "0..1000".to_owned(),
+                    )]),
+                },
+                ClientDerivedView {
+                    view: "communities".to_owned(),
+                    algorithm_version: "weighted_label_propagation_v1".to_owned(),
+                    parameters: std::collections::BTreeMap::from([
+                        ("ownership_truth".to_owned(), "not_claimed".to_owned()),
+                        ("seed".to_owned(), "524f4f544c494748".to_owned()),
+                    ]),
+                },
+            ],
             execution_completeness: truncated_execution(
                 client::LimitingResourceKind::Results,
                 client::ContinuationGuidance::NarrowScope,
@@ -6790,7 +6812,7 @@ async fn architecture_overview_maps_components_connections_and_hotspots() {
             VerticalTool::ArchitectureOverview,
             json!({
                 "repository": {"repository_id": repository()},
-                "views": ["hotspots"]
+                "views": ["communities", "hotspots"]
             }),
         )
         .await
@@ -6826,14 +6848,32 @@ async fn architecture_overview_maps_components_connections_and_hotspots() {
     assert_eq!(hotspot.change_frequency, None);
     assert_eq!(hotspot.complexity, None);
     assert_eq!(hotspot.score, 1_000);
-    assert_eq!(output.data.views.len(), 1);
+    assert_eq!(output.data.communities.len(), 1);
+    let community = &output.data.communities[0];
+    assert_eq!(community.id, "community:file-a");
+    assert_eq!(community.members, ["file-a", "file-b"]);
+    assert_eq!(community.internal_connection_weight, 2);
+    assert!(!community.ownership_truth);
+    assert_eq!(output.data.views.len(), 2);
     assert_eq!(output.data.views[0].view, ArchitectureView::Hotspots);
     assert_eq!(output.data.views[0].algorithm_version, "fan_in_out_v1");
+    assert_eq!(
+        output.data.views[0].parameters.get("score_range"),
+        Some(&"0..1000".to_owned())
+    );
+    assert_eq!(output.data.views[1].view, ArchitectureView::Communities);
+    assert_eq!(
+        output.data.views[1].parameters.get("ownership_truth"),
+        Some(&"not_claimed".to_owned())
+    );
     let ObservedCall::ArchitectureOverview(request) = harness.only_call() else {
         panic!("expected architecture overview call");
     };
     assert_eq!(request.repository(), repository());
-    assert_eq!(request.views(), &["hotspots".to_owned()]);
+    assert_eq!(
+        request.views(),
+        &["communities".to_owned(), "hotspots".to_owned()]
+    );
     assert_eq!(request.max_components(), None);
     assert_eq!(request.include_edges(), None);
     assert_eq!(request.min_confidence(), None);

@@ -27,6 +27,7 @@ pub use update::{
 };
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     io::{self, Cursor, Read as _, Write as _},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -1689,6 +1690,19 @@ pub struct ArchitectureOverviewHotspot {
     pub score: u16,
 }
 
+/// One deterministic structural-affinity community.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ArchitectureOverviewCommunity {
+    /// Stable derived community identity.
+    pub id: String,
+    /// Component identities assigned to this community.
+    pub members: Vec<String>,
+    /// Sum of weights for connections whose endpoints are both members.
+    pub internal_connection_weight: u64,
+    /// Always false because this view does not establish ownership.
+    pub ownership_truth: bool,
+}
+
 /// Derived-view algorithm metadata reported by an architecture overview.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ArchitectureOverviewDerivedView {
@@ -1696,6 +1710,8 @@ pub struct ArchitectureOverviewDerivedView {
     pub view: String,
     /// Algorithm version identifier.
     pub algorithm_version: String,
+    /// Canonically ordered source-free algorithm parameters.
+    pub parameters: BTreeMap<String, String>,
 }
 
 /// Bounded file-granularity architecture overview for one generation.
@@ -1709,6 +1725,8 @@ pub struct ArchitectureOverview {
     pub connections: Vec<ArchitectureOverviewConnection>,
     /// Structural hotspot rankings in deterministic order.
     pub hotspots: Vec<ArchitectureOverviewHotspot>,
+    /// Deterministic non-canonical communities in deterministic order.
+    pub communities: Vec<ArchitectureOverviewCommunity>,
     /// Derived-view algorithm metadata in deterministic order.
     pub views: Vec<ArchitectureOverviewDerivedView>,
     /// Authoritative execution-completeness diagnostics.
@@ -7866,6 +7884,7 @@ fn parse_architecture_overview(
     if response.components.len() > 250
         || response.connections.len() > 1_000
         || response.hotspots.len() > 250
+        || response.communities.len() > 250
         || response.views.len() > 8
     {
         return Err(ClientError::InvalidResponseCorrelation);
@@ -7941,6 +7960,35 @@ fn parse_architecture_overview(
                 .map_err(|_| ClientError::InvalidResponseCorrelation)?,
         });
     }
+    let component_ids: BTreeSet<&str> = components
+        .iter()
+        .map(|component| component.id.as_str())
+        .collect();
+    let mut communities = Vec::new();
+    communities
+        .try_reserve_exact(response.communities.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for community in response.communities {
+        let unique_members: BTreeSet<&str> = community.members.iter().map(String::as_str).collect();
+        if community.id.is_empty()
+            || community.id.len() > 512
+            || community.members.is_empty()
+            || community.members.len() > 250
+            || unique_members.len() != community.members.len()
+            || unique_members.iter().any(|member| {
+                member.is_empty() || member.len() > 512 || !component_ids.contains(member)
+            })
+            || community.ownership_truth
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        communities.push(ArchitectureOverviewCommunity {
+            id: community.id,
+            members: community.members,
+            internal_connection_weight: community.internal_connection_weight,
+            ownership_truth: false,
+        });
+    }
     let mut views = Vec::new();
     views
         .try_reserve_exact(response.views.len())
@@ -7950,12 +7998,22 @@ fn parse_architecture_overview(
             || view.view.len() > 32
             || view.algorithm_version.is_empty()
             || view.algorithm_version.len() > 128
+            || view.parameters.len() > 16
+            || view.parameters.iter().any(|(key, value)| {
+                key.is_empty()
+                    || key.len() > 128
+                    || value.is_empty()
+                    || value.len() > 512
+                    || key.as_bytes().contains(&0)
+                    || value.as_bytes().contains(&0)
+            })
         {
             return Err(ClientError::InvalidResponseCorrelation);
         }
         views.push(ArchitectureOverviewDerivedView {
             view: view.view,
             algorithm_version: view.algorithm_version,
+            parameters: view.parameters.into_iter().collect(),
         });
     }
     Ok(ArchitectureOverview {
@@ -7963,6 +8021,7 @@ fn parse_architecture_overview(
         components,
         connections,
         hotspots,
+        communities,
         views,
         execution_completeness,
     })

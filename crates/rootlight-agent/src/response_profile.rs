@@ -1767,7 +1767,9 @@ mod tests {
             views: vec![DerivedViewInfo {
                 view: ArchitectureView::Modules,
                 algorithm_version: "modules-v1".to_owned(),
+                parameters: std::collections::BTreeMap::new(),
             }],
+            communities: Vec::new(),
             explanation: None,
         };
         let (compact, standard, evidence) = shaped_profiles(&raw);

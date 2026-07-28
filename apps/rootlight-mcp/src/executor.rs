@@ -56,13 +56,13 @@ use rootlight_mcp_contract::change::{
     TestsSelectInput,
 };
 use rootlight_mcp_contract::intent::{
-    ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesData, ArchitectureCyclesInput,
-    ArchitectureOverviewData, ArchitectureOverviewInput, ArchitectureView, BlindSpot, CodeDeadData,
-    CodeDeadInput, CycleBreakCandidate, DeadCandidate, DeadClassification, DerivedViewInfo,
-    Direction, EntryPointPolicy, EntryPointSummary, FlowTraceData, FlowTraceInput, FrontierSummary,
-    Hotspot, MinimalCycle, RelationKind, RelationProjection, RelationshipGroup, RelationshipTarget,
-    RelationshipTotals, RuleSummary, StronglyConnectedComponent, SymbolRelationshipsData,
-    SymbolRelationshipsInput, TraceEdge, TracePath,
+    ArchitectureCommunity, ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesData,
+    ArchitectureCyclesInput, ArchitectureOverviewData, ArchitectureOverviewInput, ArchitectureView,
+    BlindSpot, CodeDeadData, CodeDeadInput, CycleBreakCandidate, DeadCandidate, DeadClassification,
+    DerivedViewInfo, Direction, EntryPointPolicy, EntryPointSummary, FlowTraceData, FlowTraceInput,
+    FrontierSummary, Hotspot, MinimalCycle, RelationKind, RelationProjection, RelationshipGroup,
+    RelationshipTarget, RelationshipTotals, RuleSummary, StronglyConnectedComponent,
+    SymbolRelationshipsData, SymbolRelationshipsInput, TraceEdge, TracePath,
 };
 use rootlight_mcp_contract::{
     DetailKey, ErrorCode, ExposureProfile, GenerationSelector, McpTool, NextAction, PublicError,
@@ -5021,6 +5021,7 @@ where
         components: Vec::new(),
         connections: Vec::new(),
         hotspots: Vec::new(),
+        communities: Vec::new(),
         views: Vec::new(),
         explanation: Some(explanation),
     };
@@ -5074,7 +5075,10 @@ fn normalize_architecture_overview(
     let mut views = Vec::new();
     if let Some(requested) = input.views {
         for view in requested {
-            if view != ArchitectureView::Hotspots {
+            if !matches!(
+                view,
+                ArchitectureView::Communities | ArchitectureView::Hotspots
+            ) {
                 return Err(ToolExecutionError::new(unsupported.clone()));
             }
             views.push(architecture_view_label(view)?);
@@ -5142,6 +5146,18 @@ fn map_architecture_overview(
             score: hotspot.score,
         });
     }
+    let mut communities = Vec::new();
+    communities
+        .try_reserve_exact(response.result.communities.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for community in response.result.communities {
+        communities.push(ArchitectureCommunity {
+            id: community.id,
+            members: community.members,
+            internal_connection_weight: community.internal_connection_weight,
+            ownership_truth: community.ownership_truth,
+        });
+    }
     let mut views = Vec::new();
     views
         .try_reserve_exact(response.result.views.len())
@@ -5151,12 +5167,14 @@ fn map_architecture_overview(
         views.push(DerivedViewInfo {
             view: category,
             algorithm_version: view.algorithm_version,
+            parameters: view.parameters,
         });
     }
     let data = ArchitectureOverviewData {
         components,
         connections,
         hotspots,
+        communities,
         views,
         explanation: None,
     };

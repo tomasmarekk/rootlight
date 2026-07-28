@@ -1853,8 +1853,24 @@ pub struct FirstSliceHotspot {
     #[allow(missing_docs)]
     pub score: u32,
 }
-/// Derived-view algorithm metadata for community or ownership algorithms.
+/// One deterministic structural-affinity community over reported components.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceArchitectureCommunity {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "2")]
+    #[allow(missing_docs)]
+    pub members: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint64, tag = "3")]
+    #[allow(missing_docs)]
+    pub internal_connection_weight: u64,
+    #[prost(bool, tag = "4")]
+    #[allow(missing_docs)]
+    pub ownership_truth: bool,
+}
+/// Derived-view algorithm metadata for community or ownership algorithms.
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FirstSliceDerivedView {
     #[prost(string, tag = "1")]
     #[allow(missing_docs)]
@@ -1862,6 +1878,12 @@ pub struct FirstSliceDerivedView {
     #[prost(string, tag = "2")]
     #[allow(missing_docs)]
     pub algorithm_version: ::prost::alloc::string::String,
+    #[prost(map = "string, string", tag = "3")]
+    #[allow(missing_docs)]
+    pub parameters: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
 }
 /// Returns bounded architecture components, connections, and hotspots.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1889,6 +1911,9 @@ pub struct ArchitectureOverviewResponse {
     #[prost(message, optional, tag = "7")]
     #[allow(missing_docs)]
     pub completeness: ::core::option::Option<FirstSliceCompleteness>,
+    #[prost(message, repeated, tag = "8")]
+    #[allow(missing_docs)]
+    pub communities: ::prost::alloc::vec::Vec<FirstSliceArchitectureCommunity>,
 }
 /// Requests a bounded test selection for one generation and seed set.
 #[derive(Clone, PartialEq, ::prost::Message)]

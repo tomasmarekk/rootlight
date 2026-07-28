@@ -634,6 +634,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 components: Vec::new(),
                 connections: Vec::new(),
                 hotspots: Vec::new(),
+                communities: Vec::new(),
                 views: Vec::new(),
                 execution_completeness: complete_execution(),
             })

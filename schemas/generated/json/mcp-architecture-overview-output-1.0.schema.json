@@ -41,6 +41,45 @@
         }
       ]
     },
+    "ArchitectureCommunity": {
+      "description": "One deterministic structural-affinity community.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Stable derived community identity.",
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "internal_connection_weight": {
+          "description": "Sum of weights for connections whose endpoints are both members.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "members": {
+          "description": "Component identities assigned to this derived community.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 250,
+          "minItems": 1
+        },
+        "ownership_truth": {
+          "description": "Always false; communities do not establish canonical ownership.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "members",
+        "internal_connection_weight",
+        "ownership_truth"
+      ]
+    },
     "ArchitectureComponent": {
       "description": "One aggregated architecture component.",
       "type": "object",
@@ -147,6 +186,14 @@
       "description": "`architecture.overview` result data.",
       "type": "object",
       "properties": {
+        "communities": {
+          "description": "Deterministic non-canonical architectural communities.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArchitectureCommunity"
+          },
+          "maxItems": 250
+        },
         "components": {
           "description": "Aggregated architecture components.",
           "type": "array",
@@ -430,6 +477,13 @@
           "type": "string",
           "maxLength": 128,
           "minLength": 1
+        },
+        "parameters": {
+          "description": "Canonically ordered source-free algorithm parameters.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "view": {
           "description": "View category.",

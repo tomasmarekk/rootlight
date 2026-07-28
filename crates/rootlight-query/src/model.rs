@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use rootlight_cancel::CancellationReason;
@@ -387,6 +387,12 @@ pub enum QueryOperator {
     EntityLookup,
     /// Scan typed relations with an edge cap.
     RelationScan,
+    /// Aggregate entity relations into a bounded component graph.
+    AggregateGraph,
+    /// Compute deterministic non-canonical architectural communities.
+    CommunityView,
+    /// Rank structural hotspots from the aggregated component graph.
+    HotspotRank,
     /// Scan source occurrences with a row cap.
     OccurrenceScan,
     /// Resolve deduplicated provenance.
@@ -1070,12 +1076,13 @@ pub struct ArchitectureCyclesResult {
 
 /// Architecture derived-view categories served by an `architecture.overview`.
 ///
-/// The first slice serves only the structural hotspot ranking as a derived
-/// view; the base component and connection model is always file-granularity.
+/// The base component and connection model is always file-granularity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ArchitectureOverviewView {
+    /// Deterministic structural-affinity communities.
+    Communities,
     /// Structural hotspot ranking derived view.
     Hotspots,
 }
@@ -1085,6 +1092,7 @@ impl ArchitectureOverviewView {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Communities => "communities",
             Self::Hotspots => "hotspots",
         }
     }
@@ -1093,6 +1101,7 @@ impl ArchitectureOverviewView {
     #[must_use]
     pub fn from_label(value: &str) -> Option<Self> {
         match value {
+            "communities" => Some(Self::Communities),
             "hotspots" => Some(Self::Hotspots),
             _ => None,
         }
@@ -1167,6 +1176,22 @@ pub struct ArchitectureHotspot {
     pub score: u16,
 }
 
+/// One deterministic architectural community over reported components.
+///
+/// Communities are a recomputable structural-affinity hint. They are never a
+/// canonical module boundary or an ownership assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArchitectureCommunity {
+    /// Stable derived identity for this algorithm version and member set.
+    pub id: String,
+    /// Reported component identities assigned to the community.
+    pub members: Vec<String>,
+    /// Sum of component-graph edge weights whose endpoints are both members.
+    pub internal_connection_weight: u64,
+    /// Explicitly false because this view does not establish ownership.
+    pub ownership_truth: bool,
+}
+
 /// Derived-view algorithm metadata reported by an `architecture.overview`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ArchitectureOverviewDerivedView {
@@ -1174,6 +1199,8 @@ pub struct ArchitectureOverviewDerivedView {
     pub view: ArchitectureOverviewView,
     /// Algorithm version identifier.
     pub algorithm_version: String,
+    /// Canonically ordered source-free algorithm parameters.
+    pub parameters: BTreeMap<String, String>,
 }
 
 /// Data returned by an `architecture.overview` plan.
@@ -1187,6 +1214,8 @@ pub struct ArchitectureOverviewResult {
     pub connections: Vec<ArchitectureConnection>,
     /// Structural hotspot rankings in deterministic order.
     pub hotspots: Vec<ArchitectureHotspot>,
+    /// Deterministic structural-affinity communities in deterministic order.
+    pub communities: Vec<ArchitectureCommunity>,
     /// Derived-view algorithm metadata in deterministic order.
     pub views: Vec<ArchitectureOverviewDerivedView>,
     /// Authoritative execution completeness.

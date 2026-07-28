@@ -5,7 +5,7 @@ use std::{
 };
 
 use rootlight_cancel::{Cancellation, CancellationReason};
-use rootlight_ids::{FactId, FileId, GenerationId, SymbolId};
+use rootlight_ids::{FactId, FileId, GenerationId, SymbolId, content_hash};
 use rootlight_ir::{
     AnalysisTier, CoverageRecord, CoverageScope, CoverageStatus, EntityFlag, EntityKind,
     EntityVisibility, NormalizedIrDocument, OccurrenceTarget, RelationEndpoint, RelationPredicate,
@@ -23,28 +23,29 @@ use crate::model::{
     ADVANCED_MAX_DEPTH, AdvancedAggregateFunction, AdvancedAstNode, AdvancedColumnSchema,
     AdvancedColumnType, AdvancedCompleteness, AdvancedEntityKind, AdvancedPlanExplanation,
     AdvancedPredicate, AdvancedQueryPlan, AdvancedQueryResult, AdvancedRelationKind,
-    AdvancedSortKey, AdvancedTraverseDirection, AdvancedValue, ArchitectureComponent,
-    ArchitectureConnection, ArchitectureCyclesPlan, ArchitectureCyclesProjection,
-    ArchitectureCyclesResult, ArchitectureHotspot, ArchitectureOverviewDerivedView,
-    ArchitectureOverviewPlan, ArchitectureOverviewResult, ArchitectureOverviewView,
-    BreakingCandidateRecord, ChangeImpactClassification, ChangeImpactPlan, ChangeImpactResult,
-    ChangeImpactRiskLevel, ChangeImpactRiskSummary, ChangeImpactTestCandidate, CodeDeadBlindSpot,
-    CodeDeadEntryPointPolicy, CodeDeadEntryPointSummary, CodeDeadPlan, CodeDeadResult,
-    CodeDeadSuppressionRule, CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent,
-    CyclePath, DeadCodeCandidate, DeadCodeClassification, ExecutionCompleteness, FlowTraceEdge,
-    FlowTraceFrontier, FlowTracePath, FlowTracePlan, FlowTraceProjection, FlowTraceResult,
-    HistoryArchitectureDelta, HistoryChangeKind, HistoryComparePlan, HistoryCompareResult,
-    HistorySemanticChangeKind, ImpactEntryRecord, ImpactGroupRecord, LineageMatchRecord, LocateHit,
-    LocateMode, PlanChangeContextPack, PlanChangeDecision, PlanChangeImpactSummary,
-    PlanChangeObjective, PlanChangePlan, PlanChangeResult, PlanChangeStepRecord, PlanEstimate,
-    PlanExplanation, PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource,
-    QueryResponse, QueryUsage, RankedTestSelection, RelationDirection, RelationFamily,
-    RelationshipEdgeTarget, RelationshipGroup, RepositoryDataTrust, ResolvedChangeRecord,
-    SemanticChangeRecord, SourceChunkEncoding, SourceChunkResult, SourceReadPlan,
-    SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
-    SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap, TestsSelectKind,
-    TestsSelectPlan, TestsSelectResult, TokenAccountingProfile, checked_add, checked_u128_to_u64,
-    checked_usize_to_u64, ensure_estimate, search_mode,
+    AdvancedSortKey, AdvancedTraverseDirection, AdvancedValue, ArchitectureCommunity,
+    ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesPlan,
+    ArchitectureCyclesProjection, ArchitectureCyclesResult, ArchitectureHotspot,
+    ArchitectureOverviewDerivedView, ArchitectureOverviewPlan, ArchitectureOverviewResult,
+    ArchitectureOverviewView, BreakingCandidateRecord, ChangeImpactClassification,
+    ChangeImpactPlan, ChangeImpactResult, ChangeImpactRiskLevel, ChangeImpactRiskSummary,
+    ChangeImpactTestCandidate, CodeDeadBlindSpot, CodeDeadEntryPointPolicy,
+    CodeDeadEntryPointSummary, CodeDeadPlan, CodeDeadResult, CodeDeadSuppressionRule,
+    CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent, CyclePath, DeadCodeCandidate,
+    DeadCodeClassification, ExecutionCompleteness, FlowTraceEdge, FlowTraceFrontier, FlowTracePath,
+    FlowTracePlan, FlowTraceProjection, FlowTraceResult, HistoryArchitectureDelta,
+    HistoryChangeKind, HistoryComparePlan, HistoryCompareResult, HistorySemanticChangeKind,
+    ImpactEntryRecord, ImpactGroupRecord, LineageMatchRecord, LocateHit, LocateMode,
+    PlanChangeContextPack, PlanChangeDecision, PlanChangeImpactSummary, PlanChangeObjective,
+    PlanChangePlan, PlanChangeResult, PlanChangeStepRecord, PlanEstimate, PlanExplanation,
+    PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage,
+    RankedTestSelection, RelationDirection, RelationFamily, RelationshipEdgeTarget,
+    RelationshipGroup, RepositoryDataTrust, ResolvedChangeRecord, SemanticChangeRecord,
+    SourceChunkEncoding, SourceChunkResult, SourceReadPlan, SourceReadQueryResult,
+    SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult,
+    TestsSelectCoverage, TestsSelectGap, TestsSelectKind, TestsSelectPlan, TestsSelectResult,
+    TokenAccountingProfile, checked_add, checked_u128_to_u64, checked_usize_to_u64,
+    ensure_estimate, search_mode,
 };
 
 /// Daemon-independent typed query service pinned to normalized IR and lexical data.
@@ -1147,15 +1148,23 @@ where
             duration_micros: duration_micros(budget.max_duration),
         };
         ensure_estimate(estimate, budget)?;
+        let mut operators = vec![
+            QueryOperator::GenerationPin,
+            QueryOperator::RelationScan,
+            QueryOperator::EntityLookup,
+            QueryOperator::AggregateGraph,
+        ];
+        if views.contains(&ArchitectureOverviewView::Communities) {
+            operators.push(QueryOperator::CommunityView);
+        }
+        if views.contains(&ArchitectureOverviewView::Hotspots) {
+            operators.push(QueryOperator::HotspotRank);
+        }
+        operators.push(QueryOperator::OutputBudget);
         let explanation = PlanExplanation {
             generation: self.generation.metadata().generation(),
             kind: PlanKind::ArchitectureOverview,
-            operators: vec![
-                QueryOperator::GenerationPin,
-                QueryOperator::RelationScan,
-                QueryOperator::EntityLookup,
-                QueryOperator::OutputBudget,
-            ],
+            operators,
             estimate,
         };
         Ok(ArchitectureOverviewPlan {
@@ -1207,6 +1216,7 @@ where
             components: overview.components,
             connections: overview.connections,
             hotspots: overview.hotspots,
+            communities: overview.communities,
             views: overview.views,
             execution,
             limiting_resources,
@@ -3611,14 +3621,172 @@ struct ArchitectureOverviewAnalysis {
     components: Vec<ArchitectureComponent>,
     connections: Vec<ArchitectureConnection>,
     hotspots: Vec<ArchitectureHotspot>,
+    communities: Vec<ArchitectureCommunity>,
     views: Vec<ArchitectureOverviewDerivedView>,
 }
+
+const ARCHITECTURE_COMMUNITY_SEED: u64 = 0x524f_4f54_4c49_4748;
+const ARCHITECTURE_COMMUNITY_MAX_ITERATIONS: usize = 8;
 
 /// Returns the stable algorithm-version label for one derived view.
 const fn architecture_overview_algorithm_version(view: ArchitectureOverviewView) -> &'static str {
     match view {
+        ArchitectureOverviewView::Communities => "weighted_label_propagation_v1",
         ArchitectureOverviewView::Hotspots => "fan_in_out_v1",
     }
+}
+
+fn architecture_overview_parameters(view: ArchitectureOverviewView) -> BTreeMap<String, String> {
+    match view {
+        ArchitectureOverviewView::Communities => BTreeMap::from([
+            (
+                "graph".to_owned(),
+                "undirected_weighted_component_relations".to_owned(),
+            ),
+            (
+                "max_iterations".to_owned(),
+                ARCHITECTURE_COMMUNITY_MAX_ITERATIONS.to_string(),
+            ),
+            ("ownership_truth".to_owned(), "not_claimed".to_owned()),
+            (
+                "seed".to_owned(),
+                format!("{ARCHITECTURE_COMMUNITY_SEED:016x}"),
+            ),
+        ]),
+        ArchitectureOverviewView::Hotspots => BTreeMap::from([
+            (
+                "normalization".to_owned(),
+                "max_fan_in_plus_fan_out".to_owned(),
+            ),
+            ("score_range".to_owned(), "0..1000".to_owned()),
+        ]),
+    }
+}
+
+fn seeded_community_rank(file: FileId) -> u64 {
+    let mut prefix = [0_u8; size_of::<u64>()];
+    prefix.copy_from_slice(&file.as_bytes()[..size_of::<u64>()]);
+    u64::from_be_bytes(prefix) ^ ARCHITECTURE_COMMUNITY_SEED
+}
+
+fn architecture_community_id(members: &[FileId]) -> Result<String, QueryError> {
+    const IDENTITY_CONTEXT: &[u8] =
+        b"rootlight/architecture-community/weighted-label-propagation/v1";
+
+    let member_bytes = members
+        .len()
+        .checked_mul(size_of::<FileId>())
+        .and_then(|bytes| bytes.checked_add(IDENTITY_CONTEXT.len() + size_of::<u64>()))
+        .ok_or(QueryError::MemoryUnavailable)?;
+    let mut identity = Vec::new();
+    identity
+        .try_reserve_exact(member_bytes)
+        .map_err(|_| QueryError::MemoryUnavailable)?;
+    identity.extend_from_slice(IDENTITY_CONTEXT);
+    identity.extend_from_slice(&ARCHITECTURE_COMMUNITY_SEED.to_be_bytes());
+    for member in members {
+        identity.extend_from_slice(member.as_bytes());
+    }
+    Ok(format!("community:{}", content_hash(&identity)))
+}
+
+fn build_architecture_communities(
+    component_files: &[FileId],
+    aggregated: &BTreeMap<(FileId, FileId, RelationFamily), (u32, u16)>,
+    control: &QueryControl<'_>,
+) -> Result<Vec<ArchitectureCommunity>, QueryError> {
+    let mut adjacency: BTreeMap<FileId, BTreeMap<FileId, u64>> = component_files
+        .iter()
+        .copied()
+        .map(|file| (file, BTreeMap::new()))
+        .collect();
+    for ((from, to, _family), (weight, _confidence)) in aggregated {
+        control.check()?;
+        if let Some(neighbors) = adjacency.get_mut(from) {
+            let entry = neighbors.entry(*to).or_insert(0);
+            *entry = entry.saturating_add(u64::from(*weight));
+        }
+        if let Some(neighbors) = adjacency.get_mut(to) {
+            let entry = neighbors.entry(*from).or_insert(0);
+            *entry = entry.saturating_add(u64::from(*weight));
+        }
+    }
+
+    let mut labels: BTreeMap<FileId, FileId> = component_files
+        .iter()
+        .copied()
+        .map(|file| (file, file))
+        .collect();
+    for _ in 0..ARCHITECTURE_COMMUNITY_MAX_ITERATIONS {
+        control.check()?;
+        let mut next = labels.clone();
+        for file in component_files {
+            control.check()?;
+            let current = labels.get(file).copied().unwrap_or(*file);
+            let mut scores = BTreeMap::from([(current, 1_u64)]);
+            if let Some(neighbors) = adjacency.get(file) {
+                for (neighbor, weight) in neighbors {
+                    // Canonical file order makes this in-place propagation
+                    // deterministic while preventing two-node label swapping.
+                    let label = next.get(neighbor).copied().unwrap_or(*neighbor);
+                    let score = scores.entry(label).or_insert(0);
+                    *score = score.saturating_add(*weight);
+                }
+            }
+            let selected = scores
+                .into_iter()
+                .max_by(|(left_label, left_score), (right_label, right_score)| {
+                    left_score.cmp(right_score).then_with(|| {
+                        seeded_community_rank(*right_label)
+                            .cmp(&seeded_community_rank(*left_label))
+                            .then_with(|| right_label.cmp(left_label))
+                    })
+                })
+                .map_or(current, |(label, _score)| label);
+            next.insert(*file, selected);
+        }
+        if next == labels {
+            break;
+        }
+        labels = next;
+    }
+
+    let mut grouped: BTreeMap<FileId, Vec<FileId>> = BTreeMap::new();
+    for file in component_files {
+        grouped
+            .entry(labels.get(file).copied().unwrap_or(*file))
+            .or_default()
+            .push(*file);
+    }
+    let mut communities = Vec::new();
+    for (_label, mut members) in grouped {
+        control.check()?;
+        members.sort();
+        let member_set: BTreeSet<FileId> = members.iter().copied().collect();
+        let internal_connection_weight = aggregated
+            .iter()
+            .filter(|((from, to, _family), _)| member_set.contains(from) && member_set.contains(to))
+            .fold(0_u64, |total, (_edge, (weight, _confidence))| {
+                total.saturating_add(u64::from(*weight))
+            });
+        communities.push(ArchitectureCommunity {
+            id: architecture_community_id(&members)?,
+            members: members
+                .into_iter()
+                .map(|member| member.to_string())
+                .collect(),
+            internal_connection_weight,
+            ownership_truth: false,
+        });
+    }
+    communities.sort_by(|left, right| {
+        right
+            .members
+            .len()
+            .cmp(&left.members.len())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(communities)
 }
 
 /// Returns the repository-controlled display path for one file, falling back to
@@ -3691,7 +3859,9 @@ fn build_architecture_overview(
             }
             continue;
         }
-        if !plan.include_edges || !allowed.contains(&relation.predicate) {
+        let communities_requested = plan.views.contains(&ArchitectureOverviewView::Communities);
+        if (!plan.include_edges && !communities_requested) || !allowed.contains(&relation.predicate)
+        {
             continue;
         }
         let confidence = relation.confidence.get();
@@ -3798,21 +3968,23 @@ fn build_architecture_overview(
     }
 
     let mut connections: Vec<ArchitectureConnection> = Vec::new();
-    for ((from, to, family), (weight, confidence)) in &aggregated {
-        let connection = ArchitectureConnection {
-            from: from.to_string(),
-            to: to.to_string(),
-            kind: *family,
-            weight: *weight,
-            confidence: *confidence,
-        };
-        emit_cycle_value(
-            &mut connections,
-            connection,
-            tracker,
-            limiting_resources,
-            control,
-        )?;
+    if plan.include_edges {
+        for ((from, to, family), (weight, confidence)) in &aggregated {
+            let connection = ArchitectureConnection {
+                from: from.to_string(),
+                to: to.to_string(),
+                kind: *family,
+                weight: *weight,
+                confidence: *confidence,
+            };
+            emit_cycle_value(
+                &mut connections,
+                connection,
+                tracker,
+                limiting_resources,
+                control,
+            )?;
+        }
     }
 
     // Rank reported components by structural fan-in and fan-out, normalizing
@@ -3872,11 +4044,25 @@ fn build_architecture_overview(
         emit_cycle_value(&mut hotspots, hotspot, tracker, limiting_resources, control)?;
     }
 
+    let mut communities = Vec::new();
+    if plan.views.contains(&ArchitectureOverviewView::Communities) {
+        for community in build_architecture_communities(&component_files, &aggregated, control)? {
+            emit_cycle_value(
+                &mut communities,
+                community,
+                tracker,
+                limiting_resources,
+                control,
+            )?;
+        }
+    }
+
     let mut views: Vec<ArchitectureOverviewDerivedView> = Vec::new();
     for view in &plan.views {
         let derived = ArchitectureOverviewDerivedView {
             view: *view,
             algorithm_version: architecture_overview_algorithm_version(*view).to_owned(),
+            parameters: architecture_overview_parameters(*view),
         };
         emit_cycle_value(&mut views, derived, tracker, limiting_resources, control)?;
     }
@@ -3885,6 +4071,7 @@ fn build_architecture_overview(
         components,
         connections,
         hotspots,
+        communities,
         views,
     })
 }
@@ -8091,6 +8278,57 @@ mod tests {
         assert_eq!(overview.views.len(), 1);
         assert_eq!(overview.views[0].view, ArchitectureOverviewView::Hotspots);
         assert_eq!(overview.views[0].algorithm_version, "fan_in_out_v1");
+        assert_eq!(
+            overview.views[0].parameters.get("score_range"),
+            Some(&"0..1000".to_owned())
+        );
+    }
+
+    #[test]
+    fn architecture_overview_builds_deterministic_non_ownership_communities() {
+        let mut document = overview_document();
+        for byte in 1..=4 {
+            add_file(&mut document, byte, &format!("src/f{byte}.rs"));
+            add_entity(&mut document, 10 + byte, byte, EntityKind::Function);
+            add_contains(&mut document, 100 + byte, byte, 10 + byte, 800);
+        }
+        add_calls(&mut document, 110, 11, 12, 900);
+        add_calls(&mut document, 111, 13, 14, 900);
+
+        let plan = overview_plan(50, false, 0, vec![ArchitectureOverviewView::Communities]);
+        let first = run_overview(&document, &plan);
+        let second = run_overview(&document, &plan);
+
+        assert!(first.connections.is_empty());
+        assert_eq!(first.communities, second.communities);
+        assert_eq!(first.communities.len(), 2);
+        let member_sets: BTreeSet<Vec<String>> = first
+            .communities
+            .iter()
+            .map(|community| community.members.clone())
+            .collect();
+        assert_eq!(
+            member_sets,
+            BTreeSet::from([
+                vec![file_id(1).to_string(), file_id(2).to_string()],
+                vec![file_id(3).to_string(), file_id(4).to_string()],
+            ])
+        );
+        assert!(first.communities.iter().all(
+            |community| !community.ownership_truth && community.internal_connection_weight == 1
+        ));
+        assert_eq!(
+            first.views[0].algorithm_version,
+            "weighted_label_propagation_v1"
+        );
+        assert_eq!(
+            first.views[0].parameters.get("ownership_truth"),
+            Some(&"not_claimed".to_owned())
+        );
+        assert_eq!(
+            first.views[0].parameters.get("max_iterations"),
+            Some(&ARCHITECTURE_COMMUNITY_MAX_ITERATIONS.to_string())
+        );
     }
 
     #[test]

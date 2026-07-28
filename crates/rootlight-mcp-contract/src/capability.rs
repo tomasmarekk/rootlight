@@ -951,7 +951,6 @@ const ARCHITECTURE_OVERVIEW_RULES: &[CapabilityRule] = &[
     implemented("budget", "reduces the common hard execution budget"),
     unsupported("budget.evidence_level", "evidence projection is not served"),
     unsupported_value("views[]", "build", "build view is not served"),
-    unsupported_value("views[]", "communities", "community view is not served"),
     unsupported_value("views[]", "data", "data view is not served"),
     unsupported_value("views[]", "modules", "module view is not served"),
     unsupported_value("views[]", "ownership", "ownership view is not served"),

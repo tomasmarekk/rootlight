@@ -2429,6 +2429,18 @@ fn architecture_overview(
             score: u32::from(hotspot.score),
         });
     }
+    let mut communities = Vec::new();
+    communities
+        .try_reserve_exact(response.data.communities.len())
+        .map_err(|_| resource_exhausted())?;
+    for community in response.data.communities {
+        communities.push(daemon::FirstSliceArchitectureCommunity {
+            id: community.id,
+            members: community.members,
+            internal_connection_weight: community.internal_connection_weight,
+            ownership_truth: community.ownership_truth,
+        });
+    }
     let mut wire_views = Vec::new();
     wire_views
         .try_reserve_exact(response.data.views.len())
@@ -2437,6 +2449,7 @@ fn architecture_overview(
         wire_views.push(daemon::FirstSliceDerivedView {
             view: view.view.as_str().to_owned(),
             algorithm_version: view.algorithm_version,
+            parameters: view.parameters.into_iter().collect(),
         });
     }
     Ok(daemon::ArchitectureOverviewResponse {
@@ -2447,6 +2460,7 @@ fn architecture_overview(
         hotspots,
         views: wire_views,
         completeness: Some(completeness),
+        communities,
     })
 }
 
