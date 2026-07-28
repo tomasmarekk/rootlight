@@ -420,7 +420,12 @@ fn environment_block(command: &ProcessCommand) -> Result<Vec<u16>, ProcessError>
     let mut entries = if command.clear_environment {
         Vec::new()
     } else {
-        env::vars_os().collect::<Vec<_>>()
+        // Windows exposes drive-relative current-directory state through
+        // pseudo-variables such as `=C:`. They are not ordinary environment
+        // keys and must not cross this explicit child boundary.
+        env::vars_os()
+            .filter(|(key, _)| !is_drive_current_directory_key(key))
+            .collect::<Vec<_>>()
     };
     for (key, value) in &command.environment {
         validate_environment_entry(key, value)?;
@@ -450,6 +455,12 @@ fn environment_block(command: &ProcessCommand) -> Result<Vec<u16>, ProcessError>
         block.push(0);
     }
     Ok(block)
+}
+
+fn is_drive_current_directory_key(key: &OsStr) -> bool {
+    key.encode_wide()
+        .next()
+        .is_some_and(|unit| unit == u16::from(b'='))
 }
 
 fn validate_environment_entry(key: &OsStr, value: &OsStr) -> Result<(), ProcessError> {
@@ -800,6 +811,14 @@ mod tests {
             .map(|entry| String::from_utf16(entry).expect("entry is UTF-16"))
             .collect::<Vec<_>>();
         assert_eq!(entries, ["alpha=start", "PATH=replacement", "zeta=last"]);
+    }
+
+    #[test]
+    fn drive_current_directory_keys_are_never_inherited_as_environment() {
+        assert!(is_drive_current_directory_key(OsStr::new("=C:")));
+        assert!(is_drive_current_directory_key(OsStr::new("=D:")));
+        assert!(!is_drive_current_directory_key(OsStr::new("PATH")));
+        assert!(validate_environment_entry(OsStr::new("=C:"), OsStr::new(r"C:\work")).is_err());
     }
 
     #[test]
