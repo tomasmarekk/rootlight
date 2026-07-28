@@ -77,6 +77,60 @@ message AnalysisResult {
   rootlight.common.v1.ContentHash output_digest = 4;
 }
 
+// Highest semantic tier requested for one project analysis unit.
+enum RequestedAnalysisTier {
+  REQUESTED_ANALYSIS_TIER_UNSPECIFIED = 0;
+  TIER_A = 1;
+  TIER_B = 2;
+  TIER_C = 3;
+  TIER_D = 4;
+}
+
+// Exact generated span mapped to one project-relative origin span.
+message GeneratedOrigin {
+  uint64 generated_start_byte = 1;
+  uint64 generated_end_byte = 2;
+  string origin_path = 3;
+  uint64 origin_start_byte = 4;
+  uint64 origin_end_byte = 5;
+  string transformation = 6;
+  rootlight.common.v1.ContentHash generator_digest = 7;
+}
+
+// One canonical generation-bound source in a project analysis unit.
+message ProjectInput {
+  rootlight.common.v1.FileId file = 1;
+  string path = 2;
+  string language = 3;
+  rootlight.common.v1.ContentHash source_digest = 4;
+  bytes source = 5;
+  bool generated = 6;
+  repeated GeneratedOrigin origins = 7;
+}
+
+// Bounded multi-file request for one package, project, or build target.
+message ProjectAnalysisRequest {
+  bytes session_id = 1;
+  bytes request_id = 2;
+  rootlight.common.v1.RepositoryId repository = 3;
+  rootlight.common.v1.GenerationId generation = 4;
+  string analysis_unit = 5;
+  string target = 6;
+  rootlight.common.v1.ContentHash build_context = 7;
+  rootlight.common.v1.ContentHash config_digest = 8;
+  repeated ProjectInput inputs = 9;
+  bytes context_manifest = 10;
+  RequestedAnalysisTier requested_tier = 11;
+}
+
+// Bounded normalized output for one project analysis unit.
+message ProjectAnalysisResult {
+  bytes session_id = 1;
+  bytes request_id = 2;
+  bytes normalized_ir = 3;
+  rootlight.common.v1.ContentHash output_digest = 4;
+}
+
 // Cooperative cancellation for one in-flight adapter request.
 message CancelRequest {
   bytes session_id = 1;
@@ -92,5 +146,7 @@ message AdapterFrame {
     AnalysisResult analysis_result = 4;
     CancelRequest cancel = 5;
     rootlight.common.v1.PublicError error = 6;
+    ProjectAnalysisRequest project_analysis_request = 7;
+    ProjectAnalysisResult project_analysis_result = 8;
   }
 }

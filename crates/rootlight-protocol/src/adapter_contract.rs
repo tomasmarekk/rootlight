@@ -13,7 +13,8 @@ use prost::Message;
 use crate::generated::{
     adapter::v1::{
         AdapterFrame, AdapterIdentity, AdapterTrustLevel, AnalysisRequest, AnalysisResult,
-        CancelRequest, CapabilityAdvertisement, ResourceLimits, SessionRequirements, adapter_frame,
+        CancelRequest, CapabilityAdvertisement, ProjectAnalysisRequest, ProjectAnalysisResult,
+        RequestedAnalysisTier, ResourceLimits, SessionRequirements, adapter_frame,
     },
     common::v1::{ContractVersion, ExtensionDescriptor, VersionRange},
 };
@@ -23,7 +24,7 @@ pub const ADAPTER_PROTOCOL_MAJOR: u32 = 1;
 /// Earliest adapter protocol minor supported by this host.
 pub const MINIMUM_ADAPTER_PROTOCOL_MINOR: u32 = 1;
 /// Latest adapter protocol minor supported by this host.
-pub const CURRENT_ADAPTER_PROTOCOL_MINOR: u32 = 1;
+pub const CURRENT_ADAPTER_PROTOCOL_MINOR: u32 = 2;
 /// Maximum encoded adapter frame accepted from a child process.
 pub const MAX_ADAPTER_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Width of the big-endian payload-length prefix used on adapter pipes.
@@ -36,6 +37,9 @@ pub const ADAPTER_NONCE_BYTES: usize = 16;
 pub const ADAPTER_DIGEST_BYTES: usize = 32;
 
 const MAX_LABEL_BYTES: usize = 128;
+const MAX_PROJECT_PATH_BYTES: usize = 4_096;
+const MAX_PROJECT_CONTEXT_BYTES: usize = 1024 * 1024;
+const PROJECT_NORMALIZED_IR_CAPABILITY: &str = "project_normalized_ir";
 const MAX_WALL_TIME_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_CPU_TIME_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_MEMORY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
@@ -344,6 +348,152 @@ impl NegotiatedSession {
         Ok(())
     }
 
+    /// Validates one canonical multi-file project request.
+    ///
+    /// Content hashes and context-manifest semantics are revalidated by the
+    /// host after this allocation and correlation boundary succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterContractError`] when the project capability, identity,
+    /// canonical input order, origin mapping, or aggregate quotas are invalid.
+    pub fn validate_project_analysis_request(
+        &self,
+        request: &ProjectAnalysisRequest,
+    ) -> Result<(), AdapterContractError> {
+        if self.protocol.minor < 2 || !self.has_capability(PROJECT_NORMALIZED_IR_CAPABILITY) {
+            return Err(AdapterContractError::CapabilityMismatch);
+        }
+        if request.encoded_len() > MAX_ADAPTER_FRAME_BYTES {
+            return Err(AdapterContractError::FrameSize);
+        }
+        self.validate_message_identity(&request.session_id, &request.request_id)?;
+        validate_fixed_bytes(
+            request
+                .repository
+                .as_ref()
+                .ok_or(AdapterContractError::MissingField)?
+                .value
+                .as_slice(),
+            16,
+        )?;
+        validate_fixed_bytes(
+            request
+                .generation
+                .as_ref()
+                .ok_or(AdapterContractError::MissingField)?
+                .value
+                .as_slice(),
+            20,
+        )?;
+        validate_metadata_string(&request.analysis_unit)?;
+        validate_metadata_string(&request.target)?;
+        validate_digest(
+            request
+                .build_context
+                .as_ref()
+                .ok_or(AdapterContractError::MissingField)?
+                .value
+                .as_slice(),
+        )?;
+        validate_digest(
+            request
+                .config_digest
+                .as_ref()
+                .ok_or(AdapterContractError::MissingField)?
+                .value
+                .as_slice(),
+        )?;
+        if RequestedAnalysisTier::try_from(request.requested_tier)
+            .map_err(|_| AdapterContractError::InvalidIdentity)?
+            == RequestedAnalysisTier::Unspecified
+        {
+            return Err(AdapterContractError::InvalidIdentity);
+        }
+        if request.inputs.is_empty()
+            || request.inputs.len()
+                > usize::try_from(self.limits.files)
+                    .map_err(|_| AdapterContractError::QuotaMismatch)?
+            || request.context_manifest.is_empty()
+            || request.context_manifest.len() > MAX_PROJECT_CONTEXT_BYTES
+        {
+            return Err(AdapterContractError::QuotaMismatch);
+        }
+
+        let mut file_ids = BTreeSet::new();
+        let mut paths = BTreeSet::new();
+        let mut previous_path = None::<&str>;
+        let mut input_bytes = request.context_manifest.len();
+        for input in &request.inputs {
+            let file = input
+                .file
+                .as_ref()
+                .ok_or(AdapterContractError::MissingField)?;
+            validate_fixed_bytes(&file.value, 20)?;
+            validate_project_path(&input.path)?;
+            validate_protocol_label(&input.language)?;
+            validate_digest(
+                input
+                    .source_digest
+                    .as_ref()
+                    .ok_or(AdapterContractError::MissingField)?
+                    .value
+                    .as_slice(),
+            )?;
+            if previous_path.is_some_and(|previous| previous >= input.path.as_str())
+                || !file_ids.insert(file.value.as_slice())
+                || !paths.insert(input.path.as_str())
+            {
+                return Err(AdapterContractError::InvalidIdentity);
+            }
+            previous_path = Some(&input.path);
+            input_bytes = input_bytes
+                .checked_add(input.source.len())
+                .ok_or(AdapterContractError::QuotaMismatch)?;
+            validate_generated_origins(&input.origins, input.source.len())?;
+        }
+        if u64::try_from(input_bytes).map_err(|_| AdapterContractError::QuotaMismatch)?
+            > self.limits.input_bytes
+        {
+            return Err(AdapterContractError::QuotaMismatch);
+        }
+        Ok(())
+    }
+
+    /// Validates one project result before semantic IR decoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterContractError`] when the project capability, request
+    /// correlation, output ceiling, or declared digest is invalid.
+    pub fn validate_project_analysis_result(
+        &self,
+        result: &ProjectAnalysisResult,
+    ) -> Result<(), AdapterContractError> {
+        if self.protocol.minor < 2 || !self.has_capability(PROJECT_NORMALIZED_IR_CAPABILITY) {
+            return Err(AdapterContractError::CapabilityMismatch);
+        }
+        if result.encoded_len() > MAX_ADAPTER_FRAME_BYTES {
+            return Err(AdapterContractError::FrameSize);
+        }
+        self.validate_message_identity(&result.session_id, &result.request_id)?;
+        validate_digest(
+            result
+                .output_digest
+                .as_ref()
+                .ok_or(AdapterContractError::MissingField)?
+                .value
+                .as_slice(),
+        )?;
+        if u64::try_from(result.normalized_ir.len())
+            .map_err(|_| AdapterContractError::QuotaMismatch)?
+            > self.limits.output_bytes
+        {
+            return Err(AdapterContractError::QuotaMismatch);
+        }
+        Ok(())
+    }
+
     /// Validates one cooperative cancellation correlation.
     ///
     /// # Errors
@@ -544,6 +694,8 @@ pub const fn frame_kind(frame: &AdapterFrame) -> &'static str {
         Some(adapter_frame::Message::Session(_)) => "session",
         Some(adapter_frame::Message::AnalysisRequest(_)) => "analysis_request",
         Some(adapter_frame::Message::AnalysisResult(_)) => "analysis_result",
+        Some(adapter_frame::Message::ProjectAnalysisRequest(_)) => "project_analysis_request",
+        Some(adapter_frame::Message::ProjectAnalysisResult(_)) => "project_analysis_result",
         Some(adapter_frame::Message::Cancel(_)) => "cancel",
         Some(adapter_frame::Message::Error(_)) => "error",
         None => "missing",
@@ -718,6 +870,55 @@ fn validate_protocol_label(label: &str) -> Result<(), AdapterContractError> {
     Ok(())
 }
 
+fn validate_metadata_string(value: &str) -> Result<(), AdapterContractError> {
+    if value.is_empty()
+        || value.len() > MAX_PROJECT_PATH_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(AdapterContractError::InvalidIdentity);
+    }
+    Ok(())
+}
+
+fn validate_project_path(path: &str) -> Result<(), AdapterContractError> {
+    validate_metadata_string(path)?;
+    if path.starts_with('/')
+        || path.starts_with('\\')
+        || path.contains('\\')
+        || path.split('/').any(|component| {
+            component.is_empty() || component == "." || component == ".." || component.contains(':')
+        })
+    {
+        return Err(AdapterContractError::InvalidIdentity);
+    }
+    Ok(())
+}
+
+fn validate_generated_origins(
+    origins: &[crate::generated::adapter::v1::GeneratedOrigin],
+    source_bytes: usize,
+) -> Result<(), AdapterContractError> {
+    let source_bytes =
+        u64::try_from(source_bytes).map_err(|_| AdapterContractError::QuotaMismatch)?;
+    let mut previous_end = 0_u64;
+    for (index, origin) in origins.iter().enumerate() {
+        validate_project_path(&origin.origin_path)?;
+        validate_protocol_label(&origin.transformation)?;
+        if let Some(digest) = &origin.generator_digest {
+            validate_digest(&digest.value)?;
+        }
+        if origin.generated_start_byte >= origin.generated_end_byte
+            || origin.generated_end_byte > source_bytes
+            || origin.origin_start_byte >= origin.origin_end_byte
+            || (index != 0 && origin.generated_start_byte < previous_end)
+        {
+            return Err(AdapterContractError::InvalidIdentity);
+        }
+        previous_end = origin.generated_end_byte;
+    }
+    Ok(())
+}
+
 fn validate_version_label(label: &str) -> Result<(), AdapterContractError> {
     if label.is_empty()
         || label.len() > MAX_LABEL_BYTES
@@ -772,7 +973,10 @@ const fn trust_rank(trust: AdapterTrustLevel) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generated::common::v1::{ContentHash, FileId, GenerationId, RepositoryId};
+    use crate::generated::{
+        adapter::v1::{GeneratedOrigin, ProjectInput},
+        common::v1::{ContentHash, FileId, GenerationId, RepositoryId},
+    };
 
     #[test]
     fn negotiation_binds_identity_capabilities_extensions_quotas_and_cancellation() {
@@ -898,6 +1102,120 @@ mod tests {
         assert_eq!(
             session.validate_analysis_request(&default_nonce),
             Err(AdapterContractError::SessionMismatch)
+        );
+    }
+
+    #[test]
+    fn negotiated_session_validates_canonical_bounded_project_frames() {
+        let session = ValidatedAdvertisement::validate(advertisement())
+            .expect("advertisement validates")
+            .negotiate(requirements())
+            .expect("requirements negotiate");
+        let request = project_analysis_request();
+        session
+            .validate_project_analysis_request(&request)
+            .expect("bounded project request validates");
+        session
+            .validate_project_analysis_result(&ProjectAnalysisResult {
+                session_id: vec![7; ADAPTER_NONCE_BYTES],
+                request_id: vec![9; ADAPTER_NONCE_BYTES],
+                normalized_ir: vec![1; 64],
+                output_digest: Some(ContentHash {
+                    value: vec![3; ADAPTER_DIGEST_BYTES],
+                }),
+            })
+            .expect("bounded project result validates");
+
+        let frame = AdapterFrame {
+            message: Some(adapter_frame::Message::ProjectAnalysisRequest(request)),
+        };
+        let encoded = encode_adapter_frame(&frame).expect("project frame encodes");
+        let decoded = decode_adapter_frame(&encoded).expect("project frame decodes");
+        assert_eq!(frame_kind(&decoded), "project_analysis_request");
+    }
+
+    #[test]
+    fn project_request_rejects_noncanonical_identity_origins_and_aggregate_quota() {
+        let session = ValidatedAdvertisement::validate(advertisement())
+            .expect("advertisement validates")
+            .negotiate(requirements())
+            .expect("requirements negotiate");
+
+        let mut reversed = project_analysis_request();
+        reversed.inputs.reverse();
+        assert_eq!(
+            session.validate_project_analysis_request(&reversed),
+            Err(AdapterContractError::InvalidIdentity)
+        );
+
+        let mut duplicate_file = project_analysis_request();
+        duplicate_file.inputs[1].file = duplicate_file.inputs[0].file.clone();
+        assert_eq!(
+            session.validate_project_analysis_request(&duplicate_file),
+            Err(AdapterContractError::InvalidIdentity)
+        );
+
+        let mut overlapping_origins = project_analysis_request();
+        overlapping_origins.inputs[1].origins.push(GeneratedOrigin {
+            generated_start_byte: 3,
+            generated_end_byte: 6,
+            origin_path: "schema/api.proto".to_owned(),
+            origin_start_byte: 6,
+            origin_end_byte: 9,
+            transformation: "prost".to_owned(),
+            generator_digest: Some(ContentHash {
+                value: vec![8; ADAPTER_DIGEST_BYTES],
+            }),
+        });
+        assert_eq!(
+            session.validate_project_analysis_request(&overlapping_origins),
+            Err(AdapterContractError::InvalidIdentity)
+        );
+
+        let mut out_of_bounds_origin = project_analysis_request();
+        out_of_bounds_origin.inputs[1].origins[0].generated_end_byte = 17;
+        assert_eq!(
+            session.validate_project_analysis_request(&out_of_bounds_origin),
+            Err(AdapterContractError::InvalidIdentity)
+        );
+
+        let mut oversized = project_analysis_request();
+        oversized.context_manifest = vec![0; 1_024];
+        assert_eq!(
+            session.validate_project_analysis_request(&oversized),
+            Err(AdapterContractError::QuotaMismatch)
+        );
+    }
+
+    #[test]
+    fn project_frames_require_protocol_v1_2_and_the_negotiated_capability() {
+        let mut legacy_advertisement = advertisement();
+        legacy_advertisement
+            .capabilities
+            .retain(|capability| capability != PROJECT_NORMALIZED_IR_CAPABILITY);
+        legacy_advertisement
+            .supported_protocols
+            .as_mut()
+            .expect("version range exists")
+            .maximum = Some(ContractVersion { major: 1, minor: 1 });
+        let validated = ValidatedAdvertisement::validate(legacy_advertisement)
+            .expect("legacy advertisement validates");
+        let mut legacy_requirements = requirements();
+        legacy_requirements
+            .required_capabilities
+            .retain(|capability| capability != PROJECT_NORMALIZED_IR_CAPABILITY);
+        legacy_requirements
+            .selected_protocol
+            .as_mut()
+            .expect("selected protocol exists")
+            .minor = 1;
+        let session = validated
+            .negotiate(legacy_requirements)
+            .expect("legacy requirements negotiate");
+
+        assert_eq!(
+            session.validate_project_analysis_request(&project_analysis_request()),
+            Err(AdapterContractError::CapabilityMismatch)
         );
     }
 
@@ -1033,7 +1351,11 @@ mod tests {
                     minor: CURRENT_ADAPTER_PROTOCOL_MINOR,
                 }),
             }),
-            capabilities: vec!["semantic.scopes".to_owned(), "semantic.types".to_owned()],
+            capabilities: vec![
+                PROJECT_NORMALIZED_IR_CAPABILITY.to_owned(),
+                "semantic.scopes".to_owned(),
+                "semantic.types".to_owned(),
+            ],
             extensions: vec![extension()],
             trust_level: AdapterTrustLevel::FirstParty as i32,
             hard_limits: Some(limits(2_048)),
@@ -1049,7 +1371,10 @@ mod tests {
                 minor: CURRENT_ADAPTER_PROTOCOL_MINOR,
             }),
             expected_adapter: Some(identity()),
-            required_capabilities: vec!["semantic.types".to_owned()],
+            required_capabilities: vec![
+                PROJECT_NORMALIZED_IR_CAPABILITY.to_owned(),
+                "semantic.types".to_owned(),
+            ],
             required_extensions: vec![extension()],
             granted_limits: Some(limits(1_024)),
             maximum_trust: AdapterTrustLevel::FirstParty as i32,
@@ -1102,6 +1427,59 @@ mod tests {
                 value: vec![5; ADAPTER_DIGEST_BYTES],
             }),
             source: vec![6; source_bytes],
+        }
+    }
+
+    fn project_analysis_request() -> ProjectAnalysisRequest {
+        ProjectAnalysisRequest {
+            session_id: vec![7; ADAPTER_NONCE_BYTES],
+            request_id: vec![9; ADAPTER_NONCE_BYTES],
+            repository: Some(RepositoryId { value: vec![1; 16] }),
+            generation: Some(GenerationId { value: vec![2; 20] }),
+            analysis_unit: "workspace.service".to_owned(),
+            target: "service".to_owned(),
+            build_context: Some(ContentHash {
+                value: vec![4; ADAPTER_DIGEST_BYTES],
+            }),
+            config_digest: Some(ContentHash {
+                value: vec![5; ADAPTER_DIGEST_BYTES],
+            }),
+            inputs: vec![
+                ProjectInput {
+                    file: Some(FileId { value: vec![3; 20] }),
+                    path: "src/a.rs".to_owned(),
+                    language: "rust".to_owned(),
+                    source_digest: Some(ContentHash {
+                        value: vec![6; ADAPTER_DIGEST_BYTES],
+                    }),
+                    source: b"pub fn a() {}".to_vec(),
+                    generated: false,
+                    origins: Vec::new(),
+                },
+                ProjectInput {
+                    file: Some(FileId { value: vec![4; 20] }),
+                    path: "src/b.rs".to_owned(),
+                    language: "rust".to_owned(),
+                    source_digest: Some(ContentHash {
+                        value: vec![7; ADAPTER_DIGEST_BYTES],
+                    }),
+                    source: b"pub fn b() {}".to_vec(),
+                    generated: true,
+                    origins: vec![GeneratedOrigin {
+                        generated_start_byte: 0,
+                        generated_end_byte: 4,
+                        origin_path: "schema/api.proto".to_owned(),
+                        origin_start_byte: 1,
+                        origin_end_byte: 5,
+                        transformation: "prost".to_owned(),
+                        generator_digest: Some(ContentHash {
+                            value: vec![8; ADAPTER_DIGEST_BYTES],
+                        }),
+                    }],
+                },
+            ],
+            context_manifest: b"{}".to_vec(),
+            requested_tier: RequestedAnalysisTier::TierB as i32,
         }
     }
 }

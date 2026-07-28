@@ -152,6 +152,109 @@ pub struct AnalysisResult {
     #[allow(missing_docs)]
     pub output_digest: ::core::option::Option<super::super::common::v1::ContentHash>,
 }
+/// Exact generated span mapped to one project-relative origin span.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GeneratedOrigin {
+    #[prost(uint64, tag = "1")]
+    #[allow(missing_docs)]
+    pub generated_start_byte: u64,
+    #[prost(uint64, tag = "2")]
+    #[allow(missing_docs)]
+    pub generated_end_byte: u64,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub origin_path: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub origin_start_byte: u64,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub origin_end_byte: u64,
+    #[prost(string, tag = "6")]
+    #[allow(missing_docs)]
+    pub transformation: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub generator_digest: ::core::option::Option<super::super::common::v1::ContentHash>,
+}
+/// One canonical generation-bound source in a project analysis unit.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProjectInput {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub file: ::core::option::Option<super::super::common::v1::FileId>,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub path: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub language: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub source_digest: ::core::option::Option<super::super::common::v1::ContentHash>,
+    #[prost(bytes = "vec", tag = "5")]
+    #[allow(missing_docs)]
+    pub source: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bool, tag = "6")]
+    #[allow(missing_docs)]
+    pub generated: bool,
+    #[prost(message, repeated, tag = "7")]
+    #[allow(missing_docs)]
+    pub origins: ::prost::alloc::vec::Vec<GeneratedOrigin>,
+}
+/// Bounded multi-file request for one package, project, or build target.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProjectAnalysisRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    #[allow(missing_docs)]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    #[allow(missing_docs)]
+    pub request_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<super::super::common::v1::GenerationId>,
+    #[prost(string, tag = "5")]
+    #[allow(missing_docs)]
+    pub analysis_unit: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    #[allow(missing_docs)]
+    pub target: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub build_context: ::core::option::Option<super::super::common::v1::ContentHash>,
+    #[prost(message, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub config_digest: ::core::option::Option<super::super::common::v1::ContentHash>,
+    #[prost(message, repeated, tag = "9")]
+    #[allow(missing_docs)]
+    pub inputs: ::prost::alloc::vec::Vec<ProjectInput>,
+    #[prost(bytes = "vec", tag = "10")]
+    #[allow(missing_docs)]
+    pub context_manifest: ::prost::alloc::vec::Vec<u8>,
+    #[prost(enumeration = "RequestedAnalysisTier", tag = "11")]
+    #[allow(missing_docs)]
+    pub requested_tier: i32,
+}
+/// Bounded normalized output for one project analysis unit.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProjectAnalysisResult {
+    #[prost(bytes = "vec", tag = "1")]
+    #[allow(missing_docs)]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    #[allow(missing_docs)]
+    pub request_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    #[allow(missing_docs)]
+    pub normalized_ir: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub output_digest: ::core::option::Option<super::super::common::v1::ContentHash>,
+}
 /// Cooperative cancellation for one in-flight adapter request.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CancelRequest {
@@ -165,7 +268,7 @@ pub struct CancelRequest {
 /// Length-prefixed message union used on the adapter pipe.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AdapterFrame {
-    #[prost(oneof = "adapter_frame::Message", tags = "1, 2, 3, 4, 5, 6")]
+    #[prost(oneof = "adapter_frame::Message", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
     #[allow(missing_docs)]
     pub message: ::core::option::Option<adapter_frame::Message>,
 }
@@ -192,6 +295,12 @@ pub mod adapter_frame {
         #[prost(message, tag = "6")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
+        #[prost(message, tag = "7")]
+        #[allow(missing_docs)]
+        ProjectAnalysisRequest(super::ProjectAnalysisRequest),
+        #[prost(message, tag = "8")]
+        #[allow(missing_docs)]
+        ProjectAnalysisResult(super::ProjectAnalysisResult),
     }
 }
 /// Trust origin applied before any adapter process is started.
@@ -228,6 +337,48 @@ impl AdapterTrustLevel {
             "FIRST_PARTY" => Some(Self::FirstParty),
             "USER_PROVIDED" => Some(Self::UserProvided),
             "UNTRUSTED" => Some(Self::Untrusted),
+            _ => None,
+        }
+    }
+}
+/// Highest semantic tier requested for one project analysis unit.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RequestedAnalysisTier {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    TierA = 1,
+    #[allow(missing_docs)]
+    TierB = 2,
+    #[allow(missing_docs)]
+    TierC = 3,
+    #[allow(missing_docs)]
+    TierD = 4,
+}
+impl RequestedAnalysisTier {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REQUESTED_ANALYSIS_TIER_UNSPECIFIED",
+            Self::TierA => "TIER_A",
+            Self::TierB => "TIER_B",
+            Self::TierC => "TIER_C",
+            Self::TierD => "TIER_D",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REQUESTED_ANALYSIS_TIER_UNSPECIFIED" => Some(Self::Unspecified),
+            "TIER_A" => Some(Self::TierA),
+            "TIER_B" => Some(Self::TierB),
+            "TIER_C" => Some(Self::TierC),
+            "TIER_D" => Some(Self::TierD),
             _ => None,
         }
     }
