@@ -23,3 +23,15 @@ owner = "@tomasmarekk"
 reason = "Darwin descriptor ACL APIs are required to remove inherited access and verify account-private SQLite files without a path race"
 expected_source_tokens = 5
 expected_geiger_count = 17
+
+[[boundaries]]
+package = "rootlight-sandbox"
+package_version = "0.1.0"
+manifest = "crates/rootlight-sandbox/Cargo.toml"
+module = "rootlight_sandbox::platform::os"
+source = "crates/rootlight-sandbox/src/platform/os.rs"
+status = "enabled"
+owner = "@tomasmarekk"
+reason = "Win32 process creation, explicit inherited-handle lists, exact process ownership, and Job Object containment require native APIs unavailable through stable safe Rust"
+expected_source_tokens = 22
+expected_geiger_count = 108

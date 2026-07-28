@@ -29,6 +29,7 @@ workspace_members = [
   "rootlight-query",
   "rootlight-resolve",
   "rootlight-runtime",
+  "rootlight-sandbox",
   "rootlight-search",
   "rootlight-segment",
   "rootlight-service",
@@ -162,6 +163,11 @@ allowed_internal_dependencies = [
   "rootlight-runtime",
   "rootlight-vfs",
 ]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-sandbox"
+allowed_internal_dependencies = []
 allow_build_script = false
 
 [[crates]]

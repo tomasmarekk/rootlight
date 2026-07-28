@@ -2311,6 +2311,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootlight-sandbox"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "windows",
+]
+
+[[package]]
 name = "rootlight-search"
 version = "0.1.0"
 dependencies = [
