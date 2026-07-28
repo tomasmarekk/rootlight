@@ -49,7 +49,9 @@ fn cancellation_reaches_active_daemon_analyses_without_emitting_responses() {
 
     let arguments = json!({
         "root": repository_root,
-        "mode": "auto",
+        // The test cancels query execution, so project analysis would add
+        // unrelated setup latency under loaded CI runners.
+        "mode": "structural",
         "detached": false
     });
     let index = process_support::retry_transient_busy("index", |attempt_id| {
