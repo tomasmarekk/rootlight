@@ -13,12 +13,12 @@ use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId};
 use rootlight_incremental::{
     AnalysisUnitId, ArtifactDecisionKind, ArtifactId, ArtifactSummary, AuthoritativeScan,
-    BaselineFile, DependencyEdge, DependencyGraph, DependencyRegistry, DependencySource,
-    EquivalenceSnapshot, FactDomain, FactDomainSet, FactNode, FallbackReason, FileChangeKind,
-    FileDescriptor, FileMetadata, GenerationSummary, GraphLimits, HashDecisionReason,
-    IncrementalError, InputFingerprint, InputKey, InputKind, InputSnapshot, LogicalComponent,
-    LogicalDomain, MetadataBaseline, PassDeclaration, PassId, PassObservation, PlanningLimits,
-    PlatformFileIdentity, ReconcileLimits, ReconcileMode, ScannedFile, TraceAction,
+    BaselineFile, ChangeClass, DependencyEdge, DependencyGraph, DependencyRegistry,
+    DependencySource, EquivalenceSnapshot, FactDomain, FactDomainSet, FactNode, FallbackReason,
+    FileChangeKind, FileDescriptor, FileMetadata, GenerationSummary, GraphLimits,
+    HashDecisionReason, IncrementalError, InputFingerprint, InputKey, InputKind, InputSnapshot,
+    LogicalComponent, LogicalDomain, MetadataBaseline, PassDeclaration, PassId, PassObservation,
+    PlanningLimits, PlatformFileIdentity, ReconcileLimits, ReconcileMode, ScannedFile, TraceAction,
     plan_invalidation, plan_reconcile,
 };
 
@@ -156,6 +156,214 @@ fn body_change_invalidates_only_declared_dependent_closure() {
             .entries()
             .iter()
             .all(|entry| entry.action() != TraceAction::ConservativeFallback)
+    );
+}
+
+#[test]
+fn typed_inputs_cover_every_normative_change_class() {
+    let subject = unit(1);
+    let keyed_fact = fact(2);
+    let keyed_file = file(3);
+    let cases = [
+        (InputKey::FileContent(keyed_file), ChangeClass::Surface),
+        (InputKey::FilePath(keyed_file), ChangeClass::Move),
+        (InputKey::PublicSurface(subject), ChangeClass::Surface),
+        (InputKey::BodySummary(subject), ChangeClass::BodyOnly),
+        (InputKey::ImportSet(subject), ChangeClass::Surface),
+        (InputKey::BuildTarget(keyed_fact), ChangeClass::BuildContext),
+        (
+            InputKey::CompilerOptions(keyed_fact),
+            ChangeClass::BuildContext,
+        ),
+        (
+            InputKey::DependencyVersion(keyed_fact),
+            ChangeClass::BuildContext,
+        ),
+        (
+            InputKey::GrammarVersion(keyed_fact),
+            ChangeClass::ProviderChange,
+        ),
+        (
+            InputKey::AdapterVersion(keyed_fact),
+            ChangeClass::ProviderChange,
+        ),
+        (InputKey::ResolverVersion, ChangeClass::ProviderChange),
+        (InputKey::ConfigurationRevision, ChangeClass::Configuration),
+        (InputKey::SearchRevision, ChangeClass::Configuration),
+        (
+            InputKey::DerivedPlan(keyed_fact),
+            ChangeClass::Configuration,
+        ),
+    ];
+
+    for (key, expected) in cases {
+        let parent = input_snapshot([InputFingerprint::new(key, hash(1))]);
+        let current = input_snapshot([InputFingerprint::new(key, hash(2))]);
+        let changes = parent
+            .changes_to(&current, planning_limits(), &cancellation())
+            .expect("typed transition is bounded");
+        assert_eq!(changes.changes().len(), 1);
+        assert_eq!(changes.changes()[0].key(), key);
+        assert_eq!(changes.changes()[0].class(), expected);
+    }
+
+    let unchanged = input_snapshot([InputFingerprint::new(
+        InputKey::BodySummary(subject),
+        hash(1),
+    )]);
+    assert!(
+        unchanged
+            .changes_to(&unchanged, planning_limits(), &cancellation())
+            .expect("identical snapshots compare")
+            .is_empty()
+    );
+    let empty = input_snapshot([]);
+    let added = empty
+        .changes_to(
+            &input_snapshot([InputFingerprint::new(
+                InputKey::BodySummary(subject),
+                hash(1),
+            )]),
+            planning_limits(),
+            &cancellation(),
+        )
+        .expect("addition compares");
+    assert_eq!(added.changes()[0].class(), ChangeClass::Added);
+    let deleted = input_snapshot([InputFingerprint::new(
+        InputKey::BodySummary(subject),
+        hash(1),
+    )])
+    .changes_to(&empty, planning_limits(), &cancellation())
+    .expect("deletion compares");
+    assert_eq!(deleted.changes()[0].class(), ChangeClass::Delete);
+}
+
+#[test]
+fn surface_build_and_provider_changes_select_their_exact_declared_closures() {
+    let changed = unit(1);
+    let dependent = unit(2);
+    let unrelated = unit(3);
+    let surface = FactNode::new(changed, FactDomain::PublicSurface);
+    let dependent_resolution = FactNode::new(dependent, FactDomain::Resolution);
+    let unrelated_resolution = FactNode::new(unrelated, FactDomain::Resolution);
+    let search = FactNode::new(dependent, FactDomain::Search);
+    let syntax = FactNode::new(changed, FactDomain::Syntax);
+    let surface_key = InputKey::PublicSurface(changed);
+    let compiler_key = InputKey::CompilerOptions(fact(4));
+    let adapter_key = InputKey::AdapterVersion(fact(5));
+    let pass = PassId::parse("contract.invalidate").expect("fixture pass ID is valid");
+    let declaration = PassDeclaration::new(
+        pass.clone(),
+        [
+            InputKind::PublicSurface,
+            InputKind::CompilerOptions,
+            InputKind::AdapterVersion,
+        ],
+        FactDomainSet::all(),
+        FactDomainSet::all(),
+    )
+    .expect("fixture declaration has outputs");
+    let registry = DependencyRegistry::new([declaration], graph_limits(5, 7), &cancellation())
+        .expect("fixture registry is valid");
+    let graph = DependencyGraph::new(
+        [
+            surface,
+            dependent_resolution,
+            unrelated_resolution,
+            search,
+            syntax,
+        ],
+        [
+            DependencyEdge::new(DependencySource::Input(surface_key), surface, pass.clone()),
+            DependencyEdge::new(
+                DependencySource::Fact(surface),
+                dependent_resolution,
+                pass.clone(),
+            ),
+            DependencyEdge::new(
+                DependencySource::Input(compiler_key),
+                dependent_resolution,
+                pass.clone(),
+            ),
+            DependencyEdge::new(
+                DependencySource::Input(compiler_key),
+                unrelated_resolution,
+                pass.clone(),
+            ),
+            DependencyEdge::new(DependencySource::Input(adapter_key), syntax, pass.clone()),
+            DependencyEdge::new(DependencySource::Fact(syntax), surface, pass.clone()),
+            DependencyEdge::new(DependencySource::Fact(dependent_resolution), search, pass),
+        ],
+        &registry,
+        graph_limits(5, 7),
+        &cancellation(),
+    )
+    .expect("fixture graph is valid");
+    let parent_inputs = input_snapshot([
+        InputFingerprint::new(surface_key, hash(1)),
+        InputFingerprint::new(compiler_key, hash(1)),
+        InputFingerprint::new(adapter_key, hash(1)),
+    ]);
+
+    let surface_plan = plan_invalidation(
+        &summary(parent_inputs.clone(), Vec::new()),
+        &input_snapshot([
+            InputFingerprint::new(surface_key, hash(2)),
+            InputFingerprint::new(compiler_key, hash(1)),
+            InputFingerprint::new(adapter_key, hash(1)),
+        ]),
+        &graph,
+        planning_limits(),
+        &cancellation(),
+    )
+    .expect("surface closure succeeds");
+    assert_eq!(
+        surface_plan.invalidated_nodes().collect::<BTreeSet<_>>(),
+        BTreeSet::from([surface, dependent_resolution, search])
+    );
+    assert!(
+        !surface_plan
+            .invalidated_nodes()
+            .any(|node| node == unrelated_resolution)
+    );
+
+    let build_plan = plan_invalidation(
+        &summary(parent_inputs.clone(), Vec::new()),
+        &input_snapshot([
+            InputFingerprint::new(surface_key, hash(1)),
+            InputFingerprint::new(compiler_key, hash(2)),
+            InputFingerprint::new(adapter_key, hash(1)),
+        ]),
+        &graph,
+        planning_limits(),
+        &cancellation(),
+    )
+    .expect("build-context closure succeeds");
+    assert_eq!(
+        build_plan.invalidated_nodes().collect::<BTreeSet<_>>(),
+        BTreeSet::from([dependent_resolution, unrelated_resolution, search])
+    );
+
+    let provider_plan = plan_invalidation(
+        &summary(parent_inputs, Vec::new()),
+        &input_snapshot([
+            InputFingerprint::new(surface_key, hash(1)),
+            InputFingerprint::new(compiler_key, hash(1)),
+            InputFingerprint::new(adapter_key, hash(2)),
+        ]),
+        &graph,
+        planning_limits(),
+        &cancellation(),
+    )
+    .expect("provider closure succeeds");
+    assert_eq!(
+        provider_plan.invalidated_nodes().collect::<BTreeSet<_>>(),
+        BTreeSet::from([syntax, surface, dependent_resolution, search])
+    );
+    assert!(
+        !provider_plan
+            .invalidated_nodes()
+            .any(|node| node == unrelated_resolution)
     );
 }
 

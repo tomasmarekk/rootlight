@@ -20,6 +20,7 @@ mod semantic_contract;
 mod token_accounting;
 mod trajectory;
 mod trajectory_quality;
+mod workspace_scale;
 
 pub use ablation::{
     ABLATION_SCHEMA_VERSION, AblationAggregateReport, AblationBlindingKey, AblationDecision,
@@ -122,6 +123,11 @@ pub use trajectory_quality::{
     WorkflowQualityTaskRegistration, build_workflow_quality_evidence,
     decode_workflow_quality_evidence, encode_workflow_quality_evidence,
     preregister_workflow_quality_protocol,
+};
+pub use workspace_scale::{
+    WORKSPACE_SCALE_EVIDENCE_MAX_BYTES, WORKSPACE_SCALE_EVIDENCE_SCHEMA, WorkspaceScaleEvidence,
+    WorkspaceScaleEvidenceError, build_workspace_scale_evidence, encode_workspace_scale_evidence,
+    verify_workspace_scale_evidence,
 };
 
 /// Result-bundle schema version written and verified by this crate.

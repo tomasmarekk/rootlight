@@ -17,6 +17,8 @@ rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 rootlight-resolve = { path = "../rootlight-resolve" }
+rootlight-runtime = { path = "../rootlight-runtime" }
+rootlight-service = { path = "../rootlight-service" }
 rootlight-vfs = { path = "../rootlight-vfs" }
 rootlight-workspace = { path = "../rootlight-workspace" }
 serde.workspace = true

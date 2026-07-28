@@ -1946,6 +1946,8 @@ dependencies = [
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-resolve",
+ "rootlight-runtime",
+ "rootlight-service",
  "rootlight-vfs",
  "rootlight-workspace",
  "serde",

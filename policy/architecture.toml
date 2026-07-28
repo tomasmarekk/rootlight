@@ -44,11 +44,15 @@ dev_only_members = ["rootlight-bench", "xtask"]
 [[crates]]
 name = "rootlight-adapter-host"
 allowed_internal_dependencies = [
+  "rootlight-adapter-sdk",
+  "rootlight-adapter-treesitter",
+  "rootlight-adapters",
   "rootlight-cancel",
   "rootlight-ids",
   "rootlight-ir",
   "rootlight-protocol",
   "rootlight-sandbox",
+  "rootlight-vfs",
 ]
 allow_build_script = false
 
@@ -89,6 +93,7 @@ allow_build_script = false
 name = "rootlight-adapter-sdk"
 allowed_internal_dependencies = [
   "rootlight-cancel",
+  "rootlight-ids",
   "rootlight-ir",
   "rootlight-vfs",
 ]
@@ -134,6 +139,8 @@ allowed_internal_dependencies = [
   "rootlight-ids",
   "rootlight-ir",
   "rootlight-resolve",
+  "rootlight-runtime",
+  "rootlight-service",
   "rootlight-vfs",
   "rootlight-workspace",
 ]
@@ -180,6 +187,7 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-daemon"
 allowed_internal_dependencies = [
+  "rootlight-adapter-host",
   "rootlight-daemon-core",
   "rootlight-error",
   "rootlight-ids",
