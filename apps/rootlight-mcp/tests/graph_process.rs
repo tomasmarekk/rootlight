@@ -1077,7 +1077,10 @@ fn write_negative_repository_fixture(root: &Path) {
 }
 
 fn index_repository(mcp: &mut McpProcess, root: &Path) -> IndexReceipt {
-    let arguments = json!({"root": root, "mode": "auto", "detached": false});
+    // Graph-tool transport coverage is independent of project-adapter
+    // selection; structural mode keeps this process test bounded while the
+    // dedicated adapter-isolation suites exercise deep mode.
+    let arguments = json!({"root": root, "mode": "structural", "detached": false});
     let response = process_support::retry_transient_busy("index", |attempt_id| {
         mcp.call(attempt_id, "repo.index", arguments.clone())
     });
