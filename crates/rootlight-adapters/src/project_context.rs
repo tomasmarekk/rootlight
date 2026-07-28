@@ -23,6 +23,16 @@ const IDENTITY_DOMAIN: &[u8] = b"rootlight-project-context-v1\0";
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ProjectContextLanguage {
+    /// Rust source interpreted with Cargo workspace and target metadata.
+    Rust,
+    /// TypeScript source interpreted with a `tsconfig` project graph.
+    Typescript,
+    /// JavaScript source interpreted with a `tsconfig` or `jsconfig` project graph.
+    Javascript,
+    /// Python source interpreted with package-root and type-checker metadata.
+    Python,
+    /// Go source interpreted with module, workspace, and build-tag metadata.
+    Go,
     /// C source interpreted with a compile database.
     C,
     /// C++ source interpreted with a compile database.
@@ -96,12 +106,59 @@ impl ProjectContextCoverage {
     }
 }
 
+/// One exact generated span and its project-relative handwritten origin.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratedOriginMapping {
+    generated_start_byte: u64,
+    generated_end_byte: u64,
+    origin_path: String,
+    origin_start_byte: u64,
+    origin_end_byte: u64,
+    transformation: String,
+    generator_digest: Option<String>,
+}
+
+impl GeneratedOriginMapping {
+    /// Returns the generated half-open byte range.
+    #[must_use]
+    pub const fn generated_range(&self) -> (u64, u64) {
+        (self.generated_start_byte, self.generated_end_byte)
+    }
+
+    /// Returns the normalized project-relative origin path.
+    #[must_use]
+    pub fn origin_path(&self) -> &str {
+        &self.origin_path
+    }
+
+    /// Returns the origin half-open byte range.
+    #[must_use]
+    pub const fn origin_range(&self) -> (u64, u64) {
+        (self.origin_start_byte, self.origin_end_byte)
+    }
+
+    /// Returns the stable transformation identity.
+    #[must_use]
+    pub fn transformation(&self) -> &str {
+        &self.transformation
+    }
+
+    /// Returns the generator or schema digest when supplied.
+    #[must_use]
+    pub fn generator_digest(&self) -> Option<&str> {
+        self.generator_digest.as_deref()
+    }
+}
+
 /// One project-relative source file and its optional generated origin.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectContextFile {
     path: String,
     generated_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    origin_mappings: Vec<GeneratedOriginMapping>,
 }
 
 impl ProjectContextFile {
@@ -115,6 +172,12 @@ impl ProjectContextFile {
     #[must_use]
     pub fn generated_from(&self) -> Option<&str> {
         self.generated_from.as_deref()
+    }
+
+    /// Returns canonical generated-to-origin span mappings.
+    #[must_use]
+    pub fn origin_mappings(&self) -> &[GeneratedOriginMapping] {
+        &self.origin_mappings
     }
 }
 
@@ -137,6 +200,346 @@ impl ProjectContextEvidence {
     #[must_use]
     pub fn source(&self) -> &str {
         &self.source
+    }
+}
+
+/// Rust Cargo workspace and target context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RustProjectContext {
+    cargo_metadata_digest: String,
+    cargo_lock_digest: Option<String>,
+    workspace_members: Vec<String>,
+    targets: Vec<String>,
+    source_roots: Vec<String>,
+    edition: String,
+    target_triple: String,
+    enabled_features: Vec<String>,
+    cfgs: Vec<String>,
+    compiler_version: Option<String>,
+    precise_index_digest: Option<String>,
+}
+
+impl RustProjectContext {
+    /// Returns the digest of normalized Cargo metadata.
+    #[must_use]
+    pub fn cargo_metadata_digest(&self) -> &str {
+        &self.cargo_metadata_digest
+    }
+
+    /// Returns the captured Cargo lockfile digest, if one exists.
+    #[must_use]
+    pub fn cargo_lock_digest(&self) -> Option<&str> {
+        self.cargo_lock_digest.as_deref()
+    }
+
+    /// Returns canonical Cargo workspace members.
+    #[must_use]
+    pub fn workspace_members(&self) -> &[String] {
+        &self.workspace_members
+    }
+
+    /// Returns canonical package targets.
+    #[must_use]
+    pub fn targets(&self) -> &[String] {
+        &self.targets
+    }
+
+    /// Returns project-relative Rust source roots.
+    #[must_use]
+    pub fn source_roots(&self) -> &[String] {
+        &self.source_roots
+    }
+
+    /// Returns the Rust edition selected for the target.
+    #[must_use]
+    pub fn edition(&self) -> &str {
+        &self.edition
+    }
+
+    /// Returns the exact compilation target triple.
+    #[must_use]
+    pub fn target_triple(&self) -> &str {
+        &self.target_triple
+    }
+
+    /// Returns the enabled Cargo features.
+    #[must_use]
+    pub fn enabled_features(&self) -> &[String] {
+        &self.enabled_features
+    }
+
+    /// Returns normalized active `cfg` predicates.
+    #[must_use]
+    pub fn cfgs(&self) -> &[String] {
+        &self.cfgs
+    }
+
+    /// Returns the compiler frontend identity when captured.
+    #[must_use]
+    pub fn compiler_version(&self) -> Option<&str> {
+        self.compiler_version.as_deref()
+    }
+
+    /// Returns the compiler-precise index digest when captured.
+    #[must_use]
+    pub fn precise_index_digest(&self) -> Option<&str> {
+        self.precise_index_digest.as_deref()
+    }
+}
+
+/// TypeScript or JavaScript project-graph context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TypeScriptProjectContext {
+    config_digest: String,
+    package_lock_digest: Option<String>,
+    project_references: Vec<String>,
+    source_roots: Vec<String>,
+    type_roots: Vec<String>,
+    path_mappings: Vec<ProjectContextEvidence>,
+    module_resolution: String,
+    language_target: String,
+    jsx_mode: Option<String>,
+    semantic_frontend_version: Option<String>,
+    precise_index_digest: Option<String>,
+}
+
+impl TypeScriptProjectContext {
+    /// Returns the normalized `tsconfig` or `jsconfig` digest.
+    #[must_use]
+    pub fn config_digest(&self) -> &str {
+        &self.config_digest
+    }
+
+    /// Returns the package-lock digest when supplied.
+    #[must_use]
+    pub fn package_lock_digest(&self) -> Option<&str> {
+        self.package_lock_digest.as_deref()
+    }
+
+    /// Returns canonical project references.
+    #[must_use]
+    pub fn project_references(&self) -> &[String] {
+        &self.project_references
+    }
+
+    /// Returns project-relative source roots.
+    #[must_use]
+    pub fn source_roots(&self) -> &[String] {
+        &self.source_roots
+    }
+
+    /// Returns project-relative type roots.
+    #[must_use]
+    pub fn type_roots(&self) -> &[String] {
+        &self.type_roots
+    }
+
+    /// Returns normalized path aliases with their declarative sources.
+    #[must_use]
+    pub fn path_mappings(&self) -> &[ProjectContextEvidence] {
+        &self.path_mappings
+    }
+
+    /// Returns the selected module-resolution mode.
+    #[must_use]
+    pub fn module_resolution(&self) -> &str {
+        &self.module_resolution
+    }
+
+    /// Returns the selected JavaScript language target.
+    #[must_use]
+    pub fn language_target(&self) -> &str {
+        &self.language_target
+    }
+
+    /// Returns the selected JSX mode when applicable.
+    #[must_use]
+    pub fn jsx_mode(&self) -> Option<&str> {
+        self.jsx_mode.as_deref()
+    }
+
+    /// Returns the semantic frontend version when captured.
+    #[must_use]
+    pub fn semantic_frontend_version(&self) -> Option<&str> {
+        self.semantic_frontend_version.as_deref()
+    }
+
+    /// Returns a compiler-precise index digest when captured.
+    #[must_use]
+    pub fn precise_index_digest(&self) -> Option<&str> {
+        self.precise_index_digest.as_deref()
+    }
+}
+
+/// Python package and type-environment context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PythonProjectContext {
+    pyproject_digest: Option<String>,
+    lock_digest: Option<String>,
+    package_roots: Vec<String>,
+    import_paths: Vec<String>,
+    namespace_packages: Vec<String>,
+    stub_roots: Vec<String>,
+    type_checker: Option<String>,
+    semantic_frontend_version: Option<String>,
+    precise_index_digest: Option<String>,
+}
+
+impl PythonProjectContext {
+    /// Returns the `pyproject.toml` digest when supplied.
+    #[must_use]
+    pub fn pyproject_digest(&self) -> Option<&str> {
+        self.pyproject_digest.as_deref()
+    }
+
+    /// Returns the dependency lock digest when supplied.
+    #[must_use]
+    pub fn lock_digest(&self) -> Option<&str> {
+        self.lock_digest.as_deref()
+    }
+
+    /// Returns project-relative package roots.
+    #[must_use]
+    pub fn package_roots(&self) -> &[String] {
+        &self.package_roots
+    }
+
+    /// Returns project-relative import search paths.
+    #[must_use]
+    pub fn import_paths(&self) -> &[String] {
+        &self.import_paths
+    }
+
+    /// Returns declared namespace packages.
+    #[must_use]
+    pub fn namespace_packages(&self) -> &[String] {
+        &self.namespace_packages
+    }
+
+    /// Returns project-relative stub roots.
+    #[must_use]
+    pub fn stub_roots(&self) -> &[String] {
+        &self.stub_roots
+    }
+
+    /// Returns the selected type-checker identity.
+    #[must_use]
+    pub fn type_checker(&self) -> Option<&str> {
+        self.type_checker.as_deref()
+    }
+
+    /// Returns the semantic frontend version when captured.
+    #[must_use]
+    pub fn semantic_frontend_version(&self) -> Option<&str> {
+        self.semantic_frontend_version.as_deref()
+    }
+
+    /// Returns a compiler-precise index digest when captured.
+    #[must_use]
+    pub fn precise_index_digest(&self) -> Option<&str> {
+        self.precise_index_digest.as_deref()
+    }
+}
+
+/// Go module, workspace, and build-selection context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoProjectContext {
+    go_mod_digest: String,
+    go_work_digest: Option<String>,
+    go_sum_digest: Option<String>,
+    modules: Vec<String>,
+    packages: Vec<String>,
+    replacements: Vec<ProjectContextEvidence>,
+    build_tags: Vec<String>,
+    goos: String,
+    goarch: String,
+    vendor_mode: bool,
+    cgo_enabled: bool,
+    semantic_frontend_version: Option<String>,
+    precise_index_digest: Option<String>,
+}
+
+impl GoProjectContext {
+    /// Returns the primary `go.mod` digest.
+    #[must_use]
+    pub fn go_mod_digest(&self) -> &str {
+        &self.go_mod_digest
+    }
+
+    /// Returns the `go.work` digest when supplied.
+    #[must_use]
+    pub fn go_work_digest(&self) -> Option<&str> {
+        self.go_work_digest.as_deref()
+    }
+
+    /// Returns the `go.sum` digest when supplied.
+    #[must_use]
+    pub fn go_sum_digest(&self) -> Option<&str> {
+        self.go_sum_digest.as_deref()
+    }
+
+    /// Returns canonical module identities.
+    #[must_use]
+    pub fn modules(&self) -> &[String] {
+        &self.modules
+    }
+
+    /// Returns canonical package import paths.
+    #[must_use]
+    pub fn packages(&self) -> &[String] {
+        &self.packages
+    }
+
+    /// Returns normalized module replacements with their sources.
+    #[must_use]
+    pub fn replacements(&self) -> &[ProjectContextEvidence] {
+        &self.replacements
+    }
+
+    /// Returns active Go build tags.
+    #[must_use]
+    pub fn build_tags(&self) -> &[String] {
+        &self.build_tags
+    }
+
+    /// Returns the selected `GOOS`.
+    #[must_use]
+    pub fn goos(&self) -> &str {
+        &self.goos
+    }
+
+    /// Returns the selected `GOARCH`.
+    #[must_use]
+    pub fn goarch(&self) -> &str {
+        &self.goarch
+    }
+
+    /// Returns whether vendor mode is selected.
+    #[must_use]
+    pub const fn vendor_mode(&self) -> bool {
+        self.vendor_mode
+    }
+
+    /// Returns whether cgo participation is selected.
+    #[must_use]
+    pub const fn cgo_enabled(&self) -> bool {
+        self.cgo_enabled
+    }
+
+    /// Returns the semantic frontend version when captured.
+    #[must_use]
+    pub fn semantic_frontend_version(&self) -> Option<&str> {
+        self.semantic_frontend_version.as_deref()
+    }
+
+    /// Returns a compiler-precise index digest when captured.
+    #[must_use]
+    pub fn precise_index_digest(&self) -> Option<&str> {
+        self.precise_index_digest.as_deref()
     }
 }
 
@@ -359,6 +762,14 @@ impl PhpProjectContext {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ProjectContextMetadata {
+    /// Rust metadata captured from Cargo and an optional semantic frontend.
+    Rust(RustProjectContext),
+    /// TypeScript or JavaScript metadata captured from project configuration.
+    Typescript(TypeScriptProjectContext),
+    /// Python metadata captured from package and type-checker configuration.
+    Python(PythonProjectContext),
+    /// Go metadata captured from module and build-selection configuration.
+    Go(GoProjectContext),
     /// C or C++ metadata captured from a compile database.
     Cxx(CxxProjectContext),
     /// Java or Kotlin metadata captured from a declarative project model.
@@ -467,10 +878,21 @@ impl ProjectContext {
             }
             if let Some(origin) = &file.generated_from {
                 validator.string(origin)?;
+                if !is_normalized_relative_path(origin) {
+                    return Err(ProjectContextError::InvalidFilePath);
+                }
             }
+            validate_origin_mappings(&file.origin_mappings, &mut validator)?;
         }
         self.files.sort();
         reject_duplicates(&self.files)?;
+        if self
+            .files
+            .windows(2)
+            .any(|pair| pair[0].path == pair[1].path)
+        {
+            return Err(ProjectContextError::DuplicateValue);
+        }
         self.coverage.validate_and_normalize(&mut validator)?;
         self.metadata
             .validate_and_normalize(self.language, &mut validator)
@@ -519,6 +941,19 @@ impl ProjectContextMetadata {
         validator: &mut Validator,
     ) -> Result<(), ProjectContextError> {
         match (language, self) {
+            (ProjectContextLanguage::Rust, Self::Rust(context)) => {
+                context.validate_and_normalize(validator)
+            }
+            (
+                ProjectContextLanguage::Typescript | ProjectContextLanguage::Javascript,
+                Self::Typescript(context),
+            ) => context.validate_and_normalize(validator),
+            (ProjectContextLanguage::Python, Self::Python(context)) => {
+                context.validate_and_normalize(validator)
+            }
+            (ProjectContextLanguage::Go, Self::Go(context)) => {
+                context.validate_and_normalize(validator)
+            }
             (ProjectContextLanguage::C | ProjectContextLanguage::Cpp, Self::Cxx(context)) => {
                 context.validate_and_normalize(validator)
             }
@@ -533,6 +968,98 @@ impl ProjectContextMetadata {
             }
             _ => Err(ProjectContextError::LanguageMetadataMismatch),
         }
+    }
+}
+
+impl RustProjectContext {
+    fn validate_and_normalize(
+        &mut self,
+        validator: &mut Validator,
+    ) -> Result<(), ProjectContextError> {
+        validator.digest(&self.cargo_metadata_digest)?;
+        validator.optional_digest(self.cargo_lock_digest.as_deref())?;
+        if self.workspace_members.is_empty()
+            || self.targets.is_empty()
+            || self.source_roots.is_empty()
+        {
+            return Err(ProjectContextError::MissingProjectStructure);
+        }
+        normalize_strings(&mut self.workspace_members, validator)?;
+        normalize_strings(&mut self.targets, validator)?;
+        normalize_paths(&mut self.source_roots, validator)?;
+        validator.string(&self.edition)?;
+        if !matches!(self.edition.as_str(), "2015" | "2018" | "2021" | "2024") {
+            return Err(ProjectContextError::InvalidLanguageOption);
+        }
+        validator.string(&self.target_triple)?;
+        normalize_strings(&mut self.enabled_features, validator)?;
+        normalize_strings(&mut self.cfgs, validator)?;
+        validator.optional_string(self.compiler_version.as_deref())?;
+        validator.optional_digest(self.precise_index_digest.as_deref())
+    }
+}
+
+impl TypeScriptProjectContext {
+    fn validate_and_normalize(
+        &mut self,
+        validator: &mut Validator,
+    ) -> Result<(), ProjectContextError> {
+        validator.digest(&self.config_digest)?;
+        validator.optional_digest(self.package_lock_digest.as_deref())?;
+        if self.source_roots.is_empty() {
+            return Err(ProjectContextError::MissingProjectStructure);
+        }
+        normalize_paths(&mut self.project_references, validator)?;
+        normalize_paths(&mut self.source_roots, validator)?;
+        normalize_paths(&mut self.type_roots, validator)?;
+        normalize_evidence(&mut self.path_mappings, validator)?;
+        validator.string(&self.module_resolution)?;
+        validator.string(&self.language_target)?;
+        validator.optional_string(self.jsx_mode.as_deref())?;
+        validator.optional_string(self.semantic_frontend_version.as_deref())?;
+        validator.optional_digest(self.precise_index_digest.as_deref())
+    }
+}
+
+impl PythonProjectContext {
+    fn validate_and_normalize(
+        &mut self,
+        validator: &mut Validator,
+    ) -> Result<(), ProjectContextError> {
+        validator.optional_digest(self.pyproject_digest.as_deref())?;
+        validator.optional_digest(self.lock_digest.as_deref())?;
+        if self.package_roots.is_empty() {
+            return Err(ProjectContextError::MissingProjectStructure);
+        }
+        normalize_paths(&mut self.package_roots, validator)?;
+        normalize_paths(&mut self.import_paths, validator)?;
+        normalize_strings(&mut self.namespace_packages, validator)?;
+        normalize_paths(&mut self.stub_roots, validator)?;
+        validator.optional_string(self.type_checker.as_deref())?;
+        validator.optional_string(self.semantic_frontend_version.as_deref())?;
+        validator.optional_digest(self.precise_index_digest.as_deref())
+    }
+}
+
+impl GoProjectContext {
+    fn validate_and_normalize(
+        &mut self,
+        validator: &mut Validator,
+    ) -> Result<(), ProjectContextError> {
+        validator.digest(&self.go_mod_digest)?;
+        validator.optional_digest(self.go_work_digest.as_deref())?;
+        validator.optional_digest(self.go_sum_digest.as_deref())?;
+        if self.modules.is_empty() || self.packages.is_empty() {
+            return Err(ProjectContextError::MissingProjectStructure);
+        }
+        normalize_strings(&mut self.modules, validator)?;
+        normalize_strings(&mut self.packages, validator)?;
+        normalize_evidence(&mut self.replacements, validator)?;
+        normalize_strings(&mut self.build_tags, validator)?;
+        validator.string(&self.goos)?;
+        validator.string(&self.goarch)?;
+        validator.optional_string(self.semantic_frontend_version.as_deref())?;
+        validator.optional_digest(self.precise_index_digest.as_deref())
     }
 }
 
@@ -603,6 +1130,28 @@ impl PhpProjectContext {
     }
 }
 
+fn validate_origin_mappings(
+    mappings: &[GeneratedOriginMapping],
+    validator: &mut Validator,
+) -> Result<(), ProjectContextError> {
+    validator.items(mappings.len())?;
+    let mut previous_end = 0_u64;
+    for (index, mapping) in mappings.iter().enumerate() {
+        validator.string(&mapping.origin_path)?;
+        validator.string(&mapping.transformation)?;
+        validator.optional_digest(mapping.generator_digest.as_deref())?;
+        if !is_normalized_relative_path(&mapping.origin_path)
+            || mapping.generated_start_byte >= mapping.generated_end_byte
+            || mapping.origin_start_byte >= mapping.origin_end_byte
+            || (index != 0 && mapping.generated_start_byte < previous_end)
+        {
+            return Err(ProjectContextError::InvalidOriginMapping { index });
+        }
+        previous_end = mapping.generated_end_byte;
+    }
+    Ok(())
+}
+
 fn normalize_strings(
     values: &mut Vec<String>,
     validator: &mut Validator,
@@ -610,6 +1159,21 @@ fn normalize_strings(
     validator.items(values.len())?;
     for value in &*values {
         validator.string(value)?;
+    }
+    values.sort();
+    reject_duplicates(values)
+}
+
+fn normalize_paths(
+    values: &mut Vec<String>,
+    validator: &mut Validator,
+) -> Result<(), ProjectContextError> {
+    validator.items(values.len())?;
+    for value in &*values {
+        validator.string(value)?;
+        if !is_normalized_relative_path(value) {
+            return Err(ProjectContextError::InvalidFilePath);
+        }
     }
     values.sort();
     reject_duplicates(values)
@@ -677,6 +1241,10 @@ impl Validator {
         Ok(())
     }
 
+    fn optional_string(&mut self, value: Option<&str>) -> Result<(), ProjectContextError> {
+        value.map_or(Ok(()), |value| self.string(value))
+    }
+
     fn code(&mut self, value: &str) -> Result<(), ProjectContextError> {
         self.string(value)?;
         let bytes = value.as_bytes();
@@ -703,6 +1271,10 @@ impl Validator {
             return Err(ProjectContextError::InvalidDigest);
         }
         Ok(())
+    }
+
+    fn optional_digest(&mut self, value: Option<&str>) -> Result<(), ProjectContextError> {
+        value.map_or(Ok(()), |value| self.digest(value))
     }
 }
 
@@ -772,6 +1344,12 @@ pub enum ProjectContextError {
     /// A source path was not normalized and project-relative.
     #[error("project context contains an invalid source path")]
     InvalidFilePath,
+    /// A generated-to-origin range was empty, unordered, or named an unsafe path.
+    #[error("project context contains invalid generated-origin mapping {index}")]
+    InvalidOriginMapping {
+        /// Zero-based mapping index within its generated file.
+        index: usize,
+    },
     /// A stable skip code was not lowercase `snake_case`.
     #[error("project context contains an invalid skip code")]
     InvalidSkipCode,
@@ -793,6 +1371,12 @@ pub enum ProjectContextError {
     /// A PHP project model did not name any Composer autoload root.
     #[error("PHP project context must contain at least one autoload root")]
     MissingAutoloadRoots,
+    /// A target-language context omitted its required project roots or targets.
+    #[error("project context omits required project structure")]
+    MissingProjectStructure,
+    /// A language-specific option was outside the supported normalized set.
+    #[error("project context contains an invalid language option")]
+    InvalidLanguageOption,
     /// Complete coverage was paired with one or more skip reasons.
     #[error("complete project context coverage cannot contain skip reasons")]
     ContradictoryCoverage,

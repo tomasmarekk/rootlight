@@ -123,6 +123,133 @@ fn jvm_dotnet_and_php_contexts_retain_language_specific_evidence() {
 }
 
 #[test]
+fn deep_language_contexts_bind_build_selection_and_generated_origins() {
+    let rust = decode(&json!({
+        "schema_version": 1,
+        "language": "rust",
+        "target": "rootlight-service",
+        "files": [{
+            "path": "target/generated/schema.rs",
+            "generated_from": "proto/schema.proto",
+            "origin_mappings": [{
+                "generated_start_byte": 0,
+                "generated_end_byte": 24,
+                "origin_path": "proto/schema.proto",
+                "origin_start_byte": 8,
+                "origin_end_byte": 32,
+                "transformation": "prost",
+                "generator_digest": DIGEST
+            }]
+        }],
+        "metadata": {
+            "kind": "rust",
+            "cargo_metadata_digest": DIGEST,
+            "cargo_lock_digest": DIGEST,
+            "workspace_members": ["rootlight-service"],
+            "targets": ["lib"],
+            "source_roots": ["crates/rootlight-service/src"],
+            "edition": "2024",
+            "target_triple": "x86_64-pc-windows-msvc",
+            "enabled_features": ["default"],
+            "cfgs": ["windows"],
+            "compiler_version": "rustc 1.97.1",
+            "precise_index_digest": null
+        },
+        "coverage": {"status": "complete", "skips": []}
+    }));
+    let ProjectContextMetadata::Rust(rust_metadata) = rust.metadata() else {
+        panic!("Rust input must retain Cargo metadata");
+    };
+    assert_eq!(rust_metadata.edition(), "2024");
+    assert_eq!(
+        rust.files()[0].origin_mappings()[0].origin_path(),
+        "proto/schema.proto"
+    );
+
+    let typescript = decode(&json!({
+        "schema_version": 1,
+        "language": "typescript",
+        "target": "web",
+        "files": [{"path": "src/index.ts", "generated_from": null}],
+        "metadata": {
+            "kind": "typescript",
+            "config_digest": DIGEST,
+            "package_lock_digest": DIGEST,
+            "project_references": ["packages/shared/tsconfig.json"],
+            "source_roots": ["src"],
+            "type_roots": ["types"],
+            "path_mappings": [{"value": "@shared/*=packages/shared/*", "source": "tsconfig.json"}],
+            "module_resolution": "bundler",
+            "language_target": "es2024",
+            "jsx_mode": null,
+            "semantic_frontend_version": "typescript 6.0",
+            "precise_index_digest": null
+        },
+        "coverage": {"status": "complete", "skips": []}
+    }));
+    let ProjectContextMetadata::Typescript(ts_metadata) = typescript.metadata() else {
+        panic!("TypeScript input must retain project-graph metadata");
+    };
+    assert_eq!(ts_metadata.module_resolution(), "bundler");
+
+    let python = decode(&json!({
+        "schema_version": 1,
+        "language": "python",
+        "target": "api",
+        "files": [{"path": "src/api/__init__.py", "generated_from": null}],
+        "metadata": {
+            "kind": "python",
+            "pyproject_digest": DIGEST,
+            "lock_digest": null,
+            "package_roots": ["src"],
+            "import_paths": ["src"],
+            "namespace_packages": ["api"],
+            "stub_roots": ["typings"],
+            "type_checker": "pyright",
+            "semantic_frontend_version": null,
+            "precise_index_digest": null
+        },
+        "coverage": {
+            "status": "bounded",
+            "skips": [{"code": "dynamic_imports", "detail": "runtime imports were not executed"}]
+        }
+    }));
+    let ProjectContextMetadata::Python(python_metadata) = python.metadata() else {
+        panic!("Python input must retain package metadata");
+    };
+    assert_eq!(python_metadata.package_roots(), ["src"]);
+
+    let go = decode(&json!({
+        "schema_version": 1,
+        "language": "go",
+        "target": "server",
+        "files": [{"path": "cmd/server/main.go", "generated_from": null}],
+        "metadata": {
+            "kind": "go",
+            "go_mod_digest": DIGEST,
+            "go_work_digest": null,
+            "go_sum_digest": DIGEST,
+            "modules": ["example.test/rootlight"],
+            "packages": ["example.test/rootlight/cmd/server"],
+            "replacements": [],
+            "build_tags": ["production"],
+            "goos": "windows",
+            "goarch": "amd64",
+            "vendor_mode": false,
+            "cgo_enabled": false,
+            "semantic_frontend_version": "gopls 0.20",
+            "precise_index_digest": null
+        },
+        "coverage": {"status": "complete", "skips": []}
+    }));
+    let ProjectContextMetadata::Go(go_metadata) = go.metadata() else {
+        panic!("Go input must retain module metadata");
+    };
+    assert_eq!(go_metadata.goos(), "windows");
+    assert_eq!(go_metadata.goarch(), "amd64");
+}
+
+#[test]
 fn paired_language_families_accept_each_declared_language() {
     let mut c = cxx_manifest(json!(["include"]), json!(["DEBUG=1"]));
     c["language"] = json!("c");

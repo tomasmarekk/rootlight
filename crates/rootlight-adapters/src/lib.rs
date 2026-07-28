@@ -23,11 +23,12 @@ use rootlight_ir::{
 };
 
 pub use project_context::{
-    CxxProjectContext, DotnetProjectContext, JvmProjectContext, MAX_PROJECT_CONTEXT_BYTES,
-    MAX_PROJECT_CONTEXT_ITEMS, MAX_PROJECT_CONTEXT_STRING_BYTES, PROJECT_CONTEXT_SCHEMA_VERSION,
-    PhpProjectContext, ProjectContext, ProjectContextCoverage, ProjectContextCoverageStatus,
-    ProjectContextError, ProjectContextEvidence, ProjectContextFile, ProjectContextLanguage,
-    ProjectContextMetadata, ProjectContextSkip,
+    CxxProjectContext, DotnetProjectContext, GeneratedOriginMapping, GoProjectContext,
+    JvmProjectContext, MAX_PROJECT_CONTEXT_BYTES, MAX_PROJECT_CONTEXT_ITEMS,
+    MAX_PROJECT_CONTEXT_STRING_BYTES, PROJECT_CONTEXT_SCHEMA_VERSION, PhpProjectContext,
+    ProjectContext, ProjectContextCoverage, ProjectContextCoverageStatus, ProjectContextError,
+    ProjectContextEvidence, ProjectContextFile, ProjectContextLanguage, ProjectContextMetadata,
+    ProjectContextSkip, PythonProjectContext, RustProjectContext, TypeScriptProjectContext,
 };
 pub use scip_import::{
     ScipImportError, ScipImportLimits, ScipImportOutcome, ScipImportReport, ScipImportRequest,
