@@ -6,7 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rootlight_cancel::{Cancellation, Cancelled};
 use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, content_hash};
@@ -18,13 +18,17 @@ use rootlight_ir::{
 use rootlight_protocol::{
     adapter_contract::{AdapterContractError, NegotiatedSession, decode_adapter_frame},
     generated::{
-        adapter::v1::{AnalysisRequest, AnalysisResult, adapter_frame},
+        adapter::v1::{
+            AnalysisRequest, AnalysisResult, ProjectAnalysisRequest, RequestedAnalysisTier,
+            adapter_frame,
+        },
         common::v1::{ContractVersion, ExtensionDescriptor},
     },
 };
 use serde::Serialize;
 
 const NORMALIZED_IR_CAPABILITY: &str = "normalized_ir";
+const PROJECT_NORMALIZED_IR_CAPABILITY: &str = "project_normalized_ir";
 /// Version of the machine-readable platform isolation evidence.
 pub const ISOLATION_EVIDENCE_SCHEMA: &str = "rootlight.adapter-isolation/1";
 /// Maximum encoded size of one platform isolation report.
@@ -329,6 +333,61 @@ pub struct PendingAnalysis {
     build_context: ContentHash,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct PendingProjectInput {
+    path: String,
+    language: String,
+    source_digest: ContentHash,
+    source_bytes: u64,
+    generated: bool,
+}
+
+/// Generation-bound project identity retained across an untrusted process call.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PendingProjectAnalysis {
+    request_id: [u8; 16],
+    repository: RepositoryId,
+    generation: GenerationId,
+    analysis_unit: String,
+    target: String,
+    build_context: ContentHash,
+    config_digest: ContentHash,
+    requested_tier: RequestedAnalysisTier,
+    inputs: BTreeMap<FileId, PendingProjectInput>,
+}
+
+impl PendingProjectAnalysis {
+    /// Returns the immutable repository identity.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the immutable generation identity.
+    #[must_use]
+    pub const fn generation(&self) -> GenerationId {
+        self.generation
+    }
+
+    /// Returns the canonical project or package analysis-unit label.
+    #[must_use]
+    pub fn analysis_unit(&self) -> &str {
+        &self.analysis_unit
+    }
+
+    /// Returns the canonical build-target label.
+    #[must_use]
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    /// Returns the digest of the validated context manifest.
+    #[must_use]
+    pub const fn config_digest(&self) -> ContentHash {
+        self.config_digest
+    }
+}
+
 impl PendingAnalysis {
     /// Returns the immutable repository identity.
     #[must_use]
@@ -423,6 +482,117 @@ pub fn prepare_analysis(
     })
 }
 
+/// Validates and binds one canonical multi-file project request.
+///
+/// # Errors
+///
+/// Returns [`AdapterHostError`] for cancellation, an unnegotiated project
+/// capability, malformed protocol fields, a substituted source or context
+/// manifest, or an invalid stable identifier.
+pub fn prepare_project_analysis(
+    session: &NegotiatedSession,
+    request: &ProjectAnalysisRequest,
+    cancellation: &Cancellation,
+) -> Result<PendingProjectAnalysis, AdapterHostError> {
+    cancellation.check()?;
+    if !session.has_capability(PROJECT_NORMALIZED_IR_CAPABILITY) {
+        return Err(AdapterHostError::CapabilityMismatch);
+    }
+    session.validate_project_analysis_request(request)?;
+    let expected_config_digest =
+        request
+            .config_digest
+            .as_ref()
+            .ok_or(AdapterHostError::Protocol(
+                AdapterContractError::MissingField,
+            ))?;
+    let config_digest = content_hash(&request.context_manifest);
+    if expected_config_digest.value.as_slice() != config_digest.as_bytes() {
+        return Err(AdapterHostError::DigestMismatch);
+    }
+
+    let mut inputs = BTreeMap::new();
+    for input in &request.inputs {
+        cancellation.check()?;
+        let expected_source_digest =
+            input
+                .source_digest
+                .as_ref()
+                .ok_or(AdapterHostError::Protocol(
+                    AdapterContractError::MissingField,
+                ))?;
+        let source_digest = content_hash(&input.source);
+        if expected_source_digest.value.as_slice() != source_digest.as_bytes() {
+            return Err(AdapterHostError::DigestMismatch);
+        }
+        let file = FileId::from_bytes(fixed_id(
+            &input
+                .file
+                .as_ref()
+                .ok_or(AdapterHostError::Protocol(
+                    AdapterContractError::MissingField,
+                ))?
+                .value,
+        )?);
+        let source_bytes =
+            u64::try_from(input.source.len()).map_err(|_| AdapterHostError::Limit)?;
+        if inputs
+            .insert(
+                file,
+                PendingProjectInput {
+                    path: input.path.clone(),
+                    language: input.language.clone(),
+                    source_digest,
+                    source_bytes,
+                    generated: input.generated,
+                },
+            )
+            .is_some()
+        {
+            return Err(AdapterHostError::Identifier);
+        }
+    }
+    cancellation.check()?;
+
+    let requested_tier = RequestedAnalysisTier::try_from(request.requested_tier)
+        .map_err(|_| AdapterHostError::Identifier)?;
+    Ok(PendingProjectAnalysis {
+        request_id: fixed_id(&request.request_id)?,
+        repository: RepositoryId::from_bytes(fixed_id(
+            &request
+                .repository
+                .as_ref()
+                .ok_or(AdapterHostError::Protocol(
+                    AdapterContractError::MissingField,
+                ))?
+                .value,
+        )?),
+        generation: GenerationId::from_bytes(fixed_id(
+            &request
+                .generation
+                .as_ref()
+                .ok_or(AdapterHostError::Protocol(
+                    AdapterContractError::MissingField,
+                ))?
+                .value,
+        )?),
+        analysis_unit: request.analysis_unit.clone(),
+        target: request.target.clone(),
+        build_context: ContentHash::from_bytes(fixed_id(
+            &request
+                .build_context
+                .as_ref()
+                .ok_or(AdapterHostError::Protocol(
+                    AdapterContractError::MissingField,
+                ))?
+                .value,
+        )?),
+        config_digest,
+        requested_tier,
+        inputs,
+    })
+}
+
 /// Decodes, correlates, hashes, and canonicalizes one hostile adapter result.
 ///
 /// This boundary is also used for explicitly supplied external semantic
@@ -474,6 +644,57 @@ pub fn validate_analysis_result(
     Ok(document)
 }
 
+/// Decodes and binds one hostile multi-file project result.
+///
+/// # Errors
+///
+/// Returns [`AdapterHostError`] for cancellation, malformed or unexpected
+/// frames, correlation or digest mismatch, bounded IR decode failure, invalid
+/// normalized facts, or substitution of the project source set and context.
+pub fn validate_project_analysis_result(
+    session: &NegotiatedSession,
+    pending: PendingProjectAnalysis,
+    encoded_frame: &[u8],
+    supported_extensions: &ExtensionSupport,
+    cancellation: &Cancellation,
+) -> Result<NormalizedIrDocument, AdapterHostError> {
+    cancellation.check()?;
+    let frame = decode_adapter_frame(encoded_frame)?;
+    let result = match frame.message {
+        Some(adapter_frame::Message::ProjectAnalysisResult(result)) => result,
+        _ => return Err(AdapterHostError::UnexpectedFrame),
+    };
+    session.validate_project_analysis_result(&result)?;
+    if result.request_id.as_slice() != pending.request_id {
+        return Err(AdapterHostError::RequestMismatch);
+    }
+    cancellation.check()?;
+
+    let output_digest = result
+        .output_digest
+        .as_ref()
+        .ok_or(AdapterHostError::Protocol(
+            AdapterContractError::MissingField,
+        ))?;
+    if output_digest.value.as_slice() != content_hash(&result.normalized_ir).as_bytes() {
+        return Err(AdapterHostError::DigestMismatch);
+    }
+    cancellation.check()?;
+    let mut limits = IrLimits::default();
+    limits.max_document_bytes = usize::try_from(session.limits().output_bytes)
+        .map_err(|_| AdapterHostError::Limit)?
+        .min(limits.max_document_bytes);
+    let decoded = decode_ir_document(&result.normalized_ir, &limits, supported_extensions)?;
+    cancellation.check()?;
+    let IrDocument::NormalizedV1_1(document) = decoded else {
+        return Err(AdapterHostError::UnsupportedIr);
+    };
+    let document = canonicalize_ir_document(document, &limits, supported_extensions)?;
+    cancellation.check()?;
+    validate_project_document_binding(session, &pending, &document)?;
+    Ok(document)
+}
+
 fn validate_result_correlation(
     session: &NegotiatedSession,
     pending: &PendingAnalysis,
@@ -520,6 +741,93 @@ fn validate_document_binding(
             return Err(AdapterHostError::ContextMismatch);
         }
     }
+    for extension in &document.extensions {
+        let version = parse_extension_version(&extension.version)
+            .ok_or(AdapterHostError::ExtensionMismatch)?;
+        let descriptor = ExtensionDescriptor {
+            namespace: extension.namespace.clone(),
+            version: Some(version),
+            critical: extension.criticality == ExtensionCriticality::Critical,
+        };
+        if !session.has_extension(&descriptor) {
+            return Err(AdapterHostError::ExtensionMismatch);
+        }
+    }
+    Ok(())
+}
+
+fn validate_project_document_binding(
+    session: &NegotiatedSession,
+    pending: &PendingProjectAnalysis,
+    document: &NormalizedIrDocument,
+) -> Result<(), AdapterHostError> {
+    if document.repository != pending.repository || document.generation != pending.generation {
+        return Err(AdapterHostError::ContextMismatch);
+    }
+    if document.files.len() != pending.inputs.len() {
+        return Err(AdapterHostError::SourceContextMismatch);
+    }
+    for file in &document.files {
+        let Some(expected) = pending.inputs.get(&file.id) else {
+            return Err(AdapterHostError::SourceContextMismatch);
+        };
+        if file.repository != pending.repository
+            || file.generation != pending.generation
+            || file.path != expected.path
+            || file.content_hash != expected.source_digest
+            || file.byte_length != expected.source_bytes
+            || file.language != expected.language
+            || file.generated != expected.generated
+        {
+            return Err(AdapterHostError::SourceContextMismatch);
+        }
+    }
+
+    let adapter = session.adapter();
+    let adapter_digest = ContentHash::from_bytes(fixed_id(&adapter.source_digest)?);
+    let languages = pending
+        .inputs
+        .values()
+        .map(|input| input.language.as_str())
+        .collect::<BTreeSet<_>>();
+    for provenance in &document.provenance {
+        if provenance.producer.name() != adapter.name
+            || provenance.producer.version() != adapter.version
+            || provenance.binary_digest != adapter_digest
+        {
+            return Err(AdapterHostError::ProvenanceMismatch);
+        }
+        if !languages.contains(provenance.language.as_str())
+            || provenance.build_context.digest() != pending.build_context
+            || !tier_is_at_or_below_request(provenance.tier, pending.requested_tier)
+        {
+            return Err(AdapterHostError::ContextMismatch);
+        }
+    }
+    validate_extension_bindings(session, document)
+}
+
+fn tier_is_at_or_below_request(
+    observed: rootlight_ir::AnalysisTier,
+    requested: RequestedAnalysisTier,
+) -> bool {
+    use rootlight_ir::AnalysisTier;
+
+    match requested {
+        RequestedAnalysisTier::TierA => true,
+        RequestedAnalysisTier::TierB => observed != AnalysisTier::TierA,
+        RequestedAnalysisTier::TierC => {
+            matches!(observed, AnalysisTier::TierC | AnalysisTier::TierD)
+        }
+        RequestedAnalysisTier::TierD => observed == AnalysisTier::TierD,
+        RequestedAnalysisTier::Unspecified => false,
+    }
+}
+
+fn validate_extension_bindings(
+    session: &NegotiatedSession,
+    document: &NormalizedIrDocument,
+) -> Result<(), AdapterHostError> {
     for extension in &document.extensions {
         let version = parse_extension_version(&extension.version)
             .ok_or(AdapterHostError::ExtensionMismatch)?;
@@ -646,7 +954,8 @@ mod tests {
         generated::{
             adapter::v1::{
                 AdapterFrame, AdapterIdentity, AdapterTrustLevel, AnalysisResult,
-                CapabilityAdvertisement, ResourceLimits, SessionRequirements,
+                CapabilityAdvertisement, ProjectAnalysisRequest, ProjectAnalysisResult,
+                ProjectInput, RequestedAnalysisTier, ResourceLimits, SessionRequirements,
             },
             common::v1::{
                 ContentHash as WireContentHash, ContractVersion, FileId as WireFileId,
@@ -894,6 +1203,101 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn project_result_is_bound_to_every_input_context_and_requested_tier() {
+        let (session, request) = project_session_and_request();
+        let cancellation = Cancellation::new();
+        let pending = prepare_project_analysis(&session, &request, &cancellation)
+            .expect("project request is accepted");
+        assert_eq!(pending.analysis_unit(), "workspace.service");
+        assert_eq!(pending.target(), "service");
+        assert_eq!(
+            pending.config_digest(),
+            content_hash(&request.context_manifest)
+        );
+        let document = normalized_project_document(&session, &pending, AnalysisTier::TierB);
+        let encoded = project_result_frame(
+            &session,
+            &pending,
+            serde_json::to_vec(&document).expect("project document encodes"),
+        );
+
+        let validated = validate_project_analysis_result(
+            &session,
+            pending,
+            &encoded,
+            &ExtensionSupport::default(),
+            &cancellation,
+        )
+        .expect("project result passes the hostile boundary");
+        assert_eq!(validated.files.len(), 2);
+
+        let pending = prepare_project_analysis(&session, &request, &cancellation)
+            .expect("project request is accepted");
+        let mut substituted = normalized_project_document(&session, &pending, AnalysisTier::TierB);
+        substituted.files[0].path = "src/substituted.rs".to_owned();
+        let encoded = project_result_frame(
+            &session,
+            &pending,
+            serde_json::to_vec(&substituted).expect("substituted document encodes"),
+        );
+        assert!(matches!(
+            validate_project_analysis_result(
+                &session,
+                pending,
+                &encoded,
+                &ExtensionSupport::default(),
+                &cancellation,
+            ),
+            Err(AdapterHostError::SourceContextMismatch)
+        ));
+
+        let pending = prepare_project_analysis(&session, &request, &cancellation)
+            .expect("project request is accepted");
+        let overclaimed = normalized_project_document(&session, &pending, AnalysisTier::TierA);
+        let encoded = project_result_frame(
+            &session,
+            &pending,
+            serde_json::to_vec(&overclaimed).expect("overclaimed document encodes"),
+        );
+        assert!(matches!(
+            validate_project_analysis_result(
+                &session,
+                pending,
+                &encoded,
+                &ExtensionSupport::default(),
+                &cancellation,
+            ),
+            Err(AdapterHostError::ContextMismatch)
+        ));
+    }
+
+    #[test]
+    fn project_request_rejects_source_manifest_and_cancellation_substitution() {
+        let (session, request) = project_session_and_request();
+        let cancellation = Cancellation::new();
+
+        let mut source_substitution = request.clone();
+        source_substitution.inputs[0].source.push(b'!');
+        assert!(matches!(
+            prepare_project_analysis(&session, &source_substitution, &cancellation),
+            Err(AdapterHostError::DigestMismatch)
+        ));
+
+        let mut manifest_substitution = request.clone();
+        manifest_substitution.context_manifest.push(b' ');
+        assert!(matches!(
+            prepare_project_analysis(&session, &manifest_substitution, &cancellation),
+            Err(AdapterHostError::DigestMismatch)
+        ));
+
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        assert!(matches!(
+            prepare_project_analysis(&session, &request, &cancellation),
+            Err(AdapterHostError::Cancelled(_))
+        ));
+    }
+
     fn session_and_request() -> (NegotiatedSession, AnalysisRequest) {
         let identity = AdapterIdentity {
             name: "fixture-adapter".to_owned(),
@@ -957,6 +1361,101 @@ mod tests {
                     value: content_hash(&source).as_bytes().to_vec(),
                 }),
                 source,
+            },
+        )
+    }
+
+    fn project_session_and_request() -> (NegotiatedSession, ProjectAnalysisRequest) {
+        let identity = AdapterIdentity {
+            name: "fixture-adapter".to_owned(),
+            version: "1.0.0".to_owned(),
+            source_digest: vec![9; 32],
+        };
+        let limits = ResourceLimits {
+            wall_time_ms: 10_000,
+            cpu_time_ms: 5_000,
+            memory_bytes: 64 * 1024 * 1024,
+            input_bytes: 1024 * 1024,
+            output_bytes: 1024 * 1024,
+            files: 2,
+            processes: 1,
+            handles: 16,
+            retries: 0,
+        };
+        let capabilities = vec![PROJECT_NORMALIZED_IR_CAPABILITY.to_owned()];
+        let advertisement = ValidatedAdvertisement::validate(CapabilityAdvertisement {
+            adapter: Some(identity.clone()),
+            supported_protocols: Some(VersionRange {
+                minimum: Some(ContractVersion {
+                    major: ADAPTER_PROTOCOL_MAJOR,
+                    minor: CURRENT_ADAPTER_PROTOCOL_MINOR,
+                }),
+                maximum: Some(ContractVersion {
+                    major: ADAPTER_PROTOCOL_MAJOR,
+                    minor: CURRENT_ADAPTER_PROTOCOL_MINOR,
+                }),
+            }),
+            capabilities: capabilities.clone(),
+            extensions: Vec::new(),
+            trust_level: AdapterTrustLevel::FirstParty as i32,
+            hard_limits: Some(limits),
+            supports_cancellation: true,
+        })
+        .expect("project advertisement is valid");
+        let session = advertisement
+            .negotiate(SessionRequirements {
+                session_id: vec![1; 16],
+                selected_protocol: Some(advertisement.selected_protocol()),
+                expected_adapter: Some(identity),
+                required_capabilities: capabilities,
+                required_extensions: Vec::new(),
+                granted_limits: Some(limits),
+                maximum_trust: AdapterTrustLevel::FirstParty as i32,
+                require_cancellation: true,
+            })
+            .expect("project session negotiates");
+        let first_source = b"pub fn first() {}".to_vec();
+        let second_source = b"pub fn second() {}".to_vec();
+        let context_manifest = b"{\"target\":\"service\"}".to_vec();
+        (
+            session,
+            ProjectAnalysisRequest {
+                session_id: vec![1; 16],
+                request_id: vec![2; 16],
+                repository: Some(WireRepositoryId { value: vec![3; 16] }),
+                generation: Some(WireGenerationId { value: vec![4; 20] }),
+                analysis_unit: "workspace.service".to_owned(),
+                target: "service".to_owned(),
+                build_context: Some(WireContentHash { value: vec![6; 32] }),
+                config_digest: Some(WireContentHash {
+                    value: content_hash(&context_manifest).as_bytes().to_vec(),
+                }),
+                inputs: vec![
+                    ProjectInput {
+                        file: Some(WireFileId { value: vec![5; 20] }),
+                        path: "src/a.rs".to_owned(),
+                        language: "rust".to_owned(),
+                        source_digest: Some(WireContentHash {
+                            value: content_hash(&first_source).as_bytes().to_vec(),
+                        }),
+                        source: first_source,
+                        generated: false,
+                        origins: Vec::new(),
+                    },
+                    ProjectInput {
+                        file: Some(WireFileId { value: vec![6; 20] }),
+                        path: "src/b.rs".to_owned(),
+                        language: "rust".to_owned(),
+                        source_digest: Some(WireContentHash {
+                            value: content_hash(&second_source).as_bytes().to_vec(),
+                        }),
+                        source: second_source,
+                        generated: false,
+                        origins: Vec::new(),
+                    },
+                ],
+                context_manifest,
+                requested_tier: RequestedAnalysisTier::TierB as i32,
             },
         )
     }
@@ -1052,6 +1551,94 @@ mod tests {
             build_context: BuildContextIdentity::new(pending.build_context),
             input_sources: vec![source.clone()],
             evidence_sources: vec![source],
+            derivation_parents: Vec::new(),
+            rule: None,
+        });
+        document
+    }
+
+    fn project_result_frame(
+        session: &NegotiatedSession,
+        pending: &PendingProjectAnalysis,
+        normalized_ir: Vec<u8>,
+    ) -> Vec<u8> {
+        let output_digest = content_hash(&normalized_ir);
+        encode_adapter_frame(&AdapterFrame {
+            message: Some(adapter_frame::Message::ProjectAnalysisResult(
+                ProjectAnalysisResult {
+                    session_id: session.session_id().to_vec(),
+                    request_id: pending.request_id.to_vec(),
+                    normalized_ir,
+                    output_digest: Some(WireContentHash {
+                        value: output_digest.as_bytes().to_vec(),
+                    }),
+                },
+            )),
+        })
+        .expect("project result frame encodes")
+    }
+
+    fn normalized_project_document(
+        session: &NegotiatedSession,
+        pending: &PendingProjectAnalysis,
+        tier: AnalysisTier,
+    ) -> NormalizedIrDocument {
+        let provenance = FactId::from_bytes([7; 20]);
+        let adapter_digest = ContentHash::from_bytes(
+            session
+                .adapter()
+                .source_digest
+                .as_slice()
+                .try_into()
+                .expect("fixture adapter digest has canonical width"),
+        );
+        let mut document = NormalizedIrDocument::empty(pending.repository(), pending.generation());
+        let mut sources = Vec::new();
+        for (file, input) in &pending.inputs {
+            let source = SourceRef::new(
+                pending.repository(),
+                pending.generation(),
+                SourceSpan::new(*file, 0, input.source_bytes).expect("fixture span is ordered"),
+                input.source_digest,
+                None,
+            );
+            document.files.push(FileRecord {
+                id: *file,
+                repository: pending.repository(),
+                generation: pending.generation(),
+                path: input.path.clone(),
+                path_locator: None,
+                content_hash: input.source_digest,
+                byte_length: input.source_bytes,
+                language: input.language.clone(),
+                encoding: "utf-8".to_owned(),
+                generated: input.generated,
+                provenance,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            });
+            sources.push(source);
+        }
+        document.provenance.push(ProvenanceRecord {
+            id: provenance,
+            repository: pending.repository(),
+            generation: pending.generation(),
+            producer_kind: ProducerKind::Compiler,
+            producer: ProducerIdentity::new(
+                &session.adapter().name,
+                &session.adapter().version,
+                pending.build_context,
+            )
+            .expect("fixture producer is valid"),
+            binary_digest: adapter_digest,
+            frontend_version: Some("fixture-project-frontend-1".to_owned()),
+            language: "rust".to_owned(),
+            tier,
+            build_context: BuildContextIdentity::new(pending.build_context),
+            input_sources: sources.clone(),
+            evidence_sources: sources,
             derivation_parents: Vec::new(),
             rule: None,
         });
