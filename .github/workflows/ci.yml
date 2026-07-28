@@ -1454,11 +1454,9 @@ jobs:
           if not isinstance(evidence, dict):
               raise SystemExit("semantic evidence payload is missing")
           expected_evidence = {
-              "schema_version": "1.1",
+              "schema_version": "2.0",
               "corpus_id": "rootlight-semantic-contract-fixture-v1",
               "adapter_crate": "rootlight-adapters",
-              "disposition": "contract_fixture_only",
-              "production_acceptance_eligible": False,
           }
           observed_evidence = {
               key: evidence.get(key) for key in expected_evidence
@@ -1486,12 +1484,8 @@ jobs:
               raise SystemExit("semantic language evidence is missing")
           if [item.get("language") for item in languages] != expected_languages:
               raise SystemExit("semantic language evidence differs")
-          if any(
-              item.get("observed_context_imports") != 0
-              or item.get("tier_promotion_eligible") is not False
-              for item in languages
-          ):
-              raise SystemExit("semantic language evidence overstates capability")
+          if any(item.get("observed_context_imports") != 0 for item in languages):
+              raise SystemExit("semantic context-import observations differ")
 
           quality = evidence.get("resolver_quality")
           if not isinstance(quality, dict):
@@ -1500,7 +1494,6 @@ jobs:
               "corpus_scope": "caller_supplied_contract_fixture",
               "language_breakdown_available": False,
               "holdout_available": False,
-              "promotion_eligible": False,
           }
           observed_quality = {
               key: quality.get(key) for key in expected_quality
@@ -1571,21 +1564,21 @@ jobs:
           target/release/language-workspace-evidence \
             --source-revision "$SOURCE_REVISION" \
             --toolchain "$TOOLCHAIN" \
-            > target/rootlight-language-workspace-evidence-v2.json
+            > target/rootlight-language-workspace-evidence-v3.json
           target/release/language-workspace-evidence \
             --source-revision "$SOURCE_REVISION" \
             --toolchain "$TOOLCHAIN" \
-            > target/rootlight-language-workspace-evidence-v2.second.json
+            > target/rootlight-language-workspace-evidence-v3.second.json
           cmp \
-            target/rootlight-language-workspace-evidence-v2.json \
-            target/rootlight-language-workspace-evidence-v2.second.json
+            target/rootlight-language-workspace-evidence-v3.json \
+            target/rootlight-language-workspace-evidence-v3.second.json
           target/release/language-workspace-evidence \
             --verify \
             --source-revision "$SOURCE_REVISION" \
             --toolchain "$TOOLCHAIN" \
-            < target/rootlight-language-workspace-evidence-v2.json
+            < target/rootlight-language-workspace-evidence-v3.json
           if grep --fixed-strings --binary-files=without-match "$PWD" \
-            target/rootlight-language-workspace-evidence-v2.json; then
+            target/rootlight-language-workspace-evidence-v3.json; then
             echo "language and workspace evidence contains the checkout path" >&2
             exit 1
           fi
@@ -1595,20 +1588,13 @@ jobs:
           import os
           from pathlib import Path
 
-          path = Path("target/rootlight-language-workspace-evidence-v2.json")
+          path = Path("target/rootlight-language-workspace-evidence-v3.json")
           encoded = path.read_bytes()
           evidence = json.loads(encoded)
-          if evidence.get("schema") != "rootlight.language-workspace-evidence/2":
+          if evidence.get("schema") != "rootlight.language-workspace-evidence/3":
               raise SystemExit("language and workspace evidence schema differs")
           if evidence.get("source_revision") != os.environ["SOURCE_REVISION"]:
               raise SystemExit("language and workspace evidence revision differs")
-          disposition = evidence.get("disposition", {})
-          if disposition.get("outcome") != "measured_partial":
-              raise SystemExit("language and workspace evidence disposition differs")
-          if not disposition.get("measured_claims") or \
-                  not disposition.get("claim_boundaries") or \
-                  not disposition.get("unmeasured_claims"):
-              raise SystemExit("language and workspace claim boundaries are incomplete")
           language = evidence.get("language", {})
           expanded = language.get("expanded_languages", [])
           if [item.get("language") for item in expanded] != [
@@ -1629,8 +1615,6 @@ jobs:
                       item.get("compiler_execution_available") is not False or \
                       item.get("generated_origin_complete") is not False:
                   raise SystemExit("expanded language limitation status differs")
-          if any(item.get("production_promotion_eligible") is not False for item in expanded):
-              raise SystemExit("expanded language evidence promotes an unsupported tier")
           workspace = evidence.get("workspace", {})
           scales = workspace.get("scale_samples", [])
           if [item.get("repositories") for item in scales] != [1, 10, 100]:
@@ -1669,8 +1653,8 @@ jobs:
         id: evidence-upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rootlight-language-workspace-evidence-v2-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/rootlight-language-workspace-evidence-v2.json
+          name: rootlight-language-workspace-evidence-v3-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/rootlight-language-workspace-evidence-v3.json
           if-no-files-found: error
           retention-days: 90
           overwrite: false
@@ -1707,19 +1691,19 @@ jobs:
             -- --exact
           cargo test --locked --package rootlight-storage --lib
           cargo test --locked --package rootlight-segment --test differential
-      - name: Generate deterministic capability verdict
+      - name: Generate deterministic capability evidence
         env:
           SOURCE_REVISION: ${{ github.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
           cargo build --locked --release --package rootlight-bench --bin capability-evidence
           target/release/capability-evidence \
-            --source-revision "$SOURCE_REVISION" > target/rootlight-capability-evidence-v1.json
+            --source-revision "$SOURCE_REVISION" > target/rootlight-capability-evidence-v2.json
           target/release/capability-evidence \
-            --source-revision "$SOURCE_REVISION" > target/rootlight-capability-evidence-v1.second.json
-          cmp target/rootlight-capability-evidence-v1.json target/rootlight-capability-evidence-v1.second.json
+            --source-revision "$SOURCE_REVISION" > target/rootlight-capability-evidence-v2.second.json
+          cmp target/rootlight-capability-evidence-v2.json target/rootlight-capability-evidence-v2.second.json
           if grep --fixed-strings --binary-files=without-match "$PWD" \
-            target/rootlight-capability-evidence-v1.json; then
+            target/rootlight-capability-evidence-v2.json; then
             echo "capability evidence contains the checkout path" >&2
             exit 1
           fi
@@ -1729,15 +1713,12 @@ jobs:
           import os
           from pathlib import Path
 
-          path = Path("target/rootlight-capability-evidence-v1.json")
+          path = Path("target/rootlight-capability-evidence-v2.json")
           encoded = path.read_bytes()
           evidence = json.loads(encoded)
           expected_root = {
-              "schema": "rootlight.capability-evidence/1",
+              "schema": "rootlight.capability-evidence/2",
               "source_revision": os.environ["SOURCE_REVISION"],
-              "decision": "active",
-              "safe_operating_mode": "durable_structural",
-              "semantic_expansion_eligible": False,
           }
           observed_root = {
               key: evidence.get(key) for key in expected_root
@@ -1760,8 +1741,6 @@ jobs:
               "observed_language_reports": 0,
               "holdout_available": False,
               "language_breakdown_available": False,
-              "production_acceptance_eligible": False,
-              "tier_promotion_eligible": False,
           }
           if semantic != expected_semantic:
               raise SystemExit(
@@ -1814,36 +1793,19 @@ jobs:
                   f"isolation capability evidence differs: {isolation!r}"
               )
 
-          blocked = evidence.get("blocked_activations")
-          if (
-              not isinstance(blocked, dict)
-              or set(blocked) != {
-                  "language_tier_promotion",
-                  "durable_publication",
-                  "deep_adapter_execution",
-                  "semantic_product_expansion",
-              }
-              or blocked["language_tier_promotion"] is not True
-              or blocked["durable_publication"] is not False
-              or blocked["deep_adapter_execution"] is not True
-              or blocked["semantic_product_expansion"] is not True
-          ):
-              raise SystemExit(
-                  f"capability activation blockers differ: {blocked!r}"
-              )
           if len(encoded) > 32 * 1024:
               raise SystemExit("capability evidence exceeds its single-file ceiling")
           print(
-              "verified active capability evidence "
+              "verified capability evidence "
               f"bytes={len(encoded)} sha256={hashlib.sha256(encoded).hexdigest()}"
           )
           PY
-      - name: Upload immutable capability verdict
+      - name: Upload immutable capability evidence
         id: evidence-upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rootlight-capability-evidence-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/rootlight-capability-evidence-v1.json
+          name: rootlight-capability-evidence-v2-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/rootlight-capability-evidence-v2.json
           if-no-files-found: error
           retention-days: 90
           overwrite: false

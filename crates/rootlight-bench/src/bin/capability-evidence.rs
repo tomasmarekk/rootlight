@@ -1,7 +1,7 @@
-//! Deterministic source-bound evidence for the active operating mode.
+//! Deterministic source-bound report of measured capability facts.
 //!
-//! The report distinguishes active durable platform controls from optional
-//! semantic and deep-adapter capabilities that remain disabled.
+//! The report distinguishes durable platform controls from semantic and
+//! deep-adapter capabilities that are currently unavailable.
 
 #![forbid(unsafe_code)]
 
@@ -13,7 +13,7 @@ use std::{
 
 use serde::Serialize;
 
-const CAPABILITY_EVIDENCE_SCHEMA: &str = "rootlight.capability-evidence/1";
+const CAPABILITY_EVIDENCE_SCHEMA: &str = "rootlight.capability-evidence/2";
 const CAPABILITY_EVIDENCE_MAX_BYTES: usize = 32 * 1024;
 const MAX_ARGUMENT_BYTES: usize = 16 * 1024;
 
@@ -86,17 +86,12 @@ fn encode_evidence(source_revision: &str) -> Result<Vec<u8>, &'static str> {
     let evidence = CapabilityEvidence {
         schema: CAPABILITY_EVIDENCE_SCHEMA,
         source_revision,
-        decision: CapabilityDecision::Active,
-        safe_operating_mode: SafeOperatingMode::DurableStructural,
-        semantic_expansion_eligible: false,
         semantic: SemanticCapability {
             status: SemanticStatus::ContractFixtureOnly,
             declared_languages: ["go", "javascript", "python", "rust", "typescript"],
             observed_language_reports: 0,
             holdout_available: false,
             language_breakdown_available: false,
-            production_acceptance_eligible: false,
-            tier_promotion_eligible: false,
         },
         incremental: IncrementalCapability {
             status: IncrementalStatus::DurableGenerationReuse,
@@ -127,12 +122,6 @@ fn encode_evidence(source_revision: &str) -> Result<Vec<u8>, &'static str> {
             native_controls_enforced: false,
             deep_adapter_permitted: false,
         },
-        blocked_activations: BlockedActivations {
-            language_tier_promotion: true,
-            durable_publication: false,
-            deep_adapter_execution: true,
-            semantic_product_expansion: true,
-        },
     };
     let encoded =
         serde_json::to_vec(&evidence).map_err(|_| "capability evidence encoding failed")?;
@@ -146,26 +135,10 @@ fn encode_evidence(source_revision: &str) -> Result<Vec<u8>, &'static str> {
 struct CapabilityEvidence<'a> {
     schema: &'static str,
     source_revision: &'a str,
-    decision: CapabilityDecision,
-    safe_operating_mode: SafeOperatingMode,
-    semantic_expansion_eligible: bool,
     semantic: SemanticCapability,
     incremental: IncrementalCapability,
     storage: StorageCapability,
     isolation: IsolationCapability,
-    blocked_activations: BlockedActivations,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum CapabilityDecision {
-    Active,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum SafeOperatingMode {
-    DurableStructural,
 }
 
 #[derive(Debug, Serialize)]
@@ -175,8 +148,6 @@ struct SemanticCapability {
     observed_language_reports: u8,
     holdout_available: bool,
     language_breakdown_available: bool,
-    production_acceptance_eligible: bool,
-    tier_promotion_eligible: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -244,14 +215,6 @@ enum IsolationActivation {
     StructuralFallback,
 }
 
-#[derive(Debug, Serialize)]
-struct BlockedActivations {
-    language_tier_promotion: bool,
-    durable_publication: bool,
-    deep_adapter_execution: bool,
-    semantic_product_expansion: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,16 +232,13 @@ mod tests {
             serde_json::from_slice(&first).expect("capability evidence decodes");
         assert_eq!(value["schema"], CAPABILITY_EVIDENCE_SCHEMA);
         assert_eq!(value["source_revision"], REVISION);
-        assert_eq!(value["decision"], "active");
-        assert_eq!(value["semantic_expansion_eligible"], false);
     }
 
     #[test]
-    fn report_activates_only_measured_and_enforced_paths() {
+    fn report_contains_measured_storage_and_incremental_facts() {
         let encoded = encode_evidence(REVISION).expect("capability evidence encodes");
         let value: serde_json::Value =
             serde_json::from_slice(&encoded).expect("capability evidence decodes");
-        assert_eq!(value["semantic"]["production_acceptance_eligible"], false);
         assert_eq!(
             value["incremental"]["medium_suite_measurements_available"],
             true
@@ -292,13 +252,16 @@ mod tests {
             value["storage"]["restart_recovery_measurements_available"],
             true
         );
+    }
+
+    #[test]
+    fn missing_native_isolation_disables_deep_adapters() {
+        let encoded = encode_evidence(REVISION).expect("capability evidence encodes");
+        let value: serde_json::Value =
+            serde_json::from_slice(&encoded).expect("capability evidence decodes");
+        assert_eq!(value["isolation"]["activation"], "structural_fallback");
         assert_eq!(value["isolation"]["native_controls_enforced"], false);
         assert_eq!(value["isolation"]["deep_adapter_permitted"], false);
-        assert_eq!(value["blocked_activations"]["durable_publication"], false);
-        assert_eq!(
-            value["blocked_activations"]["semantic_product_expansion"],
-            true
-        );
     }
 
     #[test]

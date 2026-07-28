@@ -1,7 +1,7 @@
 //! Source-free semantic contract conformance evidence.
 //!
 //! Reports consume the shared language registry and caller-supplied resolver
-//! decisions. Contract fixtures cannot authorize tier promotion or completion.
+//! decisions while recording the fixture's observable scope and limitations.
 
 use std::collections::BTreeMap;
 
@@ -24,7 +24,7 @@ const PERCENT_SCALE: u64 = 100;
 const MILLI_SCALE: u64 = 1_000;
 
 /// Version of the machine-readable semantic contract evidence schema.
-pub const SEMANTIC_EVIDENCE_SCHEMA_VERSION: &str = "1.1";
+pub const SEMANTIC_EVIDENCE_SCHEMA_VERSION: &str = "2.0";
 /// Version of the source-revision-bound semantic evidence envelope.
 pub const SEMANTIC_EVIDENCE_ENVELOPE_SCHEMA: &str = "rootlight.semantic-evidence-envelope/1";
 /// Maximum canonical byte size emitted for one semantic contract report.
@@ -60,17 +60,9 @@ pub struct SemanticEvidence {
     schema_version: String,
     corpus_id: String,
     adapter_crate: String,
-    disposition: EvidenceDisposition,
-    production_acceptance_eligible: bool,
     languages: Vec<LanguageEvidence>,
     resolver_quality: ResolverQualityEvidence,
     repository_execution: RepositoryExecutionEvidence,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum EvidenceDisposition {
-    ContractFixtureOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -81,7 +73,6 @@ struct LanguageEvidence {
     adapter_version: String,
     context_import_contract: String,
     observed_context_imports: u64,
-    tier_promotion_eligible: bool,
     required_coverage_domains: u8,
     uncertainty_codes: Vec<String>,
 }
@@ -105,7 +96,6 @@ struct ResolverQualityEvidence {
     corpus_scope: ResolverCorpusScope,
     language_breakdown_available: bool,
     holdout_available: bool,
-    promotion_eligible: bool,
     expectations: u64,
     exact_expected: u64,
     ambiguous_expected: u64,
@@ -192,8 +182,7 @@ pub enum SemanticEvidenceError {
 /// Builds contract evidence from the shared registry and caller-supplied decisions.
 ///
 /// The function accepts no repository path, environment, process, or command
-/// input. The report records that structural no-execution restriction and is
-/// explicitly ineligible for tier promotion or production acceptance.
+/// input. The report records that structural no-execution restriction directly.
 ///
 /// # Errors
 ///
@@ -230,8 +219,6 @@ pub fn build_semantic_evidence(
         schema_version: SEMANTIC_EVIDENCE_SCHEMA_VERSION.to_owned(),
         corpus_id: CORPUS_ID.to_owned(),
         adapter_crate: ADAPTER_CRATE.to_owned(),
-        disposition: EvidenceDisposition::ContractFixtureOnly,
-        production_acceptance_eligible: false,
         languages: language_evidence(registry)?,
         resolver_quality: quality_evidence(batch, expectations)?,
         repository_execution: RepositoryExecutionEvidence {
@@ -337,7 +324,6 @@ fn language_evidence(
                 adapter_version: ADAPTER_VERSION.to_owned(),
                 context_import_contract: "validated_declarative_normalized_ir".to_owned(),
                 observed_context_imports: 0,
-                tier_promotion_eligible: false,
                 required_coverage_domains: 8,
                 uncertainty_codes,
             })
@@ -449,7 +435,6 @@ fn quality_evidence(
         corpus_scope: ResolverCorpusScope::CallerSuppliedContractFixture,
         language_breakdown_available: false,
         holdout_available: false,
-        promotion_eligible: false,
         expectations: report.expectations,
         exact_expected,
         ambiguous_expected,
@@ -593,15 +578,12 @@ mod tests {
             encode_semantic_evidence(&repeated).expect("repeated evidence encodes");
 
         assert_eq!(first_bytes, repeated_bytes);
-        assert_eq!(first.disposition, EvidenceDisposition::ContractFixtureOnly);
-        assert!(!first.production_acceptance_eligible);
         assert_eq!(first.languages.len(), EXPECTED_PROFILES.len());
         assert!(
             first
                 .languages
                 .iter()
-                .all(|language| language.observed_context_imports == 0
-                    && !language.tier_promotion_eligible)
+                .all(|language| language.observed_context_imports == 0)
         );
         assert_eq!(
             first.resolver_quality.corpus_scope,
@@ -609,7 +591,6 @@ mod tests {
         );
         assert!(!first.resolver_quality.language_breakdown_available);
         assert!(!first.resolver_quality.holdout_available);
-        assert!(!first.resolver_quality.promotion_eligible);
         assert_eq!(first.resolver_quality.exact_outcomes, 1);
         assert_eq!(first.resolver_quality.candidate_outcomes, 1);
         assert_eq!(first.resolver_quality.unresolved_outcomes, 1);
@@ -618,8 +599,7 @@ mod tests {
         assert!(!first.repository_execution.command_surface_available);
         assert_eq!(first.repository_execution.observed_command_attempts, 0);
         let text = String::from_utf8(first_bytes).expect("canonical evidence is UTF-8");
-        assert!(text.contains("\"disposition\":\"contract_fixture_only\""));
-        assert!(text.contains("\"production_acceptance_eligible\":false"));
+        assert!(text.contains("\"corpus_scope\":\"caller_supplied_contract_fixture\""));
         assert!(!text.contains("fn target"));
         assert!(!text.contains("\\Users\\"));
         assert!(!text.contains("/home/"));
@@ -708,7 +688,10 @@ mod tests {
             serde_json::from_slice(&first).expect("envelope JSON decodes");
         assert_eq!(value["schema"], SEMANTIC_EVIDENCE_ENVELOPE_SCHEMA);
         assert_eq!(value["source_revision"], revision);
-        assert_eq!(value["evidence"]["production_acceptance_eligible"], false);
+        assert_eq!(
+            value["evidence"]["resolver_quality"]["holdout_available"],
+            false
+        );
         assert!(matches!(
             encode_semantic_evidence_envelope(&evidence, "not-a-revision"),
             Err(SemanticEvidenceError::InvalidSourceRevision)

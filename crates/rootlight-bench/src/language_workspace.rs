@@ -2,7 +2,7 @@
 //!
 //! Measurements exercise the production Tree-sitter adapter through VFS
 //! snapshots and real temporary workspaces. Capabilities that cannot be measured
-//! reproducibly remain explicit claim boundaries.
+//! reproducibly remain explicit limitations.
 
 use std::{
     collections::BTreeMap,
@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 /// Schema written by the language and workspace evidence generator.
-pub const LANGUAGE_WORKSPACE_EVIDENCE_SCHEMA: &str = "rootlight.language-workspace-evidence/2";
+pub const LANGUAGE_WORKSPACE_EVIDENCE_SCHEMA: &str = "rootlight.language-workspace-evidence/3";
 /// Maximum accepted encoded artifact size.
 pub const LANGUAGE_WORKSPACE_EVIDENCE_MAX_BYTES: usize = 256 * 1024;
 
@@ -70,32 +70,6 @@ const WORKFLOW_KINDS: [WorkflowKind; 5] = [
     WorkflowKind::Context,
     WorkflowKind::Plan,
     WorkflowKind::Migration,
-];
-const CLAIM_BOUNDARIES: [&str; 7] = [
-    "independent-language-holdout-unavailable",
-    "compiler-assisted-analysis-unavailable",
-    "deep-adapter-native-isolation-unavailable",
-    "generated-origin-mapping-incomplete",
-    "wall-clock-performance-not-measured",
-    "process-tree-memory-not-measured",
-    "scip-export-deferred",
-];
-const MEASURED_CLAIMS: [&str; 8] = [
-    "audited-structural-grammars",
-    "candidate-bound-structural-conformance",
-    "generated-file-classification",
-    "caller-supplied-project-context-validation",
-    "caller-supplied-scip-import",
-    "vfs-backed-workspace-scale-observation",
-    "immutable-workspace-snapshots",
-    "bounded-declarative-cross-repository-links",
-];
-const UNMEASURED_CLAIMS: [&str; 5] = [
-    "semantic-language-tier-promotion",
-    "default-compiler-or-build-execution",
-    "exhaustive-macro-or-generated-origin-claims",
-    "scip-export",
-    "performance-or-memory-target-compliance",
 ];
 const GRAMMAR_LOCK: &[u8] = include_bytes!("../../../adapters/grammars.lock");
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -194,7 +168,6 @@ pub struct LanguageWorkspaceEvidence {
     schema: String,
     source_revision: String,
     environment: EnvironmentEvidence,
-    disposition: EvidenceDisposition,
     language: LanguageEvidence,
     workspace: WorkspaceEvidence,
     security: SecurityEvidence,
@@ -211,15 +184,6 @@ struct EnvironmentEvidence {
     feature_profile: String,
     timing_status: String,
     process_memory_status: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EvidenceDisposition {
-    outcome: String,
-    claim_boundaries: Vec<String>,
-    measured_claims: Vec<String>,
-    unmeasured_claims: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,7 +209,6 @@ struct GrammarEvidence {
     abi_version: usize,
     encoding: String,
     observed_tier: String,
-    production_promotion_eligible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,7 +240,6 @@ struct ExpandedLanguageEvidence {
     generated_origin_mappings: usize,
     generated_origin_complete: bool,
     generated_origin_status: String,
-    production_promotion_eligible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,7 +353,7 @@ struct SecurityEvidence {
 struct CapabilityLimitation {
     capability: String,
     status: String,
-    claim_boundary: String,
+    detail: String,
 }
 
 /// Builds deterministic candidate-bound evidence for one exact source revision.
@@ -430,12 +392,6 @@ pub fn build_language_workspace_evidence(
             feature_profile: "workspace-default".to_owned(),
             timing_status: "not_measured_reproducible_observations_only".to_owned(),
             process_memory_status: "not_measured_reproducible_observations_only".to_owned(),
-        },
-        disposition: EvidenceDisposition {
-            outcome: "measured_partial".to_owned(),
-            claim_boundaries: strings(&CLAIM_BOUNDARIES),
-            measured_claims: strings(&MEASURED_CLAIMS),
-            unmeasured_claims: strings(&UNMEASURED_CLAIMS),
         },
         language,
         workspace,
@@ -515,7 +471,6 @@ fn language_evidence() -> Result<LanguageEvidence, LanguageWorkspaceEvidenceErro
             abi_version: descriptor.abi_version(),
             encoding: descriptor.encoding().as_str().to_owned(),
             observed_tier: "tier_d".to_owned(),
-            production_promotion_eligible: false,
         })
         .collect::<Vec<_>>();
     grammars.sort_by(|left, right| left.language.cmp(&right.language));
@@ -695,7 +650,6 @@ fn observe_language(
         generated_origin_mappings: document.source_mappings.len(),
         generated_origin_complete: false,
         generated_origin_status: "unavailable_no_external_origin_map".to_owned(),
-        production_promotion_eligible: false,
     })
 }
 
@@ -1279,10 +1233,6 @@ fn validate_evidence(
     if evidence.schema != LANGUAGE_WORKSPACE_EVIDENCE_SCHEMA
         || evidence.source_revision != source_revision
         || evidence.environment.toolchain != toolchain
-        || evidence.disposition.outcome != "measured_partial"
-        || evidence.disposition.claim_boundaries != strings(&CLAIM_BOUNDARIES)
-        || evidence.disposition.measured_claims != strings(&MEASURED_CLAIMS)
-        || evidence.disposition.unmeasured_claims != strings(&UNMEASURED_CLAIMS)
         || evidence.language.grammars.len() != 11
         || evidence.language.expanded_languages.len() != EXPANDED_LANGUAGES.len()
         || evidence.language.scip.export_available
@@ -1308,7 +1258,6 @@ fn validate_evidence(
                 .as_deref()
                 .is_some_and(|digest| !is_sha256(digest))
             || grammar.observed_tier != "tier_d"
-            || grammar.production_promotion_eligible
     }) || evidence
         .language
         .expanded_languages
@@ -1338,7 +1287,6 @@ fn validate_evidence(
                 || language.generated_origin_mappings != 0
                 || language.generated_origin_complete
                 || language.generated_origin_status != "unavailable_no_external_origin_map"
-                || language.production_promotion_eligible
         })
         || evidence
             .workspace
@@ -1417,10 +1365,6 @@ fn privacy_scan(encoded: &[u8]) -> Result<(), LanguageWorkspaceEvidenceError> {
     Ok(())
 }
 
-fn strings<const N: usize>(values: &[&str; N]) -> Vec<String> {
-    values.iter().map(|value| (*value).to_owned()).collect()
-}
-
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -1440,7 +1384,7 @@ fn capability_limitations() -> Vec<CapabilityLimitation> {
         (
             "independent-language-holdout",
             "unavailable",
-            "conformance results do not establish promotion precision or recall",
+            "conformance results do not include independent precision or recall",
         ),
         (
             "deep-adapter-native-isolation",
@@ -1469,13 +1413,11 @@ fn capability_limitations() -> Vec<CapabilityLimitation> {
         ),
     ]
     .into_iter()
-    .map(
-        |(capability, status, claim_boundary)| CapabilityLimitation {
-            capability: capability.to_owned(),
-            status: status.to_owned(),
-            claim_boundary: claim_boundary.to_owned(),
-        },
-    )
+    .map(|(capability, status, detail)| CapabilityLimitation {
+        capability: capability.to_owned(),
+        status: status.to_owned(),
+        detail: detail.to_owned(),
+    })
     .collect()
 }
 
@@ -1504,7 +1446,7 @@ pub enum LanguageWorkspaceEvidenceError {
     /// A measured counter exceeded its representable range.
     #[error("language and workspace evidence counter overflowed")]
     CounterOverflow,
-    /// Strict evidence invariants do not match the declared claim boundaries.
+    /// Strict evidence invariants do not match measured capabilities or limitations.
     #[error("language and workspace evidence is invalid")]
     InvalidEvidence,
     /// Encoded evidence exceeded the single-file ceiling.
@@ -1545,18 +1487,17 @@ mod tests {
     }
 
     #[test]
-    fn measured_evidence_preserves_unavailable_capability_boundaries() {
+    fn structural_observations_report_actual_capabilities_and_limitations() {
         let evidence = build_language_workspace_evidence(REVISION, TOOLCHAIN)
             .expect("candidate-bound evidence should build");
-        assert_eq!(evidence.disposition.outcome, "measured_partial");
         assert!(evidence.language.expanded_languages.iter().all(|language| {
-            language.parser_coverage == "complete"
+            language.observed_tier == "tier_d"
+                && language.parser_coverage == "complete"
                 && language.conformance_label_recall_ppm == 1_000_000
                 && !language.holdout_available
                 && !language.native_isolation_available
                 && !language.compiler_execution_available
                 && !language.generated_origin_complete
-                && !language.production_promotion_eligible
         }));
         assert_eq!(evidence.security.workspace_source_reads, 111);
         assert_eq!(
@@ -1580,7 +1521,7 @@ mod tests {
             encode_language_workspace_evidence(&evidence).expect("contract evidence should encode");
         let mut value: serde_json::Value =
             serde_json::from_slice(&encoded).expect("contract evidence should decode");
-        value["disposition"]["outcome"] = serde_json::Value::String("pass".to_owned());
+        value["workspace"]["partial_snapshot"]["complete"] = serde_json::Value::Bool(true);
         let tampered = serde_json::to_vec(&value).expect("tampered evidence should encode");
         assert!(verify_language_workspace_evidence(&tampered, REVISION, TOOLCHAIN).is_err());
         assert!(privacy_scan(br#"{"path":"C:\\Users\\private"}"#).is_err());

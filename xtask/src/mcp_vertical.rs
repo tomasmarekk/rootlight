@@ -523,6 +523,11 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     let rustc_version = command_output("rustc", &["--version"])?;
     let syntax_recovery_diagnostic_observed =
         v1_index.syntax_recovery_diagnostic_observed || v1.syntax_recovery_diagnostic_observed;
+    if !syntax_recovery_diagnostic_observed {
+        return Err(VerticalError::Invariant(
+            "malformed fixture query results omitted the syntax recovery diagnostic",
+        ));
+    }
     let daemon_ready = LatencySeries::new(daemon_ready_samples)?;
     let bridge_start = LatencySeries::new(bridge_start_samples)?;
     let transport = LatencySeries::new(transport_samples)?;
@@ -554,10 +559,6 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     if peak_rss_bytes.is_none() {
         unavailable_metrics.push("true_process_rss_operation_status_reported_zero");
     }
-    if !syntax_recovery_diagnostic_observed {
-        unavailable_metrics.push("malformed_source_diagnostic_text_and_code");
-    }
-
     Ok(Summary {
         schema_version: EVIDENCE_SCHEMA_VERSION,
         run_status: "completed",
@@ -610,7 +611,6 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
             observed_source_read_rust_coverage_tier: "B",
             expected_syntax_diagnostic_code: SYNTAX_RECOVERY_DIAGNOSTIC,
             syntax_recovery_diagnostic_observed,
-            syntax_diagnostic_acceptance_met: syntax_recovery_diagnostic_observed,
             nested_ignored_exact_match_count: discovery_policy.ignored_exact_match_count,
             nested_ignored_policy_exclusion_test_passed: discovery_policy
                 .ignored_policy_exclusion_test_passed,
@@ -671,7 +671,6 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
             pinned_old_source_consistent: true,
             active_new_source_consistent: true,
             clean_rebuild_ids_differ_by_design: clean_rebuild_ids_differ,
-            stable_id_acceptance_met: false,
             identity_remap_method: "exact_known_repository_generation_symbol_and_file_identifiers_v1",
             clean_rebuild_semantically_identical: true,
             canonical_exact_locate_blake3: canonical_blake3(&canonical_v1.exact_locate)?,
@@ -5063,7 +5062,6 @@ struct FixtureEvidence {
     observed_source_read_rust_coverage_tier: &'static str,
     expected_syntax_diagnostic_code: &'static str,
     syntax_recovery_diagnostic_observed: bool,
-    syntax_diagnostic_acceptance_met: bool,
     nested_ignored_exact_match_count: usize,
     nested_ignored_policy_exclusion_test_passed: bool,
     nested_ignored_exhaustive_repository_negative_claimed: bool,
@@ -5276,7 +5274,6 @@ struct GenerationEvidence {
     pinned_old_source_consistent: bool,
     active_new_source_consistent: bool,
     clean_rebuild_ids_differ_by_design: bool,
-    stable_id_acceptance_met: bool,
     identity_remap_method: &'static str,
     clean_rebuild_semantically_identical: bool,
     canonical_exact_locate_blake3: String,

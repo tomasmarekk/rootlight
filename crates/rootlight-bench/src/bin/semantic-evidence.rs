@@ -1,7 +1,7 @@
 //! Deterministic source-bound semantic fallback evidence generator.
 //!
-//! The fixed contract corpus measures ambiguity handling but never authorizes
-//! language-tier promotion or production semantic acceptance.
+//! The fixed contract corpus measures exact, ambiguous, and unsupported
+//! resolution outcomes without executing repository code.
 
 #![forbid(unsafe_code)]
 
@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_fixture_cannot_authorize_production_acceptance() {
+    fn fixed_fixture_reports_exact_ambiguous_and_unsupported_outcomes() {
         let registry = initial_semantic_registry().expect("shared registry is valid");
         let (batch, expectations) = contract_fixture().expect("contract fixture is valid");
         let evidence = build_semantic_evidence(&registry, &batch, &expectations)
@@ -208,7 +208,19 @@ mod tests {
         .expect("source-bound contract fixture encodes");
         let value: serde_json::Value =
             serde_json::from_slice(&encoded).expect("semantic envelope decodes");
-        assert_eq!(value["evidence"]["production_acceptance_eligible"], false);
+        assert_eq!(value["evidence"]["resolver_quality"]["exact_outcomes"], 1);
+        assert_eq!(
+            value["evidence"]["resolver_quality"]["candidate_outcomes"],
+            1
+        );
+        assert_eq!(
+            value["evidence"]["resolver_quality"]["unresolved_outcomes"],
+            1
+        );
+        assert_eq!(
+            value["evidence"]["resolver_quality"]["ambiguous_hidden_exact"],
+            0
+        );
         assert_eq!(
             value["evidence"]["resolver_quality"]["holdout_available"],
             false
