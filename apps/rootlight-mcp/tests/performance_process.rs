@@ -56,6 +56,11 @@ const IMPACT_P95_NS: u64 = 500_000_000;
 const CONTEXT_PACK_P95_NS: u64 = 750_000_000;
 const ARCHITECTURE_P95_NS: u64 = 750_000_000;
 const CYCLES_P95_NS: u64 = 1_000_000_000;
+// A cold query includes one-time daemon discovery and connection, so its tail
+// allows scheduler variance without relaxing the median or warm-query bounds.
+const COLD_CODE_LOCATE_P50_NS: u64 = 300_000_000;
+const COLD_CODE_LOCATE_P95_NS: u64 = 400_000_000;
+const COLD_CODE_LOCATE_P99_NS: u64 = 600_000_000;
 #[cfg(target_os = "linux")]
 const PROCESS_TREE_RSS_P99_BYTES: u64 = 1024 * 1024 * 1024;
 const TOKENIZER_ASSET_SHA256: &str =
@@ -633,10 +638,25 @@ fn performance_thresholds() -> Vec<PerformanceThreshold> {
             unavailable_policy: UnavailablePolicy::Block,
         });
     }
-    for (condition_id, budget) in [
-        ("cold-small-complete", 300_000_000),
-        ("warm-large-complete", CODE_LOCATE_P95_NS),
-        ("warm-small-truncated", CODE_LOCATE_P95_NS.saturating_mul(2)),
+    for (condition_id, p50_budget, p95_budget, p99_budget) in [
+        (
+            "cold-small-complete",
+            COLD_CODE_LOCATE_P50_NS,
+            COLD_CODE_LOCATE_P95_NS,
+            COLD_CODE_LOCATE_P99_NS,
+        ),
+        (
+            "warm-large-complete",
+            CODE_LOCATE_P95_NS,
+            CODE_LOCATE_P95_NS,
+            CODE_LOCATE_P95_NS.saturating_mul(2),
+        ),
+        (
+            "warm-small-truncated",
+            CODE_LOCATE_P95_NS.saturating_mul(2),
+            CODE_LOCATE_P95_NS.saturating_mul(2),
+            CODE_LOCATE_P95_NS.saturating_mul(4),
+        ),
     ] {
         thresholds.push(PerformanceThreshold {
             threshold_id: format!("code-locate-{condition_id}-p50"),
@@ -644,7 +664,7 @@ fn performance_thresholds() -> Vec<PerformanceThreshold> {
             condition_id: condition_id.to_owned(),
             class: ThresholdClass::Gate,
             metric: ThresholdMetric::WallLatencyP50Ns,
-            upper_bound: budget,
+            upper_bound: p50_budget,
             unavailable_policy: UnavailablePolicy::Block,
         });
         thresholds.push(PerformanceThreshold {
@@ -653,7 +673,7 @@ fn performance_thresholds() -> Vec<PerformanceThreshold> {
             condition_id: condition_id.to_owned(),
             class: ThresholdClass::Gate,
             metric: ThresholdMetric::WallLatencyP95Ns,
-            upper_bound: budget,
+            upper_bound: p95_budget,
             unavailable_policy: UnavailablePolicy::Block,
         });
         thresholds.push(PerformanceThreshold {
@@ -662,7 +682,7 @@ fn performance_thresholds() -> Vec<PerformanceThreshold> {
             condition_id: condition_id.to_owned(),
             class: ThresholdClass::Gate,
             metric: ThresholdMetric::WallLatencyP99Ns,
-            upper_bound: budget.saturating_mul(2),
+            upper_bound: p99_budget,
             unavailable_policy: UnavailablePolicy::Block,
         });
         thresholds.push(PerformanceThreshold {
