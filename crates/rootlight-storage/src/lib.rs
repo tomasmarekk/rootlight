@@ -10,6 +10,7 @@ mod lifecycle;
 mod migration;
 mod publication;
 mod reader;
+mod sharing;
 
 pub use generation::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationBudgetError, GenerationContext,
@@ -42,4 +43,10 @@ pub use reader::{
     CoverageReadRequest, GenerationReadLimit, GenerationReadLimitError, GenerationReader,
     HARD_MAX_GENERATION_READ_ITEMS, OccurrenceReadRequest, ReadPage, ReadPageCompleteness,
     ReadPageError, RelationReadDirection, RelationReadRequest, RelationReadRequestError,
+};
+pub use sharing::{
+    HARD_MAX_SHARED_GENERATION_BUNDLE_BYTES, HARD_MAX_SHARED_GENERATION_HEADER_BYTES,
+    SHARED_GENERATION_BUNDLE_SCHEMA, SharedGenerationError, SharedGenerationExpectation,
+    SharedGenerationImport, SharedGenerationLimits, export_shared_generation,
+    import_shared_generation, shared_generation_source_set_hash,
 };

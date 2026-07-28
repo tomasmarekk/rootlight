@@ -35,7 +35,7 @@ use rootlight_daemon_core::{
     ResourcePressure as DomainResourcePressure, ServiceError, SupportBundle as DomainSupportBundle,
 };
 use rootlight_error::{ErrorCode, PublicError};
-use rootlight_ids::OperationId;
+use rootlight_ids::{ContentHash, GenerationId, OperationId, RepositoryId, content_hash};
 use rootlight_operations::{
     CancellationAuthority, CatalogWriterLock, ClientInstanceId, GenerationRepairCandidate,
     MAX_REPAIR_CANDIDATES, OperationJournal, OperationRecord, OperationStage as JournalStage,
@@ -47,7 +47,8 @@ use rootlight_runtime::{PrivateOutputFile, RuntimeError, RuntimePaths};
 use rootlight_service::CancellationReason;
 use rootlight_service::{
     Cancellation, CodeLocateResult, FirstSliceError, FirstSliceIndexReceipt, FirstSliceService,
-    LocateMode, QueryResponse, SourceReadQueryResult, SymbolExplainResult,
+    LocateMode, QueryResponse, SharedGenerationExpectation, SharedGenerationLimits,
+    SourceReadQueryResult, SymbolExplainResult,
 };
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +59,8 @@ const CLI_CONTRACT_VERSION: &str = "1.0";
 const CLI_CLIENT_INSTANCE_ID: [u8; 16] = *b"rootlight-cli-v1";
 const FIRST_SLICE_DEMO_CONTRACT_VERSION: &str = "1.0";
 const HARD_MAX_CLI_JSON_BYTES: usize = 4 * 1024 * 1024;
+const SHARED_GENERATION_RECEIPT_SCHEMA: &str = "rootlight.shared-generation-receipt/1";
+const SHARED_GENERATION_RETENTION: usize = 8;
 const MAX_REPAIR_INVENTORY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_UPDATE_CONTEXT_BYTES: u64 = 64 * 1024;
 const MAX_UPDATE_KEY_FILE_BYTES: u64 = 256;
@@ -167,6 +170,12 @@ fn run() -> Result<CommandResult, CliError> {
     }
     if command == "update" {
         return execute_update(&trailing);
+    }
+    if command == "generation-import" {
+        return execute_generation_import(&trailing);
+    }
+    if command == "generation-export" && !standalone {
+        return Err(CliError::Usage);
     }
 
     dispatch_after_command_preflight(standalone, &command, &trailing, |standalone| {
@@ -840,6 +849,157 @@ fn execute_client(
     }
 }
 
+fn execute_generation_export(
+    paths: &RuntimePaths,
+    arguments: &[std::ffi::OsString],
+) -> Result<CommandResult, CliError> {
+    let (repository, generation, output) = match arguments {
+        [repository_flag, repository, output_flag, output]
+            if repository_flag == "--repository" && output_flag == "--output" =>
+        {
+            (
+                parse_repository(repository)?,
+                None,
+                generation_output_path(output)?,
+            )
+        }
+        [
+            repository_flag,
+            repository,
+            generation_flag,
+            generation,
+            output_flag,
+            output,
+        ] if repository_flag == "--repository"
+            && generation_flag == "--generation"
+            && output_flag == "--output" =>
+        {
+            (
+                parse_repository(repository)?,
+                Some(parse_generation(generation)?),
+                generation_output_path(output)?,
+            )
+        }
+        _ => return Err(CliError::Usage),
+    };
+    let cancellation = generation_transfer_cancellation()?;
+    let service = FirstSliceService::new_durable(
+        SHARED_GENERATION_RETENTION,
+        paths.state_dir(),
+        &cancellation,
+    )?;
+    let exported = service.export_shared_generation(
+        repository,
+        generation,
+        SharedGenerationLimits::default(),
+        &cancellation,
+    )?;
+    write_generation_bundle(output, exported.bundle())?;
+    Ok(CommandResult::GenerationExport(
+        SharedGenerationReceipt::new(
+            exported.repository(),
+            exported.generation(),
+            exported.source_set_hash(),
+            exported.bundle(),
+        )?,
+    ))
+}
+
+fn execute_generation_import(arguments: &[std::ffi::OsString]) -> Result<CommandResult, CliError> {
+    let (input, repository, source_set_hash, generation) = match arguments {
+        [
+            input_flag,
+            input,
+            repository_flag,
+            repository,
+            source_flag,
+            source_set_hash,
+        ] if input_flag == "--input"
+            && repository_flag == "--repository"
+            && source_flag == "--source-set-hash" =>
+        {
+            (
+                Path::new(input),
+                parse_repository(repository)?,
+                parse_content_hash(source_set_hash)?,
+                None,
+            )
+        }
+        [
+            input_flag,
+            input,
+            repository_flag,
+            repository,
+            source_flag,
+            source_set_hash,
+            generation_flag,
+            generation,
+        ] if input_flag == "--input"
+            && repository_flag == "--repository"
+            && source_flag == "--source-set-hash"
+            && generation_flag == "--generation" =>
+        {
+            (
+                Path::new(input),
+                parse_repository(repository)?,
+                parse_content_hash(source_set_hash)?,
+                Some(parse_generation(generation)?),
+            )
+        }
+        _ => return Err(CliError::Usage),
+    };
+    let limits = SharedGenerationLimits::default();
+    let encoded = read_generation_bundle(input, limits.max_bundle_bytes())?;
+    let cancellation = generation_transfer_cancellation()?;
+    let service = FirstSliceService::new(1)?;
+    let mut expectation = SharedGenerationExpectation::new(repository, source_set_hash);
+    if let Some(generation) = generation {
+        expectation = expectation.with_generation(generation);
+    }
+    let imported =
+        service.import_shared_generation(&encoded, expectation, limits, &cancellation)?;
+    let metadata = imported.generation().metadata();
+    Ok(CommandResult::GenerationImport(
+        SharedGenerationReceipt::new(
+            metadata.repository(),
+            metadata.generation(),
+            imported.source_set_hash(),
+            &encoded,
+        )?,
+    ))
+}
+
+fn generation_transfer_cancellation() -> Result<Cancellation, CliError> {
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(30))
+        .ok_or(CliError::Clock)?;
+    Ok(Cancellation::with_deadline(deadline))
+}
+
+fn parse_repository(argument: &std::ffi::OsStr) -> Result<RepositoryId, CliError> {
+    argument
+        .to_str()
+        .ok_or(CliError::InvalidGenerationInput)?
+        .parse()
+        .map_err(|_| CliError::InvalidGenerationInput)
+}
+
+fn parse_generation(argument: &std::ffi::OsStr) -> Result<GenerationId, CliError> {
+    argument
+        .to_str()
+        .ok_or(CliError::InvalidGenerationInput)?
+        .parse()
+        .map_err(|_| CliError::InvalidGenerationInput)
+}
+
+fn parse_content_hash(argument: &std::ffi::OsStr) -> Result<ContentHash, CliError> {
+    argument
+        .to_str()
+        .ok_or(CliError::InvalidGenerationInput)?
+        .parse()
+        .map_err(|_| CliError::InvalidGenerationInput)
+}
+
 fn execute_standalone(
     paths: &RuntimePaths,
     command: &str,
@@ -849,6 +1009,9 @@ fn execute_standalone(
     let mut nonce = [0_u8; 16];
     getrandom::fill(&mut nonce).map_err(|_| CliError::RandomUnavailable)?;
     let _writer = CatalogWriterLock::acquire(&paths.writer_lock_path(), nonce)?;
+    if command == "generation-export" {
+        return execute_generation_export(paths, arguments);
+    }
     let catalog_path = paths.operation_journal_path();
     let journal = Arc::new(OperationJournal::open(&catalog_path)?);
     let limits = DaemonLimits::default();
@@ -1256,6 +1419,61 @@ fn map_support_output_error(error: RuntimeError) -> CliError {
     }
 }
 
+fn generation_output_path(argument: &std::ffi::OsStr) -> Result<&Path, CliError> {
+    let path = Path::new(argument);
+    validate_support_output_path(path).map_err(|_| CliError::InvalidGenerationPath)?;
+    Ok(path)
+}
+
+fn write_generation_bundle(path: &Path, bundle: &[u8]) -> Result<(), CliError> {
+    PrivateOutputFile::preflight().map_err(map_generation_output_error)?;
+    validate_support_output_path(path).map_err(|_| CliError::InvalidGenerationPath)?;
+    let mut output = PrivateOutputFile::create(path).map_err(map_generation_output_error)?;
+    if let Err(source) = output.write_all(bundle) {
+        return match output.abort() {
+            Ok(()) => Err(CliError::GenerationWrite(source)),
+            Err(cleanup) => Err(CliError::GenerationCleanup(cleanup)),
+        };
+    }
+    output.commit().map_err(map_generation_output_error)
+}
+
+fn map_generation_output_error(error: RuntimeError) -> CliError {
+    match error {
+        RuntimeError::Io(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+            CliError::GenerationOutputExists
+        }
+        RuntimeError::Io(source) => CliError::GenerationWrite(source),
+        error @ RuntimeError::PrivateOutputCleanup(_) => CliError::GenerationCleanup(error),
+        error => CliError::Runtime(error),
+    }
+}
+
+fn read_generation_bundle(path: &Path, maximum: usize) -> Result<Vec<u8>, CliError> {
+    let metadata = fs::symlink_metadata(path).map_err(CliError::GenerationRead)?;
+    if !metadata.file_type().is_file() {
+        return Err(CliError::InvalidGenerationInput);
+    }
+    let maximum_u64 = u64::try_from(maximum).map_err(|_| CliError::GenerationInputTooLarge)?;
+    if metadata.len() > maximum_u64 {
+        return Err(CliError::GenerationInputTooLarge);
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(CliError::GenerationRead)?
+        .take(
+            maximum_u64
+                .checked_add(1)
+                .ok_or(CliError::GenerationInputTooLarge)?,
+        )
+        .read_to_end(&mut bytes)
+        .map_err(CliError::GenerationRead)?;
+    if bytes.len() > maximum {
+        return Err(CliError::GenerationInputTooLarge);
+    }
+    Ok(bytes)
+}
+
 fn operation_from_domain(operation: OperationRecord) -> OperationStatus {
     OperationStatus {
         operation: operation.operation,
@@ -1396,7 +1614,42 @@ enum CommandResult {
         accepted: bool,
         operation: OperationStatus,
     },
+    GenerationExport(SharedGenerationReceipt),
+    GenerationImport(SharedGenerationReceipt),
     FirstSliceDemo(Box<FirstSliceDemoResult>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SharedGenerationReceipt {
+    schema_version: &'static str,
+    repository: RepositoryId,
+    generation: GenerationId,
+    source_set_hash: ContentHash,
+    bundle_hash: ContentHash,
+    bundle_bytes: u64,
+    read_only: bool,
+    activated: bool,
+}
+
+impl SharedGenerationReceipt {
+    fn new(
+        repository: RepositoryId,
+        generation: GenerationId,
+        source_set_hash: ContentHash,
+        bundle: &[u8],
+    ) -> Result<Self, CliError> {
+        Ok(Self {
+            schema_version: SHARED_GENERATION_RECEIPT_SCHEMA,
+            repository,
+            generation,
+            source_set_hash,
+            bundle_hash: content_hash(bundle),
+            bundle_bytes: u64::try_from(bundle.len())
+                .map_err(|_| CliError::GenerationInputTooLarge)?,
+            read_only: true,
+            activated: false,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1488,7 +1741,7 @@ impl ExitFamily {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: rootlight [--standalone] first-slice-demo|health [--json]|diagnostics quick|support-bundle --output <file>|repair --dry-run <verify-catalog|verify-generation-headers|full-scrub|select-last-good-generation|rebuild-lexical-index|rebuild-derived-overlays|rebuild-repository|reconstruct-catalog|purge-quarantine> [--inventory <file>]|update install --root <dir> --artifact <file> --checksum <file> --public-key <file> --key-id <id> --channel <channel>|update uninstall --root <dir>|update apply --metadata <file> --metadata-signature <file> --artifact-signature <file> --artifact <file> --sbom <file> --provenance <file> --license-bundle <file>|update recover|update status|update verify --metadata <file> --metadata-signature <file> --artifact-signature <file> --artifact <file> --sbom <file> --provenance <file> --license-bundle <file> --public-key <file> --context <file>|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
+        "usage: rootlight [--standalone] first-slice-demo|health [--json]|diagnostics quick|support-bundle --output <file>|--standalone generation-export --repository <id> [--generation <id>] --output <file>|generation-import --input <file> --repository <id> --source-set-hash <hash> [--generation <id>]|repair --dry-run <verify-catalog|verify-generation-headers|full-scrub|select-last-good-generation|rebuild-lexical-index|rebuild-derived-overlays|rebuild-repository|reconstruct-catalog|purge-quarantine> [--inventory <file>]|update install --root <dir> --artifact <file> --checksum <file> --public-key <file> --key-id <id> --channel <channel>|update uninstall --root <dir>|update apply --metadata <file> --metadata-signature <file> --artifact-signature <file> --artifact <file> --sbom <file> --provenance <file> --license-bundle <file>|update recover|update status|update verify --metadata <file> --metadata-signature <file> --artifact-signature <file> --artifact <file> --sbom <file> --provenance <file> --license-bundle <file> --public-key <file> --context <file>|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
     )]
     Usage,
     #[error("daemon path overrides must provide both state and runtime directories")]
@@ -1503,6 +1756,20 @@ enum CliError {
     DigestEncoding,
     #[error("support bundle staging cleanup failed")]
     SupportCleanup(#[source] RuntimeError),
+    #[error("shared generation input is invalid")]
+    InvalidGenerationInput,
+    #[error("shared generation input or output path is invalid")]
+    InvalidGenerationPath,
+    #[error("shared generation input exceeds its byte limit")]
+    GenerationInputTooLarge,
+    #[error("shared generation input could not be read")]
+    GenerationRead(#[source] std::io::Error),
+    #[error("shared generation output already exists")]
+    GenerationOutputExists,
+    #[error("shared generation output failed")]
+    GenerationWrite(#[source] std::io::Error),
+    #[error("shared generation staging cleanup failed")]
+    GenerationCleanup(#[source] RuntimeError),
     #[error("repair inventory is invalid")]
     InvalidRepairInventory,
     #[error("repair inventory exceeds its byte limit")]
@@ -1573,6 +1840,11 @@ impl CliError {
             | Self::IncompletePathOverride
             | Self::InvalidSupportPath
             | Self::SupportOutputExists
+            | Self::InvalidGenerationInput
+            | Self::InvalidGenerationPath
+            | Self::GenerationInputTooLarge
+            | Self::GenerationRead(_)
+            | Self::GenerationOutputExists
             | Self::InvalidRepairInventory
             | Self::RepairInventoryTooLarge
             | Self::InvalidUpdateInput
@@ -1583,7 +1855,8 @@ impl CliError {
                 | FilesystemUpdateError::InvalidSignature,
             )
             | Self::InvalidOperation
-            | Self::InvalidTimeout => ExitFamily::Usage,
+            | Self::InvalidTimeout
+            | Self::FirstSlice(FirstSliceError::Sharing) => ExitFamily::Usage,
             Self::FilesystemUpdate(
                 FilesystemUpdateError::Health(_) | FilesystemUpdateError::UnsupportedPlatform,
             )
@@ -1763,6 +2036,72 @@ mod tests {
         assert_eq!(json["contract_version"], "1.0");
         assert_eq!(json["result"]["type"], "operation_status");
         assert_eq!(json["result"]["data"]["kind"], "control_probe");
+    }
+
+    #[test]
+    fn generation_commands_export_and_verify_a_read_only_bundle() {
+        let temporary = support_tempdir();
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .expect("runtime paths are valid");
+        paths.prepare_owner().expect("runtime paths are private");
+        let repository_root = temporary.path().join("repository");
+        fs::create_dir(&repository_root).expect("repository root creates");
+        fs::create_dir(repository_root.join("src")).expect("source directory creates");
+        fs::write(
+            repository_root.join("src/lib.rs"),
+            FIRST_SLICE_SOURCE_BEFORE,
+        )
+        .expect("source writes");
+        let cancellation = generation_transfer_cancellation().expect("deadline is representable");
+        let indexed = {
+            let mut service = FirstSliceService::new_durable(
+                SHARED_GENERATION_RETENTION,
+                paths.state_dir(),
+                &cancellation,
+            )
+            .expect("durable service initializes");
+            service
+                .index_rust_fixture(&repository_root, &cancellation)
+                .expect("fixture indexes")
+        };
+
+        let bundle = temporary.path().join("generation.rlshare");
+        let export_arguments = [
+            std::ffi::OsString::from("--repository"),
+            std::ffi::OsString::from(indexed.repository.to_string()),
+            std::ffi::OsString::from("--generation"),
+            std::ffi::OsString::from(indexed.generation.to_string()),
+            std::ffi::OsString::from("--output"),
+            bundle.as_os_str().to_owned(),
+        ];
+        let CommandResult::GenerationExport(exported) =
+            execute_generation_export(&paths, &export_arguments).expect("generation exports")
+        else {
+            panic!("generation export returned the wrong result");
+        };
+        assert!(bundle.is_file());
+        assert!(exported.read_only);
+        assert!(!exported.activated);
+
+        let import_arguments = [
+            std::ffi::OsString::from("--input"),
+            bundle.as_os_str().to_owned(),
+            std::ffi::OsString::from("--repository"),
+            std::ffi::OsString::from(exported.repository.to_string()),
+            std::ffi::OsString::from("--source-set-hash"),
+            std::ffi::OsString::from(exported.source_set_hash.to_string()),
+            std::ffi::OsString::from("--generation"),
+            std::ffi::OsString::from(exported.generation.to_string()),
+        ];
+        let CommandResult::GenerationImport(imported) =
+            execute_generation_import(&import_arguments).expect("generation imports")
+        else {
+            panic!("generation import returned the wrong result");
+        };
+        assert_eq!(imported, exported);
     }
 
     #[test]

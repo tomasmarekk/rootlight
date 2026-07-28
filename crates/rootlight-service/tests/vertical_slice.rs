@@ -7,7 +7,7 @@ use std::{
 };
 
 use rootlight_cancel::{Cancellation, CancellationReason};
-use rootlight_ids::{GenerationId, RepositoryId};
+use rootlight_ids::{GenerationId, RepositoryId, content_hash};
 use rootlight_incremental::{FactDomain, FactDomainSet};
 use rootlight_ir::CoverageStatus;
 use rootlight_query::{
@@ -19,7 +19,8 @@ use rootlight_service::{
     CodeDeadEntryPointPolicy, FileChangeKind, FirstSliceBuildStrategy, FirstSliceError,
     FirstSliceFreshnessStatus, FirstSliceIncrementalEvidence, FirstSliceObservedFreshness,
     FirstSlicePublicationMode, FirstSliceService, FirstSliceTwoStageAvailability,
-    PlanChangeObjective, RelationDirection, RelationFamily,
+    PlanChangeObjective, RelationDirection, RelationFamily, SharedGenerationExpectation,
+    SharedGenerationLimits,
     catalog::{
         CatalogInstant, CatalogListFilter, CatalogPageRequest, CatalogPageSize,
         CatalogRepositoryState,
@@ -32,6 +33,60 @@ const AFTER: &str = "pub fn answer() -> u32 {\n    43\n}\n";
 const OTHER: &str = "pub fn other() -> u32 {\n    7\n}\n";
 const KEPT: &str = "pub fn kept_after_negation() -> bool {\n    true\n}\n";
 const MALFORMED: &str = "// malformed_source_sentinel\npub fn broken( {\n";
+
+#[test]
+fn shared_generation_round_trip_is_source_bound_and_does_not_activate() {
+    let fixture = fixture(BEFORE);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+
+    let exported = service
+        .export_shared_generation(
+            indexed.repository,
+            Some(indexed.generation),
+            SharedGenerationLimits::default(),
+            &cancellation,
+        )
+        .expect("generation exports");
+    assert_eq!(exported.repository(), indexed.repository);
+    assert_eq!(exported.generation(), indexed.generation);
+
+    let imported = service
+        .import_shared_generation(
+            exported.bundle(),
+            SharedGenerationExpectation::new(indexed.repository, exported.source_set_hash())
+                .with_generation(indexed.generation),
+            SharedGenerationLimits::default(),
+            &cancellation,
+        )
+        .expect("generation imports");
+    assert_eq!(
+        imported.generation().metadata().generation(),
+        indexed.generation
+    );
+    assert_eq!(
+        service.active_generation_for(indexed.repository),
+        Some(indexed.generation)
+    );
+
+    assert_eq!(
+        service
+            .import_shared_generation(
+                exported.bundle(),
+                SharedGenerationExpectation::new(
+                    indexed.repository,
+                    content_hash(b"wrong source set"),
+                ),
+                SharedGenerationLimits::default(),
+                &cancellation,
+            )
+            .expect_err("wrong source set is rejected"),
+        FirstSliceError::Sharing
+    );
+}
 
 #[test]
 fn fixture_flows_through_oracle_search_queries_and_prior_generation() {

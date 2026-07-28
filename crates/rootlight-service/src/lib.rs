@@ -83,7 +83,12 @@ pub use rootlight_source::{SourceEncoding, SourceReadOptions};
 use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationControlError,
     GenerationManifestRecipe, GenerationMetadata, IdentityVerificationError,
-    IdentityVerifiedGeneration,
+    IdentityVerifiedGeneration, SharedGenerationError,
+    export_shared_generation as encode_shared_generation,
+    import_shared_generation as decode_shared_generation, shared_generation_source_set_hash,
+};
+pub use rootlight_storage::{
+    SharedGenerationExpectation, SharedGenerationImport, SharedGenerationLimits,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot, VfsError};
 use serde::{Deserialize, Serialize};
@@ -165,6 +170,41 @@ pub struct FirstSliceIndexReceipt {
     pub diagnostics: Vec<FirstSliceIndexDiagnostic>,
     /// End-to-end indexing time rounded up to microseconds.
     pub elapsed_micros: u64,
+}
+
+/// Portable source-free bundle exported from one retained immutable generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSliceSharedGenerationExport {
+    repository: RepositoryId,
+    generation: GenerationId,
+    source_set_hash: ContentHash,
+    bundle: Vec<u8>,
+}
+
+impl FirstSliceSharedGenerationExport {
+    /// Returns the repository bound into the bundle.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the immutable generation bound into the bundle.
+    #[must_use]
+    pub const fn generation(&self) -> GenerationId {
+        self.generation
+    }
+
+    /// Returns the generation-independent source-set identity.
+    #[must_use]
+    pub const fn source_set_hash(&self) -> ContentHash {
+        self.source_set_hash
+    }
+
+    /// Returns the canonical portable bundle bytes.
+    #[must_use]
+    pub fn bundle(&self) -> &[u8] {
+        &self.bundle
+    }
 }
 
 /// Bounded repository identity and capacity reservation made before indexing.
@@ -3495,6 +3535,69 @@ impl FirstSliceService {
         self.active_by_repository.get(&repository).copied()
     }
 
+    /// Exports one retained immutable generation as a portable source-free
+    /// bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns repository and generation selection failures from
+    /// [`Self::resolve_generation`], or [`FirstSliceError::Sharing`] when
+    /// canonical encoding, cancellation, or transfer limits reject export.
+    pub fn export_shared_generation(
+        &self,
+        repository: RepositoryId,
+        generation: Option<GenerationId>,
+        limits: SharedGenerationLimits,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceSharedGenerationExport, FirstSliceError> {
+        let generation = self.resolve_generation(repository, generation)?.generation;
+        let snapshot = self
+            .generations
+            .generation(generation)
+            .map_err(|error| map_query_error(error, cancellation))?;
+        let source_set_hash = shared_generation_source_set_hash(snapshot.document())
+            .map_err(|error| map_sharing_error(error, cancellation))?;
+        let bundle = encode_shared_generation(snapshot, limits, cancellation)
+            .map_err(|error| map_sharing_error(error, cancellation))?;
+        Ok(FirstSliceSharedGenerationExport {
+            repository,
+            generation,
+            source_set_hash,
+            bundle,
+        })
+    }
+
+    /// Imports and identity-verifies one portable generation without
+    /// activating it or mutating this service's retained generations.
+    ///
+    /// The returned object owns the verified immutable generation. Callers may
+    /// inspect it or pass it into a separately authorized publication flow;
+    /// this method intentionally has no implicit catalog write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::Sharing`] for framing, integrity,
+    /// repository, generation, source-set, cancellation, or resource-limit
+    /// failures.
+    pub fn import_shared_generation(
+        &self,
+        encoded: &[u8],
+        expectation: SharedGenerationExpectation,
+        limits: SharedGenerationLimits,
+        cancellation: &Cancellation,
+    ) -> Result<SharedGenerationImport, FirstSliceError> {
+        let context = GenerationContext::new(cancellation, GenerationBudget::default());
+        decode_shared_generation(
+            encoded,
+            expectation,
+            limits,
+            &IrLimits::default(),
+            &self.extensions,
+            &context,
+        )
+        .map_err(|error| map_sharing_error(error, cancellation))
+    }
+
     /// Reports whether commits cross the private durable catalog boundary.
     #[must_use]
     pub const fn uses_durable_publication(&self) -> bool {
@@ -4865,6 +4968,9 @@ pub enum FirstSliceError {
     /// A query plan or execution failed.
     #[error("first-slice query failed")]
     Query,
+    /// Portable generation export or verified read-only import failed.
+    #[error("first-slice shared generation transfer failed")]
+    Sharing,
     /// The requested stable symbol is absent from the pinned generation.
     #[error("first-slice symbol was not found")]
     SymbolNotFound,
@@ -6190,6 +6296,20 @@ fn map_source_error(error: SourceError, cancellation: &Cancellation) -> FirstSli
         | SourceError::ResponseMemoryBudgetExceeded
         | SourceError::MemoryUnavailable => FirstSliceError::BudgetExceeded,
         _ => FirstSliceError::Source,
+    }
+}
+
+fn map_sharing_error(error: SharedGenerationError, cancellation: &Cancellation) -> FirstSliceError {
+    if let Some(cancelled) = current_cancellation(cancellation) {
+        return cancelled;
+    }
+    match error {
+        SharedGenerationError::Cancelled => FirstSliceError::Cancelled(
+            cancellation
+                .reason()
+                .unwrap_or(CancellationReason::ClientRequest),
+        ),
+        _ => FirstSliceError::Sharing,
     }
 }
 
