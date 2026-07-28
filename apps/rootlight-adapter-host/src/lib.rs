@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod process;
+mod server;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,6 +31,7 @@ use rootlight_protocol::{
 use serde::Serialize;
 
 pub use process::{IsolatedProjectAnalysis, execute_isolated_project_adapter};
+pub use server::serve_project_session;
 
 const NORMALIZED_IR_CAPABILITY: &str = "normalized_ir";
 const PROJECT_NORMALIZED_IR_CAPABILITY: &str = "project_normalized_ir";
