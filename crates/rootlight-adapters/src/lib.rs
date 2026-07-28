@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod project_context;
+mod project_semantics;
 mod scip_import;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,6 +30,9 @@ pub use project_context::{
     ProjectContext, ProjectContextCoverage, ProjectContextCoverageStatus, ProjectContextError,
     ProjectContextEvidence, ProjectContextFile, ProjectContextLanguage, ProjectContextMetadata,
     ProjectContextSkip, PythonProjectContext, RustProjectContext, TypeScriptProjectContext,
+};
+pub use project_semantics::{
+    SemanticProjectAnalyzer, SemanticProjectAnalyzerConfigError, SemanticProjectLanguage,
 };
 pub use scip_import::{
     ScipImportError, ScipImportLimits, ScipImportOutcome, ScipImportReport, ScipImportRequest,
