@@ -5,11 +5,11 @@ use std::{
 };
 
 use rootlight_cancel::{Cancellation, CancellationReason};
-use rootlight_ids::{FactId, FileId, GenerationId, SymbolId, content_hash};
+use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, SymbolId, content_hash};
 use rootlight_ir::{
-    AnalysisTier, CoverageRecord, CoverageScope, CoverageStatus, EntityFlag, EntityKind,
-    EntityVisibility, NormalizedIrDocument, OccurrenceTarget, RelationEndpoint, RelationPredicate,
-    SourceRef,
+    AnalysisTier, ContainerRef, CoverageRecord, CoverageScope, CoverageStatus, EntityFlag,
+    EntityKind, EntityVisibility, NormalizedIrDocument, OccurrenceTarget, RelationEndpoint,
+    RelationPredicate, SourceRef,
 };
 use rootlight_search::{LexicalSearch, SearchBudget, SearchRequest, validate_search_request};
 use rootlight_source::{
@@ -5516,14 +5516,16 @@ const HISTORY_COMPARE_MAX_BREAKING: usize = 256;
 
 /// Comparable per-entity fingerprint used to diff two generations.
 ///
-/// The fingerprint captures only what the normalized IR honestly exposes: the
-/// entity kind label, public-surface membership, and the definition source span.
-/// A kind or span difference is reported as a modification; rename and move
-/// detection are not claimed by this slice.
+/// The fingerprint captures the normalized fields needed for identity-preserved
+/// comparison and conservative one-to-one rename or move matching.
 struct HistoryEntityFingerprint {
     kind_label: String,
+    language: String,
+    canonical_name: String,
+    container: Option<ContainerRef>,
     is_public: bool,
     source_file: Option<FileId>,
+    source_content_hash: Option<ContentHash>,
     source_start: u64,
     source_end: u64,
 }
@@ -5533,8 +5535,12 @@ impl HistoryEntityFingerprint {
         let span = entity.evidence.source.as_ref().map(|source| source.span());
         Ok(Self {
             kind_label: serialized_label(&entity.kind)?,
+            language: entity.language.clone(),
+            canonical_name: entity.canonical_name.clone(),
+            container: entity.container,
             is_public: entity_is_exported(entity),
             source_file: span.map(|span| span.file()),
+            source_content_hash: entity.evidence.source.as_ref().map(SourceRef::content_hash),
             source_start: span.map_or(0, |span| span.start_byte()),
             source_end: span.map_or(0, |span| span.end_byte()),
         })
@@ -5549,6 +5555,27 @@ impl HistoryEntityFingerprint {
     }
 }
 
+/// Exact fields that prove an entity moved with unchanged source content.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct HistoryMoveKey {
+    kind_label: String,
+    language: String,
+    canonical_name: String,
+    source_content_hash: ContentHash,
+    source_start: u64,
+    source_end: u64,
+}
+
+/// Stable declaration neighborhood used for conservative rename matching.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct HistoryRenameKey {
+    kind_label: String,
+    language: String,
+    container: Option<ContainerRef>,
+    source_file: FileId,
+    source_start: u64,
+}
+
 /// Bounded `history.compare` analysis assembled before result emission.
 struct HistoryCompareAnalysis {
     coverage: CoverageStatus,
@@ -5561,12 +5588,12 @@ struct HistoryCompareAnalysis {
 /// Builds a bounded semantic comparison between two generation documents.
 ///
 /// The base and head entity sets are indexed by stable identity and diffed into
-/// added, removed, and modified changes. Identity-preserved symbols form honest
-/// lineage matches. Removed or modified public-surface symbols become breaking
-/// candidates ranked by their base-generation consumer count. The architecture
-/// delta is an honest zero because this slice models no service or boundary
-/// graph. Rows, edges, results, and memory are bounded exactly like
-/// `change.impact`.
+/// added, removed, modified, moved, and renamed changes. Identity-preserved
+/// symbols and uniquely proven moves or renames form lineage matches. Removed,
+/// renamed, or modified public-surface symbols become breaking candidates ranked
+/// by their base-generation consumer count. The architecture delta is an honest
+/// zero because this slice models no service or boundary graph. Rows, edges,
+/// results, and memory are bounded exactly like `change.impact`.
 fn build_history_compare(
     base_document: &NormalizedIrDocument,
     head_document: &NormalizedIrDocument,
@@ -5582,6 +5609,8 @@ fn build_history_compare(
     let mut identities: BTreeSet<SymbolId> = BTreeSet::new();
     identities.extend(base_entities.keys().copied());
     identities.extend(head_entities.keys().copied());
+    let mut unmatched_base: BTreeSet<SymbolId> = BTreeSet::new();
+    let mut unmatched_head: BTreeSet<SymbolId> = BTreeSet::new();
 
     let mut changes: Vec<SemanticChangeRecord> = Vec::new();
     let mut lineage: Vec<LineageMatchRecord> = Vec::new();
@@ -5593,44 +5622,14 @@ fn build_history_compare(
     for symbol in identities {
         control.check()?;
         match (base_entities.get(&symbol), head_entities.get(&symbol)) {
-            (None, Some(head)) => {
-                let kind = HistorySemanticChangeKind::Added;
-                let change = SemanticChangeRecord {
-                    kind,
-                    symbol_id: symbol,
-                    entity_kind: head.kind_label.clone(),
-                    breaking_candidate: false,
-                    significance: history_significance(kind, false),
-                };
-                emit_cycle_value(&mut changes, change, tracker, limiting_resources, control)?;
+            (None, Some(_)) => {
+                unmatched_head.insert(symbol);
             }
-            (Some(base), None) => {
-                let kind = HistorySemanticChangeKind::Removed;
-                let breaking_candidate = base.is_public;
-                let significance = history_significance(kind, breaking_candidate);
-                let change = SemanticChangeRecord {
-                    kind,
-                    symbol_id: symbol,
-                    entity_kind: base.kind_label.clone(),
-                    breaking_candidate,
-                    significance,
-                };
-                emit_cycle_value(&mut changes, change, tracker, limiting_resources, control)?;
-                if breaking_candidate {
-                    breaking_symbols.insert(symbol);
-                    breaking.push((
-                        significance,
-                        BreakingCandidateRecord {
-                            symbol_id: symbol,
-                            consumer_count: 0,
-                            is_public_surface: true,
-                            reason: "removed_public_surface".to_owned(),
-                        },
-                    ));
-                }
+            (Some(_), None) => {
+                unmatched_base.insert(symbol);
             }
             (Some(base), Some(head)) => {
-                // Identity preserved: an honest lineage match, never a rename.
+                // Identity preservation is stronger evidence than any heuristic.
                 if lineage.len() < plan.max_results {
                     emit_cycle_value(
                         &mut lineage,
@@ -5652,7 +5651,7 @@ fn build_history_compare(
                     } else {
                         HistorySemanticChangeKind::Modified
                     };
-                    let breaking_candidate = head.is_public;
+                    let breaking_candidate = base.is_public || head.is_public;
                     let significance = history_significance(kind, breaking_candidate);
                     let change = SemanticChangeRecord {
                         kind,
@@ -5678,6 +5677,168 @@ fn build_history_compare(
             }
             (None, None) => {}
         }
+    }
+
+    let move_pairs = unique_history_matches(
+        &base_entities,
+        &head_entities,
+        &unmatched_base,
+        &unmatched_head,
+        |entity| {
+            Some(HistoryMoveKey {
+                kind_label: entity.kind_label.clone(),
+                language: entity.language.clone(),
+                canonical_name: entity.canonical_name.clone(),
+                source_content_hash: entity.source_content_hash?,
+                source_start: entity.source_start,
+                source_end: entity.source_end,
+            })
+        },
+        control,
+    )?;
+    for (base_symbol, head_symbol) in move_pairs {
+        let base = base_entities
+            .get(&base_symbol)
+            .ok_or(QueryError::SymbolNotFound)?;
+        let head = head_entities
+            .get(&head_symbol)
+            .ok_or(QueryError::SymbolNotFound)?;
+        if base.source_file == head.source_file {
+            continue;
+        }
+        unmatched_base.remove(&base_symbol);
+        unmatched_head.remove(&head_symbol);
+        emit_history_lineage_change(
+            &mut changes,
+            &mut lineage,
+            HistorySemanticChangeKind::Moved,
+            base_symbol,
+            head_symbol,
+            head,
+            false,
+            1_000,
+            plan,
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+
+    let rename_pairs = unique_history_matches(
+        &base_entities,
+        &head_entities,
+        &unmatched_base,
+        &unmatched_head,
+        |entity| {
+            Some(HistoryRenameKey {
+                kind_label: entity.kind_label.clone(),
+                language: entity.language.clone(),
+                container: entity.container,
+                source_file: entity.source_file?,
+                source_start: entity.source_start,
+            })
+        },
+        control,
+    )?;
+    for (base_symbol, head_symbol) in rename_pairs {
+        let base = base_entities
+            .get(&base_symbol)
+            .ok_or(QueryError::SymbolNotFound)?;
+        let head = head_entities
+            .get(&head_symbol)
+            .ok_or(QueryError::SymbolNotFound)?;
+        if base.canonical_name == head.canonical_name
+            || !history_names_resemble(&base.canonical_name, &head.canonical_name)
+        {
+            continue;
+        }
+        unmatched_base.remove(&base_symbol);
+        unmatched_head.remove(&head_symbol);
+        let breaking_candidate = base.is_public;
+        let significance =
+            history_significance(HistorySemanticChangeKind::Renamed, breaking_candidate);
+        emit_history_lineage_change(
+            &mut changes,
+            &mut lineage,
+            HistorySemanticChangeKind::Renamed,
+            base_symbol,
+            head_symbol,
+            head,
+            breaking_candidate,
+            900,
+            plan,
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+        if breaking_candidate {
+            breaking_symbols.insert(base_symbol);
+            breaking.push((
+                significance,
+                BreakingCandidateRecord {
+                    symbol_id: base_symbol,
+                    consumer_count: 0,
+                    is_public_surface: true,
+                    reason: "renamed_public_surface".to_owned(),
+                },
+            ));
+        }
+    }
+
+    for symbol in unmatched_base {
+        control.check()?;
+        let base = base_entities
+            .get(&symbol)
+            .ok_or(QueryError::SymbolNotFound)?;
+        let kind = HistorySemanticChangeKind::Removed;
+        let breaking_candidate = base.is_public;
+        let significance = history_significance(kind, breaking_candidate);
+        emit_cycle_value(
+            &mut changes,
+            SemanticChangeRecord {
+                kind,
+                symbol_id: symbol,
+                entity_kind: base.kind_label.clone(),
+                breaking_candidate,
+                significance,
+            },
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+        if breaking_candidate {
+            breaking_symbols.insert(symbol);
+            breaking.push((
+                significance,
+                BreakingCandidateRecord {
+                    symbol_id: symbol,
+                    consumer_count: 0,
+                    is_public_surface: true,
+                    reason: "removed_public_surface".to_owned(),
+                },
+            ));
+        }
+    }
+
+    for symbol in unmatched_head {
+        control.check()?;
+        let head = head_entities
+            .get(&symbol)
+            .ok_or(QueryError::SymbolNotFound)?;
+        let kind = HistorySemanticChangeKind::Added;
+        emit_cycle_value(
+            &mut changes,
+            SemanticChangeRecord {
+                kind,
+                symbol_id: symbol,
+                entity_kind: head.kind_label.clone(),
+                breaking_candidate: false,
+                significance: history_significance(kind, false),
+            },
+            tracker,
+            limiting_resources,
+            control,
+        )?;
     }
 
     // Fill base-generation consumer counts for the breaking candidates.
@@ -5725,7 +5886,11 @@ fn build_history_compare(
         .map(|(_, candidate)| candidate)
         .collect();
 
-    // Lineage was emitted in deterministic identity order; cap it.
+    lineage.sort_by(|left, right| {
+        left.base_symbol_id
+            .cmp(&right.base_symbol_id)
+            .then_with(|| left.head_symbol_id.cmp(&right.head_symbol_id))
+    });
     if lineage.len() > plan.max_results {
         record_limit(limiting_resources, QueryResource::Results)?;
     }
@@ -5737,8 +5902,9 @@ fn build_history_compare(
     } else if limits_optional_results(limiting_resources) {
         CoverageStatus::Sampled
     } else {
-        // The entity diff is complete over both documents, but rename, move, and
-        // architecture detection are documented out-of-scope bounds.
+        // Exact one-to-one moves and local renames are modeled. Combined
+        // rename-plus-move, split, merge, and architecture detection remain
+        // documented bounds.
         CoverageStatus::Bounded
     };
 
@@ -5754,6 +5920,136 @@ fn build_history_compare(
         breaking_candidates,
         lineage,
     })
+}
+
+/// Returns only bidirectionally unique matches for a deterministic key.
+///
+/// Marking duplicate keys as ambiguous prevents collision-dependent aliases.
+fn unique_history_matches<Key, KeyFor>(
+    base_entities: &BTreeMap<SymbolId, HistoryEntityFingerprint>,
+    head_entities: &BTreeMap<SymbolId, HistoryEntityFingerprint>,
+    base_symbols: &BTreeSet<SymbolId>,
+    head_symbols: &BTreeSet<SymbolId>,
+    key_for: KeyFor,
+    control: &QueryControl<'_>,
+) -> Result<Vec<(SymbolId, SymbolId)>, QueryError>
+where
+    Key: Ord,
+    KeyFor: Fn(&HistoryEntityFingerprint) -> Option<Key>,
+{
+    fn insert<Key: Ord>(index: &mut BTreeMap<Key, Option<SymbolId>>, key: Key, symbol: SymbolId) {
+        index
+            .entry(key)
+            .and_modify(|candidate| *candidate = None)
+            .or_insert(Some(symbol));
+    }
+
+    let mut base_index: BTreeMap<Key, Option<SymbolId>> = BTreeMap::new();
+    for symbol in base_symbols {
+        control.check()?;
+        let Some(entity) = base_entities.get(symbol) else {
+            continue;
+        };
+        if let Some(key) = key_for(entity) {
+            insert(&mut base_index, key, *symbol);
+        }
+    }
+    let mut head_index: BTreeMap<Key, Option<SymbolId>> = BTreeMap::new();
+    for symbol in head_symbols {
+        control.check()?;
+        let Some(entity) = head_entities.get(symbol) else {
+            continue;
+        };
+        if let Some(key) = key_for(entity) {
+            insert(&mut head_index, key, *symbol);
+        }
+    }
+
+    let mut matches = Vec::new();
+    for (key, base_symbol) in base_index {
+        control.check()?;
+        let Some(base_symbol) = base_symbol else {
+            continue;
+        };
+        let Some(Some(head_symbol)) = head_index.get(&key) else {
+            continue;
+        };
+        matches.push((base_symbol, *head_symbol));
+    }
+    Ok(matches)
+}
+
+/// Rejects same-location replacements whose names share no meaningful anchor.
+///
+/// Exact Git or declaration-fingerprint evidence can broaden this conservative
+/// fallback later without weakening collision handling.
+fn history_names_resemble(base: &str, head: &str) -> bool {
+    let base_chars: Vec<char> = base.chars().collect();
+    let head_chars: Vec<char> = head.chars().collect();
+    let shorter = base_chars.len().min(head_chars.len());
+    if shorter < 4 {
+        return false;
+    }
+    let common_prefix = base_chars
+        .iter()
+        .zip(&head_chars)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let common_suffix = base_chars
+        .iter()
+        .rev()
+        .zip(head_chars.iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
+    common_prefix.max(common_suffix) >= 3_usize.max(shorter / 2)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the helper carries one complete bounded history result row"
+)]
+fn emit_history_lineage_change(
+    changes: &mut Vec<SemanticChangeRecord>,
+    lineage: &mut Vec<LineageMatchRecord>,
+    kind: HistorySemanticChangeKind,
+    base_symbol: SymbolId,
+    head_symbol: SymbolId,
+    head: &HistoryEntityFingerprint,
+    breaking_candidate: bool,
+    confidence: u16,
+    plan: &HistoryComparePlan,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+    control: &QueryControl<'_>,
+) -> Result<(), QueryError> {
+    emit_cycle_value(
+        changes,
+        SemanticChangeRecord {
+            kind,
+            symbol_id: head_symbol,
+            entity_kind: head.kind_label.clone(),
+            breaking_candidate,
+            significance: history_significance(kind, breaking_candidate),
+        },
+        tracker,
+        limiting_resources,
+        control,
+    )?;
+    if lineage.len() < plan.max_results {
+        emit_cycle_value(
+            lineage,
+            LineageMatchRecord {
+                base_symbol_id: base_symbol,
+                head_symbol_id: head_symbol,
+                confidence,
+                is_rename: kind == HistorySemanticChangeKind::Renamed,
+            },
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+    Ok(())
 }
 
 /// Indexes one generation's entities by stable identity under the row budget.
@@ -5820,7 +6116,9 @@ fn count_history_incoming(
 const fn history_significance(kind: HistorySemanticChangeKind, breaking_candidate: bool) -> u16 {
     let base = match kind {
         HistorySemanticChangeKind::Removed => 700,
+        HistorySemanticChangeKind::Renamed => 650,
         HistorySemanticChangeKind::SignatureModified => 600,
+        HistorySemanticChangeKind::Moved => 500,
         HistorySemanticChangeKind::Modified => 400,
         HistorySemanticChangeKind::RelationChanged => 300,
         HistorySemanticChangeKind::Added => 200,
@@ -5837,6 +6135,8 @@ fn history_change_matches_filter(
     match kind {
         HistorySemanticChangeKind::Added
         | HistorySemanticChangeKind::Removed
+        | HistorySemanticChangeKind::Moved
+        | HistorySemanticChangeKind::Renamed
         | HistorySemanticChangeKind::Modified => filter.contains(&HistoryChangeKind::Entities),
         HistorySemanticChangeKind::SignatureModified => {
             filter.contains(&HistoryChangeKind::Entities)
@@ -7907,6 +8207,20 @@ mod tests {
         });
     }
 
+    fn add_file_with_content(
+        document: &mut NormalizedIrDocument,
+        byte: u8,
+        content_byte: u8,
+        path: &str,
+    ) {
+        add_file(document, byte, path);
+        document
+            .files
+            .last_mut()
+            .expect("file was just pushed")
+            .content_hash = ContentHash::from_bytes([content_byte; 32]);
+    }
+
     fn add_entity(document: &mut NormalizedIrDocument, byte: u8, file_byte: u8, kind: EntityKind) {
         let source = SourceRef::new(
             document.repository,
@@ -7925,6 +8239,49 @@ mod tests {
             canonical_name: format!("sym_{byte}"),
             display_name: format!("sym_{byte}"),
             qualified_name: format!("sym_{byte}"),
+            container: None,
+            visibility: EntityVisibility::Private,
+            flags: Vec::new(),
+            provenance: FactId::from_bytes([byte; 20]),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        });
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the helper exposes every source field varied by history fixtures"
+    )]
+    fn add_history_entity(
+        document: &mut NormalizedIrDocument,
+        byte: u8,
+        file_byte: u8,
+        content_byte: u8,
+        start_byte: u64,
+        end_byte: u64,
+        canonical_name: &str,
+        kind: EntityKind,
+    ) {
+        let source = SourceRef::new(
+            document.repository,
+            document.generation,
+            SourceSpan::new(file_id(file_byte), start_byte, end_byte)
+                .expect("test span is ordered"),
+            ContentHash::from_bytes([content_byte; 32]),
+            None,
+        );
+        document.entities.push(EntityRecord {
+            id: symbol(byte),
+            repository: document.repository,
+            generation: document.generation,
+            kind,
+            language: "rust".to_owned(),
+            tier: AnalysisTier::TierD,
+            canonical_name: canonical_name.to_owned(),
+            display_name: canonical_name.to_owned(),
+            qualified_name: canonical_name.to_owned(),
             container: None,
             visibility: EntityVisibility::Private,
             flags: Vec::new(),
@@ -9245,8 +9602,9 @@ mod tests {
 
         let mut head = history_document(2);
         add_file(&mut head, 1, "src/a.rs");
+        add_file(&mut head, 2, "src/b.rs");
         add_entity(&mut head, 11, 1, EntityKind::Function);
-        add_entity(&mut head, 13, 1, EntityKind::Function);
+        add_entity(&mut head, 13, 2, EntityKind::Function);
 
         let plan = history_compare_plan(
             history_generation(1),
@@ -9351,6 +9709,137 @@ mod tests {
     }
 
     #[test]
+    fn history_compare_resolves_a_unique_exact_content_move() {
+        let mut base = history_document(1);
+        add_file_with_content(&mut base, 1, 9, "src/old.rs");
+        add_history_entity(&mut base, 41, 1, 9, 5, 15, "run", EntityKind::Function);
+
+        let mut head = history_document(2);
+        add_file_with_content(&mut head, 2, 9, "src/new.rs");
+        add_history_entity(&mut head, 42, 2, 9, 5, 15, "run", EntityKind::Function);
+
+        let plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::new(),
+            100,
+        );
+        let analysis = run_history_compare(&base, &head, &plan);
+
+        assert_eq!(analysis.changes.len(), 1);
+        assert_eq!(analysis.changes[0].kind, HistorySemanticChangeKind::Moved);
+        assert_eq!(analysis.changes[0].symbol_id, symbol(42));
+        assert_eq!(analysis.changes[0].significance, 500);
+        assert_eq!(analysis.lineage.len(), 1);
+        assert_eq!(analysis.lineage[0].base_symbol_id, symbol(41));
+        assert_eq!(analysis.lineage[0].head_symbol_id, symbol(42));
+        assert_eq!(analysis.lineage[0].confidence, 1_000);
+        assert!(!analysis.lineage[0].is_rename);
+    }
+
+    #[test]
+    fn history_compare_resolves_a_unique_local_rename() {
+        let mut base = history_document(1);
+        add_file_with_content(&mut base, 1, 1, "src/a.rs");
+        add_history_entity(&mut base, 51, 1, 1, 5, 13, "old_name", EntityKind::Function);
+
+        let mut head = history_document(2);
+        add_file_with_content(&mut head, 1, 2, "src/a.rs");
+        add_history_entity(&mut head, 52, 1, 2, 5, 13, "new_name", EntityKind::Function);
+
+        let plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::new(),
+            100,
+        );
+        let analysis = run_history_compare(&base, &head, &plan);
+
+        assert_eq!(analysis.changes.len(), 1);
+        assert_eq!(analysis.changes[0].kind, HistorySemanticChangeKind::Renamed);
+        assert_eq!(analysis.changes[0].symbol_id, symbol(52));
+        assert_eq!(analysis.changes[0].significance, 650);
+        assert_eq!(analysis.lineage.len(), 1);
+        assert_eq!(analysis.lineage[0].base_symbol_id, symbol(51));
+        assert_eq!(analysis.lineage[0].head_symbol_id, symbol(52));
+        assert_eq!(analysis.lineage[0].confidence, 900);
+        assert!(analysis.lineage[0].is_rename);
+    }
+
+    #[test]
+    fn history_compare_preserves_ambiguous_rename_candidates() {
+        let mut base = history_document(1);
+        add_file_with_content(&mut base, 1, 1, "src/a.rs");
+        add_history_entity(&mut base, 61, 1, 1, 5, 13, "old_one", EntityKind::Function);
+        add_history_entity(&mut base, 62, 1, 1, 5, 13, "old_two", EntityKind::Function);
+
+        let mut head = history_document(2);
+        add_file_with_content(&mut head, 1, 2, "src/a.rs");
+        add_history_entity(&mut head, 63, 1, 2, 5, 13, "new_name", EntityKind::Function);
+
+        let plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::new(),
+            100,
+        );
+        let analysis = run_history_compare(&base, &head, &plan);
+
+        assert_eq!(analysis.changes.len(), 3);
+        assert_eq!(
+            analysis
+                .changes
+                .iter()
+                .filter(|change| change.kind == HistorySemanticChangeKind::Removed)
+                .count(),
+            2
+        );
+        assert_eq!(
+            analysis
+                .changes
+                .iter()
+                .filter(|change| change.kind == HistorySemanticChangeKind::Added)
+                .count(),
+            1
+        );
+        assert!(analysis.lineage.is_empty());
+    }
+
+    #[test]
+    fn history_compare_does_not_alias_an_unrelated_same_location_replacement() {
+        let mut base = history_document(1);
+        add_file_with_content(&mut base, 1, 1, "src/a.rs");
+        add_history_entity(&mut base, 71, 1, 1, 5, 10, "alpha", EntityKind::Function);
+
+        let mut head = history_document(2);
+        add_file_with_content(&mut head, 1, 2, "src/a.rs");
+        add_history_entity(&mut head, 72, 1, 2, 5, 9, "beta", EntityKind::Function);
+
+        let plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::new(),
+            100,
+        );
+        let analysis = run_history_compare(&base, &head, &plan);
+
+        assert_eq!(analysis.changes.len(), 2);
+        assert!(
+            analysis
+                .changes
+                .iter()
+                .any(|change| change.kind == HistorySemanticChangeKind::Removed)
+        );
+        assert!(
+            analysis
+                .changes
+                .iter()
+                .any(|change| change.kind == HistorySemanticChangeKind::Added)
+        );
+        assert!(analysis.lineage.is_empty());
+    }
+
+    #[test]
     fn history_compare_reports_an_empty_complete_comparison_when_base_equals_head() {
         let mut document = history_document(1);
         add_file(&mut document, 1, "src/a.rs");
@@ -9389,8 +9878,8 @@ mod tests {
         add_entity(&mut base, 12, 1, EntityKind::Function);
 
         let mut head = history_document(2);
-        add_file(&mut head, 1, "src/a.rs");
-        add_entity(&mut head, 13, 1, EntityKind::Function);
+        add_file(&mut head, 2, "src/b.rs");
+        add_entity(&mut head, 13, 2, EntityKind::Function);
 
         let entities = history_compare_plan(
             history_generation(1),

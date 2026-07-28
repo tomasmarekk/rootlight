@@ -1758,6 +1758,10 @@ pub enum HistorySemanticChangeKind {
     Added,
     /// An entity was removed.
     Removed,
+    /// An entity moved to a different source file.
+    Moved,
+    /// An entity was renamed without preserving its current identity.
+    Renamed,
     /// An entity body or location was modified without a kind change.
     Modified,
     /// An entity kind or signature span was modified.
@@ -1773,6 +1777,8 @@ impl HistorySemanticChangeKind {
         match self {
             Self::Added => "added",
             Self::Removed => "removed",
+            Self::Moved => "moved",
+            Self::Renamed => "renamed",
             Self::Modified => "modified",
             Self::SignatureModified => "signature_modified",
             Self::RelationChanged => "relation_changed",
@@ -1785,6 +1791,8 @@ impl HistorySemanticChangeKind {
         match value {
             "added" => Some(Self::Added),
             "removed" => Some(Self::Removed),
+            "moved" => Some(Self::Moved),
+            "renamed" => Some(Self::Renamed),
             "modified" => Some(Self::Modified),
             "signature_modified" => Some(Self::SignatureModified),
             "relation_changed" => Some(Self::RelationChanged),
@@ -2994,7 +3002,7 @@ mod tests {
         ExecutionCompleteness, ExecutionCompletenessState, HARD_MAX_QUERY_DURATION,
         HARD_MAX_QUERY_EDGES, HARD_MAX_QUERY_JSON_BYTES, HARD_MAX_QUERY_MEMORY_BYTES,
         HARD_MAX_QUERY_RESULTS, HARD_MAX_QUERY_ROWS, HARD_MAX_QUERY_SOURCE_BYTES,
-        HARD_MAX_QUERY_TOKENS, QueryBudget, QueryError, QueryResource,
+        HARD_MAX_QUERY_TOKENS, HistorySemanticChangeKind, QueryBudget, QueryError, QueryResource,
     };
 
     const RESOURCES: [QueryResource; 10] = [
@@ -3064,6 +3072,25 @@ mod tests {
             serde_json::to_string(&QueryResource::Paths).expect("paths serializes"),
             "\"paths\""
         );
+    }
+
+    #[test]
+    fn history_semantic_change_labels_round_trip() {
+        for kind in [
+            HistorySemanticChangeKind::Added,
+            HistorySemanticChangeKind::Removed,
+            HistorySemanticChangeKind::Moved,
+            HistorySemanticChangeKind::Renamed,
+            HistorySemanticChangeKind::Modified,
+            HistorySemanticChangeKind::SignatureModified,
+            HistorySemanticChangeKind::RelationChanged,
+        ] {
+            assert_eq!(
+                HistorySemanticChangeKind::from_label(kind.as_str()),
+                Some(kind)
+            );
+        }
+        assert_eq!(HistorySemanticChangeKind::from_label("unknown"), None);
     }
 
     #[test]

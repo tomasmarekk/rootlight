@@ -375,6 +375,12 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
                 && cancellation.follow_up_parent_generation_absent,
         },
     )?;
+    let lineage = exercise_incremental_lineage(
+        &mut mcp,
+        &catalog,
+        &mut transcript,
+        &temporary.path().join("lineage-repository"),
+    )?;
 
     let state_bytes_before_restart = directory_bytes(paths.state_dir())?;
     let primary_mcp_stderr = mcp.shutdown()?;
@@ -547,6 +553,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         v2_index.status_evidence.clone(),
         rebuilt_index.status_evidence.clone(),
     ];
+    operation_statuses.extend(lineage.statuses);
     operation_statuses.extend(catalog_statuses);
     let peak_rss_bytes = operation_statuses
         .iter()
@@ -641,6 +648,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         catalog: catalog_evidence,
         tool_matrix,
         architecture_communities,
+        lineage: lineage.evidence,
         process_safety: ProcessSafetyEvidence {
             live_daemon_port_verified_for_all_sessions: true,
             cancellation_fixture_profile: "generated-cancellation-only-rust-v1",
@@ -3769,6 +3777,368 @@ fn modify_fixture_to_v2(repository_root: &Path) -> Result<(), VerticalError> {
     })
 }
 
+fn exercise_incremental_lineage(
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+    repository_root: &Path,
+) -> Result<LineageExercise, VerticalError> {
+    prepare_lineage_repository(repository_root)?;
+    let base = index_repository_deep(
+        "lineage-base",
+        process,
+        catalog,
+        transcript,
+        repository_root,
+    )?;
+    let base_stable = locate_lineage_symbols(
+        "lineage-base-stable",
+        process,
+        catalog,
+        transcript,
+        &base,
+        "stable_anchor",
+        1,
+    )?;
+    let base_renamed = locate_lineage_symbols(
+        "lineage-base-rename",
+        process,
+        catalog,
+        transcript,
+        &base,
+        "before_name",
+        1,
+    )?;
+    let base_moved = locate_lineage_symbols(
+        "lineage-base-move",
+        process,
+        catalog,
+        transcript,
+        &base,
+        "moved_lineage",
+        1,
+    )?;
+    let base_collisions = locate_lineage_symbols(
+        "lineage-base-collision",
+        process,
+        catalog,
+        transcript,
+        &base,
+        "collision_marker",
+        2,
+    )?;
+
+    modify_lineage_repository(repository_root)?;
+    let head = index_repository_deep(
+        "lineage-head",
+        process,
+        catalog,
+        transcript,
+        repository_root,
+    )?;
+    if base.repository != head.repository
+        || head.parent_generation.as_deref() != Some(base.generation.as_str())
+    {
+        return Err(VerticalError::Invariant(
+            "lineage fixture did not publish an incremental child generation",
+        ));
+    }
+    let head_stable = locate_lineage_symbols(
+        "lineage-head-stable",
+        process,
+        catalog,
+        transcript,
+        &head,
+        "stable_anchor",
+        1,
+    )?;
+    let head_renamed = locate_lineage_symbols(
+        "lineage-head-rename",
+        process,
+        catalog,
+        transcript,
+        &head,
+        "after__name",
+        1,
+    )?;
+    let head_moved = locate_lineage_symbols(
+        "lineage-head-move",
+        process,
+        catalog,
+        transcript,
+        &head,
+        "moved_lineage",
+        1,
+    )?;
+    let head_collisions = locate_lineage_symbols(
+        "lineage-head-collision",
+        process,
+        catalog,
+        transcript,
+        &head,
+        "collision_marker",
+        1,
+    )?;
+
+    let stable_base = &base_stable[0];
+    let stable_head = &head_stable[0];
+    let renamed_base = &base_renamed[0];
+    let renamed_head = &head_renamed[0];
+    let moved_base = &base_moved[0];
+    let moved_head = &head_moved[0];
+    if stable_base != stable_head
+        || renamed_base == renamed_head
+        || moved_base == moved_head
+        || base_collisions.contains(&head_collisions[0])
+    {
+        return Err(VerticalError::Invariant(
+            "lineage fixture identities did not exercise stable, rename, move, and collision cases",
+        ));
+    }
+
+    let comparison = call_tool(
+        "lineage.history-compare",
+        process,
+        catalog,
+        transcript,
+        "history.compare",
+        json!({
+            "repository": {"repository_id": base.repository},
+            "base": base.generation,
+            "head": head.generation,
+            "max_results": 100,
+            "profile": "compact"
+        }),
+    )?;
+    require_tool_success(&comparison, "history.compare")?;
+    require_trust_labels(&comparison.structured)?;
+    assert_control_value_omits_sentinels(&comparison.structured)?;
+    assert_read_correlation(&comparison.structured, &head.repository, &head.generation)?;
+    if comparison.structured["data"]["matched_states"]["base_generation"] != base.generation
+        || comparison.structured["data"]["matched_states"]["head_generation"] != head.generation
+    {
+        return Err(VerticalError::Invariant(
+            "history.compare did not preserve the requested lineage generations",
+        ));
+    }
+    let changes =
+        comparison.structured["data"]["changes"]
+            .as_array()
+            .ok_or(VerticalError::Invariant(
+                "history.compare changes were not an array",
+            ))?;
+    let matches =
+        comparison.structured["data"]["lineage"]
+            .as_array()
+            .ok_or(VerticalError::Invariant(
+                "history.compare lineage was not an array",
+            ))?;
+
+    require_history_change(changes, "renamed", renamed_head)?;
+    require_history_change(changes, "moved", moved_head)?;
+    require_history_lineage(matches, stable_base, stable_head, false)?;
+    require_history_lineage(matches, renamed_base, renamed_head, true)?;
+    require_history_lineage(matches, moved_base, moved_head, false)?;
+    for symbol in &base_collisions {
+        require_history_change(changes, "removed", symbol)?;
+    }
+    require_history_change(changes, "added", &head_collisions[0])?;
+    let collision_symbols: BTreeSet<&str> = base_collisions
+        .iter()
+        .chain(head_collisions.iter())
+        .map(String::as_str)
+        .collect();
+    if matches.iter().any(|lineage| {
+        lineage["base_symbol_id"]
+            .as_str()
+            .is_some_and(|symbol| collision_symbols.contains(symbol))
+            || lineage["head_symbol_id"]
+                .as_str()
+                .is_some_and(|symbol| collision_symbols.contains(symbol))
+    }) {
+        return Err(VerticalError::Invariant(
+            "ambiguous lineage collision was silently collapsed",
+        ));
+    }
+
+    Ok(LineageExercise {
+        evidence: LineageEvidence {
+            scenario: "installed_incremental_history_compare",
+            repository_id: base.repository,
+            base_generation_id: base.generation,
+            head_generation_id: head.generation,
+            unchanged_symbol_id: stable_base.clone(),
+            renamed_base_symbol_id: renamed_base.clone(),
+            renamed_head_symbol_id: renamed_head.clone(),
+            moved_base_symbol_id: moved_base.clone(),
+            moved_head_symbol_id: moved_head.clone(),
+            ambiguous_base_symbols: base_collisions.len(),
+            ambiguous_head_symbols: head_collisions.len(),
+            ambiguous_lineage_matches: 0,
+        },
+        statuses: vec![base.status_evidence, head.status_evidence],
+    })
+}
+
+fn locate_lineage_symbols(
+    label: &str,
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+    index: &IndexReceipt,
+    query: &str,
+    expected: usize,
+) -> Result<Vec<String>, VerticalError> {
+    let locate = call_tool(
+        label,
+        process,
+        catalog,
+        transcript,
+        "code.locate",
+        json!({
+            "repository": {"repository_id": index.repository},
+            "generation": index.generation,
+            "query": query,
+            "search_modes": ["exact"],
+            "max_results": 10,
+            "response_profile": "compact"
+        }),
+    )?;
+    require_tool_success(&locate, "code.locate")?;
+    require_trust_labels(&locate.structured)?;
+    assert_control_value_omits_sentinels(&locate.structured)?;
+    assert_read_correlation(&locate.structured, &index.repository, &index.generation)?;
+    assert_complete_tier_b_rust_coverage(&locate.structured)?;
+    let matches =
+        locate.structured["data"]["matches"]
+            .as_array()
+            .ok_or(VerticalError::Invariant(
+                "lineage code.locate matches were not an array",
+            ))?;
+    if matches.len() != expected || matches.iter().any(|entry| entry["display_name"] != query) {
+        return Err(VerticalError::Invariant(
+            "lineage code.locate did not return the expected exact declarations",
+        ));
+    }
+    matches
+        .iter()
+        .map(|entry| required_string(&entry["symbol_id"], "lineage symbol ID"))
+        .collect()
+}
+
+fn require_history_change(
+    changes: &[Value],
+    kind: &str,
+    symbol: &str,
+) -> Result<(), VerticalError> {
+    if changes
+        .iter()
+        .any(|change| change["kind"] == kind && change["symbol_id"] == symbol)
+    {
+        Ok(())
+    } else {
+        Err(VerticalError::Invariant(
+            "history.compare omitted an expected semantic change",
+        ))
+    }
+}
+
+fn require_history_lineage(
+    matches: &[Value],
+    base_symbol: &str,
+    head_symbol: &str,
+    is_rename: bool,
+) -> Result<(), VerticalError> {
+    if matches.iter().any(|lineage| {
+        lineage["base_symbol_id"] == base_symbol
+            && lineage["head_symbol_id"] == head_symbol
+            && lineage["is_rename"] == is_rename
+    }) {
+        Ok(())
+    } else {
+        Err(VerticalError::Invariant(
+            "history.compare omitted an expected resolvable lineage alias",
+        ))
+    }
+}
+
+fn prepare_lineage_repository(repository_root: &Path) -> Result<(), VerticalError> {
+    let source_root = repository_root.join("src");
+    fs::create_dir_all(&source_root).map_err(|source| VerticalError::Io {
+        action: "create lineage fixture source directory",
+        source,
+    })?;
+    write_lineage_file(
+        &repository_root.join("Cargo.toml"),
+        b"[package]\nname = \"rootlight-lineage-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        "write lineage fixture manifest",
+    )?;
+    write_lineage_file(
+        &source_root.join("lib.rs"),
+        b"pub mod rename;\npub mod move_old;\npub mod collision_a;\npub mod collision_b;\n\npub fn stable_anchor() -> usize { 1 }\n",
+        "write lineage fixture library",
+    )?;
+    write_lineage_file(
+        &source_root.join("rename.rs"),
+        b"pub fn before_name() -> usize { 2 }\n",
+        "write lineage rename source",
+    )?;
+    write_lineage_file(
+        &source_root.join("move_old.rs"),
+        b"pub fn moved_lineage() -> usize { 3 }\n",
+        "write lineage move source",
+    )?;
+    for name in ["collision_a.rs", "collision_b.rs"] {
+        write_lineage_file(
+            &source_root.join(name),
+            b"pub fn collision_marker() -> usize { 4 }\n",
+            "write lineage collision source",
+        )?;
+    }
+    Ok(())
+}
+
+fn modify_lineage_repository(repository_root: &Path) -> Result<(), VerticalError> {
+    let source_root = repository_root.join("src");
+    write_lineage_file(
+        &source_root.join("lib.rs"),
+        b"pub mod rename;\npub mod move_new;\npub mod collision_c;\n\npub fn stable_anchor() -> usize { 1 }\n",
+        "write modified lineage fixture library",
+    )?;
+    write_lineage_file(
+        &source_root.join("rename.rs"),
+        b"pub fn after__name() -> usize { 2 }\n",
+        "write renamed lineage source",
+    )?;
+    fs::rename(
+        source_root.join("move_old.rs"),
+        source_root.join("move_new.rs"),
+    )
+    .map_err(|source| VerticalError::Io {
+        action: "move lineage fixture source",
+        source,
+    })?;
+    for name in ["collision_a.rs", "collision_b.rs"] {
+        fs::remove_file(source_root.join(name)).map_err(|source| VerticalError::Io {
+            action: "remove ambiguous lineage source",
+            source,
+        })?;
+    }
+    write_lineage_file(
+        &source_root.join("collision_c.rs"),
+        b"pub fn collision_marker() -> usize { 4 }\n",
+        "write ambiguous lineage replacement",
+    )
+}
+
+fn write_lineage_file(
+    path: &Path,
+    content: &[u8],
+    action: &'static str,
+) -> Result<(), VerticalError> {
+    fs::write(path, content).map_err(|source| VerticalError::Io { action, source })
+}
+
 fn restore_fixture_v1(
     fixture: &FrozenFixture,
     repository_root: &Path,
@@ -5275,6 +5645,7 @@ struct Summary {
     catalog: CatalogEvidence,
     tool_matrix: ToolMatrixEvidence,
     architecture_communities: ArchitectureCommunityEvidence,
+    lineage: LineageEvidence,
     process_safety: ProcessSafetyEvidence,
     generations: GenerationEvidence,
     measurements: MeasurementEvidence,
@@ -5296,6 +5667,27 @@ struct ArchitectureCommunityEvidence {
     seed: &'static str,
     max_iterations: usize,
     canonical_data_blake3: String,
+}
+
+struct LineageExercise {
+    evidence: LineageEvidence,
+    statuses: Vec<OperationStatusEvidence>,
+}
+
+#[derive(Serialize)]
+struct LineageEvidence {
+    scenario: &'static str,
+    repository_id: String,
+    base_generation_id: String,
+    head_generation_id: String,
+    unchanged_symbol_id: String,
+    renamed_base_symbol_id: String,
+    renamed_head_symbol_id: String,
+    moved_base_symbol_id: String,
+    moved_head_symbol_id: String,
+    ambiguous_base_symbols: usize,
+    ambiguous_head_symbols: usize,
+    ambiguous_lineage_matches: usize,
 }
 
 #[derive(Serialize)]
