@@ -11,7 +11,12 @@ publish = false
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows.workspace = true
+windows = { workspace = true, features = [
+  "Win32_Security_Cryptography",
+  "Win32_Security_Isolation",
+  "Win32_System_LibraryLoader",
+  "Win32_System_SystemServices",
+] }
 
 [lints.rust]
 missing_docs = "warn"

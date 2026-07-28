@@ -6,10 +6,17 @@
 
 #![deny(unsafe_code)]
 
+mod adapter;
 mod error;
 mod platform;
 mod process;
 
+pub use adapter::{
+    AdapterControl, AdapterControlEvidence, AdapterIsolationMechanism, AdapterIsolationReport,
+    AdapterMechanismEvidence, AdapterProcessCommand, AdapterSandboxLimits, AdapterStderr,
+    AdapterStdin, AdapterStdout, IsolatedAdapterProcess, probe_windows_adapter_isolation,
+    spawn_windows_isolated_adapter,
+};
 pub use error::ProcessError;
 pub use process::{
     ChildProcess, ChildStderr, ChildStdin, ChildStdout, KillOnCloseJob, ProcessCommand, StdioMode,

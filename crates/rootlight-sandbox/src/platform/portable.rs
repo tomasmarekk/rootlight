@@ -6,7 +6,10 @@ use std::{
     time::Instant,
 };
 
-use crate::{ProcessCommand, ProcessError, StdioMode};
+use crate::{
+    AdapterIsolationReport, AdapterProcessCommand, AdapterSandboxLimits, ProcessCommand,
+    ProcessError, StdioMode,
+};
 
 #[derive(Debug)]
 pub(crate) struct ChildProcess {
@@ -49,6 +52,8 @@ impl ChildProcess {
 
 #[derive(Debug)]
 pub(crate) struct KillOnCloseJob;
+#[derive(Debug)]
+pub(crate) struct IsolatedAdapterProcess;
 
 impl KillOnCloseJob {
     pub(crate) fn new() -> Result<Self, ProcessError> {
@@ -94,6 +99,73 @@ pub(crate) fn spawn_in_job(
     _job: &KillOnCloseJob,
 ) -> Result<ChildProcess, ProcessError> {
     Err(ProcessError::UnsupportedPlatform)
+}
+
+pub(crate) fn probe_windows_adapter_isolation(
+    _command: ProcessCommand,
+    _limits: AdapterSandboxLimits,
+) -> Result<AdapterIsolationReport, ProcessError> {
+    Err(ProcessError::UnsupportedPlatform)
+}
+
+pub(crate) fn spawn_windows_isolated_adapter(
+    command: AdapterProcessCommand,
+    _limits: AdapterSandboxLimits,
+) -> Result<(IsolatedAdapterProcess, AdapterIsolationReport), ProcessError> {
+    let _ = (
+        command.program,
+        command.arguments,
+        command.input_limit,
+        command.output_limit,
+        command.diagnostic_limit,
+    );
+    Err(ProcessError::UnsupportedPlatform)
+}
+
+impl IsolatedAdapterProcess {
+    pub(crate) fn id(&self) -> u32 {
+        0
+    }
+
+    pub(crate) fn input_limit(&self) -> usize {
+        0
+    }
+
+    pub(crate) fn output_limit(&self) -> usize {
+        0
+    }
+
+    pub(crate) fn diagnostic_limit(&self) -> usize {
+        0
+    }
+
+    pub(crate) fn take_stdin(&mut self) -> Option<ChildStdin> {
+        None
+    }
+
+    pub(crate) fn take_stdout(&mut self) -> Option<ChildStdout> {
+        None
+    }
+
+    pub(crate) fn take_stderr(&mut self) -> Option<ChildStderr> {
+        None
+    }
+
+    pub(crate) fn try_wait(&mut self) -> Result<Option<ExitStatus>, ProcessError> {
+        Err(ProcessError::UnsupportedPlatform)
+    }
+
+    pub(crate) fn terminate(&self) -> Result<(), ProcessError> {
+        Err(ProcessError::UnsupportedPlatform)
+    }
+
+    pub(crate) fn wait_empty(&self, _deadline: Instant) -> Result<(), ProcessError> {
+        Err(ProcessError::UnsupportedPlatform)
+    }
+
+    pub(crate) fn fail_closed_cleanup(self) -> Result<(), ProcessError> {
+        Err(ProcessError::UnsupportedPlatform)
+    }
 }
 
 fn validate_command(command: &ProcessCommand) -> Result<(), ProcessError> {

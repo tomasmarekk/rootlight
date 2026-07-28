@@ -9,7 +9,7 @@ use std::{
     cmp::Ordering,
     env,
     ffi::{OsStr, c_void},
-    fs::File,
+    fs::{self, File},
     io::{Read, Write},
     mem::{size_of, size_of_val},
     os::windows::{
@@ -17,9 +17,13 @@ use std::{
         io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle, RawHandle},
         process::ExitStatusExt as _,
     },
+    path::{Path, PathBuf},
     process::ExitStatus,
     ptr,
-    sync::{Mutex, OnceLock},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -32,23 +36,40 @@ use windows::{
             WAIT_TIMEOUT,
         },
         Globalization::{CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal},
-        Security::SECURITY_ATTRIBUTES,
+        Security::{
+            ACL, ACL_REVISION, AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE,
+            Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom},
+            FreeSid, GetLengthSid, GetTokenInformation, InitializeAcl,
+            InitializeSecurityDescriptor,
+            Isolation::{CreateAppContainerProfile, DeleteAppContainerProfile},
+            OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
+            SECURITY_CAPABILITIES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
+            SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenIsAppContainer, TokenUser,
+        },
         Storage::FileSystem::{
-            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+            CreateDirectoryW, CreateFileW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_READONLY, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING, SetFileAttributesW,
         },
         System::{
             JobObjects::{
-                AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+                AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+                JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_JOB_TIME,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_TERMINATE_AT_END_OF_JOB,
+                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_END_OF_JOB_TIME_INFORMATION,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
+                JobObjectEndOfJobTimeInformation, JobObjectExtendedLimitInformation,
                 QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
             },
             Pipes::CreatePipe,
+            SystemServices::SECURITY_DESCRIPTOR_REVISION,
             Threading::{
                 CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
-                DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
-                InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-                PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, ResumeThread,
+                DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
+                GetExitCodeProcess, InitializeProcThreadAttributeList,
+                LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
                 STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
                 WaitForSingleObject,
             },
@@ -57,13 +78,25 @@ use windows::{
     core::{PCWSTR, PWSTR},
 };
 
-use crate::{ProcessCommand, ProcessError, StdioMode};
+use crate::{
+    AdapterIsolationReport, AdapterProcessCommand, AdapterSandboxLimits, ProcessCommand,
+    ProcessError, StdioMode,
+};
 
 const PROCESS_TERMINATION_EXIT_CODE: u32 = 1;
 const FAILED_THREAD_RESUME: u32 = u32::MAX;
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+// These values are defined by the Windows SDK as one-bit policy selections
+// shifted into the image-load mitigation fields.
+const IMAGE_LOAD_NO_REMOTE_ALWAYS_ON: u64 = 1_u64 << 52;
+const IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON: u64 = 1_u64 << 56;
+const IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON: u64 = 1_u64 << 60;
+const ADAPTER_IMAGE_LOAD_POLICY: u64 = IMAGE_LOAD_NO_REMOTE_ALWAYS_ON
+    | IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON
+    | IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON;
 
 static SPAWN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static APPCONTAINER_PROFILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub(crate) struct ChildProcess {
@@ -82,6 +115,29 @@ pub(crate) struct ChildStdout(File);
 
 #[derive(Debug)]
 pub(crate) struct ChildStderr(File);
+
+pub(crate) struct IsolatedAdapterProcess {
+    job: KillOnCloseJob,
+    child: ChildProcess,
+    workspace: Option<PrivateAdapterWorkspace>,
+    input_limit: usize,
+    output_limit: usize,
+    diagnostic_limit: usize,
+    cleaned: bool,
+}
+
+impl std::fmt::Debug for IsolatedAdapterProcess {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IsolatedAdapterProcess")
+            .field("process_id", &self.child.process_id)
+            .field("input_limit", &self.input_limit)
+            .field("output_limit", &self.output_limit)
+            .field("diagnostic_limit", &self.diagnostic_limit)
+            .field("cleaned", &self.cleaned)
+            .finish_non_exhaustive()
+    }
+}
 
 impl Write for ChildStdin {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
@@ -140,6 +196,89 @@ impl ChildProcess {
     }
 }
 
+impl IsolatedAdapterProcess {
+    pub(crate) fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub(crate) fn input_limit(&self) -> usize {
+        self.input_limit
+    }
+
+    pub(crate) fn output_limit(&self) -> usize {
+        self.output_limit
+    }
+
+    pub(crate) fn diagnostic_limit(&self) -> usize {
+        self.diagnostic_limit
+    }
+
+    pub(crate) fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.child.take_stdin()
+    }
+
+    pub(crate) fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.take_stdout()
+    }
+
+    pub(crate) fn take_stderr(&mut self) -> Option<ChildStderr> {
+        self.child.take_stderr()
+    }
+
+    pub(crate) fn try_wait(&mut self) -> Result<Option<ExitStatus>, ProcessError> {
+        self.child.try_wait()
+    }
+
+    pub(crate) fn terminate(&self) -> Result<(), ProcessError> {
+        self.job.terminate(PROCESS_TERMINATION_EXIT_CODE)
+    }
+
+    pub(crate) fn wait_empty(&self, deadline: Instant) -> Result<(), ProcessError> {
+        self.job.wait_empty(deadline)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_root(&self) -> &Path {
+        &self
+            .workspace
+            .as_ref()
+            .expect("live adapter retains its workspace")
+            .root
+    }
+
+    pub(crate) fn fail_closed_cleanup(mut self) -> Result<(), ProcessError> {
+        self.cleanup()
+    }
+
+    fn cleanup(&mut self) -> Result<(), ProcessError> {
+        if self.cleaned {
+            return Ok(());
+        }
+        let child_exited = matches!(wait_result(&self.child.process, 0), Ok(WaitResult::Exited));
+        if !child_exited {
+            self.job.terminate(PROCESS_TERMINATION_EXIT_CODE)?;
+        }
+        self.job
+            .wait_empty(Instant::now() + Duration::from_secs(5))?;
+        if !matches!(wait_result(&self.child.process, 5_000)?, WaitResult::Exited) {
+            return Err(ProcessError::Deadline {
+                operation: "reap isolated adapter before workspace cleanup",
+            });
+        }
+        if let Some(workspace) = self.workspace.take() {
+            workspace.remove()?;
+        }
+        self.cleaned = true;
+        Ok(())
+    }
+}
+
+impl Drop for IsolatedAdapterProcess {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct KillOnCloseJob {
     job: OwnedHandle,
@@ -190,6 +329,24 @@ impl KillOnCloseJob {
         Ok(accounting)
     }
 
+    #[cfg(test)]
+    fn extended_limits(&self) -> Result<JOBOBJECT_EXTENDED_LIMIT_INFORMATION, ProcessError> {
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        // SAFETY: the information class matches the writable limits structure
+        // and the kernel writes at most the declared byte length.
+        unsafe {
+            QueryInformationJobObject(
+                Some(as_handle(&self.job)),
+                JobObjectExtendedLimitInformation,
+                ptr::from_mut(&mut limits).cast(),
+                structure_size::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()?,
+                None,
+            )
+        }
+        .map_err(|source| ProcessError::windows("query adapter Job Object limits", source))?;
+        Ok(limits)
+    }
+
     pub(crate) fn terminate(&self, exit_code: u32) -> Result<(), ProcessError> {
         // SAFETY: the retained handle names this Job Object and the exit code
         // is copied by value.
@@ -210,6 +367,48 @@ impl KillOnCloseJob {
             thread::sleep(WAIT_POLL_INTERVAL);
         }
     }
+
+    fn with_adapter_limits(limits: AdapterSandboxLimits) -> Result<Self, ProcessError> {
+        // SAFETY: no security descriptor or shared name is supplied; the
+        // returned handle is immediately adopted by one OwnedHandle.
+        let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
+            .map_err(|source| ProcessError::windows("create adapter Job Object", source))?;
+        let job = owned_handle(job);
+        let mut native_limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        native_limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+            | JOB_OBJECT_LIMIT_JOB_MEMORY
+            | JOB_OBJECT_LIMIT_JOB_TIME;
+        native_limits.BasicLimitInformation.ActiveProcessLimit = 1;
+        native_limits.BasicLimitInformation.PerJobUserTimeLimit = limits.cpu_ticks();
+        native_limits.JobMemoryLimit = limits.memory_bytes();
+        // SAFETY: the information class matches the initialized structure and
+        // its storage remains valid for the complete synchronous call.
+        unsafe {
+            SetInformationJobObject(
+                as_handle(&job),
+                JobObjectExtendedLimitInformation,
+                ptr::from_ref(&native_limits).cast(),
+                structure_size::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()?,
+            )
+        }
+        .map_err(|source| ProcessError::windows("configure adapter Job Object", source))?;
+        let end_action = JOBOBJECT_END_OF_JOB_TIME_INFORMATION {
+            EndOfJobTimeAction: JOB_OBJECT_TERMINATE_AT_END_OF_JOB,
+        };
+        // SAFETY: the information class matches the initialized end-action
+        // structure and its storage remains valid for the synchronous call.
+        unsafe {
+            SetInformationJobObject(
+                as_handle(&job),
+                JobObjectEndOfJobTimeInformation,
+                ptr::from_ref(&end_action).cast(),
+                structure_size::<JOBOBJECT_END_OF_JOB_TIME_INFORMATION>()?,
+            )
+        }
+        .map_err(|source| ProcessError::windows("configure adapter CPU end action", source))?;
+        Ok(Self { job })
+    }
 }
 
 pub(crate) fn spawn(command: ProcessCommand) -> Result<ChildProcess, ProcessError> {
@@ -221,6 +420,323 @@ pub(crate) fn spawn_in_job(
     job: &KillOnCloseJob,
 ) -> Result<ChildProcess, ProcessError> {
     spawn_inner(command, Some(job))
+}
+
+pub(crate) fn probe_windows_adapter_isolation(
+    command: ProcessCommand,
+    limits: AdapterSandboxLimits,
+) -> Result<AdapterIsolationReport, ProcessError> {
+    validate_command(&command)?;
+    let application = nul_terminated(command.program.as_os_str(), "executable path")?;
+    let mut command_line = command_line(&command)?;
+    let environment = environment_block(&command)?;
+    let current_directory = command
+        .current_directory
+        .as_deref()
+        .map(|path| nul_terminated(path.as_os_str(), "working directory"))
+        .transpose()?;
+
+    let lock = SPAWN_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let streams = PreparedStreams::new(command.stdin, command.stdout, command.stderr)?;
+    let handles = streams.child_handles();
+    verify_inheritable_handles(&handles)?;
+    let mut app_container = AppContainerSid::create_ephemeral()?;
+    let security_capabilities = SECURITY_CAPABILITIES {
+        AppContainerSid: app_container.sid,
+        Capabilities: ptr::null_mut(),
+        CapabilityCount: 0,
+        Reserved: 0,
+    };
+    let attributes = AttributeList::with_adapter_profile(
+        &handles,
+        &security_capabilities,
+        &ADAPTER_IMAGE_LOAD_POLICY,
+    )?;
+    let mut startup = STARTUPINFOEXW::default();
+    startup.StartupInfo.cb = structure_size::<STARTUPINFOEXW>()?;
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = handles[0];
+    startup.StartupInfo.hStdOutput = handles[1];
+    startup.StartupInfo.hStdError = handles[2];
+    startup.lpAttributeList = attributes.list;
+
+    let job = KillOnCloseJob::with_adapter_limits(limits)?;
+    let flags = CREATE_UNICODE_ENVIRONMENT
+        | EXTENDED_STARTUPINFO_PRESENT
+        | CREATE_NO_WINDOW
+        | CREATE_SUSPENDED;
+    let mut information = PROCESS_INFORMATION::default();
+    // SAFETY: every pointer references initialized storage that remains alive
+    // through the synchronous call. The attribute list contains the exact
+    // standard handles, zero-capability AppContainer identity, and immutable
+    // image-load policy.
+    let creation = unsafe {
+        CreateProcessW(
+            PCWSTR(application.as_ptr()),
+            Some(PWSTR(command_line.as_mut_ptr())),
+            None,
+            None,
+            true,
+            flags,
+            Some(environment.as_ptr().cast::<c_void>()),
+            current_directory
+                .as_ref()
+                .map_or(PCWSTR::null(), |directory| PCWSTR(directory.as_ptr())),
+            ptr::from_ref(&startup.StartupInfo),
+            ptr::from_mut(&mut information),
+        )
+    };
+    if let Err(source) = creation {
+        app_container.delete()?;
+        return Err(ProcessError::windows(
+            "create suspended adapter probe",
+            source,
+        ));
+    }
+
+    let process = owned_handle(information.hProcess);
+    let thread_handle = owned_handle(information.hThread);
+    // SAFETY: both retained handles are live kernel objects. The primary
+    // thread remains suspended, so no adapter instruction can run.
+    let assignment = unsafe { AssignProcessToJobObject(as_handle(&job.job), as_handle(&process)) };
+    if let Err(source) = assignment {
+        if let Err(cleanup) = terminate_suspended(&process) {
+            std::mem::forget(process);
+            std::mem::forget(thread_handle);
+            return Err(cleanup);
+        }
+        return Err(ProcessError::windows(
+            "assign suspended adapter probe to Job Object",
+            source,
+        ));
+    }
+    verify_appcontainer_token(&process)?;
+    job.terminate(PROCESS_TERMINATION_EXIT_CODE)?;
+    job.wait_empty(Instant::now() + Duration::from_secs(5))?;
+    if !matches!(wait_result(&process, 5_000)?, WaitResult::Exited) {
+        return Err(ProcessError::Deadline {
+            operation: "reap suspended adapter probe",
+        });
+    }
+    drop(thread_handle);
+    drop(process);
+    drop(attributes);
+    app_container.delete()?;
+    Ok(AdapterIsolationReport::windows_suspended_probe())
+}
+
+pub(crate) fn spawn_windows_isolated_adapter(
+    command: AdapterProcessCommand,
+    limits: AdapterSandboxLimits,
+) -> Result<(IsolatedAdapterProcess, AdapterIsolationReport), ProcessError> {
+    if !command.program.is_absolute() {
+        return Err(ProcessError::InvalidInput(
+            "the adapter executable path must be absolute".to_owned(),
+        ));
+    }
+    if !fs::metadata(&command.program)
+        .map_err(|source| ProcessError::io("inspect adapter executable", source))?
+        .is_file()
+    {
+        return Err(ProcessError::InvalidInput(
+            "the adapter executable must be a regular file".to_owned(),
+        ));
+    }
+
+    let lock = SPAWN_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app_container = AppContainerSid::create_ephemeral()?;
+    let current_user = CurrentUserSid::load()?;
+    let workspace =
+        PrivateAdapterWorkspace::create(&command.program, &current_user, app_container.sid)?;
+    let mut process_command = ProcessCommand::new(&workspace.executable)
+        .env_clear()
+        .current_dir(&workspace.current_directory)
+        .stdin(StdioMode::Piped)
+        .stdout(StdioMode::Piped)
+        .stderr(StdioMode::Piped);
+    for argument in command.arguments {
+        process_command = process_command.arg(argument);
+    }
+    for key in ["SystemDrive", "SystemRoot", "WINDIR"] {
+        if let Some(value) = env::var_os(key) {
+            process_command = process_command.env(key, value);
+        }
+    }
+    for key in ["APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "USERPROFILE"] {
+        process_command = process_command.env(key, &workspace.current_directory);
+    }
+    process_command = process_command.env("ROOTLIGHT_ADAPTER_ISOLATED", "1");
+    validate_command(&process_command)?;
+    let application = nul_terminated(process_command.program.as_os_str(), "adapter executable")?;
+    let mut command_line = command_line(&process_command)?;
+    let environment = environment_block(&process_command)?;
+    let current_directory = nul_terminated(
+        workspace.current_directory.as_os_str(),
+        "adapter current directory",
+    )?;
+    let mut streams = PreparedStreams::new(
+        process_command.stdin,
+        process_command.stdout,
+        process_command.stderr,
+    )?;
+    let handles = streams.child_handles();
+    verify_inheritable_handles(&handles)?;
+    let security_capabilities = SECURITY_CAPABILITIES {
+        AppContainerSid: app_container.sid,
+        Capabilities: ptr::null_mut(),
+        CapabilityCount: 0,
+        Reserved: 0,
+    };
+    let attributes = AttributeList::with_adapter_profile(
+        &handles,
+        &security_capabilities,
+        &ADAPTER_IMAGE_LOAD_POLICY,
+    )?;
+    let mut startup = STARTUPINFOEXW::default();
+    startup.StartupInfo.cb = structure_size::<STARTUPINFOEXW>()?;
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = handles[0];
+    startup.StartupInfo.hStdOutput = handles[1];
+    startup.StartupInfo.hStdError = handles[2];
+    startup.lpAttributeList = attributes.list;
+
+    let job = KillOnCloseJob::with_adapter_limits(limits)?;
+    let flags = CREATE_UNICODE_ENVIRONMENT
+        | EXTENDED_STARTUPINFO_PRESENT
+        | CREATE_NO_WINDOW
+        | CREATE_SUSPENDED;
+    let mut information = PROCESS_INFORMATION::default();
+    // SAFETY: every pointer references initialized storage that remains alive
+    // through the synchronous call. The child is suspended and receives only
+    // the exact pipe handles, zero-capability AppContainer identity, and
+    // immutable image-load policy.
+    let creation = unsafe {
+        CreateProcessW(
+            PCWSTR(application.as_ptr()),
+            Some(PWSTR(command_line.as_mut_ptr())),
+            None,
+            None,
+            true,
+            flags,
+            Some(environment.as_ptr().cast::<c_void>()),
+            PCWSTR(current_directory.as_ptr()),
+            ptr::from_ref(&startup.StartupInfo),
+            ptr::from_mut(&mut information),
+        )
+    };
+    if let Err(source) = creation {
+        app_container.delete()?;
+        workspace.remove()?;
+        return Err(ProcessError::windows(
+            "create suspended isolated adapter",
+            source,
+        ));
+    }
+
+    let process = owned_handle(information.hProcess);
+    let thread_handle = owned_handle(information.hThread);
+    // SAFETY: both retained handles are live kernel objects. The primary
+    // thread remains suspended, so no adapter instruction can run.
+    let assignment = unsafe { AssignProcessToJobObject(as_handle(&job.job), as_handle(&process)) };
+    if let Err(source) = assignment {
+        if let Err(cleanup) = terminate_suspended(&process) {
+            std::mem::forget(process);
+            std::mem::forget(thread_handle);
+            return Err(cleanup);
+        }
+        app_container.delete()?;
+        workspace.remove()?;
+        return Err(ProcessError::windows(
+            "assign isolated adapter to Job Object",
+            source,
+        ));
+    }
+    if let Err(source) = verify_appcontainer_token(&process) {
+        terminate_assigned_suspended(&job, &process)?;
+        app_container.delete()?;
+        workspace.remove()?;
+        return Err(source);
+    }
+    // Removing the profile before resumption denies the AppContainer its
+    // otherwise implicit writable profile storage. The token retains its SID.
+    if let Err(source) = app_container.delete() {
+        terminate_assigned_suspended(&job, &process)?;
+        workspace.remove()?;
+        return Err(source);
+    }
+    if let Err(source) = workspace.clear_current_directory() {
+        terminate_assigned_suspended(&job, &process)?;
+        workspace.remove()?;
+        return Err(source);
+    }
+
+    // SAFETY: this is the exact primary thread returned by CreateProcessW with
+    // CREATE_SUSPENDED after all native controls and profile removal succeeded.
+    if unsafe { ResumeThread(as_handle(&thread_handle)) } == FAILED_THREAD_RESUME {
+        let source = windows::core::Error::from_win32();
+        job.terminate(PROCESS_TERMINATION_EXIT_CODE)?;
+        job.wait_empty(Instant::now() + Duration::from_secs(5))?;
+        workspace.remove()?;
+        return Err(ProcessError::windows("resume isolated adapter", source));
+    }
+    drop(thread_handle);
+    drop(attributes);
+    let (stdin, stdout, stderr) = streams.take_parent_streams();
+    let child = ChildProcess {
+        process,
+        process_id: information.dwProcessId,
+        stdin,
+        stdout,
+        stderr,
+    };
+    let report = AdapterIsolationReport::windows_isolated_process();
+    Ok((
+        IsolatedAdapterProcess {
+            job,
+            child,
+            workspace: Some(workspace),
+            input_limit: command.input_limit,
+            output_limit: command.output_limit,
+            diagnostic_limit: command.diagnostic_limit,
+            cleaned: false,
+        },
+        report,
+    ))
+}
+
+fn verify_appcontainer_token(process: &OwnedHandle) -> Result<(), ProcessError> {
+    let mut token = HANDLE::default();
+    // SAFETY: the retained process handle names the suspended probe. The token
+    // output pointer references writable storage and requests query-only access.
+    unsafe { OpenProcessToken(as_handle(process), TOKEN_QUERY, &mut token) }
+        .map_err(|source| ProcessError::windows("open adapter probe token", source))?;
+    let token = owned_handle(token);
+    let mut is_app_container = 0_u32;
+    let mut returned_bytes = 0_u32;
+    // SAFETY: TokenIsAppContainer returns one u32 into initialized writable
+    // storage, bounded by the exact declared structure length.
+    unsafe {
+        GetTokenInformation(
+            as_handle(&token),
+            TokenIsAppContainer,
+            Some(ptr::from_mut(&mut is_app_container).cast()),
+            structure_size::<u32>()?,
+            ptr::from_mut(&mut returned_bytes),
+        )
+    }
+    .map_err(|source| ProcessError::windows("query adapter AppContainer token", source))?;
+    if returned_bytes != structure_size::<u32>()? || is_app_container == 0 {
+        return Err(ProcessError::InvalidInput(
+            "adapter probe token is not an AppContainer token".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn spawn_inner(
@@ -650,6 +1166,369 @@ fn verify_inheritable_handles(handles: &[HANDLE]) -> Result<(), ProcessError> {
     Ok(())
 }
 
+struct AppContainerSid {
+    sid: PSID,
+    profile_name: Vec<u16>,
+    deleted: bool,
+}
+
+impl AppContainerSid {
+    fn create_ephemeral() -> Result<Self, ProcessError> {
+        let sequence = APPCONTAINER_PROFILE_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed);
+        let mut profile_name =
+            format!("rootlight.deep-adapter.{}.{}", std::process::id(), sequence)
+                .encode_utf16()
+                .collect::<Vec<_>>();
+        profile_name.push(0);
+        let name = PCWSTR(profile_name.as_ptr());
+        // SAFETY: the unique name is NUL-terminated and alive for the complete
+        // call. No capabilities are granted. The returned SID has one owner.
+        let sid =
+            unsafe { CreateAppContainerProfile(name, name, name, None) }.map_err(|source| {
+                ProcessError::windows("create adapter AppContainer profile", source)
+            })?;
+        Ok(Self {
+            sid,
+            profile_name,
+            deleted: false,
+        })
+    }
+
+    fn delete(&mut self) -> Result<(), ProcessError> {
+        if self.deleted {
+            return Ok(());
+        }
+        // SAFETY: the profile name is NUL-terminated and names the profile
+        // created by this object.
+        unsafe { DeleteAppContainerProfile(PCWSTR(self.profile_name.as_ptr())) }.map_err(
+            |source| ProcessError::windows("delete adapter AppContainer profile", source),
+        )?;
+        self.deleted = true;
+        Ok(())
+    }
+}
+
+impl Drop for AppContainerSid {
+    fn drop(&mut self) {
+        if !self.deleted {
+            // SAFETY: the profile name is NUL-terminated and names the profile
+            // created by this object. Drop cannot report best-effort cleanup.
+            let _ = unsafe { DeleteAppContainerProfile(PCWSTR(self.profile_name.as_ptr())) };
+        }
+        // SAFETY: this SID was allocated by
+        // CreateAppContainerProfile and has not been freed.
+        unsafe {
+            FreeSid(self.sid);
+        }
+    }
+}
+
+struct CurrentUserSid {
+    _storage: Vec<usize>,
+    sid: PSID,
+}
+
+impl CurrentUserSid {
+    fn load() -> Result<Self, ProcessError> {
+        let mut token = HANDLE::default();
+        // SAFETY: GetCurrentProcess returns a process pseudo-handle valid for
+        // this call. The output pointer requests a query-only token handle.
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
+            .map_err(|source| ProcessError::windows("open current process token", source))?;
+        let token = owned_handle(token);
+        let mut bytes = 0_u32;
+        // SAFETY: this documented sizing call supplies no output buffer and a
+        // valid writable size pointer.
+        let sizing = unsafe {
+            GetTokenInformation(
+                as_handle(&token),
+                TokenUser,
+                None,
+                0,
+                ptr::from_mut(&mut bytes),
+            )
+        };
+        if bytes == 0 {
+            return sizing
+                .map(|()| unreachable!("token-user sizing returned no size"))
+                .map_err(|source| ProcessError::windows("size current user token", source));
+        }
+        let words = usize::try_from(bytes)
+            .map_err(|_| ProcessError::InvalidInput("token-user size exceeds usize".to_owned()))?
+            .div_ceil(size_of::<usize>());
+        let mut storage = vec![0_usize; words];
+        // SAFETY: storage is pointer-aligned and contains at least the byte
+        // capacity requested by the kernel sizing call.
+        unsafe {
+            GetTokenInformation(
+                as_handle(&token),
+                TokenUser,
+                Some(storage.as_mut_ptr().cast()),
+                bytes,
+                ptr::from_mut(&mut bytes),
+            )
+        }
+        .map_err(|source| ProcessError::windows("read current user token", source))?;
+        // SAFETY: successful TokenUser retrieval initialized a TOKEN_USER at
+        // the aligned start of storage and its SID remains inside that buffer.
+        let sid = unsafe { storage.as_ptr().cast::<TOKEN_USER>().read().User.Sid };
+        // SAFETY: TokenUser guarantees a valid SID pointer for the lifetime of
+        // the returned buffer.
+        if unsafe { GetLengthSid(sid) } == 0 {
+            return Err(ProcessError::InvalidInput(
+                "current user token contains an empty SID".to_owned(),
+            ));
+        }
+        Ok(Self {
+            _storage: storage,
+            sid,
+        })
+    }
+}
+
+struct DirectorySecurity {
+    _acl: Vec<usize>,
+    descriptor: SECURITY_DESCRIPTOR,
+}
+
+impl DirectorySecurity {
+    fn appcontainer_read_only(
+        current_user: PSID,
+        app_container: PSID,
+    ) -> Result<Self, ProcessError> {
+        let current_sid_bytes = sid_length(current_user)?;
+        let app_sid_bytes = sid_length(app_container)?;
+        let required_bytes = size_of::<ACL>()
+            .checked_add(current_sid_bytes)
+            .and_then(|value| value.checked_add(app_sid_bytes))
+            .and_then(|value| value.checked_add(256))
+            .ok_or_else(|| ProcessError::InvalidInput("directory ACL size overflow".to_owned()))?;
+        let words = required_bytes.div_ceil(size_of::<usize>());
+        let mut acl = vec![0_usize; words];
+        let acl_bytes = u32::try_from(acl.len().saturating_mul(size_of::<usize>()))
+            .map_err(|_| ProcessError::InvalidInput("directory ACL exceeds u32".to_owned()))?;
+        let acl_pointer = acl.as_mut_ptr().cast::<ACL>();
+        // SAFETY: acl_pointer references aligned writable storage of exactly
+        // acl_bytes and remains owned by DirectorySecurity.
+        unsafe { InitializeAcl(acl_pointer, acl_bytes, ACL_REVISION) }
+            .map_err(|source| ProcessError::windows("initialize adapter directory ACL", source))?;
+        let inheritance = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+        // SAFETY: both SIDs remain live for this synchronous ACL construction,
+        // and the ACL has capacity for both access entries.
+        unsafe {
+            AddAccessAllowedAceEx(
+                acl_pointer,
+                ACL_REVISION,
+                inheritance,
+                FILE_ALL_ACCESS.0,
+                current_user,
+            )
+        }
+        .map_err(|source| ProcessError::windows("grant owner adapter directory access", source))?;
+        // SAFETY: the AppContainer SID remains live and receives only
+        // read/execute access inherited by child directories and files.
+        unsafe {
+            AddAccessAllowedAceEx(
+                acl_pointer,
+                ACL_REVISION,
+                inheritance,
+                FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE.0,
+                app_container,
+            )
+        }
+        .map_err(|source| {
+            ProcessError::windows("grant AppContainer read-only directory access", source)
+        })?;
+        let mut descriptor = SECURITY_DESCRIPTOR::default();
+        // SAFETY: descriptor is initialized writable storage and uses the
+        // current self-relative descriptor revision.
+        unsafe {
+            InitializeSecurityDescriptor(
+                PSECURITY_DESCRIPTOR(ptr::from_mut(&mut descriptor).cast()),
+                SECURITY_DESCRIPTOR_REVISION,
+            )
+        }
+        .map_err(|source| {
+            ProcessError::windows("initialize adapter directory security descriptor", source)
+        })?;
+        // SAFETY: the initialized ACL remains owned beside the descriptor for
+        // every CreateDirectoryW call using this object.
+        unsafe {
+            SetSecurityDescriptorDacl(
+                PSECURITY_DESCRIPTOR(ptr::from_mut(&mut descriptor).cast()),
+                true,
+                Some(acl_pointer),
+                false,
+            )
+        }
+        .map_err(|source| {
+            ProcessError::windows("set adapter directory security descriptor", source)
+        })?;
+        // SAFETY: the descriptor is initialized and remains writable here.
+        // Protecting its DACL prevents the parent temp directory from adding
+        // inherited principals beyond the two explicit access entries.
+        unsafe {
+            SetSecurityDescriptorControl(
+                PSECURITY_DESCRIPTOR(ptr::from_mut(&mut descriptor).cast()),
+                SE_DACL_PROTECTED,
+                SE_DACL_PROTECTED,
+            )
+        }
+        .map_err(|source| {
+            ProcessError::windows("protect adapter directory security descriptor", source)
+        })?;
+        Ok(Self {
+            _acl: acl,
+            descriptor,
+        })
+    }
+
+    fn attributes(&mut self) -> Result<SECURITY_ATTRIBUTES, ProcessError> {
+        Ok(SECURITY_ATTRIBUTES {
+            nLength: structure_size::<SECURITY_ATTRIBUTES>()?,
+            lpSecurityDescriptor: ptr::from_mut(&mut self.descriptor).cast(),
+            bInheritHandle: false.into(),
+        })
+    }
+}
+
+struct PrivateAdapterWorkspace {
+    root: PathBuf,
+    executable: PathBuf,
+    current_directory: PathBuf,
+    removed: bool,
+}
+
+impl PrivateAdapterWorkspace {
+    fn create(
+        source_executable: &Path,
+        current_user: &CurrentUserSid,
+        app_container: PSID,
+    ) -> Result<Self, ProcessError> {
+        let mut security =
+            DirectorySecurity::appcontainer_read_only(current_user.sid, app_container)?;
+        let attributes = security.attributes()?;
+        let mut random = [0_u8; 16];
+        // SAFETY: the output slice is initialized writable storage and the
+        // system-preferred provider requires no explicit algorithm handle.
+        let random_status =
+            unsafe { BCryptGenRandom(None, &mut random, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+        if random_status.0 < 0 {
+            return Err(ProcessError::Windows {
+                operation: "generate adapter workspace name",
+                code: random_status.0.cast_unsigned(),
+                message: "BCryptGenRandom returned a failing NTSTATUS".to_owned(),
+            });
+        }
+        let suffix = random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let root = env::temp_dir().join(format!(".rootlight-adapter-{suffix}"));
+        create_directory(&root, &attributes)?;
+        let runtime = root.join("runtime");
+        let current_directory = root.join("work");
+        if let Err(error) = create_directory(&runtime, &attributes)
+            .and_then(|()| create_directory(&current_directory, &attributes))
+        {
+            let _ = fs::remove_dir_all(&root);
+            return Err(error);
+        }
+        let executable = runtime.join("adapter.exe");
+        if let Err(source) = fs::copy(source_executable, &executable) {
+            let _ = fs::remove_dir_all(&root);
+            return Err(ProcessError::io("stage adapter executable", source));
+        }
+        set_file_attributes(&executable, FILE_ATTRIBUTE_READONLY)?;
+        Ok(Self {
+            root,
+            executable,
+            current_directory,
+            removed: false,
+        })
+    }
+
+    fn remove(mut self) -> Result<(), ProcessError> {
+        self.remove_inner()
+    }
+
+    fn clear_current_directory(&self) -> Result<(), ProcessError> {
+        for entry in fs::read_dir(&self.current_directory)
+            .map_err(|source| ProcessError::io("inspect adapter current directory", source))?
+        {
+            let path = entry
+                .map_err(|source| ProcessError::io("inspect adapter current entry", source))?
+                .path();
+            if path.is_dir() {
+                fs::remove_dir_all(&path)
+                    .map_err(|source| ProcessError::io("remove adapter profile overlay", source))?;
+            } else {
+                fs::remove_file(&path)
+                    .map_err(|source| ProcessError::io("remove adapter current file", source))?;
+            }
+        }
+        if fs::read_dir(&self.current_directory)
+            .map_err(|source| ProcessError::io("verify adapter current directory", source))?
+            .next()
+            .is_some()
+        {
+            return Err(ProcessError::InvalidInput(
+                "adapter current directory is not empty".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn remove_inner(&mut self) -> Result<(), ProcessError> {
+        if self.removed {
+            return Ok(());
+        }
+        if fs::metadata(&self.executable).is_ok() {
+            set_file_attributes(&self.executable, FILE_ATTRIBUTE_NORMAL)?;
+        }
+        fs::remove_dir_all(&self.root)
+            .map_err(|source| ProcessError::io("remove adapter workspace", source))?;
+        self.removed = true;
+        Ok(())
+    }
+}
+
+impl Drop for PrivateAdapterWorkspace {
+    fn drop(&mut self) {
+        let _ = self.remove_inner();
+    }
+}
+
+fn sid_length(sid: PSID) -> Result<usize, ProcessError> {
+    // SAFETY: callers pass SIDs retained by their owning token/profile objects.
+    let bytes = unsafe { GetLengthSid(sid) };
+    if bytes == 0 {
+        return Err(ProcessError::InvalidInput(
+            "security principal contains an empty SID".to_owned(),
+        ));
+    }
+    usize::try_from(bytes)
+        .map_err(|_| ProcessError::InvalidInput("SID length exceeds usize".to_owned()))
+}
+
+fn create_directory(path: &Path, attributes: &SECURITY_ATTRIBUTES) -> Result<(), ProcessError> {
+    let encoded = nul_terminated(path.as_os_str(), "adapter workspace path")?;
+    // SAFETY: the path is NUL-terminated and the security attributes reference
+    // a live descriptor and ACL for the complete synchronous call.
+    unsafe { CreateDirectoryW(PCWSTR(encoded.as_ptr()), Some(ptr::from_ref(attributes))) }
+        .map_err(|source| ProcessError::windows("create private adapter directory", source))
+}
+
+fn set_file_attributes(
+    path: &Path,
+    attributes: windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
+) -> Result<(), ProcessError> {
+    let encoded = nul_terminated(path.as_os_str(), "adapter runtime file")?;
+    // SAFETY: the path is NUL-terminated and attributes are copied by value.
+    unsafe { SetFileAttributesW(PCWSTR(encoded.as_ptr()), attributes) }
+        .map_err(|source| ProcessError::windows("set adapter runtime attributes", source))
+}
+
 struct AttributeList {
     list: LPPROC_THREAD_ATTRIBUTE_LIST,
     _storage: Vec<usize>,
@@ -657,11 +1536,55 @@ struct AttributeList {
 
 impl AttributeList {
     fn with_handle_list(handles: &[HANDLE]) -> Result<Self, ProcessError> {
+        let mut attributes = Self::new(1)?;
+        attributes.update_raw(
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+            handles.as_ptr().cast(),
+            size_of_val(handles),
+            "set process handle allowlist",
+        )?;
+        Ok(attributes)
+    }
+
+    fn with_adapter_profile(
+        handles: &[HANDLE],
+        security_capabilities: &SECURITY_CAPABILITIES,
+        image_load_policy: &u64,
+    ) -> Result<Self, ProcessError> {
+        let mut attributes = Self::new(3)?;
+        attributes.update_raw(
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+            handles.as_ptr().cast(),
+            size_of_val(handles),
+            "set adapter process handle allowlist",
+        )?;
+        attributes.update_raw(
+            PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+            ptr::from_ref(security_capabilities).cast(),
+            size_of::<SECURITY_CAPABILITIES>(),
+            "set adapter AppContainer capabilities",
+        )?;
+        attributes.update_raw(
+            PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY as usize,
+            ptr::from_ref(image_load_policy).cast(),
+            size_of::<u64>(),
+            "set adapter image-load mitigations",
+        )?;
+        Ok(attributes)
+    }
+
+    fn new(attribute_count: u32) -> Result<Self, ProcessError> {
         let mut bytes = 0_usize;
         // SAFETY: this documented sizing call supplies no destination and a
         // valid writable size pointer.
-        let sizing =
-            unsafe { InitializeProcThreadAttributeList(None, 1, None, ptr::from_mut(&mut bytes)) };
+        let sizing = unsafe {
+            InitializeProcThreadAttributeList(
+                None,
+                attribute_count,
+                None,
+                ptr::from_mut(&mut bytes),
+            )
+        };
         if bytes == 0 {
             return sizing
                 .map(|()| unreachable!("attribute-list sizing returned no size"))
@@ -673,27 +1596,34 @@ impl AttributeList {
         // SAFETY: storage is pointer-aligned, has at least the requested byte
         // capacity, and remains owned by AttributeList until deletion.
         unsafe {
-            InitializeProcThreadAttributeList(Some(list), 1, None, ptr::from_mut(&mut bytes))
-        }
-        .map_err(|source| ProcessError::windows("initialize process attribute list", source))?;
-        // SAFETY: the initialized list and exact handle slice remain alive
-        // through process creation, and cbSize matches the complete slice.
-        unsafe {
-            UpdateProcThreadAttribute(
-                list,
-                0,
-                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-                Some(handles.as_ptr().cast()),
-                size_of_val(handles),
+            InitializeProcThreadAttributeList(
+                Some(list),
+                attribute_count,
                 None,
-                None,
+                ptr::from_mut(&mut bytes),
             )
         }
-        .map_err(|source| ProcessError::windows("set process handle allowlist", source))?;
+        .map_err(|source| ProcessError::windows("initialize process attribute list", source))?;
         Ok(Self {
             list,
             _storage: storage,
         })
+    }
+
+    fn update_raw(
+        &mut self,
+        attribute: usize,
+        value: *const c_void,
+        bytes: usize,
+        operation: &'static str,
+    ) -> Result<(), ProcessError> {
+        // SAFETY: the list is initialized with enough attribute slots. The
+        // caller supplies initialized storage that outlives process creation
+        // and the byte length exactly matches that storage.
+        unsafe {
+            UpdateProcThreadAttribute(self.list, 0, attribute, Some(value), bytes, None, None)
+        }
+        .map_err(|source| ProcessError::windows(operation, source))
     }
 }
 
@@ -744,6 +1674,20 @@ fn terminate_suspended(process: &OwnedHandle) -> Result<(), ProcessError> {
     if !matches!(wait_result(process, 5_000)?, WaitResult::Exited) {
         return Err(ProcessError::Deadline {
             operation: "reap unassigned child",
+        });
+    }
+    Ok(())
+}
+
+fn terminate_assigned_suspended(
+    job: &KillOnCloseJob,
+    process: &OwnedHandle,
+) -> Result<(), ProcessError> {
+    job.terminate(PROCESS_TERMINATION_EXIT_CODE)?;
+    job.wait_empty(Instant::now() + Duration::from_secs(5))?;
+    if !matches!(wait_result(process, 5_000)?, WaitResult::Exited) {
+        return Err(ProcessError::Deadline {
+            operation: "reap assigned suspended adapter",
         });
     }
     Ok(())
@@ -829,6 +1773,415 @@ mod tests {
             command_line(&command),
             Err(ProcessError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn adapter_job_records_hard_process_memory_and_cpu_limits() {
+        let limits = AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_millis(750))
+            .expect("adapter limits validate");
+        let job = KillOnCloseJob::with_adapter_limits(limits).expect("adapter Job Object opens");
+        let observed = job.extended_limits().expect("adapter limits read back");
+        assert_eq!(observed.BasicLimitInformation.ActiveProcessLimit, 1);
+        assert_eq!(
+            observed.BasicLimitInformation.PerJobUserTimeLimit,
+            7_500_000
+        );
+        assert_eq!(observed.JobMemoryLimit, 256 * 1024 * 1024);
+        assert!(
+            observed
+                .BasicLimitInformation
+                .LimitFlags
+                .contains(JOB_OBJECT_LIMIT_ACTIVE_PROCESS)
+        );
+        assert!(
+            observed
+                .BasicLimitInformation
+                .LimitFlags
+                .contains(JOB_OBJECT_LIMIT_JOB_MEMORY)
+        );
+        assert!(
+            observed
+                .BasicLimitInformation
+                .LimitFlags
+                .contains(JOB_OBJECT_LIMIT_JOB_TIME)
+        );
+        assert!(
+            observed
+                .BasicLimitInformation
+                .LimitFlags
+                .contains(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+        );
+    }
+
+    #[test]
+    fn adapter_job_terminates_a_process_at_the_hard_memory_limit() {
+        let limits = AdapterSandboxLimits::new(96 * 1024 * 1024, Duration::from_secs(5))
+            .expect("adapter limits validate");
+        let job = KillOnCloseJob::with_adapter_limits(limits).expect("adapter Job Object opens");
+        let mut child = spawn_in_job(
+            ProcessCommand::new(env::current_exe().expect("test executable path resolves"))
+                .arg("--exact")
+                .arg("platform::os::tests::adapter_memory_limit_helper")
+                .arg("--nocapture")
+                .env("ROOTLIGHT_SANDBOX_MEMORY_LIMIT_HELPER", "1"),
+            &job,
+        )
+        .expect("memory-bound helper starts");
+        let status = wait_for_exit_status(&mut child, Instant::now() + Duration::from_secs(5));
+        assert!(!status.success());
+        job.wait_empty(Instant::now() + Duration::from_secs(2))
+            .expect("memory-limited Job Object empties");
+    }
+
+    #[test]
+    fn adapter_memory_limit_helper() {
+        if env::var_os("ROOTLIGHT_SANDBOX_MEMORY_LIMIT_HELPER").as_deref() != Some(OsStr::new("1"))
+        {
+            return;
+        }
+        let mut retained = Vec::new();
+        loop {
+            let mut page = vec![0_u8; 4 * 1024 * 1024];
+            page.fill(0xa5);
+            retained.push(std::hint::black_box(page));
+        }
+    }
+
+    #[test]
+    fn adapter_probe_applies_native_attributes_without_resuming_user_code() {
+        let command = ProcessCommand::new(system_binary("cmd.exe"));
+        let limits = AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_secs(1))
+            .expect("adapter limits validate");
+        let report =
+            probe_windows_adapter_isolation(command, limits).expect("adapter probe completes");
+        assert!(
+            report
+                .control(crate::AdapterControl::NetworkEgress)
+                .is_enforced()
+        );
+        assert!(
+            report
+                .control(crate::AdapterControl::ProcessCreation)
+                .is_enforced()
+        );
+        assert!(!report.permits_deep_adapter());
+    }
+
+    #[test]
+    fn isolated_adapter_executes_after_verified_native_setup() {
+        let limits = AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_secs(2))
+            .expect("adapter limits validate");
+        let (status, output, _) = run_isolated_helper(
+            "platform::os::tests::isolated_adapter_smoke_helper",
+            &[],
+            limits,
+        );
+        assert!(
+            status.success(),
+            "isolated helper failed: {}",
+            String::from_utf8_lossy(&output)
+        );
+    }
+
+    #[test]
+    fn isolated_adapter_smoke_helper() {
+        if !is_isolated_helper() {
+            return;
+        }
+        assert_eq!(env::var("ROOTLIGHT_ADAPTER_ISOLATED").as_deref(), Ok("1"));
+    }
+
+    #[test]
+    fn isolated_adapter_denies_network_endpoints() {
+        let listener =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).expect("parent listener binds");
+        listener
+            .set_nonblocking(true)
+            .expect("parent listener becomes nonblocking");
+        let address = listener
+            .local_addr()
+            .expect("parent listener address reads");
+        let limits = AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_secs(2))
+            .expect("adapter limits validate");
+        let (status, stdout, stderr) = run_isolated_helper(
+            "platform::os::tests::isolated_adapter_network_helper",
+            address.to_string().as_bytes(),
+            limits,
+        );
+        assert!(
+            status.success(),
+            "network helper failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(listener.accept().is_err());
+    }
+
+    #[test]
+    fn isolated_adapter_network_helper() {
+        if !is_isolated_helper() {
+            return;
+        }
+        let mut address = String::new();
+        std::io::stdin()
+            .read_to_string(&mut address)
+            .expect("network target reads");
+        let address = address
+            .parse::<std::net::SocketAddr>()
+            .expect("network target parses");
+        assert!(
+            std::net::TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_err()
+        );
+    }
+
+    #[test]
+    fn isolated_adapter_denies_descendant_creation() {
+        let limits = AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_secs(2))
+            .expect("adapter limits validate");
+        let (status, stdout, stderr) = run_isolated_helper(
+            "platform::os::tests::isolated_adapter_child_process_helper",
+            &[],
+            limits,
+        );
+        let stdout = String::from_utf8_lossy(&stdout);
+        assert!(stdout.contains("child-attempted"));
+        assert!(
+            status.success() || !stdout.contains("child-created"),
+            "child creation escaped the Job limit: stdout={stdout} stderr={}",
+            String::from_utf8_lossy(&stderr)
+        );
+    }
+
+    #[test]
+    fn isolated_adapter_child_process_helper() {
+        if !is_isolated_helper() {
+            return;
+        }
+        println!("child-attempted");
+        let result = std::process::Command::new(system_binary("cmd.exe"))
+            .args(["/D", "/Q", "/C", "exit", "0"])
+            .status();
+        match result {
+            Err(_) => println!("child-denied"),
+            Ok(status) if !status.success() => println!("child-denied"),
+            Ok(_) => {
+                println!("child-created");
+                panic!("isolated adapter created a successful descendant");
+            }
+        }
+    }
+
+    #[test]
+    fn isolated_adapter_denies_user_files_and_all_writes() {
+        let mut foreign_profile =
+            AppContainerSid::create_ephemeral().expect("foreign AppContainer profile opens");
+        let owner = CurrentUserSid::load().expect("current user SID reads");
+        let workspace = PrivateAdapterWorkspace::create(
+            &env::current_exe().expect("test executable path resolves"),
+            &owner,
+            foreign_profile.sid,
+        )
+        .expect("foreign private workspace opens");
+        let sentinel = workspace.root.join("ambient-secret.txt");
+        fs::write(&sentinel, b"ambient secret").expect("ambient sentinel writes");
+        let home_sentinel =
+            Path::new(&env::var_os("USERPROFILE").expect("parent user profile path exists")).join(
+                format!(".rootlight-adapter-denial-{}.txt", std::process::id()),
+            );
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&home_sentinel)
+            .and_then(|mut file| file.write_all(b"user home secret"))
+            .expect("user-home sentinel writes");
+        foreign_profile
+            .delete()
+            .expect("foreign AppContainer profile deletes");
+        let input = format!(
+            "{}\n{}",
+            sentinel.to_string_lossy(),
+            home_sentinel.to_string_lossy()
+        );
+        let limits = AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_secs(2))
+            .expect("adapter limits validate");
+        let (status, stdout, stderr) = run_isolated_helper(
+            "platform::os::tests::isolated_adapter_filesystem_helper",
+            input.as_bytes(),
+            limits,
+        );
+        let succeeded = status.success();
+        fs::remove_file(&home_sentinel).expect("user-home sentinel removes");
+        workspace.remove().expect("foreign workspace removes");
+        assert!(
+            succeeded,
+            "filesystem helper failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+    }
+
+    #[test]
+    fn isolated_adapter_filesystem_helper() {
+        if !is_isolated_helper() {
+            return;
+        }
+        let mut requested_path = String::new();
+        std::io::stdin()
+            .read_to_string(&mut requested_path)
+            .expect("bounded test input reads");
+        for path in requested_path.lines() {
+            assert!(fs::read(path).is_err(), "unexpected access to {path}");
+        }
+        let current = env::current_dir().expect("controlled current directory resolves");
+        assert!(fs::write(current.join("forbidden.tmp"), b"no").is_err());
+        for key in ["APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "USERPROFILE"] {
+            let path = PathBuf::from(env::var_os(key).expect("restricted path variable exists"));
+            assert!(path.starts_with(&current));
+            assert!(fs::write(path.join(format!("{key}.tmp")), b"no").is_err());
+        }
+    }
+
+    #[test]
+    fn isolated_adapter_current_directory_cannot_supply_a_dll() {
+        let limits = AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_secs(2))
+            .expect("adapter limits validate");
+        let (status, stdout, stderr) = run_isolated_helper(
+            "platform::os::tests::isolated_adapter_dll_helper",
+            &[],
+            limits,
+        );
+        assert!(
+            status.success(),
+            "DLL helper failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+    }
+
+    #[test]
+    fn isolated_adapter_dll_helper() {
+        if !is_isolated_helper() {
+            return;
+        }
+        let current = env::current_dir().expect("controlled current directory resolves");
+        let entries = fs::read_dir(&current)
+            .expect("controlled current directory reads")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("controlled current entries read");
+        assert!(entries.is_empty());
+        assert!(fs::write(current.join("rootlight-attack.dll"), b"not a DLL").is_err());
+        let library = nul_terminated(OsStr::new("rootlight-attack.dll"), "test library")
+            .expect("name encodes");
+        // SAFETY: the test name is NUL-terminated. The expected failure returns
+        // no module handle and therefore transfers no ownership.
+        let loaded = unsafe {
+            windows::Win32::System::LibraryLoader::LoadLibraryW(PCWSTR(library.as_ptr()))
+        };
+        assert!(loaded.is_err());
+    }
+
+    #[test]
+    fn isolated_adapter_streams_fail_closed_at_their_byte_quotas() {
+        let command = AdapterProcessCommand::new(
+            env::current_exe().expect("test executable path resolves"),
+            1,
+            64,
+            64 * 1024,
+        )
+        .expect("adapter command validates")
+        .arg("--exact")
+        .expect("test selector is a literal")
+        .arg("platform::os::tests::isolated_adapter_output_quota_helper")
+        .expect("test name is a literal")
+        .arg("--nocapture")
+        .expect("test flag is a literal");
+        let limits = AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_secs(2))
+            .expect("adapter limits validate");
+        let mut adapter = crate::spawn_windows_isolated_adapter(command, limits)
+            .expect("isolated adapter starts");
+        let workspace_root = adapter.workspace_root().to_path_buf();
+        let mut stdin = adapter.take_stdin().expect("adapter stdin is retained");
+        assert!(stdin.write_all(b"too large").is_err());
+        drop(stdin);
+        let mut stdout = adapter.take_stdout().expect("adapter stdout is retained");
+        assert_eq!(stdout.read(&mut []).expect("empty output read succeeds"), 0);
+        let mut output = Vec::new();
+        assert!(stdout.read_to_end(&mut output).is_err());
+        adapter
+            .terminate()
+            .expect("quota-violating adapter terminates");
+        adapter
+            .wait_empty(Instant::now() + Duration::from_secs(2))
+            .expect("quota-violating adapter Job Object empties");
+        drop(stdout);
+        drop(adapter);
+        assert!(
+            !workspace_root.exists(),
+            "isolated adapter workspace survived exact child cleanup"
+        );
+    }
+
+    #[test]
+    fn isolated_adapter_output_quota_helper() {
+        if !is_isolated_helper() {
+            return;
+        }
+        println!("{}", "x".repeat(4 * 1024));
+    }
+
+    #[test]
+    fn isolated_adapter_cpu_and_memory_limits_terminate_hostile_work() {
+        let cpu_limits = AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_millis(100))
+            .expect("adapter CPU limits validate");
+        let (cpu_status, _, _) = run_isolated_helper(
+            "platform::os::tests::isolated_adapter_cpu_helper",
+            &[],
+            cpu_limits,
+        );
+        assert!(!cpu_status.success());
+
+        let memory_limits = AdapterSandboxLimits::new(96 * 1024 * 1024, Duration::from_secs(5))
+            .expect("adapter memory limits validate");
+        let (memory_status, _, _) = run_isolated_helper(
+            "platform::os::tests::isolated_adapter_memory_helper",
+            &[],
+            memory_limits,
+        );
+        assert!(!memory_status.success());
+    }
+
+    #[test]
+    fn isolated_adapter_cpu_helper() {
+        if !is_isolated_helper() {
+            return;
+        }
+        let mut value = 1_u64;
+        loop {
+            value = std::hint::black_box(value.wrapping_mul(6364136223846793005).wrapping_add(1));
+        }
+    }
+
+    #[test]
+    fn isolated_adapter_memory_helper() {
+        if !is_isolated_helper() {
+            return;
+        }
+        let mut retained = Vec::new();
+        loop {
+            let mut page = vec![0_u8; 4 * 1024 * 1024];
+            page.fill(0x5a);
+            retained.push(std::hint::black_box(page));
+        }
+    }
+
+    #[test]
+    fn ephemeral_appcontainer_profile_cleanup_is_idempotent() {
+        let mut profile = AppContainerSid::create_ephemeral().expect("AppContainer profile opens");
+        profile.delete().expect("AppContainer profile deletes");
+        assert!(profile.deleted);
+        profile
+            .delete()
+            .expect("repeated profile cleanup remains successful");
     }
 
     #[test]
@@ -934,9 +2287,13 @@ mod tests {
     }
 
     fn wait_for_exit(child: &mut ChildProcess, deadline: Instant) {
+        let _ = wait_for_exit_status(child, deadline);
+    }
+
+    fn wait_for_exit_status(child: &mut ChildProcess, deadline: Instant) -> ExitStatus {
         loop {
-            if child.try_wait().expect("child status reads").is_some() {
-                return;
+            if let Some(status) = child.try_wait().expect("child status reads") {
+                return status;
             }
             if Instant::now() >= deadline {
                 child.terminate().expect("timed-out child terminates");
@@ -960,5 +2317,66 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn wait_for_isolated_exit(child: &mut IsolatedAdapterProcess, deadline: Instant) -> ExitStatus {
+        loop {
+            if let Some(status) = child.try_wait().expect("isolated child status reads") {
+                return status;
+            }
+            if Instant::now() >= deadline {
+                child.terminate().expect("timed-out adapter terminates");
+                panic!("isolated adapter did not exit before the deadline");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn run_isolated_helper(
+        test_name: &str,
+        input: &[u8],
+        limits: AdapterSandboxLimits,
+    ) -> (ExitStatus, Vec<u8>, Vec<u8>) {
+        let command = AdapterProcessCommand::new(
+            env::current_exe().expect("test executable path resolves"),
+            input.len().max(1),
+            64 * 1024,
+            64 * 1024,
+        )
+        .expect("adapter command validates")
+        .arg("--exact")
+        .expect("test selector is a literal")
+        .arg(test_name)
+        .expect("test name is a literal")
+        .arg("--nocapture")
+        .expect("test flag is a literal");
+        let (mut adapter, report) =
+            spawn_windows_isolated_adapter(command, limits).expect("isolated adapter starts");
+        assert!(report.permits_deep_adapter());
+        let mut stdin = adapter.take_stdin().expect("adapter stdin is retained");
+        stdin
+            .write_all(input)
+            .expect("bounded adapter input writes");
+        stdin.flush().expect("bounded adapter input flushes");
+        drop(stdin);
+        let mut stdout = adapter.take_stdout().expect("adapter stdout is retained");
+        let mut stderr = adapter.take_stderr().expect("adapter stderr is retained");
+        let mut output = Vec::new();
+        let mut diagnostic = Vec::new();
+        stdout
+            .read_to_end(&mut output)
+            .expect("bounded adapter output reads");
+        stderr
+            .read_to_end(&mut diagnostic)
+            .expect("bounded adapter diagnostics read");
+        let status = wait_for_isolated_exit(&mut adapter, Instant::now() + Duration::from_secs(8));
+        adapter
+            .wait_empty(Instant::now() + Duration::from_secs(2))
+            .expect("isolated adapter Job Object empties");
+        (status, output, diagnostic)
+    }
+
+    fn is_isolated_helper() -> bool {
+        env::var_os("ROOTLIGHT_ADAPTER_ISOLATED").as_deref() == Some(OsStr::new("1"))
     }
 }
