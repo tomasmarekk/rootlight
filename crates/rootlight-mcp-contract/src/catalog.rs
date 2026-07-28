@@ -167,7 +167,7 @@ impl McpTool {
                 "Use bounded unit-test ranking from explicit symbol seeds with direct-edge or declaring-file co-location rationale and explicit gaps; other test kinds, path, change, build-target, framework, and execution-budget inputs are unsupported."
             }
             Self::ArchitectureOverview => {
-                "Use a bounded file-granularity architecture map with optional hotspots; module, package, service, data, ownership, community, and build views are unsupported."
+                "Use a bounded file-granularity architecture map with optional hotspots and deterministic non-ownership communities; module, package, service, data, ownership, and build views are unsupported."
             }
             Self::ArchitectureCycles => {
                 "Detect bounded symbol-level cycles over static call, reference, type, implementation, and import edges; other relation families, custom scope, and ranking are unsupported."
@@ -528,6 +528,13 @@ mod tests {
         assert!(repository_list.contains("lifecycle-state"));
         assert!(repository_list.contains("workspace grouping"));
         assert!(!repository_list.contains("does not filter"));
+    }
+
+    #[test]
+    fn architecture_description_matches_implemented_community_view() {
+        let description = McpTool::ArchitectureOverview.description();
+        assert!(description.contains("deterministic non-ownership communities"));
+        assert!(!description.contains("community, and build views are unsupported"));
     }
 
     #[test]
