@@ -89,6 +89,7 @@ const SYNTAX_RECOVERY_DIAGNOSTIC: &str = "syntax-error-recovery";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const SETUP_RETRY_ATTEMPTS: u8 = 3;
 const CANCELLATION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(4);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const TRANSPORT_SAMPLES: usize = 20;
@@ -1556,18 +1557,35 @@ fn index_repository(
     let root = repository_root
         .to_str()
         .ok_or(VerticalError::Invariant("fixture root was not valid UTF-8"))?;
-    let response = call_tool(
-        &format!("{label}.repo-index"),
-        process,
-        catalog,
-        transcript,
-        "repo.index",
-        json!({
-            "root": root,
-            "mode": "structural",
-            "detached": false
-        }),
-    )?;
+    let arguments = json!({
+        "root": root,
+        "mode": "structural",
+        "detached": false
+    });
+    let mut attempt = 1_u8;
+    let response = loop {
+        let request_label = if attempt == 1 {
+            format!("{label}.repo-index")
+        } else {
+            format!("{label}.repo-index.retry-{attempt}")
+        };
+        let outcome = call_tool(
+            &request_label,
+            process,
+            catalog,
+            transcript,
+            "repo.index",
+            arguments.clone(),
+        )?;
+        let Some(delay) = retryable_busy_delay(&outcome) else {
+            break outcome;
+        };
+        if attempt == SETUP_RETRY_ATTEMPTS {
+            break outcome;
+        }
+        thread::sleep(delay);
+        attempt = attempt.saturating_add(1);
+    };
     require_tool_success(&response, "repo.index")?;
     assert_control_value_omits_sentinels(&response.structured)?;
     let repository = required_string(
@@ -3191,6 +3209,19 @@ fn require_tool_success(outcome: &ToolOutcome, _tool: &str) -> Result<(), Vertic
     } else {
         Ok(())
     }
+}
+
+fn retryable_busy_delay(outcome: &ToolOutcome) -> Option<Duration> {
+    let error = &outcome.structured["error"];
+    if !outcome.is_error || error["code"] != "BUSY" || error["retryable"] != true {
+        return None;
+    }
+    Some(Duration::from_millis(
+        error["retry_after_ms"]
+            .as_u64()
+            .unwrap_or(25)
+            .clamp(1, 1_000),
+    ))
 }
 
 fn assert_read_correlation(
@@ -5676,10 +5707,11 @@ impl VerticalError {
 mod tests {
     use super::{
         CANCELLATION_FIXTURE_FILES, EXPECTED_TOOLS, MATRIX_STATES, Options, ToolMatrixCell,
-        VerticalError, assert_bounded_tier_b_rust_coverage, assert_complete_tier_b_rust_coverage,
-        canonicalize_known_identities, diagnostic_code_is_present, estimated_tokens,
-        matrix_not_applicable_reason, modify_fixture_to_v2, nearest_rank, normalize_read_response,
-        observe_rust_coverage, prepare_cancellation_repository, redact_request_for_evidence,
+        ToolOutcome, VerticalError, assert_bounded_tier_b_rust_coverage,
+        assert_complete_tier_b_rust_coverage, canonicalize_known_identities,
+        diagnostic_code_is_present, estimated_tokens, matrix_not_applicable_reason,
+        modify_fixture_to_v2, nearest_rank, normalize_read_response, observe_rust_coverage,
+        prepare_cancellation_repository, redact_request_for_evidence, retryable_busy_delay,
         shrink_cancellation_repository, source_tokenizer_input, validate_tool_matrix_cells,
     };
     use serde_json::json;
@@ -5707,6 +5739,49 @@ mod tests {
             Options::parse(&mut std::iter::empty()),
             Err(VerticalError::MissingBinDir)
         ));
+    }
+
+    #[test]
+    fn setup_retry_accepts_only_the_retryable_busy_contract() {
+        let retryable = ToolOutcome {
+            structured: json!({
+                "error": {
+                    "code": "BUSY",
+                    "retryable": true,
+                    "retry_after_ms": 7
+                }
+            }),
+            is_error: true,
+        };
+        assert_eq!(
+            retryable_busy_delay(&retryable).map(|delay| delay.as_millis()),
+            Some(7)
+        );
+
+        for outcome in [
+            ToolOutcome {
+                structured: json!({
+                    "error": {
+                        "code": "BUSY",
+                        "retryable": false,
+                        "retry_after_ms": 7
+                    }
+                }),
+                is_error: true,
+            },
+            ToolOutcome {
+                structured: json!({
+                    "error": {
+                        "code": "INTERNAL",
+                        "retryable": true,
+                        "retry_after_ms": 7
+                    }
+                }),
+                is_error: true,
+            },
+        ] {
+            assert!(retryable_busy_delay(&outcome).is_none());
+        }
     }
 
     #[test]
