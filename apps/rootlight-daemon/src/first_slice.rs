@@ -5821,17 +5821,20 @@ mod tests {
             .expect("cancelled index releases the work lane");
         index.join().expect("index thread joins");
         let terminal = wait_for_terminal_operation(&journal, operation);
-        let status = execute(
+        let status = execute_retrying_busy(
             &daemon,
-            FirstSliceIpcRequest::RepositoryOperationStatus(
-                daemon::RepositoryOperationStatusRequest {
-                    schema_version: Some(schema_version()),
-                    operation: Some(operation_to_wire(operation)),
-                    action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
-                    wait_ms: None,
-                    after_revision: None,
-                },
-            ),
+            || {
+                FirstSliceIpcRequest::RepositoryOperationStatus(
+                    daemon::RepositoryOperationStatusRequest {
+                        schema_version: Some(schema_version()),
+                        operation: Some(operation_to_wire(operation)),
+                        action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                        wait_ms: None,
+                        after_revision: None,
+                    },
+                )
+            },
+            "terminal operation status follows committed publication",
         );
         let FirstSliceIpcResponse::RepositoryOperationStatus(status) = status else {
             panic!("operation status response expected");
