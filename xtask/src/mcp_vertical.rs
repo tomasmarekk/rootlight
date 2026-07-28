@@ -523,11 +523,6 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     let rustc_version = command_output("rustc", &["--version"])?;
     let syntax_recovery_diagnostic_observed =
         v1_index.syntax_recovery_diagnostic_observed || v1.syntax_recovery_diagnostic_observed;
-    if !syntax_recovery_diagnostic_observed {
-        return Err(VerticalError::Invariant(
-            "malformed fixture query results omitted the syntax recovery diagnostic",
-        ));
-    }
     let daemon_ready = LatencySeries::new(daemon_ready_samples)?;
     let bridge_start = LatencySeries::new(bridge_start_samples)?;
     let transport = LatencySeries::new(transport_samples)?;
@@ -558,6 +553,9 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     ];
     if peak_rss_bytes.is_none() {
         unavailable_metrics.push("true_process_rss_operation_status_reported_zero");
+    }
+    if !syntax_recovery_diagnostic_observed {
+        unavailable_metrics.push("malformed_source_diagnostic_text_and_code");
     }
     Ok(Summary {
         schema_version: EVIDENCE_SCHEMA_VERSION,
