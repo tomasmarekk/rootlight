@@ -1,7 +1,7 @@
 //! Fail-closed process entry point for the generic deep-adapter host.
 //!
-//! Native execution remains unavailable until every required isolation control
-//! has an audited backend; this binary never substitutes an unsandboxed launch.
+//! The project-session mode accepts only bounded stdin source under native
+//! isolation. Other deep-adapter modes remain unavailable until audited.
 
 #![forbid(unsafe_code)]
 
@@ -19,6 +19,7 @@ use std::{
 
 use rootlight_adapter_host::{
     AdapterActivation, IsolationReport, encode_isolation_report, evaluate_adapter_activation,
+    run_project_session,
 };
 #[cfg(windows)]
 use rootlight_sandbox::{
@@ -33,6 +34,9 @@ fn main() -> ExitCode {
         Some(value) if value == OsStr::new("--isolation-witness") => {
             return isolation_witness(arguments);
         }
+        Some(value) if value == OsStr::new("--project-session") => {
+            return project_session(arguments);
+        }
         _ => {}
     }
     let report = IsolationReport::current();
@@ -43,6 +47,14 @@ fn main() -> ExitCode {
     };
     eprintln!("{message}");
     ExitCode::FAILURE
+}
+
+fn project_session(arguments: impl Iterator<Item = std::ffi::OsString>) -> ExitCode {
+    if let Err(error) = run_project_session(arguments) {
+        eprintln!("error: {error}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
 fn report(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> ExitCode {

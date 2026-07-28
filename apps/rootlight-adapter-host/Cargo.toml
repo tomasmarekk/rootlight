@@ -8,11 +8,16 @@ license.workspace = true
 publish = false
 
 [dependencies]
+blake3.workspace = true
+rootlight-adapter-sdk = { path = "../../crates/rootlight-adapter-sdk" }
+rootlight-adapter-treesitter = { path = "../../crates/rootlight-adapter-treesitter" }
+rootlight-adapters = { path = "../../crates/rootlight-adapters" }
 rootlight-cancel = { path = "../../crates/rootlight-cancel" }
 rootlight-ids = { path = "../../crates/rootlight-ids" }
 rootlight-ir = { path = "../../crates/rootlight-ir" }
 rootlight-protocol = { path = "../../crates/rootlight-protocol" }
 rootlight-sandbox = { path = "../../crates/rootlight-sandbox" }
+rootlight-vfs = { path = "../../crates/rootlight-vfs" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

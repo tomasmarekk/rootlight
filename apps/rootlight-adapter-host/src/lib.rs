@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod process;
+mod project;
 mod server;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,10 +32,16 @@ use rootlight_protocol::{
 use serde::Serialize;
 
 pub use process::{IsolatedProjectAnalysis, execute_isolated_project_adapter};
+pub use project::{
+    PROJECT_ADAPTER_HARD_LIMITS, PROJECT_ADAPTER_NAME, PROJECT_ADAPTER_VERSION,
+    negotiate_project_adapter_session, project_adapter_advertisement, project_adapter_identity,
+    run_project_session,
+};
 pub use server::serve_project_session;
 
 const NORMALIZED_IR_CAPABILITY: &str = "normalized_ir";
-const PROJECT_NORMALIZED_IR_CAPABILITY: &str = "project_normalized_ir";
+/// Capability label for transactional normalized project IR.
+pub const PROJECT_NORMALIZED_IR_CAPABILITY: &str = "project_normalized_ir";
 /// Version of the machine-readable platform isolation evidence.
 pub const ISOLATION_EVIDENCE_SCHEMA: &str = "rootlight.adapter-isolation/1";
 /// Maximum encoded size of one platform isolation report.
@@ -852,7 +859,10 @@ fn validate_extension_bindings(
 fn parse_extension_version(version: &str) -> Option<ContractVersion> {
     let mut components = version.split('.');
     let major = components.next()?.parse().ok()?;
-    let minor = components.next()?.parse().ok()?;
+    let minor = match components.next() {
+        Some(minor) => minor.parse().ok()?,
+        None => 0,
+    };
     if major == 0 || components.next().is_some() {
         return None;
     }
@@ -954,6 +964,15 @@ pub enum AdapterHostError {
     /// The isolated adapter exited unsuccessfully or emitted diagnostics.
     #[error("adapter process failed")]
     ProcessFailed,
+    /// The production project adapter binary could not be authenticated.
+    #[error("adapter binary identity could not be established")]
+    BinaryIdentity,
+    /// A project request could not be converted into the checked SDK model.
+    #[error("adapter project request was invalid")]
+    ProjectRequest,
+    /// The bounded project analyzer could not produce a complete transaction.
+    #[error("adapter project analysis failed")]
+    ProjectAnalysis,
 }
 
 #[cfg(test)]
@@ -983,6 +1002,20 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn extension_versions_accept_canonical_major_only_form() {
+        assert_eq!(
+            parse_extension_version("1"),
+            Some(ContractVersion { major: 1, minor: 0 })
+        );
+        assert_eq!(
+            parse_extension_version("1.2"),
+            Some(ContractVersion { major: 1, minor: 2 })
+        );
+        assert_eq!(parse_extension_version("0"), None);
+        assert_eq!(parse_extension_version("1.2.3"), None);
+    }
 
     #[test]
     fn current_platform_fails_closed_before_process_creation() {

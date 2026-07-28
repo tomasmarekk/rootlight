@@ -26,11 +26,14 @@ use rootlight_sandbox::{
     IsolatedAdapterProcess, spawn_windows_isolated_adapter,
 };
 
+use crate::project::{
+    FILES_ARGUMENT, INPUT_BYTES_ARGUMENT, MEMORY_BYTES_ARGUMENT, OUTPUT_BYTES_ARGUMENT,
+    PROJECT_SESSION_ARGUMENT, WALL_TIME_ARGUMENT,
+};
 use crate::{
     AdapterHostError, IsolationReport, prepare_project_analysis, validate_project_analysis_result,
 };
 
-const PROJECT_SESSION_ARGUMENT: &str = "--project-session";
 const MAX_ADAPTER_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const PROCESS_REAP_GRACE: Duration = Duration::from_secs(2);
@@ -93,6 +96,16 @@ pub fn execute_isolated_project_adapter(
     )
     .map_err(|_| AdapterHostError::Process)?
     .arg(PROJECT_SESSION_ARGUMENT)
+    .and_then(|command| command.arg(WALL_TIME_ARGUMENT))
+    .and_then(|command| command.arg(session.limits().wall_time_ms.to_string()))
+    .and_then(|command| command.arg(MEMORY_BYTES_ARGUMENT))
+    .and_then(|command| command.arg(session.limits().memory_bytes.to_string()))
+    .and_then(|command| command.arg(INPUT_BYTES_ARGUMENT))
+    .and_then(|command| command.arg(session.limits().input_bytes.to_string()))
+    .and_then(|command| command.arg(OUTPUT_BYTES_ARGUMENT))
+    .and_then(|command| command.arg(session.limits().output_bytes.to_string()))
+    .and_then(|command| command.arg(FILES_ARGUMENT))
+    .and_then(|command| command.arg(session.limits().files.to_string()))
     .map_err(|_| AdapterHostError::Process)?;
     let memory_bytes =
         usize::try_from(session.limits().memory_bytes).map_err(|_| AdapterHostError::Limit)?;

@@ -1844,11 +1844,16 @@ dependencies = [
 name = "rootlight-adapter-host"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "rootlight-adapter-sdk",
+ "rootlight-adapter-treesitter",
+ "rootlight-adapters",
  "rootlight-cancel",
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-protocol",
  "rootlight-sandbox",
+ "rootlight-vfs",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
