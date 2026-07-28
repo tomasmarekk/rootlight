@@ -668,6 +668,18 @@ pub struct RepositoryIndexDiagnostic {
     pub message: String,
 }
 
+/// Analysis strength requested or selected for one repository generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryIndexMode {
+    /// Select the strongest analysis available in the connected daemon.
+    Auto,
+    /// Use only audited in-process structural analyzers.
+    Structural,
+    /// Attempt native-isolated whole-project Tier B analysis.
+    Deep,
+}
+
 /// Successful repository-index publication.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RepositoryIndex {
@@ -679,6 +691,8 @@ pub struct RepositoryIndex {
     pub state: OperationState,
     /// Durable operation revision.
     pub revision: u64,
+    /// Analysis strength selected by the daemon.
+    pub mode: RepositoryIndexMode,
     /// Previous generation, when present.
     pub parent_generation: Option<GenerationId>,
     /// Newly published immutable generation after successful completion.
@@ -2659,7 +2673,24 @@ impl Client {
         operation: OperationId,
         detached: bool,
     ) -> Result<RepositoryIndex, ClientError> {
-        match self.request(build_repository_index_request(root, operation, detached)?)? {
+        self.repository_index_with_mode(root, operation, detached, RepositoryIndexMode::Structural)
+    }
+
+    /// Indexes one repository using the requested analysis strength.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::repository_index`].
+    pub fn repository_index_with_mode(
+        &self,
+        root: &str,
+        operation: OperationId,
+        detached: bool,
+        mode: RepositoryIndexMode,
+    ) -> Result<RepositoryIndex, ClientError> {
+        match self.request(build_repository_index_request(
+            root, operation, detached, mode,
+        )?)? {
             daemon::response_envelope::Response::RepositoryIndex(response) => {
                 parse_repository_index(response, operation)
             }
@@ -2687,9 +2718,36 @@ impl Client {
         detached: bool,
         timeout: RequestTimeout,
     ) -> Result<RepositoryIndex, ClientError> {
+        self.repository_index_async_with_mode(
+            root,
+            operation,
+            detached,
+            RepositoryIndexMode::Structural,
+            timeout,
+        )
+        .await
+    }
+
+    /// Asynchronously indexes one repository using the requested analysis strength.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::repository_index_async`].
+    pub async fn repository_index_async_with_mode(
+        &self,
+        root: &str,
+        operation: OperationId,
+        detached: bool,
+        mode: RepositoryIndexMode,
+        timeout: RequestTimeout,
+    ) -> Result<RepositoryIndex, ClientError> {
         match self
             .request_async(
-                build_repository_index_request(root, operation, detached)?,
+                build_repository_index_request(root, operation, detached, mode)?,
                 timeout,
             )
             .await?
@@ -6377,6 +6435,7 @@ fn build_repository_index_request(
     root: &str,
     operation: OperationId,
     detached: bool,
+    mode: RepositoryIndexMode,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
     if root.is_empty() || root.len() > 4096 || root.as_bytes().contains(&0) {
         return Err(ClientError::InvalidFirstSliceRequest);
@@ -6387,6 +6446,17 @@ fn build_repository_index_request(
             root: root.to_owned(),
             operation: Some(operation_to_wire(operation)),
             detached,
+            mode: match mode {
+                RepositoryIndexMode::Auto => {
+                    daemon::RepositoryIndexMode::RepositoryIndexAuto as i32
+                }
+                RepositoryIndexMode::Structural => {
+                    daemon::RepositoryIndexMode::RepositoryIndexStructural as i32
+                }
+                RepositoryIndexMode::Deep => {
+                    daemon::RepositoryIndexMode::RepositoryIndexDeep as i32
+                }
+            },
         },
     ))
 }
@@ -6754,6 +6824,16 @@ fn parse_repository_index(
     require_first_slice_response_schema(response.schema_version)?;
     let operation = parse_operation(response.operation)?;
     let state = parse_operation_state(response.state)?;
+    let mode = match daemon::RepositoryIndexMode::try_from(response.mode)
+        .map_err(|_| ClientError::InvalidResponseCorrelation)?
+    {
+        daemon::RepositoryIndexMode::RepositoryIndexStructural => RepositoryIndexMode::Structural,
+        daemon::RepositoryIndexMode::RepositoryIndexDeep => RepositoryIndexMode::Deep,
+        daemon::RepositoryIndexMode::RepositoryIndexAuto
+        | daemon::RepositoryIndexMode::Unspecified => {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+    };
     let published_generation = response
         .published_generation
         .map(parse_generation)
@@ -6788,6 +6868,7 @@ fn parse_repository_index(
         operation,
         state,
         revision: response.revision,
+        mode,
         parent_generation,
         published_generation,
         discovered_inputs: response.discovered_inputs,
@@ -10292,6 +10373,7 @@ mod tests {
             elapsed_micros: 10,
             estimated_disk_bytes: 128 * 1024 * 1024,
             diagnostics: Vec::new(),
+            mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
         }
     }
 
@@ -12026,6 +12108,7 @@ mod tests {
             elapsed_micros: 10,
             estimated_disk_bytes: 128 * 1024 * 1024,
             diagnostics: Vec::new(),
+            mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
         };
         assert!(parse_repository_index(index.clone(), operation).is_ok());
         let mut diagnostic = index.clone();

@@ -2713,7 +2713,7 @@ mod tests {
             ],
             "review any new generated-rule exclusion"
         );
-        assert_eq!((declared, covered, exclusions.len()), (152, 150, 2));
+        assert_eq!((declared, covered, exclusions.len()), (151, 149, 2));
     }
 
     #[tokio::test]
@@ -2922,7 +2922,7 @@ mod tests {
             json!({
                 "version": "1.0",
                 "updateByRepositoryId": false,
-                "acceptedModes": ["auto", "structural"],
+                "acceptedModes": ["auto", "structural", "deep"],
                 "scope": "whole_repository",
                 "synchronousTerminal": true,
                 "maxWaitMs": 30_000,
@@ -3098,8 +3098,8 @@ mod tests {
                     "8a34f0f54ead6388de5d1b5737545c0fb730d9a4980e86667eed7116ea267901".to_owned(),
                 ),
                 (
-                    678_467,
-                    "08928976265a51f710e343508bab9c6aea1e8001a823e34776d89ad511097b76".to_owned(),
+                    678_330,
+                    "656294d88a9e6e345c8e013d70a7385c7a60c57aaa5c7ce1dbc6cc79d6b79ae8".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -4061,6 +4061,32 @@ mod tests {
             }
         }))
         .expect("fixture satisfies the typed repo.index output");
+    }
+
+    #[tokio::test]
+    async fn deep_repository_index_reaches_the_executor() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "repo.index",
+                        "arguments": {
+                            "root": "C:/fixture",
+                            "mode": "deep",
+                            "detached": false
+                        }
+                    }),
+                ),
+                cancellation(),
+            )
+            .await;
+        let result = success(response);
+
+        assert_eq!(result["isError"], false);
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

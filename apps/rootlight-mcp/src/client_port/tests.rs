@@ -18,7 +18,7 @@ use rootlight_client::{
     QueryContext, QueryUsage, RecoveryClass, RepositoryCatalogEntry, RepositoryCatalogFreshness,
     RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryCatalogSnapshotId,
     RepositoryCatalogState, RepositoryCoverageEntry, RepositoryIndex, RepositoryIndexDiagnostic,
-    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
+    RepositoryIndexMode, RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
     RepositoryStatusRequest, RequestOptions, RequestTimeout, ResultCompleteness,
     ResultCompletenessState, SourceChunk, SourceRead, SourceReference, SymbolExplain,
     SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
@@ -50,6 +50,7 @@ enum Call {
         root: String,
         operation: OperationId,
         detached: bool,
+        mode: RepositoryIndexMode,
         timeout: RequestTimeout,
     },
     OperationStatus {
@@ -222,18 +223,26 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         root: String,
         operation: OperationId,
         detached: bool,
+        mode: RepositoryIndexMode,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<RepositoryIndex> {
         self.record(Call::RepositoryIndex {
             root,
             operation,
             detached,
+            mode,
             timeout,
         });
+        let selected_mode = match mode {
+            RepositoryIndexMode::Auto => RepositoryIndexMode::Structural,
+            RepositoryIndexMode::Structural => RepositoryIndexMode::Structural,
+            RepositoryIndexMode::Deep => RepositoryIndexMode::Deep,
+        };
         Box::pin(async move {
             Ok(RepositoryIndex {
                 repository: repository(),
                 operation,
+                mode: selected_mode,
                 state: OperationState::Succeeded,
                 revision: 2,
                 parent_generation: Some(parent_generation()),

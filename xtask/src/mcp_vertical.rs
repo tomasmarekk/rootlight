@@ -86,6 +86,8 @@ const IGNORED_SENTINEL: &str = "ROOTLIGHT_IGNORED_SENTINEL";
 const OUTSIDE_SENTINEL: &str = "ROOTLIGHT_OUTSIDE_SENTINEL";
 const HOSTILE_ROOT_SENTINEL: &str = "rootlight-hostile-root";
 const SYNTAX_RECOVERY_DIAGNOSTIC: &str = "syntax-error-recovery";
+const PROJECT_ANALYSIS_FALLBACK_DIAGNOSTIC: &str = "project-adapter-analysis-fallback";
+const PROJECT_SEMANTICS_PROVIDER: &str = "rootlight-project-semantics";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -273,7 +275,8 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         one_item_catalog,
     )?;
 
-    let v1_index = index_repository("v1", &mut mcp, &catalog, &mut transcript, &repository_root)?;
+    let v1_index =
+        index_repository_deep("v1", &mut mcp, &catalog, &mut transcript, &repository_root)?;
     if v1_index.parent_generation.is_some() {
         return Err(VerticalError::Invariant(
             "first valid fixture publication unexpectedly had a parent generation",
@@ -306,7 +309,8 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         &v1_index.generation,
     )?;
     modify_fixture_to_v2(&repository_root)?;
-    let v2_index = index_repository("v2", &mut mcp, &catalog, &mut transcript, &repository_root)?;
+    let v2_index =
+        index_repository_deep("v2", &mut mcp, &catalog, &mut transcript, &repository_root)?;
     if v1_index.repository != v2_index.repository {
         return Err(VerticalError::Invariant(
             "repository identity changed across fixture generations",
@@ -475,7 +479,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
             "tool catalog changed for the deterministic rebuild",
         ));
     }
-    let rebuilt_index = index_repository(
+    let rebuilt_index = index_repository_deep(
         "rebuild-v1",
         &mut rebuilt_mcp,
         &rebuilt_catalog,
@@ -1562,12 +1566,40 @@ fn index_repository(
     transcript: &mut TranscriptWriter,
     repository_root: &Path,
 ) -> Result<IndexReceipt, VerticalError> {
+    index_repository_with_mode(
+        label,
+        process,
+        catalog,
+        transcript,
+        repository_root,
+        "structural",
+    )
+}
+
+fn index_repository_deep(
+    label: &str,
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+    repository_root: &Path,
+) -> Result<IndexReceipt, VerticalError> {
+    index_repository_with_mode(label, process, catalog, transcript, repository_root, "deep")
+}
+
+fn index_repository_with_mode(
+    label: &str,
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+    repository_root: &Path,
+    mode: &'static str,
+) -> Result<IndexReceipt, VerticalError> {
     let root = repository_root
         .to_str()
         .ok_or(VerticalError::Invariant("fixture root was not valid UTF-8"))?;
     let arguments = json!({
         "root": root,
-        "mode": "structural",
+        "mode": mode,
         "detached": false
     });
     let mut attempt = 1_u8;
@@ -1596,6 +1628,38 @@ fn index_repository(
     };
     require_tool_success(&response, "repo.index")?;
     assert_control_value_omits_sentinels(&response.structured)?;
+    let selected_mode = required_string(
+        &response.structured["data"]["accepted_plan"]["mode"],
+        "repo.index selected mode",
+    )?;
+    if selected_mode != mode {
+        return Err(VerticalError::Invariant(
+            "repo.index did not select the explicitly requested analysis mode",
+        ));
+    }
+    if mode == "deep" {
+        let providers = response.structured["data"]["accepted_plan"]["providers"]
+            .as_array()
+            .ok_or(VerticalError::Invariant(
+                "deep repo.index omitted its accepted providers",
+            ))?;
+        if !providers
+            .iter()
+            .any(|provider| provider.as_str() == Some(PROJECT_SEMANTICS_PROVIDER))
+        {
+            return Err(VerticalError::Invariant(
+                "deep repo.index omitted the project semantics provider",
+            ));
+        }
+        if diagnostic_code_is_present(
+            &response.structured["data"]["diagnostics"],
+            PROJECT_ANALYSIS_FALLBACK_DIAGNOSTIC,
+        ) {
+            return Err(VerticalError::Invariant(
+                "deep repo.index degraded to structural fallback",
+            ));
+        }
+    }
     let repository = required_string(
         &response.structured["data"]["repository_id"],
         "repo.index repository ID",
@@ -1954,7 +2018,8 @@ fn exercise_complete_tool_matrix(
         snapshot,
         cancellation_observed,
     } = scenario;
-    let matrix_index = index_repository("matrix", process, catalog, transcript, repository_root)?;
+    let matrix_index =
+        index_repository_deep("matrix", process, catalog, transcript, repository_root)?;
     if matrix_index.repository != head.repository || matrix_index.generation != head.generation {
         return Err(VerticalError::Invariant(
             "unchanged matrix fixture did not preserve repository and generation identity",

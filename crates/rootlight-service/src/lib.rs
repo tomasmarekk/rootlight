@@ -41,8 +41,8 @@ use rootlight_discovery::{
     ManifestInput, correlate_incremental_manifest, discover, discover_incremental,
 };
 use rootlight_ids::{
-    ContentHash, FileId, GenerationId, GenerationIdentity, OperationId, RepositoryId, SymbolId,
-    content_hash, derive_fact, derive_generation, derive_repository,
+    ContentHash, FactId, FileId, GenerationId, GenerationIdentity, OperationId, RepositoryId,
+    SymbolId, content_hash, derive_fact, derive_generation, derive_repository,
 };
 use rootlight_incremental::{
     AnalysisUnitId, ArtifactDecisionKind, ArtifactId, ArtifactSummary, DependencyEdge,
@@ -53,8 +53,9 @@ use rootlight_incremental::{
 };
 pub use rootlight_incremental::{ChangeClass, FactDomain, FallbackReason, FileChangeKind};
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, ExtensionSupport, FileIdentityClaim, IrLimits,
-    NormalizedIrDocument, OccurrenceRole, ProducerIdentity, SourceRef, SourceSpan,
+    AnalysisTier, BuildContextIdentity, CoverageStatus, DiagnosticRecord, DiagnosticSeverity,
+    ExtensionSupport, FactEvidence, FactRef, FileIdentityClaim, IrLimits, NormalizedIrDocument,
+    OccurrenceRole, ProducerIdentity, SourceRef, SourceSpan, derive_diagnostic_record_id,
 };
 pub use rootlight_query::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
@@ -99,8 +100,10 @@ const MAX_SYNTAX_DEPTH: usize = 128;
 const MAX_REPOSITORY_PATH_IDENTITY_BYTES: usize = 64 * 1024;
 const MAX_RANDOM_ID_ATTEMPTS: usize = 8;
 const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/3";
+const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/1";
 const PARSER_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.parser-providers/1";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
+const PROJECT_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.project-context/1";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/2";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
@@ -1613,6 +1616,183 @@ impl Default for FirstSliceBudget {
     }
 }
 
+/// Analysis strength requested for one repository generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstSliceIndexMode {
+    /// Use only in-process audited structural analyzers.
+    Structural,
+    /// Attempt isolated whole-project Tier B analysis with explicit fallback.
+    Deep,
+}
+
+/// One immutable source made available to a whole-project analysis provider.
+#[derive(Debug, Clone, Copy)]
+pub struct FirstSliceProjectInput<'a> {
+    file: FileId,
+    path: &'a str,
+    content_hash: ContentHash,
+    source: &'a [u8],
+    generated: bool,
+}
+
+impl FirstSliceProjectInput<'_> {
+    /// Returns the repository-stable file identity.
+    #[must_use]
+    pub const fn file(&self) -> FileId {
+        self.file
+    }
+
+    /// Returns the canonical repository-relative display path.
+    #[must_use]
+    pub const fn path(&self) -> &str {
+        self.path
+    }
+
+    /// Returns the digest of the immutable source bytes.
+    #[must_use]
+    pub const fn content_hash(&self) -> ContentHash {
+        self.content_hash
+    }
+
+    /// Returns the immutable source bytes.
+    #[must_use]
+    pub const fn source(&self) -> &[u8] {
+        self.source
+    }
+
+    /// Reports whether discovery classified the source as generated.
+    #[must_use]
+    pub const fn generated(&self) -> bool {
+        self.generated
+    }
+}
+
+/// One generation-bound whole-project analysis transaction.
+#[derive(Debug, Clone, Copy)]
+pub struct FirstSliceProjectAnalysisRequest<'a> {
+    repository: RepositoryId,
+    generation: GenerationId,
+    language: &'a str,
+    build_context: ContentHash,
+    context_manifest: &'a [u8],
+    inputs: &'a [FirstSliceProjectInput<'a>],
+}
+
+impl FirstSliceProjectAnalysisRequest<'_> {
+    /// Returns the owning repository.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the immutable target generation.
+    #[must_use]
+    pub const fn generation(&self) -> GenerationId {
+        self.generation
+    }
+
+    /// Returns the exact language shared by every input.
+    #[must_use]
+    pub const fn language(&self) -> &str {
+        self.language
+    }
+
+    /// Returns the build-context identity selected by the service.
+    #[must_use]
+    pub const fn build_context(&self) -> ContentHash {
+        self.build_context
+    }
+
+    /// Returns the canonical opaque build-context manifest.
+    #[must_use]
+    pub const fn context_manifest(&self) -> &[u8] {
+        self.context_manifest
+    }
+
+    /// Returns display-path-sorted immutable inputs.
+    #[must_use]
+    pub const fn inputs(&self) -> &[FirstSliceProjectInput<'_>] {
+        self.inputs
+    }
+}
+
+/// Validated project output plus evidence from its exact producing process.
+#[derive(Debug)]
+pub struct FirstSliceProjectAnalysis {
+    document: NormalizedIrDocument,
+    isolation_permits_deep_adapter: bool,
+}
+
+impl FirstSliceProjectAnalysis {
+    /// Creates one project output at the daemon-owned adapter boundary.
+    #[must_use]
+    pub const fn new(document: NormalizedIrDocument, isolation_permits_deep_adapter: bool) -> Self {
+        Self {
+            document,
+            isolation_permits_deep_adapter,
+        }
+    }
+
+    fn into_parts(self) -> (NormalizedIrDocument, bool) {
+        (self.document, self.isolation_permits_deep_adapter)
+    }
+}
+
+/// Source-free failures from the optional whole-project analysis boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FirstSliceProjectAnalysisError {
+    /// Cooperative cancellation or a monotonic deadline won.
+    #[error("project analysis was cancelled: {0:?}")]
+    Cancelled(CancellationReason),
+    /// The configured adapter identity could not be authenticated.
+    #[error("project adapter identity is unavailable")]
+    Identity,
+    /// The adapter protocol or request correlation failed.
+    #[error("project adapter protocol failed")]
+    Protocol,
+    /// The native isolation boundary could not be established.
+    #[error("project adapter isolation failed")]
+    Isolation,
+    /// The bounded project analysis could not complete.
+    #[error("project adapter analysis failed")]
+    Analysis,
+}
+
+impl FirstSliceProjectAnalysisError {
+    const fn fallback_code(self) -> &'static str {
+        match self {
+            Self::Cancelled(_) => "project-adapter-cancelled",
+            Self::Identity => "project-adapter-identity-fallback",
+            Self::Protocol => "project-adapter-protocol-fallback",
+            Self::Isolation => "project-adapter-isolation-fallback",
+            Self::Analysis => "project-adapter-analysis-fallback",
+        }
+    }
+}
+
+/// Daemon-supplied whole-project analyzer used only through native isolation.
+pub trait FirstSliceProjectAnalyzer: Send + Sync {
+    /// Returns the exact adapter-binary identity included in generation identity.
+    fn provider_identity(&self) -> ContentHash;
+
+    /// Produces one atomic language-project document.
+    ///
+    /// Implementations must not execute repository-owned code or expose local
+    /// repository paths to the child process.
+    ///
+    /// # Errors
+    ///
+    /// Returns a source-free boundary failure. Cancellation must be reported as
+    /// [`FirstSliceProjectAnalysisError::Cancelled`] instead of selecting a
+    /// structural fallback.
+    fn analyze(
+        &self,
+        request: FirstSliceProjectAnalysisRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError>;
+}
+
 /// Transport-independent owner of bounded repository generations.
 ///
 /// The service retains at most the caller-selected hard-bounded generation
@@ -1625,6 +1805,7 @@ pub struct FirstSliceService {
     analysis_limits: AnalysisLimits,
     extensions: ExtensionSupport,
     analyzers: BTreeMap<String, TreeSitterAnalyzer>,
+    project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
     resolver: ResolutionEngine,
     // The canonical-root digest remains an internal lookup key. Durable mode
     // persists the random repository UUID instead of deriving public identity
@@ -1683,12 +1864,51 @@ impl FirstSliceService {
         state_root: &Path,
         cancellation: &Cancellation,
     ) -> Result<Self, FirstSliceError> {
+        Self::new_durable_with_optional_project_analyzer(
+            maximum_generations,
+            state_root,
+            None,
+            cancellation,
+        )
+    }
+
+    /// Opens the durable service with one authenticated project analyzer.
+    ///
+    /// The exact provider identity participates in generation derivation.
+    /// Project output is accepted only when the provider also reports native
+    /// isolation evidence; all other non-cancellation failures select an
+    /// explicit structural fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::new_durable`].
+    pub fn new_durable_with_project_analyzer(
+        maximum_generations: usize,
+        state_root: &Path,
+        project_analyzer: Arc<dyn FirstSliceProjectAnalyzer>,
+        cancellation: &Cancellation,
+    ) -> Result<Self, FirstSliceError> {
+        Self::new_durable_with_optional_project_analyzer(
+            maximum_generations,
+            state_root,
+            Some(project_analyzer),
+            cancellation,
+        )
+    }
+
+    fn new_durable_with_optional_project_analyzer(
+        maximum_generations: usize,
+        state_root: &Path,
+        project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
+        cancellation: &Cancellation,
+    ) -> Result<Self, FirstSliceError> {
         let durable = DurableCatalog::open(state_root, maximum_generations)?;
         let restored = durable.restore(cancellation)?;
         let mut service = Self::new_with_storage(
             maximum_generations,
             MAX_RETAINED_SOURCE_BYTES,
             Some(durable),
+            project_analyzer,
         )?;
         service.install_restored(restored, cancellation)?;
         Ok(service)
@@ -1806,13 +2026,14 @@ impl FirstSliceService {
         maximum_generations: usize,
         maximum_source_bytes: usize,
     ) -> Result<Self, FirstSliceError> {
-        Self::new_with_storage(maximum_generations, maximum_source_bytes, None)
+        Self::new_with_storage(maximum_generations, maximum_source_bytes, None, None)
     }
 
     fn new_with_storage(
         maximum_generations: usize,
         maximum_source_bytes: usize,
         durable: Option<DurableCatalog>,
+        project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
     ) -> Result<Self, FirstSliceError> {
         let total_generation_capacity = maximum_generations
             .checked_mul(MAX_FIRST_SLICE_REPOSITORIES)
@@ -1886,6 +2107,7 @@ impl FirstSliceService {
             analysis_limits,
             extensions: ExtensionSupport::default(),
             analyzers,
+            project_analyzer,
             resolver: ResolutionEngine::default(),
             repositories: BTreeMap::new(),
             pending_repository_registrations: BTreeMap::new(),
@@ -1931,6 +2153,32 @@ impl FirstSliceService {
             return Ok(());
         }
         durable.ensure_staging_capacity(required_bytes)
+    }
+
+    /// Reports whether an authenticated whole-project analyzer is configured.
+    #[must_use]
+    pub fn deep_analysis_available(&self) -> bool {
+        self.project_analyzer.is_some()
+    }
+
+    fn provider_set_hash(&self, mode: FirstSliceIndexMode) -> Result<ContentHash, FirstSliceError> {
+        let structural = first_slice_provider_set_hash()?;
+        if mode == FirstSliceIndexMode::Structural {
+            return Ok(structural);
+        }
+        let Some(project_analyzer) = &self.project_analyzer else {
+            return hash_static_components(&[
+                PROJECT_PROVIDER_SET_SEED,
+                structural.as_bytes(),
+                b"unavailable",
+            ]);
+        };
+        let project = project_analyzer.provider_identity();
+        hash_static_components(&[
+            PROJECT_PROVIDER_SET_SEED,
+            structural.as_bytes(),
+            project.as_bytes(),
+        ])
     }
 
     #[cfg(test)]
@@ -2095,7 +2343,21 @@ impl FirstSliceService {
         path: &Path,
         cancellation: &Cancellation,
     ) -> Result<FirstSliceIndexReceipt, FirstSliceError> {
-        let prepared = self.prepare_repository(path, cancellation)?;
+        self.index_repository_with_mode(path, FirstSliceIndexMode::Structural, cancellation)
+    }
+
+    /// Indexes and publishes one repository using the requested analysis strength.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::index_repository`].
+    pub fn index_repository_with_mode(
+        &mut self,
+        path: &Path,
+        mode: FirstSliceIndexMode,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceIndexReceipt, FirstSliceError> {
+        let prepared = self.prepare_repository_with_mode(path, mode, cancellation)?;
         self.publish_prepared(prepared, cancellation)
     }
 
@@ -2129,6 +2391,20 @@ impl FirstSliceService {
     pub fn prepare_repository(
         &self,
         path: &Path,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
+        self.prepare_repository_with_mode(path, FirstSliceIndexMode::Structural, cancellation)
+    }
+
+    /// Builds one hidden generation using the requested analysis strength.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::prepare_repository`].
+    pub fn prepare_repository_with_mode(
+        &self,
+        path: &Path,
+        mode: FirstSliceIndexMode,
         cancellation: &Cancellation,
     ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
         let started = Instant::now();
@@ -2176,7 +2452,7 @@ impl FirstSliceService {
             DiscoveryPolicy::build(Vec::new(), false).map_err(|_| FirstSliceError::Discovery)?;
         let discovery_limits = DiscoveryLimits::from_config(&self.config);
         let parser_provider_hash = first_slice_parser_provider_hash()?;
-        let provider_set_hash = first_slice_provider_set_hash()?;
+        let provider_set_hash = self.provider_set_hash(mode)?;
         let active = self.active_by_repository.get(&repository).copied();
         let parent_baseline =
             active.and_then(|generation| self.incremental_baselines.get(&generation));
@@ -2331,6 +2607,7 @@ impl FirstSliceService {
             cancellation,
         )?;
         let mut document = NormalizedIrDocument::empty(repository, generation);
+        let mut structural_documents = BTreeMap::<String, Vec<NormalizedIrDocument>>::new();
         let mut structural_entries = Vec::new();
         structural_entries
             .try_reserve_exact(sources.len())
@@ -2401,16 +2678,24 @@ impl FirstSliceService {
                 parsed_files = parsed_files.checked_add(1).ok_or(FirstSliceError::Limits)?;
                 (output, Arc::new(artifact))
             };
-            append_normalized_document(
-                &mut document,
-                output.document().clone(),
-                self.analysis_limits.ir(),
-            )?;
+            let language_documents = structural_documents.entry(language.clone()).or_default();
+            language_documents
+                .try_reserve(1)
+                .map_err(|_| FirstSliceError::Limits)?;
+            language_documents.push(output.document().clone());
             structural_entries.push(StructuralArtifactEntry {
                 id: artifact_id,
                 artifact,
             });
         }
+        self.append_best_available_documents(
+            &mut document,
+            structural_documents,
+            &sources,
+            &source_languages,
+            mode,
+            cancellation,
+        )?;
         incremental_plan.state.evidence.parsed_files =
             u64::try_from(parsed_files).map_err(|_| FirstSliceError::Limits)?;
         incremental_plan.state.evidence.reused_parser_artifacts =
@@ -2527,6 +2812,112 @@ impl FirstSliceService {
                 durable,
             },
         ))
+    }
+
+    fn append_best_available_documents(
+        &self,
+        target: &mut NormalizedIrDocument,
+        structural_documents: BTreeMap<String, Vec<NormalizedIrDocument>>,
+        sources: &[RustSourceInput],
+        source_languages: &BTreeMap<FileId, String>,
+        mode: FirstSliceIndexMode,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceError> {
+        for (language, fallback_documents) in structural_documents {
+            check_cancellation(cancellation)?;
+            let mut inputs = Vec::new();
+            inputs
+                .try_reserve_exact(fallback_documents.len())
+                .map_err(|_| FirstSliceError::Limits)?;
+            for source in sources {
+                if source_languages.get(&source.snapshot.file()) != Some(&language) {
+                    continue;
+                }
+                inputs.push(FirstSliceProjectInput {
+                    file: source.snapshot.file(),
+                    path: source.snapshot.path().as_str(),
+                    content_hash: source.snapshot.content_hash(),
+                    source: source.snapshot.content(),
+                    generated: source.generated,
+                });
+            }
+            if inputs.len() != fallback_documents.len() {
+                return Err(FirstSliceError::Identity);
+            }
+
+            let mut fallback_error = (mode == FirstSliceIndexMode::Deep
+                && self.project_analyzer.is_none())
+            .then_some(FirstSliceProjectAnalysisError::Identity);
+            if mode == FirstSliceIndexMode::Deep
+                && let Some(project_analyzer) = &self.project_analyzer
+            {
+                let context_manifest = project_context_manifest(&language, self.config.hash())?;
+                let build_context =
+                    hash_static_components(&[BUILD_CONTEXT_SEED, language.as_bytes()])?;
+                let request = FirstSliceProjectAnalysisRequest {
+                    repository: target.repository,
+                    generation: target.generation,
+                    language: &language,
+                    build_context,
+                    context_manifest: &context_manifest,
+                    inputs: &inputs,
+                };
+                match project_analyzer.analyze(request, cancellation) {
+                    Ok(output) => {
+                        let (document, isolation_permits_deep_adapter) = output.into_parts();
+                        if !isolation_permits_deep_adapter {
+                            fallback_error = Some(FirstSliceProjectAnalysisError::Isolation);
+                        } else if !project_document_matches_inputs(
+                            &document,
+                            target.repository,
+                            target.generation,
+                            &inputs,
+                        ) {
+                            fallback_error = Some(FirstSliceProjectAnalysisError::Protocol);
+                        } else if append_normalized_document(
+                            target,
+                            document,
+                            self.analysis_limits.ir(),
+                        )
+                        .is_ok()
+                        {
+                            continue;
+                        } else {
+                            fallback_error = Some(FirstSliceProjectAnalysisError::Analysis);
+                        }
+                    }
+                    Err(FirstSliceProjectAnalysisError::Cancelled(reason)) => {
+                        return Err(FirstSliceError::Cancelled(reason));
+                    }
+                    Err(error) => fallback_error = Some(error),
+                }
+            }
+
+            let fallback_file = fallback_documents
+                .first()
+                .and_then(|document| document.files.first())
+                .map(|file| file.id)
+                .ok_or(FirstSliceError::Identity)?;
+            let fallback_provenance = fallback_documents
+                .first()
+                .and_then(|document| document.provenance.first())
+                .map(|provenance| provenance.id)
+                .ok_or(FirstSliceError::Identity)?;
+            for document in fallback_documents {
+                append_normalized_document(target, document, self.analysis_limits.ir())?;
+            }
+            if let Some(error) = fallback_error {
+                append_project_fallback_diagnostic(
+                    target,
+                    &language,
+                    error,
+                    fallback_file,
+                    fallback_provenance,
+                    self.analysis_limits.ir(),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Compatibility wrapper for callers using the original Rust-first API name.
@@ -5382,6 +5773,89 @@ fn durable_staging_reservation(source_bytes: u64) -> Result<u64, FirstSliceError
         .ok_or(FirstSliceError::Limits)
 }
 
+fn project_context_manifest(
+    language: &str,
+    configuration: ContentHash,
+) -> Result<Vec<u8>, FirstSliceError> {
+    let capacity = PROJECT_CONTEXT_SEED
+        .len()
+        .checked_add(configuration.as_bytes().len())
+        .and_then(|length| length.checked_add(language.len()))
+        .and_then(|length| length.checked_add(2))
+        .ok_or(FirstSliceError::Limits)?;
+    let mut manifest = Vec::new();
+    manifest
+        .try_reserve_exact(capacity)
+        .map_err(|_| FirstSliceError::Limits)?;
+    manifest.extend_from_slice(PROJECT_CONTEXT_SEED);
+    manifest.push(0);
+    manifest.extend_from_slice(configuration.as_bytes());
+    manifest.push(0);
+    manifest.extend_from_slice(language.as_bytes());
+    Ok(manifest)
+}
+
+fn project_document_matches_inputs(
+    document: &NormalizedIrDocument,
+    repository: RepositoryId,
+    generation: GenerationId,
+    inputs: &[FirstSliceProjectInput<'_>],
+) -> bool {
+    if document.repository != repository
+        || document.generation != generation
+        || document.files.len() != inputs.len()
+        || document.provenance.is_empty()
+        || document
+            .provenance
+            .iter()
+            .any(|provenance| provenance.tier != AnalysisTier::TierB)
+    {
+        return false;
+    }
+    let expected = inputs
+        .iter()
+        .map(FirstSliceProjectInput::file)
+        .collect::<BTreeSet<_>>();
+    let observed = document
+        .files
+        .iter()
+        .map(|file| file.id)
+        .collect::<BTreeSet<_>>();
+    expected.len() == inputs.len() && expected == observed
+}
+
+fn append_project_fallback_diagnostic(
+    document: &mut NormalizedIrDocument,
+    language: &str,
+    error: FirstSliceProjectAnalysisError,
+    fallback_file: FileId,
+    fallback_provenance: FactId,
+    limits: &IrLimits,
+) -> Result<(), FirstSliceError> {
+    let total = normalized_record_count(document)?;
+    checked_combined_length(total, 1, limits.max_total_records)?;
+    reserve_records(&mut document.diagnostics, 1, limits.max_diagnostics)?;
+    let mut diagnostic = DiagnosticRecord {
+        id: FactId::from_bytes([0; 20]),
+        repository: document.repository,
+        generation: document.generation,
+        code: error.fallback_code().to_owned(),
+        message: format!("project analysis for {language} used structural fallback"),
+        severity: DiagnosticSeverity::Warning,
+        source: None,
+        coverage_effect: CoverageStatus::Unknown,
+        provenance: fallback_provenance,
+        evidence: FactEvidence {
+            source: None,
+            derivation: vec![FactRef::File(fallback_file)],
+        },
+    };
+    diagnostic.id =
+        derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
+    document.diagnostics.push(diagnostic);
+    Ok(())
+}
+
 fn append_normalized_document(
     target: &mut NormalizedIrDocument,
     source: NormalizedIrDocument,
@@ -5936,6 +6410,7 @@ mod tests {
         ffi::OsStr,
         fs,
         path::Path,
+        sync::atomic::{AtomicUsize, Ordering},
         time::{Duration, Instant},
     };
 
@@ -5961,6 +6436,27 @@ mod tests {
         include_str!("../../../tests/fixtures/vertical-slice/first-slice/v1-to-v2.patch");
     const IGNORED_SENTINEL: &str = "ROOTLIGHT_IGNORED_SENTINEL";
     const EQUIVALENCE_COMPONENT_BYTES: usize = 4 * 1024 * 1024;
+
+    struct FailingProjectAnalyzer {
+        identity: ContentHash,
+        error: FirstSliceProjectAnalysisError,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl FirstSliceProjectAnalyzer for FailingProjectAnalyzer {
+        fn provider_identity(&self) -> ContentHash {
+            self.identity
+        }
+
+        fn analyze(
+            &self,
+            _request: FirstSliceProjectAnalysisRequest<'_>,
+            _cancellation: &Cancellation,
+        ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(self.error)
+        }
+    }
 
     fn durable_test_tempdir() -> TempDir {
         #[cfg(target_os = "macos")]
@@ -6034,6 +6530,154 @@ mod tests {
                 "package sample\n\nfunc GoValue() int { return 1 }\n",
             )],
             &[("go", "GoValue")],
+        );
+    }
+
+    #[test]
+    fn project_analysis_failure_uses_an_explicit_structural_fallback() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[("src/value.py", "def python_value():\n    return 1\n")],
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer = Arc::new(FailingProjectAnalyzer {
+            identity: content_hash(b"failing-project-adapter"),
+            error: FirstSliceProjectAnalysisError::Analysis,
+            calls: Arc::clone(&calls),
+        });
+        let mut service =
+            FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("service initializes with a project adapter");
+
+        let receipt = service
+            .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
+            .expect("structural fallback remains publishable");
+        let status = service
+            .repository_status(receipt.repository, None)
+            .expect("fallback generation status resolves");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(receipt.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "project-adapter-analysis-fallback"
+                && diagnostic.message == "project analysis for python used structural fallback"
+        }));
+        assert!(status.coverage.iter().any(|coverage| {
+            coverage.language == "python"
+                && coverage.tier == "tier_d"
+                && coverage.status == "complete"
+        }));
+    }
+
+    #[test]
+    fn structural_mode_never_invokes_the_project_analyzer() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[("src/value.py", "def python_value():\n    return 1\n")],
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer = Arc::new(FailingProjectAnalyzer {
+            identity: content_hash(b"unused-project-adapter"),
+            error: FirstSliceProjectAnalysisError::Analysis,
+            calls: Arc::clone(&calls),
+        });
+        let mut service =
+            FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("service initializes with a project adapter");
+
+        let receipt = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &deadline(),
+            )
+            .expect("structural analysis publishes");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(receipt.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn project_adapter_cancellation_never_degrades_to_fallback() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[("src/value.py", "def python_value():\n    return 1\n")],
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer = Arc::new(FailingProjectAnalyzer {
+            identity: content_hash(b"cancelled-project-adapter"),
+            error: FirstSliceProjectAnalysisError::Cancelled(CancellationReason::ClientRequest),
+            calls: Arc::clone(&calls),
+        });
+        let mut service =
+            FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("service initializes with a project adapter");
+
+        assert_eq!(
+            service.index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Deep,
+                &deadline(),
+            ),
+            Err(FirstSliceError::Cancelled(
+                CancellationReason::ClientRequest
+            ))
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(service.active_generation().is_none());
+    }
+
+    #[test]
+    fn exact_project_adapter_identity_changes_generation_provider_identity() {
+        let structural = FirstSliceService::new(2).expect("structural service initializes");
+        let first = FirstSliceService::new_with_storage(
+            2,
+            MAX_RETAINED_SOURCE_BYTES,
+            None,
+            Some(Arc::new(FailingProjectAnalyzer {
+                identity: content_hash(b"project-adapter-one"),
+                error: FirstSliceProjectAnalysisError::Analysis,
+                calls: Arc::new(AtomicUsize::new(0)),
+            })),
+        )
+        .expect("first project service initializes");
+        let second = FirstSliceService::new_with_storage(
+            2,
+            MAX_RETAINED_SOURCE_BYTES,
+            None,
+            Some(Arc::new(FailingProjectAnalyzer {
+                identity: content_hash(b"project-adapter-two"),
+                error: FirstSliceProjectAnalysisError::Analysis,
+                calls: Arc::new(AtomicUsize::new(0)),
+            })),
+        )
+        .expect("second project service initializes");
+
+        assert_ne!(
+            structural
+                .provider_set_hash(FirstSliceIndexMode::Structural)
+                .expect("hash derives"),
+            first
+                .provider_set_hash(FirstSliceIndexMode::Deep)
+                .expect("hash derives")
+        );
+        assert_eq!(
+            structural
+                .provider_set_hash(FirstSliceIndexMode::Structural)
+                .expect("hash derives"),
+            first
+                .provider_set_hash(FirstSliceIndexMode::Structural)
+                .expect("hash derives")
+        );
+        assert_ne!(
+            first
+                .provider_set_hash(FirstSliceIndexMode::Deep)
+                .expect("hash derives"),
+            second
+                .provider_set_hash(FirstSliceIndexMode::Deep)
+                .expect("hash derives")
         );
     }
 

@@ -93,7 +93,7 @@ pub const DEFAULT_OPERATION_WORKERS: usize = 4;
 /// Fixed bounded CPU work performed by one infrastructure control probe.
 pub const CONTROL_PROBE_WORK: Duration = Duration::from_secs(3);
 /// Default maximum server-side request response time.
-pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Retained compatibility interval from the former polling scheduler.
 pub const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
 /// Default orderly shutdown grace period.
@@ -6100,6 +6100,7 @@ fn first_slice_response_correlates(
                     response.parent_generation.as_ref().map(|id| &id.value),
                     response.published_generation.as_ref().map(|id| &id.value),
                 )
+                && repository_index_mode_correlates(request.mode, response.mode)
                 && response.indexed_files <= response.discovered_inputs
         }
         (
@@ -7023,6 +7024,30 @@ fn first_slice_response_correlates(
         }
         _ => false,
     }
+}
+
+fn repository_index_mode_correlates(request: i32, response: i32) -> bool {
+    let Ok(request) = daemon::RepositoryIndexMode::try_from(request) else {
+        return false;
+    };
+    let Ok(response) = daemon::RepositoryIndexMode::try_from(response) else {
+        return false;
+    };
+    matches!(
+        (request, response),
+        (
+            daemon::RepositoryIndexMode::Unspecified
+                | daemon::RepositoryIndexMode::RepositoryIndexStructural,
+            daemon::RepositoryIndexMode::RepositoryIndexStructural
+        ) | (
+            daemon::RepositoryIndexMode::RepositoryIndexDeep,
+            daemon::RepositoryIndexMode::RepositoryIndexDeep
+        ) | (
+            daemon::RepositoryIndexMode::RepositoryIndexAuto,
+            daemon::RepositoryIndexMode::RepositoryIndexStructural
+                | daemon::RepositoryIndexMode::RepositoryIndexDeep
+        )
+    )
 }
 
 fn repository_catalog_page_correlates(
@@ -10227,6 +10252,7 @@ mod tests {
                             value: operation.clone(),
                         }),
                         detached: false,
+                        mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
                     },
                 )),
             },
@@ -10337,6 +10363,7 @@ mod tests {
                             value: operation.clone(),
                         }),
                         detached: true,
+                        mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
                     },
                 )),
             },
@@ -15175,6 +15202,7 @@ mod tests {
             root: "C:\\bounded".to_owned(),
             operation: Some(operation.clone()),
             detached: true,
+            mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
         });
         let index_response = daemon::RepositoryIndexResponse {
             schema_version: schema,
@@ -15189,10 +15217,18 @@ mod tests {
             entities: 2,
             elapsed_micros: 1,
             estimated_disk_bytes: 4_096,
+            diagnostics: Vec::new(),
+            mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
         };
         assert!(first_slice_response_correlates(
             &index_request,
             &FirstSliceIpcResponse::RepositoryIndex(index_response.clone())
+        ));
+        let mut substituted_mode = index_response.clone();
+        substituted_mode.mode = daemon::RepositoryIndexMode::RepositoryIndexDeep as i32;
+        assert!(!first_slice_response_correlates(
+            &index_request,
+            &FirstSliceIpcResponse::RepositoryIndex(substituted_mode)
         ));
         let mut pending_index = index_response.clone();
         pending_index.state = daemon::OperationState::Queued as i32;

@@ -23,8 +23,8 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, RepositoryId, content_hash};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageStatus, DiagnosticSeverity, ExtensionSupport,
-    FactDomain, IrLimits, OccurrenceRole, OccurrenceTarget, ProducerIdentity, RelationPredicate,
-    SourceRef, SourceSpan,
+    FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain, IrLimits, OccurrenceRole, OccurrenceTarget,
+    ProducerIdentity, RelationPredicate, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef, SourceSpan,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
@@ -85,6 +85,28 @@ fn every_language_emits_complete_tier_b_project_semantics() {
         assert!(
             !output.document().extensions.is_empty(),
             "{} signature evidence was not retained",
+            case.language.as_str()
+        );
+        assert_eq!(
+            output
+                .document()
+                .extensions
+                .iter()
+                .filter(|extension| extension.namespace == FILE_IDENTITY_CLAIM_NAMESPACE)
+                .count(),
+            output.document().files.len(),
+            "{} file identity proofs were incomplete",
+            case.language.as_str()
+        );
+        assert_eq!(
+            output
+                .document()
+                .extensions
+                .iter()
+                .filter(|extension| extension.namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE)
+                .count(),
+            output.document().entities.len(),
+            "{} symbol identity proofs were incomplete",
             case.language.as_str()
         );
     }

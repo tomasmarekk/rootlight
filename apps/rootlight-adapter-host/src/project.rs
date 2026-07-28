@@ -27,8 +27,9 @@ use rootlight_ids::{
     ContentHash, FileId, FileIdentity, GenerationId, RepositoryId, content_hash, derive_file,
 };
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, ExtensionSupport, IrLimits, LEXICAL_EXTENSION_NAMESPACE,
-    ProducerIdentity, SourceRef, SourceSpan,
+    AnalysisTier, BuildContextIdentity, ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, IrLimits,
+    LEXICAL_EXTENSION_NAMESPACE, ProducerIdentity, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef,
+    SourceSpan,
 };
 use rootlight_protocol::{
     adapter_contract::{
@@ -109,8 +110,8 @@ pub fn project_adapter_identity(executable: &Path) -> Result<AdapterIdentity, Ad
 /// Builds and validates the production advertisement for one exact executable.
 ///
 /// The advertisement fixes protocol 1.2, project normalized IR, first-party
-/// lexical evidence, first-party trust, cancellation, and the built-in hard
-/// resource ceiling.
+/// lexical evidence, producer-neutral identity claims, first-party trust,
+/// cancellation, and the built-in hard resource ceiling.
 ///
 /// # Errors
 ///
@@ -127,7 +128,7 @@ pub fn project_adapter_advertisement(
             maximum: Some(version),
         }),
         capabilities: vec![crate::PROJECT_NORMALIZED_IR_CAPABILITY.to_owned()],
-        extensions: vec![lexical_extension()],
+        extensions: project_extensions(),
         trust_level: AdapterTrustLevel::FirstParty as i32,
         hard_limits: Some(PROJECT_ADAPTER_HARD_LIMITS),
         supports_cancellation: true,
@@ -157,7 +158,7 @@ pub fn negotiate_project_adapter_session(
             selected_protocol: Some(project_protocol_version()),
             expected_adapter: Some(advertisement.identity().clone()),
             required_capabilities: vec![crate::PROJECT_NORMALIZED_IR_CAPABILITY.to_owned()],
-            required_extensions: vec![lexical_extension()],
+            required_extensions: project_extensions(),
             granted_limits: Some(granted_limits),
             maximum_trust: AdapterTrustLevel::FirstParty as i32,
             require_cancellation: true,
@@ -266,8 +267,20 @@ const fn project_protocol_version() -> ContractVersion {
 }
 
 fn lexical_extension() -> ExtensionDescriptor {
+    project_extension(LEXICAL_EXTENSION_NAMESPACE)
+}
+
+fn project_extensions() -> Vec<ExtensionDescriptor> {
+    vec![
+        project_extension(FILE_IDENTITY_CLAIM_NAMESPACE),
+        project_extension(SYMBOL_IDENTITY_CLAIM_NAMESPACE),
+        lexical_extension(),
+    ]
+}
+
+fn project_extension(namespace: &str) -> ExtensionDescriptor {
     ExtensionDescriptor {
-        namespace: LEXICAL_EXTENSION_NAMESPACE.to_owned(),
+        namespace: namespace.to_owned(),
         version: Some(ContractVersion { major: 1, minor: 0 }),
         critical: false,
     }
@@ -911,5 +924,24 @@ mod tests {
             semantic_language("TypeScript"),
             Err(AdapterHostError::ProjectRequest)
         ));
+    }
+
+    #[test]
+    fn project_session_negotiates_every_emitted_extension() {
+        let extensions = project_extensions();
+        assert_eq!(
+            extensions
+                .iter()
+                .map(|extension| extension.namespace.as_str())
+                .collect::<Vec<_>>(),
+            [
+                FILE_IDENTITY_CLAIM_NAMESPACE,
+                SYMBOL_IDENTITY_CLAIM_NAMESPACE,
+                LEXICAL_EXTENSION_NAMESPACE,
+            ]
+        );
+        assert!(extensions.iter().all(|extension| {
+            extension.version == Some(ContractVersion { major: 1, minor: 0 }) && !extension.critical
+        }));
     }
 }

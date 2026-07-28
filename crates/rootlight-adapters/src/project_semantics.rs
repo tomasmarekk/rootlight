@@ -20,14 +20,15 @@ use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, Confidence, ContainerRef, CoverageRecord, CoverageScope,
     CoverageStatus, DiagnosticRecord, EntityFlag, EntityKind, EntityRecord, EntityVisibility,
-    EvidenceKind, FactDomain, FactEvidence, FactRef, FileRecord, LexicalEvidenceFormat,
-    LexicalEvidenceKind, LexicalEvidenceV1, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
-    ProducerIdentity, ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
-    RelationRecord, SkippedRegion, SkippedRegionReason, SourceMappingKind, SourceMappingRecord,
-    SourceRef, SourceSpan, SymbolIdentityClaim, derive_coverage_record_id,
-    derive_diagnostic_record_id, derive_occurrence_record_id, derive_provenance_record_id,
-    derive_relation_record_id, derive_skipped_region_id, derive_source_mapping_record_id,
-    new_lexical_evidence_envelope,
+    EvidenceKind, FactDomain, FactEvidence, FactRef, FileIdentityClaim, FileRecord,
+    LexicalEvidenceFormat, LexicalEvidenceKind, LexicalEvidenceV1, OccurrenceRecord,
+    OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord,
+    RelationEndpoint, RelationPredicate, RelationRecord, SkippedRegion, SkippedRegionReason,
+    SourceMappingKind, SourceMappingRecord, SourceRef, SourceSpan, SymbolIdentityClaim,
+    derive_coverage_record_id, derive_diagnostic_record_id, derive_occurrence_record_id,
+    derive_provenance_record_id, derive_relation_record_id, derive_skipped_region_id,
+    derive_source_mapping_record_id, new_file_identity_claim_envelope,
+    new_lexical_evidence_envelope, new_symbol_identity_claim_envelope,
 };
 
 const STRUCTURAL_TIER: AnalysisTier = AnalysisTier::TierB;
@@ -528,6 +529,14 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             let path = input.source().path().as_str().to_owned();
             let byte_length = u64::try_from(input.source().bytes().len())
                 .map_err(|_| provider_failure("project-source-length"))?;
+            let file_claim = FileIdentityClaim {
+                file: source.span().file(),
+                repository: source.repository(),
+                path: path.clone(),
+                path_identity: input.source().path().identity_bytes().to_vec(),
+                content_hash: source.content_hash(),
+                byte_length,
+            };
             self.records.push(IrRecord::File(FileRecord {
                 id: source.span().file(),
                 repository: source.repository(),
@@ -543,15 +552,25 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 evidence: direct_evidence(source.clone()),
             }));
             self.records.push(IrRecord::Provenance(provenance));
+            self.records.push(IrRecord::Extension(
+                new_file_identity_claim_envelope(
+                    &file_claim,
+                    source.generation(),
+                    provenance_id,
+                    source.clone(),
+                )
+                .map_err(|_| provider_failure("project-file-identity-claim"))?,
+            ));
 
             let module_name = module_name(&path);
             let module_span = source.span();
-            let module_symbol = self.symbol(
+            let module_claim = self.symbol_claim(
                 EntityKind::Module,
                 ContainerRef::File(source.span().file()),
                 &module_name,
                 &path,
             );
+            let module_symbol = module_claim.symbol;
             self.records.push(IrRecord::Entity(EntityRecord {
                 id: module_symbol,
                 repository: source.repository(),
@@ -568,6 +587,15 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 provenance: provenance_id,
                 evidence: direct_evidence(source.clone()),
             }));
+            self.records.push(IrRecord::Extension(
+                new_symbol_identity_claim_envelope(
+                    &module_claim,
+                    source.generation(),
+                    provenance_id,
+                    source.clone(),
+                )
+                .map_err(|_| provider_failure("project-symbol-identity-claim"))?,
+            ));
             self.entities.push(SemanticEntity {
                 symbol: module_symbol,
                 name: module_name,
@@ -583,6 +611,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             domain_counts.insert(FactDomain::Files, 1);
             domain_counts.insert(FactDomain::Provenance, 1);
             domain_counts.insert(FactDomain::Entities, 1);
+            domain_counts.insert(FactDomain::Extensions, 2);
             self.states.insert(
                 source.span().file(),
                 FileBuildState {
@@ -628,12 +657,14 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     scope.span().end_byte()
                 );
                 let module = self.module_for(input)?;
-                let symbol = self.symbol(
+                let claim = self.symbol_claim(
                     EntityKind::Namespace,
                     ContainerRef::Entity(module),
                     &name,
                     &name,
                 );
+                let symbol = claim.symbol;
+                let provenance = self.provenance_for(input)?;
                 scope_symbols.insert(scope.local_id(), symbol);
                 self.records.push(IrRecord::Entity(EntityRecord {
                     id: symbol,
@@ -648,9 +679,18 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     container: Some(ContainerRef::Entity(module)),
                     visibility: EntityVisibility::Private,
                     flags: vec![EntityFlag::Synthetic],
-                    provenance: self.provenance_for(input)?,
+                    provenance,
                     evidence: direct_evidence(source.clone()),
                 }));
+                self.records.push(IrRecord::Extension(
+                    new_symbol_identity_claim_envelope(
+                        &claim,
+                        source.generation(),
+                        provenance,
+                        source.clone(),
+                    )
+                    .map_err(|_| provider_failure("project-symbol-identity-claim"))?,
+                ));
                 self.entities.push(SemanticEntity {
                     symbol,
                     name,
@@ -660,6 +700,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     source,
                 });
                 self.state_mut(input)?.increment(FactDomain::Entities)?;
+                self.state_mut(input)?.increment(FactDomain::Extensions)?;
             }
 
             let mut selected_definition_spans = BTreeSet::new();
@@ -802,7 +843,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .container
                 .map(ContainerRef::Entity)
                 .unwrap_or(ContainerRef::File(draft.file));
-            let symbol = self.symbol(draft.kind, container, &draft.name, &draft.header);
+            let claim = self.symbol_claim(draft.kind, container, &draft.name, &draft.header);
+            let symbol = claim.symbol;
             let state = self
                 .states
                 .get(&draft.file)
@@ -825,6 +867,15 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 provenance,
                 evidence: direct_evidence(draft.source.clone()),
             }));
+            self.records.push(IrRecord::Extension(
+                new_symbol_identity_claim_envelope(
+                    &claim,
+                    draft.source.generation(),
+                    provenance,
+                    draft.source.clone(),
+                )
+                .map_err(|_| provider_failure("project-symbol-identity-claim"))?,
+            ));
             let signature_source = source_for_span(
                 self.input_for_file(draft.file)?,
                 SourceSpan::new(
@@ -867,6 +918,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             });
             self.state_mut_by_file(draft.file)?
                 .increment(FactDomain::Entities)?;
+            self.state_mut_by_file(draft.file)?
+                .increment(FactDomain::Extensions)?;
             self.state_mut_by_file(draft.file)?
                 .increment(FactDomain::Extensions)?;
             let subject = match container {
@@ -1262,13 +1315,13 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         Ok(record)
     }
 
-    fn symbol(
+    fn symbol_claim(
         &self,
         kind: EntityKind,
         container: ContainerRef,
         name: &str,
         signature: &str,
-    ) -> SymbolId {
+    ) -> SymbolIdentityClaim {
         let mut container_identity = Vec::new();
         match container {
             ContainerRef::Repository(repository) => {
@@ -1296,7 +1349,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             build_context_discriminator: self.request.build_context().digest().as_bytes().to_vec(),
         };
         claim.symbol = claim.derived_symbol();
-        claim.symbol
+        claim
     }
 
     fn module_for(&self, input: &ProjectSourceInput<'_>) -> Result<SymbolId, AdapterError> {
@@ -1517,7 +1570,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             return Ok(existing.clone());
         }
         let container = ContainerRef::Repository(source.repository());
-        let symbol = self.symbol(EntityKind::ExternalSymbol, container, name, name);
+        let claim = self.symbol_claim(EntityKind::ExternalSymbol, container, name, name);
+        let symbol = claim.symbol;
+        let provenance = self.provenance_for_file(file)?;
         let entity = SemanticEntity {
             symbol,
             name: name.to_owned(),
@@ -1539,12 +1594,18 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             container: Some(container),
             visibility: EntityVisibility::Unknown,
             flags: vec![EntityFlag::External, EntityFlag::Synthetic],
-            provenance: self.provenance_for_file(file)?,
-            evidence: direct_evidence(source),
+            provenance,
+            evidence: direct_evidence(source.clone()),
         }));
+        self.records.push(IrRecord::Extension(
+            new_symbol_identity_claim_envelope(&claim, source.generation(), provenance, source)
+                .map_err(|_| provider_failure("project-symbol-identity-claim"))?,
+        ));
         self.entities.push(entity.clone());
         self.state_mut_by_file(file)?
             .increment(FactDomain::Entities)?;
+        self.state_mut_by_file(file)?
+            .increment(FactDomain::Extensions)?;
         Ok(entity)
     }
 

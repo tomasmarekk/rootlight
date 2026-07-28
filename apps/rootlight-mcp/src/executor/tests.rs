@@ -2886,6 +2886,7 @@ async fn maps_repository_index_without_replacing_stable_identities() {
         RepositoryIndex {
             repository: repository(),
             operation: operation(),
+            mode: client::RepositoryIndexMode::Structural,
             state: ClientOperationState::Succeeded,
             revision: 8,
             parent_generation: Some(parent_generation()),
@@ -2945,6 +2946,7 @@ async fn repository_auto_mode_reports_the_selected_structural_plan() {
         RepositoryIndex {
             repository: repository(),
             operation: operation(),
+            mode: client::RepositoryIndexMode::Structural,
             state: ClientOperationState::Succeeded,
             revision: 8,
             parent_generation: Some(parent_generation()),
@@ -2991,12 +2993,68 @@ async fn repository_auto_mode_reports_the_selected_structural_plan() {
 }
 
 #[tokio::test]
+async fn repository_deep_mode_preserves_the_isolated_project_plan() {
+    let response = RepositoryIndexPortResponse::new(
+        RepositoryIndex {
+            repository: repository(),
+            operation: operation(),
+            mode: client::RepositoryIndexMode::Deep,
+            state: ClientOperationState::Succeeded,
+            revision: 8,
+            parent_generation: Some(parent_generation()),
+            published_generation: Some(generation()),
+            discovered_inputs: 4,
+            indexed_files: 4,
+            entities: 12,
+            elapsed_micros: 500,
+            estimated_disk_bytes: 4_096,
+            diagnostics: Vec::new(),
+        },
+        IndexPlanSummary {
+            scope: IndexPlanScope::Repository,
+            mode: IndexMode::Deep,
+            providers: vec![
+                "rootlight-first-slice-treesitter".to_owned(),
+                "rootlight-project-semantics".to_owned(),
+            ],
+            parent_generation: RequiredNullable(Some(parent_generation())),
+            estimated_disk_bytes: 4_096,
+        },
+        Vec::new(),
+    );
+    let harness = Harness::new(FakeOutcome::RepositoryIndex(Ok(response)));
+
+    let output: RepoIndexOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoIndex,
+            json!({"root": "C:/fixture", "mode": "deep"}),
+        )
+        .await
+        .expect("deep selects the isolated project plan"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected repository index success");
+    };
+
+    assert_eq!(output.data.accepted_plan.mode, IndexMode::Deep);
+    assert!(matches!(
+        harness.only_call(),
+        ObservedCall::RepositoryIndex(RepositoryIndexPortRequest {
+            mode: IndexMode::Deep,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn identical_index_inputs_may_use_fresh_operations_but_converge_generation() {
     let response = |operation| {
         RepositoryIndexPortResponse::new(
             RepositoryIndex {
                 repository: repository(),
                 operation,
+                mode: client::RepositoryIndexMode::Structural,
                 state: ClientOperationState::Succeeded,
                 revision: 8,
                 parent_generation: Some(parent_generation()),
@@ -8383,10 +8441,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         ),
         (
             VerticalTool::RepoIndex,
-            json!({"root": "C:/fixture", "mode": "deep"}),
-        ),
-        (
-            VerticalTool::RepoIndex,
             json!({"root": "C:/fixture", "requested_tiers": {"rust": "C"}}),
         ),
         (
@@ -11864,6 +11918,7 @@ async fn accepted_effect_defaults_match_omitted_values() {
                     RepositoryIndex {
                         repository: repository(),
                         operation: operation(),
+                        mode: client::RepositoryIndexMode::Structural,
                         state: ClientOperationState::Succeeded,
                         revision: 8,
                         parent_generation: None,

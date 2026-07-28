@@ -472,6 +472,21 @@ const REPO_INDEX_RULES: &[CapabilityRule] = &[
         "continues durable indexing after the requesting transport disconnects",
     ),
     implemented_value("detached", "false", "selects attached execution"),
+    implemented_value(
+        "mode",
+        "auto",
+        "selects the strongest analysis available in the connected daemon",
+    ),
+    implemented_value(
+        "mode",
+        "structural",
+        "selects audited in-process structural analysis",
+    ),
+    implemented_value(
+        "mode",
+        "deep",
+        "selects native-isolated whole-project semantic analysis",
+    ),
     unsupported(
         "repository_id",
         "updating a registered repository is not served",
@@ -486,7 +501,6 @@ const REPO_INDEX_RULES: &[CapabilityRule] = &[
         "configuration patching is not served",
     ),
     unsupported("wait_ms", "synchronous index waiting is not served"),
-    unsupported_value("mode", "deep", "deep indexing is not served"),
     unsupported_value("mode", "rebuild", "rebuild indexing is not served"),
 ];
 
@@ -1428,7 +1442,7 @@ fn lifecycle_metadata(tool: McpTool) -> Option<DiscoveryLifecycleMetadata> {
     (tool == McpTool::RepoIndex).then_some(DiscoveryLifecycleMetadata {
         version: "1.0",
         update_by_repository_id: false,
-        accepted_modes: vec!["auto", "structural"],
+        accepted_modes: vec!["auto", "structural", "deep"],
         scope: "whole_repository",
         synchronous_terminal: true,
         max_wait_ms: 30_000,
@@ -1692,7 +1706,7 @@ const fn input_shape_hash(tool: McpTool) -> &'static str {
 
 const fn tool_fallback_summary(tool: McpTool) -> &'static str {
     match tool {
-        McpTool::RepoIndex => "bounded attached durable structural generation creation",
+        McpTool::RepoIndex => "bounded attached durable generation creation",
         McpTool::RepoStatus => {
             "bounded durable active or exact-generation status with coverage, operations, and freshness conditions"
         }
@@ -2098,6 +2112,12 @@ mod tests {
             repo_index.disposition("detached", Some("false")).status,
             CapabilityStatus::Implemented
         );
+        for mode in ["auto", "structural", "deep"] {
+            assert_eq!(
+                repo_index.disposition("mode", Some(mode)).status,
+                CapabilityStatus::Implemented
+            );
+        }
 
         let repo_status = CAPABILITIES[McpTool::RepoStatus as usize];
         let explicit_generation =
@@ -2251,7 +2271,7 @@ mod tests {
             .expect("repo.index exposes its versioned lifecycle profile");
         assert_eq!(lifecycle.version, "1.0");
         assert!(!lifecycle.update_by_repository_id);
-        assert_eq!(lifecycle.accepted_modes, ["auto", "structural"]);
+        assert_eq!(lifecycle.accepted_modes, ["auto", "structural", "deep"]);
         assert_eq!(lifecycle.scope, "whole_repository");
         assert!(lifecycle.synchronous_terminal);
         assert_eq!(lifecycle.max_wait_ms, 30_000);

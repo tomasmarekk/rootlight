@@ -14,6 +14,7 @@ process-test-hooks = []
 [dependencies]
 blake3.workspace = true
 getrandom.workspace = true
+rootlight-adapter-host = { path = "../rootlight-adapter-host" }
 rootlight-daemon-core = { path = "../../crates/rootlight-daemon-core" }
 rootlight-error = { path = "../../crates/rootlight-error" }
 rootlight-ids = { path = "../../crates/rootlight-ids" }

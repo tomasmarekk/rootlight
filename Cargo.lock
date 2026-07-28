@@ -2039,6 +2039,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "getrandom 0.3.4",
+ "rootlight-adapter-host",
  "rootlight-daemon-core",
  "rootlight-error",
  "rootlight-ids",

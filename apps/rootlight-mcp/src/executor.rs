@@ -450,7 +450,7 @@ impl RepositoryIndexPortRequest {
         &self.root
     }
 
-    /// Returns the admitted structural indexing mode.
+    /// Returns the admitted indexing mode.
     #[must_use]
     pub const fn mode(&self) -> IndexMode {
         self.mode
@@ -6328,7 +6328,7 @@ fn normalize_repository_index(
 ) -> Result<RepositoryIndexPortRequest, ToolExecutionError> {
     if input.repository_id.is_some()
         || input.scope.is_some()
-        || matches!(input.mode, Some(IndexMode::Deep | IndexMode::Rebuild))
+        || matches!(input.mode, Some(IndexMode::Rebuild))
         || input
             .requested_tiers
             .as_ref()
@@ -6535,10 +6535,9 @@ fn map_repository_index(
     if response.accepted_plan.scope != IndexPlanScope::Repository
         || !matches!(
             (expected_mode, response.accepted_plan.mode),
-            (
-                IndexMode::Auto | IndexMode::Structural,
-                IndexMode::Structural
-            )
+            (IndexMode::Auto, IndexMode::Structural | IndexMode::Deep)
+                | (IndexMode::Structural, IndexMode::Structural)
+                | (IndexMode::Deep, IndexMode::Deep)
         )
         || response.accepted_plan.parent_generation.0 != response.result.parent_generation
         || response.result.published_generation.is_some()

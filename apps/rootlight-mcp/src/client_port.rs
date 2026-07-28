@@ -16,7 +16,8 @@ use rootlight_client::{
     AdvancedQuery, AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview,
     ChangeImpact, Client, ClientError, CodeDead, CodeLocate, CoverageStatus, FlowTrace,
     GenerationSelector, HistoryCompare, LocateMode, PlanChange, RepositoryCatalogPage,
-    RepositoryCatalogPageRequest, RepositoryIndex, RepositoryOperationAction,
+    RepositoryCatalogPageRequest, RepositoryIndex,
+    RepositoryIndexMode as ClientRepositoryIndexMode, RepositoryOperationAction,
     RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
     RequestTimeout, SourceEncoding as ClientSourceEncoding, SourceRead,
     SourceReadOptions as ClientSourceReadOptions, SourceReference, SymbolExplain,
@@ -49,6 +50,7 @@ use crate::{
 
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const FIRST_SLICE_PROVIDER: &str = "rootlight-first-slice-treesitter";
+const PROJECT_SEMANTICS_PROVIDER: &str = "rootlight-project-semantics";
 const FIRST_SLICE_LANGUAGE: &str = "rust";
 const BRIDGE_TRACE_PREFIX: &str = "bridge-";
 
@@ -60,6 +62,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         root: String,
         operation: OperationId,
         detached: bool,
+        mode: ClientRepositoryIndexMode,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<RepositoryIndex>;
 
@@ -346,13 +349,14 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         root: String,
         operation: OperationId,
         detached: bool,
+        mode: ClientRepositoryIndexMode,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<RepositoryIndex> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             let client = client.resolve().await?;
             client
-                .repository_index_async(&root, operation, detached, timeout)
+                .repository_index_async_with_mode(&root, operation, detached, mode, timeout)
                 .await
         })
     }
@@ -828,19 +832,41 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
         Box::pin(async move {
             let operation = random_operation_id()?;
             let timeout = request_timeout()?;
+            let requested_mode = match request.mode() {
+                IndexMode::Auto => ClientRepositoryIndexMode::Auto,
+                IndexMode::Structural => ClientRepositoryIndexMode::Structural,
+                IndexMode::Deep => ClientRepositoryIndexMode::Deep,
+                IndexMode::Rebuild => return Err(ClientPortError::Executor),
+            };
             let result = client
                 .repository_index(
                     request.root().to_owned(),
                     operation,
                     request.detached(),
+                    requested_mode,
                     timeout,
                 )
                 .await
                 .map_err(map_client_error)?;
+            let (mode, providers) = match result.mode {
+                ClientRepositoryIndexMode::Structural => {
+                    (IndexMode::Structural, vec![FIRST_SLICE_PROVIDER.to_owned()])
+                }
+                ClientRepositoryIndexMode::Deep => (
+                    IndexMode::Deep,
+                    vec![
+                        FIRST_SLICE_PROVIDER.to_owned(),
+                        PROJECT_SEMANTICS_PROVIDER.to_owned(),
+                    ],
+                ),
+                ClientRepositoryIndexMode::Auto => {
+                    return Err(ClientPortError::InvalidResponse);
+                }
+            };
             let accepted_plan = IndexPlanSummary {
                 scope: IndexPlanScope::Repository,
-                mode: IndexMode::Structural,
-                providers: vec![FIRST_SLICE_PROVIDER.to_owned()],
+                mode,
+                providers,
                 parent_generation: RequiredNullable(result.parent_generation),
                 estimated_disk_bytes: result.estimated_disk_bytes,
             };

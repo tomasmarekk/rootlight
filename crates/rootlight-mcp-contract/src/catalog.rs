@@ -137,7 +137,7 @@ impl McpTool {
     pub const fn description(self) -> &'static str {
         match self {
             Self::RepoIndex => {
-                "Use bounded attached durable structural generation creation for one whole repository in auto or structural mode; the call terminates within 30 seconds, each public call creates a fresh operation, internal retries reuse an operation, and successful operation and generation state remains atomically queryable after restart."
+                "Use bounded attached durable generation creation for one whole repository in auto, structural, or native-isolated deep mode; the call terminates within 30 seconds, each public call creates a fresh operation, internal retries reuse an operation, and successful operation and generation state remains atomically queryable after restart."
             }
             Self::RepoStatus => {
                 "Use bounded durable active or exact-generation status with coverage, operations, and freshness conditions; coverage is compact summary or language detail, operation projection is bounded, and custom budgets and expanded response profiles are unsupported."

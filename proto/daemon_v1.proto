@@ -327,12 +327,21 @@ message FirstSliceSourceRef {
   optional uint64 end_line = 8;
 }
 
-// Requests admission of the supported whole-root Rust fixture index plan.
+// Analysis strength requested for one repository generation.
+enum RepositoryIndexMode {
+  REPOSITORY_INDEX_MODE_UNSPECIFIED = 0;
+  REPOSITORY_INDEX_STRUCTURAL = 1;
+  REPOSITORY_INDEX_DEEP = 2;
+  REPOSITORY_INDEX_AUTO = 3;
+}
+
+// Requests admission of one supported whole-repository index plan.
 message RepositoryIndexRequest {
   rootlight.common.v1.ContractVersion schema_version = 1;
   string root = 2;
   rootlight.common.v1.OperationId operation = 3;
   bool detached = 4;
+  RepositoryIndexMode mode = 5;
 }
 
 // One bounded source-free diagnostic retained by repository indexing.
@@ -356,6 +365,7 @@ message RepositoryIndexResponse {
   uint64 elapsed_micros = 11;
   uint64 estimated_disk_bytes = 12;
   repeated RepositoryIndexDiagnostic diagnostics = 13;
+  RepositoryIndexMode mode = 14;
 }
 
 // Action accepted by the first-slice operation status request.

@@ -571,7 +571,7 @@ pub struct FirstSliceSourceRef {
     #[allow(missing_docs)]
     pub end_line: ::core::option::Option<u64>,
 }
-/// Requests admission of the supported whole-root Rust fixture index plan.
+/// Requests admission of one supported whole-repository index plan.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RepositoryIndexRequest {
     #[prost(message, optional, tag = "1")]
@@ -588,6 +588,9 @@ pub struct RepositoryIndexRequest {
     #[prost(bool, tag = "4")]
     #[allow(missing_docs)]
     pub detached: bool,
+    #[prost(enumeration = "RepositoryIndexMode", tag = "5")]
+    #[allow(missing_docs)]
+    pub mode: i32,
 }
 /// One bounded source-free diagnostic retained by repository indexing.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -647,6 +650,9 @@ pub struct RepositoryIndexResponse {
     #[prost(message, repeated, tag = "13")]
     #[allow(missing_docs)]
     pub diagnostics: ::prost::alloc::vec::Vec<RepositoryIndexDiagnostic>,
+    #[prost(enumeration = "RepositoryIndexMode", tag = "14")]
+    #[allow(missing_docs)]
+    pub mode: i32,
 }
 /// Reads or cooperatively cancels one operation created by repository indexing.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2920,6 +2926,44 @@ impl RecoveryClass {
             "INTERRUPTED_BY_RESTART" => Some(Self::InterruptedByRestart),
             "DEADLINE_ELAPSED" => Some(Self::DeadlineElapsed),
             "LEASE_EXPIRED" => Some(Self::LeaseExpired),
+            _ => None,
+        }
+    }
+}
+/// Analysis strength requested for one repository generation.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RepositoryIndexMode {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    RepositoryIndexStructural = 1,
+    #[allow(missing_docs)]
+    RepositoryIndexDeep = 2,
+    #[allow(missing_docs)]
+    RepositoryIndexAuto = 3,
+}
+impl RepositoryIndexMode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REPOSITORY_INDEX_MODE_UNSPECIFIED",
+            Self::RepositoryIndexStructural => "REPOSITORY_INDEX_STRUCTURAL",
+            Self::RepositoryIndexDeep => "REPOSITORY_INDEX_DEEP",
+            Self::RepositoryIndexAuto => "REPOSITORY_INDEX_AUTO",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REPOSITORY_INDEX_MODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "REPOSITORY_INDEX_STRUCTURAL" => Some(Self::RepositoryIndexStructural),
+            "REPOSITORY_INDEX_DEEP" => Some(Self::RepositoryIndexDeep),
+            "REPOSITORY_INDEX_AUTO" => Some(Self::RepositoryIndexAuto),
             _ => None,
         }
     }

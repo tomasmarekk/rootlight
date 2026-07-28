@@ -22,13 +22,19 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use rootlight_adapter_host::{
+    AdapterHostError, execute_isolated_project_adapter, negotiate_project_adapter_session,
+    project_adapter_identity,
+};
 use rootlight_daemon_core::{
     ControlRequest, ControlResponse, FirstSliceEffectiveBudget, FirstSliceIpcContext,
     FirstSliceIpcFuture, FirstSliceIpcHandler, FirstSliceIpcRequest, FirstSliceIpcResponse,
     JournalActorHandle, ServiceError, operation_record_to_wire,
 };
 use rootlight_error::{ErrorCode, NextAction, PublicError};
-use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
+use rootlight_ids::{
+    ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId, content_hash,
+};
 use rootlight_ir::{
     AnalysisTier, CoverageRecord, CoverageStatus, LineRange, OccurrenceRole, RelationEndpoint,
     RelationPredicate, SourceRef, SourceSpan,
@@ -38,7 +44,10 @@ use rootlight_operations::{
     OperationError, OperationKind, OperationRecord, OperationStage, OperationState,
     OperationSubmission, PlanHash,
 };
-use rootlight_protocol::generated::{common::v1 as common, daemon::v1 as daemon};
+use rootlight_protocol::{
+    adapter_contract::ADAPTER_NONCE_BYTES,
+    generated::{adapter::v1 as adapter, common::v1 as common, daemon::v1 as daemon},
+};
 use rootlight_query::{
     ArchitectureOverviewView, CodeDeadEntryPointPolicy, ExecutionCompletenessState, LocateMode,
     QueryResource, QueryUsage, RelationDirection, RelationFamily, TestsSelectKind,
@@ -46,8 +55,10 @@ use rootlight_query::{
 use rootlight_service::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
     AdvancedAstNode, FirstSliceBudget, FirstSliceDurableOperation, FirstSliceError,
-    FirstSliceGenerationContext, FirstSliceIndexAdmission, FirstSliceIndexReceipt,
-    FirstSliceOperationContext, FirstSliceService, HistoryChangeKind, PlanChangeObjective,
+    FirstSliceGenerationContext, FirstSliceIndexAdmission, FirstSliceIndexMode,
+    FirstSliceIndexReceipt, FirstSliceOperationContext, FirstSliceProjectAnalysis,
+    FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer,
+    FirstSliceService, HistoryChangeKind, PlanChangeObjective,
     SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
@@ -80,8 +91,205 @@ const DEFAULT_CHANGE_IMPACT_MAX_DEPTH: u32 = 3;
 const DEFAULT_CHANGE_IMPACT_MAX_DEPENDENTS: u32 = 100;
 const DEFAULT_PLAN_CHANGE_MAX_STEPS: u32 = 6;
 const DEFAULT_HISTORY_COMPARE_MAX_RESULTS: u32 = 100;
+// Keep native adapter limits below the 30-second request envelope so process
+// cleanup, IR validation, resolution, and atomic publication retain headroom.
+const PROJECT_ADAPTER_WALL_TIME_MS: u64 = 20_000;
+const PROJECT_ADAPTER_CPU_TIME_MS: u64 = 15_000;
+const PROJECT_ADAPTER_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
+const PROJECT_ADAPTER_INPUT_BYTES: u64 = 16 * 1024 * 1024;
+const PROJECT_ADAPTER_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
+const PROJECT_ADAPTER_HANDLES: u32 = 64;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
+
+struct InstalledProjectAnalyzer {
+    executable: PathBuf,
+    provider_identity: ContentHash,
+}
+
+impl InstalledProjectAnalyzer {
+    fn discover() -> Result<Option<Arc<dyn FirstSliceProjectAnalyzer>>, FirstSliceError> {
+        let mut executable = std::env::current_exe().map_err(|_| FirstSliceError::Adapter)?;
+        executable.set_file_name(format!(
+            "rootlight-adapter-host{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        if !executable
+            .try_exists()
+            .map_err(|_| FirstSliceError::Adapter)?
+        {
+            return Ok(None);
+        }
+        if !executable
+            .metadata()
+            .map_err(|_| FirstSliceError::Adapter)?
+            .is_file()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        let identity =
+            project_adapter_identity(&executable).map_err(|_| FirstSliceError::Adapter)?;
+        let provider_identity =
+            adapter_identity_digest(&identity).map_err(|_| FirstSliceError::Adapter)?;
+        Ok(Some(Arc::new(Self {
+            executable,
+            provider_identity,
+        })))
+    }
+}
+
+impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
+    fn provider_identity(&self) -> ContentHash {
+        self.provider_identity
+    }
+
+    fn analyze(
+        &self,
+        request: FirstSliceProjectAnalysisRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
+        let observed_identity = project_adapter_identity(&self.executable)
+            .map_err(map_project_adapter_error)
+            .and_then(|identity| adapter_identity_digest(&identity))?;
+        if observed_identity != self.provider_identity {
+            return Err(FirstSliceProjectAnalysisError::Identity);
+        }
+
+        let mut ordered_inputs: Vec<&rootlight_service::FirstSliceProjectInput<'_>> = Vec::new();
+        ordered_inputs
+            .try_reserve_exact(request.inputs().len())
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        ordered_inputs.extend(request.inputs().iter());
+        ordered_inputs.sort_unstable_by(|left, right| left.path().cmp(right.path()));
+        let input_bytes = ordered_inputs
+            .iter()
+            .try_fold(request.context_manifest().len(), |total, input| {
+                total.checked_add(input.source().len())
+            });
+        if input_bytes.is_none_or(|bytes| {
+            u64::try_from(bytes).map_or(true, |bytes| bytes > PROJECT_ADAPTER_INPUT_BYTES)
+        }) {
+            return Err(FirstSliceProjectAnalysisError::Analysis);
+        }
+        let files = u32::try_from(ordered_inputs.len())
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        if files == 0 {
+            return Err(FirstSliceProjectAnalysisError::Analysis);
+        }
+        let limits = adapter::ResourceLimits {
+            wall_time_ms: PROJECT_ADAPTER_WALL_TIME_MS,
+            cpu_time_ms: PROJECT_ADAPTER_CPU_TIME_MS,
+            memory_bytes: PROJECT_ADAPTER_MEMORY_BYTES,
+            input_bytes: PROJECT_ADAPTER_INPUT_BYTES,
+            output_bytes: PROJECT_ADAPTER_OUTPUT_BYTES,
+            files,
+            processes: 1,
+            handles: PROJECT_ADAPTER_HANDLES,
+            retries: 0,
+        };
+        let mut session_id = [0_u8; ADAPTER_NONCE_BYTES];
+        getrandom::fill(&mut session_id).map_err(|_| FirstSliceProjectAnalysisError::Identity)?;
+        if session_id.iter().all(|byte| *byte == 0) {
+            return Err(FirstSliceProjectAnalysisError::Identity);
+        }
+        let session = negotiate_project_adapter_session(&self.executable, session_id, limits)
+            .map_err(map_project_adapter_error)?;
+
+        let mut request_id = [0_u8; ADAPTER_NONCE_BYTES];
+        getrandom::fill(&mut request_id).map_err(|_| FirstSliceProjectAnalysisError::Identity)?;
+        if request_id.iter().all(|byte| *byte == 0) {
+            return Err(FirstSliceProjectAnalysisError::Identity);
+        }
+        let mut inputs = Vec::new();
+        inputs
+            .try_reserve_exact(ordered_inputs.len())
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        for input in ordered_inputs {
+            let mut source = Vec::new();
+            source
+                .try_reserve_exact(input.source().len())
+                .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+            source.extend_from_slice(input.source());
+            inputs.push(adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: input.file().as_bytes().to_vec(),
+                }),
+                path: input.path().to_owned(),
+                language: request.language().to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: input.content_hash().as_bytes().to_vec(),
+                }),
+                source,
+                generated: input.generated(),
+                origins: Vec::new(),
+            });
+        }
+        let context_manifest = request.context_manifest().to_vec();
+        let project_request = adapter::ProjectAnalysisRequest {
+            session_id: session.session_id().to_vec(),
+            request_id: request_id.to_vec(),
+            repository: Some(common::RepositoryId {
+                value: request.repository().as_bytes().to_vec(),
+            }),
+            generation: Some(common::GenerationId {
+                value: request.generation().as_bytes().to_vec(),
+            }),
+            analysis_unit: format!("first-slice.{}", request.language()),
+            target: format!("//rootlight:{}", request.language()),
+            build_context: Some(common::ContentHash {
+                value: request.build_context().as_bytes().to_vec(),
+            }),
+            config_digest: Some(common::ContentHash {
+                value: content_hash(&context_manifest).as_bytes().to_vec(),
+            }),
+            inputs,
+            context_manifest,
+            requested_tier: adapter::RequestedAnalysisTier::TierB as i32,
+        };
+        let output = execute_isolated_project_adapter(
+            &self.executable,
+            &session,
+            &project_request,
+            &rootlight_ir::ExtensionSupport::default(),
+            cancellation,
+        )
+        .map_err(map_project_adapter_error)?;
+        Ok(FirstSliceProjectAnalysis::new(
+            output.document().clone(),
+            output.isolation().permits_deep_adapter(),
+        ))
+    }
+}
+
+fn adapter_identity_digest(
+    identity: &adapter::AdapterIdentity,
+) -> Result<ContentHash, FirstSliceProjectAnalysisError> {
+    let digest = identity
+        .source_digest
+        .as_slice()
+        .try_into()
+        .map_err(|_| FirstSliceProjectAnalysisError::Identity)?;
+    Ok(ContentHash::from_bytes(digest))
+}
+
+fn map_project_adapter_error(error: AdapterHostError) -> FirstSliceProjectAnalysisError {
+    match error {
+        AdapterHostError::Cancelled(cancelled) => {
+            FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
+        }
+        AdapterHostError::BinaryIdentity
+        | AdapterHostError::DigestMismatch
+        | AdapterHostError::ProvenanceMismatch => FirstSliceProjectAnalysisError::Identity,
+        AdapterHostError::Process
+        | AdapterHostError::ProcessIo
+        | AdapterHostError::ProcessTimeout
+        | AdapterHostError::IsolationEvidence => FirstSliceProjectAnalysisError::Isolation,
+        AdapterHostError::ProcessFailed | AdapterHostError::ProjectAnalysis => {
+            FirstSliceProjectAnalysisError::Analysis
+        }
+        _ => FirstSliceProjectAnalysisError::Protocol,
+    }
+}
 
 enum WorkerCommand {
     Execute {
@@ -168,9 +376,22 @@ impl FirstSliceDaemon {
                 .checked_add(STARTUP_RESTORE_TIMEOUT)
                 .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?,
         );
-        let service =
-            FirstSliceService::new_durable(DEFAULT_GENERATION_RETENTION, state_root, &cancellation)
-                .map_err(FirstSliceHostError::Service)?;
+        let project_analyzer =
+            InstalledProjectAnalyzer::discover().map_err(FirstSliceHostError::Service)?;
+        let service = match project_analyzer {
+            Some(project_analyzer) => FirstSliceService::new_durable_with_project_analyzer(
+                DEFAULT_GENERATION_RETENTION,
+                state_root,
+                project_analyzer,
+                &cancellation,
+            ),
+            None => FirstSliceService::new_durable(
+                DEFAULT_GENERATION_RETENTION,
+                state_root,
+                &cancellation,
+            ),
+        }
+        .map_err(FirstSliceHostError::Service)?;
         let durable_publications = service.durable_operation_publications().collect::<Vec<_>>();
         let reconciled_publications = tokio::time::timeout(STARTUP_RESTORE_TIMEOUT, async {
             let mut reconciled = Vec::new();
@@ -1046,6 +1267,20 @@ fn repository_index(
         ..
     } = resources;
     let operation = parse_operation(request.operation.as_ref())?;
+    let requested_mode =
+        daemon::RepositoryIndexMode::try_from(request.mode).map_err(|_| invalid_argument())?;
+    let mode = match requested_mode {
+        daemon::RepositoryIndexMode::Unspecified
+        | daemon::RepositoryIndexMode::RepositoryIndexStructural => FirstSliceIndexMode::Structural,
+        daemon::RepositoryIndexMode::RepositoryIndexDeep => FirstSliceIndexMode::Deep,
+        daemon::RepositoryIndexMode::RepositoryIndexAuto => {
+            if service.deep_analysis_available() {
+                FirstSliceIndexMode::Deep
+            } else {
+                FirstSliceIndexMode::Structural
+            }
+        }
+    };
     let root = PathBuf::from(&request.root);
     let requested_repository = service
         .registered_repository_for_root(&root, &context.cancellation)
@@ -1060,10 +1295,14 @@ fn repository_index(
     };
     let lifecycle_deadline = lifecycle_deadline(work_deadline)?;
     let deadline_unix_ms = deadline_unix_ms(work_deadline)?;
+    let mut plan_hasher = blake3::Hasher::new();
+    plan_hasher.update(b"rootlight.repository-index-plan/1\0");
+    plan_hasher.update(request.root.as_bytes());
+    plan_hasher.update(&[repository_index_mode_tag(mode)]);
     let submission = OperationSubmission::new(
         operation,
         OperationKind::RepositoryIndex,
-        PlanHash::from_bytes(*blake3::hash(request.root.as_bytes()).as_bytes()),
+        PlanHash::from_bytes(*plan_hasher.finalize().as_bytes()),
         context.client_instance_id,
         detached,
         Some(deadline_unix_ms),
@@ -1085,7 +1324,7 @@ fn repository_index(
                 ..submission
             };
             let existing = journal_call(runtime, context.deadline, journal.retry_status(retry))?;
-            return retry_index_response(metadata, existing);
+            return retry_index_response(metadata, existing, mode);
         }
         Err(error) if error.code() == ErrorCode::NotFound => {}
         Ok(_) => return Err(internal_error()),
@@ -1102,7 +1341,7 @@ fn repository_index(
             }
         };
     if !submitted.inserted {
-        return retry_index_response(metadata, submitted.operation);
+        return retry_index_response(metadata, submitted.operation, mode);
     }
     if let Some(admission) = context.index_admission.as_ref() {
         admission.mark_inserted();
@@ -1125,7 +1364,7 @@ fn repository_index(
     };
     lock_metadata(metadata)?.admit(operation, admission);
     if detached && let Some(reply) = reply.take() {
-        let response = admitted_index_response(admission, &submitted.operation);
+        let response = admitted_index_response(admission, &submitted.operation, mode);
         let _ = reply.send(Ok(FirstSliceIpcResponse::RepositoryIndex(response)));
     }
     let result = (|| {
@@ -1180,7 +1419,7 @@ fn repository_index(
             )?;
             return Err(error);
         }
-        match service.prepare_rust_fixture(&root, &cancellation) {
+        match service.prepare_repository_with_mode(&root, mode, &cancellation) {
             Ok(prepared) => {
                 if propagate_peer_cancellation(
                     runtime,
@@ -1344,7 +1583,7 @@ fn repository_index(
                 let mut metadata = lock_metadata(metadata)?;
                 metadata.observe_terminal(&operation_record);
                 metadata.commit(operation)?;
-                Ok(index_response(receipt, &operation_record))
+                Ok(index_response(receipt, &operation_record, mode))
             }
             Err(error) => {
                 let public = service_error(error);
@@ -1443,6 +1682,7 @@ fn bind_journal_cancellation_deadline(
 fn retry_index_response(
     metadata: &Mutex<OperationMetadataSet>,
     operation: OperationRecord,
+    mode: FirstSliceIndexMode,
 ) -> Result<daemon::RepositoryIndexResponse, PublicError> {
     let metadata = lock_metadata(metadata)?
         .records
@@ -1463,6 +1703,7 @@ fn retry_index_response(
                 metadata.parent_generation,
                 metadata.estimated_disk_bytes,
                 &operation,
+                mode,
             ));
         }
         OperationState::Failed => {
@@ -1488,18 +1729,20 @@ fn retry_index_response(
         PublicationState::None | PublicationState::FailedClosed => return Err(internal_error()),
     }
     let receipt = metadata.receipt.ok_or_else(internal_error)?;
-    Ok(index_response(receipt, &operation))
+    Ok(index_response(receipt, &operation, mode))
 }
 
 fn admitted_index_response(
     admission: FirstSliceIndexAdmission,
     operation: &OperationRecord,
+    mode: FirstSliceIndexMode,
 ) -> daemon::RepositoryIndexResponse {
     pending_index_response(
         admission.repository,
         admission.parent,
         admission.estimated_disk_bytes,
         operation,
+        mode,
     )
 }
 
@@ -1508,6 +1751,7 @@ fn pending_index_response(
     parent: Option<GenerationId>,
     estimated_disk_bytes: u64,
     operation: &OperationRecord,
+    mode: FirstSliceIndexMode,
 ) -> daemon::RepositoryIndexResponse {
     daemon::RepositoryIndexResponse {
         schema_version: Some(schema_version()),
@@ -1523,12 +1767,14 @@ fn pending_index_response(
         elapsed_micros: 0,
         estimated_disk_bytes,
         diagnostics: Vec::new(),
+        mode: repository_index_mode_to_wire(mode) as i32,
     }
 }
 
 fn index_response(
     receipt: FirstSliceIndexReceipt,
     operation: &OperationRecord,
+    mode: FirstSliceIndexMode,
 ) -> daemon::RepositoryIndexResponse {
     daemon::RepositoryIndexResponse {
         schema_version: Some(schema_version()),
@@ -1551,6 +1797,7 @@ fn index_response(
                 message: diagnostic.message,
             })
             .collect(),
+        mode: repository_index_mode_to_wire(mode) as i32,
     }
 }
 
@@ -3853,6 +4100,20 @@ fn operation_state_to_wire(state: OperationState) -> daemon::OperationState {
     }
 }
 
+const fn repository_index_mode_tag(mode: FirstSliceIndexMode) -> u8 {
+    match mode {
+        FirstSliceIndexMode::Structural => 1,
+        FirstSliceIndexMode::Deep => 2,
+    }
+}
+
+const fn repository_index_mode_to_wire(mode: FirstSliceIndexMode) -> daemon::RepositoryIndexMode {
+    match mode {
+        FirstSliceIndexMode::Structural => daemon::RepositoryIndexMode::RepositoryIndexStructural,
+        FirstSliceIndexMode::Deep => daemon::RepositoryIndexMode::RepositoryIndexDeep,
+    }
+}
+
 const fn operation_kind_to_wire(kind: OperationKind) -> daemon::OperationKind {
     match kind {
         OperationKind::ControlProbe => daemon::OperationKind::ControlProbe,
@@ -5291,6 +5552,7 @@ mod tests {
                 root: repository_root.to_string_lossy().into_owned(),
                 operation: Some(operation_to_wire(operation)),
                 detached: true,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
             },
             &context,
             &mut reply,
@@ -5622,6 +5884,7 @@ mod tests {
                 root: fixture.path().to_string_lossy().into_owned(),
                 operation: Some(operation_to_wire(operation)),
                 detached: true,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
             }),
         );
         assert!(matches!(
@@ -5812,6 +6075,7 @@ mod tests {
                     root,
                     operation: Some(operation_to_wire(operation)),
                     detached,
+                    mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
                 }),
                 context,
             ));
@@ -5883,6 +6147,7 @@ mod tests {
                             [operation_byte.wrapping_add(64); 16],
                         ))),
                         detached: true,
+                        mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
                     })
                 },
                 "fresh index completes on the released work lane",
@@ -6007,6 +6272,7 @@ mod tests {
                 root: fixture.path().to_string_lossy().into_owned(),
                 operation: Some(operation_to_wire(OperationId::from_bytes([1; 16]))),
                 detached: true,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
             }),
         );
         let FirstSliceIpcResponse::RepositoryIndex(first) = first else {
@@ -6023,6 +6289,7 @@ mod tests {
                     root: fixture.path().to_string_lossy().into_owned(),
                     operation: Some(operation_to_wire(OperationId::from_bytes([1; 16]))),
                     detached: true,
+                    mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
                 })
             },
             "terminal operation retry becomes visible",
@@ -6046,6 +6313,7 @@ mod tests {
                 root: fixture.path().to_string_lossy().into_owned(),
                 operation: Some(operation_to_wire(OperationId::from_bytes([2; 16]))),
                 detached: true,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
             }),
         );
         assert!(matches!(second, FirstSliceIpcResponse::RepositoryIndex(_)));
@@ -6115,6 +6383,7 @@ mod tests {
                     root,
                     operation: Some(operation_to_wire(operation)),
                     detached: true,
+                    mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
                 }),
             )
         });
@@ -6245,6 +6514,7 @@ mod tests {
                     root,
                     operation: Some(operation_to_wire(operation)),
                     detached: true,
+                    mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
                 }),
             )
         });
@@ -6294,6 +6564,7 @@ mod tests {
                     root: retry_root.clone(),
                     operation: Some(operation_to_wire(OperationId::from_bytes([46; 16]))),
                     detached: true,
+                    mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
                 })
             },
             "reindex after failed publication succeeds",
@@ -6363,6 +6634,7 @@ mod tests {
                     root,
                     operation: Some(operation_to_wire(operation)),
                     detached: true,
+                    mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
                 }),
                 context,
             ))
@@ -6480,8 +6752,12 @@ mod tests {
             .reserve(failed, 1, None)
             .expect("metadata reserves");
         assert_eq!(
-            retry_index_response(&Mutex::new(metadata), failed_record)
-                .expect_err("failed retry replays its error"),
+            retry_index_response(
+                &Mutex::new(metadata),
+                failed_record,
+                FirstSliceIndexMode::Structural,
+            )
+            .expect_err("failed retry replays its error"),
             stored_error
         );
 
@@ -6500,9 +6776,12 @@ mod tests {
         cancelled_metadata
             .reserve(cancelled, 1, None)
             .expect("metadata reserves");
-        let cancelled_error =
-            retry_index_response(&Mutex::new(cancelled_metadata), cancelled_record)
-                .expect_err("cancelled retry is terminal");
+        let cancelled_error = retry_index_response(
+            &Mutex::new(cancelled_metadata),
+            cancelled_record,
+            FirstSliceIndexMode::Structural,
+        )
+        .expect_err("cancelled retry is terminal");
         assert_eq!(cancelled_error.code(), ErrorCode::Cancelled);
 
         let interrupted = OperationId::from_bytes([53; 16]);
@@ -6516,9 +6795,12 @@ mod tests {
         interrupted_metadata
             .reserve(interrupted, 1, None)
             .expect("metadata reserves");
-        let interrupted_error =
-            retry_index_response(&Mutex::new(interrupted_metadata), interrupted_record)
-                .expect_err("interrupted retry is terminal");
+        let interrupted_error = retry_index_response(
+            &Mutex::new(interrupted_metadata),
+            interrupted_record,
+            FirstSliceIndexMode::Structural,
+        )
+        .expect_err("interrupted retry is terminal");
         assert_eq!(interrupted_error.code(), ErrorCode::Cancelled);
     }
 
