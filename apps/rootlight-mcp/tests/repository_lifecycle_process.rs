@@ -473,17 +473,35 @@ fn write_repository(root: &Path, value: u32) {
 }
 
 fn index_repository(mcp: &mut McpProcess, id: &str, root: &Path) -> Value {
-    let response = mcp.call(
-        id,
-        "repo.index",
-        json!({
-            "root": root,
-            "mode": "structural",
-            "detached": false
-        }),
-    );
-    assert_success(&response, "repo.index");
-    response
+    const MAX_ATTEMPTS: u8 = 3;
+
+    let arguments = json!({
+        "root": root,
+        "mode": "structural",
+        "detached": false
+    });
+    for attempt in 1..=MAX_ATTEMPTS {
+        let response = mcp.call(
+            &format!("{id}-attempt-{attempt}"),
+            "repo.index",
+            arguments.clone(),
+        );
+        let error = &response["result"]["structuredContent"]["error"];
+        let retryable_busy = error["code"] == "BUSY" && error["retryable"] == true;
+        if !retryable_busy || attempt == MAX_ATTEMPTS {
+            assert_success(&response, "repo.index");
+            return response;
+        }
+
+        // A retryable BUSY response is the protocol's explicit replay signal
+        // after a saturated daemon lane; every other result returns above.
+        let retry_after_ms = error["retry_after_ms"]
+            .as_u64()
+            .unwrap_or(25)
+            .clamp(1, 1_000);
+        thread::sleep(Duration::from_millis(retry_after_ms));
+    }
+    unreachable!("bounded retry loop always returns")
 }
 
 fn required_text(response: &Value, path: &[&str]) -> String {
