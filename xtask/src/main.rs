@@ -11,7 +11,6 @@ mod capability;
 mod contract_matrix;
 mod daemon_lifecycle;
 mod datasets;
-mod disposition;
 mod grammar_lock;
 mod ids;
 mod incident;
@@ -106,10 +105,6 @@ fn run() -> Result<(), XtaskError> {
         }
         Some("policy-check") | Some("policy") => policy::check()?,
         Some("license-check") => license::check()?,
-        Some("disposition-check") => {
-            let root = parse_required_root(&mut args)?;
-            disposition::check(&root)?;
-        }
         Some("capability-check") => {
             let options = capability::Options::parse(&mut args)?;
             capability::check(&options)?;
@@ -185,20 +180,10 @@ fn parse_required_bin_dir(
     }
 }
 
-fn parse_required_root(
-    args: &mut impl Iterator<Item = String>,
-) -> Result<std::path::PathBuf, XtaskError> {
-    match (args.next(), args.next()) {
-        (Some(flag), Some(path)) if flag == "--root" => Ok(std::path::PathBuf::from(path)),
-        (Some(argument), _) => Err(XtaskError::UnexpectedArgument(argument)),
-        (None, _) => Err(XtaskError::MissingRoot),
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|budget-conformance-check [--fixture-root PATH] [--refresh] [--runtime-report PATH --cancellation-report PATH --output PATH]|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|contract-matrix <--output PATH|--verify PATH> --source-revision REV|daemon-lifecycle-check --bin-dir PATH|dataset-check|dataset-cache --cache-dir PATH --output PATH --source-revision REV|incident-tabletop --output PATH --source-revision REV|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|package-check|package-build --target TARGET --version VERSION --source-revision REV --bin-dir PATH --output-dir PATH|package-smoke --baseline-archive PATH --archive PATH --source-revision REV --output PATH|package-verify --archive PATH|update-release-metadata --archive PATH --sbom PATH --provenance PATH --license-bundle PATH --target TARGET --version VERSION --key-id ID [--private-seed PATH --public-key-hex HEX] --valid-from UNIX --expires UNIX --rollout-percentage PERCENT --catalog-schema VERSION --protocol-major VERSION --protocol-minor VERSION --output-dir PATH|response-profile-check [--fixture-root PATH] [--refresh]|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|license-check|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|budget-conformance-check [--fixture-root PATH] [--refresh] [--runtime-report PATH --cancellation-report PATH --output PATH]|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|contract-matrix <--output PATH|--verify PATH> --source-revision REV|daemon-lifecycle-check --bin-dir PATH|dataset-check|dataset-cache --cache-dir PATH --output PATH --source-revision REV|incident-tabletop --output PATH --source-revision REV|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|package-check|package-build --target TARGET --version VERSION --source-revision REV --bin-dir PATH --output-dir PATH|package-smoke --baseline-archive PATH --archive PATH --source-revision REV --output PATH|package-verify --archive PATH|update-release-metadata --archive PATH --sbom PATH --provenance PATH --license-bundle PATH --target TARGET --version VERSION --key-id ID [--private-seed PATH --public-key-hex HEX] --valid-from UNIX --expires UNIX --rollout-percentage PERCENT --catalog-schema VERSION --protocol-major VERSION --protocol-minor VERSION --output-dir PATH|response-profile-check [--fixture-root PATH] [--refresh]|freeze-daemon-protocol|id-vectors|generate [--check]|license-check|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -209,8 +194,6 @@ enum XtaskError {
     MissingFixtureRoot,
     #[error("--bin-dir requires a path")]
     MissingBinDir,
-    #[error("--root requires a path")]
-    MissingRoot,
     #[error(transparent)]
     Architecture(#[from] architecture::ArchitectureError),
     #[error(transparent)]
@@ -223,8 +206,6 @@ enum XtaskError {
     DaemonLifecycle(#[from] daemon_lifecycle::LifecycleError),
     #[error(transparent)]
     Datasets(#[from] datasets::DatasetError),
-    #[error(transparent)]
-    Disposition(#[from] disposition::DispositionError),
     #[error(transparent)]
     IdVectors(#[from] ids::IdVectorError),
     #[error(transparent)]

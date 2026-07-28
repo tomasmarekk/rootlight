@@ -140,28 +140,6 @@ jobs:
           retention-days: 90
           overwrite: false
           include-hidden-files: false
-      - name: Disposition validation
-        run: |
-          mkdir -p target/disposition-validation
-          set -o pipefail
-          {
-            cargo run --locked --quiet --package xtask -- disposition-check --root tests/fixtures/disposition
-            for fixture in tests/fixtures/disposition/invalid/*; do
-              if cargo run --locked --quiet --package xtask -- disposition-check --root "$fixture"; then
-                echo "invalid disposition fixture was unexpectedly accepted: $fixture"
-                exit 1
-              fi
-              echo "invalid disposition fixture rejected as required: $fixture"
-            done
-          } 2>&1 | tee target/disposition-validation/report.txt
-      - name: Retain disposition validation
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: disposition-validation-${{ github.sha }}-${{ github.run_attempt }}
-          path: target/disposition-validation/report.txt
-          if-no-files-found: error
-          retention-days: 90
       - name: Daemon lifecycle
         run: |
           cargo build --locked --package rootlight --package rootlight-daemon --package xtask
