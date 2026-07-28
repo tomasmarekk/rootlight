@@ -1,0 +1,969 @@
+# Produces one exact-revision native candidate set and its release trust chain.
+# The publication workflow consumes these immutable artifacts by run ID and attempt.
+name: release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character source revision selected for this candidate
+        required: true
+        type: string
+      ci_run_id:
+        description: Successful required CI run ID for the exact source revision
+        required: true
+        type: string
+      ci_run_attempt:
+        description: Successful required CI run attempt for the exact source revision
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      ci_run_id:
+        required: true
+        type: string
+      ci_run_attempt:
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  prepare:
+    name: authorize exact required CI revision
+    if: github.ref == 'refs/heads/main' && inputs.source_sha == github.sha
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify exact source and successful required aggregate
+        env:
+          CI_RUN_ATTEMPT: ${{ inputs.ci_run_attempt }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REVISION: ${{ inputs.source_sha }}
+          WORKFLOW_REVISION: ${{ github.sha }}
+        run: |
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          source_revision = os.environ["SOURCE_REVISION"]
+          if not re.fullmatch(r"[0-9a-f]{40}", source_revision):
+              raise SystemExit("source_sha must be a canonical lowercase Git revision")
+          if source_revision != os.environ["WORKFLOW_REVISION"]:
+              raise SystemExit("candidate source_sha differs from the selected workflow revision")
+
+          run = json.loads(
+              subprocess.check_output(
+                  [
+                      "gh",
+                      "api",
+                      f"/repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
+                      f"{os.environ['CI_RUN_ID']}",
+                  ]
+              )
+          )
+          expected_run = {
+              "conclusion": "success",
+              "event": "push",
+              "head_sha": source_revision,
+              "path": ".github/workflows/ci.yml",
+              "run_attempt": int(os.environ["CI_RUN_ATTEMPT"]),
+          }
+          observed_run = {key: run.get(key) for key in expected_run}
+          if observed_run != expected_run:
+              raise SystemExit(
+                  f"required CI run does not authorize this candidate: {observed_run!r}"
+              )
+
+          jobs = json.loads(
+              subprocess.check_output(
+                  [
+                      "gh",
+                      "api",
+                      f"/repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
+                      f"{os.environ['CI_RUN_ID']}/jobs?filter=latest&per_page=100",
+                  ]
+              )
+          )["jobs"]
+          aggregates = [
+              job for job in jobs
+              if job.get("name") == "ci-required"
+              and job.get("run_attempt") == int(os.environ["CI_RUN_ATTEMPT"])
+          ]
+          if len(aggregates) != 1 or aggregates[0].get("conclusion") != "success":
+              raise SystemExit("exact required CI aggregate did not succeed")
+          PY
+
+  release-package-candidate:
+    name: release package / ${{ matrix.target }}
+    needs: [prepare]
+    # INTENTIONAL: both release builds start without restored compiled output.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup show active-toolchain
+      - name: Build native release package from two clean build directories
+        shell: bash
+        env:
+          RUNNER_LABEL: ${{ matrix.os }}
+          SOURCE_REVISION: ${{ github.sha }}
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          test "$host" = "$TARGET_TRIPLE"
+          version="$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rootlight"))'
+          )"
+          cargo run --locked --quiet --package xtask -- package-check
+          reproducible_rustflags=""
+          if [[ "$TARGET_TRIPLE" == *windows* ]]; then
+            reproducible_rustflags="-C link-arg=/Brepro -C link-arg=/PDBALTPATH:%_PDB%"
+          fi
+          RUSTFLAGS="$reproducible_rustflags" \
+            CARGO_TARGET_DIR="$PWD/target/repro-first" cargo build \
+            --locked --release --target "$TARGET_TRIPLE" \
+            --package rootlight \
+            --package rootlight-adapter-host \
+            --package rootlight-daemon \
+            --package rootlight-launcher \
+            --package rootlight-mcp
+          RUSTFLAGS="$reproducible_rustflags" \
+            CARGO_TARGET_DIR="$PWD/target/repro-second" cargo build \
+            --locked --release --target "$TARGET_TRIPLE" \
+            --package rootlight \
+            --package rootlight-adapter-host \
+            --package rootlight-daemon \
+            --package rootlight-launcher \
+            --package rootlight-mcp
+          suffix=""
+          if [[ "$TARGET_TRIPLE" == *windows* ]]; then
+            suffix=".exe"
+          fi
+          for binary in \
+            rootlight \
+            rootlight-adapter-host \
+            rootlight-daemon \
+            rootlight-launcher \
+            rootlight-mcp; do
+            cmp \
+              "target/repro-first/$TARGET_TRIPLE/release/${binary}${suffix}" \
+              "target/repro-second/$TARGET_TRIPLE/release/${binary}${suffix}"
+          done
+          cargo run --locked --quiet --package xtask -- package-build \
+            --target "$TARGET_TRIPLE" \
+            --version "$version" \
+            --source-revision "$SOURCE_REVISION" \
+            --bin-dir "target/repro-first/$TARGET_TRIPLE/release" \
+            --output-dir artifacts/release-candidate-first
+          cargo run --locked --quiet --package xtask -- package-build \
+            --target "$TARGET_TRIPLE" \
+            --version "$version" \
+            --source-revision "$SOURCE_REVISION" \
+            --bin-dir "target/repro-second/$TARGET_TRIPLE/release" \
+            --output-dir artifacts/release-candidate-second
+          archive="artifacts/release-candidate-first/rootlight-$version-$TARGET_TRIPLE.zip"
+          cargo run --locked --quiet --package xtask -- package-verify \
+            --archive "$archive"
+          cargo run --locked --quiet --package xtask -- package-verify \
+            --archive "artifacts/release-candidate-second/rootlight-$version-$TARGET_TRIPLE.zip"
+          diff --recursive \
+            artifacts/release-candidate-first \
+            artifacts/release-candidate-second
+          cargo run --locked --quiet --package xtask -- package-build \
+            --target "$TARGET_TRIPLE" \
+            --version 0.0.0 \
+            --source-revision "$SOURCE_REVISION" \
+            --bin-dir "target/repro-first/$TARGET_TRIPLE/release" \
+            --output-dir artifacts/release-baseline
+          lifecycle="artifacts/release-candidate-first/$TARGET_TRIPLE.lifecycle.json"
+          cargo run --locked --quiet --package xtask -- package-smoke \
+            --baseline-archive "artifacts/release-baseline/rootlight-0.0.0-$TARGET_TRIPLE.zip" \
+            --archive "$archive" \
+            --source-revision "$SOURCE_REVISION" \
+            --output "$lifecycle"
+          candidate_sha256="$(cut -d ' ' -f 1 "$archive.sha256")"
+          python scripts/validate-package-lifecycle.py \
+            --path "$lifecycle" \
+            --target "$TARGET_TRIPLE" \
+            --candidate-version "$version" \
+            --source-revision "$SOURCE_REVISION" \
+            --candidate-archive "$(basename "$archive")" \
+            --candidate-sha256 "$candidate_sha256"
+          ARCHIVE="$archive" LIFECYCLE="$lifecycle" RUSTC_HOST="$host" VERSION="$version" python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import zipfile
+
+          archive = Path(os.environ["ARCHIVE"])
+          target = os.environ["TARGET_TRIPLE"]
+          required = {
+              "LICENSE",
+              "NOTICE",
+              "licenses/tree-sitter-cpp-0.23.4-LICENSE",
+              "licenses/tree-sitter-java-0.23.5-LICENSE",
+              "licenses/tree-sitter-kotlin-ng-1.1.0-LICENSE",
+              "licenses/tree-sitter-typescript-0.23.2-LICENSE",
+              "package-manifest.json",
+          }
+          with zipfile.ZipFile(archive) as package:
+              names = set(package.namelist())
+          if not required <= names:
+              raise SystemExit(f"release package lacks required notices: {required - names!r}")
+          sha256 = archive.with_name(archive.name + ".sha256").read_text(
+              encoding="utf-8"
+          ).split("  ", 1)[0]
+          if sha256 != hashlib.sha256(archive.read_bytes()).hexdigest():
+              raise SystemExit("release package SHA-256 sidecar differs")
+          blake3 = archive.with_name(archive.name + ".blake3").read_text(
+              encoding="utf-8"
+          ).split("  ", 1)[0]
+          if not re.fullmatch(r"[0-9a-f]{64}", blake3):
+              raise SystemExit("release package BLAKE3 sidecar is not canonical")
+          lifecycle_path = Path(os.environ["LIFECYCLE"])
+          lifecycle = json.loads(lifecycle_path.read_bytes())
+          lifecycle_expected = {
+              "baseline_archive": f"rootlight-0.0.0-{target}.zip",
+              "baseline_version": "0.0.0",
+              "candidate_archive": archive.name,
+              "candidate_sha256": sha256,
+              "candidate_target": target,
+              "candidate_version": os.environ["VERSION"],
+              "committed_active_version": os.environ["VERSION"],
+              "committed_last_good_version": "0.0.0",
+              "rollback_active_version": "0.0.0",
+              "schema": "rootlight.package-lifecycle/2",
+              "source_revision": os.environ["SOURCE_REVISION"],
+          }
+          if {
+              key: lifecycle.get(key) for key in lifecycle_expected
+          } != lifecycle_expected:
+              raise SystemExit(f"release package lifecycle differs: {lifecycle!r}")
+          observations = (
+              "candidate_health_observed",
+              "clean_recovery_observed",
+              "failed_health_rollback_observed",
+              "installed_command_uninstall_observed",
+              "launcher_probe_observed",
+              "unowned_data_preserved",
+              "user_data_preserved",
+          )
+          if any(lifecycle.get(field) is not True for field in observations):
+              raise SystemExit(f"release package lifecycle is incomplete: {lifecycle!r}")
+          if lifecycle.get("bootstrap_owned_files", 0) < 1:
+              raise SystemExit("release package bootstrap owned no files")
+          if lifecycle.get("uninstall_removed_versions") != 2:
+              raise SystemExit("release package uninstall did not remove both owned versions")
+          lifecycle_sha256 = hashlib.sha256(lifecycle_path.read_bytes()).hexdigest()
+          document = {
+              "schema": "rootlight.release-package-candidate/1",
+              "archive": archive.name,
+              "blake3": blake3,
+              "cargo_version": subprocess.check_output(
+                  ["cargo", "--version"], text=True
+              ).strip(),
+              "independent_archives": "bit_identical",
+              "independent_builds": "bit_identical",
+              "lifecycle_report": lifecycle_path.name,
+              "lifecycle_sha256": lifecycle_sha256,
+              "runner": os.environ["RUNNER_LABEL"],
+              "rustc_host": os.environ["RUSTC_HOST"],
+              "rustc_version": subprocess.check_output(
+                  ["rustc", "--version", "--verbose"], text=True
+              ).strip(),
+              "sha256": sha256,
+              "source_revision": os.environ["SOURCE_REVISION"],
+              "target": target,
+              "version": os.environ["VERSION"],
+          }
+          (archive.parent / f"{target}.candidate.json").write_text(
+              json.dumps(document, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+              newline="\n",
+          )
+          PY
+      - name: Upload immutable release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-release-candidate-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/release-candidate-first
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
+  release-candidate-evidence:
+    name: release package reproducibility / linux
+    needs: [prepare, release-package-candidate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Download exact candidate set
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rootlight-release-candidate-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/release-candidates
+          merge-multiple: true
+      - name: Independently validate all native candidates
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          version="$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rootlight"))'
+          )"
+          for target in \
+            aarch64-apple-darwin \
+            aarch64-unknown-linux-gnu \
+            x86_64-apple-darwin \
+            x86_64-pc-windows-msvc \
+            x86_64-unknown-linux-gnu; do
+            archive="artifacts/release-candidates/rootlight-$version-$target.zip"
+            cargo run --locked --quiet --package xtask -- package-verify --archive "$archive"
+            python scripts/validate-package-lifecycle.py \
+              --path "artifacts/release-candidates/$target.lifecycle.json" \
+              --target "$target" \
+              --candidate-version "$version" \
+              --source-revision "$SOURCE_REVISION" \
+              --candidate-archive "$(basename "$archive")" \
+              --candidate-sha256 "$(cut -d ' ' -f 1 "$archive.sha256")"
+          done
+          VERSION="$version" python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("artifacts/release-candidates")
+          targets = {
+              "aarch64-apple-darwin",
+              "aarch64-unknown-linux-gnu",
+              "x86_64-apple-darwin",
+              "x86_64-pc-windows-msvc",
+              "x86_64-unknown-linux-gnu",
+          }
+          version = os.environ["VERSION"]
+          expected = set()
+          for target in targets:
+              archive = f"rootlight-{version}-{target}.zip"
+              expected |= {
+                  archive,
+                  f"{archive}.sha256",
+                  f"{archive}.blake3",
+                  f"{target}.candidate.json",
+                  f"{target}.lifecycle.json",
+              }
+          observed = {path.name for path in root.iterdir()}
+          if observed != expected:
+              raise SystemExit(
+                  f"release candidate artifact set differs: "
+                  f"missing={sorted(expected - observed)!r}, "
+                  f"extra={sorted(observed - expected)!r}"
+              )
+          for target in targets:
+              document = json.loads(
+                  (root / f"{target}.candidate.json").read_bytes()
+              )
+              archive = f"rootlight-{version}-{target}.zip"
+              expected_fields = {
+                  "archive": archive,
+                  "independent_archives": "bit_identical",
+                  "independent_builds": "bit_identical",
+                  "lifecycle_report": f"{target}.lifecycle.json",
+                  "rustc_host": target,
+                  "schema": "rootlight.release-package-candidate/1",
+                  "source_revision": os.environ["SOURCE_REVISION"],
+                  "target": target,
+                  "version": version,
+              }
+              observed_fields = {
+                  key: document.get(key) for key in expected_fields
+              }
+              if observed_fields != expected_fields:
+                  raise SystemExit(
+                      f"{target} candidate record differs: {document!r}"
+                  )
+              lifecycle_path = root / f"{target}.lifecycle.json"
+              lifecycle_bytes = lifecycle_path.read_bytes()
+              lifecycle_sha256 = hashlib.sha256(lifecycle_bytes).hexdigest()
+              if document.get("lifecycle_sha256") != lifecycle_sha256:
+                  raise SystemExit(f"{target} lifecycle digest differs")
+              lifecycle = json.loads(lifecycle_bytes)
+              archive_sha256 = (
+                  root / f"{archive}.sha256"
+              ).read_text(encoding="utf-8").split("  ", 1)[0]
+              lifecycle_expected = {
+                  "baseline_archive": f"rootlight-0.0.0-{target}.zip",
+                  "baseline_version": "0.0.0",
+                  "candidate_archive": archive,
+                  "candidate_sha256": archive_sha256,
+                  "candidate_target": target,
+                  "candidate_version": version,
+                  "committed_active_version": version,
+                  "committed_last_good_version": "0.0.0",
+                  "rollback_active_version": "0.0.0",
+                  "schema": "rootlight.package-lifecycle/2",
+                  "source_revision": os.environ["SOURCE_REVISION"],
+              }
+              if {
+                  key: lifecycle.get(key) for key in lifecycle_expected
+              } != lifecycle_expected:
+                  raise SystemExit(f"{target} lifecycle differs: {lifecycle!r}")
+              observations = (
+                  "candidate_health_observed",
+                  "clean_recovery_observed",
+                  "failed_health_rollback_observed",
+                  "launcher_probe_observed",
+                  "unowned_data_preserved",
+                  "user_data_preserved",
+              )
+              if any(lifecycle.get(field) is not True for field in observations):
+                  raise SystemExit(f"{target} lifecycle is incomplete: {lifecycle!r}")
+              if lifecycle.get("bootstrap_owned_files", 0) < 1:
+                  raise SystemExit(f"{target} bootstrap owned no files")
+              if lifecycle.get("uninstall_removed_versions") != 2:
+                  raise SystemExit(f"{target} uninstall did not remove both versions")
+          PY
+
+  supply-chain:
+    name: supply chain / linux
+    needs: [prepare]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Install checksum-verified policy tools
+        run: bash scripts/install-policy-tools.sh "$HOME/.local/bin"
+      - name: Acquire audit inputs
+        run: |
+          cargo fetch --locked
+          bash scripts/download-rustsec-database.sh artifacts/rustsec-db
+          bash scripts/download-osv-database.sh artifacts/osv-db
+      - name: Dependency, license, source, and advisory policy
+        run: |
+          cargo deny check bans licenses sources
+          cargo audit --db artifacts/rustsec-db --no-fetch -D warnings
+          OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$PWD/artifacts/osv-db" \
+            osv-scanner scan source --offline --format json --lockfile Cargo.lock \
+            > artifacts/osv-report.json
+      - name: Secret scan
+        run: gitleaks git --redact=100 --no-banner --no-color --log-level warn .
+      - name: Security negative controls
+        run: bash scripts/policy-negative-controls.sh
+      - name: Unsafe inventory
+        shell: bash
+        run: bash scripts/run-geiger.sh "$HOME/.local/bin/cargo-geiger" artifacts/geiger
+      - name: Generate deterministic SBOM inputs
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          bash scripts/generate-sbom.sh artifacts/sbom-first
+          bash scripts/generate-sbom.sh artifacts/sbom-second
+          diff -ru artifacts/sbom-first artifacts/sbom-second
+          python scripts/generate-release-sboms.py \
+            --output artifacts/release-sbom-first \
+            --source-revision "$SOURCE_REVISION"
+          python scripts/generate-release-sboms.py \
+            --output artifacts/release-sbom-second \
+            --source-revision "$SOURCE_REVISION"
+          diff -ru artifacts/release-sbom-first artifacts/release-sbom-second
+          while IFS= read -r -d '' sbom; do
+            cyclonedx validate \
+              --input-file "$sbom" \
+              --input-format json \
+              --input-version v1_5 \
+              --fail-on-errors
+          done < <(
+            find artifacts/sbom-first artifacts/release-sbom-first \
+              -type f -name '*.cdx.json' -print0 |
+              sort --zero-terminated
+          )
+      - name: Reject host paths in generated evidence
+        run: |
+          if grep --recursive --fixed-strings --binary-files=without-match "$PWD" \
+            artifacts/sbom-first artifacts/sbom-second \
+            artifacts/release-sbom-first artifacts/release-sbom-second \
+            artifacts/osv-report.json; then
+            echo "supply-chain evidence contains the checkout path" >&2
+            exit 1
+          fi
+      - name: Upload deterministic target-specific release SBOMs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-release-sbom-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/release-sbom-first
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
+  unsafe-inventory-windows:
+    name: unsafe inventory / windows
+    needs: [prepare]
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Install checksum-verified cargo-geiger
+        shell: bash
+        run: bash scripts/install-geiger.sh "$HOME/.local/bin"
+      - name: Inventory Windows unsafe boundary
+        shell: bash
+        run: |
+          bash scripts/run-geiger.sh \
+            "$HOME/.local/bin/cargo-geiger.exe" \
+            artifacts/geiger \
+            rootlight-sandbox
+      - name: Upload Windows unsafe inventory
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-unsafe-windows-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/geiger
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
+  release-signing:
+    name: release signatures and provenance / main
+    if: github.ref == 'refs/heads/main' && inputs.source_sha == github.sha
+    needs: [prepare, release-package-candidate, release-candidate-evidence, supply-chain, unsafe-inventory-windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Download exact release candidates
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rootlight-release-candidate-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/release-candidates
+          merge-multiple: true
+      - name: Download exact target-specific SBOMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rootlight-release-sbom-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/release-sbom
+      - name: Validate candidate and SBOM set before identity acquisition
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          version="$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rootlight"))'
+          )"
+          for target in \
+            aarch64-apple-darwin \
+            aarch64-unknown-linux-gnu \
+            x86_64-apple-darwin \
+            x86_64-pc-windows-msvc \
+            x86_64-unknown-linux-gnu; do
+            cargo run --locked --quiet --package xtask -- package-verify \
+              --archive "artifacts/release-candidates/rootlight-$version-$target.zip"
+          done
+          VERSION="$version" python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import zipfile
+
+          candidates = Path("artifacts/release-candidates")
+          sboms = Path("artifacts/release-sbom")
+          targets = {
+              "aarch64-apple-darwin",
+              "aarch64-unknown-linux-gnu",
+              "x86_64-apple-darwin",
+              "x86_64-pc-windows-msvc",
+              "x86_64-unknown-linux-gnu",
+          }
+          version = os.environ["VERSION"]
+          expected_candidates = set()
+          for target in targets:
+              archive = f"rootlight-{version}-{target}.zip"
+              expected_candidates |= {
+                  archive,
+                  f"{archive}.sha256",
+                  f"{archive}.blake3",
+                  f"{target}.candidate.json",
+                  f"{target}.lifecycle.json",
+              }
+          if {path.name for path in candidates.iterdir()} != expected_candidates:
+              raise SystemExit("release candidate set differs before signing")
+          expected_sboms = {"SHA256SUMS", *targets}
+          if {path.name for path in sboms.iterdir()} != expected_sboms:
+              raise SystemExit("release SBOM target set differs before signing")
+          checksum_lines = []
+          for target in sorted(targets):
+              archive = candidates / f"rootlight-{version}-{target}.zip"
+              with zipfile.ZipFile(archive) as package:
+                  names = set(package.namelist())
+              if not {"LICENSE", "NOTICE", "package-manifest.json"} <= names:
+                  raise SystemExit(f"{target} package lacks license or notice bundle")
+              path = sboms / target / "rootlight-distribution.cdx.json"
+              document = json.loads(path.read_bytes())
+              component = document.get("metadata", {}).get("component", {})
+              properties = {
+                  item.get("name"): item.get("value")
+                  for item in component.get("properties", [])
+              }
+              expected_properties = {
+                  "rootlight:build:profile": "release",
+                  "rootlight:source:revision": os.environ["SOURCE_REVISION"],
+                  "rootlight:target:triple": target,
+              }
+              if (
+                  document.get("bomFormat") != "CycloneDX"
+                  or document.get("specVersion") != "1.5"
+                  or not str(document.get("serialNumber", "")).startswith("urn:uuid:")
+                  or properties != expected_properties
+              ):
+                  raise SystemExit(f"{target} release SBOM differs")
+              relative = path.relative_to(sboms).as_posix()
+              checksum_lines.append(
+                  f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {relative}\n"
+              )
+          if (sboms / "SHA256SUMS").read_text(encoding="utf-8") != "".join(
+              checksum_lines
+          ):
+              raise SystemExit("release SBOM checksums differ")
+          PY
+      - name: Install pinned Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.2
+      - name: Create detached keyless signatures
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          for archive in artifacts/release-candidates/*.zip; do
+            cosign sign-blob \
+              --yes \
+              --bundle "$archive.sigstore.json" \
+              "$archive"
+          done
+      - name: Create SLSA provenance attestation
+        id: provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.2.0
+        with:
+          subject-path: artifacts/release-candidates/*.zip
+      - name: Attest aarch64 Linux SBOM
+        id: sbom_aarch64_linux
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.2.0
+        with:
+          subject-path: artifacts/release-candidates/rootlight-*-aarch64-unknown-linux-gnu.zip
+          sbom-path: artifacts/release-sbom/aarch64-unknown-linux-gnu/rootlight-distribution.cdx.json
+      - name: Attest aarch64 macOS SBOM
+        id: sbom_aarch64_macos
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.2.0
+        with:
+          subject-path: artifacts/release-candidates/rootlight-*-aarch64-apple-darwin.zip
+          sbom-path: artifacts/release-sbom/aarch64-apple-darwin/rootlight-distribution.cdx.json
+      - name: Attest x86_64 Windows SBOM
+        id: sbom_x86_64_windows
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.2.0
+        with:
+          subject-path: artifacts/release-candidates/rootlight-*-x86_64-pc-windows-msvc.zip
+          sbom-path: artifacts/release-sbom/x86_64-pc-windows-msvc/rootlight-distribution.cdx.json
+      - name: Attest x86_64 Linux SBOM
+        id: sbom_x86_64_linux
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.2.0
+        with:
+          subject-path: artifacts/release-candidates/rootlight-*-x86_64-unknown-linux-gnu.zip
+          sbom-path: artifacts/release-sbom/x86_64-unknown-linux-gnu/rootlight-distribution.cdx.json
+      - name: Attest x86_64 macOS SBOM
+        id: sbom_x86_64_macos
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.2.0
+        with:
+          subject-path: artifacts/release-candidates/rootlight-*-x86_64-apple-darwin.zip
+          sbom-path: artifacts/release-sbom/x86_64-apple-darwin/rootlight-distribution.cdx.json
+      - name: Retain signed attestation bundles
+        run: |
+          mkdir -p artifacts/release-attestations
+          cp "${{ steps.provenance.outputs.bundle-path }}" \
+            artifacts/release-attestations/slsa-provenance.sigstore.json
+          cp "${{ steps.sbom_aarch64_linux.outputs.bundle-path }}" \
+            artifacts/release-attestations/sbom-aarch64-unknown-linux-gnu.sigstore.json
+          cp "${{ steps.sbom_aarch64_macos.outputs.bundle-path }}" \
+            artifacts/release-attestations/sbom-aarch64-apple-darwin.sigstore.json
+          cp "${{ steps.sbom_x86_64_windows.outputs.bundle-path }}" \
+            artifacts/release-attestations/sbom-x86_64-pc-windows-msvc.sigstore.json
+          cp "${{ steps.sbom_x86_64_linux.outputs.bundle-path }}" \
+            artifacts/release-attestations/sbom-x86_64-unknown-linux-gnu.sigstore.json
+          cp "${{ steps.sbom_x86_64_macos.outputs.bundle-path }}" \
+            artifacts/release-attestations/sbom-x86_64-apple-darwin.sigstore.json
+      - name: Independently verify signatures, transparency, SBOMs, and provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release-candidate.yml@refs/heads/main"
+          mkdir -p artifacts/release-verification
+          for archive in artifacts/release-candidates/*.zip; do
+            name="$(basename "$archive" .zip)"
+            cosign verify-blob \
+              --bundle "$archive.sigstore.json" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-github-workflow-name "release candidate" \
+              --certificate-github-workflow-ref refs/heads/main \
+              --certificate-github-workflow-repository "$GITHUB_REPOSITORY" \
+              --certificate-github-workflow-sha "$SOURCE_REVISION" \
+              --certificate-github-workflow-trigger "$GITHUB_EVENT_NAME" \
+              "$archive"
+            gh attestation verify "$archive" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "$identity" \
+              --deny-self-hosted-runners \
+              --source-digest "$SOURCE_REVISION" \
+              --source-ref refs/heads/main \
+              --format json \
+              > "artifacts/release-verification/$name.provenance.json"
+            gh attestation verify "$archive" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "$identity" \
+              --deny-self-hosted-runners \
+              --source-digest "$SOURCE_REVISION" \
+              --source-ref refs/heads/main \
+              --predicate-type https://cyclonedx.org/bom \
+              --format json \
+              > "artifacts/release-verification/$name.sbom.json"
+          done
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          candidates = Path("artifacts/release-candidates")
+          bundles = sorted(candidates.glob("*.zip.sigstore.json"))
+          if len(bundles) != 5:
+              raise SystemExit("detached signature bundle set differs")
+
+          def contains_nonempty(value, key):
+              if isinstance(value, dict):
+                  if isinstance(value.get(key), list) and value[key]:
+                      return True
+                  return any(contains_nonempty(item, key) for item in value.values())
+              if isinstance(value, list):
+                  return any(contains_nonempty(item, key) for item in value)
+              return False
+
+          for bundle in bundles:
+              if not contains_nonempty(json.loads(bundle.read_bytes()), "tlogEntries"):
+                  raise SystemExit(f"{bundle.name} lacks a transparency-log entry")
+          verification = Path("artifacts/release-verification")
+          for suffix, predicate_type in (
+              (".provenance.json", "https://slsa.dev/provenance/v1"),
+              (".sbom.json", "https://cyclonedx.org/bom"),
+          ):
+              paths = sorted(verification.glob(f"*{suffix}"))
+              if len(paths) != 5:
+                  raise SystemExit(f"{suffix} verification set differs")
+              for path in paths:
+                  results = json.loads(path.read_bytes())
+                  if not isinstance(results, list) or not results:
+                      raise SystemExit(f"{path.name} has no verified attestation")
+                  if not any(
+                      result.get("verificationResult", {})
+                      .get("statement", {})
+                      .get("predicateType")
+                      == predicate_type
+                      and result.get("verificationResult", {}).get(
+                          "verifiedTimestamps"
+                      )
+                      for result in results
+                  ):
+                      raise SystemExit(
+                          f"{path.name} lacks the expected witnessed predicate"
+                      )
+          PY
+      - name: Upload detached signatures and attestation verification
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-release-trust-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/release-candidates/*.zip.sigstore.json
+            artifacts/release-attestations
+            artifacts/release-verification
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
+  release-trust-evidence:
+    name: release trust evidence
+    if: always()
+    needs: [release-signing]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Require exact candidate signing
+        env:
+          SIGNING_RESULT: ${{ needs.release-signing.result }}
+        run: |
+          python - <<'PY'
+          import os
+
+          observed = os.environ["SIGNING_RESULT"]
+          if observed != "success":
+              raise SystemExit(
+                  f"release signing result differs: expected='success', observed={observed}"
+              )
+          PY
+
+  release-performance:
+    name: release performance / ${{ matrix.target }}
+    needs: [prepare]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        shell: bash
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          rustup show active-toolchain
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "$TARGET_TRIPLE"
+      - name: Build release binaries
+        shell: bash
+        run: cargo build --release --locked --package rootlight-daemon --package rootlight-mcp
+      - name: Verify bridge startup latency
+        shell: bash
+        run: |
+          cargo test --release --locked --package rootlight-mcp --test startup_process \
+            -- --ignored --exact bridge_initializes_within_release_startup_slo
+          cargo test --release --locked --package rootlight-mcp --test startup_process \
+            -- --ignored --exact daemon_reaches_ready_within_release_startup_slo
+      - name: Verify cold, warm, scale, truncation, reliability, and resources
+        shell: bash
+        env:
+          ROOTLIGHT_PERFORMANCE_EVIDENCE: ${{ github.workspace }}/artifacts/performance/${{ matrix.target }}.json
+        run: |
+          mkdir -p artifacts/performance
+          cargo test --release --locked --package rootlight-mcp --test performance_process \
+            -- --ignored --exact real_daemon_mcp_produces_all_tool_performance_evidence
+      - name: Upload native release performance evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-release-performance-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/performance/${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
+  release-candidate-required:
+    name: release-candidate-required
+    if: always()
+    needs: [prepare, release-package-candidate, release-candidate-evidence, supply-chain, unsafe-inventory-windows, release-signing, release-trust-evidence, release-performance]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every release-candidate gate
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+
+          failed = {
+              name: result.get("result")
+              for name, result in json.loads(os.environ["NEEDS_JSON"]).items()
+              if result.get("result") != "success"
+          }
+          if failed:
+              print(f"release-candidate jobs did not succeed: {failed}", file=sys.stderr)
+              raise SystemExit(1)
+          print("all package, performance, SBOM, signing, provenance, and trust jobs succeeded")
+          PY

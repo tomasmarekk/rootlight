@@ -8,6 +8,11 @@ commit = "df4cb1c069e1874edd31b4311f1884172cec0e10"
 release = "v6.0.3"
 
 [[actions]]
+repository = "actions/cache"
+commit = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+release = "v6.1.0"
+
+[[actions]]
 repository = "actions/attest"
 commit = "a1948c3f048ba23858d222213b7c278aabede763"
 release = "v4.2.0"
@@ -28,9 +33,9 @@ commit = "6f9f17788090df1f26f669e9d70d6ae9567deba6"
 release = "v4.1.2"
 
 [[write_permission_jobs]]
-workflow = ".github/workflows/ci.yml"
+workflow = ".github/workflows/release-candidate.yml"
 job = "release-signing"
-condition = "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+condition = "github.ref == 'refs/heads/main' && inputs.source_sha == github.sha"
 permissions = [
   "artifact-metadata=write",
   "attestations=write",

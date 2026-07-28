@@ -3,12 +3,20 @@ name: release
 on:
   workflow_dispatch:
     inputs:
-      ci_run_id:
-        description: Successful CI run ID for this exact source revision
+      candidate_run_id:
+        description: Successful release-candidate run ID for this exact source revision
         required: true
         type: string
-      ci_run_attempt:
-        description: CI run attempt containing the signed release candidates
+      candidate_run_attempt:
+        description: Release-candidate run attempt containing the immutable artifacts
+        required: true
+        type: string
+      nightly_run_id:
+        description: Successful nightly run ID for this exact source revision
+        required: true
+        type: string
+      nightly_run_attempt:
+        description: Nightly run attempt containing the exhaustive validation
         required: true
         type: string
       tag_name:
@@ -54,39 +62,79 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Verify successful exact-revision CI run and release tag
+      - name: Verify exact candidate, nightly aggregates, and release tag
         env:
-          CI_RUN_ATTEMPT: ${{ inputs.ci_run_attempt }}
-          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
           GH_TOKEN: ${{ github.token }}
+          NIGHTLY_RUN_ATTEMPT: ${{ inputs.nightly_run_attempt }}
+          NIGHTLY_RUN_ID: ${{ inputs.nightly_run_id }}
           SOURCE_REVISION: ${{ github.sha }}
           TAG_NAME: ${{ inputs.tag_name }}
         run: |
           test "$GITHUB_REF" = "refs/heads/main"
           test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
-          mkdir -p artifacts
-          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID" \
-            > artifacts/ci-run.json
           python - <<'PY'
           import json
           import os
           import subprocess
-          from pathlib import Path
 
-          run = json.loads(Path("artifacts/ci-run.json").read_bytes())
-          expected = {
-              "conclusion": "success",
-              "head_sha": os.environ["SOURCE_REVISION"],
-              "path": ".github/workflows/ci.yml",
-              "run_attempt": int(os.environ["CI_RUN_ATTEMPT"]),
-          }
-          observed = {key: run.get(key) for key in expected}
-          if observed != expected:
-              raise SystemExit(
-                  f"CI run does not authorize this source revision: {observed!r}"
+          repository = os.environ["GITHUB_REPOSITORY"]
+          source_revision = os.environ["SOURCE_REVISION"]
+
+          def require_run(prefix, path, aggregate_name, events):
+              run_id = os.environ[f"{prefix}_RUN_ID"]
+              attempt = int(os.environ[f"{prefix}_RUN_ATTEMPT"])
+              run = json.loads(
+                  subprocess.check_output(
+                      ["gh", "api", f"/repos/{repository}/actions/runs/{run_id}"]
+                  )
               )
-          if run.get("event") not in {"push", "workflow_dispatch"}:
-              raise SystemExit(f"unsupported CI event: {run.get('event')!r}")
+              expected = {
+                  "conclusion": "success",
+                  "head_sha": source_revision,
+                  "path": path,
+                  "run_attempt": attempt,
+              }
+              observed = {key: run.get(key) for key in expected}
+              if observed != expected or run.get("event") not in events:
+                  raise SystemExit(
+                      f"{prefix.lower()} run does not authorize this release: "
+                      f"observed={observed!r} event={run.get('event')!r}"
+                  )
+
+              jobs = json.loads(
+                  subprocess.check_output(
+                      [
+                          "gh",
+                          "api",
+                          f"/repos/{repository}/actions/runs/{run_id}/"
+                          "jobs?filter=latest&per_page=100",
+                      ]
+                  )
+              )["jobs"]
+              aggregates = [
+                  job for job in jobs
+                  if job.get("name") == aggregate_name
+                  and job.get("run_attempt") == attempt
+              ]
+              if len(aggregates) != 1 or aggregates[0].get("conclusion") != "success":
+                  raise SystemExit(
+                      f"{prefix.lower()} aggregate {aggregate_name!r} did not succeed"
+                  )
+
+          require_run(
+              "CANDIDATE",
+              ".github/workflows/release-candidate.yml",
+              "release-candidate-required",
+              {"workflow_dispatch", "workflow_call"},
+          )
+          require_run(
+              "NIGHTLY",
+              ".github/workflows/nightly.yml",
+              "nightly-required",
+              {"schedule", "workflow_dispatch"},
+          )
 
           metadata = json.loads(
               subprocess.check_output(
@@ -107,25 +155,40 @@ jobs:
       - name: Download exact native candidates
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: rootlight-release-candidate-*-${{ github.sha }}-${{ inputs.ci_run_id }}-${{ inputs.ci_run_attempt }}
+          pattern: rootlight-release-candidate-*-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
           path: artifacts/release-candidates
           merge-multiple: true
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.ci_run_id }}
+          run-id: ${{ inputs.candidate_run_id }}
       - name: Download signature and attestation bundles
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: rootlight-release-trust-${{ github.sha }}-${{ inputs.ci_run_id }}-${{ inputs.ci_run_attempt }}
+          name: rootlight-release-trust-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
           path: artifacts/release-trust
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.ci_run_id }}
+          run-id: ${{ inputs.candidate_run_id }}
       - name: Download target-specific SBOMs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: rootlight-release-sbom-${{ github.sha }}-${{ inputs.ci_run_id }}-${{ inputs.ci_run_attempt }}
+          name: rootlight-release-sbom-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
           path: artifacts/release-sbom
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.ci_run_id }}
+          run-id: ${{ inputs.candidate_run_id }}
+      - name: Download exact release-performance audit inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rootlight-release-performance-*-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
+          path: artifacts/release-performance
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id }}
+      - name: Download exact Windows unsafe audit input
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rootlight-unsafe-windows-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
+          path: artifacts/release-unsafe-windows
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id }}
       - name: Verify exact candidates and source binding
         env:
           SOURCE_REVISION: ${{ github.sha }}
@@ -223,6 +286,24 @@ jobs:
                   raise SystemExit(f"candidate uninstall differs for {target}")
           if not any(Path("artifacts/release-sbom").rglob("*.cdx.json")):
               raise SystemExit("release SBOM set is empty")
+          performance = Path("artifacts/release-performance")
+          expected_performance = {
+              "aarch64-apple-darwin",
+              "aarch64-unknown-linux-gnu",
+              "x86_64-apple-darwin",
+              "x86_64-pc-windows-msvc",
+              "x86_64-unknown-linux-gnu",
+          }
+          observed_performance = {
+              path.stem for path in performance.glob("*.json")
+          }
+          if observed_performance != expected_performance:
+              raise SystemExit(
+                  f"release performance audit set differs: {observed_performance!r}"
+              )
+          unsafe = Path("artifacts/release-unsafe-windows")
+          if not any(path.is_file() for path in unsafe.rglob("*")):
+              raise SystemExit("Windows unsafe audit input is empty")
           PY
       - name: Create exact unsigned update metadata
         id: update_metadata
@@ -514,25 +595,25 @@ jobs:
       - name: Download exact native candidates
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: rootlight-release-candidate-*-${{ github.sha }}-${{ inputs.ci_run_id }}-${{ inputs.ci_run_attempt }}
+          pattern: rootlight-release-candidate-*-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
           path: artifacts/release-candidates
           merge-multiple: true
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.ci_run_id }}
+          run-id: ${{ inputs.candidate_run_id }}
       - name: Download signature and attestation bundles
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: rootlight-release-trust-${{ github.sha }}-${{ inputs.ci_run_id }}-${{ inputs.ci_run_attempt }}
+          name: rootlight-release-trust-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
           path: artifacts/release-trust
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.ci_run_id }}
+          run-id: ${{ inputs.candidate_run_id }}
       - name: Download target-specific SBOMs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: rootlight-release-sbom-${{ github.sha }}-${{ inputs.ci_run_id }}-${{ inputs.ci_run_attempt }}
+          name: rootlight-release-sbom-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
           path: artifacts/release-sbom
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.ci_run_id }}
+          run-id: ${{ inputs.candidate_run_id }}
       - name: Download protected update signatures
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

@@ -1,0 +1,1518 @@
+# Exhaustive scheduled validation for compatibility, durability, security, and benchmarks.
+# Release publication consumes a successful exact-revision nightly aggregate.
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  current-stable:
+    name: current stable / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install current stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          test "$(rustc --version)" = "$(rustup run stable rustc --version)"
+      - name: Bind cache to the resolved current-stable compiler
+        id: current-stable-toolchain
+        run: echo "rustc=$(rustc --version | sha256sum | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Restore exact current-stable build inputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rootlight-nightly-current-stable-${{ runner.os }}-${{ runner.arch }}-${{ steps.current-stable-toolchain.outputs.rustc }}-${{ hashFiles('Cargo.lock') }}-all-features-debug-v1
+      - name: Current-stable quality canary
+        run: |
+          cargo check --workspace --all-targets --all-features --locked
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-features --locked
+
+  platform:
+    name: platform / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup show active-toolchain
+      - name: Restore exact platform build inputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rootlight-nightly-platform-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-all-features-debug-v1
+      - name: Platform contract suite
+        shell: bash
+        run: |
+          cargo check --workspace --all-targets --all-features --locked
+          cargo test --workspace --all-features --locked
+          cargo run --locked --quiet --package xtask -- architecture-check
+          cargo run --locked --quiet --package xtask -- generate --check
+          cargo run --locked --quiet --package xtask -- compatibility-check
+          cargo run --locked --quiet --package xtask -- policy-check
+          cargo run --locked --quiet --package xtask -- id-vectors > target/id-vectors.actual.json
+      - name: Daemon lifecycle
+        shell: bash
+        run: |
+          cargo build --locked --package rootlight --package rootlight-daemon --package xtask
+          cargo run --locked --quiet --package xtask -- daemon-lifecycle-check --bin-dir target/debug
+      - name: Compare identifier vectors
+        shell: pwsh
+        run: |
+          $expected = (Get-Content tests/fixtures/id-vectors.json -Raw).Replace("`r`n", "`n")
+          $actual = (Get-Content target/id-vectors.actual.json -Raw).Replace("`r`n", "`n")
+          if ($actual -cne $expected) {
+            throw "identifier vectors differ from the committed fixture"
+          }
+      - name: Clean generated tree
+        shell: bash
+        run: git diff --exit-code
+
+  vertical-slice:
+    name: vertical slice / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup show active-toolchain
+      - name: Restore exact vertical-slice build inputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rootlight-nightly-vertical-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-debug-v1
+      - name: Build vertical-slice binaries
+        shell: bash
+        run: cargo build --locked --package rootlight-daemon --package rootlight-mcp --package xtask
+      - name: Run vertical-slice integration check
+        shell: bash
+        run: cargo run --locked --quiet --package xtask -- mcp-vertical-check --bin-dir target/debug --output-dir artifacts/vertical-slice/${{ matrix.os }}
+      - name: Upload vertical-slice evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vertical-slice-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/vertical-slice/${{ matrix.os }}/summary.json
+            artifacts/vertical-slice/${{ matrix.os }}/transcript.jsonl
+            artifacts/vertical-slice/${{ matrix.os }}/failure.json
+          if-no-files-found: warn
+          retention-days: 7
+          include-hidden-files: false
+          overwrite: false
+
+  durability-platform:
+    name: durable catalog / ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+          - os: windows-2025
+            platform: windows
+          - os: macos-15
+            platform: macos-aarch64
+          - os: macos-15-intel
+            platform: macos-x86_64
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup show active-toolchain
+      - name: Restore exact durability build inputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rootlight-nightly-durability-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-debug-v1
+      - name: Exercise private storage and crash recovery
+        shell: bash
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+          TARGET_PLATFORM: ${{ matrix.platform }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          cargo test --locked --package rootlight-vfs
+          cargo test --locked --package rootlight-service durable_service_
+          cargo test --locked --package rootlight-operations \
+            authorized_publication_reconciles_only_with_external_commit_proof
+          cargo test --locked --package rootlight-operations \
+            interrupted_unprepared_work_cannot_be_reconciled_as_published
+          cargo test --locked --package rootlight-daemon \
+            durable_marker_reconciles_the_journal_after_publication_crash
+          mkdir -p artifacts/durability-platform
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          platform = os.environ["TARGET_PLATFORM"]
+          document = {
+              "schema": "rootlight.durability-platform/1",
+              "source_revision": os.environ["SOURCE_REVISION"],
+              "platform": platform,
+              "private_boundary": "passed",
+              "durable_restore": "passed",
+              "crash_reconciliation": "passed",
+          }
+          Path(f"artifacts/durability-platform/{platform}.json").write_text(
+              json.dumps(document, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+              newline="\n",
+          )
+          PY
+      - name: Upload platform durability evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-durability-platform-${{ matrix.platform }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/durability-platform/${{ matrix.platform }}.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+          include-hidden-files: false
+
+  durability-evidence:
+    name: durability evidence / linux
+    needs: [durability-platform]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Download cross-platform durability results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rootlight-durability-platform-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/durability-platform
+          merge-multiple: true
+      - name: Validate platform results and restart lineage
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("artifacts/durability-platform")
+          expected_platforms = {
+              "linux",
+              "macos-aarch64",
+              "macos-x86_64",
+              "windows",
+          }
+          if {path.stem for path in root.iterdir()} != expected_platforms:
+              raise SystemExit("cross-platform durability artifact set differs")
+          for platform in sorted(expected_platforms):
+              document = json.loads((root / f"{platform}.json").read_bytes())
+              expected = {
+                  "schema": "rootlight.durability-platform/1",
+                  "source_revision": os.environ["SOURCE_REVISION"],
+                  "platform": platform,
+                  "private_boundary": "passed",
+                  "durable_restore": "passed",
+                  "crash_reconciliation": "passed",
+              }
+              if document != expected:
+                  raise SystemExit(
+                      f"{platform} durability evidence differs: {document!r}"
+                  )
+          PY
+          cargo test --locked --package rootlight-mcp \
+            --test repository_lifecycle_process \
+            repository_generation_and_source_queries_survive_daemon_restart -- --exact
+          cargo test --locked --package rootlight-operations \
+            version_two_schema_rejects_tampered_ledger_and_definition
+          cargo test --locked --package rootlight-catalog \
+            undeclared_migration_is_rejected
+
+  incident-evidence:
+    name: incident tabletop / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Exercise incident controls twice
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          cargo run --locked --quiet --package xtask -- incident-tabletop \
+            --output artifacts/incident-first.json \
+            --source-revision "$SOURCE_REVISION"
+          cargo run --locked --quiet --package xtask -- incident-tabletop \
+            --output artifacts/incident-second.json \
+            --source-revision "$SOURCE_REVISION"
+          cmp artifacts/incident-first.json artifacts/incident-second.json
+      - name: Upload incident tabletop evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-incident-tabletop-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/incident-first.json
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+
+  dataset-evidence:
+    name: benchmark datasets / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Acquire immutable datasets twice
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          cargo run --locked --quiet --package xtask -- dataset-check
+          cargo run --locked --quiet --package xtask -- dataset-cache \
+            --cache-dir target/dataset-cache-first \
+            --output artifacts/dataset-first.json \
+            --source-revision "$SOURCE_REVISION"
+          cargo run --locked --quiet --package xtask -- dataset-cache \
+            --cache-dir target/dataset-cache-second \
+            --output artifacts/dataset-second.json \
+            --source-revision "$SOURCE_REVISION"
+          diff --recursive target/dataset-cache-first target/dataset-cache-second
+          cmp artifacts/dataset-first.json artifacts/dataset-second.json
+      - name: Upload dataset acquisition evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-dataset-cache-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/dataset-first.json
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+
+  supply-chain:
+    name: supply chain / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Install checksum-verified policy tools
+        run: bash scripts/install-policy-tools.sh "$HOME/.local/bin"
+      - name: Acquire audit inputs
+        run: |
+          cargo fetch --locked
+          bash scripts/download-rustsec-database.sh artifacts/rustsec-db
+          bash scripts/download-osv-database.sh artifacts/osv-db
+      - name: Dependency, license, source, and advisory policy
+        run: |
+          cargo deny check bans licenses sources
+          cargo audit --db artifacts/rustsec-db --no-fetch -D warnings
+          OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$PWD/artifacts/osv-db" \
+            osv-scanner scan source --offline --format json --lockfile Cargo.lock \
+            > artifacts/osv-report.json
+      - name: Secret scan
+        run: gitleaks git --redact=100 --no-banner --no-color --log-level warn .
+      - name: Security negative controls
+        run: bash scripts/policy-negative-controls.sh
+      - name: Unsafe inventory
+        shell: bash
+        run: bash scripts/run-geiger.sh "$HOME/.local/bin/cargo-geiger" artifacts/geiger
+      - name: Generate deterministic SBOM inputs
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          bash scripts/generate-sbom.sh artifacts/sbom-first
+          bash scripts/generate-sbom.sh artifacts/sbom-second
+          diff -ru artifacts/sbom-first artifacts/sbom-second
+          python scripts/generate-release-sboms.py \
+            --output artifacts/release-sbom-first \
+            --source-revision "$SOURCE_REVISION"
+          python scripts/generate-release-sboms.py \
+            --output artifacts/release-sbom-second \
+            --source-revision "$SOURCE_REVISION"
+          diff -ru artifacts/release-sbom-first artifacts/release-sbom-second
+          while IFS= read -r -d '' sbom; do
+            cyclonedx validate \
+              --input-file "$sbom" \
+              --input-format json \
+              --input-version v1_5 \
+              --fail-on-errors
+          done < <(
+            find artifacts/sbom-first artifacts/release-sbom-first \
+              -type f -name '*.cdx.json' -print0 |
+              sort --zero-terminated
+          )
+      - name: Reject host paths in generated evidence
+        run: |
+          if grep --recursive --fixed-strings --binary-files=without-match "$PWD" \
+            artifacts/sbom-first artifacts/sbom-second \
+            artifacts/release-sbom-first artifacts/release-sbom-second \
+            artifacts/osv-report.json; then
+            echo "supply-chain evidence contains the checkout path" >&2
+            exit 1
+          fi
+      - name: Upload deterministic target-specific release SBOMs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-release-sbom-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/release-sbom-first
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+
+  unsafe-inventory-windows:
+    name: unsafe inventory / windows
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Install checksum-verified cargo-geiger
+        shell: bash
+        run: bash scripts/install-geiger.sh "$HOME/.local/bin"
+      - name: Inventory Windows unsafe boundary
+        shell: bash
+        run: |
+          bash scripts/run-geiger.sh \
+            "$HOME/.local/bin/cargo-geiger.exe" \
+            artifacts/geiger \
+            rootlight-sandbox
+      - name: Upload Windows unsafe inventory
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-unsafe-windows-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/geiger
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+
+  offline:
+    name: offline / blocked egress / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Fetch locked inputs without compiling project code
+        run: bash scripts/prepare-offline.sh
+      - name: Build and test after kernel-enforced egress denial
+        run: |
+          sudo RUNNER_HOME="$HOME" RUNNER_PATH="$PATH" \
+            bash scripts/run-in-network-namespace.sh scripts/run-offline-tests.sh
+
+  parser-evidence:
+    name: parser fallback evidence / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Generate deterministic parser fallback envelope
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          cargo build --locked --release --package rootlight-bench --bin parser-evidence
+          target/release/parser-evidence \
+            --source-revision "$SOURCE_REVISION" > target/rootlight-parser-benchmark-v1.json
+          target/release/parser-evidence \
+            --source-revision "$SOURCE_REVISION" > target/rootlight-parser-benchmark-v1.second.json
+          cmp target/rootlight-parser-benchmark-v1.json target/rootlight-parser-benchmark-v1.second.json
+          target/release/parser-evidence \
+            --verify < target/rootlight-parser-benchmark-v1.json
+          if grep --fixed-strings --binary-files=without-match "$PWD" \
+            target/rootlight-parser-benchmark-v1.json; then
+            echo "parser evidence contains the checkout path" >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          path = Path("target/rootlight-parser-benchmark-v1.json")
+          encoded = path.read_bytes()
+          envelope = json.loads(encoded)
+          expected = {
+              "schema_version": "rootlight.parser-ci-evidence/1",
+              "evidence_status": "deterministic_fallback",
+              "record_set_count": 2,
+              "dataset_record_count": 4,
+              "dataset_record_bytes": 825,
+              "dataset_record_sha256": (
+                  "990f996b75507cd26bef61dbaeace897"
+                  "5bb7e5b81113de74a623448f926dc074"
+              ),
+              "sample_record_count": 44,
+              "sample_record_bytes": 7200,
+              "sample_record_sha256": (
+                  "eb98d07b2bd81e2918fe465424060768"
+                  "b49f72b31133d6434d25f29aa25127cc"
+              ),
+          }
+          observed = {key: envelope.get(key) for key in expected}
+          if observed != expected:
+              raise SystemExit(
+                  f"parser evidence fixed contract mismatch: {observed!r}"
+              )
+          if len(encoded) > 256 * 1024:
+              raise SystemExit("parser evidence exceeds its single-file ceiling")
+          print(
+              "verified parser fallback envelope "
+              f"bytes={len(encoded)} sha256={hashlib.sha256(encoded).hexdigest()}"
+          )
+          PY
+      - name: Upload immutable parser fallback envelope
+        if: failure()
+        id: evidence-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-parser-benchmark-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/rootlight-parser-benchmark-v1.json
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+      - name: Record immutable artifact identity
+        if: failure()
+        env:
+          ARTIFACT_ID: ${{ steps.evidence-upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.evidence-upload.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.evidence-upload.outputs.artifact-digest }}
+        run: |
+          {
+            echo "### Parser fallback evidence"
+            echo
+            echo "- artifact id: \`$ARTIFACT_ID\`"
+            echo "- artifact url: $ARTIFACT_URL"
+            echo "- artifact digest: \`$ARTIFACT_DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  semantic-evidence:
+    name: semantic fallback evidence / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Generate deterministic semantic fallback envelope
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          cargo build --locked --release --package rootlight-bench --bin semantic-evidence
+          target/release/semantic-evidence \
+            --source-revision "$SOURCE_REVISION" > target/rootlight-semantic-evidence-v1.json
+          target/release/semantic-evidence \
+            --source-revision "$SOURCE_REVISION" > target/rootlight-semantic-evidence-v1.second.json
+          cmp target/rootlight-semantic-evidence-v1.json target/rootlight-semantic-evidence-v1.second.json
+          if grep --fixed-strings --binary-files=without-match "$PWD" \
+            target/rootlight-semantic-evidence-v1.json; then
+            echo "semantic evidence contains the checkout path" >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("target/rootlight-semantic-evidence-v1.json")
+          encoded = path.read_bytes()
+          envelope = json.loads(encoded)
+          expected_envelope = {
+              "schema": "rootlight.semantic-evidence-envelope/1",
+              "source_revision": os.environ["SOURCE_REVISION"],
+          }
+          observed_envelope = {
+              key: envelope.get(key) for key in expected_envelope
+          }
+          if observed_envelope != expected_envelope:
+              raise SystemExit(
+                  f"semantic evidence envelope mismatch: {observed_envelope!r}"
+              )
+
+          evidence = envelope.get("evidence")
+          if not isinstance(evidence, dict):
+              raise SystemExit("semantic evidence payload is missing")
+          expected_evidence = {
+              "schema_version": "2.0",
+              "corpus_id": "rootlight-semantic-contract-fixture-v1",
+              "adapter_crate": "rootlight-adapters",
+          }
+          observed_evidence = {
+              key: evidence.get(key) for key in expected_evidence
+          }
+          if observed_evidence != expected_evidence:
+              raise SystemExit(
+                  f"semantic evidence payload mismatch: {observed_evidence!r}"
+              )
+
+          languages = evidence.get("languages")
+          expected_languages = [
+              "c",
+              "cpp",
+              "csharp",
+              "go",
+              "java",
+              "javascript",
+              "kotlin",
+              "php",
+              "python",
+              "rust",
+              "typescript",
+          ]
+          if not isinstance(languages, list):
+              raise SystemExit("semantic language evidence is missing")
+          if [item.get("language") for item in languages] != expected_languages:
+              raise SystemExit("semantic language evidence differs")
+          if any(item.get("observed_context_imports") != 0 for item in languages):
+              raise SystemExit("semantic context-import observations differ")
+
+          quality = evidence.get("resolver_quality")
+          if not isinstance(quality, dict):
+              raise SystemExit("semantic resolver evidence is missing")
+          expected_quality = {
+              "corpus_scope": "caller_supplied_contract_fixture",
+              "language_breakdown_available": False,
+              "holdout_available": False,
+          }
+          observed_quality = {
+              key: quality.get(key) for key in expected_quality
+          }
+          if observed_quality != expected_quality:
+              raise SystemExit(
+                  f"semantic resolver evidence overstates capability: {observed_quality!r}"
+              )
+
+          execution = evidence.get("repository_execution")
+          if not isinstance(execution, dict):
+              raise SystemExit("repository execution evidence is missing")
+          if (
+              execution.get("command_surface_available") is not False
+              or execution.get("observed_command_attempts") != 0
+              or execution.get("network_egress_available") is not False
+          ):
+              raise SystemExit("repository execution evidence differs")
+          if len(encoded) > 128 * 1024:
+              raise SystemExit("semantic evidence exceeds its single-file ceiling")
+          print(
+              "verified semantic fallback envelope "
+              f"bytes={len(encoded)} sha256={hashlib.sha256(encoded).hexdigest()}"
+          )
+          PY
+      - name: Upload immutable semantic fallback envelope
+        if: failure()
+        id: evidence-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-semantic-evidence-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/rootlight-semantic-evidence-v1.json
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+      - name: Record immutable artifact identity
+        if: failure()
+        env:
+          ARTIFACT_ID: ${{ steps.evidence-upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.evidence-upload.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.evidence-upload.outputs.artifact-digest }}
+        run: |
+          {
+            echo "### Semantic fallback evidence"
+            echo
+            echo "- artifact id: \`$ARTIFACT_ID\`"
+            echo "- artifact url: $ARTIFACT_URL"
+            echo "- artifact digest: \`$ARTIFACT_DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  language-workspace-evidence:
+    name: language and workspace candidate evidence / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Generate and independently reproduce candidate-bound measurements
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          TOOLCHAIN="$(rustc -V)"
+          cargo build --locked --release --package rootlight-bench \
+            --bin language-workspace-evidence
+          target/release/language-workspace-evidence \
+            --source-revision "$SOURCE_REVISION" \
+            --toolchain "$TOOLCHAIN" \
+            > target/rootlight-language-workspace-evidence-v3.json
+          target/release/language-workspace-evidence \
+            --source-revision "$SOURCE_REVISION" \
+            --toolchain "$TOOLCHAIN" \
+            > target/rootlight-language-workspace-evidence-v3.second.json
+          cmp \
+            target/rootlight-language-workspace-evidence-v3.json \
+            target/rootlight-language-workspace-evidence-v3.second.json
+          target/release/language-workspace-evidence \
+            --verify \
+            --source-revision "$SOURCE_REVISION" \
+            --toolchain "$TOOLCHAIN" \
+            < target/rootlight-language-workspace-evidence-v3.json
+          if grep --fixed-strings --binary-files=without-match "$PWD" \
+            target/rootlight-language-workspace-evidence-v3.json; then
+            echo "language and workspace evidence contains the checkout path" >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("target/rootlight-language-workspace-evidence-v3.json")
+          encoded = path.read_bytes()
+          evidence = json.loads(encoded)
+          if evidence.get("schema") != "rootlight.language-workspace-evidence/3":
+              raise SystemExit("language and workspace evidence schema differs")
+          if evidence.get("source_revision") != os.environ["SOURCE_REVISION"]:
+              raise SystemExit("language and workspace evidence revision differs")
+          language = evidence.get("language", {})
+          expanded = language.get("expanded_languages", [])
+          if [item.get("language") for item in expanded] != [
+              "c", "cpp", "csharp", "java", "kotlin", "php"
+          ]:
+              raise SystemExit("expanded language evidence differs")
+          for item in expanded:
+              if item.get("parser_coverage") != "complete" or \
+                      item.get("parser_diagnostics") != 0:
+                  raise SystemExit("expanded language parser measurement differs")
+              if item.get("conformance_label_precision_ppm") != 1_000_000 or \
+                      item.get("conformance_label_recall_ppm") != 1_000_000:
+                  raise SystemExit("expanded language conformance differs")
+              if item.get("generated_classification_observed") is not True:
+                  raise SystemExit("generated classification was not observed")
+              if item.get("holdout_available") is not False or \
+                      item.get("native_isolation_available") is not False or \
+                      item.get("compiler_execution_available") is not False or \
+                      item.get("generated_origin_complete") is not False:
+                  raise SystemExit("expanded language limitation status differs")
+          workspace = evidence.get("workspace", {})
+          scales = workspace.get("scale_samples", [])
+          if [item.get("repositories") for item in scales] != [1, 10, 100]:
+              raise SystemExit("workspace scale evidence differs")
+          for item in scales:
+              repositories = item.get("repositories")
+              if item.get("complete") is not True or \
+                      item.get("measurement_scope") != \
+                          "temporary_filesystem_vfs_and_production_parser":
+                  raise SystemExit("workspace scale measurement is incomplete")
+              if item.get("source_files") != repositories or \
+                      item.get("vfs_snapshot_reads") != repositories or \
+                      item.get("production_adapter_parses") != repositories:
+                  raise SystemExit("workspace scale source coverage differs")
+              if item.get("parse_diagnostics") != 0 or \
+                      not all(item.get(field, 0) > 0 for field in (
+                          "source_bytes", "physical_loc", "syntax_facts"
+                      )):
+                  raise SystemExit("workspace scale parser observation differs")
+          if workspace.get("partial_snapshot", {}).get("explicit_failures") != 1:
+              raise SystemExit("workspace partial failure evidence differs")
+          security = evidence.get("security", {})
+          if security.get("workspace_source_reads") != 111 or \
+                  security.get("filesystem_capability_available") is not True or \
+                  security.get("native_parser_present") is not True or \
+                  security.get("evidence_module_unsafe_code_allowed") is not False:
+              raise SystemExit("language and workspace security evidence differs")
+          if len(encoded) > 256 * 1024:
+              raise SystemExit("language and workspace evidence exceeds its ceiling")
+          print(
+              "verified language and workspace candidate measurements "
+              f"bytes={len(encoded)} sha256={hashlib.sha256(encoded).hexdigest()}"
+          )
+          PY
+      - name: Upload immutable language and workspace candidate evidence
+        if: failure()
+        id: evidence-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-language-workspace-evidence-v3-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/rootlight-language-workspace-evidence-v3.json
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+      - name: Record immutable artifact identity
+        if: failure()
+        env:
+          ARTIFACT_ID: ${{ steps.evidence-upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.evidence-upload.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.evidence-upload.outputs.artifact-digest }}
+        run: |
+          {
+            echo "### Language and workspace candidate evidence"
+            echo
+            echo "- artifact id: \`$ARTIFACT_ID\`"
+            echo "- artifact url: $ARTIFACT_URL"
+            echo "- artifact digest: \`$ARTIFACT_DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  capability-evidence:
+    name: capability fallback evidence / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Verify bounded fallback contracts
+        run: |
+          cargo test --locked --package rootlight-service --lib \
+            tests::dependency_directed_successors_match_fresh_logical_rebuilds \
+            -- --exact
+          cargo test --locked --package rootlight-storage --lib
+          cargo test --locked --package rootlight-segment --test differential
+      - name: Generate deterministic capability evidence
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          cargo build --locked --release --package rootlight-bench --bin capability-evidence
+          target/release/capability-evidence \
+            --source-revision "$SOURCE_REVISION" > target/rootlight-capability-evidence-v2.json
+          target/release/capability-evidence \
+            --source-revision "$SOURCE_REVISION" > target/rootlight-capability-evidence-v2.second.json
+          cmp target/rootlight-capability-evidence-v2.json target/rootlight-capability-evidence-v2.second.json
+          if grep --fixed-strings --binary-files=without-match "$PWD" \
+            target/rootlight-capability-evidence-v2.json; then
+            echo "capability evidence contains the checkout path" >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("target/rootlight-capability-evidence-v2.json")
+          encoded = path.read_bytes()
+          evidence = json.loads(encoded)
+          expected_root = {
+              "schema": "rootlight.capability-evidence/2",
+              "source_revision": os.environ["SOURCE_REVISION"],
+          }
+          observed_root = {
+              key: evidence.get(key) for key in expected_root
+          }
+          if observed_root != expected_root:
+              raise SystemExit(
+                  f"capability evidence root mismatch: {observed_root!r}"
+              )
+
+          semantic = evidence.get("semantic")
+          expected_semantic = {
+              "status": "contract_fixture_only",
+              "declared_languages": [
+                  "go",
+                  "javascript",
+                  "python",
+                  "rust",
+                  "typescript",
+              ],
+              "observed_language_reports": 0,
+              "holdout_available": False,
+              "language_breakdown_available": False,
+          }
+          if semantic != expected_semantic:
+              raise SystemExit(
+                  f"semantic capability evidence differs: {semantic!r}"
+              )
+
+          incremental = evidence.get("incremental")
+          if not isinstance(incremental, dict):
+              raise SystemExit("incremental capability evidence is missing")
+          expected_incremental = {
+              "status": "durable_generation_reuse",
+              "authoritative_reconcile_contract_available": True,
+              "parser_artifact_reuse_contract_available": True,
+              "fresh_generation_lowering_required": True,
+              "fixture_equivalence_ci_required": True,
+              "production_mutation_corpus_available": False,
+              "medium_suite_measurements_available": True,
+              "body_edit_p95_available": True,
+              "durable_artifact_cache_available": True,
+          }
+          if incremental != expected_incremental:
+              raise SystemExit(
+                  f"incremental capability evidence differs: {incremental!r}"
+              )
+
+          storage = evidence.get("storage")
+          if not isinstance(storage, dict):
+              raise SystemExit("storage capability evidence is missing")
+          if (
+              storage.get("selected_backend") != "sqlite"
+              or storage.get("segment_status") != "durable_catalog_and_snapshots"
+              or storage.get("durable_filesystem_publication_active") is not True
+              or storage.get("restart_recovery_measurements_available") is not True
+              or storage.get("two_stage_publication_active") is not False
+          ):
+              raise SystemExit(
+                  f"storage capability evidence differs: {storage!r}"
+              )
+
+          isolation = evidence.get("isolation")
+          expected_isolation = {
+              "activation": "structural_fallback",
+              "required_platforms": ["linux", "mac_os", "windows"],
+              "cross_platform_reports_required": True,
+              "native_controls_enforced": False,
+              "deep_adapter_permitted": False,
+          }
+          if isolation != expected_isolation:
+              raise SystemExit(
+                  f"isolation capability evidence differs: {isolation!r}"
+              )
+
+          if len(encoded) > 32 * 1024:
+              raise SystemExit("capability evidence exceeds its single-file ceiling")
+          print(
+              "verified capability evidence "
+              f"bytes={len(encoded)} sha256={hashlib.sha256(encoded).hexdigest()}"
+          )
+          PY
+      - name: Upload immutable capability evidence
+        if: failure()
+        id: evidence-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-capability-evidence-v2-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/rootlight-capability-evidence-v2.json
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+      - name: Record immutable artifact identity
+        if: failure()
+        env:
+          ARTIFACT_ID: ${{ steps.evidence-upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.evidence-upload.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.evidence-upload.outputs.artifact-digest }}
+        run: |
+          {
+            echo "### Capability fallback evidence"
+            echo
+            echo "- artifact id: \`$ARTIFACT_ID\`"
+            echo "- artifact url: $ARTIFACT_URL"
+            echo "- artifact digest: \`$ARTIFACT_DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  adapter-isolation:
+    name: adapter isolation evidence / ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+            reason_prefix: linux
+          - os: windows-2025
+            platform: windows
+            reason_prefix: windows
+          - os: macos-15
+            platform: mac_os
+            reason_prefix: macos
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup show active-toolchain
+      - name: Generate deterministic exact-process isolation evidence
+        shell: bash
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+          EXPECTED_REASON_PREFIX: ${{ matrix.reason_prefix }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          mkdir -p artifacts/adapter-isolation
+          cargo run --locked --quiet --package rootlight-adapter-host -- \
+            --report --source-revision "$SOURCE_REVISION" \
+            > "artifacts/adapter-isolation/$EXPECTED_PLATFORM.json"
+          cargo run --locked --quiet --package rootlight-adapter-host -- \
+            --report --source-revision "$SOURCE_REVISION" \
+            > "artifacts/adapter-isolation/$EXPECTED_PLATFORM.second.json"
+          cmp \
+            "artifacts/adapter-isolation/$EXPECTED_PLATFORM.json" \
+            "artifacts/adapter-isolation/$EXPECTED_PLATFORM.second.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          expected_controls = [
+              "filesystem_view",
+              "temporary_directory",
+              "network_egress",
+              "process_creation",
+              "memory",
+              "cpu",
+              "handles",
+              "dynamic_library_search",
+              "descendant_cleanup",
+          ]
+          platform = os.environ["EXPECTED_PLATFORM"]
+          path = Path(f"artifacts/adapter-isolation/{platform}.json")
+          evidence = json.loads(path.read_bytes())
+          windows = platform == "windows"
+          expected = {
+              "schema": "rootlight.adapter-isolation/1",
+              "source_revision": os.environ["SOURCE_REVISION"],
+              "platform": platform,
+              "activation": "isolated_deep" if windows else "structural_fallback",
+              "deep_adapter_permitted": windows,
+              "structural_fallback_active": not windows,
+          }
+          observed = {key: evidence.get(key) for key in expected}
+          if observed != expected:
+              raise SystemExit(
+                  f"adapter isolation evidence mismatch: {observed!r}"
+              )
+          controls = evidence.get("controls")
+          if not isinstance(controls, list):
+              raise SystemExit("adapter isolation controls are missing")
+          if [item.get("control") for item in controls] != expected_controls:
+              raise SystemExit("adapter isolation controls differ")
+          expected_reason = (
+              "all_required_native_mechanisms_enforced"
+              if windows
+              else (
+                  f"{os.environ['EXPECTED_REASON_PREFIX']}"
+                  "_native_enforcement_not_implemented"
+              )
+          )
+          if any(
+              item.get("enforced") is not windows
+              or item.get("reason_code") != expected_reason
+              for item in controls
+          ):
+              raise SystemExit("adapter isolation enforcement evidence differs")
+          if path.stat().st_size > 16 * 1024:
+              raise SystemExit("adapter isolation evidence exceeds its ceiling")
+          PY
+          if grep --fixed-strings --binary-files=without-match "$PWD" \
+            "artifacts/adapter-isolation/$EXPECTED_PLATFORM.json"; then
+            echo "adapter isolation evidence contains the checkout path" >&2
+            exit 1
+          fi
+      - name: Upload immutable adapter isolation evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: adapter-isolation-${{ matrix.platform }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/adapter-isolation/${{ matrix.platform }}.json
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+
+  budget-evidence:
+    name: budget runtime evidence / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Build real process boundaries
+        run: cargo build --locked --package rootlight-daemon --package rootlight-mcp --package xtask
+      - name: Generate and validate bounded runtime evidence
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+          ROOTLIGHT_BUDGET_RUNTIME_REPORT: ${{ github.workspace }}/artifacts/budget/budget-runtime.json
+          ROOTLIGHT_CANCELLATION_PROCESS_REPORT: ${{ github.workspace }}/artifacts/budget/cancellation-process.json
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          mkdir -p artifacts/budget
+          cargo test --locked --package rootlight-mcp \
+            --test budget_process -- --ignored --nocapture
+          cargo test --locked --package rootlight-mcp \
+            --test cancellation_process -- --nocapture
+          cargo run --locked --quiet --package xtask -- budget-conformance-check \
+            --runtime-report "$ROOTLIGHT_BUDGET_RUNTIME_REPORT" \
+            --cancellation-report "$ROOTLIGHT_CANCELLATION_PROCESS_REPORT" \
+            --output artifacts/budget/conformance.json
+          cargo run --locked --quiet --package xtask -- budget-conformance-check \
+            --runtime-report "$ROOTLIGHT_BUDGET_RUNTIME_REPORT" \
+            --cancellation-report "$ROOTLIGHT_CANCELLATION_PROCESS_REPORT" \
+            --output artifacts/budget/conformance.second.json
+          cmp artifacts/budget/conformance.json artifacts/budget/conformance.second.json
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("artifacts/budget")
+          runtime = json.loads((root / "budget-runtime.json").read_bytes())
+          cancellation = json.loads((root / "cancellation-process.json").read_bytes())
+          conformance = json.loads((root / "conformance.json").read_bytes())
+          revision = os.environ["SOURCE_REVISION"]
+          expected = {
+              "budget-runtime.json": ("rootlight.mcp-budget-runtime/1", 128 * 1024),
+              "cancellation-process.json": (
+                  "rootlight.mcp-cancellation-process/1",
+                  64 * 1024,
+              ),
+              "conformance.json": (
+                  "rootlight.mcp-budget-conformance/1",
+                  2 * 1024 * 1024,
+              ),
+          }
+          documents = {
+              "budget-runtime.json": runtime,
+              "cancellation-process.json": cancellation,
+              "conformance.json": conformance,
+          }
+          for name, (schema, ceiling) in expected.items():
+              if documents[name].get("schema") != schema:
+                  raise SystemExit(f"{name} schema differs")
+              if documents[name].get("source_revision") != revision:
+                  raise SystemExit(f"{name} revision differs")
+              if (root / name).stat().st_size > ceiling:
+                  raise SystemExit(f"{name} exceeds its byte ceiling")
+          if len(runtime.get("cases", [])) != 14:
+              raise SystemExit("runtime evidence does not cover all 14 budget tools")
+          if len(cancellation.get("cases", [])) != 2:
+              raise SystemExit("cancellation evidence differs")
+          measured = [
+              tool for tool in conformance.get("tools", [])
+              if tool.get("runtime_trigger_coverage") == "covered_real_process"
+          ]
+          if len(measured) != 14:
+              raise SystemExit("conformance report does not accept all runtime cases")
+          if any(
+              tool.get("runtime_trigger_coverage") == "not_measured"
+              for tool in conformance.get("tools", [])
+          ):
+              raise SystemExit("conformance report retains an unmeasured budget tool")
+          encoded = b"".join(
+              (root / name).read_bytes()
+              for name in (
+                  "budget-runtime.json",
+                  "cancellation-process.json",
+                  "conformance.json",
+              )
+          )
+          if str(Path.cwd()).encode() in encoded:
+              raise SystemExit("budget evidence contains the checkout path")
+          PY
+      - name: Upload immutable runtime budget evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-budget-runtime-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/budget/budget-runtime.json
+            artifacts/budget/cancellation-process.json
+            artifacts/budget/conformance.json
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+
+  agent-workflow-quality:
+    name: agent workflow and context quality / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Build release daemon and MCP bridge
+        run: cargo build --release --locked --package rootlight-daemon --package rootlight-mcp
+      - name: Measure controlled agent workflows and context quality
+        env:
+          ROOTLIGHT_ABLATION_REPORT: ${{ github.workspace }}/artifacts/trajectory/context-pack-ablation.json
+          ROOTLIGHT_TRAJECTORY_REPORT: ${{ github.workspace }}/artifacts/trajectory/trajectory-evidence.json
+          ROOTLIGHT_WORKFLOW_QUALITY_REPORT: ${{ github.workspace }}/artifacts/trajectory/workflow-quality.json
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          mkdir -p artifacts/trajectory
+          cargo test --release --locked --package rootlight-mcp \
+            --test trajectory_process \
+            -- --ignored --exact preregistered_trajectories_run_through_daemon_and_mcp_processes
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("artifacts/trajectory")
+          trajectory_path = root / "trajectory-evidence.json"
+          ablation_path = root / "context-pack-ablation.json"
+          quality_path = root / "workflow-quality.json"
+          trajectory_bytes = trajectory_path.read_bytes()
+          ablation_bytes = ablation_path.read_bytes()
+          quality_bytes = quality_path.read_bytes()
+          trajectory = json.loads(trajectory_bytes)
+          ablation = json.loads(ablation_bytes)
+          quality = json.loads(quality_bytes)
+
+          if trajectory.get("schema") != "rootlight.agent-trajectories/1":
+              raise SystemExit("trajectory evidence schema differs")
+          workflows = trajectory.get("protocol", {}).get("workflows", [])
+          if len(workflows) != 14:
+              raise SystemExit("trajectory evidence does not retain all controlled workflows")
+          denominator = trajectory.get("denominator", {})
+          expected_denominator = {
+              "expected_attempts": 84,
+              "observed_attempts": 84,
+              "succeeded": 56,
+              "failed": 0,
+              "timed_out": 0,
+              "cancelled": 0,
+              "not_available": 28,
+              "excluded": 0,
+              "redundant_status_preflights": 0,
+          }
+          for field, expected in expected_denominator.items():
+              if denominator.get(field) != expected:
+                  raise SystemExit(
+                      f"trajectory denominator {field} differs: "
+                      f"{denominator.get(field)!r} != {expected!r}"
+                  )
+          if quality.get("schema") != "rootlight.agent-workflow-quality/1":
+              raise SystemExit("all-workflow quality evidence schema differs")
+          quality_protocol = quality.get("protocol", {})
+          trajectory_digests = trajectory.get("digests", {})
+          if quality_protocol.get("source_revision") != os.environ["SOURCE_REVISION"]:
+              raise SystemExit("all-workflow quality revision differs")
+          for quality_field, trajectory_field in (
+              ("trajectory_protocol_sha256", "protocol_sha256"),
+              ("trajectory_tasks_sha256", "tasks_sha256"),
+              ("fixture_sha256", "fixture_sha256"),
+          ):
+              if quality_protocol.get(quality_field) != trajectory_digests.get(trajectory_field):
+                  raise SystemExit(
+                      f"all-workflow quality {quality_field} is detached from trajectory evidence"
+                  )
+          protocol_encoding = json.dumps(
+              quality_protocol,
+              ensure_ascii=False,
+              separators=(",", ":"),
+          ).encode()
+          protocol_sha256 = hashlib.sha256(
+              b"rootlight.workflow-quality.protocol.v1\0" + protocol_encoding
+          ).hexdigest()
+          if quality.get("protocol_sha256") != protocol_sha256:
+              raise SystemExit("all-workflow quality protocol digest differs")
+          if quality_protocol.get("maximum_quality_loss_centipoints") != 200:
+              raise SystemExit("all-workflow quality threshold was weakened")
+          tasks = quality_protocol.get("tasks", [])
+          pairs = quality.get("pairs", [])
+          summaries = quality.get("workflows", [])
+          pairs_encoding = json.dumps(
+              pairs,
+              ensure_ascii=False,
+              separators=(",", ":"),
+          ).encode()
+          if quality.get("pairs_sha256") != hashlib.sha256(
+              b"rootlight.workflow-quality.pairs.v1\0" + pairs_encoding
+          ).hexdigest():
+              raise SystemExit("all-workflow quality candidate-pair digest differs")
+          quality_denominator = quality.get("denominator", {})
+          if len(tasks) != 28 or len(pairs) != 28 or len(summaries) != 14:
+              raise SystemExit("all-workflow quality coverage differs")
+          expected_quality_denominator = {
+              "expected_workflows": 14,
+              "observed_workflows": 14,
+              "expected_pairs": 28,
+              "observed_pairs": 28,
+              "rootlight_graded": 28,
+              "bounded_file_graded": 28,
+          }
+          for field, expected in expected_quality_denominator.items():
+              if quality_denominator.get(field) != expected:
+                  raise SystemExit(
+                      f"all-workflow quality denominator {field} differs: "
+                      f"{quality_denominator.get(field)!r} != {expected!r}"
+                  )
+          hex_digest = lambda value: isinstance(value, str) and len(value) == 64 \
+              and all(character in "0123456789abcdef" for character in value)
+          task_keys = set()
+          trajectory_attempts = {
+              (
+                  attempt.get("workflow_id"),
+                  attempt.get("attempt_index"),
+                  attempt.get("condition"),
+              ): attempt
+              for attempt in trajectory.get("attempts", [])
+          }
+          for task in tasks:
+              task_key = (task.get("workflow_id"), task.get("attempt_index"))
+              if task_key in task_keys:
+                  raise SystemExit("all-workflow quality task registration is duplicated")
+              task_keys.add(task_key)
+              if task.get("fixture_sha256") != trajectory_digests.get("fixture_sha256") or \
+                      not hex_digest(task.get("prompt_sha256")) or \
+                      not hex_digest(task.get("answer_key_sha256")):
+                  raise SystemExit("all-workflow task binding differs")
+              root_attempt = trajectory_attempts.get((*task_key, "rootlight"))
+              bounded_attempt = trajectory_attempts.get(
+                  (*task_key, "bounded_file_exploration")
+              )
+              if root_attempt is None or bounded_attempt is None or \
+                      root_attempt.get("task_sha256") != task.get("task_sha256") or \
+                      bounded_attempt.get("task_sha256") != task.get("task_sha256"):
+                  raise SystemExit("all-workflow task digest is detached from candidates")
+          expected_dimensions = [
+              ("correctness", 2500),
+              ("completeness", 2000),
+              ("evidence_support", 2000),
+              ("uncertainty_handling", 1000),
+              ("actionability", 1000),
+              ("source_relevance", 1000),
+              ("task_adherence", 500),
+          ]
+          pair_keys = set()
+          for pair in pairs:
+              pair_key = (pair.get("workflow_id"), pair.get("attempt_index"))
+              if pair_key not in task_keys or pair_key in pair_keys:
+                  raise SystemExit("all-workflow quality pair coverage differs")
+              pair_keys.add(pair_key)
+              task = next(item for item in tasks if (
+                  item.get("workflow_id"), item.get("attempt_index")
+              ) == pair_key)
+              for field in (
+                  "task_sha256",
+                  "fixture_sha256",
+                  "deterministic_seed",
+                  "prompt_sha256",
+                  "answer_key_sha256",
+              ):
+                  if pair.get(field) != task.get(field):
+                      raise SystemExit(f"all-workflow pair {field} binding differs")
+              for candidate_name, condition in (
+                  ("rootlight", "rootlight"),
+                  ("bounded_file_exploration", "bounded_file_exploration"),
+              ):
+                  candidate = pair.get(candidate_name, {})
+                  attempt = trajectory_attempts.get((*pair_key, condition))
+                  if attempt is None or candidate.get("condition") != condition or \
+                          candidate.get("attempt_id") != attempt.get("attempt_id") or \
+                          not hex_digest(candidate.get("candidate_sha256")):
+                      raise SystemExit("all-workflow candidate binding differs")
+                  dimensions = candidate.get("dimensions", [])
+                  observed_dimensions = [
+                      (item.get("dimension"), item.get("maximum_centipoints"))
+                      for item in dimensions
+                  ]
+                  if observed_dimensions != expected_dimensions or any(
+                      not isinstance(item.get("earned_centipoints"), int)
+                      or item["earned_centipoints"] < 0
+                      or item["earned_centipoints"] > item["maximum_centipoints"]
+                      for item in dimensions
+                  ):
+                      raise SystemExit("all-workflow candidate rubric differs")
+                  if candidate.get("score_centipoints") != sum(
+                      item["earned_centipoints"] for item in dimensions
+                  ):
+                      raise SystemExit("all-workflow candidate score does not reconcile")
+              expected_loss = max(
+                  0,
+                  pair["bounded_file_exploration"]["score_centipoints"]
+                  - pair["rootlight"]["score_centipoints"],
+              )
+              if pair.get("rootlight_quality_loss_centipoints") != expected_loss or \
+                      expected_loss > 200 or pair.get("within_threshold") is not True:
+                  raise SystemExit("all-workflow seed-pair quality loss exceeds two points")
+          if pair_keys != task_keys:
+              raise SystemExit("all-workflow quality pair denominator is incomplete")
+          workflow_ids = {workflow.get("workflow_id") for workflow in summaries}
+          if len(workflow_ids) != 14:
+              raise SystemExit("all-workflow quality summaries are incomplete")
+          for workflow in summaries:
+              if workflow.get("expected_pairs") != 2 or \
+                      workflow.get("observed_pairs") != 2 or \
+                      workflow.get("rootlight_quality_loss_centipoints", 201) > 200 or \
+                      workflow.get("maximum_pair_loss_centipoints", 201) > 200 or \
+                      workflow.get("within_threshold") is not True:
+                  raise SystemExit("per-workflow quality threshold failed")
+          efficiency = quality.get("efficiency", {})
+          if any(not isinstance(efficiency.get(field), int) or efficiency[field] <= 0 for field in (
+              "rootlight_tool_calls",
+              "rootlight_o200k_tokens",
+              "bounded_file_tool_calls",
+              "bounded_file_o200k_tokens",
+          )):
+              raise SystemExit("all-workflow efficiency accounting is incomplete")
+          if quality.get("threshold_passed") is not True:
+              raise SystemExit("all-workflow quality did not pass")
+          if ablation.get("protocol", {}).get("schema") != \
+                  "rootlight.context-pack-ablation/1":
+              raise SystemExit("context-pack ablation schema differs")
+          if ablation.get("protocol", {}).get("source_revision") != \
+                  os.environ["SOURCE_REVISION"]:
+              raise SystemExit("context-pack ablation revision differs")
+          aggregate = ablation.get("aggregate", {})
+          if aggregate.get("decision", {}).get("disposition") != "pass":
+              raise SystemExit("context-pack ablation did not pass")
+          if aggregate.get("expected_pairs") != 2 or \
+                  aggregate.get("complete_quality_pairs") != 2:
+              raise SystemExit("context-pack ablation pair denominator differs")
+          quality_loss = aggregate.get("quality_loss_centipoints")
+          maximum_loss = aggregate.get("maximum_quality_loss_centipoints")
+          if not isinstance(quality_loss, int) or \
+                  not isinstance(maximum_loss, int) or quality_loss > maximum_loss:
+              raise SystemExit("context-pack quality loss exceeds its fixed limit")
+          sensitivity = aggregate.get("sensitivity", {})
+          if sensitivity.get("context_ungraded") != 0 or \
+                  sensitivity.get("direct_ungraded") != 0:
+              raise SystemExit("context-pack ablation retains ungraded candidates")
+          encoded = trajectory_bytes + ablation_bytes + quality_bytes
+          if str(Path.cwd()).encode() in encoded:
+              raise SystemExit("agent workflow evidence contains the checkout path")
+          print(
+              "verified agent workflow evidence "
+              f"trajectory_sha256={hashlib.sha256(trajectory_bytes).hexdigest()} "
+              f"ablation_sha256={hashlib.sha256(ablation_bytes).hexdigest()} "
+              f"quality_sha256={hashlib.sha256(quality_bytes).hexdigest()}"
+          )
+          PY
+      - name: Upload immutable agent workflow evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-agent-workflow-quality-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/trajectory/trajectory-evidence.json
+            artifacts/trajectory/context-pack-ablation.json
+            artifacts/trajectory/workflow-quality.json
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+
+  nightly-required:
+    name: nightly-required
+    if: always()
+    needs: [current-stable, platform, vertical-slice, durability-platform, durability-evidence, incident-evidence, dataset-evidence, supply-chain, unsafe-inventory-windows, offline, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, agent-workflow-quality]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every exhaustive validation job
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+
+          failed = {
+              name: result.get("result")
+              for name, result in json.loads(os.environ["NEEDS_JSON"]).items()
+              if result.get("result") != "success"
+          }
+          if failed:
+              print(f"nightly validation jobs did not succeed: {failed}", file=sys.stderr)
+              raise SystemExit(1)
+          print("all exhaustive nightly validation jobs succeeded")
+          PY
