@@ -1077,11 +1077,10 @@ fn write_negative_repository_fixture(root: &Path) {
 }
 
 fn index_repository(mcp: &mut McpProcess, root: &Path) -> IndexReceipt {
-    let response = mcp.call(
-        "index",
-        "repo.index",
-        json!({"root": root, "mode": "auto", "detached": false}),
-    );
+    let arguments = json!({"root": root, "mode": "auto", "detached": false});
+    let response = process_support::retry_transient_busy("index", |attempt_id| {
+        mcp.call(attempt_id, "repo.index", arguments.clone())
+    });
     assert_success(&response, "repo.index");
     let data = &response["result"]["structuredContent"]["data"];
     let repository_id = required_string(&data["repository_id"], "repository identity");

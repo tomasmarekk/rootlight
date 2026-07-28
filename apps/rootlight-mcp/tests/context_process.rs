@@ -313,11 +313,10 @@ impl ContextFixture {
 }
 
 fn index_repository(mcp: &mut McpProcess, root: &Path, id: &str) -> (String, String) {
-    let response = mcp.call(
-        id,
-        "repo.index",
-        json!({"root": root, "mode": "auto", "detached": false}),
-    );
+    let arguments = json!({"root": root, "mode": "auto", "detached": false});
+    let response = process_support::retry_transient_busy(id, |attempt_id| {
+        mcp.call(attempt_id, "repo.index", arguments.clone())
+    });
     assert_success(&response, "repo.index");
     let data = &structured(&response)["data"];
     let repository_id = required_string(&data["repository_id"], "repository identity");

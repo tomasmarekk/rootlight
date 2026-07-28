@@ -802,34 +802,55 @@ fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str)
 }
 
 fn index_repository_retrying_busy(mcp: &mut McpProcess, request_id: &str, root: &Path) -> Value {
-    const MAX_ATTEMPTS: u8 = 3;
-
     let arguments = json!({
         "root": root,
         "mode": "auto",
         "detached": false
     });
-    for attempt in 1..=MAX_ATTEMPTS {
-        let response = mcp.call(
-            &format!("{request_id}-attempt-{attempt}"),
-            "repo.index",
-            arguments.clone(),
-        );
-        let error = &response["result"]["structuredContent"]["error"];
-        let retryable_busy = error["code"] == "BUSY" && error["retryable"] == true;
-        if !retryable_busy || attempt == MAX_ATTEMPTS {
-            return response;
-        }
+    process_support::retry_transient_busy(request_id, |attempt_id| {
+        mcp.call(attempt_id, "repo.index", arguments.clone())
+    })
+}
 
-        // The public BUSY contract is the only error that permits replay after
-        // a timed-out daemon lane; every other response returns immediately.
-        let retry_after_ms = error["retry_after_ms"]
-            .as_u64()
-            .unwrap_or(25)
-            .clamp(1, 1_000);
-        thread::sleep(Duration::from_millis(retry_after_ms));
-    }
-    unreachable!("bounded retry loop always returns")
+#[test]
+fn setup_retry_replays_only_retryable_busy() {
+    let attempts = std::cell::Cell::new(0_u8);
+    let response = process_support::retry_transient_busy("fixture-index", |request_id| {
+        let attempt = attempts.get().saturating_add(1);
+        attempts.set(attempt);
+        if attempt == 1 {
+            json!({
+                "id": request_id,
+                "result": {
+                    "structuredContent": {
+                        "error": {
+                            "code": "BUSY",
+                            "retryable": true,
+                            "retry_after_ms": 1
+                        }
+                    }
+                }
+            })
+        } else {
+            json!({"id": request_id, "result": {"structuredContent": {"data": {}}}})
+        }
+    });
+    assert_eq!(attempts.get(), 2);
+    assert_eq!(response["id"], "fixture-index-attempt-2");
+
+    let response = process_support::retry_transient_busy("terminal", |request_id| {
+        attempts.set(attempts.get().saturating_add(1));
+        json!({
+            "id": request_id,
+            "result": {
+                "structuredContent": {
+                    "error": {"code": "BUSY", "retryable": false}
+                }
+            }
+        })
+    });
+    assert_eq!(attempts.get(), 3);
+    assert_eq!(response["id"], "terminal-attempt-1");
 }
 
 fn process_test_guard() -> MutexGuard<'static, ()> {

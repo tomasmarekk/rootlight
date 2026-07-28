@@ -777,11 +777,10 @@ impl RetrievalFixture {
         let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
         daemon.wait_until_ready(&runtime_dir);
         let mut mcp = McpProcess::spawn(&state_dir, &runtime_dir);
-        let index = mcp.call(
-            "index",
-            "repo.index",
-            json!({"root": repository_root, "mode": "auto", "detached": false}),
-        );
+        let arguments = json!({"root": repository_root, "mode": "auto", "detached": false});
+        let index = process_support::retry_transient_busy("index", |attempt_id| {
+            mcp.call(attempt_id, "repo.index", arguments.clone())
+        });
         assert_success(&index, "repo.index");
         let repository_id = index["result"]["structuredContent"]["data"]["repository_id"]
             .as_str()
