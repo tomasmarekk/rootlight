@@ -18,6 +18,7 @@ rootlight-ipc = { path = "../rootlight-ipc" }
 rootlight-observability = { path = "../rootlight-observability" }
 rootlight-protocol = { path = "../rootlight-protocol" }
 rootlight-runtime = { path = "../rootlight-runtime" }
+rootlight-sandbox = { path = "../rootlight-sandbox" }
 rootlight-vfs = { path = "../rootlight-vfs" }
 semver.workspace = true
 serde.workspace = true

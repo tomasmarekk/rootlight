@@ -34,6 +34,7 @@ rootlight-runtime = { path = "../crates/rootlight-runtime" }
 rootlight-agent = { path = "../crates/rootlight-agent" }
 rootlight-storage = { path = "../crates/rootlight-storage" }
 rootlight-protocol = { path = "../crates/rootlight-protocol" }
+rootlight-sandbox = { path = "../crates/rootlight-sandbox" }
 schemars.workspace = true
 semver.workspace = true
 serde.workspace = true

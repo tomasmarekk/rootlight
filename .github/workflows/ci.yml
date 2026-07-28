@@ -48,6 +48,7 @@ jobs:
           cargo run --locked --quiet --package xtask -- budget-conformance-check
           cargo run --locked --quiet --package xtask -- policy-check
           cargo run --locked --quiet --package xtask -- license-check
+          python scripts/test-validate-package-lifecycle.py
           cargo run --locked --quiet --package xtask -- id-vectors > target/id-vectors.actual.json
           cmp tests/fixtures/id-vectors.json target/id-vectors.actual.json
       - name: Capability parity and evidence
@@ -482,6 +483,14 @@ jobs:
             --archive "$archive" \
             --source-revision "$SOURCE_REVISION" \
             --output "$lifecycle"
+          candidate_sha256="$(cut -d ' ' -f 1 "$archive.sha256")"
+          python scripts/validate-package-lifecycle.py \
+            --path "$lifecycle" \
+            --target "$TARGET_TRIPLE" \
+            --candidate-version "$version" \
+            --source-revision "$SOURCE_REVISION" \
+            --candidate-archive "$(basename "$archive")" \
+            --candidate-sha256 "$candidate_sha256"
           ARCHIVE="$archive" LIFECYCLE="$lifecycle" RUSTC_HOST="$host" VERSION="$version" python - <<'PY'
           import hashlib
           import json
@@ -528,7 +537,7 @@ jobs:
               "committed_active_version": os.environ["VERSION"],
               "committed_last_good_version": "0.0.0",
               "rollback_active_version": "0.0.0",
-              "schema": "rootlight.package-lifecycle/1",
+              "schema": "rootlight.package-lifecycle/2",
               "source_revision": os.environ["SOURCE_REVISION"],
           }
           if {
@@ -619,8 +628,15 @@ jobs:
             x86_64-apple-darwin \
             x86_64-pc-windows-msvc \
             x86_64-unknown-linux-gnu; do
-            cargo run --locked --quiet --package xtask -- package-verify \
-              --archive "artifacts/release-candidates/rootlight-$version-$target.zip"
+            archive="artifacts/release-candidates/rootlight-$version-$target.zip"
+            cargo run --locked --quiet --package xtask -- package-verify --archive "$archive"
+            python scripts/validate-package-lifecycle.py \
+              --path "artifacts/release-candidates/$target.lifecycle.json" \
+              --target "$target" \
+              --candidate-version "$version" \
+              --source-revision "$SOURCE_REVISION" \
+              --candidate-archive "$(basename "$archive")" \
+              --candidate-sha256 "$(cut -d ' ' -f 1 "$archive.sha256")"
           done
           VERSION="$version" python - <<'PY'
           import hashlib
@@ -696,7 +712,7 @@ jobs:
                   "committed_active_version": version,
                   "committed_last_good_version": "0.0.0",
                   "rollback_active_version": "0.0.0",
-                  "schema": "rootlight.package-lifecycle/1",
+                  "schema": "rootlight.package-lifecycle/2",
                   "source_revision": os.environ["SOURCE_REVISION"],
               }
               if {

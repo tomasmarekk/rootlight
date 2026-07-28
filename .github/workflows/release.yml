@@ -143,6 +143,13 @@ jobs:
             archive="artifacts/release-candidates/rootlight-$version-$target.zip"
             cargo run --locked --quiet --package xtask -- package-verify \
               --archive "$archive"
+            python scripts/validate-package-lifecycle.py \
+              --path "artifacts/release-candidates/$target.lifecycle.json" \
+              --target "$target" \
+              --candidate-version "$version" \
+              --source-revision "$SOURCE_REVISION" \
+              --candidate-archive "$(basename "$archive")" \
+              --candidate-sha256 "$(cut -d ' ' -f 1 "$archive.sha256")"
             test -f "artifacts/release-candidates/$target.candidate.json"
             find artifacts/release-trust \
               -type f -name "rootlight-$version-$target.zip.sigstore.json" \
@@ -193,7 +200,7 @@ jobs:
                   "committed_active_version": os.environ["VERSION"],
                   "committed_last_good_version": "0.0.0",
                   "rollback_active_version": "0.0.0",
-                  "schema": "rootlight.package-lifecycle/1",
+                  "schema": "rootlight.package-lifecycle/2",
                   "source_revision": os.environ["SOURCE_REVISION"],
               }
               if {

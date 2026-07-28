@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+mod installed;
+
 use std::collections::BTreeSet;
 use std::{
     fs::{self, File},
@@ -32,7 +34,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 const SPEC_PATH: &str = "packaging/package.toml";
 const SPEC_SCHEMA: &str = "rootlight.package-spec/1";
 const ARCHIVE_SCHEMA: &str = "rootlight.package-manifest/1";
-const LIFECYCLE_SCHEMA: &str = "rootlight.package-lifecycle/1";
+const LIFECYCLE_SCHEMA: &str = "rootlight.package-lifecycle/2";
 const MAX_SPEC_BYTES: u64 = 256 * 1024;
 const MAX_TEMPLATE_BYTES: u64 = 1024 * 1024;
 const MAX_LICENSE_BYTES: u64 = 1024 * 1024;
@@ -791,6 +793,7 @@ fn exercise_install_lifecycle(
         return invalid_install("committed update state is inconsistent");
     }
     probe_launcher(&install_root, Duration::from_secs(30))?;
+    let installed_release = installed::exercise(&install_root, &candidate_manifest.version)?;
     let recovered_status = recover_update(&install_root)?;
     if recovered_status != active_status {
         return invalid_install("clean recovery changed committed update state");
@@ -879,6 +882,7 @@ fn exercise_install_lifecycle(
         committed_last_good_version: active_status.last_good_version,
         rollback_active_version: rollback_status.active_version,
         uninstall_removed_versions: uninstalled.removed_versions,
+        installed_release,
         installed_command_uninstall_observed: true,
         launcher_probe_observed: true,
         candidate_health_observed: true,
@@ -1549,6 +1553,7 @@ struct PackageLifecycleReport {
     committed_last_good_version: String,
     rollback_active_version: String,
     uninstall_removed_versions: usize,
+    installed_release: installed::InstalledReleaseEvidence,
     installed_command_uninstall_observed: bool,
     launcher_probe_observed: bool,
     candidate_health_observed: bool,
@@ -1618,6 +1623,30 @@ pub(crate) enum PackageError {
     Clock,
     #[error("installed package launcher failed")]
     Launcher(#[source] std::io::Error),
+    #[error("installed package process check failed during {operation}")]
+    InstalledProcess {
+        operation: &'static str,
+        #[source]
+        source: rootlight_sandbox::ProcessError,
+    },
+    #[error("installed package IO check failed during {operation}")]
+    InstalledIo {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("installed package runtime check failed during {operation}")]
+    InstalledRuntime {
+        operation: &'static str,
+        #[source]
+        source: rootlight_runtime::RuntimeError,
+    },
+    #[error("installed package client check failed during {operation}")]
+    InstalledClient {
+        operation: &'static str,
+        #[source]
+        source: rootlight_client::ClientError,
+    },
     #[error("immutable package output already exists: {0}")]
     OutputExists(PathBuf),
     #[error("{algorithm} checksum sidecar does not match package archive: {path}")]

@@ -28,7 +28,6 @@ pub use update::{
 
 use std::{
     io::{self, Cursor, Read as _, Write as _},
-    process::{Child, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
@@ -60,6 +59,7 @@ use rootlight_protocol::{
     generated::{common::v1 as common, daemon::v1 as daemon},
 };
 use rootlight_runtime::{LaunchLock, RuntimePaths};
+use rootlight_sandbox::{ChildProcess, ProcessCommand, ProcessError, StdioMode};
 use sha2::{Digest as _, Sha256};
 use tokio::time::Instant as TokioInstant;
 use unicode_casefold::UnicodeCaseFold as _;
@@ -85,7 +85,8 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_IO_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_SUPPORT_ARCHIVE_BYTES: usize = 768 * 1024;
 const MAX_SUPPORT_ENTRY_BYTES: usize = 128 * 1024;
-const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(30);
+const COORDINATED_START_TIMEOUT: Duration = Duration::from_secs(3);
+const COORDINATED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const START_CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const START_CHILD_RETAIN_ATTEMPTS: usize = 3;
 const START_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -2232,7 +2233,7 @@ pub struct Client {
 pub struct OwnedDaemon {
     paths: RuntimePaths,
     identity: ReadyDaemonIdentity,
-    child: Option<Child>,
+    child: Option<ChildProcess>,
 }
 
 impl OwnedDaemon {
@@ -2250,19 +2251,17 @@ impl OwnedDaemon {
             self.terminate_or_retain();
             return Err(ClientError::DaemonLaunchFailed);
         }
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or(ClientError::DaemonLaunchFailed)?;
+        let mut stdin = child.take_stdin().ok_or(ClientError::DaemonLaunchFailed)?;
         stdin
             .write_all(b"shutdown\n")
             .map_err(ClientError::LaunchIo)?;
-        drop(child.stdin.take());
+        stdin.flush().map_err(ClientError::LaunchIo)?;
+        drop(stdin);
         let deadline = Instant::now()
-            .checked_add(DEFAULT_START_TIMEOUT)
+            .checked_add(COORDINATED_SHUTDOWN_TIMEOUT)
             .ok_or(ClientError::InvalidRequestTimeout)?;
         loop {
-            if let Some(status) = child.try_wait().map_err(ClientError::LaunchIo)? {
+            if let Some(status) = child.try_wait().map_err(launch_process_error)? {
                 self.child = None;
                 return if status.success() {
                     Ok(())
@@ -5345,7 +5344,7 @@ fn wait_for_ready_daemon(
 struct CoordinatedStartup {
     authority: Option<LaunchLock>,
     ownership: StartupOwnership,
-    child: Option<Child>,
+    child: Option<ChildProcess>,
 }
 
 impl CoordinatedStartup {
@@ -5401,7 +5400,7 @@ impl CoordinatedStartup {
         let Some(child) = self.child.as_mut() else {
             return Ok(true);
         };
-        if child.try_wait().map_err(ClientError::LaunchIo)?.is_none() {
+        if child.try_wait().map_err(launch_process_error)?.is_none() {
             return Ok(false);
         }
         self.child = None;
@@ -5475,7 +5474,7 @@ fn terminate_or_retain_startup_process_with(
     StartupCleanup::Retained
 }
 
-fn terminate_startup_child(child: &mut Child) -> Result<(), ClientError> {
+fn terminate_startup_child(child: &mut ChildProcess) -> Result<(), ClientError> {
     let deadline = Instant::now()
         .checked_add(START_CHILD_STOP_TIMEOUT)
         .ok_or(ClientError::InvalidRequestTimeout)?;
@@ -5487,14 +5486,24 @@ trait StartupProcess {
     fn terminate(&mut self) -> io::Result<()>;
 }
 
-impl StartupProcess for Child {
+impl StartupProcess for ChildProcess {
     fn try_exited(&mut self) -> io::Result<bool> {
-        self.try_wait().map(|status| status.is_some())
+        ChildProcess::try_wait(self)
+            .map(|status| status.is_some())
+            .map_err(process_io_error)
     }
 
     fn terminate(&mut self) -> io::Result<()> {
-        self.kill()
+        ChildProcess::terminate(self).map_err(process_io_error)
     }
+}
+
+fn process_io_error(source: ProcessError) -> io::Error {
+    io::Error::other(source)
+}
+
+fn launch_process_error(source: ProcessError) -> ClientError {
+    ClientError::LaunchIo(process_io_error(source))
 }
 
 fn terminate_startup_process_until(
@@ -5594,7 +5603,7 @@ fn classify_health_probe(
 
 fn startup_deadline() -> Result<Instant, ClientError> {
     Instant::now()
-        .checked_add(DEFAULT_START_TIMEOUT)
+        .checked_add(COORDINATED_START_TIMEOUT)
         .ok_or(ClientError::InvalidRequestTimeout)
 }
 
@@ -5654,7 +5663,7 @@ fn ipc_unavailable(error: &IpcError) -> bool {
 fn spawn_coordinated_daemon(
     ownership: StartupOwnership,
     paths: &RuntimePaths,
-) -> Result<Child, ClientError> {
+) -> Result<ChildProcess, ClientError> {
     let executable = std::env::current_exe().map_err(ClientError::LaunchIo)?;
     let directory = executable
         .parent()
@@ -5663,20 +5672,19 @@ fn spawn_coordinated_daemon(
     if !daemon.is_file() {
         return Err(ClientError::DaemonExecutableMissing);
     }
-    let mut command = Command::new(daemon);
     let (argument, stdin) = match ownership {
-        StartupOwnership::Detached => ("--coordinated-start", Stdio::null()),
-        StartupOwnership::Retained => ("--coordinated-stdio", Stdio::piped()),
+        StartupOwnership::Detached => ("--coordinated-start", StdioMode::Null),
+        StartupOwnership::Retained => ("--coordinated-stdio", StdioMode::Piped),
     };
-    command
+    ProcessCommand::new(daemon)
         .arg(argument)
         .env("ROOTLIGHT_STATE_DIR", paths.state_dir())
         .env("ROOTLIGHT_RUNTIME_DIR", paths.runtime_dir())
         .stdin(stdin)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(StdioMode::Null)
+        .stderr(StdioMode::Null)
         .spawn()
-        .map_err(ClientError::LaunchIo)
+        .map_err(launch_process_error)
 }
 
 #[cfg(windows)]
@@ -10958,22 +10966,21 @@ mod tests {
             .expect("server observes peer close");
     }
 
-    fn spawn_cleanup_child(root: &std::path::Path) -> (Child, RuntimePaths) {
+    fn spawn_cleanup_child(root: &std::path::Path) -> (ChildProcess, RuntimePaths) {
         let child_paths = RuntimePaths::new(root.join("state"), root.join("runtime"))
             .expect("child runtime paths are valid");
         let marker = root.join("ready");
-        let mut child = Command::new(std::env::current_exe().expect("test executable resolves"))
-            .args([
-                "--exact",
-                "tests::coordinated_startup_cleanup_child",
-                "--nocapture",
-            ])
-            .env(STARTUP_CHILD_ROOT_ENV, root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("cleanup child starts");
+        let mut child =
+            ProcessCommand::new(std::env::current_exe().expect("test executable resolves"))
+                .arg("--exact")
+                .arg("tests::coordinated_startup_cleanup_child")
+                .arg("--nocapture")
+                .env(STARTUP_CHILD_ROOT_ENV, root)
+                .stdin(StdioMode::Null)
+                .stdout(StdioMode::Null)
+                .stderr(StdioMode::Null)
+                .spawn()
+                .expect("cleanup child starts");
         let marker_deadline = Instant::now()
             .checked_add(Duration::from_secs(5))
             .expect("marker deadline is representable");
@@ -11030,39 +11037,7 @@ mod tests {
             .acquire_launch_lock()
             .expect("startup authority is acquired");
 
-        let child_root = temporary.path().join("child");
-        let child_paths = RuntimePaths::new(child_root.join("state"), child_root.join("runtime"))
-            .expect("child runtime paths are valid");
-        let marker = child_root.join("ready");
-        let mut child = Command::new(std::env::current_exe().expect("test executable resolves"))
-            .args([
-                "--exact",
-                "tests::coordinated_startup_cleanup_child",
-                "--nocapture",
-            ])
-            .env(STARTUP_CHILD_ROOT_ENV, &child_root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("cleanup child starts");
-        let marker_deadline = Instant::now()
-            .checked_add(Duration::from_secs(5))
-            .expect("marker deadline is representable");
-        while !marker.is_file() {
-            assert!(
-                child
-                    .try_wait()
-                    .expect("cleanup child status reads")
-                    .is_none(),
-                "cleanup child exited before acquiring its proof lock"
-            );
-            assert!(
-                Instant::now() < marker_deadline,
-                "cleanup child did not acquire its proof lock"
-            );
-            std::thread::sleep(START_POLL_INTERVAL);
-        }
+        let (child, child_paths) = spawn_cleanup_child(&temporary.path().join("child"));
 
         let startup = CoordinatedStartup {
             authority: Some(authority),
@@ -11170,8 +11145,24 @@ mod tests {
             .expect("startup authority is acquired");
         let (mut child, child_paths) = spawn_cleanup_child(&temporary.path().join("child-exited"));
         let child_id = child.id();
-        child.kill().expect("cleanup child can be terminated");
-        child.wait().expect("cleanup child can be reaped");
+        child.terminate().expect("cleanup child can be terminated");
+        let exit_deadline = Instant::now()
+            .checked_add(START_CHILD_STOP_TIMEOUT)
+            .expect("cleanup child deadline is representable");
+        loop {
+            if child
+                .try_wait()
+                .expect("cleanup child status reads")
+                .is_some()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < exit_deadline,
+                "cleanup child did not exit after termination"
+            );
+            std::thread::sleep(START_POLL_INTERVAL);
+        }
         let mut startup = CoordinatedStartup {
             authority: Some(authority),
             ownership: StartupOwnership::Detached,
@@ -11260,6 +11251,30 @@ mod tests {
         assert!(matches!(
             terminate_startup_process_until(&mut timeout, || true),
             Err(ClientError::DaemonLaunchCleanupTimedOut)
+        ));
+    }
+
+    #[test]
+    fn coordinated_startup_and_shutdown_have_distinct_deadlines() {
+        assert_eq!(COORDINATED_START_TIMEOUT, Duration::from_secs(3));
+        assert_eq!(COORDINATED_SHUTDOWN_TIMEOUT, Duration::from_secs(30));
+        assert!(COORDINATED_START_TIMEOUT < COORDINATED_SHUTDOWN_TIMEOUT);
+    }
+
+    #[test]
+    fn sandbox_process_failure_remains_a_launch_io_source() {
+        let error = launch_process_error(ProcessError::InvalidInput(
+            "injected invalid process command".to_owned(),
+        ));
+        let ClientError::LaunchIo(source) = error else {
+            panic!("sandbox process failures stay on the launch IO path");
+        };
+        assert!(matches!(
+            source
+                .get_ref()
+                .and_then(|cause| cause.downcast_ref::<ProcessError>()),
+            Some(ProcessError::InvalidInput(message))
+                if message == "injected invalid process command"
         ));
     }
 

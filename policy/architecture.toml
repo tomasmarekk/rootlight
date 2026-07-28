@@ -161,6 +161,7 @@ allowed_internal_dependencies = [
   "rootlight-observability",
   "rootlight-protocol",
   "rootlight-runtime",
+  "rootlight-sandbox",
   "rootlight-vfs",
 ]
 allow_build_script = false
@@ -395,6 +396,7 @@ allowed_internal_dependencies = [
   "rootlight-operations",
   "rootlight-protocol",
   "rootlight-runtime",
+  "rootlight-sandbox",
   "rootlight-storage",
 ]
 allow_build_script = false
