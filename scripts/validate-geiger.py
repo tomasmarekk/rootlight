@@ -448,6 +448,11 @@ def load_approved_counts(
                 raise fail(f"workspace package has multiple enabled boundaries: {cargo_id}")
             if geiger_host_os in {"all", host_operating_system}:
                 approved_counts[cargo_id] = geiger_count
+            else:
+                # Keep an explicit zero for a host-specific boundary. Cargo-geiger
+                # cannot evaluate cfg_attr lint state, but its off-host count is
+                # still authoritative and must remain zero.
+                approved_counts[cargo_id] = 0
 
     return approved_counts
 
@@ -619,7 +624,10 @@ def validate_report(
                     f"workspace package {cargo_id} expected {expected_unsafe} used unsafe "
                     f"items, observed {used_unsafe}"
                 )
-            if forbids_unsafe != (expected_unsafe == 0):
+            host_specific_zero = (
+                cargo_id in approved_counts and expected_unsafe == 0
+            )
+            if forbids_unsafe != (expected_unsafe == 0) and not host_specific_zero:
                 raise fail(
                     f"workspace package {cargo_id} reports an inconsistent unsafe lint state"
                 )

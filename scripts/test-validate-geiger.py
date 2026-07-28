@@ -306,10 +306,12 @@ class GeigerValidationTests(unittest.TestCase):
         approved = VALIDATOR.load_approved_counts(
             self.policy_path, self.inventory, "linux"
         )
-        self.assertEqual(approved, {})
+        self.assertEqual(approved, {self.cargo_id: 0})
+        report = self.report()
+        report["packages"][0]["unsafety"]["forbids_unsafe"] = False
         self.assertEqual(
             VALIDATOR.validate_report(
-                self.report(),
+                report,
                 self.cargo_id,
                 self.inventory,
                 approved,
@@ -318,9 +320,7 @@ class GeigerValidationTests(unittest.TestCase):
             1,
         )
 
-        report = self.report()
         entry = report["packages"][0]
-        entry["unsafety"]["forbids_unsafe"] = False
         entry["unsafety"]["used"]["exprs"]["unsafe_"] = 1
         with self.assertRaisesRegex(ValueError, "expected 0 used unsafe items"):
             VALIDATOR.validate_report(
@@ -328,6 +328,19 @@ class GeigerValidationTests(unittest.TestCase):
                 self.cargo_id,
                 self.inventory,
                 approved,
+                VALIDATOR.SUPPORTED_CARGO_GEIGER_VERSION,
+            )
+
+    def test_safe_package_still_requires_an_unconditional_forbid_lint(self) -> None:
+        report = self.report()
+        report["packages"][0]["unsafety"]["forbids_unsafe"] = False
+
+        with self.assertRaisesRegex(ValueError, "inconsistent unsafe lint state"):
+            VALIDATOR.validate_report(
+                report,
+                self.cargo_id,
+                self.inventory,
+                {},
                 VALIDATOR.SUPPORTED_CARGO_GEIGER_VERSION,
             )
 
@@ -380,6 +393,7 @@ class GeigerValidationTests(unittest.TestCase):
     def test_dependency_counts_are_deferred_to_their_authoritative_report(self) -> None:
         dependency_root = self.root / "dependency"
         dependency_root.mkdir()
+        dependency_root = dependency_root.resolve(strict=True)
         dependency_id = f"path+{dependency_root.as_uri()}#dependency@1.0.0"
         dependency = VALIDATOR.WorkspacePackage(
             cargo_id=dependency_id,
