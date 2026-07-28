@@ -723,8 +723,26 @@ impl ExactChild {
 
 impl Drop for ExactChild {
     fn drop(&mut self) {
-        if !self.reaped {
+        if self.reaped {
+            return;
+        }
+        let deadline = Instant::now()
+            .checked_add(PROCESS_CLEANUP_TIMEOUT)
+            .unwrap_or_else(Instant::now);
+        // Error paths cannot return a second failure, so keep exact process
+        // authority long enough to terminate and reap the child boundedly.
+        loop {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
             let _ = self.child.terminate();
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                return;
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL);
         }
     }
 }
