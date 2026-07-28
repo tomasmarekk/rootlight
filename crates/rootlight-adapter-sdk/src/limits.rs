@@ -7,6 +7,97 @@ use rootlight_ir::IrLimits;
 
 use crate::error::{LimitError, SinkError};
 
+/// Explicit aggregate limits for one project-analysis transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectAnalysisLimits {
+    max_files: usize,
+    max_total_source_bytes: usize,
+    max_context_bytes: usize,
+    max_generated_mappings: usize,
+    max_generated_mapping_bytes: usize,
+    max_analysis_unit_bytes: usize,
+    max_build_target_bytes: usize,
+}
+
+impl ProjectAnalysisLimits {
+    /// Creates explicit project-analysis limits.
+    ///
+    /// Mapping count and byte limits may both be zero to disable generated
+    /// origin metadata for this transaction class.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LimitError::Zero`] when any universally required project
+    /// bound is zero.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        max_files: usize,
+        max_total_source_bytes: usize,
+        max_context_bytes: usize,
+        max_generated_mappings: usize,
+        max_generated_mapping_bytes: usize,
+        max_analysis_unit_bytes: usize,
+        max_build_target_bytes: usize,
+    ) -> Result<Self, LimitError> {
+        require_nonzero("project.max_files", max_files)?;
+        require_nonzero("project.max_total_source_bytes", max_total_source_bytes)?;
+        require_nonzero("project.max_context_bytes", max_context_bytes)?;
+        require_nonzero("project.max_analysis_unit_bytes", max_analysis_unit_bytes)?;
+        require_nonzero("project.max_build_target_bytes", max_build_target_bytes)?;
+        Ok(Self {
+            max_files,
+            max_total_source_bytes,
+            max_context_bytes,
+            max_generated_mappings,
+            max_generated_mapping_bytes,
+            max_analysis_unit_bytes,
+            max_build_target_bytes,
+        })
+    }
+
+    /// Returns the maximum number of source files in one transaction.
+    #[must_use]
+    pub const fn max_files(self) -> usize {
+        self.max_files
+    }
+
+    /// Returns the aggregate source-byte ceiling.
+    #[must_use]
+    pub const fn max_total_source_bytes(self) -> usize {
+        self.max_total_source_bytes
+    }
+
+    /// Returns the canonical build-context manifest byte ceiling.
+    #[must_use]
+    pub const fn max_context_bytes(self) -> usize {
+        self.max_context_bytes
+    }
+
+    /// Returns the aggregate generated-origin mapping count ceiling.
+    #[must_use]
+    pub const fn max_generated_mappings(self) -> usize {
+        self.max_generated_mappings
+    }
+
+    /// Returns the deterministically accounted generated-origin byte ceiling.
+    #[must_use]
+    pub const fn max_generated_mapping_bytes(self) -> usize {
+        self.max_generated_mapping_bytes
+    }
+
+    /// Returns the analysis-unit label byte ceiling.
+    #[must_use]
+    pub const fn max_analysis_unit_bytes(self) -> usize {
+        self.max_analysis_unit_bytes
+    }
+
+    /// Returns the build-target label byte ceiling.
+    #[must_use]
+    pub const fn max_build_target_bytes(self) -> usize {
+        self.max_build_target_bytes
+    }
+}
+
 /// Fixed thresholds applied independently to every emitted batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchThresholds {
@@ -173,6 +264,7 @@ pub struct AnalysisLimits {
     syntax_stream: StreamLimits,
     ir_stream: StreamLimits,
     ir: IrLimits,
+    project: Option<ProjectAnalysisLimits>,
 }
 
 impl AnalysisLimits {
@@ -210,7 +302,15 @@ impl AnalysisLimits {
             syntax_stream,
             ir_stream,
             ir,
+            project: None,
         })
+    }
+
+    /// Enables project analysis with explicit aggregate admission limits.
+    #[must_use]
+    pub const fn with_project_limits(mut self, project: ProjectAnalysisLimits) -> Self {
+        self.project = Some(project);
+        self
     }
 
     /// Returns the admitted source-file byte ceiling.
@@ -262,6 +362,12 @@ impl AnalysisLimits {
     #[must_use]
     pub const fn ir(&self) -> &IrLimits {
         &self.ir
+    }
+
+    /// Returns project limits when multi-file analysis is explicitly enabled.
+    #[must_use]
+    pub const fn project(&self) -> Option<ProjectAnalysisLimits> {
+        self.project
     }
 }
 

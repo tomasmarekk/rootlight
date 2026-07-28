@@ -3,11 +3,12 @@
 //! A successful report is the transaction commit boundary: staged facts remain
 //! invisible until its usage and end marker match the sink exactly.
 
-use rootlight_ir::{AnalysisTier, CoverageStatus, FactDomain};
+use rootlight_ir::{AnalysisTier, BuildContextIdentity, CoverageStatus, FactDomain};
 
 use crate::{
     error::{ReportError, ResourceKind},
     limits::{AnalysisLimits, StreamUsage},
+    request::{AnalysisUnitId, BuildTargetId, ProjectAnalysisRequest},
 };
 
 // `FactDomain` is a closed eight-variant contract, so a longer input can only
@@ -87,7 +88,7 @@ impl DomainCoverage {
     }
 }
 
-/// Per-file byte and fact-domain coverage.
+/// Per-invocation byte and fact-domain coverage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverageReport {
     tier: AnalysisTier,
@@ -99,7 +100,7 @@ pub struct CoverageReport {
 }
 
 impl CoverageReport {
-    /// Creates checked per-file coverage.
+    /// Creates checked invocation coverage.
     ///
     /// Domain entries are sorted by domain so equivalent reports are independent
     /// of adapter emission order.
@@ -341,6 +342,44 @@ impl WorkReport {
         staged_usage: StreamUsage,
         next_sequence: u64,
     ) -> Result<(), ReportError> {
+        self.validate_commit_with_source_limit(
+            source_bytes,
+            limits.max_source_bytes(),
+            limits,
+            staged_usage,
+            next_sequence,
+        )
+    }
+
+    pub(crate) fn validate_project_commit(
+        &self,
+        source_bytes: usize,
+        limits: &AnalysisLimits,
+        staged_usage: StreamUsage,
+        next_sequence: u64,
+    ) -> Result<(), ReportError> {
+        let source_limit = limits
+            .project()
+            .map_or(limits.max_source_bytes(), |project| {
+                project.max_total_source_bytes()
+            });
+        self.validate_commit_with_source_limit(
+            source_bytes,
+            source_limit,
+            limits,
+            staged_usage,
+            next_sequence,
+        )
+    }
+
+    fn validate_commit_with_source_limit(
+        &self,
+        source_bytes: usize,
+        source_limit: usize,
+        limits: &AnalysisLimits,
+        staged_usage: StreamUsage,
+        next_sequence: u64,
+    ) -> Result<(), ReportError> {
         if self.coverage.total_source_bytes != source_bytes {
             return Err(ReportError::SourceLengthMismatch {
                 expected: source_bytes,
@@ -368,7 +407,7 @@ impl WorkReport {
         require_at_most(
             ResourceKind::SourceBytes,
             self.resources.source_bytes,
-            limits.max_source_bytes(),
+            source_limit,
         )?;
         require_at_most(
             ResourceKind::SyntaxNodes,
@@ -396,6 +435,85 @@ pub type ParseReport = WorkReport;
 
 /// Successful analyzer report whose validation commits staged normalized IR.
 pub type AnalysisReport = WorkReport;
+
+/// Successful project report bound to the exact requested semantic context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectAnalysisReport {
+    work: WorkReport,
+    analysis_unit: AnalysisUnitId,
+    build_target: BuildTargetId,
+    build_context: BuildContextIdentity,
+    requested_tier: AnalysisTier,
+}
+
+impl ProjectAnalysisReport {
+    /// Binds a successful work report to its project request identity.
+    #[must_use]
+    pub const fn new(
+        work: WorkReport,
+        analysis_unit: AnalysisUnitId,
+        build_target: BuildTargetId,
+        build_context: BuildContextIdentity,
+        requested_tier: AnalysisTier,
+    ) -> Self {
+        Self {
+            work,
+            analysis_unit,
+            build_target,
+            build_context,
+            requested_tier,
+        }
+    }
+
+    /// Returns the checked aggregate work report.
+    #[must_use]
+    pub const fn work(&self) -> &WorkReport {
+        &self.work
+    }
+
+    /// Returns the reported analysis-unit identity.
+    #[must_use]
+    pub const fn analysis_unit(&self) -> &AnalysisUnitId {
+        &self.analysis_unit
+    }
+
+    /// Returns the reported build-target identity.
+    #[must_use]
+    pub const fn build_target(&self) -> &BuildTargetId {
+        &self.build_target
+    }
+
+    /// Returns the reported build-context identity.
+    #[must_use]
+    pub const fn build_context(&self) -> BuildContextIdentity {
+        self.build_context
+    }
+
+    /// Returns the highest tier requested for this analysis.
+    #[must_use]
+    pub const fn requested_tier(&self) -> AnalysisTier {
+        self.requested_tier
+    }
+
+    pub(crate) fn validate_request_identity(
+        &self,
+        request: &ProjectAnalysisRequest<'_>,
+    ) -> Result<(), ReportError> {
+        if &self.analysis_unit != request.analysis_unit() {
+            return Err(ReportError::ProjectAnalysisUnitMismatch);
+        }
+        if &self.build_target != request.build_target() {
+            return Err(ReportError::ProjectBuildTargetMismatch);
+        }
+        if self.build_context != request.build_context() {
+            return Err(ReportError::ProjectBuildContextMismatch);
+        }
+        if self.requested_tier != request.requested_tier() {
+            return Err(ReportError::ProjectRequestedTierMismatch);
+        }
+        Ok(())
+    }
+}
 
 fn require_at_most(
     resource: ResourceKind,

@@ -19,6 +19,12 @@ pub enum LabelField {
     SyntaxKind,
     /// Stable diagnostic code.
     DiagnosticCode,
+    /// Canonical project analysis-unit identity.
+    AnalysisUnit,
+    /// Canonical build-target identity.
+    BuildTarget,
+    /// Generated-source transformation identity.
+    Transformation,
 }
 
 /// The invariant violated by a bounded label.
@@ -111,7 +117,7 @@ pub enum SnapshotError {
     LengthOverflow,
 }
 
-/// Invalid per-file parse or analysis request.
+/// Invalid checked parse, file-analysis, or project-analysis request.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum RequestError {
@@ -145,6 +151,82 @@ pub enum RequestError {
     IncludedRangeOrder {
         /// Zero-based range index.
         index: usize,
+    },
+    /// Project analysis was not explicitly enabled in the request limits.
+    #[error("project analysis requires explicit project limits")]
+    ProjectAnalysisDisabled,
+    /// A project request contained no generation-bound source inputs.
+    #[error("project analysis requires at least one source input")]
+    EmptyProject,
+    /// A project input belonged to another repository.
+    #[error("project input {index} belongs to another repository")]
+    ProjectRepositoryMismatch {
+        /// Zero-based input index.
+        index: usize,
+    },
+    /// A project input belonged to another repository generation.
+    #[error("project input {index} belongs to another generation")]
+    ProjectGenerationMismatch {
+        /// Zero-based input index.
+        index: usize,
+    },
+    /// A project input reused an earlier file identity.
+    #[error("project input {index} reuses a file identity")]
+    DuplicateProjectFile {
+        /// Zero-based input index.
+        index: usize,
+    },
+    /// Project input paths were not in strict canonical identity order.
+    #[error("project input {index} is not in canonical path order")]
+    ProjectPathOrder {
+        /// Zero-based input index.
+        index: usize,
+    },
+    /// A non-generated source declared generated-origin mappings.
+    #[error("project input {index} declares origins but is not generated")]
+    OriginsRequireGeneratedSource {
+        /// Zero-based input index.
+        index: usize,
+    },
+    /// A generated-origin mapping exceeded its generated source.
+    #[error("generated-origin mapping {mapping} for input {input} is outside the source")]
+    GeneratedOriginOutsideSource {
+        /// Zero-based input index.
+        input: usize,
+        /// Zero-based mapping index.
+        mapping: usize,
+    },
+    /// Generated-origin mappings were not sorted and disjoint.
+    #[error("generated-origin mapping {mapping} for input {input} overlaps its predecessor")]
+    GeneratedOriginOrder {
+        /// Zero-based input index.
+        input: usize,
+        /// Zero-based mapping index.
+        mapping: usize,
+    },
+    /// A mapped origin path contradicted an included source identity or extent.
+    #[error("generated-origin mapping {mapping} for input {input} contradicts its origin source")]
+    GeneratedOriginMismatch {
+        /// Zero-based input index.
+        input: usize,
+        /// Zero-based mapping index.
+        mapping: usize,
+    },
+    /// Aggregate project accounting overflowed.
+    #[error("project request resource accounting overflowed")]
+    ProjectAccountingOverflow,
+    /// The configuration digest did not authenticate the context manifest.
+    #[error("project configuration digest does not match the context manifest")]
+    ProjectConfigurationDigestMismatch,
+    /// A project resource exceeded its explicit aggregate limit.
+    #[error("{resource:?} project usage {observed} exceeds limit {limit}")]
+    ProjectLimit {
+        /// Limited project resource.
+        resource: ResourceKind,
+        /// Observed request usage.
+        observed: usize,
+        /// Explicit request maximum.
+        limit: usize,
     },
     /// The selected provider does not advertise the requested language.
     #[error("provider does not support the requested language")]
@@ -204,6 +286,20 @@ pub enum ResourceKind {
     ExtensionBytes,
     /// Source bytes.
     SourceBytes,
+    /// Files in one project transaction.
+    ProjectFiles,
+    /// Aggregate source bytes in one project transaction.
+    ProjectSourceBytes,
+    /// Canonical project build-context bytes.
+    ProjectContextBytes,
+    /// Generated-origin mappings in one project transaction.
+    GeneratedMappings,
+    /// Deterministically accounted generated-origin mapping bytes.
+    GeneratedMappingBytes,
+    /// Analysis-unit identity bytes.
+    AnalysisUnitBytes,
+    /// Build-target identity bytes.
+    BuildTargetBytes,
     /// Embedded included source ranges.
     IncludedRanges,
     /// Concrete-syntax nodes processed by a parser or analyzer.
@@ -325,6 +421,18 @@ pub enum ReportError {
         /// Tier claimed by the completed coverage report.
         observed: AnalysisTier,
     },
+    /// A project report claimed a different requested tier.
+    #[error("project report requested tier differs from the request")]
+    ProjectRequestedTierMismatch,
+    /// A project report claimed a different analysis unit.
+    #[error("project report analysis unit differs from the request")]
+    ProjectAnalysisUnitMismatch,
+    /// A project report claimed a different build target.
+    #[error("project report build target differs from the request")]
+    ProjectBuildTargetMismatch,
+    /// A project report claimed a different build-context identity.
+    #[error("project report build context differs from the request")]
+    ProjectBuildContextMismatch,
     /// The report usage did not match the staged stream.
     #[error("reported stream usage does not match staged usage")]
     StreamUsageMismatch,

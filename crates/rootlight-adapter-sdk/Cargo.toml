@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 rootlight-cancel = { path = "../rootlight-cancel" }
+rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 rootlight-vfs = { path = "../rootlight-vfs" }
 thiserror.workspace = true

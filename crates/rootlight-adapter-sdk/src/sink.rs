@@ -23,8 +23,8 @@ use crate::{
     },
     ir_accounting::{IrRawBudget, ir_batch_metrics},
     limits::{RemainingBudget, StreamLimits, StreamUsage},
-    report::{AnalysisReport, ParseReport},
-    request::{AnalysisRequest, ParseRequest},
+    report::{AnalysisReport, ParseReport, ProjectAnalysisReport},
+    request::{AnalysisRequest, ParseRequest, ProjectAnalysisRequest},
 };
 
 const MAX_SYNTAX_KIND_BYTES: usize = 128;
@@ -570,6 +570,30 @@ pub trait LanguageAnalyzer: Send + Sync {
     ) -> Result<AnalysisReport, AdapterError>;
 }
 
+/// Synchronous cooperative analyzer for one complete project transaction.
+///
+/// This is an independent whole-project contract: the SDK never decomposes it
+/// into hidden [`LanguageAnalyzer::analyze`] calls. Implementations can inspect
+/// every canonical input before staging one normalized IR document.
+pub trait ProjectLanguageAnalyzer: Send + Sync {
+    /// Returns immutable producer identity and capabilities.
+    fn descriptor(&self) -> &ProducerDescriptor;
+
+    /// Analyzes the complete immutable project and stages bounded IR batches.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] for cancellation, backpressure, or provider
+    /// failure. Implementations must check `cancellation` between bounded work
+    /// units and before every emitted batch.
+    fn analyze_project(
+        &self,
+        request: &ProjectAnalysisRequest<'_>,
+        sink: &mut dyn IrBatchSink,
+        cancellation: &Cancellation,
+    ) -> Result<ProjectAnalysisReport, AdapterError>;
+}
+
 /// Committed deterministic parser output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseOutput {
@@ -623,6 +647,34 @@ impl AnalysisOutput {
     /// Returns the report that committed the staged stream.
     #[must_use]
     pub const fn report(&self) -> &AnalysisReport {
+        &self.report
+    }
+
+    /// Returns the caller-selected memory enforcement outcome.
+    #[must_use]
+    pub const fn memory_admission(&self) -> MemoryAdmissionStatus {
+        self.memory_admission
+    }
+}
+
+/// Committed canonical normalized IR for one project transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectAnalysisOutput {
+    document: NormalizedIrDocument,
+    report: ProjectAnalysisReport,
+    memory_admission: MemoryAdmissionStatus,
+}
+
+impl ProjectAnalysisOutput {
+    /// Returns canonical project IR independent of accepted batch ordering.
+    #[must_use]
+    pub const fn document(&self) -> &NormalizedIrDocument {
+        &self.document
+    }
+
+    /// Returns the context-bound report that committed the staged stream.
+    #[must_use]
+    pub const fn report(&self) -> &ProjectAnalysisReport {
         &self.report
     }
 
@@ -837,7 +889,8 @@ impl SyntaxFactSink for BoundedSyntaxSink {
 /// Transactional in-memory normalized-IR sink with raw pre-dedupe quotas.
 #[derive(Debug)]
 pub struct BoundedIrSink {
-    source: SourceRef,
+    anchor: SourceRef,
+    sources: Vec<SourceRef>,
     stream_limits: StreamLimits,
     ir_limits: IrLimits,
     extensions: ExtensionSupport,
@@ -859,7 +912,35 @@ impl BoundedIrSink {
     ) -> Self {
         let document = NormalizedIrDocument::empty(source.repository(), source.generation());
         Self {
-            source,
+            anchor: source.clone(),
+            sources: vec![source],
+            stream_limits,
+            ir_limits,
+            extensions,
+            state: SinkState::Open,
+            next_sequence: 0,
+            usage: StreamUsage::default(),
+            raw: IrRawBudget::default(),
+            document,
+        }
+    }
+
+    fn new_project(
+        request: &ProjectAnalysisRequest<'_>,
+        stream_limits: StreamLimits,
+        ir_limits: IrLimits,
+        extensions: ExtensionSupport,
+    ) -> Self {
+        let anchor = request.anchor().clone();
+        let sources = request
+            .inputs()
+            .iter()
+            .map(|input| input.source().source_ref().clone())
+            .collect();
+        let document = NormalizedIrDocument::empty(anchor.repository(), anchor.generation());
+        Self {
+            anchor,
+            sources,
             stream_limits,
             ir_limits,
             extensions,
@@ -880,7 +961,7 @@ impl BoundedIrSink {
     /// Discards all staged output and permanently closes the sink.
     pub fn discard(&mut self) {
         self.document =
-            NormalizedIrDocument::empty(self.source.repository(), self.source.generation());
+            NormalizedIrDocument::empty(self.anchor.repository(), self.anchor.generation());
         self.usage = StreamUsage::default();
         self.raw = IrRawBudget::default();
         self.next_sequence = 0;
@@ -891,7 +972,7 @@ impl BoundedIrSink {
         self.ensure_open()?;
         let staged = mem::replace(
             &mut self.document,
-            NormalizedIrDocument::empty(self.source.repository(), self.source.generation()),
+            NormalizedIrDocument::empty(self.anchor.repository(), self.anchor.generation()),
         );
         self.state = SinkState::Closed;
         canonicalize_ir_document(staged, &self.ir_limits, &self.extensions)
@@ -953,7 +1034,7 @@ impl IrBatchSink for BoundedIrSink {
             return Err(SinkError::EmptyBatch);
         }
         for record in &batch.records {
-            if !record_matches_bound_source(record, &self.source) {
+            if !record_matches_bound_sources(record, &self.anchor, &self.sources) {
                 return Err(SinkError::SourceMismatch);
             }
         }
@@ -1160,6 +1241,85 @@ pub fn execute_analysis<A: LanguageAnalyzer + ?Sized>(
     })
 }
 
+/// Executes one whole-project analyzer transaction and commits only valid IR.
+///
+/// The adapter receives all canonical project inputs in one call. Staged
+/// output remains invisible unless the provider returns a report matching the
+/// exact analysis unit, build target, build context, requested tier, resource
+/// usage, and stream end marker.
+///
+/// # Errors
+///
+/// Returns [`AdapterError`] for missing deadline, descriptor mismatch,
+/// rejected memory admission, cancellation, provider failure, sink rejection,
+/// invalid IR, exceeded output quota, or inconsistent project reporting.
+pub fn execute_project_analysis<A: ProjectLanguageAnalyzer + ?Sized>(
+    analyzer: &A,
+    request: &ProjectAnalysisRequest<'_>,
+    extensions: ExtensionSupport,
+    memory_policy: MemoryAdmissionPolicy,
+    cancellation: &Cancellation,
+) -> Result<ProjectAnalysisOutput, AdapterError> {
+    validate_deadline_admission(cancellation)?;
+    validate_project_analyzer_descriptor(analyzer.descriptor(), request)?;
+    let memory_admission = admit_memory(analyzer.descriptor().memory_enforcement(), memory_policy)?;
+    let mut sink = BoundedIrSink::new_project(
+        request,
+        request.limits().ir_stream().clone(),
+        request.limits().ir().clone(),
+        extensions,
+    );
+    if let Err(cancelled) = cancellation.check() {
+        sink.discard();
+        return Err(cancelled.into());
+    }
+    let report = match analyzer.analyze_project(request, &mut sink, cancellation) {
+        Ok(report) => report,
+        Err(error) => {
+            sink.discard();
+            return Err(error);
+        }
+    };
+    if let Err(cancelled) = cancellation.check() {
+        sink.discard();
+        return Err(cancelled.into());
+    }
+    if let Err(error) = report.validate_request_identity(request) {
+        sink.discard();
+        return Err(error.into());
+    }
+    if let Err(error) = report.work().validate_project_commit(
+        request.total_source_bytes(),
+        request.limits(),
+        sink.usage,
+        sink.next_sequence,
+    ) {
+        sink.discard();
+        return Err(error.into());
+    }
+    if report.work().coverage().tier() != analyzer.descriptor().tier() {
+        sink.discard();
+        return Err(ReportError::AnalysisTierMismatch {
+            expected: analyzer.descriptor().tier(),
+            observed: report.work().coverage().tier(),
+        }
+        .into());
+    }
+    if let Err(error) = validate_memory_report(
+        analyzer.descriptor().memory_enforcement(),
+        report.work().resources().reported_memory_bytes(),
+    ) {
+        sink.discard();
+        return Err(error.into());
+    }
+    let document = sink.commit()?;
+    Ok(ProjectAnalysisOutput {
+        document,
+        report,
+        memory_admission,
+    })
+}
+
 fn validate_parse_capabilities(
     capabilities: &ParseCapabilities,
     request: &ParseRequest<'_>,
@@ -1206,6 +1366,23 @@ fn validate_analyzer_descriptor(
         return Err(RequestError::UnsupportedLanguage);
     }
     if tier_rank(descriptor.tier()) > tier_rank(request.tier()) {
+        return Err(RequestError::UnsupportedTier);
+    }
+    Ok(())
+}
+
+fn validate_project_analyzer_descriptor(
+    descriptor: &ProducerDescriptor,
+    request: &ProjectAnalysisRequest<'_>,
+) -> Result<(), RequestError> {
+    if request
+        .inputs()
+        .iter()
+        .any(|input| input.language() != descriptor.language())
+    {
+        return Err(RequestError::UnsupportedLanguage);
+    }
+    if tier_rank(descriptor.tier()) < tier_rank(request.requested_tier()) {
         return Err(RequestError::UnsupportedTier);
     }
     Ok(())
@@ -1614,78 +1791,92 @@ fn append_ir_record(document: &mut NormalizedIrDocument, record: IrRecord) {
     }
 }
 
-fn record_matches_bound_source(record: &IrRecord, source: &SourceRef) -> bool {
+fn record_matches_bound_sources(
+    record: &IrRecord,
+    anchor: &SourceRef,
+    sources: &[SourceRef],
+) -> bool {
     let owner_matches = |repository, generation| {
-        repository == source.repository() && generation == source.generation()
+        repository == anchor.repository() && generation == anchor.generation()
     };
     match record {
         IrRecord::File(record) => {
             owner_matches(record.repository, record.generation)
-                && record.id == source.span().file()
-                && record.content_hash == source.content_hash()
-                && record.byte_length == source.span().end_byte()
-                && evidence_matches(&record.evidence, source)
+                && sources.iter().any(|source| {
+                    record.id == source.span().file()
+                        && record.content_hash == source.content_hash()
+                        && record.byte_length == source.span().end_byte()
+                })
+                && evidence_matches_sources(&record.evidence, sources)
         }
         IrRecord::Entity(record) => {
             owner_matches(record.repository, record.generation)
-                && evidence_matches(&record.evidence, source)
+                && evidence_matches_sources(&record.evidence, sources)
         }
         IrRecord::Occurrence(record) => {
             owner_matches(record.repository, record.generation)
-                && record.file == source.span().file()
-                && source_within_source(&record.source, source)
-                && evidence_matches(&record.evidence, source)
+                && sources.iter().any(|source| {
+                    record.file == source.span().file()
+                        && source_within_source(&record.source, source)
+                })
+                && evidence_matches_sources(&record.evidence, sources)
         }
         IrRecord::Relation(record) => {
             owner_matches(record.repository, record.generation)
-                && evidence_matches(&record.evidence, source)
+                && evidence_matches_sources(&record.evidence, sources)
         }
         IrRecord::Provenance(record) => {
             owner_matches(record.repository, record.generation)
                 && record
                     .input_sources
                     .iter()
-                    .all(|candidate| source_within_source(candidate, source))
+                    .all(|candidate| source_matches_any(candidate, sources))
                 && record
                     .evidence_sources
                     .iter()
-                    .all(|candidate| source_within_source(candidate, source))
+                    .all(|candidate| source_matches_any(candidate, sources))
         }
         IrRecord::SourceMapping(record) => {
             owner_matches(record.repository, record.generation)
-                && source_within_source(&record.from, source)
-                && source_within_source(&record.to, source)
-                && evidence_matches(&record.evidence, source)
+                && source_matches_any(&record.from, sources)
+                && source_matches_any(&record.to, sources)
+                && evidence_matches_sources(&record.evidence, sources)
         }
         IrRecord::Coverage(record) => {
             owner_matches(record.repository, record.generation)
-                && evidence_matches(&record.evidence, source)
+                && evidence_matches_sources(&record.evidence, sources)
         }
         IrRecord::SkippedRegion(record) => {
             owner_matches(record.repository, record.generation)
-                && source_within_source(&record.source, source)
-                && evidence_matches(&record.evidence, source)
+                && source_matches_any(&record.source, sources)
+                && evidence_matches_sources(&record.evidence, sources)
         }
         IrRecord::Diagnostic(record) => {
             owner_matches(record.repository, record.generation)
                 && record
                     .source
                     .as_ref()
-                    .is_none_or(|candidate| source_within_source(candidate, source))
-                && evidence_matches(&record.evidence, source)
+                    .is_none_or(|candidate| source_matches_any(candidate, sources))
+                && evidence_matches_sources(&record.evidence, sources)
         }
         IrRecord::Extension(record) => {
             owner_matches(record.repository, record.generation)
-                && evidence_matches(&record.evidence, source)
+                && evidence_matches_sources(&record.evidence, sources)
         }
     }
 }
 
-fn evidence_matches(evidence: &FactEvidence, source: &SourceRef) -> bool {
+fn source_matches_any(candidate: &SourceRef, sources: &[SourceRef]) -> bool {
+    sources
+        .iter()
+        .any(|source| source_within_source(candidate, source))
+}
+
+fn evidence_matches_sources(evidence: &FactEvidence, sources: &[SourceRef]) -> bool {
     evidence
         .source
         .as_ref()
-        .is_none_or(|candidate| source_within_source(candidate, source))
+        .is_none_or(|candidate| source_matches_any(candidate, sources))
 }
 
 #[cfg(test)]

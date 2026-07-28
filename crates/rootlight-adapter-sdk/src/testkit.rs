@@ -8,7 +8,8 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use crate::{
     AdapterDiagnostic, AdapterError, AnalysisReport, AnalysisRequest, CoverageReport, IrBatch,
     IrBatchSink, IrRecord, LanguageAnalyzer, ParseCapabilities, ParseProvider, ParseReport,
-    ParseRequest, ProducerDescriptor, ResourceUsage, SinkError, StreamEnd, StreamUsage, SyntaxFact,
+    ParseRequest, ProducerDescriptor, ProjectAnalysisReport, ProjectAnalysisRequest,
+    ProjectLanguageAnalyzer, ResourceUsage, SinkError, StreamEnd, StreamUsage, SyntaxFact,
     SyntaxFactBatch, SyntaxFactSink, WorkReport,
 };
 
@@ -274,6 +275,132 @@ impl LanguageAnalyzer for MockLanguageAnalyzer {
             ),
             sink.next_sequence(),
         )
+    }
+}
+
+/// Deterministic whole-project analyzer double using one transactional stream.
+#[derive(Debug, Clone)]
+pub struct MockProjectLanguageAnalyzer {
+    descriptor: ProducerDescriptor,
+    records: Vec<IrRecord>,
+    coverage: CoverageReport,
+    syntax_nodes: usize,
+    max_syntax_depth: usize,
+    reported_memory_bytes: Option<usize>,
+    cancel_after_batches: Option<(usize, CancellationReason)>,
+}
+
+impl MockProjectLanguageAnalyzer {
+    /// Creates an in-process project analyzer double.
+    #[must_use]
+    pub fn new(
+        descriptor: ProducerDescriptor,
+        records: Vec<IrRecord>,
+        coverage: CoverageReport,
+        max_syntax_depth: usize,
+    ) -> Self {
+        let reported_memory_bytes = match descriptor.memory_enforcement() {
+            crate::MemoryEnforcement::AccountedInProcess => Some(0),
+            _ => None,
+        };
+        Self {
+            descriptor,
+            records,
+            coverage,
+            syntax_nodes: 0,
+            max_syntax_depth,
+            reported_memory_bytes,
+            cancel_after_batches: None,
+        }
+    }
+
+    /// Configures concrete-syntax nodes observed across the project.
+    #[must_use]
+    pub const fn with_syntax_nodes(mut self, nodes: usize) -> Self {
+        self.syntax_nodes = nodes;
+        self
+    }
+
+    /// Configures deterministic adapter-reported working memory.
+    #[must_use]
+    pub const fn with_reported_memory_bytes(mut self, bytes: usize) -> Self {
+        self.reported_memory_bytes = Some(bytes);
+        self
+    }
+
+    /// Requests cancellation immediately before the selected batch boundary.
+    #[must_use]
+    pub const fn with_cancellation_after_batches(
+        mut self,
+        batches: usize,
+        reason: CancellationReason,
+    ) -> Self {
+        self.cancel_after_batches = Some((batches, reason));
+        self
+    }
+}
+
+impl ProjectLanguageAnalyzer for MockProjectLanguageAnalyzer {
+    fn descriptor(&self) -> &ProducerDescriptor {
+        &self.descriptor
+    }
+
+    fn analyze_project(
+        &self,
+        request: &ProjectAnalysisRequest<'_>,
+        sink: &mut dyn IrBatchSink,
+        cancellation: &Cancellation,
+    ) -> Result<ProjectAnalysisReport, AdapterError> {
+        let mut record_index = 0_usize;
+        let mut emitted_batches = 0_usize;
+        while record_index < self.records.len() {
+            cancel_at_boundary(self.cancel_after_batches, emitted_batches, cancellation);
+            cancellation.check()?;
+            let budget = sink.remaining_budget();
+            let mut records = Vec::new();
+            let mut batch_usage = empty_batch_usage();
+            while record_index < self.records.len() {
+                let item_usage = IrBatch::new(
+                    sink.next_sequence(),
+                    vec![self.records[record_index].clone()],
+                )
+                .usage(request.limits().ir())?;
+                let candidate_usage = combine_batch_usage(batch_usage, item_usage)?;
+                if !usage_fits(candidate_usage, budget) {
+                    break;
+                }
+                batch_usage = candidate_usage;
+                records.push(self.records[record_index].clone());
+                record_index += 1;
+            }
+            if records.is_empty() {
+                records.push(self.records[record_index].clone());
+                record_index += 1;
+            }
+            sink.push(IrBatch::new(sink.next_sequence(), records))?;
+            emitted_batches += 1;
+        }
+        cancellation.check()?;
+        let usage = sink.staged_usage();
+        let work = report(
+            self.coverage.clone(),
+            ResourceUsage::new(
+                request.total_source_bytes(),
+                self.records.len(),
+                self.syntax_nodes,
+                self.max_syntax_depth,
+                self.reported_memory_bytes,
+                usage,
+            ),
+            sink.next_sequence(),
+        )?;
+        Ok(ProjectAnalysisReport::new(
+            work,
+            request.analysis_unit().clone(),
+            request.build_target().clone(),
+            request.build_context(),
+            request.requested_tier(),
+        ))
     }
 }
 
