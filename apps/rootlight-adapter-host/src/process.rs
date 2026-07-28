@@ -114,15 +114,20 @@ pub fn execute_isolated_project_adapter(
     let deadline = Instant::now()
         .checked_add(wall_time)
         .ok_or(AdapterHostError::Limit)?;
-    let completion = poll_process(&mut process, deadline, cancellation);
-    if completion.is_err() {
-        terminate_and_reap(&process);
-    }
-
+    let status = match poll_process(&mut process, deadline, cancellation) {
+        Ok(status) => status,
+        Err(error) => {
+            terminate_and_reap(&process);
+            drop(process);
+            let _ = join_worker(input_writer);
+            let _ = join_worker(output_reader);
+            let _ = join_worker(diagnostic_reader);
+            return Err(error);
+        }
+    };
     let input_result = join_worker(input_writer);
     let output_result = join_worker(output_reader);
     let diagnostic_result = join_worker(diagnostic_reader);
-    let status = completion?;
     input_result?;
     let output = output_result?;
     let diagnostic = diagnostic_result?;
