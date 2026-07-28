@@ -24,7 +24,7 @@ const TOOLCHAIN_POLICY_PATH: &str = "policy/toolchain.toml";
 const UNSAFE_POLICY_PATH: &str = "policy/unsafe.toml";
 const WORKFLOW_ROOT: &str = ".github/workflows";
 const CURRENT_SCHEMA_VERSION: &str = "1.0";
-const UNSAFE_SCHEMA_VERSION: &str = "2.0";
+const UNSAFE_SCHEMA_VERSION: &str = "3.0";
 
 pub(crate) fn check() -> Result<(), PolicyError> {
     let metadata = MetadataCommand::new()
@@ -1890,6 +1890,8 @@ struct UnsafeBoundary {
     reason: String,
     expected_source_tokens: usize,
     expected_geiger_count: usize,
+    #[serde(rename = "geiger_host_os")]
+    _geiger_host_os: UnsafeBoundaryGeigerHost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -1897,6 +1899,15 @@ struct UnsafeBoundary {
 enum UnsafeBoundaryStatus {
     Disabled,
     Enabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum UnsafeBoundaryGeigerHost {
+    All,
+    Linux,
+    Macos,
+    Windows,
 }
 
 #[derive(Debug, Deserialize)]

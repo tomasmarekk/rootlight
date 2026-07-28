@@ -61,7 +61,7 @@ class GeigerValidationTests(unittest.TestCase):
         self.policy_path.write_text(
             "\n".join(
                 (
-                    'schema_version = "2.0"',
+                    'schema_version = "3.0"',
                     "",
                     "[[boundaries]]",
                     'package = "rootlight-vfs"',
@@ -74,6 +74,7 @@ class GeigerValidationTests(unittest.TestCase):
                     'reason = "native handle APIs require a reviewed boundary"',
                     "expected_source_tokens = 0",
                     "expected_geiger_count = 0",
+                    'geiger_host_os = "all"',
                     "",
                 )
             ),
@@ -162,7 +163,9 @@ class GeigerValidationTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.inventory = VALIDATOR.load_inventory(self.inventory_path)
-        self.approved = VALIDATOR.load_approved_counts(self.policy_path, self.inventory)
+        self.approved = VALIDATOR.load_approved_counts(
+            self.policy_path, self.inventory, "windows"
+        )
         self.report_path = self.root / "report.json"
         self.write_report()
         self.execution_identity = self.root / "cargo-geiger.execution.json"
@@ -192,7 +195,11 @@ class GeigerValidationTests(unittest.TestCase):
         if list(arguments) == ["cargo", "-vV"]:
             return "cargo 1.97.0 (test)\nrelease: 1.97.0"
         if list(arguments) == ["rustc", "-vV"]:
-            return "rustc 1.97.0 (test)\nrelease: 1.97.0\nhost: test"
+            return (
+                "rustc 1.97.0 (test)\n"
+                "release: 1.97.0\n"
+                "host: x86_64-pc-windows-msvc"
+            )
         raise AssertionError(f"unexpected command: {arguments}")
 
     def report(
@@ -281,9 +288,68 @@ class GeigerValidationTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertEqual(
-            VALIDATOR.load_approved_counts(self.policy_path, self.inventory),
+            VALIDATOR.load_approved_counts(
+                self.policy_path, self.inventory, "windows"
+            ),
             {self.cargo_id: 1},
         )
+
+    def test_host_specific_boundary_requires_zero_off_host(self) -> None:
+        self.policy_path.write_text(
+            self.policy_path.read_text(encoding="utf-8")
+            .replace('status = "disabled"', 'status = "enabled"')
+            .replace("expected_source_tokens = 0", "expected_source_tokens = 1")
+            .replace("expected_geiger_count = 0", "expected_geiger_count = 1")
+            .replace('geiger_host_os = "all"', 'geiger_host_os = "windows"'),
+            encoding="utf-8",
+        )
+        approved = VALIDATOR.load_approved_counts(
+            self.policy_path, self.inventory, "linux"
+        )
+        self.assertEqual(approved, {})
+        self.assertEqual(
+            VALIDATOR.validate_report(
+                self.report(),
+                self.cargo_id,
+                self.inventory,
+                approved,
+                VALIDATOR.SUPPORTED_CARGO_GEIGER_VERSION,
+            ),
+            1,
+        )
+
+        report = self.report()
+        entry = report["packages"][0]
+        entry["unsafety"]["forbids_unsafe"] = False
+        entry["unsafety"]["used"]["exprs"]["unsafe_"] = 1
+        with self.assertRaisesRegex(ValueError, "expected 0 used unsafe items"):
+            VALIDATOR.validate_report(
+                report,
+                self.cargo_id,
+                self.inventory,
+                approved,
+                VALIDATOR.SUPPORTED_CARGO_GEIGER_VERSION,
+            )
+
+    def test_rustc_host_operating_system_is_exact(self) -> None:
+        for host, expected in (
+            ("x86_64-unknown-linux-gnu", "linux"),
+            ("aarch64-apple-darwin", "macos"),
+            ("x86_64-pc-windows-msvc", "windows"),
+        ):
+            self.assertEqual(
+                VALIDATOR.rustc_host_operating_system(
+                    f"rustc 1.97.0\nhost: {host}"
+                ),
+                expected,
+            )
+        for invalid in (
+            "rustc 1.97.0",
+            "host: x86_64-unknown-freebsd",
+            "host: x86_64-unknown-linux-gnu\nhost: x86_64-pc-windows-msvc",
+        ):
+            with self.assertRaises(ValueError):
+                VALIDATOR.rustc_host_operating_system(invalid)
 
     def test_enabled_boundary_requires_the_exact_full_report_count(self) -> None:
         report = self.report()
@@ -499,7 +565,9 @@ class GeigerValidationTests(unittest.TestCase):
         substitute.mkdir()
         (substitute / "Cargo.toml").write_text("[package]\n", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "exact workspace package"):
-            VALIDATOR.load_approved_counts(self.policy_path, self.inventory)
+            VALIDATOR.load_approved_counts(
+                self.policy_path, self.inventory, "windows"
+            )
 
     def test_inventory_root_rejects_unknown_fields(self) -> None:
         document = json.loads(self.inventory_path.read_text(encoding="utf-8"))
@@ -511,14 +579,16 @@ class GeigerValidationTests(unittest.TestCase):
     def test_policy_root_rejects_unknown_fields(self) -> None:
         self.policy_path.write_text(
             self.policy_path.read_text(encoding="utf-8").replace(
-                'schema_version = "2.0"\n',
-                'schema_version = "2.0"\nunexpected = true\n',
+                'schema_version = "3.0"\n',
+                'schema_version = "3.0"\nunexpected = true\n',
                 1,
             ),
             encoding="utf-8",
         )
         with self.assertRaisesRegex(ValueError, "missing or unknown fields"):
-            VALIDATOR.load_approved_counts(self.policy_path, self.inventory)
+            VALIDATOR.load_approved_counts(
+                self.policy_path, self.inventory, "windows"
+            )
 
     def test_boundary_rejects_unknown_fields(self) -> None:
         self.policy_path.write_text(
@@ -526,7 +596,21 @@ class GeigerValidationTests(unittest.TestCase):
             encoding="utf-8",
         )
         with self.assertRaisesRegex(ValueError, "missing or unknown fields"):
-            VALIDATOR.load_approved_counts(self.policy_path, self.inventory)
+            VALIDATOR.load_approved_counts(
+                self.policy_path, self.inventory, "windows"
+            )
+
+    def test_boundary_rejects_unknown_geiger_host(self) -> None:
+        self.policy_path.write_text(
+            self.policy_path.read_text(encoding="utf-8").replace(
+                'geiger_host_os = "all"', 'geiger_host_os = "freebsd"'
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "invalid cargo-geiger host"):
+            VALIDATOR.load_approved_counts(
+                self.policy_path, self.inventory, "windows"
+            )
 
     def test_evidence_root_and_nested_objects_reject_unknown_fields(self) -> None:
         envelope = self.build_envelope()

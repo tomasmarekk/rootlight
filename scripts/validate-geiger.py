@@ -24,7 +24,7 @@ from typing import Any, Sequence
 
 
 SCHEMA_VERSION = "1.0"
-UNSAFE_POLICY_SCHEMA_VERSION = "2.0"
+UNSAFE_POLICY_SCHEMA_VERSION = "3.0"
 SUPPORTED_CARGO_GEIGER_VERSION = "cargo-geiger 0.13.0"
 SUPPORTED_CARGO_GEIGER_POLICY_VERSION = "0.13.0"
 SOURCE_INPUT_MODE = "workspace-rust-source-digest-v1"
@@ -53,7 +53,9 @@ UNSAFE_BOUNDARY_KEYS = {
     "reason",
     "expected_source_tokens",
     "expected_geiger_count",
+    "geiger_host_os",
 }
+SUPPORTED_HOST_OPERATING_SYSTEMS = {"linux", "macos", "windows"}
 TOOLCHAIN_POLICY_ROOT_KEYS = {"schema_version", "inputs", "tools"}
 CARGO_GEIGER_POLICY_KEYS = {
     "name",
@@ -188,6 +190,25 @@ def require_nonnegative_integer(value: Any, description: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise fail(f"{description} must be a non-negative integer")
     return value
+
+
+def rustc_host_operating_system(verbose_version: Any) -> str:
+    version = require_string(verbose_version, "rustc verbose version")
+    hosts = [
+        line.removeprefix("host: ").strip()
+        for line in version.splitlines()
+        if line.startswith("host: ")
+    ]
+    if len(hosts) != 1 or not hosts[0]:
+        raise fail("rustc verbose version must contain exactly one host triple")
+    host = hosts[0].casefold()
+    if "windows" in host:
+        return "windows"
+    if "darwin" in host:
+        return "macos"
+    if "linux" in host:
+        return "linux"
+    raise fail(f"rustc host triple uses an unsupported operating system: {hosts[0]}")
 
 
 def require_sha256(value: Any, description: str) -> str:
@@ -339,7 +360,13 @@ def load_inventory(path: pathlib.Path) -> dict[str, WorkspacePackage]:
 def load_approved_counts(
     policy_path: pathlib.Path,
     inventory: dict[str, WorkspacePackage],
+    host_operating_system: str,
 ) -> dict[str, int]:
+    if host_operating_system not in SUPPORTED_HOST_OPERATING_SYSTEMS:
+        raise fail(
+            "cargo-geiger host operating system is unsupported: "
+            f"{host_operating_system}"
+        )
     policy = require_object(
         tomllib.loads(policy_path.read_text(encoding="utf-8")),
         "unsafe inventory policy",
@@ -404,6 +431,14 @@ def load_approved_counts(
         geiger_count = require_nonnegative_integer(
             boundary["expected_geiger_count"], "expected cargo-geiger count"
         )
+        geiger_host_os = require_string(
+            boundary["geiger_host_os"], "cargo-geiger boundary host operating system"
+        )
+        if geiger_host_os not in {*SUPPORTED_HOST_OPERATING_SYSTEMS, "all"}:
+            raise fail(
+                "unsafe inventory policy contains an invalid cargo-geiger "
+                f"host operating system: {geiger_host_os}"
+            )
         if status == "disabled" and (source_count != 0 or geiger_count != 0):
             raise fail("disabled unsafe boundaries must retain zero evidence counts")
         if status == "enabled" and (source_count == 0 or geiger_count == 0):
@@ -411,7 +446,8 @@ def load_approved_counts(
         if status == "enabled":
             if cargo_id in approved_counts:
                 raise fail(f"workspace package has multiple enabled boundaries: {cargo_id}")
-            approved_counts[cargo_id] = geiger_count
+            if geiger_host_os in {"all", host_operating_system}:
+                approved_counts[cargo_id] = geiger_count
 
     return approved_counts
 
@@ -1188,7 +1224,17 @@ def build_evidence_envelope(
     report_file = canonical_non_alias_file(report_path, "cargo-geiger report")
 
     inventory = load_inventory(inventory_file)
-    approved = load_approved_counts(unsafe_policy, inventory)
+    cargo_verbose_version = capture_command(
+        ["cargo", "-vV"], "Cargo verbose version", workspace_root
+    )
+    rustc_verbose_version = capture_command(
+        ["rustc", "-vV"], "rustc verbose version", workspace_root
+    )
+    approved = load_approved_counts(
+        unsafe_policy,
+        inventory,
+        rustc_host_operating_system(rustc_verbose_version),
+    )
     required_id = require_string(required_cargo_id, "required Cargo package ID")
     if required_id not in inventory:
         raise fail(
@@ -1212,12 +1258,6 @@ def build_evidence_envelope(
         install_identity["version"],
     )
 
-    cargo_verbose_version = capture_command(
-        ["cargo", "-vV"], "Cargo verbose version", workspace_root
-    )
-    rustc_verbose_version = capture_command(
-        ["rustc", "-vV"], "rustc verbose version", workspace_root
-    )
     return {
         "schema_version": SCHEMA_VERSION,
         "workspace_inventory_sha256": sha256_file(

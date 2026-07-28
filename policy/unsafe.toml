@@ -1,4 +1,4 @@
-schema_version = "2.0"
+schema_version = "3.0"
 
 [[boundaries]]
 package = "rootlight-vfs"
@@ -11,6 +11,7 @@ owner = "@tomasmarekk"
 reason = "native handle APIs are required for private-at-birth creation, exact identity, atomic no-replace publication, and identity-bound cleanup"
 expected_source_tokens = 5
 expected_geiger_count = 17
+geiger_host_os = "all"
 
 [[boundaries]]
 package = "rootlight-catalog"
@@ -23,6 +24,7 @@ owner = "@tomasmarekk"
 reason = "Darwin descriptor ACL APIs are required to remove inherited access and verify account-private SQLite files without a path race"
 expected_source_tokens = 5
 expected_geiger_count = 17
+geiger_host_os = "all"
 
 [[boundaries]]
 package = "rootlight-sandbox"
@@ -35,3 +37,4 @@ owner = "@tomasmarekk"
 reason = "Win32 process creation, explicit inherited-handle lists, exact process ownership, and Job Object containment require native APIs unavailable through stable safe Rust"
 expected_source_tokens = 22
 expected_geiger_count = 108
+geiger_host_os = "windows"

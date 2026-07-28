@@ -991,10 +991,40 @@ jobs:
           overwrite: false
           include-hidden-files: false
 
+  unsafe-inventory-windows:
+    name: unsafe inventory / windows
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Install checksum-verified cargo-geiger
+        shell: bash
+        run: bash scripts/install-geiger.sh "$HOME/.local/bin"
+      - name: Inventory Windows unsafe boundary
+        shell: bash
+        run: |
+          bash scripts/run-geiger.sh \
+            "$HOME/.local/bin/cargo-geiger.exe" \
+            artifacts/geiger \
+            rootlight-sandbox
+      - name: Upload Windows unsafe inventory
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-unsafe-windows-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/geiger
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
   release-signing:
     name: release signatures and provenance / main
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [release-package-candidate, supply-chain]
+    needs: [release-package-candidate, supply-chain, unsafe-inventory-windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -2373,7 +2403,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fast, msrv, current-stable, platform, vertical-slice, package-evidence, release-package-candidate, release-candidate-evidence, release-signing, release-trust-evidence, durability-platform, durability-evidence, incident-evidence, dataset-evidence, supply-chain, offline, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, release-performance, agent-workflow-quality]
+    needs: [fast, msrv, current-stable, platform, vertical-slice, package-evidence, release-package-candidate, release-candidate-evidence, release-signing, release-trust-evidence, durability-platform, durability-evidence, incident-evidence, dataset-evidence, supply-chain, unsafe-inventory-windows, offline, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, release-performance, agent-workflow-quality]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
