@@ -7,6 +7,7 @@
 
 mod project_context;
 mod project_semantics;
+mod scip_export;
 mod scip_import;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,6 +34,11 @@ pub use project_context::{
 };
 pub use project_semantics::{
     SemanticProjectAnalyzer, SemanticProjectAnalyzerConfigError, SemanticProjectLanguage,
+};
+pub use scip_export::{
+    SCIP_EXPORT_SUBSET_VERSION, ScipExportError, ScipExportLimits, ScipExportOmissions,
+    ScipExportOutcome, ScipExportReport, ScipExportRequest, ScipExportResource, ScipExportSource,
+    export_scip_index,
 };
 pub use scip_import::{
     ScipImportError, ScipImportLimits, ScipImportOutcome, ScipImportReport, ScipImportRequest,
