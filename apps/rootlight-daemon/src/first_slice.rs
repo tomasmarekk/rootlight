@@ -499,7 +499,7 @@ pub(crate) enum FirstSliceHostError {
     StartupTimedOut,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct OperationMetadata {
     started_unix_ms: u64,
     repository: Option<RepositoryId>,
@@ -713,7 +713,7 @@ impl OperationMetadataSet {
             .records
             .iter()
             .filter_map(|(operation, metadata)| {
-                (metadata.repository == Some(repository)).then_some((*operation, *metadata))
+                (metadata.repository == Some(repository)).then_some((*operation, metadata.clone()))
             })
             .collect();
         operations.sort_by(|(left_id, left), (right_id, right)| {
@@ -1217,7 +1217,7 @@ fn repository_index(
                     }
                 };
                 let staged_receipt = staged.receipt();
-                lock_metadata(metadata)?.stage(operation, staged_receipt);
+                lock_metadata(metadata)?.stage(operation, staged_receipt.clone());
                 if let Some(hook) = publication_hook
                     && let Err(error) = hook.pause(PublicationBoundary::BeforeCompletion)
                 {
@@ -1447,7 +1447,7 @@ fn retry_index_response(
     let metadata = lock_metadata(metadata)?
         .records
         .get(&operation.operation)
-        .copied()
+        .cloned()
         .ok_or_else(unsupported_restart_state)?;
     if metadata.publication == PublicationState::FailedClosed {
         return Err(failed_closed_publication(operation.operation));
@@ -1522,6 +1522,7 @@ fn pending_index_response(
         entities: 0,
         elapsed_micros: 0,
         estimated_disk_bytes,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -1542,6 +1543,14 @@ fn index_response(
         entities: receipt.entities,
         elapsed_micros: receipt.elapsed_micros,
         estimated_disk_bytes: receipt.estimated_disk_bytes,
+        diagnostics: receipt
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| daemon::RepositoryIndexDiagnostic {
+                code: diagnostic.code,
+                message: diagnostic.message,
+            })
+            .collect(),
     }
 }
 
@@ -1586,7 +1595,7 @@ fn repository_operation_status(
     let metadata = lock_metadata(metadata)?
         .records
         .get(&operation)
-        .copied()
+        .cloned()
         .ok_or_else(unsupported_restart_state)?;
     if metadata.publication == PublicationState::FailedClosed {
         // Journal success closes the cancellation race before the process-local
@@ -1605,6 +1614,7 @@ fn repository_operation_status(
             written_bytes: 0,
             files_examined: metadata
                 .receipt
+                .as_ref()
                 .map_or(0, |receipt| receipt.discovered_inputs),
             retry_after_ms: None,
         });
@@ -1617,7 +1627,13 @@ fn repository_operation_status(
                 return Err(internal_error());
             }
         }
-        Some(metadata.receipt.ok_or_else(internal_error)?.generation)
+        Some(
+            metadata
+                .receipt
+                .as_ref()
+                .ok_or_else(internal_error)?
+                .generation,
+        )
     } else {
         None
     };
@@ -1630,6 +1646,7 @@ fn repository_operation_status(
         written_bytes: 0,
         files_examined: metadata
             .receipt
+            .as_ref()
             .map_or(0, |receipt| receipt.discovered_inputs),
         retry_after_ms: (!record.state.is_terminal()).then_some(RETRY_AFTER_MS),
     })
@@ -3487,7 +3504,7 @@ fn query_context(
     usage: &QueryUsage,
     coverage: &[CoverageRecord],
 ) -> daemon::FirstSliceQueryContext {
-    let (tier, status, skipped) = aggregate_coverage(coverage, generation.receipt);
+    let (tier, status, skipped) = aggregate_coverage(coverage, &generation.receipt);
     daemon::FirstSliceQueryContext {
         repository: Some(repository_to_wire(generation.repository)),
         generation: Some(generation_to_wire(generation.generation)),
@@ -3600,7 +3617,7 @@ const fn limiting_resource_to_wire(
 
 fn aggregate_coverage(
     coverage: &[CoverageRecord],
-    receipt: FirstSliceIndexReceipt,
+    receipt: &FirstSliceIndexReceipt,
 ) -> (AnalysisTier, CoverageStatus, u64) {
     if coverage.is_empty() {
         let (tier, status) = if receipt.indexed_files == 0 {
@@ -4269,11 +4286,12 @@ mod tests {
             lexical_documents: 1,
             oracle_allocated_bytes: 1,
             estimated_disk_bytes: 1,
+            diagnostics: Vec::new(),
             elapsed_micros: 1,
         };
 
         assert_eq!(
-            aggregate_coverage(&[], receipt),
+            aggregate_coverage(&[], &receipt),
             (AnalysisTier::TierB, CoverageStatus::Bounded, 1)
         );
     }

@@ -589,8 +589,18 @@ pub struct RepositoryIndexRequest {
     #[allow(missing_docs)]
     pub detached: bool,
 }
-/// Reports the admitted first-slice indexing operation.
+/// One bounded source-free diagnostic retained by repository indexing.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryIndexDiagnostic {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub code: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub message: ::prost::alloc::string::String,
+}
+/// Reports the admitted first-slice indexing operation.
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RepositoryIndexResponse {
     #[prost(message, optional, tag = "1")]
     #[allow(missing_docs)]
@@ -634,6 +644,9 @@ pub struct RepositoryIndexResponse {
     #[prost(uint64, tag = "12")]
     #[allow(missing_docs)]
     pub estimated_disk_bytes: u64,
+    #[prost(message, repeated, tag = "13")]
+    #[allow(missing_docs)]
+    pub diagnostics: ::prost::alloc::vec::Vec<RepositoryIndexDiagnostic>,
 }
 /// Reads or cooperatively cancels one operation created by repository indexing.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

@@ -2895,6 +2895,7 @@ async fn maps_repository_index_without_replacing_stable_identities() {
             entities: 12,
             elapsed_micros: 500,
             estimated_disk_bytes: 4_096,
+            diagnostics: Vec::new(),
         },
         IndexPlanSummary {
             scope: IndexPlanScope::Repository,
@@ -2953,6 +2954,7 @@ async fn repository_auto_mode_reports_the_selected_structural_plan() {
             entities: 12,
             elapsed_micros: 500,
             estimated_disk_bytes: 4_096,
+            diagnostics: Vec::new(),
         },
         IndexPlanSummary {
             scope: IndexPlanScope::Repository,
@@ -3004,6 +3006,7 @@ async fn identical_index_inputs_may_use_fresh_operations_but_converge_generation
                 entities: 12,
                 elapsed_micros: 500,
                 estimated_disk_bytes: 4_096,
+                diagnostics: Vec::new(),
             },
             IndexPlanSummary {
                 scope: IndexPlanScope::Repository,
@@ -11870,6 +11873,7 @@ async fn accepted_effect_defaults_match_omitted_values() {
                         entities: 1,
                         elapsed_micros: 1,
                         estimated_disk_bytes: 1,
+                        diagnostics: Vec::new(),
                     },
                     IndexPlanSummary {
                         scope: IndexPlanScope::Repository,

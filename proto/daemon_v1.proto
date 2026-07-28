@@ -335,6 +335,12 @@ message RepositoryIndexRequest {
   bool detached = 4;
 }
 
+// One bounded source-free diagnostic retained by repository indexing.
+message RepositoryIndexDiagnostic {
+  string code = 1;
+  string message = 2;
+}
+
 // Reports the admitted first-slice indexing operation.
 message RepositoryIndexResponse {
   rootlight.common.v1.ContractVersion schema_version = 1;
@@ -349,6 +355,7 @@ message RepositoryIndexResponse {
   uint64 entities = 10;
   uint64 elapsed_micros = 11;
   uint64 estimated_disk_bytes = 12;
+  repeated RepositoryIndexDiagnostic diagnostics = 13;
 }
 
 // Action accepted by the first-slice operation status request.

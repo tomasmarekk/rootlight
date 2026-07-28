@@ -24,9 +24,12 @@ use rootlight_client::{
 };
 use rootlight_ids::{FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::CoverageStatus as IrCoverageStatus;
-use rootlight_mcp_contract::vertical::{
-    AnalysisTier, CacheStatus, Freshness, IndexMode, IndexPlanScope, IndexPlanSummary,
-    LanguageCoverage, RequiredNullable,
+use rootlight_mcp_contract::{
+    SafeLabel,
+    vertical::{
+        AnalysisTier, CacheStatus, Diagnostic, Freshness, IndexMode, IndexPlanScope,
+        IndexPlanSummary, LanguageCoverage, RequiredNullable, SourceFreeMessage,
+    },
 };
 
 use crate::{
@@ -841,10 +844,22 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 parent_generation: RequiredNullable(result.parent_generation),
                 estimated_disk_bytes: result.estimated_disk_bytes,
             };
+            let mut diagnostics = Vec::new();
+            diagnostics
+                .try_reserve_exact(result.diagnostics.len())
+                .map_err(|_| ClientPortError::Executor)?;
+            for diagnostic in &result.diagnostics {
+                diagnostics.push(Diagnostic {
+                    code: SafeLabel::parse(&diagnostic.code)
+                        .map_err(|_| ClientPortError::InvalidResponse)?,
+                    message: SourceFreeMessage::parse(&diagnostic.message)
+                        .map_err(|_| ClientPortError::InvalidResponse)?,
+                });
+            }
             Ok(RepositoryIndexPortResponse::new(
                 result,
                 accepted_plan,
-                Vec::new(),
+                diagnostics,
             ))
         })
     }

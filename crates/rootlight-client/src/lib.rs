@@ -659,6 +659,15 @@ pub struct ResultCompleteness {
     pub guidance: Vec<ContinuationGuidance>,
 }
 
+/// One source-free diagnostic retained by repository indexing.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+pub struct RepositoryIndexDiagnostic {
+    /// Stable source-free diagnostic code.
+    pub code: String,
+    /// Bounded source-free diagnostic message.
+    pub message: String,
+}
+
 /// Successful repository-index publication.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RepositoryIndex {
@@ -684,6 +693,8 @@ pub struct RepositoryIndex {
     pub elapsed_micros: u64,
     /// Conservative durable staging reservation, including safety margin.
     pub estimated_disk_bytes: u64,
+    /// Deterministically ordered source-free indexing diagnostics.
+    pub diagnostics: Vec<RepositoryIndexDiagnostic>,
 }
 
 /// Durable repository-index operation state and process-local evidence.
@@ -6751,9 +6762,11 @@ fn parse_repository_index(
         .parent_generation
         .map(parse_generation)
         .transpose()?;
+    let diagnostics = parse_repository_index_diagnostics(response.diagnostics)?;
     if operation != expected_operation
         || response.indexed_files > response.discovered_inputs
         || parent_generation.is_some() && parent_generation == published_generation
+        || state != OperationState::Succeeded && !diagnostics.is_empty()
         || match state {
             OperationState::Succeeded => published_generation.is_none(),
             OperationState::Queued
@@ -6782,7 +6795,56 @@ fn parse_repository_index(
         entities: response.entities,
         elapsed_micros: response.elapsed_micros,
         estimated_disk_bytes: response.estimated_disk_bytes,
+        diagnostics,
     })
+}
+
+fn parse_repository_index_diagnostics(
+    diagnostics: Vec<daemon::RepositoryIndexDiagnostic>,
+) -> Result<Vec<RepositoryIndexDiagnostic>, ClientError> {
+    const MAX_DIAGNOSTICS: usize = 100;
+    if diagnostics.len() > MAX_DIAGNOSTICS {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut parsed = Vec::new();
+    parsed
+        .try_reserve_exact(diagnostics.len())
+        .map_err(|_| ClientError::InvalidResponseCorrelation)?;
+    for diagnostic in diagnostics {
+        if !valid_index_diagnostic_code(&diagnostic.code)
+            || !valid_index_diagnostic_message(&diagnostic.message)
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let diagnostic = RepositoryIndexDiagnostic {
+            code: diagnostic.code,
+            message: diagnostic.message,
+        };
+        if parsed
+            .last()
+            .is_some_and(|previous| previous >= &diagnostic)
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        parsed.push(diagnostic);
+    }
+    Ok(parsed)
+}
+
+fn valid_index_diagnostic_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+}
+
+fn valid_index_diagnostic_message(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 1_024
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b' ' | b'-')
+        })
 }
 
 fn parse_repository_operation_status(
@@ -10229,6 +10291,7 @@ mod tests {
             entities: 1,
             elapsed_micros: 10,
             estimated_disk_bytes: 128 * 1024 * 1024,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -11962,8 +12025,32 @@ mod tests {
             entities: 2,
             elapsed_micros: 10,
             estimated_disk_bytes: 128 * 1024 * 1024,
+            diagnostics: Vec::new(),
         };
         assert!(parse_repository_index(index.clone(), operation).is_ok());
+        let mut diagnostic = index.clone();
+        diagnostic.diagnostics = vec![daemon::RepositoryIndexDiagnostic {
+            code: "syntax-error-recovery".to_owned(),
+            message: "parser reported syntax-error-recovery".to_owned(),
+        }];
+        let parsed = parse_repository_index(diagnostic, operation)
+            .expect("source-free index diagnostic is accepted");
+        assert_eq!(
+            parsed.diagnostics,
+            [RepositoryIndexDiagnostic {
+                code: "syntax-error-recovery".to_owned(),
+                message: "parser reported syntax-error-recovery".to_owned(),
+            }]
+        );
+        let mut unsafe_diagnostic = index.clone();
+        unsafe_diagnostic.diagnostics = vec![daemon::RepositoryIndexDiagnostic {
+            code: "syntax-error-recovery".to_owned(),
+            message: r"C:\secret\src\lib.rs".to_owned(),
+        }];
+        assert!(matches!(
+            parse_repository_index(unsafe_diagnostic, operation),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
         let mut wrong_schema = index.clone();
         wrong_schema.schema_version = Some(common::ContractVersion { major: 1, minor: 1 });
         assert!(matches!(

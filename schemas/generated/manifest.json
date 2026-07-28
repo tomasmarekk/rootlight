@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "cebbf4a3de0d6d84395b6c315ac15684a53878789a457d3359fe6e12ee5d6e62"
+      "blake3": "d499ffd3f6d3988ea16c437f2ac79780d68b1548955cdb14e97936346448addc"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
@@ -82,7 +82,7 @@
     },
     {
       "path": "proto/daemon_v1.proto",
-      "blake3": "8cab409503f5b3e6508336860744f885aad9b05d4dbd8ee9165ea6b5f2f4da19"
+      "blake3": "5e33c8ce0dffc14a052a238e84071f23a4aaed77edfe94df947b8062242dd089"
     },
     {
       "path": "tests/fixtures/compatibility/contract-0.1.json",
@@ -208,7 +208,7 @@
     },
     {
       "path": "crates/rootlight-protocol/src/generated/rootlight.daemon.v1.rs",
-      "blake3": "6843a7cd8428e331cc40f995fff9b442136c696228c9dc10001e125d91f163bd"
+      "blake3": "a244f7e93985633d7568d8a3132184562175edbee8bd37667e72ad0c9255ceb0"
     },
     {
       "path": "schemas/generated/json/config-1.0.schema.json",
@@ -400,7 +400,7 @@
     },
     {
       "path": "schemas/generated/protobuf/rootlight.desc",
-      "blake3": "c659b64eb5ae85ff324b25e78814f29a11aa1678216f6860cd3e63fc1236fa6f"
+      "blake3": "c73b70661065c240f72b337e51ab300a0f894bce947f907a8cb1d970f4cd9695"
     }
   ]
 }

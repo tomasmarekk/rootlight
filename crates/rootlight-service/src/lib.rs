@@ -118,8 +118,21 @@ const SEARCH_REVISION_SEED: &[u8] = b"rootlight.first-slice.search-schema/1";
 const DERIVED_PLAN_REVISION_SEED: &[u8] =
     b"rootlight.first-slice.incremental-plan/schema-1.0/graph-1";
 
+/// Maximum number of distinct source-free diagnostics retained in an index receipt.
+pub const MAX_FIRST_SLICE_INDEX_DIAGNOSTICS: usize = 100;
+
+/// One source-free diagnostic retained with a published generation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirstSliceIndexDiagnostic {
+    /// Stable producer-defined diagnostic code.
+    pub code: String,
+    /// Bounded source-free diagnostic message.
+    pub message: String,
+}
+
 /// Bounded receipt for one first-slice generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FirstSliceIndexReceipt {
     /// Random local-UUID identity stable for aliases of this repository.
@@ -144,6 +157,9 @@ pub struct FirstSliceIndexReceipt {
     /// Conservative staging and publication reservation, including safety margin.
     #[serde(default)]
     pub estimated_disk_bytes: u64,
+    /// Distinct source-free diagnostics retained in deterministic order.
+    #[serde(default)]
+    pub diagnostics: Vec<FirstSliceIndexDiagnostic>,
     /// End-to-end indexing time rounded up to microseconds.
     pub elapsed_micros: u64,
 }
@@ -185,7 +201,7 @@ pub struct FirstSliceOperationContext {
 }
 
 /// Restored durable operation-to-generation publication mapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstSliceDurableOperation {
     /// Durable journal operation.
     pub operation: OperationId,
@@ -396,7 +412,7 @@ pub struct FirstSliceFreshnessStatus {
 }
 
 /// Checked repository and generation correlation for one first-slice query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstSliceGenerationContext {
     /// Repository owning the immutable generation.
     pub repository: RepositoryId,
@@ -633,10 +649,10 @@ pub enum FirstSliceIndexPreparation {
 impl FirstSliceIndexPreparation {
     /// Returns the receipt that publication would make active.
     #[must_use]
-    pub const fn receipt(&self) -> FirstSliceIndexReceipt {
+    pub fn receipt(&self) -> FirstSliceIndexReceipt {
         match self {
-            Self::Retained(receipt) => *receipt,
-            Self::Pending(prepared) => prepared.receipt,
+            Self::Retained(receipt) => receipt.clone(),
+            Self::Pending(prepared) => prepared.receipt.clone(),
         }
     }
 }
@@ -668,8 +684,8 @@ pub struct FirstSliceStagedIndex {
 impl FirstSliceStagedIndex {
     /// Returns the still-hidden generation receipt.
     #[must_use]
-    pub const fn receipt(&self) -> FirstSliceIndexReceipt {
-        self.receipt
+    pub fn receipt(&self) -> FirstSliceIndexReceipt {
+        self.receipt.clone()
     }
 }
 
@@ -1961,7 +1977,7 @@ impl FirstSliceService {
                 .insert(restored.root_identity, receipt.repository);
             self.repository_display_names
                 .insert(receipt.repository, restored.display_name);
-            self.receipts.insert(receipt.generation, receipt);
+            self.receipts.insert(receipt.generation, receipt.clone());
             if let Some(generation_count) = restored.published_generation_count {
                 self.published_generation_counts
                     .entry(receipt.repository)
@@ -2017,7 +2033,7 @@ impl FirstSliceService {
                 let publication = FirstSliceDurableOperation {
                     operation: operation.operation,
                     started_unix_ms: operation.started_unix_ms,
-                    receipt,
+                    receipt: receipt.clone(),
                 };
                 if self
                     .durable_operations
@@ -2191,7 +2207,7 @@ impl FirstSliceService {
             if metadata.repository() == repository
                 && metadata.configuration_hash() == self.config.hash()
                 && metadata.provider_set_hash() == provider_set_hash
-                && let Some(receipt) = self.receipts.get(&active).copied()
+                && let Some(receipt) = self.receipts.get(&active).cloned()
             {
                 check_cancellation(cancellation)?;
                 return Ok(FirstSliceIndexPreparation::Retained(receipt));
@@ -2277,7 +2293,7 @@ impl FirstSliceService {
                 && metadata.manifest_hash() == manifest_hash
                 && metadata.configuration_hash() == self.config.hash()
                 && metadata.provider_set_hash() == provider_set_hash
-                && let Some(receipt) = self.receipts.get(&active).copied()
+                && let Some(receipt) = self.receipts.get(&active).cloned()
             {
                 check_cancellation(cancellation)?;
                 return Ok(FirstSliceIndexPreparation::Retained(receipt));
@@ -2293,7 +2309,7 @@ impl FirstSliceService {
             format_version: generation_format_version(),
         })
         .id();
-        if let Some(receipt) = self.receipts.get(&generation).copied() {
+        if let Some(receipt) = self.receipts.get(&generation).cloned() {
             check_cancellation(cancellation)?;
             return Ok(FirstSliceIndexPreparation::Retained(receipt));
         }
@@ -2490,10 +2506,11 @@ impl FirstSliceService {
             lexical_documents,
             oracle_allocated_bytes,
             estimated_disk_bytes,
+            diagnostics: index_diagnostic_summaries(persisted.document())?,
             elapsed_micros: elapsed_micros(started),
         };
         if let Some(durable) = &durable {
-            durable.finish(root_identity, &display_name, receipt)?;
+            durable.finish(root_identity, &display_name, receipt.clone())?;
         }
         check_cancellation(cancellation)?;
         Ok(FirstSliceIndexPreparation::Pending(
@@ -2613,7 +2630,7 @@ impl FirstSliceService {
         let receipt = self
             .receipts
             .get(&generation)
-            .copied()
+            .cloned()
             .ok_or(FirstSliceError::Retention)?;
         if self.active_by_repository.get(&receipt.repository) == Some(&generation)
             || self.generations.active_generation() == Some(generation)
@@ -2807,7 +2824,7 @@ impl FirstSliceService {
                         operation,
                     )?;
                     if let Some(operation) = operation {
-                        self.record_durable_operation(operation, receipt)?;
+                        self.record_durable_operation(operation, &receipt)?;
                     }
                 }
                 self.generations
@@ -2865,7 +2882,7 @@ impl FirstSliceService {
                         .map_err(|_| FirstSliceError::Retention)?;
                     return Err(FirstSliceError::Retention);
                 }
-                self.receipts.insert(receipt.generation, receipt);
+                self.receipts.insert(receipt.generation, receipt.clone());
                 self.incremental_baselines
                     .insert(receipt.generation, incremental.baseline);
                 self.incremental_inputs
@@ -2877,7 +2894,7 @@ impl FirstSliceService {
                 if self.durable.is_some()
                     && let Some(operation) = operation
                 {
-                    self.record_durable_operation(operation, receipt)?;
+                    self.record_durable_operation(operation, &receipt)?;
                 }
                 if register_repository {
                     self.repositories.insert(root_identity, receipt.repository);
@@ -2945,12 +2962,12 @@ impl FirstSliceService {
     fn record_durable_operation(
         &mut self,
         operation: FirstSliceOperationContext,
-        receipt: FirstSliceIndexReceipt,
+        receipt: &FirstSliceIndexReceipt,
     ) -> Result<(), FirstSliceError> {
         let publication = FirstSliceDurableOperation {
             operation: operation.operation,
             started_unix_ms: operation.started_unix_ms,
-            receipt,
+            receipt: receipt.clone(),
         };
         match self.durable_operations.entry(operation.operation) {
             std::collections::btree_map::Entry::Vacant(entry) => {
@@ -3101,7 +3118,7 @@ impl FirstSliceService {
     pub fn durable_operation_publications(
         &self,
     ) -> impl ExactSizeIterator<Item = FirstSliceDurableOperation> + '_ {
-        self.durable_operations.values().copied()
+        self.durable_operations.values().cloned()
     }
 
     /// Resolves and verifies one repository-owned immutable generation.
@@ -3128,15 +3145,16 @@ impl FirstSliceService {
         let active_receipt = self
             .receipts
             .get(&active)
-            .copied()
+            .cloned()
             .ok_or(FirstSliceError::GenerationNotFound)?;
+        let active_parent = active_receipt.parent;
         let generation = generation.unwrap_or(active);
         let receipt = if generation == active {
             active_receipt
         } else {
             self.receipts
                 .get(&generation)
-                .copied()
+                .cloned()
                 .ok_or(FirstSliceError::GenerationNotFound)?
         };
         if receipt.repository != repository {
@@ -3147,7 +3165,7 @@ impl FirstSliceService {
             generation,
             parent: receipt.parent,
             active_generation: active,
-            active_parent: active_receipt.parent,
+            active_parent,
             active: generation == active,
             receipt,
         })
@@ -5471,6 +5489,70 @@ fn normalized_record_count(document: &NormalizedIrDocument) -> Result<usize, Fir
     })
 }
 
+fn index_diagnostic_summaries(
+    document: &NormalizedIrDocument,
+) -> Result<Vec<FirstSliceIndexDiagnostic>, FirstSliceError> {
+    const REDACTED_CODE: &str = "diagnostic-redacted";
+    const REDACTED_MESSAGE: &str = "an index diagnostic was omitted because it was not source free";
+    const TRUNCATED_CODE: &str = "diagnostics-truncated";
+    const TRUNCATED_MESSAGE: &str =
+        "additional index diagnostics were omitted by the response limit";
+
+    let mut summaries = BTreeSet::new();
+    for diagnostic in &document.diagnostics {
+        let summary = if public_diagnostic_code(&diagnostic.code)
+            && public_diagnostic_message(&diagnostic.message)
+        {
+            FirstSliceIndexDiagnostic {
+                code: diagnostic.code.clone(),
+                message: diagnostic.message.clone(),
+            }
+        } else {
+            FirstSliceIndexDiagnostic {
+                code: REDACTED_CODE.to_owned(),
+                message: REDACTED_MESSAGE.to_owned(),
+            }
+        };
+        summaries.insert(summary);
+    }
+
+    let truncated = summaries.len() > MAX_FIRST_SLICE_INDEX_DIAGNOSTICS;
+    let retained = if truncated {
+        MAX_FIRST_SLICE_INDEX_DIAGNOSTICS.saturating_sub(1)
+    } else {
+        summaries.len()
+    };
+    let mut result = Vec::new();
+    result
+        .try_reserve_exact(retained.saturating_add(usize::from(truncated)))
+        .map_err(|_| FirstSliceError::Limits)?;
+    result.extend(summaries.into_iter().take(retained));
+    if truncated {
+        result.push(FirstSliceIndexDiagnostic {
+            code: TRUNCATED_CODE.to_owned(),
+            message: TRUNCATED_MESSAGE.to_owned(),
+        });
+        result.sort();
+    }
+    Ok(result)
+}
+
+fn public_diagnostic_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+}
+
+fn public_diagnostic_message(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 1_024
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b' ' | b'-')
+        })
+}
+
 fn reserve_records<T>(
     target: &mut Vec<T>,
     additional: usize,
@@ -6542,6 +6624,10 @@ mod tests {
             .index_rust_fixture(fixture.path(), &cancellation)
             .expect("malformed syntax preserves a generation");
         assert_eq!(receipt.indexed_files, 2);
+        assert!(receipt.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "syntax-error-recovery"
+                && diagnostic.message == "parser reported syntax-error-recovery"
+        }));
         let snapshot = service
             .generations
             .generation(receipt.generation)
@@ -6631,7 +6717,7 @@ mod tests {
             &incremental,
             fixture.path(),
             initial.generation,
-            body,
+            &body,
             &cancellation,
         );
 
@@ -6643,7 +6729,7 @@ mod tests {
             &incremental,
             fixture.path(),
             body.generation,
-            surface,
+            &surface,
             &cancellation,
         );
 
@@ -6655,7 +6741,7 @@ mod tests {
             &incremental,
             fixture.path(),
             surface.generation,
-            addition,
+            &addition,
             &cancellation,
         );
 
@@ -6667,7 +6753,7 @@ mod tests {
             &incremental,
             fixture.path(),
             addition.generation,
-            movement,
+            &movement,
             &cancellation,
         );
 
@@ -6679,7 +6765,7 @@ mod tests {
             &incremental,
             fixture.path(),
             movement.generation,
-            deletion,
+            &deletion,
             &cancellation,
         );
     }
@@ -7504,7 +7590,7 @@ mod tests {
         incremental: &FirstSliceService,
         root: &Path,
         parent: GenerationId,
-        successor: FirstSliceIndexReceipt,
+        successor: &FirstSliceIndexReceipt,
         cancellation: &Cancellation,
     ) {
         let evidence = incremental

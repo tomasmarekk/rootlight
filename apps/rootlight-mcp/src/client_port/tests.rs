@@ -17,10 +17,11 @@ use rootlight_client::{
     OperationStage, OperationState, PlanChange, PlanChangeContextPack, PlanChangeImpactSummary,
     QueryContext, QueryUsage, RecoveryClass, RepositoryCatalogEntry, RepositoryCatalogFreshness,
     RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryCatalogSnapshotId,
-    RepositoryCatalogState, RepositoryCoverageEntry, RepositoryIndex, RepositoryOperationAction,
-    RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
-    RequestTimeout, ResultCompleteness, ResultCompletenessState, SourceChunk, SourceRead,
-    SourceReference, SymbolExplain, SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
+    RepositoryCatalogState, RepositoryCoverageEntry, RepositoryIndex, RepositoryIndexDiagnostic,
+    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
+    RepositoryStatusRequest, RequestOptions, RequestTimeout, ResultCompleteness,
+    ResultCompletenessState, SourceChunk, SourceRead, SourceReference, SymbolExplain,
+    SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -242,6 +243,10 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 entities: 1,
                 elapsed_micros: 10,
                 estimated_disk_bytes: 4_096,
+                diagnostics: vec![RepositoryIndexDiagnostic {
+                    code: "syntax-error-recovery".to_owned(),
+                    message: "parser reported syntax-error-recovery".to_owned(),
+                }],
             })
         })
     }
@@ -860,6 +865,15 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
     assert_eq!(
         index.data.accepted_plan.parent_generation.0,
         Some(parent_generation())
+    );
+    assert_eq!(index.data.diagnostics.len(), 1);
+    assert_eq!(
+        index.data.diagnostics[0].code.as_str(),
+        "syntax-error-recovery"
+    );
+    assert_eq!(
+        index.data.diagnostics[0].message.as_str(),
+        "parser reported syntax-error-recovery"
     );
     let indexed_operation = index.data.operation_id;
 
