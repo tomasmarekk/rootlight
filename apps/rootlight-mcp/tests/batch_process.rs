@@ -44,15 +44,7 @@ fn every_advertised_batch_subtool_reaches_its_production_adapter() {
     daemon.wait_until_ready(&runtime_dir);
     let mut mcp = McpProcess::spawn(false, &state_dir, &runtime_dir, "developer");
 
-    let index = mcp.call(
-        "index",
-        "repo.index",
-        json!({
-            "root": repository_root,
-            "mode": "auto",
-            "detached": false
-        }),
-    );
+    let index = index_repository_retrying_busy(&mut mcp, "index", &repository_root);
     assert_success(&index, "repo.index");
     let repository_id = index["result"]["structuredContent"]["data"]["repository_id"]
         .as_str()
@@ -167,15 +159,7 @@ fn positive_retrievals_match_standalone_semantics_in_production_processes() {
     daemon.wait_until_ready(&runtime_dir);
     let mut mcp = McpProcess::spawn(false, &state_dir, &runtime_dir, "developer");
 
-    let index = mcp.call(
-        "parity-index",
-        "repo.index",
-        json!({
-            "root": repository_root,
-            "mode": "auto",
-            "detached": false
-        }),
-    );
+    let index = index_repository_retrying_busy(&mut mcp, "parity-index", &repository_root);
     assert_success(&index, "repo.index");
     let repository_id = index["result"]["structuredContent"]["data"]["repository_id"]
         .as_str()
@@ -523,15 +507,7 @@ fn ordered_runtime_outcomes_match_the_public_process_golden() {
     daemon.wait_until_ready(&runtime_dir);
     let mut mcp = McpProcess::spawn(false, &state_dir, &runtime_dir, "developer");
 
-    let index = mcp.call(
-        "outcome-index",
-        "repo.index",
-        json!({
-            "root": repository_root,
-            "mode": "auto",
-            "detached": false
-        }),
-    );
+    let index = index_repository_retrying_busy(&mut mcp, "outcome-index", &repository_root);
     assert_success(&index, "repo.index");
     let repository_id = index["result"]["structuredContent"]["data"]["repository_id"]
         .as_str()
@@ -823,6 +799,37 @@ fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str)
         }
     }
     panic!("fixture indexing did not publish within the bounded wait");
+}
+
+fn index_repository_retrying_busy(mcp: &mut McpProcess, request_id: &str, root: &Path) -> Value {
+    const MAX_ATTEMPTS: u8 = 3;
+
+    let arguments = json!({
+        "root": root,
+        "mode": "auto",
+        "detached": false
+    });
+    for attempt in 1..=MAX_ATTEMPTS {
+        let response = mcp.call(
+            &format!("{request_id}-attempt-{attempt}"),
+            "repo.index",
+            arguments.clone(),
+        );
+        let error = &response["result"]["structuredContent"]["error"];
+        let retryable_busy = error["code"] == "BUSY" && error["retryable"] == true;
+        if !retryable_busy || attempt == MAX_ATTEMPTS {
+            return response;
+        }
+
+        // The public BUSY contract is the only error that permits replay after
+        // a timed-out daemon lane; every other response returns immediately.
+        let retry_after_ms = error["retry_after_ms"]
+            .as_u64()
+            .unwrap_or(25)
+            .clamp(1, 1_000);
+        thread::sleep(Duration::from_millis(retry_after_ms));
+    }
+    unreachable!("bounded retry loop always returns")
 }
 
 fn process_test_guard() -> MutexGuard<'static, ()> {
