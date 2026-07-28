@@ -566,11 +566,31 @@ fn write_repository_revision(root: &Path, changed: bool) {
 }
 
 fn index_repository(mcp: &mut McpProcess, root: &Path, case: &str) -> IndexReceipt {
-    let response = mcp.call(
-        &format!("index-{case}"),
-        "repo.index",
-        json!({"root": root, "mode": "auto", "detached": false}),
-    );
+    const MAX_ATTEMPTS: u8 = 3;
+
+    let arguments = json!({"root": root, "mode": "auto", "detached": false});
+    let mut attempt = 1_u8;
+    let response = loop {
+        let response = mcp.call(
+            &format!("index-{case}-attempt-{attempt}"),
+            "repo.index",
+            arguments.clone(),
+        );
+        let error = &response["result"]["structuredContent"]["error"];
+        let retryable_busy = error["code"] == "BUSY" && error["retryable"] == true;
+        if !retryable_busy || attempt == MAX_ATTEMPTS {
+            break response;
+        }
+
+        // A timed-out daemon lane may be replayed only through the public BUSY
+        // contract; every other response remains the authoritative outcome.
+        let retry_after_ms = error["retry_after_ms"]
+            .as_u64()
+            .unwrap_or(25)
+            .clamp(1, 1_000);
+        thread::sleep(Duration::from_millis(retry_after_ms));
+        attempt = attempt.saturating_add(1);
+    };
     assert_success(&response, "repo.index");
     let data = &response["result"]["structuredContent"]["data"];
     let repository_id = required_string(&data["repository_id"], "repository identity");
