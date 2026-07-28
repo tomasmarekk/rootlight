@@ -48,15 +48,15 @@
     },
     {
       "profile": "analysis",
-      "serialized_bytes": 501146,
-      "sha256": "edfcdd40a26fcde01e6c74e3312cdcde583fa067115d4bfb9ae7a54775a0775f",
-      "actual_tokens": 107810
+      "serialized_bytes": 502089,
+      "sha256": "1eb17fbca53d24b7d03e2211a26c2d113bbcb9682cc5f22203a7c2b0e8ffb300",
+      "actual_tokens": 107996
     },
     {
       "profile": "developer",
-      "serialized_bytes": 677524,
-      "sha256": "13a5ff3fb21fe0d0b3915ac46be20a950bffa740457e26932798615dce42ff32",
-      "actual_tokens": 145963
+      "serialized_bytes": 678467,
+      "sha256": "f6ebd2ace38532fef5d33b60f13149270babf91f5ee809e33594ba769a0d0c9d",
+      "actual_tokens": 146149
     }
   ]
 }

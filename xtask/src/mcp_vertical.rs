@@ -291,6 +291,13 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         42,
         43,
     )?;
+    let architecture_communities = exercise_architecture_communities(
+        &mut mcp,
+        &catalog,
+        &mut transcript,
+        &v1_index.repository,
+        &v1_index.generation,
+    )?;
     let discovery_policy = exercise_nested_ignore_policy(
         &mut mcp,
         &catalog,
@@ -629,6 +636,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         },
         catalog: catalog_evidence,
         tool_matrix,
+        architecture_communities,
         process_safety: ProcessSafetyEvidence {
             live_daemon_port_verified_for_all_sessions: true,
             cancellation_fixture_profile: "generated-cancellation-only-rust-v1",
@@ -3144,6 +3152,178 @@ fn exercise_nested_ignore_policy(
     })
 }
 
+fn exercise_architecture_communities(
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+    repository: &str,
+    generation: &str,
+) -> Result<ArchitectureCommunityEvidence, VerticalError> {
+    let arguments = || {
+        json!({
+            "repository": {"repository_id": repository},
+            "generation": generation,
+            "views": ["communities"],
+            "include_edges": false,
+            "response_profile": "compact"
+        })
+    };
+    let first = call_tool(
+        "v1-architecture-communities-first",
+        process,
+        catalog,
+        transcript,
+        "architecture.overview",
+        arguments(),
+    )?;
+    let repeated = call_tool(
+        "v1-architecture-communities-repeat",
+        process,
+        catalog,
+        transcript,
+        "architecture.overview",
+        arguments(),
+    )?;
+    for outcome in [&first, &repeated] {
+        require_tool_success(outcome, "architecture.overview")?;
+        require_matrix_read_contract(&outcome.structured)?;
+        require_trust_labels(&outcome.structured)?;
+        assert_control_value_omits_sentinels(&outcome.structured)?;
+        assert_read_correlation(&outcome.structured, repository, generation)?;
+    }
+    if first.structured["data"] != repeated.structured["data"]
+        || first.structured["coverage"] != repeated.structured["coverage"]
+        || first.structured["completeness"] != repeated.structured["completeness"]
+        || first.structured["truncated"] != repeated.structured["truncated"]
+        || first.structured["next_cursor"] != repeated.structured["next_cursor"]
+    {
+        return Err(VerticalError::Invariant(
+            "repeated architecture community calls changed their logical output",
+        ));
+    }
+    let (component_count, community_count) =
+        validate_architecture_community_data(&first.structured)?;
+    Ok(ArchitectureCommunityEvidence {
+        scenario: "installed_mcp_exact_generation_without_returned_edges",
+        component_count,
+        community_count,
+        repeated_output_identical: true,
+        members_cover_components_exactly_once: true,
+        ownership_truth_claimed: false,
+        requested_include_edges: false,
+        returned_connection_count: 0,
+        algorithm_version: "weighted_label_propagation_v1",
+        graph: "undirected_weighted_component_relations",
+        seed: "524f4f544c494748",
+        max_iterations: 8,
+        canonical_data_blake3: canonical_blake3(&first.structured["data"])?,
+    })
+}
+
+fn validate_architecture_community_data(
+    structured: &Value,
+) -> Result<(usize, usize), VerticalError> {
+    let data = &structured["data"];
+    let components = data["components"]
+        .as_array()
+        .ok_or(VerticalError::Invariant(
+            "architecture community response omitted components",
+        ))?;
+    if components.is_empty() {
+        return Err(VerticalError::Invariant(
+            "architecture community response had no components",
+        ));
+    }
+    let mut component_ids = BTreeSet::new();
+    for component in components {
+        let id = component["id"].as_str().ok_or(VerticalError::Invariant(
+            "architecture component omitted its identity",
+        ))?;
+        if id.is_empty() || !component_ids.insert(id.to_owned()) {
+            return Err(VerticalError::Invariant(
+                "architecture component identities were empty or duplicated",
+            ));
+        }
+    }
+    let connections = data["connections"]
+        .as_array()
+        .ok_or(VerticalError::Invariant(
+            "architecture community response omitted connections",
+        ))?;
+    if !connections.is_empty() {
+        return Err(VerticalError::Invariant(
+            "architecture community response returned edges despite include_edges=false",
+        ));
+    }
+    let communities = data["communities"]
+        .as_array()
+        .ok_or(VerticalError::Invariant(
+            "architecture community response omitted communities",
+        ))?;
+    if communities.is_empty() {
+        return Err(VerticalError::Invariant(
+            "architecture community response had no communities",
+        ));
+    }
+    let mut assigned = BTreeSet::new();
+    for community in communities {
+        if !community["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("community:"))
+            || community["ownership_truth"] != false
+            || !community["internal_connection_weight"].is_u64()
+        {
+            return Err(VerticalError::Invariant(
+                "architecture community metadata was invalid or claimed ownership",
+            ));
+        }
+        let members = community["members"]
+            .as_array()
+            .ok_or(VerticalError::Invariant(
+                "architecture community omitted its members",
+            ))?;
+        if members.is_empty() {
+            return Err(VerticalError::Invariant(
+                "architecture community had no members",
+            ));
+        }
+        for member in members {
+            let member = member.as_str().ok_or(VerticalError::Invariant(
+                "architecture community member identity was not text",
+            ))?;
+            if !component_ids.contains(member) || !assigned.insert(member.to_owned()) {
+                return Err(VerticalError::Invariant(
+                    "architecture communities referenced unknown or duplicate members",
+                ));
+            }
+        }
+    }
+    if assigned != component_ids {
+        return Err(VerticalError::Invariant(
+            "architecture communities did not cover every returned component",
+        ));
+    }
+    let views = data["views"].as_array().ok_or(VerticalError::Invariant(
+        "architecture community response omitted view metadata",
+    ))?;
+    let expected_parameters = json!({
+        "graph": "undirected_weighted_component_relations",
+        "max_iterations": "8",
+        "ownership_truth": "not_claimed",
+        "seed": "524f4f544c494748"
+    });
+    if views.len() != 1
+        || views[0]["view"] != "communities"
+        || views[0]["algorithm_version"] != "weighted_label_propagation_v1"
+        || views[0]["parameters"] != expected_parameters
+    {
+        return Err(VerticalError::Invariant(
+            "architecture community algorithm metadata did not match the installed contract",
+        ));
+    }
+    Ok((components.len(), communities.len()))
+}
+
 fn call_tool(
     label: &str,
     process: &mut McpProcess,
@@ -5029,10 +5209,28 @@ struct Summary {
     fixture: FixtureEvidence,
     catalog: CatalogEvidence,
     tool_matrix: ToolMatrixEvidence,
+    architecture_communities: ArchitectureCommunityEvidence,
     process_safety: ProcessSafetyEvidence,
     generations: GenerationEvidence,
     measurements: MeasurementEvidence,
     artifacts: ArtifactEvidence,
+}
+
+#[derive(Serialize)]
+struct ArchitectureCommunityEvidence {
+    scenario: &'static str,
+    component_count: usize,
+    community_count: usize,
+    repeated_output_identical: bool,
+    members_cover_components_exactly_once: bool,
+    ownership_truth_claimed: bool,
+    requested_include_edges: bool,
+    returned_connection_count: usize,
+    algorithm_version: &'static str,
+    graph: &'static str,
+    seed: &'static str,
+    max_iterations: usize,
+    canonical_data_blake3: String,
 }
 
 #[derive(Serialize)]
@@ -5712,7 +5910,8 @@ mod tests {
         diagnostic_code_is_present, estimated_tokens, matrix_not_applicable_reason,
         modify_fixture_to_v2, nearest_rank, normalize_read_response, observe_rust_coverage,
         prepare_cancellation_repository, redact_request_for_evidence, retryable_busy_delay,
-        shrink_cancellation_repository, source_tokenizer_input, validate_tool_matrix_cells,
+        shrink_cancellation_repository, source_tokenizer_input,
+        validate_architecture_community_data, validate_tool_matrix_cells,
     };
     use serde_json::json;
 
@@ -5921,6 +6120,49 @@ mod tests {
             &json!([]),
             "syntax-error-recovery"
         ));
+    }
+
+    #[test]
+    fn architecture_community_evidence_requires_a_non_ownership_partition() {
+        let valid = json!({
+            "data": {
+                "components": [
+                    {"id": "file-a"},
+                    {"id": "file-b"}
+                ],
+                "connections": [],
+                "communities": [{
+                    "id": "community:stable",
+                    "members": ["file-a", "file-b"],
+                    "internal_connection_weight": 1,
+                    "ownership_truth": false
+                }],
+                "views": [{
+                    "view": "communities",
+                    "algorithm_version": "weighted_label_propagation_v1",
+                    "parameters": {
+                        "graph": "undirected_weighted_component_relations",
+                        "max_iterations": "8",
+                        "ownership_truth": "not_claimed",
+                        "seed": "524f4f544c494748"
+                    }
+                }]
+            }
+        });
+        assert_eq!(
+            validate_architecture_community_data(&valid)
+                .expect("valid community partition is accepted"),
+            (2, 1)
+        );
+
+        let mut ownership_claim = valid.clone();
+        ownership_claim["data"]["communities"][0]["ownership_truth"] = json!(true);
+        assert!(validate_architecture_community_data(&ownership_claim).is_err());
+
+        let mut duplicate_member = valid;
+        duplicate_member["data"]["communities"][0]["members"] =
+            json!(["file-a", "file-a", "file-b"]);
+        assert!(validate_architecture_community_data(&duplicate_member).is_err());
     }
 
     #[test]
