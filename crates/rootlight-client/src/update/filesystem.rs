@@ -74,11 +74,12 @@ const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_HEALTH_PROBE_STATE_ENTRIES: usize = 65_536;
 const MAX_HEALTH_PROBE_STATE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_HEALTH_PROBE_STATE_DEPTH: usize = 128;
-const EXPECTED_BINARIES: [&str; 4] = [
+const EXPECTED_BINARIES: [&str; 5] = [
     "rootlight",
     "rootlight-adapter-host",
     "rootlight-daemon",
     "rootlight-mcp",
+    "rootlight-semantic-host",
 ];
 
 /// Exact filesystem paths for one signed offline update input.
@@ -3183,6 +3184,13 @@ mod tests {
         assert_eq!(installed.version, "1.0.0");
         assert_eq!(status.active_version, "1.0.0");
         assert!(!status.recovery_required);
+        let semantic_host = platform_executable_name("rootlight-semantic-host");
+        assert!(root.join("current/bin").join(&semantic_host).is_file());
+        assert!(
+            root.join("versions/1.0.0/bin")
+                .join(&semantic_host)
+                .is_file()
+        );
         let removed = uninstall_package(&root).expect("package uninstalls");
         assert!(removed.user_data_preserved);
         assert_eq!(
