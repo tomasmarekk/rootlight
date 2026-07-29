@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import {
-  chmodSync,
   copyFileSync,
   linkSync,
   mkdirSync,
@@ -52,7 +51,6 @@ try {
   for (const executable of ["rootlight", "rootlight-mcp"]) {
     const nativeExecutable = join(nativeBin, `${executable}${suffix}`);
     linkSync(process.execPath, nativeExecutable);
-    chmodSync(nativeExecutable, 0o755);
 
     const result = spawnSync(
       process.execPath,
