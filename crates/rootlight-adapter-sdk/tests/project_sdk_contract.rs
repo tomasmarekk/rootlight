@@ -319,6 +319,63 @@ fn project_request_rejects_invalid_generated_origins() {
             mapping: 0,
         }
     );
+
+    let unresolved = GeneratedOriginMapping::new(
+        SourceSpan::new(fixture.sources[1].span().file(), 0, 3)
+            .expect("generated fixture span is valid"),
+        RelativePath::parse(Path::new("src/missing.rs")).expect("missing path is canonical"),
+        SourceSpan::new(fixture.sources[0].span().file(), 0, 3)
+            .expect("origin fixture span is valid"),
+        transformation(),
+        None,
+    );
+    let error = ProjectAnalysisRequest::new(
+        analysis_unit(),
+        build_target(),
+        BuildContextIdentity::new(content_hash(b"build")),
+        content_hash(context),
+        context,
+        vec![
+            fixture.input(0, false, Vec::new()),
+            fixture.input(1, true, vec![unresolved]),
+        ],
+        AnalysisTier::TierA,
+        &limits,
+    )
+    .expect_err("origin paths must resolve inside the analysis unit");
+    assert_eq!(
+        error,
+        RequestError::GeneratedOriginMismatch {
+            input: 1,
+            mapping: 0,
+        }
+    );
+}
+
+#[test]
+fn generated_origin_provenance_rule_retains_transformation_and_digest() {
+    let fixture = ProjectFixture::new();
+    let mapping = fixture.mapping();
+    assert_eq!(
+        mapping.provenance_rule(),
+        format!(
+            "rootlight.generated-origin.v1:{}:{}",
+            mapping.transformation().as_str(),
+            content_hash(b"generator")
+        )
+    );
+
+    let without_digest = GeneratedOriginMapping::new(
+        mapping.generated(),
+        mapping.origin_path().clone(),
+        mapping.origin(),
+        mapping.transformation().clone(),
+        None,
+    );
+    assert_eq!(
+        without_digest.provenance_rule(),
+        "rootlight.generated-origin.v1:codegen.v1:none"
+    );
 }
 
 #[test]

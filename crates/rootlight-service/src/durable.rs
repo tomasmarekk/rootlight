@@ -930,6 +930,7 @@ fn restore_generation(
         sources.push(RustSourceInput {
             snapshot,
             generated: file.generated,
+            origins: Vec::new(),
         });
     }
     let verified = oracle

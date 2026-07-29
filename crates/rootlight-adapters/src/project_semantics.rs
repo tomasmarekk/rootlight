@@ -1133,7 +1133,28 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 };
                 let from = source_for_span(input, mapping.generated());
                 let to = source_for_span(origin_input, mapping.origin());
-                let provenance = self.provenance_for(input)?;
+                let mut provenance = ProvenanceRecord {
+                    id: FactId::from_bytes([0; 20]),
+                    repository: from.repository(),
+                    generation: from.generation(),
+                    producer_kind: ProducerKind::Derivation,
+                    producer: self.analyzer.descriptor.identity().clone(),
+                    binary_digest: self.analyzer.binary_digest,
+                    frontend_version: Some(FRONTEND_VERSION.to_owned()),
+                    language: self.analyzer.language.as_str().to_owned(),
+                    tier: STRUCTURAL_TIER,
+                    build_context: self.request.build_context(),
+                    input_sources: vec![
+                        input.source().source_ref().clone(),
+                        origin_input.source().source_ref().clone(),
+                    ],
+                    evidence_sources: vec![from.clone(), to.clone()],
+                    derivation_parents: vec![FactRef::Fact(self.provenance_for(input)?)],
+                    rule: Some(mapping.provenance_rule()),
+                };
+                provenance.id = derive_provenance_record_id(&provenance)
+                    .map_err(|_| provider_failure("project-mapping-provenance-identity"))?;
+                let provenance_id = provenance.id;
                 let mut record = SourceMappingRecord {
                     id: FactId::from_bytes([0; 20]),
                     repository: from.repository(),
@@ -1141,7 +1162,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     from: from.clone(),
                     to,
                     kind: SourceMappingKind::GeneratedToOrigin,
-                    provenance,
+                    provenance: provenance_id,
                     evidence: FactEvidence {
                         source: Some(from),
                         derivation: vec![FactRef::File(
@@ -1151,7 +1172,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 };
                 record.id = derive_source_mapping_record_id(&record)
                     .map_err(|_| provider_failure("project-mapping-identity"))?;
+                self.records.push(IrRecord::Provenance(provenance));
                 self.records.push(IrRecord::SourceMapping(record));
+                self.state_mut(input)?.increment(FactDomain::Provenance)?;
                 self.state_mut(input)?
                     .increment(FactDomain::SourceMappings)?;
             }
@@ -1210,13 +1233,16 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .ok_or_else(|| provider_failure("project-accounting"))?;
             for domain in ALL_DOMAINS {
                 let indexed = state.domain_counts.get(&domain).copied().unwrap_or(0);
-                let domain_status = if state.status == CoverageStatus::Complete
+                let domain_status = if domain == FactDomain::SourceMappings {
+                    generated_mapping_coverage(self.input_for_file(state.file)?)
+                } else if state.status == CoverageStatus::Complete
                     || matches!(domain, FactDomain::Files | FactDomain::Provenance)
                 {
                     CoverageStatus::Complete
                 } else {
                     CoverageStatus::Bounded
                 };
+                overall_status = merge_status(overall_status, domain_status);
                 let skipped = usize::from(domain_status != CoverageStatus::Complete);
                 let discovered = indexed
                     .checked_add(skipped)
@@ -2150,6 +2176,26 @@ fn tokenize_identifiers(value: &str) -> Vec<String> {
         tokens.push(current);
     }
     tokens
+}
+
+fn generated_mapping_coverage(input: &ProjectSourceInput<'_>) -> CoverageStatus {
+    if !input.is_generated() {
+        return CoverageStatus::Complete;
+    }
+    let full = input.source().source_ref().span();
+    let mut next_byte = full.start_byte();
+    for mapping in input.origins() {
+        let generated = mapping.generated();
+        if generated.file() != full.file() || generated.start_byte() != next_byte {
+            return CoverageStatus::Unknown;
+        }
+        next_byte = generated.end_byte();
+    }
+    if next_byte == full.end_byte() {
+        CoverageStatus::Complete
+    } else {
+        CoverageStatus::Unknown
+    }
 }
 
 fn merge_status(left: CoverageStatus, right: CoverageStatus) -> CoverageStatus {

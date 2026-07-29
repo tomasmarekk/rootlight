@@ -25,7 +25,8 @@ use durable::{
 };
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, AnalysisRequest, BatchThresholds, EncodingId,
-    GenerationBoundSnapshot, LanguageId, MemoryAdmissionPolicy, ParseProvider, StreamLimits,
+    GeneratedOriginMapping, GenerationBoundSnapshot, LanguageId, MemoryAdmissionPolicy,
+    ParseProvider, StreamLimits, TransformationId,
 };
 use rootlight_adapter_treesitter::{
     ADAPTER_VERSION as TREE_SITTER_ADAPTER_VERSION, GrammarDescriptor, GrammarRegistry,
@@ -60,7 +61,8 @@ pub use rootlight_incremental::{ChangeClass, FactDomain, FallbackReason, FileCha
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageStatus, DiagnosticRecord, DiagnosticSeverity,
     ExtensionSupport, FactEvidence, FactRef, FileIdentityClaim, IrLimits, NormalizedIrDocument,
-    OccurrenceRole, ProducerIdentity, SourceRef, SourceSpan, derive_diagnostic_record_id,
+    OccurrenceRole, ProducerIdentity, ProducerKind, SourceMappingKind, SourceRef, SourceSpan,
+    derive_diagnostic_record_id,
 };
 pub use rootlight_query::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
@@ -109,6 +111,8 @@ const MAX_SYNTAX_NODES: usize = 16_384;
 const MAX_SYNTAX_DEPTH: usize = 128;
 const MAX_REPOSITORY_PATH_IDENTITY_BYTES: usize = 64 * 1024;
 const MAX_RANDOM_ID_ATTEMPTS: usize = 8;
+const GENERATED_HEADER_MAX_BYTES: usize = 8 * 1024;
+const GENERATED_HEADER_MAX_LINES: usize = 64;
 const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/3";
 const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/1";
 const PARSER_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.parser-providers/1";
@@ -797,6 +801,7 @@ struct PreparedIncrementalPlan {
 struct RustSourceInput {
     snapshot: SourceSnapshot,
     generated: bool,
+    origins: Vec<GeneratedOriginMapping>,
 }
 
 struct StructuralArtifactEntry {
@@ -1710,6 +1715,7 @@ pub struct FirstSliceProjectInput<'a> {
     content_hash: ContentHash,
     source: &'a [u8],
     generated: bool,
+    origins: &'a [GeneratedOriginMapping],
 }
 
 impl FirstSliceProjectInput<'_> {
@@ -1741,6 +1747,12 @@ impl FirstSliceProjectInput<'_> {
     #[must_use]
     pub const fn generated(&self) -> bool {
         self.generated
+    }
+
+    /// Returns reliable, disjoint generated-to-origin mappings.
+    #[must_use]
+    pub const fn origins(&self) -> &[GeneratedOriginMapping] {
+        self.origins
     }
 }
 
@@ -2674,8 +2686,10 @@ impl FirstSliceService {
             sources.push(RustSourceInput {
                 snapshot,
                 generated: matches!(input.class, InputClass::Generated),
+                origins: Vec::new(),
             });
         }
+        attach_generated_origin_mappings(&mut sources, &source_languages, cancellation)?;
         let manifest_hash =
             GenerationManifestRecipe::new(repository, self.config.hash(), file_claims)
                 .map_err(|_| FirstSliceError::Identity)?
@@ -3006,6 +3020,7 @@ impl FirstSliceService {
                     content_hash: source.snapshot.content_hash(),
                     source: source.snapshot.content(),
                     generated: source.generated,
+                    origins: &source.origins,
                 });
             }
             if inputs.len() != fallback_documents.len() {
@@ -3038,6 +3053,7 @@ impl FirstSliceService {
                             &document,
                             target.repository,
                             target.generation,
+                            project_analyzer.provider_identity(),
                             &inputs,
                         ) {
                             fallback_error = Some(FirstSliceProjectAnalysisError::Protocol);
@@ -6047,6 +6063,191 @@ fn analysis_tier_for_language(language: &str) -> AnalysisTier {
     }
 }
 
+fn attach_generated_origin_mappings(
+    sources: &mut [RustSourceInput],
+    source_languages: &BTreeMap<FileId, String>,
+    cancellation: &Cancellation,
+) -> Result<(), FirstSliceError> {
+    let mut indexed_paths = BTreeMap::new();
+    for (index, source) in sources.iter().enumerate() {
+        if indexed_paths
+            .insert(source.snapshot.path().identity_bytes(), index)
+            .is_some()
+        {
+            return Err(FirstSliceError::Identity);
+        }
+    }
+
+    let mut detected = Vec::new();
+    detected
+        .try_reserve_exact(sources.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    for (index, source) in sources.iter().enumerate() {
+        check_cancellation(cancellation)?;
+        detected.push(detect_generated_origin_mapping(
+            index,
+            source,
+            sources,
+            &indexed_paths,
+            source_languages,
+        )?);
+    }
+    drop(indexed_paths);
+
+    for (source, mapping) in sources.iter_mut().zip(detected) {
+        if let Some(mapping) = mapping {
+            source
+                .origins
+                .try_reserve_exact(1)
+                .map_err(|_| FirstSliceError::Limits)?;
+            source.origins.push(mapping);
+        }
+    }
+    Ok(())
+}
+
+fn detect_generated_origin_mapping(
+    generated_index: usize,
+    generated: &RustSourceInput,
+    sources: &[RustSourceInput],
+    indexed_paths: &BTreeMap<&[u8], usize>,
+    source_languages: &BTreeMap<FileId, String>,
+) -> Result<Option<GeneratedOriginMapping>, FirstSliceError> {
+    if !generated.generated {
+        return Ok(None);
+    }
+    let Some(evidence) = generated_header_evidence(generated.snapshot.content()) else {
+        return Ok(None);
+    };
+    let Ok(origin_path) = RelativePath::parse(Path::new(evidence.origin_path)) else {
+        return Ok(None);
+    };
+    if origin_path.as_str() != evidence.origin_path {
+        return Ok(None);
+    }
+    let Some(origin_index) = indexed_paths
+        .get(origin_path.identity_bytes())
+        .copied()
+        .filter(|origin_index| *origin_index != generated_index)
+    else {
+        return Ok(None);
+    };
+    let Some(origin) = sources.get(origin_index) else {
+        return Err(FirstSliceError::Identity);
+    };
+    if source_languages.get(&generated.snapshot.file())
+        != source_languages.get(&origin.snapshot.file())
+    {
+        return Ok(None);
+    }
+    let Ok(transformation) = TransformationId::new(evidence.generator) else {
+        return Ok(None);
+    };
+    let generated_length =
+        u64::try_from(generated.snapshot.content().len()).map_err(|_| FirstSliceError::Limits)?;
+    let origin_length =
+        u64::try_from(origin.snapshot.content().len()).map_err(|_| FirstSliceError::Limits)?;
+    let (Ok(generated_span), Ok(origin_span)) = (
+        SourceSpan::new(generated.snapshot.file(), 0, generated_length),
+        SourceSpan::new(origin.snapshot.file(), 0, origin_length),
+    ) else {
+        return Ok(None);
+    };
+    if generated_span.start_byte() == generated_span.end_byte()
+        || origin_span.start_byte() == origin_span.end_byte()
+    {
+        return Ok(None);
+    }
+    Ok(Some(GeneratedOriginMapping::new(
+        generated_span,
+        origin_path,
+        origin_span,
+        transformation,
+        None,
+    )))
+}
+
+struct GeneratedHeaderEvidence<'a> {
+    generator: &'a str,
+    origin_path: &'a str,
+}
+
+fn generated_header_evidence(source: &[u8]) -> Option<GeneratedHeaderEvidence<'_>> {
+    let scan_length = source.len().min(GENERATED_HEADER_MAX_BYTES);
+    let bounded = source.get(..scan_length)?;
+    let scan = if source.len() > scan_length && !bounded.ends_with(b"\n") {
+        let complete_end = bounded
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |position| position.saturating_add(1));
+        bounded.get(..complete_end)?
+    } else {
+        bounded
+    };
+
+    let mut generator = None;
+    let mut origin_path = None;
+    for line in scan
+        .split(|byte| *byte == b'\n')
+        .take(GENERATED_HEADER_MAX_LINES)
+        .map(trim_ascii_whitespace)
+    {
+        if let Some(value) = generated_by_marker(line)
+            && generator.replace(value).is_some()
+        {
+            return None;
+        }
+        if let Some(value) = generated_source_marker(line)
+            && origin_path.replace(value).is_some()
+        {
+            return None;
+        }
+    }
+
+    let generator = std::str::from_utf8(generator?).ok()?;
+    let origin_path = std::str::from_utf8(origin_path?).ok()?;
+    (!generator.is_empty() && !origin_path.is_empty()).then_some(GeneratedHeaderEvidence {
+        generator,
+        origin_path,
+    })
+}
+
+fn generated_by_marker(line: &[u8]) -> Option<&[u8]> {
+    line.strip_prefix(b"// Code generated by ")
+        .and_then(|value| value.strip_suffix(b". DO NOT EDIT."))
+        .or_else(|| {
+            line.strip_prefix(b"# Code generated by ")
+                .and_then(|value| value.strip_suffix(b". DO NOT EDIT."))
+        })
+        .or_else(|| {
+            line.strip_prefix(b"/* Code generated by ")
+                .and_then(|value| value.strip_suffix(b". DO NOT EDIT. */"))
+        })
+}
+
+fn generated_source_marker(line: &[u8]) -> Option<&[u8]> {
+    line.strip_prefix(b"// source: ")
+        .or_else(|| line.strip_prefix(b"# source: "))
+        .or_else(|| {
+            line.strip_prefix(b"/* source: ")
+                .and_then(|value| value.strip_suffix(b" */"))
+        })
+}
+
+fn trim_ascii_whitespace(mut value: &[u8]) -> &[u8] {
+    while let Some((first, rest)) = value.split_first()
+        && first.is_ascii_whitespace()
+    {
+        value = rest;
+    }
+    while let Some((last, rest)) = value.split_last()
+        && last.is_ascii_whitespace()
+    {
+        value = rest;
+    }
+    value
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SourceInputPreflight {
     file_count: usize,
@@ -6121,29 +6322,77 @@ fn project_document_matches_inputs(
     document: &NormalizedIrDocument,
     repository: RepositoryId,
     generation: GenerationId,
+    provider_identity: ContentHash,
     inputs: &[FirstSliceProjectInput<'_>],
 ) -> bool {
     if document.repository != repository
         || document.generation != generation
         || document.files.len() != inputs.len()
         || document.provenance.is_empty()
-        || document
-            .provenance
-            .iter()
-            .any(|provenance| provenance.tier != AnalysisTier::TierB)
+        || document.provenance.iter().any(|provenance| {
+            provenance.tier != AnalysisTier::TierB || provenance.binary_digest != provider_identity
+        })
     {
         return false;
     }
-    let expected = inputs
+    let expected_files = inputs
         .iter()
-        .map(FirstSliceProjectInput::file)
-        .collect::<BTreeSet<_>>();
-    let observed = document
-        .files
+        .map(|input| (input.file(), input))
+        .collect::<BTreeMap<_, _>>();
+    if expected_files.len() != inputs.len()
+        || document.files.iter().any(|file| {
+            let Some(input) = expected_files.get(&file.id) else {
+                return true;
+            };
+            file.repository != repository
+                || file.generation != generation
+                || file.path != input.path()
+                || file.content_hash != input.content_hash()
+                || usize::try_from(file.byte_length) != Ok(input.source().len())
+                || file.generated != input.generated()
+        })
+    {
+        return false;
+    }
+
+    let expected_mappings = inputs
         .iter()
-        .map(|file| file.id)
-        .collect::<BTreeSet<_>>();
-    expected.len() == inputs.len() && expected == observed
+        .flat_map(FirstSliceProjectInput::origins)
+        .map(|mapping| ((mapping.generated(), mapping.origin()), mapping))
+        .collect::<BTreeMap<_, _>>();
+    let expected_mapping_count = inputs
+        .iter()
+        .map(|input| input.origins().len())
+        .sum::<usize>();
+    if expected_mappings.len() != expected_mapping_count {
+        return false;
+    }
+    let provenance = document
+        .provenance
+        .iter()
+        .map(|record| (record.id, record))
+        .collect::<BTreeMap<_, _>>();
+    let observed_mappings = document
+        .source_mappings
+        .iter()
+        .filter(|mapping| mapping.kind == SourceMappingKind::GeneratedToOrigin)
+        .collect::<Vec<_>>();
+    observed_mappings.len() == expected_mapping_count
+        && observed_mappings.iter().all(|observed| {
+            let key = (observed.from.span(), observed.to.span());
+            let Some(expected) = expected_mappings.get(&key) else {
+                return false;
+            };
+            let Some(mapping_provenance) = provenance.get(&observed.provenance) else {
+                return false;
+            };
+            mapping_provenance.producer_kind == ProducerKind::Derivation
+                && mapping_provenance.rule.as_deref() == Some(expected.provenance_rule().as_str())
+                && mapping_provenance.evidence_sources
+                    == [observed.from.clone(), observed.to.clone()]
+                && observed.evidence.source.as_ref() == Some(&observed.from)
+                && observed.evidence.derivation == [FactRef::File(observed.to.span().file())]
+        })
 }
 
 fn is_project_fallback_code(code: &str) -> bool {
@@ -6759,7 +7008,10 @@ mod tests {
         ffi::OsStr,
         fs,
         path::Path,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::{Duration, Instant},
     };
 
@@ -6768,7 +7020,7 @@ mod tests {
     use rootlight_incremental::{EquivalenceSnapshot, LogicalComponent, LogicalDomain};
     use rootlight_ir::{
         CoverageScope, CoverageStatus, FileRecord, OccurrenceRole, OccurrenceTarget, ProducerKind,
-        ProvenanceRecord, RelationPredicate, derive_provenance_record_id,
+        ProvenanceRecord, RelationPredicate, SourceMappingRecord, derive_provenance_record_id,
         new_file_identity_claim_envelope,
     };
     use rootlight_runtime::RuntimePaths;
@@ -6812,6 +7064,64 @@ mod tests {
     struct SuccessfulProjectAnalyzer {
         identity: ContentHash,
         calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CapturedGeneratedOrigin {
+        generated: SourceSpan,
+        origin_path: String,
+        origin: SourceSpan,
+        transformation: String,
+        generator_digest: Option<ContentHash>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CapturedProjectInput {
+        path: String,
+        generated: bool,
+        origins: Vec<CapturedGeneratedOrigin>,
+    }
+
+    struct CapturingProjectAnalyzer {
+        identity: ContentHash,
+        observations: Arc<Mutex<Vec<CapturedProjectInput>>>,
+    }
+
+    impl FirstSliceProjectAnalyzer for CapturingProjectAnalyzer {
+        fn provider_identity(&self) -> ContentHash {
+            self.identity
+        }
+
+        fn analyze(
+            &self,
+            request: FirstSliceProjectAnalysisRequest<'_>,
+            _cancellation: &Cancellation,
+        ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
+            let captured = request
+                .inputs()
+                .iter()
+                .map(|input| CapturedProjectInput {
+                    path: input.path().to_owned(),
+                    generated: input.generated(),
+                    origins: input
+                        .origins()
+                        .iter()
+                        .map(|mapping| CapturedGeneratedOrigin {
+                            generated: mapping.generated(),
+                            origin_path: mapping.origin_path().as_str().to_owned(),
+                            origin: mapping.origin(),
+                            transformation: mapping.transformation().as_str().to_owned(),
+                            generator_digest: mapping.generator_digest(),
+                        })
+                        .collect(),
+                })
+                .collect();
+            *self
+                .observations
+                .lock()
+                .expect("capture mutex is not poisoned") = captured;
+            Err(FirstSliceProjectAnalysisError::Analysis)
+        }
     }
 
     impl FirstSliceProjectAnalyzer for SuccessfulProjectAnalyzer {
@@ -6900,6 +7210,190 @@ mod tests {
             }
             Ok(FirstSliceProjectAnalysis::new(document, true))
         }
+    }
+
+    #[test]
+    fn project_document_validation_binds_generated_mapping_provenance() {
+        let repository = derive_repository(b"mapping-validation").id();
+        let generation = GenerationId::from_bytes([9; 20]);
+        let provider_identity = content_hash(b"mapping-provider");
+        let origin_file = FileId::from_bytes([1; 20]);
+        let generated_file = FileId::from_bytes([2; 20]);
+        let origin_bytes = b"schema";
+        let generated_bytes = b"generated";
+        let origin_length =
+            u64::try_from(origin_bytes.len()).expect("origin fixture length is representable");
+        let generated_length = u64::try_from(generated_bytes.len())
+            .expect("generated fixture length is representable");
+        let origin_span =
+            SourceSpan::new(origin_file, 0, origin_length).expect("origin span is valid");
+        let generated_span =
+            SourceSpan::new(generated_file, 0, generated_length).expect("generated span is valid");
+        let mapping = GeneratedOriginMapping::new(
+            generated_span,
+            RelativePath::parse(Path::new("schema/source.rs")).expect("origin path is canonical"),
+            origin_span,
+            TransformationId::new("fixture.codegen").expect("transformation is canonical"),
+            Some(content_hash(b"fixture-generator")),
+        );
+        let mappings = [mapping.clone()];
+        let inputs = [
+            FirstSliceProjectInput {
+                file: origin_file,
+                path: "schema/source.rs",
+                content_hash: content_hash(origin_bytes),
+                source: origin_bytes,
+                generated: false,
+                origins: &[],
+            },
+            FirstSliceProjectInput {
+                file: generated_file,
+                path: "src/generated.rs",
+                content_hash: content_hash(generated_bytes),
+                source: generated_bytes,
+                generated: true,
+                origins: &mappings,
+            },
+        ];
+        let origin_source = SourceRef::new(
+            repository,
+            generation,
+            origin_span,
+            content_hash(origin_bytes),
+            None,
+        );
+        let generated_source = SourceRef::new(
+            repository,
+            generation,
+            generated_span,
+            content_hash(generated_bytes),
+            None,
+        );
+        let producer = ProducerIdentity::new(
+            "rootlight-mapping-fixture",
+            "1.0.0",
+            content_hash(b"fixture-config"),
+        )
+        .expect("producer identity is valid");
+        let mut file_provenance = ProvenanceRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            producer_kind: ProducerKind::Compiler,
+            producer: producer.clone(),
+            binary_digest: provider_identity,
+            frontend_version: Some("fixture-frontend".to_owned()),
+            language: "rust".to_owned(),
+            tier: AnalysisTier::TierB,
+            build_context: BuildContextIdentity::new(content_hash(b"build-context")),
+            input_sources: vec![generated_source.clone()],
+            evidence_sources: vec![generated_source.clone()],
+            derivation_parents: Vec::new(),
+            rule: Some("fixture.structural".to_owned()),
+        };
+        file_provenance.id =
+            derive_provenance_record_id(&file_provenance).expect("file provenance derives");
+        let mut mapping_provenance = ProvenanceRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            producer_kind: ProducerKind::Derivation,
+            producer,
+            binary_digest: provider_identity,
+            frontend_version: Some("fixture-frontend".to_owned()),
+            language: "rust".to_owned(),
+            tier: AnalysisTier::TierB,
+            build_context: BuildContextIdentity::new(content_hash(b"build-context")),
+            input_sources: vec![generated_source.clone(), origin_source.clone()],
+            evidence_sources: vec![generated_source.clone(), origin_source.clone()],
+            derivation_parents: vec![FactRef::Fact(file_provenance.id)],
+            rule: Some(mapping.provenance_rule()),
+        };
+        mapping_provenance.id =
+            derive_provenance_record_id(&mapping_provenance).expect("mapping provenance derives");
+        let mut mapping_record = SourceMappingRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            from: generated_source.clone(),
+            to: origin_source.clone(),
+            kind: SourceMappingKind::GeneratedToOrigin,
+            provenance: mapping_provenance.id,
+            evidence: FactEvidence {
+                source: Some(generated_source.clone()),
+                derivation: vec![FactRef::File(origin_file)],
+            },
+        };
+        mapping_record.id = rootlight_ir::derive_source_mapping_record_id(&mapping_record)
+            .expect("mapping identity derives");
+        let mut document = NormalizedIrDocument::empty(repository, generation);
+        document.files = vec![
+            FileRecord {
+                id: origin_file,
+                repository,
+                generation,
+                path: "schema/source.rs".to_owned(),
+                path_locator: None,
+                content_hash: content_hash(origin_bytes),
+                byte_length: origin_length,
+                language: "rust".to_owned(),
+                encoding: "utf-8".to_owned(),
+                generated: false,
+                provenance: file_provenance.id,
+                evidence: FactEvidence {
+                    source: Some(origin_source),
+                    derivation: Vec::new(),
+                },
+            },
+            FileRecord {
+                id: generated_file,
+                repository,
+                generation,
+                path: "src/generated.rs".to_owned(),
+                path_locator: None,
+                content_hash: content_hash(generated_bytes),
+                byte_length: generated_length,
+                language: "rust".to_owned(),
+                encoding: "utf-8".to_owned(),
+                generated: true,
+                provenance: file_provenance.id,
+                evidence: FactEvidence {
+                    source: Some(generated_source),
+                    derivation: Vec::new(),
+                },
+            },
+        ];
+        document.provenance = vec![file_provenance, mapping_provenance];
+        document.source_mappings = vec![mapping_record.clone()];
+
+        assert!(project_document_matches_inputs(
+            &document,
+            repository,
+            generation,
+            provider_identity,
+            &inputs,
+        ));
+
+        document.provenance[1].rule = Some("rootlight.generated-origin.v1:other:none".to_owned());
+        assert!(!project_document_matches_inputs(
+            &document,
+            repository,
+            generation,
+            provider_identity,
+            &inputs,
+        ));
+        document.provenance[1].rule = Some(mapping.provenance_rule());
+
+        let mut duplicate = mapping_record;
+        duplicate.id = FactId::from_bytes([7; 20]);
+        document.source_mappings.push(duplicate);
+        assert!(!project_document_matches_inputs(
+            &document,
+            repository,
+            generation,
+            provider_identity,
+            &inputs,
+        ));
     }
 
     fn durable_test_tempdir() -> TempDir {
@@ -7012,6 +7506,80 @@ mod tests {
                 && coverage.status == "complete"
         }));
         assert_eq!(status.semantic_freshness, "pending_refinement");
+    }
+
+    #[test]
+    fn deep_project_path_forwards_only_reliable_generated_origin_headers() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[
+                ("src/generator.rs", "pub fn generate() {}\n"),
+                (
+                    "src/mapped.generated.rs",
+                    "// Code generated by fixture-gen. DO NOT EDIT.\n// source: src/generator.rs\npub fn mapped() {}\n",
+                ),
+                (
+                    "src/missing-source.generated.rs",
+                    "// Code generated by fixture-gen. DO NOT EDIT.\npub fn missing_source() {}\n",
+                ),
+                (
+                    "src/traversal.generated.rs",
+                    "// Code generated by fixture-gen. DO NOT EDIT.\n// source: ../generator.rs\npub fn traversal() {}\n",
+                ),
+                (
+                    "src/duplicate.generated.rs",
+                    "// Code generated by fixture-gen. DO NOT EDIT.\n// source: src/generator.rs\n// source: src/generator.rs\npub fn duplicate() {}\n",
+                ),
+                (
+                    "src/unknown.generated.rs",
+                    "// Code generated by fixture-gen. DO NOT EDIT.\n// source: src/not-indexed.rs\npub fn unknown() {}\n",
+                ),
+            ],
+        );
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let analyzer = Arc::new(CapturingProjectAnalyzer {
+            identity: content_hash(b"generated-origin-capture"),
+            observations: Arc::clone(&observations),
+        });
+        let mut service =
+            FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("service initializes with a project adapter");
+
+        service
+            .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
+            .expect("structural fallback remains publishable");
+
+        let observed = observations.lock().expect("capture mutex is not poisoned");
+        let mapped = observed
+            .iter()
+            .find(|input| input.path == "src/mapped.generated.rs")
+            .expect("mapped generated input is captured");
+        assert!(mapped.generated);
+        assert_eq!(mapped.origins.len(), 1);
+        assert_eq!(mapped.origins[0].origin_path, "src/generator.rs");
+        assert_eq!(mapped.origins[0].transformation, "fixture-gen");
+        assert_eq!(mapped.origins[0].generator_digest, None);
+        assert_eq!(mapped.origins[0].generated.start_byte(), 0);
+        assert_eq!(
+            mapped.origins[0].generated.end_byte(),
+            u64::try_from(
+                "// Code generated by fixture-gen. DO NOT EDIT.\n// source: src/generator.rs\npub fn mapped() {}\n"
+                    .len()
+            )
+            .expect("fixture length is representable")
+        );
+        assert_eq!(mapped.origins[0].origin.start_byte(), 0);
+        assert_eq!(
+            mapped.origins[0].origin.end_byte(),
+            u64::try_from("pub fn generate() {}\n".len()).expect("fixture length is representable")
+        );
+        assert!(
+            observed
+                .iter()
+                .filter(|input| input.path != "src/mapped.generated.rs")
+                .all(|input| input.origins.is_empty())
+        );
     }
 
     #[test]

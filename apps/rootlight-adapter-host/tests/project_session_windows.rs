@@ -21,7 +21,8 @@ use rootlight_ids::{
     FileIdentity, GenerationId, RepositoryId, content_hash, derive_file, derive_repository,
 };
 use rootlight_ir::{
-    AnalysisTier, CoverageStatus, ExtensionSupport, OccurrenceRole, RelationPredicate,
+    AnalysisTier, CoverageScope, CoverageStatus, ExtensionSupport, FactDomain, OccurrenceRole,
+    RelationPredicate,
 };
 use rootlight_protocol::{
     adapter_contract::{ADAPTER_NONCE_BYTES, NegotiatedSession},
@@ -43,26 +44,25 @@ fn actual_isolated_binary_returns_multifile_tier_b() {
     let executable = adapter_executable();
     let limits = resource_limits(8 * 1024 * 1024);
     let session = negotiated_session(&executable, limits);
+    let origin_source = b"pub fn ping() {}\n".as_slice();
+    let generated_source = b"pub fn generated() {}\n".as_slice();
     let request = project_request(
         &session,
         "rust",
         &[
-            (
-                "src/dep.rs",
-                b"pub fn ping() {}\n".as_slice(),
-                false,
-                Vec::new(),
-            ),
+            ("src/dep.rs", origin_source, false, Vec::new()),
             (
                 "src/generated.rs",
-                b"pub fn generated() {}\n".as_slice(),
+                generated_source,
                 true,
                 vec![GeneratedOrigin {
                     generated_start_byte: 0,
-                    generated_end_byte: 4,
+                    generated_end_byte: u64::try_from(generated_source.len())
+                        .expect("generated fixture length is representable"),
                     origin_path: "src/dep.rs".to_owned(),
                     origin_start_byte: 0,
-                    origin_end_byte: 4,
+                    origin_end_byte: u64::try_from(origin_source.len())
+                        .expect("origin fixture length is representable"),
                     transformation: "fixture-gen".to_owned(),
                     generator_digest: Some(WireContentHash {
                         value: content_hash(b"fixture-generator").as_bytes().to_vec(),
@@ -109,6 +109,30 @@ fn actual_isolated_binary_returns_multifile_tier_b() {
             .any(|relation| relation.predicate == RelationPredicate::Calls)
     );
     assert!(!output.document().source_mappings.is_empty());
+    let generated_file = output
+        .document()
+        .files
+        .iter()
+        .find(|file| file.path == "src/generated.rs")
+        .expect("generated file is present");
+    let mapping_coverage = output
+        .document()
+        .coverage_records
+        .iter()
+        .find(|coverage| {
+            coverage.scope == CoverageScope::File(generated_file.id)
+                && coverage.domain == FactDomain::SourceMappings
+        })
+        .expect("generated source mapping coverage is present");
+    assert_eq!(mapping_coverage.status, CoverageStatus::Complete);
+    assert_eq!(
+        (
+            mapping_coverage.discovered,
+            mapping_coverage.indexed,
+            mapping_coverage.skipped,
+        ),
+        (1, 1, 0)
+    );
 }
 
 #[test]

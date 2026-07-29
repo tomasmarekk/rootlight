@@ -21,6 +21,7 @@ use crate::{
 
 const MAX_PROJECT_ID_BYTES: usize = 1_024;
 const MAX_TRANSFORMATION_ID_BYTES: usize = 128;
+const GENERATED_ORIGIN_RULE_VERSION: &str = "rootlight.generated-origin.v1";
 
 /// Canonical identity for one project analysis unit.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -150,6 +151,25 @@ impl GeneratedOriginMapping {
     #[must_use]
     pub const fn generator_digest(&self) -> Option<ContentHash> {
         self.generator_digest
+    }
+
+    /// Returns the canonical provenance rule for the mapping transformation.
+    ///
+    /// The normalized source-mapping record has no transformation fields of
+    /// its own, so adapters retain this bounded identity in its referenced
+    /// provenance record instead of dropping generator evidence.
+    #[must_use]
+    pub fn provenance_rule(&self) -> String {
+        match self.generator_digest {
+            Some(digest) => format!(
+                "{GENERATED_ORIGIN_RULE_VERSION}:{}:{digest}",
+                self.transformation.as_str()
+            ),
+            None => format!(
+                "{GENERATED_ORIGIN_RULE_VERSION}:{}:none",
+                self.transformation.as_str()
+            ),
+        }
     }
 
     fn accounted_bytes(&self) -> Result<usize, RequestError> {
@@ -842,23 +862,27 @@ fn validate_project_mappings(
                     mapping: mapping_index,
                 });
             }
-            if let Some(origin_index) = paths.get(mapping.origin_path.identity_bytes()) {
-                let origin = inputs
-                    .get(*origin_index)
-                    .ok_or(RequestError::ProjectAccountingOverflow)?
-                    .source
-                    .source_ref()
-                    .span();
-                if mapping.origin.file() != origin.file()
-                    || mapping.origin.start_byte() < origin.start_byte()
-                    || mapping.origin.end_byte() > origin.end_byte()
-                    || mapping.origin.start_byte() == mapping.origin.end_byte()
-                {
-                    return Err(RequestError::GeneratedOriginMismatch {
-                        input: input_index,
-                        mapping: mapping_index,
-                    });
-                }
+            let Some(origin_index) = paths.get(mapping.origin_path.identity_bytes()) else {
+                return Err(RequestError::GeneratedOriginMismatch {
+                    input: input_index,
+                    mapping: mapping_index,
+                });
+            };
+            let origin = inputs
+                .get(*origin_index)
+                .ok_or(RequestError::ProjectAccountingOverflow)?
+                .source
+                .source_ref()
+                .span();
+            if mapping.origin.file() != origin.file()
+                || mapping.origin.start_byte() < origin.start_byte()
+                || mapping.origin.end_byte() > origin.end_byte()
+                || mapping.origin.start_byte() == mapping.origin.end_byte()
+            {
+                return Err(RequestError::GeneratedOriginMismatch {
+                    input: input_index,
+                    mapping: mapping_index,
+                });
             }
         }
     }

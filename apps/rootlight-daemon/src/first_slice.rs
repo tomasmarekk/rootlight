@@ -164,7 +164,7 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
         let input_bytes = ordered_inputs
             .iter()
             .try_fold(request.context_manifest().len(), |total, input| {
-                total.checked_add(input.source().len())
+                total.checked_add(project_input_wire_bytes(input)?)
             });
         if input_bytes.is_none_or(|bytes| {
             u64::try_from(bytes).map_or(true, |bytes| bytes > PROJECT_ADAPTER_INPUT_BYTES)
@@ -210,6 +210,25 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
                 .try_reserve_exact(input.source().len())
                 .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
             source.extend_from_slice(input.source());
+            let mut origins = Vec::new();
+            origins
+                .try_reserve_exact(input.origins().len())
+                .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+            for mapping in input.origins() {
+                origins.push(adapter::GeneratedOrigin {
+                    generated_start_byte: mapping.generated().start_byte(),
+                    generated_end_byte: mapping.generated().end_byte(),
+                    origin_path: mapping.origin_path().as_str().to_owned(),
+                    origin_start_byte: mapping.origin().start_byte(),
+                    origin_end_byte: mapping.origin().end_byte(),
+                    transformation: mapping.transformation().as_str().to_owned(),
+                    generator_digest: mapping.generator_digest().map(|digest| {
+                        common::ContentHash {
+                            value: digest.as_bytes().to_vec(),
+                        }
+                    }),
+                });
+            }
             inputs.push(adapter::ProjectInput {
                 file: Some(common::FileId {
                     value: input.file().as_bytes().to_vec(),
@@ -221,7 +240,7 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
                 }),
                 source,
                 generated: input.generated(),
-                origins: Vec::new(),
+                origins,
             });
         }
         let context_manifest = request.context_manifest().to_vec();
@@ -259,6 +278,27 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
             output.isolation().permits_deep_adapter(),
         ))
     }
+}
+
+fn project_input_wire_bytes(
+    input: &rootlight_service::FirstSliceProjectInput<'_>,
+) -> Option<usize> {
+    input
+        .origins()
+        .iter()
+        .try_fold(input.source().len(), |total, mapping| {
+            total
+                .checked_add(mapping.origin_path().identity_bytes().len())
+                .and_then(|bytes| bytes.checked_add(mapping.transformation().as_str().len()))
+                .and_then(|bytes| bytes.checked_add(4 * size_of::<u64>()))
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        mapping
+                            .generator_digest()
+                            .map_or(0, |digest| digest.as_bytes().len()),
+                    )
+                })
+        })
 }
 
 fn adapter_identity_digest(
