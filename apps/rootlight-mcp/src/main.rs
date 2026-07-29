@@ -27,7 +27,6 @@ const RUNTIME_DIR_ENV: &str = "ROOTLIGHT_RUNTIME_DIR";
 const PROFILE_CEILING_ENV: &str = "ROOTLIGHT_MCP_PROFILE_CEILING";
 const PROFILE_ENV: &str = "ROOTLIGHT_MCP_PROFILE";
 const INTERNAL_ERROR: i32 = -32_603;
-const ASYNC_WORKER_THREADS: usize = 2;
 
 fn main() -> ExitCode {
     let mode = match bridge_mode() {
@@ -55,10 +54,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        // MCP request work is I/O-bound and separately capped at eight in-flight
-        // calls, so a fixed pair avoids host-core-count startup amplification.
-        .worker_threads(ASYNC_WORKER_THREADS)
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        // Request work runs in the separately bounded blocking pool. The async
+        // runtime only coordinates stdio, cancellation, and completed results.
         .enable_all()
         .build()
     {

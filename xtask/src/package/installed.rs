@@ -1,7 +1,7 @@
 //! Installed-package health and MCP release gates.
 
 use std::{
-    io::{BufRead as _, BufReader, Read, Write as _},
+    io::{BufRead, BufReader, Read, Write as _},
     path::{Path, PathBuf},
     process::ExitStatus,
     sync::mpsc,
@@ -189,6 +189,9 @@ fn exercise_mcp_initialize(
             source,
         }
     })?;
+    // Keep one reader blocked across all samples so the latency distribution
+    // measures process output, not per-sample reader-thread creation.
+    let response_reader = TimedResponseReader::new()?;
     let mut tree = ProcessTree::new()?;
     let daemon_command = ProcessCommand::new(daemon)
         .arg("--coordinated-stdio")
@@ -219,6 +222,7 @@ fn exercise_mcp_initialize(
     for _ in 0..MCP_WARMUP_SAMPLES {
         warmups.push(measure_initialize(
             &tree,
+            &response_reader,
             &mcp_launcher,
             &state,
             &runtime,
@@ -229,6 +233,7 @@ fn exercise_mcp_initialize(
     for _ in 0..MCP_MEASURED_SAMPLES {
         measurements.push(measure_initialize(
             &tree,
+            &response_reader,
             &mcp_launcher,
             &state,
             &runtime,
@@ -239,7 +244,12 @@ fn exercise_mcp_initialize(
     let p95 = nearest_rank(&measurements, 95)?;
     let p99 = nearest_rank(&measurements, 99)?;
     if p50 > MCP_P50_LIMIT_MICROS || p95 > MCP_P95_LIMIT_MICROS || p99 > MCP_P99_LIMIT_MICROS {
-        return invalid("installed stable MCP launcher exceeded its release latency limits");
+        return invalid(format!(
+            "installed stable MCP launcher exceeded its release latency limits: \
+             p50={p50}us (limit {MCP_P50_LIMIT_MICROS}us), \
+             p95={p95}us (limit {MCP_P95_LIMIT_MICROS}us), \
+             p99={p99}us (limit {MCP_P99_LIMIT_MICROS}us)"
+        ));
     }
 
     daemon_stdin
@@ -333,6 +343,7 @@ fn daemon_is_starting(error: &ClientError) -> bool {
 
 fn measure_initialize(
     tree: &ProcessTree,
+    response_reader: &TimedResponseReader,
     launcher: &Path,
     state: &Path,
     runtime: &Path,
@@ -355,9 +366,7 @@ fn measure_initialize(
     let stderr = child
         .take_stderr()
         .ok_or_else(|| invalid_error("installed MCP stderr was not retained"))?;
-    let (response_sender, response_receiver) = mpsc::sync_channel(1);
-    let stdout_reader = timed_response_reader(stdout, started, response_sender)?;
-    let stderr_reader = bounded_reader(stderr, "installed-mcp-stderr")?;
+    response_reader.begin(stdout, started)?;
 
     stdin
         .write_all(INITIALIZE_REQUEST)
@@ -366,27 +375,22 @@ fn measure_initialize(
             operation: "write installed MCP initialize request",
             source,
         })?;
-    let (elapsed, response) = response_receiver
-        .recv_timeout(PROCESS_COMPLETION_TIMEOUT)
-        .map_err(|_| {
-            invalid_error("installed MCP initialize response did not meet its process deadline")
-        })?
-        .map_err(invalid_error)?;
+    let (elapsed, response) = response_reader.response(PROCESS_COMPLETION_TIMEOUT)?;
     validate_initialize_response(&response)?;
+    let stderr_reader = bounded_reader(stderr, "installed-mcp-stderr")?;
     drop(stdin);
 
     let exit_deadline = Instant::now()
         .checked_add(PROCESS_CLEANUP_TIMEOUT)
         .ok_or(PackageError::Clock)?;
-    let status = wait_for_exit_and_eof(
+    let status = wait_for_exit_and_stderr(
         &mut child,
-        &stdout_reader,
         &stderr_reader,
         exit_deadline,
         "installed MCP launcher",
     )?;
     child.mark_reaped();
-    let trailing_stdout = join_reader(stdout_reader, "installed MCP stdout")?;
+    let trailing_stdout = response_reader.finish(exit_deadline)?;
     let stderr = join_reader(stderr_reader, "installed MCP stderr")?;
     if !status.success() {
         return invalid("installed MCP launcher returned a non-success status");
@@ -541,6 +545,27 @@ fn wait_for_exit_and_eof(
     }
 }
 
+fn wait_for_exit_and_stderr(
+    child: &mut ExactChild,
+    stderr: &JoinHandle<Result<Vec<u8>, std::io::Error>>,
+    deadline: Instant,
+    operation: &'static str,
+) -> Result<ExitStatus, PackageError> {
+    loop {
+        if let Some(status) = child.try_wait()?
+            && stderr.is_finished()
+        {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            return invalid(format!(
+                "{operation} did not exit and close stderr before its deadline"
+            ));
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL);
+    }
+}
+
 fn wait_for_exit(
     child: &mut ExactChild,
     deadline: Instant,
@@ -566,50 +591,6 @@ fn bounded_reader(
         .spawn(move || read_bounded(reader))
         .map_err(|source| PackageError::InstalledIo {
             operation: "spawn installed process output reader",
-            source,
-        })
-}
-
-fn timed_response_reader(
-    stdout: impl Read + Send + 'static,
-    started: Instant,
-    sender: mpsc::SyncSender<Result<(u64, Vec<u8>), String>>,
-) -> Result<JoinHandle<Result<Vec<u8>, std::io::Error>>, PackageError> {
-    thread::Builder::new()
-        .name("installed-mcp-stdout".to_owned())
-        .spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            let mut response = Vec::new();
-            match reader.read_until(b'\n', &mut response) {
-                Ok(0) => {
-                    let source = std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "installed MCP stdout reached EOF before initialize response",
-                    );
-                    let _ = sender.send(Err(source.to_string()));
-                    Err(source)
-                }
-                Ok(_) if response.len() > MAX_PROCESS_OUTPUT_BYTES => {
-                    let source = std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "installed MCP initialize response exceeds its byte limit",
-                    );
-                    let _ = sender.send(Err(source.to_string()));
-                    Err(source)
-                }
-                Ok(_) => {
-                    let elapsed = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-                    let _ = sender.send(Ok((elapsed, response)));
-                    read_bounded(reader)
-                }
-                Err(source) => {
-                    let _ = sender.send(Err(source.to_string()));
-                    Err(source)
-                }
-            }
-        })
-        .map_err(|source| PackageError::InstalledIo {
-            operation: "spawn installed MCP response reader",
             source,
         })
 }
@@ -683,6 +664,136 @@ fn invalid<T>(detail: impl Into<String>) -> Result<T, PackageError> {
 
 fn invalid_error(detail: impl Into<String>) -> PackageError {
     PackageError::InvalidInstall(detail.into())
+}
+
+struct TimedReadRequest {
+    stdout: Box<dyn Read + Send>,
+    started: Instant,
+}
+
+struct TimedResponseReader {
+    requests: Option<mpsc::SyncSender<TimedReadRequest>>,
+    responses: mpsc::Receiver<Result<(u64, Vec<u8>), std::io::Error>>,
+    trailing: mpsc::Receiver<Result<Vec<u8>, std::io::Error>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl TimedResponseReader {
+    fn new() -> Result<Self, PackageError> {
+        let (request_sender, request_receiver) = mpsc::sync_channel::<TimedReadRequest>(1);
+        let (response_sender, response_receiver) = mpsc::sync_channel(1);
+        let (trailing_sender, trailing_receiver) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("installed-mcp-stdout".to_owned())
+            .spawn(move || {
+                while let Ok(request) = request_receiver.recv() {
+                    let mut reader = BufReader::new(request.stdout);
+                    let response = read_timed_response(&mut reader, request.started);
+                    if response.is_err() {
+                        let _ = response_sender.send(response);
+                        break;
+                    }
+                    if response_sender.send(response).is_err()
+                        || trailing_sender.send(read_bounded(reader)).is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .map_err(|source| PackageError::InstalledIo {
+                operation: "spawn installed MCP response reader",
+                source,
+            })?;
+        Ok(Self {
+            requests: Some(request_sender),
+            responses: response_receiver,
+            trailing: trailing_receiver,
+            worker: Some(worker),
+        })
+    }
+
+    fn begin(
+        &self,
+        stdout: impl Read + Send + 'static,
+        started: Instant,
+    ) -> Result<(), PackageError> {
+        self.requests
+            .as_ref()
+            .ok_or_else(|| invalid_error("installed MCP response reader is stopped"))?
+            .send(TimedReadRequest {
+                stdout: Box::new(stdout),
+                started,
+            })
+            .map_err(|_| invalid_error("installed MCP response reader stopped before a sample"))
+    }
+
+    fn response(&self, timeout: Duration) -> Result<(u64, Vec<u8>), PackageError> {
+        self.responses
+            .recv_timeout(timeout)
+            .map_err(|source| match source {
+                mpsc::RecvTimeoutError::Timeout => invalid_error(
+                    "installed MCP initialize response did not meet its process deadline",
+                ),
+                mpsc::RecvTimeoutError::Disconnected => {
+                    invalid_error("installed MCP response reader stopped before a response")
+                }
+            })?
+            .map_err(|source| PackageError::InstalledIo {
+                operation: "read installed MCP initialize response",
+                source,
+            })
+    }
+
+    fn finish(&self, deadline: Instant) -> Result<Vec<u8>, PackageError> {
+        self.trailing
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|source| match source {
+                mpsc::RecvTimeoutError::Timeout => {
+                    invalid_error("installed MCP stdout did not close before its deadline")
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    invalid_error("installed MCP response reader stopped before stdout closed")
+                }
+            })?
+            .map_err(|source| PackageError::InstalledIo {
+                operation: "read trailing installed MCP stdout",
+                source,
+            })
+    }
+}
+
+impl Drop for TimedResponseReader {
+    fn drop(&mut self) {
+        drop(self.requests.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn read_timed_response(
+    reader: &mut impl BufRead,
+    started: Instant,
+) -> Result<(u64, Vec<u8>), std::io::Error> {
+    let limit = u64::try_from(MAX_PROCESS_OUTPUT_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut response = Vec::new();
+    match reader.by_ref().take(limit).read_until(b'\n', &mut response) {
+        Ok(0) => Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "installed MCP stdout reached EOF before initialize response",
+        )),
+        Ok(_) if response.len() > MAX_PROCESS_OUTPUT_BYTES => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "installed MCP initialize response exceeds its byte limit",
+        )),
+        Ok(_) => {
+            let elapsed = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            Ok((elapsed, response))
+        }
+        Err(source) => Err(source),
+    }
 }
 
 struct ExactChild {
@@ -853,6 +964,39 @@ mod tests {
         assert_eq!(nearest_rank(&samples, 50).expect("p50 exists"), 50);
         assert_eq!(nearest_rank(&samples, 95).expect("p95 exists"), 95);
         assert_eq!(nearest_rank(&samples, 99).expect("p99 exists"), 99);
+    }
+
+    #[test]
+    fn timed_response_reader_reuses_one_worker_across_samples() {
+        let reader = TimedResponseReader::new().expect("response reader starts");
+
+        for suffix in [b"first".as_slice(), b"second".as_slice()] {
+            let mut output = br#"{"jsonrpc":"2.0"}"#.to_vec();
+            output.push(b'\n');
+            output.extend_from_slice(suffix);
+            reader
+                .begin(std::io::Cursor::new(output), Instant::now())
+                .expect("sample starts");
+            let (_elapsed, response) = reader
+                .response(PROCESS_COMPLETION_TIMEOUT)
+                .expect("response arrives");
+            assert_eq!(response, b"{\"jsonrpc\":\"2.0\"}\n");
+            assert_eq!(
+                reader
+                    .finish(Instant::now() + PROCESS_COMPLETION_TIMEOUT)
+                    .expect("trailing output closes"),
+                suffix
+            );
+        }
+    }
+
+    #[test]
+    fn timed_response_reader_bounds_the_first_line() {
+        let mut input = std::io::Cursor::new(vec![b'x'; MAX_PROCESS_OUTPUT_BYTES + 1]);
+        let error = read_timed_response(&mut input, Instant::now())
+            .expect_err("oversized response is rejected");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
