@@ -14,7 +14,7 @@ use std::{
 
 use rootlight_cancel::Cancellation;
 use rootlight_runtime::RuntimePaths;
-use rootlight_service::FirstSliceService;
+use rootlight_service::{FirstSliceError, FirstSliceService};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
@@ -123,7 +123,7 @@ pub fn build_workspace_scale_evidence(
 
     let open_started = Instant::now();
     let mut service = FirstSliceService::new_durable(2, &state_root, &cancellation)
-        .map_err(|_| WorkspaceScaleEvidenceError::Service)?;
+        .map_err(WorkspaceScaleEvidenceError::Service)?;
     let service_open_micros = elapsed_micros(open_started)?;
     if !service.uses_durable_publication() {
         return Err(WorkspaceScaleEvidenceError::Durability);
@@ -141,7 +141,7 @@ pub fn build_workspace_scale_evidence(
     for root in &repository_roots {
         let receipt = service
             .index_repository(root, &cancellation)
-            .map_err(|_| WorkspaceScaleEvidenceError::Service)?;
+            .map_err(WorkspaceScaleEvidenceError::Service)?;
         discovered_inputs = discovered_inputs
             .checked_add(receipt.discovered_inputs)
             .ok_or(WorkspaceScaleEvidenceError::ResourceLimit)?;
@@ -164,7 +164,7 @@ pub fn build_workspace_scale_evidence(
 
     let first_restore_started = Instant::now();
     let mut restored = FirstSliceService::new_durable(2, &state_root, &cancellation)
-        .map_err(|_| WorkspaceScaleEvidenceError::Service)?;
+        .map_err(WorkspaceScaleEvidenceError::Service)?;
     let first_restore_micros = elapsed_micros(first_restore_started)?;
     let repositories_restored = restored.list_repositories().len();
     let exact_generations_restored = repositories_restored == repositories
@@ -186,7 +186,7 @@ pub fn build_workspace_scale_evidence(
     let update_started = Instant::now();
     let updated = restored
         .index_repository(first_root, &cancellation)
-        .map_err(|_| WorkspaceScaleEvidenceError::Service)?;
+        .map_err(WorkspaceScaleEvidenceError::Service)?;
     let independent_update_micros = elapsed_micros(update_started)?;
     let first_generation = generations
         .first()
@@ -205,7 +205,7 @@ pub fn build_workspace_scale_evidence(
 
     let second_restore_started = Instant::now();
     let restored = FirstSliceService::new_durable(2, &state_root, &cancellation)
-        .map_err(|_| WorkspaceScaleEvidenceError::Service)?;
+        .map_err(WorkspaceScaleEvidenceError::Service)?;
     let second_restore_micros = elapsed_micros(second_restore_started)?;
     let updated_generation_restored = restored.active_generation_for(updated.repository)
         == Some(updated.generation)
@@ -548,7 +548,7 @@ pub enum WorkspaceScaleEvidenceError {
     Filesystem,
     /// The production durable service failed a bounded operation.
     #[error("workspace scale service observation failed")]
-    Service,
+    Service(#[source] FirstSliceError),
     /// The indexed or restored repository set differed.
     #[error("workspace scale repository set differs")]
     RepositorySet,
@@ -586,6 +586,7 @@ mod tests {
     const TOOLCHAIN: &str = "rustc 1.90.0";
 
     #[test]
+    #[ignore = "run serially by the platform and workspace-scale evidence gates"]
     fn one_repository_exercises_durable_restart_and_isolation() {
         let evidence = build_workspace_scale_evidence(1, REVISION, TOOLCHAIN)
             .expect("one-repository durable observation succeeds");

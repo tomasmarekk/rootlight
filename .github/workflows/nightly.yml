@@ -83,6 +83,12 @@ jobs:
           cargo run --locked --quiet --package xtask -- compatibility-check
           cargo run --locked --quiet --package xtask -- policy-check
           cargo run --locked --quiet --package xtask -- id-vectors > target/id-vectors.actual.json
+      - name: Durable workspace scale contract
+        shell: bash
+        run: >-
+          cargo test --locked --package rootlight-bench
+          workspace_scale::tests::one_repository_exercises_durable_restart_and_isolation
+          -- --ignored --exact --test-threads=1
       - name: Daemon lifecycle
         shell: bash
         run: |
