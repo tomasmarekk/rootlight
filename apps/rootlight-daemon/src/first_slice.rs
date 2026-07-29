@@ -413,7 +413,7 @@ pub(crate) struct FirstSliceDaemon {
 }
 
 impl FirstSliceDaemon {
-    /// Starts the service and lifecycle worker lanes.
+    /// Starts the service, semantic-refinement, and lifecycle worker lanes.
     ///
     /// # Errors
     ///
@@ -538,7 +538,7 @@ impl FirstSliceDaemon {
         let lanes = FirstSliceServiceLanes {
             service,
             index_serialization,
-            semantic_refinements,
+            semantic_refinements: Arc::clone(&semantic_refinements),
             refinement: refinement.clone(),
         };
         let work_journal = journal.clone();
@@ -608,6 +608,7 @@ impl FirstSliceDaemon {
                 work: Some(work),
                 control: Some(control),
                 refinement: Some(refinement),
+                semantic_refinements,
                 stopping,
                 journal,
                 work_thread: Some(work_thread),
@@ -737,11 +738,12 @@ fn operation_status_observation(
     ))
 }
 
-/// Join owner for both process-lifetime first-slice workers.
+/// Join owner for the process-lifetime first-slice workers.
 pub(crate) struct FirstSliceWorkers {
     work: Option<SyncSender<WorkerCommand>>,
     control: Option<SyncSender<WorkerCommand>>,
     refinement: Option<SyncSender<SemanticRefinementCommand>>,
+    semantic_refinements: SemanticRefinements,
     stopping: Arc<AtomicBool>,
     journal: JournalActorHandle,
     work_thread: Option<JoinHandle<()>>,
@@ -750,7 +752,7 @@ pub(crate) struct FirstSliceWorkers {
 }
 
 impl FirstSliceWorkers {
-    /// Stops both lanes while accepted connection handlers drain concurrently.
+    /// Stops all lanes while accepted connection handlers drain concurrently.
     ///
     /// # Errors
     ///
@@ -761,6 +763,9 @@ impl FirstSliceWorkers {
         deadline: tokio::time::Instant,
     ) -> Result<(), FirstSliceHostError> {
         self.stopping.store(true, Ordering::Release);
+        // Cancel the local registry before scanning the journal. A refinement
+        // may have left the queue but not activated its journal record yet.
+        cancel_all_semantic_refinements(&self.semantic_refinements, CancellationReason::Shutdown)?;
         // This runs only during global daemon shutdown. Interrupting the full
         // bounded journal batch is intentional: no operation kind may outlive
         // the process-wide worker drain.
@@ -800,6 +805,11 @@ impl FirstSliceWorkers {
 impl Drop for FirstSliceWorkers {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
+        if let Ok(refinements) = self.semantic_refinements.try_lock() {
+            for pending in refinements.values() {
+                let _ = pending.cancellation.cancel(CancellationReason::Shutdown);
+            }
+        }
         self.work.take();
         self.control.take();
         self.refinement.take();
@@ -2071,6 +2081,19 @@ fn cancel_semantic_refinements(
                 .cancellation
                 .cancel(CancellationReason::ParentCancelled);
         }
+    }
+    Ok(())
+}
+
+fn cancel_all_semantic_refinements(
+    refinements: &Mutex<BTreeMap<OperationId, PendingSemanticRefinement>>,
+    reason: CancellationReason,
+) -> Result<(), FirstSliceHostError> {
+    let refinements = refinements
+        .lock()
+        .map_err(|_| FirstSliceHostError::ThreadPanicked)?;
+    for pending in refinements.values() {
+        let _ = pending.cancellation.cancel(reason);
     }
     Ok(())
 }
@@ -7391,6 +7414,37 @@ mod tests {
         assert_eq!(
             terminal.stage,
             rootlight_operations::OperationStage::Executing
+        );
+        drop(daemon);
+        actor.join().expect("journal actor joins");
+    }
+
+    #[test]
+    fn shutdown_cancels_refinement_registered_before_journal_activation() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(journal, 4, 4).expect("journal actor starts");
+        let (daemon, workers) = FirstSliceDaemon::start(actor.handle()).expect("host starts");
+        let cancellation = Cancellation::new();
+        register_semantic_refinement(
+            &workers.semantic_refinements,
+            OperationId::from_bytes([47; 16]),
+            RepositoryId::from_bytes([48; 16]),
+            cancellation.clone(),
+        )
+        .expect("refinement registers");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        runtime
+            .block_on(workers.stop(tokio::time::Instant::now() + Duration::from_secs(2)))
+            .expect("workers stop within the global cap");
+
+        assert_eq!(
+            cancellation.reason(),
+            Some(CancellationReason::Shutdown),
+            "shutdown reaches refinements that are not journal-visible yet"
         );
         drop(daemon);
         actor.join().expect("journal actor joins");
