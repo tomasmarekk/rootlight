@@ -9,13 +9,14 @@
             "budget": "none",
             "contractVersion": "1.0",
             "explainSupported": false,
-            "fallbackSummary": "bounded attached durable structural generation creation",
+            "fallbackSummary": "bounded attached durable generation creation",
             "generation": "creates_generation",
             "inputShapeHash": "ca3b1fcc7237dea36cfb927003b8a97b39baeefe2ef08cd0c8f116d6381f160d",
             "lifecycle": {
               "acceptedModes": [
                 "auto",
-                "structural"
+                "structural",
+                "deep"
               ],
               "detached": true,
               "internalOperationRetry": true,
@@ -64,13 +65,6 @@
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "mode",
                 "status": "unsupported_stable_error",
-                "summary": "deep indexing is not served",
-                "value": "deep"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "mode",
-                "status": "unsupported_stable_error",
                 "summary": "rebuild indexing is not served",
                 "value": "rebuild"
               }
@@ -92,7 +86,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Use bounded attached durable structural generation creation for one whole repository in auto or structural mode; the call terminates within 30 seconds, each public call creates a fresh operation, internal retries reuse an operation, and successful operation and generation state remains atomically queryable after restart.",
+        "description": "Use bounded attached durable generation creation for one whole repository in auto, structural, or native-isolated deep mode; the call terminates within 30 seconds, each public call creates a fresh operation, internal retries reuse an operation, and successful operation and generation state remains atomically queryable after restart.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -18076,13 +18070,6 @@
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "views[]",
                 "status": "unsupported_stable_error",
-                "summary": "community view is not served",
-                "value": "communities"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "views[]",
-                "status": "unsupported_stable_error",
                 "summary": "data view is not served",
                 "value": "data"
               },
@@ -18139,7 +18126,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use a bounded file-granularity architecture map with optional hotspots; module, package, service, data, ownership, community, and build views are unsupported.",
+        "description": "Use a bounded file-granularity architecture map with optional hotspots and deterministic non-ownership communities; module, package, service, data, ownership, and build views are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -18615,6 +18602,45 @@
                 }
               ]
             },
+            "ArchitectureCommunity": {
+              "additionalProperties": false,
+              "description": "One deterministic structural-affinity community.",
+              "properties": {
+                "id": {
+                  "description": "Stable derived community identity.",
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "internal_connection_weight": {
+                  "description": "Sum of weights for connections whose endpoints are both members.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "members": {
+                  "description": "Component identities assigned to this derived community.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 250,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "ownership_truth": {
+                  "description": "Always false; communities do not establish canonical ownership.",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "members",
+                "internal_connection_weight",
+                "ownership_truth"
+              ],
+              "type": "object"
+            },
             "ArchitectureComponent": {
               "additionalProperties": false,
               "description": "One aggregated architecture component.",
@@ -18721,6 +18747,14 @@
               "additionalProperties": false,
               "description": "`architecture.overview` result data.",
               "properties": {
+                "communities": {
+                  "description": "Deterministic non-canonical architectural communities.",
+                  "items": {
+                    "$ref": "#/$defs/ArchitectureCommunity"
+                  },
+                  "maxItems": 250,
+                  "type": "array"
+                },
                 "components": {
                   "description": "Aggregated architecture components.",
                   "items": {
@@ -19004,6 +19038,13 @@
                   "maxLength": 128,
                   "minLength": 1,
                   "type": "string"
+                },
+                "parameters": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Canonically ordered source-free algorithm parameters.",
+                  "type": "object"
                 },
                 "view": {
                   "$ref": "#/$defs/ArchitectureView",
