@@ -143,10 +143,6 @@ jobs:
           if str(Path.cwd()).encode() in encoded:
               raise SystemExit("capability artifacts contain the checkout path")
           PY
-      - name: Daemon lifecycle
-        run: |
-          cargo build --locked --package rootlight --package rootlight-daemon --package xtask
-          cargo run --locked --quiet --package xtask -- daemon-lifecycle-check --bin-dir target/debug
       - name: Verify support-bundle privacy
         run: |
           cargo test --locked --package rootlight-observability --lib \
@@ -263,11 +259,6 @@ jobs:
           cargo test --locked --package rootlight-bench
           workspace_scale::tests::one_repository_exercises_durable_restart_and_isolation
           -- --ignored --exact --test-threads=1
-      - name: Daemon lifecycle
-        shell: bash
-        run: |
-          cargo build --locked --package rootlight --package rootlight-daemon --package xtask
-          cargo run --locked --quiet --package xtask -- daemon-lifecycle-check --bin-dir target/debug
       - name: Compare identifier vectors
         shell: pwsh
         run: |
@@ -279,6 +270,36 @@ jobs:
       - name: Clean generated tree
         shell: bash
         run: git diff --exit-code
+
+  daemon-lifecycle:
+    name: daemon lifecycle / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup show active-toolchain
+      - name: Restore exact daemon lifecycle build inputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rootlight-ci-daemon-lifecycle-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-debug-v1
+      - name: Build lifecycle binaries
+        shell: bash
+        run: cargo build --locked --package rootlight --package rootlight-daemon --package xtask
+      - name: Exercise startup, control, recovery, and shutdown
+        shell: bash
+        run: cargo run --locked --quiet --package xtask -- daemon-lifecycle-check --bin-dir target/debug
 
   vertical-slice:
     name: vertical slice / ${{ matrix.os }}
@@ -1767,7 +1788,7 @@ jobs:
   ci-required:
     name: ci-required
     if: always()
-    needs: [fast, msrv, current-stable, platform, vertical-slice, durability-platform, durability-evidence, incident-evidence, dataset-evidence, supply-chain, unsafe-inventory-windows, offline, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, agent-workflow-quality]
+    needs: [fast, msrv, current-stable, platform, daemon-lifecycle, vertical-slice, durability-platform, durability-evidence, incident-evidence, dataset-evidence, supply-chain, unsafe-inventory-windows, offline, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, agent-workflow-quality]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
