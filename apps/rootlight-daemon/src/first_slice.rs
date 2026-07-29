@@ -1259,6 +1259,30 @@ fn repository_index(
     context: &FirstSliceIpcContext,
     reply: &mut Option<Reply>,
 ) -> Result<daemon::RepositoryIndexResponse, PublicError> {
+    repository_index_with_intent(
+        service,
+        resources,
+        request,
+        context,
+        reply,
+        RepositoryIndexIntent::Requested,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum RepositoryIndexIntent {
+    Requested,
+    SemanticRefinement { structural_generation: GenerationId },
+}
+
+fn repository_index_with_intent(
+    service: &mut FirstSliceService,
+    resources: ServiceRequestResources<'_>,
+    request: daemon::RepositoryIndexRequest,
+    context: &FirstSliceIpcContext,
+    reply: &mut Option<Reply>,
+    intent: RepositoryIndexIntent,
+) -> Result<daemon::RepositoryIndexResponse, PublicError> {
     let ServiceRequestResources {
         journal,
         metadata,
@@ -1269,18 +1293,27 @@ fn repository_index(
     let operation = parse_operation(request.operation.as_ref())?;
     let requested_mode =
         daemon::RepositoryIndexMode::try_from(request.mode).map_err(|_| invalid_argument())?;
-    let mode = match requested_mode {
-        daemon::RepositoryIndexMode::Unspecified
-        | daemon::RepositoryIndexMode::RepositoryIndexStructural => FirstSliceIndexMode::Structural,
-        daemon::RepositoryIndexMode::RepositoryIndexDeep => FirstSliceIndexMode::Deep,
-        daemon::RepositoryIndexMode::RepositoryIndexAuto => {
-            if service.deep_analysis_available() {
-                FirstSliceIndexMode::Deep
-            } else {
+    let auto_refinement = matches!(intent, RepositoryIndexIntent::Requested)
+        && requested_mode == daemon::RepositoryIndexMode::RepositoryIndexAuto
+        && service.deep_analysis_available();
+    let mode = match intent {
+        RepositoryIndexIntent::SemanticRefinement { .. } => FirstSliceIndexMode::Deep,
+        RepositoryIndexIntent::Requested => match requested_mode {
+            daemon::RepositoryIndexMode::Unspecified
+            | daemon::RepositoryIndexMode::RepositoryIndexStructural => {
                 FirstSliceIndexMode::Structural
             }
-        }
+            daemon::RepositoryIndexMode::RepositoryIndexDeep => FirstSliceIndexMode::Deep,
+            // Auto publishes the interactive structural stage first. A separate
+            // journaled operation below owns the later semantic publication.
+            daemon::RepositoryIndexMode::RepositoryIndexAuto => FirstSliceIndexMode::Structural,
+        },
     };
+    if matches!(intent, RepositoryIndexIntent::SemanticRefinement { .. })
+        && requested_mode != daemon::RepositoryIndexMode::RepositoryIndexDeep
+    {
+        return Err(invalid_argument());
+    }
     let root = PathBuf::from(&request.root);
     let requested_repository = service
         .registered_repository_for_root(&root, &context.cancellation)
@@ -1296,9 +1329,31 @@ fn repository_index(
     let lifecycle_deadline = lifecycle_deadline(work_deadline)?;
     let deadline_unix_ms = deadline_unix_ms(work_deadline)?;
     let mut plan_hasher = blake3::Hasher::new();
-    plan_hasher.update(b"rootlight.repository-index-plan/1\0");
-    plan_hasher.update(request.root.as_bytes());
-    plan_hasher.update(&[repository_index_mode_tag(mode)]);
+    match intent {
+        RepositoryIndexIntent::Requested => {
+            // Preserve the original caller-plan identity across the two-stage
+            // activation change so a durable Auto submission remains retryable.
+            let plan_mode = if requested_mode == daemon::RepositoryIndexMode::RepositoryIndexAuto
+                && service.deep_analysis_available()
+            {
+                FirstSliceIndexMode::Deep
+            } else {
+                mode
+            };
+            plan_hasher.update(b"rootlight.repository-index-plan/1\0");
+            plan_hasher.update(request.root.as_bytes());
+            plan_hasher.update(&[repository_index_mode_tag(plan_mode)]);
+        }
+        RepositoryIndexIntent::SemanticRefinement {
+            structural_generation,
+        } => {
+            plan_hasher.update(b"rootlight.repository-index-plan/2\0");
+            plan_hasher.update(request.root.as_bytes());
+            plan_hasher.update(&[repository_index_mode_tag(mode)]);
+            plan_hasher.update(b"\0semantic-refinement\0");
+            plan_hasher.update(structural_generation.as_bytes());
+        }
+    }
     let submission = OperationSubmission::new(
         operation,
         OperationKind::RepositoryIndex,
@@ -1324,7 +1379,19 @@ fn repository_index(
                 ..submission
             };
             let existing = journal_call(runtime, context.deadline, journal.retry_status(retry))?;
-            return retry_index_response(metadata, existing, mode);
+            let response = retry_index_response(metadata, existing, mode)?;
+            if auto_refinement {
+                return complete_auto_structural_index(
+                    service,
+                    resources,
+                    &request.root,
+                    operation,
+                    context,
+                    reply,
+                    response,
+                );
+            }
+            return Ok(response);
         }
         Err(error) if error.code() == ErrorCode::NotFound => {}
         Ok(_) => return Err(internal_error()),
@@ -1419,7 +1486,15 @@ fn repository_index(
             )?;
             return Err(error);
         }
-        match service.prepare_repository_with_mode(&root, mode, &cancellation) {
+        let preparation = match intent {
+            RepositoryIndexIntent::Requested => {
+                service.prepare_repository_with_mode(&root, mode, &cancellation)
+            }
+            RepositoryIndexIntent::SemanticRefinement {
+                structural_generation,
+            } => service.prepare_semantic_refinement(&root, structural_generation, &cancellation),
+        };
+        match preparation {
             Ok(prepared) => {
                 if propagate_peer_cancellation(
                     runtime,
@@ -1603,7 +1678,89 @@ fn repository_index(
     if result.is_err() {
         service.release_index_admission(admission.repository);
     }
-    result
+    match result {
+        Ok(response) if auto_refinement => complete_auto_structural_index(
+            service,
+            resources,
+            &request.root,
+            operation,
+            context,
+            reply,
+            response,
+        ),
+        result => result,
+    }
+}
+
+fn complete_auto_structural_index(
+    service: &mut FirstSliceService,
+    resources: ServiceRequestResources<'_>,
+    root: &str,
+    operation: OperationId,
+    context: &FirstSliceIpcContext,
+    reply: &mut Option<Reply>,
+    response: daemon::RepositoryIndexResponse,
+) -> Result<daemon::RepositoryIndexResponse, PublicError> {
+    let Some(published_generation) = response.published_generation.as_ref() else {
+        return Ok(response);
+    };
+    let structural_generation = parse_generation(Some(published_generation))?;
+
+    // The structural response is released before the expensive follow-up. Its
+    // generation and operation marker are already durable at this point.
+    if let Some(reply) = reply.take() {
+        let _ = reply.send(Ok(FirstSliceIpcResponse::RepositoryIndex(response.clone())));
+    }
+
+    let refinement_deadline = Instant::now()
+        .checked_add(DETACHED_INDEX_TIMEOUT)
+        .ok_or_else(internal_error)?;
+    let refinement_context = FirstSliceIpcContext {
+        client_instance_id: context.client_instance_id,
+        selected_protocol_minor: context.selected_protocol_minor,
+        cancellation: Cancellation::with_deadline(refinement_deadline),
+        deadline: refinement_deadline,
+        effective_budget: context.effective_budget,
+        index_admission: None,
+    };
+    let refinement_request = daemon::RepositoryIndexRequest {
+        schema_version: Some(schema_version()),
+        root: root.to_owned(),
+        operation: Some(operation_to_wire(semantic_refinement_operation(operation))),
+        detached: true,
+        mode: daemon::RepositoryIndexMode::RepositoryIndexDeep as i32,
+    };
+    let mut refinement_reply = None;
+    let refinement_resources = ServiceRequestResources {
+        publication_hook: None,
+        ..resources
+    };
+    // Refinement failure is represented by its own durable operation while the
+    // successfully published structural generation remains authoritative.
+    drop(repository_index_with_intent(
+        service,
+        refinement_resources,
+        refinement_request,
+        &refinement_context,
+        &mut refinement_reply,
+        RepositoryIndexIntent::SemanticRefinement {
+            structural_generation,
+        },
+    ));
+    Ok(response)
+}
+
+fn semantic_refinement_operation(operation: OperationId) -> OperationId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rootlight.semantic-refinement-operation/1\0");
+    hasher.update(operation.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    if bytes == *operation.as_bytes() {
+        bytes[0] ^= 1;
+    }
+    OperationId::from_bytes(bytes)
 }
 
 fn propagate_peer_cancellation(
@@ -4509,8 +4666,31 @@ mod tests {
     use rootlight_daemon_core::JournalActor;
     use rootlight_operations::{ClientInstanceId, OperationJournal, OperationStage, RecoveryClass};
     use rootlight_runtime::RuntimePaths;
-    use std::{fs, time::Duration};
+    use std::{
+        fs,
+        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        time::Duration,
+    };
     use tempfile::TempDir;
+
+    struct FailingSemanticAnalyzer {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl FirstSliceProjectAnalyzer for FailingSemanticAnalyzer {
+        fn provider_identity(&self) -> ContentHash {
+            content_hash(b"daemon-failing-semantic-analyzer")
+        }
+
+        fn analyze(
+            &self,
+            _request: FirstSliceProjectAnalysisRequest<'_>,
+            _cancellation: &Cancellation,
+        ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
+            self.calls.fetch_add(1, AtomicOrdering::Relaxed);
+            Err(FirstSliceProjectAnalysisError::Analysis)
+        }
+    }
 
     fn durable_test_tempdir() -> TempDir {
         #[cfg(target_os = "macos")]
@@ -4533,6 +4713,114 @@ mod tests {
 
         assert_eq!(error.code(), ErrorCode::BudgetExceeded);
         assert!(!error.retryable());
+    }
+
+    #[test]
+    fn auto_index_keeps_the_structural_stage_when_semantic_refinement_fails() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn structural_stage() -> bool { true }\n",
+        )
+        .expect("fixture source writes");
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer: Arc<dyn FirstSliceProjectAnalyzer> = Arc::new(FailingSemanticAnalyzer {
+            calls: Arc::clone(&calls),
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let cancellation = Cancellation::with_deadline(deadline);
+        let mut service = FirstSliceService::new_durable_with_project_analyzer(
+            3,
+            paths.state_dir(),
+            analyzer,
+            &cancellation,
+        )
+        .expect("durable semantic service initializes");
+        let journal = Arc::new(
+            OperationJournal::open(&paths.operation_journal_path())
+                .expect("operation journal opens"),
+        );
+        let actor = JournalActor::start(Arc::clone(&journal), 8, 8).expect("journal actor starts");
+        let handle = actor.handle();
+        let metadata = Mutex::new(OperationMetadataSet::new(8));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let resources = ServiceRequestResources {
+            journal: &handle,
+            metadata: &metadata,
+            runtime: &runtime,
+            catalog_epoch: Instant::now(),
+            publication_hook: None,
+        };
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::from_bytes([7; 16]),
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation,
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+        let operation = OperationId::from_bytes([91; 16]);
+        let request = daemon::RepositoryIndexRequest {
+            schema_version: Some(schema_version()),
+            root: fixture.path().to_string_lossy().into_owned(),
+            operation: Some(operation_to_wire(operation)),
+            detached: false,
+            mode: daemon::RepositoryIndexMode::RepositoryIndexAuto as i32,
+        };
+        let (reply_sender, reply_receiver) = tokio::sync::oneshot::channel();
+        let mut reply = Some(reply_sender);
+
+        let response = repository_index(&mut service, resources, request, &context, &mut reply)
+            .expect("structural stage publishes");
+
+        assert!(reply.is_none());
+        assert_eq!(
+            response.mode,
+            daemon::RepositoryIndexMode::RepositoryIndexStructural as i32
+        );
+        assert!(response.published_generation.is_some());
+        let delivered = runtime
+            .block_on(reply_receiver)
+            .expect("structural response is delivered")
+            .expect("structural response succeeds");
+        assert!(matches!(
+            delivered,
+            FirstSliceIpcResponse::RepositoryIndex(ref delivered) if delivered == &response
+        ));
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 1);
+        let repositories = service.list_repositories();
+        let [repository] = repositories.as_slice() else {
+            panic!("only one repository is active");
+        };
+        assert_eq!(repository.semantic_freshness, "pending_refinement");
+        assert_eq!(
+            journal
+                .status(operation)
+                .expect("structural operation remains queryable")
+                .state,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            journal
+                .status(semantic_refinement_operation(operation))
+                .expect("semantic operation remains queryable")
+                .state,
+            OperationState::Failed
+        );
+
+        drop(handle);
+        actor.join().expect("journal actor joins");
     }
 
     #[test]

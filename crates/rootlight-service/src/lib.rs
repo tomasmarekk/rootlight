@@ -172,6 +172,27 @@ pub struct FirstSliceIndexReceipt {
     pub elapsed_micros: u64,
 }
 
+/// Receipts for one completed structural-first semantic refinement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSliceTwoStageIndexReceipt {
+    structural: FirstSliceIndexReceipt,
+    semantic: FirstSliceIndexReceipt,
+}
+
+impl FirstSliceTwoStageIndexReceipt {
+    /// Returns the first queryable structural generation.
+    #[must_use]
+    pub const fn structural(&self) -> &FirstSliceIndexReceipt {
+        &self.structural
+    }
+
+    /// Returns the atomic semantic refinement generation.
+    #[must_use]
+    pub const fn semantic(&self) -> &FirstSliceIndexReceipt {
+        &self.semantic
+    }
+}
+
 /// Portable source-free bundle exported from one retained immutable generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstSliceSharedGenerationExport {
@@ -415,6 +436,8 @@ impl FirstSliceIncrementalEvidence {
 pub enum FirstSliceObservedFreshness {
     /// The generation completed the latest committed authoritative scan.
     CurrentAtLastAuthoritativeScan,
+    /// Structural facts are current while semantic refinement is pending.
+    PendingSemanticRefinement,
     /// A later committed generation superseded this generation.
     Superseded,
 }
@@ -428,6 +451,10 @@ pub enum FirstSlicePublicationMode {
     ProcessLocalSingleStage,
     /// Structural and semantic facts share one immutable durable activation.
     DurableSingleStage,
+    /// A durable structural generation is queryable before semantic refinement.
+    DurableStructuralStage,
+    /// A durable semantic generation atomically refines its structural parent.
+    DurableSemanticRefinement,
 }
 
 /// Availability of structural-first semantic refinement.
@@ -439,6 +466,10 @@ pub enum FirstSliceTwoStageAvailability {
     UnavailableWithoutDurablePublication,
     /// Durable publication exists, but semantic refinement remains single-stage.
     UnavailableWithoutSemanticRefinement,
+    /// The structural stage is published and semantic refinement is pending.
+    StructuralPublished,
+    /// The semantic refinement generation is published.
+    SemanticRefinementPublished,
 }
 
 /// Honest structural and semantic freshness for one retained generation.
@@ -548,6 +579,7 @@ pub struct RepositoryStatusDto {
 const fn freshness_label(freshness: FirstSliceObservedFreshness) -> &'static str {
     match freshness {
         FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan => "current",
+        FirstSliceObservedFreshness::PendingSemanticRefinement => "pending_refinement",
         FirstSliceObservedFreshness::Superseded => "superseded",
     }
 }
@@ -2401,6 +2433,49 @@ impl FirstSliceService {
         self.publish_prepared(prepared, cancellation)
     }
 
+    /// Publishes a durable structural generation followed by an atomic deep
+    /// semantic refinement.
+    ///
+    /// The structural receipt becomes active before deep analysis starts. The
+    /// refinement is published only when every language accepted isolated
+    /// project output without a structural-fallback diagnostic. Cancellation,
+    /// adapter failure, or incomplete deep coverage leaves the structural
+    /// generation active and queryable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::Catalog`] when durable publication is
+    /// unavailable, [`FirstSliceError::Adapter`] when no deep analyzer is
+    /// configured or semantic refinement falls back, and the normal bounded
+    /// indexing failures from [`Self::index_repository_with_mode`]. At least
+    /// two retained generations are required so the structural parent remains
+    /// queryable after refinement.
+    pub fn index_repository_two_stage(
+        &mut self,
+        path: &Path,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceTwoStageIndexReceipt, FirstSliceError> {
+        if self.durable.is_none() {
+            return Err(FirstSliceError::Catalog);
+        }
+        if self.project_analyzer.is_none() {
+            return Err(FirstSliceError::Adapter);
+        }
+        if self.maximum_generations_per_repository < 2 {
+            return Err(FirstSliceError::Retention);
+        }
+
+        let structural =
+            self.index_repository_with_mode(path, FirstSliceIndexMode::Structural, cancellation)?;
+        let semantic_preparation =
+            self.prepare_semantic_refinement(path, structural.generation, cancellation)?;
+        let semantic = self.publish_prepared(semantic_preparation, cancellation)?;
+        Ok(FirstSliceTwoStageIndexReceipt {
+            structural,
+            semantic,
+        })
+    }
+
     /// Compatibility wrapper for callers using the original Rust-first API name.
     ///
     /// The production implementation now indexes every audited grammar, so this
@@ -2852,6 +2927,53 @@ impl FirstSliceService {
                 durable,
             },
         ))
+    }
+
+    /// Builds a deep generation that is eligible to refine one exact structural
+    /// parent.
+    ///
+    /// Unlike a caller-requested deep index, a semantic refinement must not
+    /// publish structural fallback output under a deep provider identity. The
+    /// returned preparation is therefore guaranteed to contain accepted
+    /// project-adapter output and to name `structural_generation` as its parent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::Catalog`] when durable publication is
+    /// unavailable, [`FirstSliceError::Adapter`] when deep analysis is
+    /// unavailable or falls back, [`FirstSliceError::Identity`] when the active
+    /// lineage changed during preparation, and the normal bounded preparation
+    /// failures from [`Self::prepare_repository_with_mode`].
+    pub fn prepare_semantic_refinement(
+        &self,
+        path: &Path,
+        structural_generation: GenerationId,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
+        if self.durable.is_none() {
+            return Err(FirstSliceError::Catalog);
+        }
+        if self.project_analyzer.is_none() {
+            return Err(FirstSliceError::Adapter);
+        }
+        if self.maximum_generations_per_repository < 2 {
+            return Err(FirstSliceError::Retention);
+        }
+
+        let preparation =
+            self.prepare_repository_with_mode(path, FirstSliceIndexMode::Deep, cancellation)?;
+        let receipt = preparation.receipt();
+        if receipt
+            .diagnostics
+            .iter()
+            .any(|diagnostic| is_project_fallback_code(&diagnostic.code))
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        if receipt.parent != Some(structural_generation) {
+            return Err(FirstSliceError::Identity);
+        }
+        Ok(preparation)
     }
 
     fn append_best_available_documents(
@@ -3498,20 +3620,80 @@ impl FirstSliceService {
         } else {
             FirstSliceObservedFreshness::Superseded
         };
-        let (publication, two_stage) = if self.durable.is_some() {
+        let snapshot = self
+            .generations
+            .generation(generation.generation)
+            .map_err(|_| FirstSliceError::GenerationNotFound)?;
+        let provider_set_hash = snapshot.metadata().provider_set_hash();
+        let structural_provider_set_hash =
+            self.provider_set_hash(FirstSliceIndexMode::Structural)?;
+        let deep_provider_set_hash = self
+            .project_analyzer
+            .as_ref()
+            .map(|_| self.provider_set_hash(FirstSliceIndexMode::Deep))
+            .transpose()?;
+        let used_project_fallback =
+            self.receipts
+                .get(&generation.generation)
+                .is_some_and(|receipt| {
+                    receipt
+                        .diagnostics
+                        .iter()
+                        .any(|diagnostic| is_project_fallback_code(&diagnostic.code))
+                });
+        let (semantic, publication, two_stage) = if used_project_fallback {
             (
+                if generation.active {
+                    FirstSliceObservedFreshness::PendingSemanticRefinement
+                } else {
+                    FirstSliceObservedFreshness::Superseded
+                },
+                if self.durable.is_some() {
+                    FirstSlicePublicationMode::DurableSingleStage
+                } else {
+                    FirstSlicePublicationMode::ProcessLocalSingleStage
+                },
+                if self.durable.is_some() {
+                    FirstSliceTwoStageAvailability::UnavailableWithoutSemanticRefinement
+                } else {
+                    FirstSliceTwoStageAvailability::UnavailableWithoutDurablePublication
+                },
+            )
+        } else if self.durable.is_some() && deep_provider_set_hash == Some(provider_set_hash) {
+            (
+                observed,
+                FirstSlicePublicationMode::DurableSemanticRefinement,
+                FirstSliceTwoStageAvailability::SemanticRefinementPublished,
+            )
+        } else if self.durable.is_some()
+            && self.project_analyzer.is_some()
+            && provider_set_hash == structural_provider_set_hash
+        {
+            (
+                if generation.active {
+                    FirstSliceObservedFreshness::PendingSemanticRefinement
+                } else {
+                    FirstSliceObservedFreshness::Superseded
+                },
+                FirstSlicePublicationMode::DurableStructuralStage,
+                FirstSliceTwoStageAvailability::StructuralPublished,
+            )
+        } else if self.durable.is_some() {
+            (
+                observed,
                 FirstSlicePublicationMode::DurableSingleStage,
                 FirstSliceTwoStageAvailability::UnavailableWithoutSemanticRefinement,
             )
         } else {
             (
+                observed,
                 FirstSlicePublicationMode::ProcessLocalSingleStage,
                 FirstSliceTwoStageAvailability::UnavailableWithoutDurablePublication,
             )
         };
         Ok(FirstSliceFreshnessStatus {
             structural: observed,
-            semantic: observed,
+            semantic,
             publication,
             two_stage,
         })
@@ -4745,6 +4927,9 @@ impl FirstSliceService {
             // infallible compatibility API omits that invalid entry.
             .filter_map(|(repository, active_generation)| {
                 let snapshot = self.generations.generation(*active_generation).ok()?;
+                let freshness = self
+                    .generation_freshness(*repository, *active_generation)
+                    .ok()?;
                 let languages = language_coverage(snapshot.document())
                     .into_iter()
                     .map(|coverage| coverage.language)
@@ -4753,14 +4938,8 @@ impl FirstSliceService {
                     repository: *repository,
                     active_generation: *active_generation,
                     languages,
-                    structural_freshness: freshness_label(
-                        FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
-                    )
-                    .to_owned(),
-                    semantic_freshness: freshness_label(
-                        FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
-                    )
-                    .to_owned(),
+                    structural_freshness: freshness_label(freshness.structural).to_owned(),
+                    semantic_freshness: freshness_label(freshness.semantic).to_owned(),
                     state: REPOSITORY_STATE_READY.to_owned(),
                 })
             })
@@ -4866,11 +5045,8 @@ impl FirstSliceService {
             .get(&repository)
             .ok_or(FirstSliceError::RepositoryNotFound)?
             .clone();
-        let freshness = if context.active {
-            FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan
-        } else {
-            FirstSliceObservedFreshness::Superseded
-        };
+        let active_freshness = self.generation_freshness(repository, context.active_generation)?;
+        let freshness = self.generation_freshness(repository, context.generation)?;
         Ok(RepositoryStatusDto {
             repository: context.repository,
             display_name,
@@ -4879,16 +5055,10 @@ impl FirstSliceService {
             active_generation: context.active_generation,
             parent_generation: context.parent,
             active_parent_generation: context.active_parent,
-            active_structural_freshness: freshness_label(
-                FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
-            )
-            .to_owned(),
-            active_semantic_freshness: freshness_label(
-                FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
-            )
-            .to_owned(),
-            structural_freshness: freshness_label(freshness).to_owned(),
-            semantic_freshness: freshness_label(freshness).to_owned(),
+            active_structural_freshness: freshness_label(active_freshness.structural).to_owned(),
+            active_semantic_freshness: freshness_label(active_freshness.semantic).to_owned(),
+            structural_freshness: freshness_label(freshness.structural).to_owned(),
+            semantic_freshness: freshness_label(freshness.semantic).to_owned(),
             state: REPOSITORY_STATE_READY.to_owned(),
             publication_state: if context.active {
                 "published".to_owned()
@@ -5930,6 +6100,10 @@ fn project_document_matches_inputs(
     expected.len() == inputs.len() && expected == observed
 }
 
+fn is_project_fallback_code(code: &str) -> bool {
+    code.starts_with("project-adapter-") && code.ends_with("-fallback")
+}
+
 fn append_project_fallback_diagnostic(
     document: &mut NormalizedIrDocument,
     language: &str,
@@ -6538,7 +6712,9 @@ mod tests {
     use rootlight_ids::GenerationId;
     use rootlight_incremental::{EquivalenceSnapshot, LogicalComponent, LogicalDomain};
     use rootlight_ir::{
-        CoverageScope, CoverageStatus, OccurrenceRole, OccurrenceTarget, RelationPredicate,
+        CoverageScope, CoverageStatus, FileRecord, OccurrenceRole, OccurrenceTarget, ProducerKind,
+        ProvenanceRecord, RelationPredicate, derive_provenance_record_id,
+        new_file_identity_claim_envelope,
     };
     use rootlight_runtime::RuntimePaths;
     use rootlight_vfs::platform::PrivateDirectory;
@@ -6575,6 +6751,99 @@ mod tests {
         ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Err(self.error)
+        }
+    }
+
+    struct SuccessfulProjectAnalyzer {
+        identity: ContentHash,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl FirstSliceProjectAnalyzer for SuccessfulProjectAnalyzer {
+        fn provider_identity(&self) -> ContentHash {
+            self.identity
+        }
+
+        fn analyze(
+            &self,
+            request: FirstSliceProjectAnalysisRequest<'_>,
+            _cancellation: &Cancellation,
+        ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let mut document =
+                NormalizedIrDocument::empty(request.repository(), request.generation());
+            for input in request.inputs() {
+                let relative = RelativePath::parse(Path::new(input.path()))
+                    .expect("test project path is canonical");
+                let length = u64::try_from(input.source().len())
+                    .expect("test project source length is bounded");
+                let source = SourceRef::new(
+                    request.repository(),
+                    request.generation(),
+                    SourceSpan::new(input.file(), 0, length)
+                        .expect("test project source span is valid"),
+                    input.content_hash(),
+                    None,
+                );
+                let producer =
+                    ProducerIdentity::new("rootlight-test-project", "1.0", request.build_context())
+                        .expect("test project producer is valid");
+                let mut provenance = ProvenanceRecord {
+                    id: FactId::from_bytes([0; 20]),
+                    repository: request.repository(),
+                    generation: request.generation(),
+                    producer_kind: ProducerKind::Derivation,
+                    producer,
+                    binary_digest: self.identity,
+                    frontend_version: Some("test-project-1".to_owned()),
+                    language: request.language().to_owned(),
+                    tier: AnalysisTier::TierB,
+                    build_context: BuildContextIdentity::new(request.build_context()),
+                    input_sources: vec![source.clone()],
+                    evidence_sources: vec![source.clone()],
+                    derivation_parents: Vec::new(),
+                    rule: None,
+                };
+                provenance.id = derive_provenance_record_id(&provenance)
+                    .expect("test project provenance identity derives");
+                let provenance_id = provenance.id;
+                document.provenance.push(provenance);
+                document.files.push(FileRecord {
+                    id: input.file(),
+                    repository: request.repository(),
+                    generation: request.generation(),
+                    path: input.path().to_owned(),
+                    path_locator: Some(relative.to_locator()),
+                    content_hash: input.content_hash(),
+                    byte_length: length,
+                    language: request.language().to_owned(),
+                    encoding: "utf-8".to_owned(),
+                    generated: input.generated(),
+                    provenance: provenance_id,
+                    evidence: FactEvidence {
+                        source: Some(source.clone()),
+                        derivation: Vec::new(),
+                    },
+                });
+                let claim = FileIdentityClaim {
+                    file: input.file(),
+                    repository: request.repository(),
+                    path: input.path().to_owned(),
+                    path_identity: relative.identity_bytes().to_vec(),
+                    content_hash: input.content_hash(),
+                    byte_length: length,
+                };
+                document.extensions.push(
+                    new_file_identity_claim_envelope(
+                        &claim,
+                        request.generation(),
+                        provenance_id,
+                        source,
+                    )
+                    .expect("test file identity claim encodes"),
+                );
+            }
+            Ok(FirstSliceProjectAnalysis::new(document, true))
         }
     }
 
@@ -6687,6 +6956,7 @@ mod tests {
                 && coverage.tier == "tier_d"
                 && coverage.status == "complete"
         }));
+        assert_eq!(status.semantic_freshness, "pending_refinement");
     }
 
     #[test]
@@ -6747,6 +7017,166 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert!(service.active_generation().is_none());
+    }
+
+    #[test]
+    fn durable_two_stage_publication_refines_and_restores_the_structural_parent() {
+        let temporary = durable_test_tempdir();
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .expect("runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let repository_root = temporary.path().join("repository");
+        fs::create_dir(&repository_root).expect("repository root creates");
+        fs::create_dir(repository_root.join("src")).expect("source directory creates");
+        fs::write(
+            repository_root.join("src/lib.rs"),
+            "pub fn two_stage_value() -> u32 { 2 }\n",
+        )
+        .expect("two-stage fixture writes");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let identity = content_hash(b"successful-project-analyzer");
+        let analyzer: Arc<dyn FirstSliceProjectAnalyzer> = Arc::new(SuccessfulProjectAnalyzer {
+            identity,
+            calls: Arc::clone(&calls),
+        });
+        let cancellation = deadline();
+
+        let receipt = {
+            let mut service = FirstSliceService::new_durable_with_project_analyzer(
+                3,
+                paths.state_dir(),
+                Arc::clone(&analyzer),
+                &cancellation,
+            )
+            .expect("durable project service initializes");
+            let receipt = service
+                .index_repository_two_stage(&repository_root, &cancellation)
+                .expect("two-stage indexing publishes");
+            assert_eq!(
+                receipt.semantic().parent,
+                Some(receipt.structural().generation)
+            );
+            assert_ne!(
+                receipt.structural().generation,
+                receipt.semantic().generation
+            );
+            assert_eq!(
+                service.active_generation_for(receipt.semantic().repository),
+                Some(receipt.semantic().generation)
+            );
+            assert_eq!(
+                service
+                    .generation_freshness(
+                        receipt.structural().repository,
+                        receipt.structural().generation,
+                    )
+                    .expect("structural freshness resolves"),
+                FirstSliceFreshnessStatus {
+                    structural: FirstSliceObservedFreshness::Superseded,
+                    semantic: FirstSliceObservedFreshness::Superseded,
+                    publication: FirstSlicePublicationMode::DurableStructuralStage,
+                    two_stage: FirstSliceTwoStageAvailability::StructuralPublished,
+                }
+            );
+            assert_eq!(
+                service
+                    .generation_freshness(
+                        receipt.semantic().repository,
+                        receipt.semantic().generation,
+                    )
+                    .expect("semantic freshness resolves"),
+                FirstSliceFreshnessStatus {
+                    structural: FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
+                    semantic: FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
+                    publication: FirstSlicePublicationMode::DurableSemanticRefinement,
+                    two_stage: FirstSliceTwoStageAvailability::SemanticRefinementPublished,
+                }
+            );
+            receipt
+        };
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        let restored = FirstSliceService::new_durable_with_project_analyzer(
+            3,
+            paths.state_dir(),
+            analyzer,
+            &cancellation,
+        )
+        .expect("two-stage state restores");
+        assert_eq!(
+            restored.active_generation_for(receipt.semantic().repository),
+            Some(receipt.semantic().generation)
+        );
+        assert_eq!(
+            restored
+                .generation_freshness(receipt.semantic().repository, receipt.semantic().generation,)
+                .expect("restored semantic freshness resolves")
+                .publication,
+            FirstSlicePublicationMode::DurableSemanticRefinement
+        );
+        restored
+            .resolve_generation(
+                receipt.structural().repository,
+                Some(receipt.structural().generation),
+            )
+            .expect("restored structural parent remains queryable");
+    }
+
+    #[test]
+    fn two_stage_refinement_failure_preserves_the_structural_generation() {
+        let temporary = durable_test_tempdir();
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .expect("runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let repository_root = temporary.path().join("repository");
+        fs::create_dir(&repository_root).expect("repository root creates");
+        fs::write(
+            repository_root.join("lib.rs"),
+            "pub fn structural_survivor() -> bool { true }\n",
+        )
+        .expect("fallback fixture writes");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer = Arc::new(FailingProjectAnalyzer {
+            identity: content_hash(b"failing-two-stage-analyzer"),
+            error: FirstSliceProjectAnalysisError::Analysis,
+            calls: Arc::clone(&calls),
+        });
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new_durable_with_project_analyzer(
+            3,
+            paths.state_dir(),
+            analyzer,
+            &cancellation,
+        )
+        .expect("durable project service initializes");
+
+        assert_eq!(
+            service.index_repository_two_stage(&repository_root, &cancellation),
+            Err(FirstSliceError::Adapter)
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let repositories = service.list_repositories();
+        let [repository] = repositories.as_slice() else {
+            panic!("only the structural repository is active");
+        };
+        assert_eq!(repository.semantic_freshness, "pending_refinement");
+        assert_eq!(
+            service
+                .generation_freshness(repository.repository, repository.active_generation)
+                .expect("structural freshness resolves")
+                .publication,
+            FirstSlicePublicationMode::DurableStructuralStage
+        );
     }
 
     #[test]
