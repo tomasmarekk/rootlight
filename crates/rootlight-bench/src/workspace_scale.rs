@@ -106,7 +106,7 @@ pub fn build_workspace_scale_evidence(
         return Err(WorkspaceScaleEvidenceError::InvalidRepositoryCount);
     }
 
-    let fixture = TempDir::new().map_err(|_| WorkspaceScaleEvidenceError::Filesystem)?;
+    let fixture = observation_tempdir()?;
     let runtime_paths =
         RuntimePaths::new(fixture.path().join("state"), fixture.path().join("runtime"))
             .map_err(|_| WorkspaceScaleEvidenceError::Filesystem)?;
@@ -316,6 +316,22 @@ pub fn verify_workspace_scale_evidence(
         return Err(WorkspaceScaleEvidenceError::Encoding);
     }
     Ok(())
+}
+
+fn observation_tempdir() -> Result<TempDir, WorkspaceScaleEvidenceError> {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS exposes its default temporary directory through the `/var`
+        // alias, which the no-follow SQLite boundary correctly rejects.
+        tempfile::Builder::new()
+            .prefix("rl-workspace-scale-")
+            .tempdir_in("/private/tmp")
+            .map_err(|_| WorkspaceScaleEvidenceError::Filesystem)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        TempDir::new().map_err(|_| WorkspaceScaleEvidenceError::Filesystem)
+    }
 }
 
 fn create_repository_fixtures(
@@ -584,6 +600,18 @@ mod tests {
 
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
     const TOOLCHAIN: &str = "rustc 1.90.0";
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_observation_path_is_canonical_and_private() {
+        let fixture = observation_tempdir().expect("macOS observation directory exists");
+
+        assert!(fixture.path().starts_with("/private/tmp"));
+        assert_eq!(
+            fs::canonicalize(fixture.path()).expect("observation directory canonicalizes"),
+            fixture.path()
+        );
+    }
 
     #[test]
     #[ignore = "run serially by the platform and workspace-scale evidence gates"]
