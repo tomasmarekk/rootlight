@@ -804,7 +804,7 @@ fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str)
 fn index_repository_retrying_busy(mcp: &mut McpProcess, request_id: &str, root: &Path) -> Value {
     let arguments = json!({
         "root": root,
-        "mode": "auto",
+        "mode": "structural",
         "detached": false
     });
     process_support::retry_transient_busy(request_id, |attempt_id| {
