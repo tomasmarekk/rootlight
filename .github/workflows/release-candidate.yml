@@ -172,7 +172,8 @@ jobs:
             --package rootlight-adapter-host \
             --package rootlight-daemon \
             --package rootlight-launcher \
-            --package rootlight-mcp
+            --package rootlight-mcp \
+            --package rootlight-semantic-host
           RUSTFLAGS="$reproducible_rustflags" \
             CARGO_TARGET_DIR="$PWD/target/repro-second" cargo build \
             --locked --release --target "$TARGET_TRIPLE" \
@@ -180,7 +181,8 @@ jobs:
             --package rootlight-adapter-host \
             --package rootlight-daemon \
             --package rootlight-launcher \
-            --package rootlight-mcp
+            --package rootlight-mcp \
+            --package rootlight-semantic-host
           suffix=""
           if [[ "$TARGET_TRIPLE" == *windows* ]]; then
             suffix=".exe"
@@ -190,7 +192,8 @@ jobs:
             rootlight-adapter-host \
             rootlight-daemon \
             rootlight-launcher \
-            rootlight-mcp; do
+            rootlight-mcp \
+            rootlight-semantic-host; do
             cmp \
               "target/repro-first/$TARGET_TRIPLE/release/${binary}${suffix}" \
               "target/repro-second/$TARGET_TRIPLE/release/${binary}${suffix}"

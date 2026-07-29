@@ -1,0 +1,24 @@
+[package]
+name = "rootlight-semantic-host"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+data-encoding.workspace = true
+rootlight-cancel = { path = "../../crates/rootlight-cancel" }
+rootlight-ids = { path = "../../crates/rootlight-ids" }
+rootlight-semantic = { path = "../../crates/rootlight-semantic" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

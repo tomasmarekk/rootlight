@@ -49,11 +49,12 @@ const MAX_PATH_BYTES: usize = 512;
 const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(windows)]
 const UNINSTALL_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const EXPECTED_BINARIES: [&str; 4] = [
+const EXPECTED_BINARIES: [&str; 5] = [
     "rootlight",
     "rootlight-adapter-host",
     "rootlight-daemon",
     "rootlight-mcp",
+    "rootlight-semantic-host",
 ];
 
 /// Runs the launcher for the public command name used to invoke this process.

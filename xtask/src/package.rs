@@ -44,11 +44,12 @@ const MAX_CHECKSUM_BYTES: u64 = 512;
 const MAX_ARCHIVE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const EXPECTED_LAUNCHER: &str = "rootlight-launcher";
-const EXPECTED_BINARIES: [&str; 4] = [
+const EXPECTED_BINARIES: [&str; 5] = [
     "rootlight",
     "rootlight-adapter-host",
     "rootlight-daemon",
     "rootlight-mcp",
+    "rootlight-semantic-host",
 ];
 const EXPECTED_TARGETS: [&str; 5] = [
     "aarch64-apple-darwin",
@@ -1057,6 +1058,7 @@ fn lifecycle_sbom(manifest: &LifecyclePackageManifest) -> Vec<u8> {
                     {"name": "rootlight-daemon"},
                     {"name": "rootlight-launcher"},
                     {"name": "rootlight-mcp"},
+                    {"name": "rootlight-semantic-host"},
                     {"name": "LICENSE"},
                     {"name": "NOTICE"}
                 ],

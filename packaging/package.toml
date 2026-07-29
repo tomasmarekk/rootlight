@@ -31,6 +31,10 @@ unix_mode = 493
 name = "rootlight-mcp"
 unix_mode = 493
 
+[[binaries]]
+name = "rootlight-semantic-host"
+unix_mode = 493
+
 [[platforms]]
 target = "aarch64-apple-darwin"
 executable_suffix = ""

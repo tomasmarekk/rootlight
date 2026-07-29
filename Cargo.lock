@@ -2364,6 +2364,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootlight-semantic"
+version = "0.1.0"
+dependencies = [
+ "rootlight-cancel",
+ "rootlight-ids",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "rootlight-semantic-host"
+version = "0.1.0"
+dependencies = [
+ "data-encoding",
+ "rootlight-cancel",
+ "rootlight-ids",
+ "rootlight-semantic",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "rootlight-service"
 version = "0.1.0"
 dependencies = [

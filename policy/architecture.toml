@@ -4,6 +4,7 @@ workspace_members = [
   "rootlight-launcher",
   "rootlight-mcp",
   "rootlight-adapter-host",
+  "rootlight-semantic-host",
   "rootlight-adapter-sdk",
   "rootlight-adapter-treesitter",
   "rootlight-adapters",
@@ -31,6 +32,7 @@ workspace_members = [
   "rootlight-runtime",
   "rootlight-sandbox",
   "rootlight-search",
+  "rootlight-semantic",
   "rootlight-segment",
   "rootlight-service",
   "rootlight-source",
@@ -86,6 +88,15 @@ allowed_internal_dependencies = [
   "rootlight-ir",
   "rootlight-mcp-contract",
   "rootlight-runtime",
+]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-semantic-host"
+allowed_internal_dependencies = [
+  "rootlight-cancel",
+  "rootlight-ids",
+  "rootlight-semantic",
 ]
 allow_build_script = false
 
@@ -325,6 +336,14 @@ allowed_internal_dependencies = [
 allow_build_script = false
 
 [[crates]]
+name = "rootlight-semantic"
+allowed_internal_dependencies = [
+  "rootlight-cancel",
+  "rootlight-ids",
+]
+allow_build_script = false
+
+[[crates]]
 name = "rootlight-segment"
 allowed_internal_dependencies = [
   "rootlight-ids",
@@ -338,6 +357,7 @@ name = "rootlight-service"
 allowed_internal_dependencies = [
   "rootlight-adapter-sdk",
   "rootlight-adapter-treesitter",
+  "rootlight-adapters",
   "rootlight-cancel",
   "rootlight-catalog",
   "rootlight-config",
