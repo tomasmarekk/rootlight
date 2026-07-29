@@ -39,11 +39,6 @@ on:
         required: true
         default: 100
         type: number
-      verified_nightly_run_id:
-        description: Optional successful exact-revision nightly run to reuse
-        required: false
-        type: string
-
 permissions:
   actions: read
   contents: read
@@ -68,8 +63,6 @@ jobs:
     outputs:
       candidate_run_attempt: ${{ steps.gates.outputs.candidate_run_attempt }}
       candidate_run_id: ${{ steps.gates.outputs.candidate_run_id }}
-      nightly_run_attempt: ${{ steps.gates.outputs.nightly_run_attempt }}
-      nightly_run_id: ${{ steps.gates.outputs.nightly_run_id }}
       npm_tag: ${{ steps.plan.outputs.npm_tag }}
       prerelease: ${{ steps.plan.outputs.prerelease }}
       tag: ${{ steps.plan.outputs.tag }}
@@ -117,11 +110,10 @@ jobs:
                       raise SystemExit("release plan output contains a line break")
                   output.write(f"{name}={value}\n")
           PY
-      - name: Run exact CI, nightly, and candidate gates
+      - name: Run exact exhaustive CI and candidate gates
         id: gates
         env:
           GH_TOKEN: ${{ github.token }}
-          NIGHTLY_RUN_ID: ${{ inputs.verified_nightly_run_id }}
           RELEASE_VERSION: ${{ steps.plan.outputs.version }}
           SOURCE_REVISION: ${{ github.sha }}
         run: |
@@ -133,9 +125,6 @@ jobs:
             --request-id "release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             --output artifacts/release-plan/gates.json
           )
-          if [[ -n "$NIGHTLY_RUN_ID" ]]; then
-            arguments+=(--nightly-run-id "$NIGHTLY_RUN_ID")
-          fi
           python scripts/orchestrate_release.py "${arguments[@]}"
           python - <<'PY'
           import json
@@ -148,8 +137,6 @@ jobs:
               "candidate_run_id",
               "ci_run_attempt",
               "ci_run_id",
-              "nightly_run_attempt",
-              "nightly_run_id",
           }
           if set(gates) != expected or any(
               not isinstance(value, int) or isinstance(value, bool) or value < 1

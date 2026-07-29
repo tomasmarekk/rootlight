@@ -12,6 +12,64 @@ REVISION = "0123456789abcdef0123456789abcdef01234567"
 
 
 class OrchestrationTests(unittest.TestCase):
+    def test_orchestration_uses_one_exhaustive_ci_gate(self) -> None:
+        ci_run = {"id": 11, "run_attempt": 2}
+        candidate_run = {"id": 22, "run_attempt": 3}
+        with (
+            patch(
+                "orchestrate_release.latest_successful_run", return_value=ci_run
+            ) as latest,
+            patch("orchestrate_release.require_run") as require,
+            patch("orchestrate_release.dispatch_workflow") as dispatch,
+            patch("orchestrate_release.discover_run", return_value=candidate_run),
+            patch(
+                "orchestrate_release.wait_for_completion",
+                return_value=candidate_run,
+            ),
+        ):
+            result = orchestrate_release.orchestrate(
+                repository="tomasmarekk/rootlight",
+                source_revision=REVISION,
+                release_version="0.1.0-alpha.1",
+                request_id="release-1-1",
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "candidate_run_attempt": 3,
+                "candidate_run_id": 22,
+                "ci_run_attempt": 2,
+                "ci_run_id": 11,
+            },
+        )
+        latest.assert_called_once_with(
+            "tomasmarekk/rootlight",
+            "ci.yml",
+            REVISION,
+            allowed_events={"push"},
+        )
+        self.assertEqual(require.call_count, 2)
+        self.assertEqual(
+            require.call_args_list[0].kwargs,
+            {
+                "source_revision": REVISION,
+                "workflow_path": ".github/workflows/ci.yml",
+                "aggregate_name": "ci-required",
+                "allowed_events": {"push"},
+            },
+        )
+        dispatch.assert_called_once_with(
+            "release-candidate.yml",
+            {
+                "release_version": "0.1.0-alpha.1",
+                "source_sha": REVISION,
+                "ci_run_id": "11",
+                "ci_run_attempt": "2",
+                "request_id": "release-1-1",
+            },
+        )
+
     @patch("orchestrate_release.gh_json")
     def test_latest_successful_run_is_exact_and_newest(self, gh_json) -> None:
         gh_json.return_value = {

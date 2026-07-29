@@ -34,7 +34,6 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--release-version", required=True)
     parser.add_argument("--request-id", required=True)
-    parser.add_argument("--nightly-run-id")
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args(arguments)
 
@@ -47,7 +46,6 @@ def main(arguments: list[str]) -> int:
             source_revision=options.source_revision,
             release_version=options.release_version,
             request_id=options.request_id,
-            nightly_run_id=options.nightly_run_id,
         )
         write_json_new(options.output, result)
     except (OSError, ReleaseGateError) as error:
@@ -62,7 +60,6 @@ def orchestrate(
     source_revision: str,
     release_version: str,
     request_id: str,
-    nightly_run_id: str | None,
 ) -> dict[str, int]:
     validate_inputs(repository, source_revision, release_version, request_id)
 
@@ -78,36 +75,6 @@ def orchestrate(
         workflow_path=".github/workflows/ci.yml",
         aggregate_name="ci-required",
         allowed_events={"push"},
-    )
-
-    if nightly_run_id:
-        nightly_run = gh_json(
-            f"/repos/{repository}/actions/runs/{validated_run_id(nightly_run_id)}"
-        )
-    else:
-        nightly_run = latest_successful_run(
-            repository,
-            "nightly.yml",
-            source_revision,
-            allowed_events={"schedule", "workflow_dispatch"},
-        )
-        if nightly_run is None:
-            title = f"nightly / {request_id}"
-            dispatch_workflow(
-                "nightly.yml",
-                {
-                    "request_id": request_id,
-                },
-            )
-            nightly_run = discover_run(repository, "nightly.yml", title, source_revision)
-            nightly_run = wait_for_completion(repository, nightly_run)
-    require_run(
-        repository,
-        nightly_run,
-        source_revision=source_revision,
-        workflow_path=".github/workflows/nightly.yml",
-        aggregate_name="nightly-required",
-        allowed_events={"schedule", "workflow_dispatch"},
     )
 
     candidate_title = f"release candidate / v{release_version} / {request_id}"
@@ -137,8 +104,6 @@ def orchestrate(
     return {
         "ci_run_id": int(ci_run["id"]),
         "ci_run_attempt": int(ci_run["run_attempt"]),
-        "nightly_run_id": int(nightly_run["id"]),
-        "nightly_run_attempt": int(nightly_run["run_attempt"]),
         "candidate_run_id": int(candidate_run["id"]),
         "candidate_run_attempt": int(candidate_run["run_attempt"]),
     }
