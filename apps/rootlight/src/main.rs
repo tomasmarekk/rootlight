@@ -47,7 +47,8 @@ use rootlight_runtime::{PrivateOutputFile, RuntimeError, RuntimePaths};
 use rootlight_service::CancellationReason;
 use rootlight_service::{
     Cancellation, CodeLocateResult, FirstSliceError, FirstSliceIndexReceipt, FirstSliceService,
-    LocateMode, QueryResponse, SharedGenerationExpectation, SharedGenerationLimits,
+    LocateMode, QueryResponse, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceLimits,
+    RuntimeTraceOverlay, SharedGenerationExpectation, SharedGenerationLimits,
     SourceReadQueryResult, SymbolExplainResult,
 };
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,7 @@ const CLI_CLIENT_INSTANCE_ID: [u8; 16] = *b"rootlight-cli-v1";
 const FIRST_SLICE_DEMO_CONTRACT_VERSION: &str = "1.0";
 const HARD_MAX_CLI_JSON_BYTES: usize = 4 * 1024 * 1024;
 const SHARED_GENERATION_RECEIPT_SCHEMA: &str = "rootlight.shared-generation-receipt/1";
+const RUNTIME_TRACE_RECEIPT_SCHEMA: &str = "rootlight.runtime-trace-receipt/1";
 const SHARED_GENERATION_RETENTION: usize = 8;
 const MAX_REPAIR_INVENTORY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_UPDATE_CONTEXT_BYTES: u64 = 64 * 1024;
@@ -174,7 +176,7 @@ fn run() -> Result<CommandResult, CliError> {
     if command == "generation-import" {
         return execute_generation_import(&trailing);
     }
-    if command == "generation-export" && !standalone {
+    if (command == "generation-export" || command == "runtime-trace-import") && !standalone {
         return Err(CliError::Usage);
     }
 
@@ -849,6 +851,50 @@ fn execute_client(
     }
 }
 
+fn execute_runtime_trace_import(
+    paths: &RuntimePaths,
+    arguments: &[std::ffi::OsString],
+) -> Result<CommandResult, CliError> {
+    let [
+        input_flag,
+        input,
+        repository_flag,
+        repository,
+        generation_flag,
+        generation,
+    ] = arguments
+    else {
+        return Err(CliError::Usage);
+    };
+    if input_flag != "--input"
+        || repository_flag != "--repository"
+        || generation_flag != "--generation"
+    {
+        return Err(CliError::Usage);
+    }
+
+    let repository = parse_repository(repository)?;
+    let generation = parse_generation(generation)?;
+    let limits = RuntimeTraceLimits::default();
+    let trace = read_runtime_trace_input(Path::new(input), limits.max_input_bytes())?;
+    let cancellation = generation_transfer_cancellation()?;
+    let service = FirstSliceService::new_durable(
+        SHARED_GENERATION_RETENTION,
+        paths.state_dir(),
+        &cancellation,
+    )?;
+    let overlay = service.import_runtime_trace_overlay(
+        repository,
+        generation,
+        &trace,
+        limits,
+        &cancellation,
+    )?;
+    Ok(CommandResult::RuntimeTraceImport(RuntimeTraceReceipt::new(
+        &overlay,
+    )?))
+}
+
 fn execute_generation_export(
     paths: &RuntimePaths,
     arguments: &[std::ffi::OsString],
@@ -1011,6 +1057,9 @@ fn execute_standalone(
     let _writer = CatalogWriterLock::acquire(&paths.writer_lock_path(), nonce)?;
     if command == "generation-export" {
         return execute_generation_export(paths, arguments);
+    }
+    if command == "runtime-trace-import" {
+        return execute_runtime_trace_import(paths, arguments);
     }
     let catalog_path = paths.operation_journal_path();
     let journal = Arc::new(OperationJournal::open(&catalog_path)?);
@@ -1474,6 +1523,31 @@ fn read_generation_bundle(path: &Path, maximum: usize) -> Result<Vec<u8>, CliErr
     Ok(bytes)
 }
 
+fn read_runtime_trace_input(path: &Path, maximum: usize) -> Result<Vec<u8>, CliError> {
+    let metadata = fs::symlink_metadata(path).map_err(CliError::RuntimeTraceRead)?;
+    if !metadata.file_type().is_file() {
+        return Err(CliError::InvalidRuntimeTraceInput);
+    }
+    let maximum_u64 = u64::try_from(maximum).map_err(|_| CliError::RuntimeTraceInputTooLarge)?;
+    if metadata.len() > maximum_u64 {
+        return Err(CliError::RuntimeTraceInputTooLarge);
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(CliError::RuntimeTraceRead)?
+        .take(
+            maximum_u64
+                .checked_add(1)
+                .ok_or(CliError::RuntimeTraceInputTooLarge)?,
+        )
+        .read_to_end(&mut bytes)
+        .map_err(CliError::RuntimeTraceRead)?;
+    if bytes.len() > maximum {
+        return Err(CliError::RuntimeTraceInputTooLarge);
+    }
+    Ok(bytes)
+}
+
 fn operation_from_domain(operation: OperationRecord) -> OperationStatus {
     OperationStatus {
         operation: operation.operation,
@@ -1616,6 +1690,7 @@ enum CommandResult {
     },
     GenerationExport(SharedGenerationReceipt),
     GenerationImport(SharedGenerationReceipt),
+    RuntimeTraceImport(RuntimeTraceReceipt),
     FirstSliceDemo(Box<FirstSliceDemoResult>),
 }
 
@@ -1648,6 +1723,42 @@ impl SharedGenerationReceipt {
                 .map_err(|_| CliError::GenerationInputTooLarge)?,
             read_only: true,
             activated: false,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RuntimeTraceReceipt {
+    schema_version: &'static str,
+    trace_schema_version: &'static str,
+    repository: RepositoryId,
+    generation: GenerationId,
+    trace_hash: ContentHash,
+    relation_records: u64,
+    total_observations: u64,
+    producer_kind: &'static str,
+    importer_version: &'static str,
+    read_only: bool,
+    persisted: bool,
+    static_generation_mutated: bool,
+}
+
+impl RuntimeTraceReceipt {
+    fn new(overlay: &RuntimeTraceOverlay) -> Result<Self, CliError> {
+        Ok(Self {
+            schema_version: RUNTIME_TRACE_RECEIPT_SCHEMA,
+            trace_schema_version: RUNTIME_TRACE_SCHEMA_VERSION,
+            repository: overlay.repository(),
+            generation: overlay.generation(),
+            trace_hash: overlay.provenance().trace_hash(),
+            relation_records: u64::try_from(overlay.relations().len())
+                .map_err(|_| CliError::RuntimeTraceInputTooLarge)?,
+            total_observations: overlay.total_observations(),
+            producer_kind: "runtime_trace",
+            importer_version: overlay.provenance().importer_version(),
+            read_only: true,
+            persisted: false,
+            static_generation_mutated: false,
         })
     }
 }
@@ -1741,7 +1852,7 @@ impl ExitFamily {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: rootlight [--standalone] first-slice-demo|health [--json]|diagnostics quick|support-bundle --output <file>|--standalone generation-export --repository <id> [--generation <id>] --output <file>|generation-import --input <file> --repository <id> --source-set-hash <hash> [--generation <id>]|repair --dry-run <verify-catalog|verify-generation-headers|full-scrub|select-last-good-generation|rebuild-lexical-index|rebuild-derived-overlays|rebuild-repository|reconstruct-catalog|purge-quarantine> [--inventory <file>]|update install --root <dir> --artifact <file> --checksum <file> --public-key <file> --key-id <id> --channel <channel>|update uninstall --root <dir>|update apply --metadata <file> --metadata-signature <file> --artifact-signature <file> --artifact <file> --sbom <file> --provenance <file> --license-bundle <file>|update recover|update status|update verify --metadata <file> --metadata-signature <file> --artifact-signature <file> --artifact <file> --sbom <file> --provenance <file> --license-bundle <file> --public-key <file> --context <file>|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
+        "usage: rootlight [--standalone] first-slice-demo|health [--json]|diagnostics quick|support-bundle --output <file>|--standalone generation-export --repository <id> [--generation <id>] --output <file>|generation-import --input <file> --repository <id> --source-set-hash <hash> [--generation <id>]|--standalone runtime-trace-import --input <file> --repository <id> --generation <id>|repair --dry-run <verify-catalog|verify-generation-headers|full-scrub|select-last-good-generation|rebuild-lexical-index|rebuild-derived-overlays|rebuild-repository|reconstruct-catalog|purge-quarantine> [--inventory <file>]|update install --root <dir> --artifact <file> --checksum <file> --public-key <file> --key-id <id> --channel <channel>|update uninstall --root <dir>|update apply --metadata <file> --metadata-signature <file> --artifact-signature <file> --artifact <file> --sbom <file> --provenance <file> --license-bundle <file>|update recover|update status|update verify --metadata <file> --metadata-signature <file> --artifact-signature <file> --artifact <file> --sbom <file> --provenance <file> --license-bundle <file> --public-key <file> --context <file>|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
     )]
     Usage,
     #[error("daemon path overrides must provide both state and runtime directories")]
@@ -1756,6 +1867,12 @@ enum CliError {
     DigestEncoding,
     #[error("support bundle staging cleanup failed")]
     SupportCleanup(#[source] RuntimeError),
+    #[error("runtime trace input is invalid")]
+    InvalidRuntimeTraceInput,
+    #[error("runtime trace input exceeds its byte limit")]
+    RuntimeTraceInputTooLarge,
+    #[error("runtime trace input could not be read")]
+    RuntimeTraceRead(#[source] std::io::Error),
     #[error("shared generation input is invalid")]
     InvalidGenerationInput,
     #[error("shared generation input or output path is invalid")]
@@ -1840,6 +1957,9 @@ impl CliError {
             | Self::IncompletePathOverride
             | Self::InvalidSupportPath
             | Self::SupportOutputExists
+            | Self::InvalidRuntimeTraceInput
+            | Self::RuntimeTraceInputTooLarge
+            | Self::RuntimeTraceRead(_)
             | Self::InvalidGenerationInput
             | Self::InvalidGenerationPath
             | Self::GenerationInputTooLarge
@@ -1856,7 +1976,9 @@ impl CliError {
             )
             | Self::InvalidOperation
             | Self::InvalidTimeout
-            | Self::FirstSlice(FirstSliceError::Sharing) => ExitFamily::Usage,
+            | Self::FirstSlice(FirstSliceError::Sharing | FirstSliceError::RuntimeTrace(_)) => {
+                ExitFamily::Usage
+            }
             Self::FilesystemUpdate(
                 FilesystemUpdateError::Health(_) | FilesystemUpdateError::UnsupportedPlatform,
             )
@@ -2102,6 +2224,105 @@ mod tests {
             panic!("generation import returned the wrong result");
         };
         assert_eq!(imported, exported);
+    }
+
+    #[test]
+    fn runtime_trace_command_imports_a_read_only_generation_overlay() {
+        let temporary = support_tempdir();
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .expect("runtime paths are valid");
+        paths.prepare_owner().expect("runtime paths are private");
+        let repository_root = temporary.path().join("repository");
+        fs::create_dir(&repository_root).expect("repository root creates");
+        fs::create_dir(repository_root.join("src")).expect("source directory creates");
+        fs::write(
+            repository_root.join("src/lib.rs"),
+            FIRST_SLICE_SOURCE_BEFORE,
+        )
+        .expect("source writes");
+        let cancellation = generation_transfer_cancellation().expect("deadline is representable");
+        let (indexed, symbol) = {
+            let mut service = FirstSliceService::new_durable(
+                SHARED_GENERATION_RETENTION,
+                paths.state_dir(),
+                &cancellation,
+            )
+            .expect("durable service initializes");
+            let indexed = service
+                .index_rust_fixture(&repository_root, &cancellation)
+                .expect("fixture indexes");
+            let located = service
+                .code_locate(
+                    indexed.generation,
+                    "answer".to_owned(),
+                    LocateMode::Exact,
+                    1,
+                    0,
+                    &cancellation,
+                )
+                .expect("fixture symbol locates");
+            (indexed, located.data.hits[0].symbol)
+        };
+        let trace = temporary.path().join("runtime-trace.json");
+        fs::write(
+            &trace,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": RUNTIME_TRACE_SCHEMA_VERSION,
+                "repository": indexed.repository,
+                "generation": indexed.generation,
+                "producer": {
+                    "name": "cli-test-tracer",
+                    "version": "1.0.0",
+                    "configuration_hash": content_hash(b"cli-test-tracer-config"),
+                    "binary_digest": content_hash(b"cli-test-tracer-binary"),
+                },
+                "records": [{
+                    "kind": "calls",
+                    "subject": symbol,
+                    "object": symbol,
+                    "count": 4,
+                }],
+            }))
+            .expect("trace JSON encodes"),
+        )
+        .expect("trace input writes");
+        let arguments = [
+            std::ffi::OsString::from("--input"),
+            trace.as_os_str().to_owned(),
+            std::ffi::OsString::from("--repository"),
+            std::ffi::OsString::from(indexed.repository.to_string()),
+            std::ffi::OsString::from("--generation"),
+            std::ffi::OsString::from(indexed.generation.to_string()),
+        ];
+
+        let CommandResult::RuntimeTraceImport(receipt) =
+            execute_runtime_trace_import(&paths, &arguments).expect("runtime trace imports")
+        else {
+            panic!("runtime trace import returned the wrong result");
+        };
+
+        assert_eq!(receipt.schema_version, RUNTIME_TRACE_RECEIPT_SCHEMA);
+        assert_eq!(receipt.trace_schema_version, RUNTIME_TRACE_SCHEMA_VERSION);
+        assert_eq!(receipt.repository, indexed.repository);
+        assert_eq!(receipt.generation, indexed.generation);
+        assert_eq!(receipt.relation_records, 1);
+        assert_eq!(receipt.total_observations, 4);
+        assert!(receipt.read_only);
+        assert!(!receipt.persisted);
+        assert!(!receipt.static_generation_mutated);
+        let restored = FirstSliceService::new_durable(
+            SHARED_GENERATION_RETENTION,
+            paths.state_dir(),
+            &cancellation,
+        )
+        .expect("durable state restores");
+        assert_eq!(
+            restored.active_generation_for(indexed.repository),
+            Some(indexed.generation)
+        );
     }
 
     #[test]

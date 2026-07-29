@@ -7,6 +7,7 @@
 
 mod project_context;
 mod project_semantics;
+mod runtime_trace;
 mod scip_export;
 mod scip_import;
 
@@ -34,6 +35,11 @@ pub use project_context::{
 };
 pub use project_semantics::{
     SemanticProjectAnalyzer, SemanticProjectAnalyzerConfigError, SemanticProjectLanguage,
+};
+pub use runtime_trace::{
+    RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError, RuntimeTraceImportRequest,
+    RuntimeTraceLimits, RuntimeTraceOverlay, RuntimeTraceProvenance, RuntimeTraceRelation,
+    RuntimeTraceRelationKind, RuntimeTraceResource, import_runtime_trace,
 };
 pub use scip_export::{
     SCIP_EXPORT_SUBSET_VERSION, ScipExportError, ScipExportLimits, ScipExportOmissions,

@@ -2374,6 +2374,7 @@ dependencies = [
  "proptest",
  "rootlight-adapter-sdk",
  "rootlight-adapter-treesitter",
+ "rootlight-adapters",
  "rootlight-cancel",
  "rootlight-catalog",
  "rootlight-config",

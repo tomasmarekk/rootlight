@@ -32,6 +32,11 @@ use rootlight_adapter_treesitter::{
     ParserSettings, RuntimeConfig, TREE_SITTER_RUNTIME_VERSION, TreeSitterAnalyzer,
     TreeSitterProvider, TreeSitterStructuralArtifact,
 };
+pub use rootlight_adapters::{
+    RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError, RuntimeTraceLimits, RuntimeTraceOverlay,
+    RuntimeTraceProvenance, RuntimeTraceRelation, RuntimeTraceRelationKind, RuntimeTraceResource,
+};
+use rootlight_adapters::{RuntimeTraceImportRequest, import_runtime_trace};
 pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::{CatalogError, CatalogErrorKind, EphemeralOracleWriter, OracleWriter};
 use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource};
@@ -3780,6 +3785,44 @@ impl FirstSliceService {
         .map_err(|error| map_sharing_error(error, cancellation))
     }
 
+    /// Imports explicit local runtime observations for one exact retained
+    /// generation without mutating its canonical static facts.
+    ///
+    /// The returned overlay remains caller-owned and read-only. This service
+    /// does not persist, activate, or merge it into normalized IR.
+    ///
+    /// # Errors
+    ///
+    /// Returns repository or generation selection failures from
+    /// [`Self::resolve_generation`], [`FirstSliceError::RuntimeTrace`] when the
+    /// bounded trace contract rejects the input, or [`FirstSliceError::Cancelled`]
+    /// when cooperative cancellation wins.
+    pub fn import_runtime_trace_overlay(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationId,
+        trace: &[u8],
+        limits: RuntimeTraceLimits,
+        cancellation: &Cancellation,
+    ) -> Result<RuntimeTraceOverlay, FirstSliceError> {
+        let context = self.resolve_generation(repository, Some(generation))?;
+        let snapshot = self
+            .generations
+            .generation(context.generation)
+            .map_err(|error| map_query_error(error, cancellation))?;
+        import_runtime_trace(
+            trace,
+            RuntimeTraceImportRequest::new(
+                repository,
+                context.generation,
+                snapshot.document(),
+                cancellation,
+            )
+            .with_limits(limits),
+        )
+        .map_err(map_runtime_trace_error)
+    }
+
     /// Reports whether commits cross the private durable catalog boundary.
     #[must_use]
     pub const fn uses_durable_publication(&self) -> bool {
@@ -5141,6 +5184,9 @@ pub enum FirstSliceError {
     /// Portable generation export or verified read-only import failed.
     #[error("first-slice shared generation transfer failed")]
     Sharing,
+    /// A caller-supplied runtime trace violated its bounded import contract.
+    #[error(transparent)]
+    RuntimeTrace(#[from] RuntimeTraceImportError),
     /// The requested stable symbol is absent from the pinned generation.
     #[error("first-slice symbol was not found")]
     SymbolNotFound,
@@ -6484,6 +6530,15 @@ fn map_sharing_error(error: SharedGenerationError, cancellation: &Cancellation) 
                 .unwrap_or(CancellationReason::ClientRequest),
         ),
         _ => FirstSliceError::Sharing,
+    }
+}
+
+fn map_runtime_trace_error(error: RuntimeTraceImportError) -> FirstSliceError {
+    match error {
+        RuntimeTraceImportError::Cancelled(cancelled) => {
+            FirstSliceError::Cancelled(cancelled.reason())
+        }
+        error => FirstSliceError::RuntimeTrace(error),
     }
 }
 

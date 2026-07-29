@@ -19,8 +19,8 @@ use rootlight_service::{
     CodeDeadEntryPointPolicy, FileChangeKind, FirstSliceBuildStrategy, FirstSliceError,
     FirstSliceFreshnessStatus, FirstSliceIncrementalEvidence, FirstSliceObservedFreshness,
     FirstSlicePublicationMode, FirstSliceService, FirstSliceTwoStageAvailability,
-    PlanChangeObjective, RelationDirection, RelationFamily, SharedGenerationExpectation,
-    SharedGenerationLimits,
+    PlanChangeObjective, RUNTIME_TRACE_SCHEMA_VERSION, RelationDirection, RelationFamily,
+    RuntimeTraceLimits, SharedGenerationExpectation, SharedGenerationLimits,
     catalog::{
         CatalogInstant, CatalogListFilter, CatalogPageRequest, CatalogPageSize,
         CatalogRepositoryState,
@@ -85,6 +85,81 @@ fn shared_generation_round_trip_is_source_bound_and_does_not_activate() {
             )
             .expect_err("wrong source set is rejected"),
         FirstSliceError::Sharing
+    );
+}
+
+#[test]
+fn runtime_trace_import_is_generation_bound_and_never_mutates_static_state() {
+    let fixture = fixture(BEFORE);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+    let located = service
+        .code_locate(
+            indexed.generation,
+            "answer".to_owned(),
+            LocateMode::Exact,
+            1,
+            0,
+            &cancellation,
+        )
+        .expect("fixture symbol locates");
+    let symbol = located.data.hits[0].symbol;
+    let trace = serde_json::to_vec(&serde_json::json!({
+        "schema": RUNTIME_TRACE_SCHEMA_VERSION,
+        "repository": indexed.repository,
+        "generation": indexed.generation,
+        "producer": {
+            "name": "vertical-slice-tracer",
+            "version": "1.0.0",
+            "configuration_hash": content_hash(b"vertical-slice-tracer-config"),
+            "binary_digest": content_hash(b"vertical-slice-tracer-binary"),
+        },
+        "records": [{
+            "kind": "calls",
+            "subject": symbol,
+            "object": symbol,
+            "count": 3,
+        }],
+    }))
+    .expect("runtime trace encodes");
+
+    let active_before = service.active_generation_for(indexed.repository);
+    let overlay = service
+        .import_runtime_trace_overlay(
+            indexed.repository,
+            indexed.generation,
+            &trace,
+            RuntimeTraceLimits::default(),
+            &cancellation,
+        )
+        .expect("runtime trace imports");
+
+    assert_eq!(overlay.repository(), indexed.repository);
+    assert_eq!(overlay.generation(), indexed.generation);
+    assert_eq!(overlay.relations().len(), 1);
+    assert_eq!(overlay.total_observations(), 3);
+    assert_eq!(
+        service.active_generation_for(indexed.repository),
+        active_before
+    );
+    assert_eq!(
+        service
+            .import_runtime_trace_overlay(
+                indexed.repository,
+                GenerationId::from_bytes([0xff; 20]),
+                &trace,
+                RuntimeTraceLimits::default(),
+                &cancellation,
+            )
+            .expect_err("an unretained generation fails before trace import"),
+        FirstSliceError::GenerationNotFound
+    );
+    assert_eq!(
+        service.active_generation_for(indexed.repository),
+        active_before
     );
 }
 
