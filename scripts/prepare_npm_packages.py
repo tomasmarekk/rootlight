@@ -32,6 +32,12 @@ RELEASE_VERSION_PATTERN = re.compile(
     r"(?:-alpha\.(?:0|[1-9][0-9]*))?$"
 )
 SOURCE_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+PUBLIC_EXECUTABLES = ("rootlight", "rootlight-mcp")
+NPM_RUNTIME_FILES = (
+    "packaging/npm/rootlight.mjs",
+    "packaging/npm/rootlight-mcp.mjs",
+    "packaging/npm/run-native.mjs",
+)
 
 
 @dataclass(frozen=True)
@@ -173,7 +179,7 @@ def prepare_bootstrap(workspace: Path, version: str, output_dir: Path) -> None:
 
 def validate_workspace(path: Path) -> Path:
     resolved = validate_directory(path, "workspace")
-    for relative in ("LICENSE", "packaging/npm/README.md", "packaging/npm/rootlight.mjs"):
+    for relative in ("LICENSE", "packaging/npm/README.md", *NPM_RUNTIME_FILES):
         candidate = resolved / relative
         if not candidate.is_file() or candidate.is_symlink():
             raise PackagePreparationError("workspace npm packaging inputs are incomplete")
@@ -233,6 +239,12 @@ def extract_candidate(
         names = [validate_archive_entry(info) for info in infos]
         if len(names) != len(set(names)) or "package-manifest.json" not in names:
             raise PackagePreparationError("native candidate paths are invalid")
+        executable_suffix = ".exe" if target.os_name == "win32" else ""
+        if any(
+            f"bin/{executable}{executable_suffix}" not in names
+            for executable in PUBLIC_EXECUTABLES
+        ):
+            raise PackagePreparationError("native candidate public executable is missing")
         total = sum(info.file_size for info in infos)
         if total > MAX_EXTRACTED_BYTES:
             raise PackagePreparationError("native candidate expands beyond the package limit")
@@ -335,19 +347,21 @@ def write_root_package(
         source_revision,
     )
     if include_runtime:
-        package["bin"] = {"rootlight": "bin/rootlight.mjs"}
+        package["bin"] = {
+            "rootlight": "bin/rootlight.mjs",
+            "rootlight-mcp": "bin/rootlight-mcp.mjs",
+        }
         package["optionalDependencies"] = {
             target.package_name: version for target in TARGETS
         }
         package["files"] = ["bin", "LICENSE", "README.md"]
         bin_dir = output_dir / "bin"
         bin_dir.mkdir()
-        copy_regular(
-            workspace / "packaging/npm/rootlight.mjs",
-            bin_dir / "rootlight.mjs",
-            64 * 1024,
-        )
-        (bin_dir / "rootlight.mjs").chmod(0o755)
+        for runtime_file in NPM_RUNTIME_FILES:
+            source = workspace / runtime_file
+            destination = bin_dir / source.name
+            copy_regular(source, destination, 64 * 1024)
+            destination.chmod(0o755)
     else:
         package["files"] = ["LICENSE", "README.md", "SECURITY-BOOTSTRAP.txt"]
         write_text_new(

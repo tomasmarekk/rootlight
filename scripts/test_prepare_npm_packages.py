@@ -37,14 +37,31 @@ class PackagePreparationTests(unittest.TestCase):
             self.assertEqual(root_package["version"], VERSION)
             self.assertEqual(root_package["gitHead"], REVISION)
             self.assertEqual(root_package["publishConfig"]["provenance"], True)
+            self.assertEqual(
+                root_package["bin"],
+                {
+                    "rootlight": "bin/rootlight.mjs",
+                    "rootlight-mcp": "bin/rootlight-mcp.mjs",
+                },
+            )
             self.assertEqual(len(root_package["optionalDependencies"]), 5)
+            for runtime_file in (
+                "rootlight.mjs",
+                "rootlight-mcp.mjs",
+                "run-native.mjs",
+            ):
+                self.assertTrue((output / "rootlight/bin" / runtime_file).is_file())
             for target in npm_packages.TARGETS:
                 package_dir = output / target.directory_name
                 package = json.loads((package_dir / "package.json").read_bytes())
                 self.assertEqual(package["name"], target.package_name)
                 self.assertEqual(package["os"], [target.os_name])
                 self.assertEqual(package["cpu"], [target.cpu])
-                self.assertTrue((package_dir / "bin/rootlight").is_file())
+                suffix = ".exe" if target.os_name == "win32" else ""
+                for executable in npm_packages.PUBLIC_EXECUTABLES:
+                    self.assertTrue(
+                        (package_dir / "bin" / f"{executable}{suffix}").is_file()
+                    )
 
     def test_archive_digest_and_paths_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -57,6 +74,30 @@ class PackagePreparationTests(unittest.TestCase):
             archive = candidates / f"rootlight-{VERSION}-{first.triple}.zip"
             with archive.open("ab") as output:
                 output.write(b"tampered")
+
+            with self.assertRaises(npm_packages.PackagePreparationError):
+                npm_packages.prepare_release(
+                    workspace_root(), candidates, VERSION, REVISION, root / "output"
+                )
+
+    def test_missing_public_executable_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidates = root / "candidates"
+            candidates.mkdir()
+            for index, target in enumerate(npm_packages.TARGETS):
+                executables = (
+                    ("rootlight",)
+                    if index == 0
+                    else npm_packages.PUBLIC_EXECUTABLES
+                )
+                write_candidate(
+                    candidates,
+                    target,
+                    VERSION,
+                    REVISION,
+                    public_executables=executables,
+                )
 
             with self.assertRaises(npm_packages.PackagePreparationError):
                 npm_packages.prepare_release(
@@ -81,6 +122,8 @@ def write_candidate(
     target: npm_packages.NativeTarget,
     version: str,
     source_revision: str,
+    *,
+    public_executables: tuple[str, ...] = npm_packages.PUBLIC_EXECUTABLES,
 ) -> None:
     archive = directory / f"rootlight-{version}-{target.triple}.zip"
     manifest = {
@@ -89,14 +132,16 @@ def write_candidate(
         "target": target.triple,
         "version": version,
     }
-    executable = zipfile.ZipInfo("bin/rootlight")
-    executable.create_system = 3
-    executable.external_attr = 0o100755 << 16
     manifest_info = zipfile.ZipInfo("package-manifest.json")
     manifest_info.create_system = 3
     manifest_info.external_attr = 0o100644 << 16
     with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_STORED) as bundle:
-        bundle.writestr(executable, b"native")
+        suffix = ".exe" if target.os_name == "win32" else ""
+        for name in public_executables:
+            executable = zipfile.ZipInfo(f"bin/{name}{suffix}")
+            executable.create_system = 3
+            executable.external_attr = 0o100755 << 16
+            bundle.writestr(executable, b"native")
         bundle.writestr(manifest_info, json.dumps(manifest).encode("utf-8"))
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_name(f"{archive.name}.sha256").write_text(

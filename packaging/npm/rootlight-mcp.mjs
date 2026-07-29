@@ -2,4 +2,4 @@
 
 import { runNative } from "./run-native.mjs";
 
-runNative("rootlight");
+runNative("rootlight-mcp");
