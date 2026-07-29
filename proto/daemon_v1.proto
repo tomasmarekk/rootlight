@@ -453,6 +453,8 @@ message FirstSliceQueryContext {
   FirstSliceCoverageStatus coverage_status = 6;
   uint64 skipped_inputs = 7;
   FirstSliceQueryUsage usage = 8;
+  string structural_freshness = 9;
+  string semantic_freshness = 10;
 }
 
 // Authoritative execution-completeness state for one bounded result.

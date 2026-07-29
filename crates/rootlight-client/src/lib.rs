@@ -530,6 +530,18 @@ pub enum TokenAccountingProfile {
     Utf8ByteUpperBoundV1,
 }
 
+/// Closed freshness classification observed for one query generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryFreshness {
+    /// Facts reflect the latest authoritative scan.
+    Current,
+    /// Facts are queryable but do not satisfy the current freshness policy.
+    Stale,
+    /// Facts belong to an older retained generation.
+    Superseded,
+}
+
 /// Repository, generation, coverage, and usage correlation for one query.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct QueryContext {
@@ -541,6 +553,10 @@ pub struct QueryContext {
     pub parent_generation: Option<GenerationId>,
     /// Whether the resolved generation is currently active.
     pub active_generation: bool,
+    /// Structural freshness of the resolved generation.
+    pub structural_freshness: QueryFreshness,
+    /// Semantic freshness of the resolved generation.
+    pub semantic_freshness: QueryFreshness,
     /// Weakest relevant analysis tier.
     pub tier: AnalysisTier,
     /// Aggregate result completeness.
@@ -2155,7 +2171,7 @@ pub struct EffectiveBudgetLimits {
     pub paths: Option<u64>,
 }
 
-/// A complete client-reduced resource budget accepted by daemon protocol 1.7.
+/// A complete client-reduced resource budget accepted by daemon protocol 1.8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EffectiveBudget(EffectiveBudgetLimits);
 
@@ -9543,11 +9559,35 @@ fn parse_query_context(
         generation,
         parent_generation,
         active_generation: context.active_generation,
+        structural_freshness: parse_query_freshness(
+            &context.structural_freshness,
+            context.active_generation,
+        )?,
+        semantic_freshness: parse_query_freshness(
+            &context.semantic_freshness,
+            context.active_generation,
+        )?,
         tier: parse_analysis_tier(context.tier)?,
         coverage_status: parse_coverage_status(context.coverage_status)?,
         skipped_inputs: context.skipped_inputs,
         usage: parse_query_usage(context.usage)?,
     })
+}
+
+fn parse_query_freshness(
+    value: &str,
+    active_generation: bool,
+) -> Result<QueryFreshness, ClientError> {
+    match value {
+        "current" => Ok(QueryFreshness::Current),
+        "stale" => Ok(QueryFreshness::Stale),
+        "superseded" => Ok(QueryFreshness::Superseded),
+        // Protocols through 1.7 did not carry independent query freshness.
+        // Preserve compatibility without manufacturing a current observation.
+        "" if active_generation => Ok(QueryFreshness::Stale),
+        "" => Ok(QueryFreshness::Superseded),
+        _ => Err(ClientError::InvalidResponseCorrelation),
+    }
 }
 
 fn parse_query_usage(
@@ -10288,11 +10328,35 @@ mod tests {
                 token_accounting: None,
                 memory_bytes: None,
             }),
+            structural_freshness: "current".to_owned(),
+            semantic_freshness: "current".to_owned(),
         }
     }
 
     fn wire_source(reference: &SourceReference) -> daemon::FirstSliceSourceRef {
         source_reference_to_wire(reference)
+    }
+
+    #[test]
+    fn query_freshness_is_validated_and_legacy_absence_is_conservative() {
+        let mut context = wire_query_context(0, 0);
+        context.structural_freshness.clear();
+        context.semantic_freshness.clear();
+
+        let parsed = parse_query_context(
+            Some(context.clone()),
+            test_repository(),
+            GenerationSelector::Active,
+        )
+        .expect("a legacy query context remains readable");
+        assert_eq!(parsed.structural_freshness, QueryFreshness::Stale);
+        assert_eq!(parsed.semantic_freshness, QueryFreshness::Stale);
+
+        context.semantic_freshness = "pending_refinement".to_owned();
+        assert!(matches!(
+            parse_query_context(Some(context), test_repository(), GenerationSelector::Active),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
     }
 
     #[test]

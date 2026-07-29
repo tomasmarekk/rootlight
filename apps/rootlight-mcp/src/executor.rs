@@ -3752,6 +3752,14 @@ fn freshness_from_label(label: &str) -> Freshness {
     }
 }
 
+fn client_freshness_from_label(label: &str) -> client::QueryFreshness {
+    match label {
+        "current" => client::QueryFreshness::Current,
+        "superseded" => client::QueryFreshness::Superseded,
+        _ => client::QueryFreshness::Stale,
+    }
+}
+
 fn coverage_status_from_label(label: &str) -> rootlight_ir::CoverageStatus {
     match label {
         "complete" => rootlight_ir::CoverageStatus::Complete,
@@ -3963,6 +3971,8 @@ fn explain_envelope_from_status<T>(
         generation: status.resolved_generation,
         parent_generation: status.parent_generation,
         active_generation: status.active_generation == status.resolved_generation,
+        structural_freshness: client_freshness_from_label(&status.structural_freshness),
+        semantic_freshness: client_freshness_from_label(&status.semantic_freshness),
         tier: client::AnalysisTier::TierC,
         coverage_status: client::CoverageStatus::Bounded,
         skipped_inputs: 0,

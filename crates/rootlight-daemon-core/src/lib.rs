@@ -7539,7 +7539,13 @@ fn query_context_correlates(
                 | daemon::FirstSliceCoverageStatus::FirstSliceCoverageSampled
                 | daemon::FirstSliceCoverageStatus::FirstSliceCoverageUnknown)
         )
+        && valid_query_freshness(&context.structural_freshness)
+        && valid_query_freshness(&context.semantic_freshness)
         && context.usage.is_some()
+}
+
+fn valid_query_freshness(freshness: &str) -> bool {
+    matches!(freshness, "current" | "stale" | "superseded")
 }
 
 fn valid_analysis_tier(tier: i32) -> bool {
@@ -15066,7 +15072,31 @@ mod tests {
                 token_accounting: None,
                 memory_bytes: None,
             }),
+            structural_freshness: "current".to_owned(),
+            semantic_freshness: "current".to_owned(),
         }
+    }
+
+    #[test]
+    fn query_context_requires_closed_freshness_labels() {
+        let repository = common::RepositoryId { value: vec![3; 16] };
+        let generation = common::GenerationId { value: vec![4; 20] };
+        let selector = daemon::GenerationSelector {
+            selector: Some(daemon::generation_selector::Selector::Active(true)),
+        };
+        let mut context = correlation_context(&repository, &generation, 0, 0);
+
+        assert!(query_context_correlates(
+            &context,
+            Some(&repository),
+            Some(&selector)
+        ));
+        context.semantic_freshness = "pending_refinement".to_owned();
+        assert!(!query_context_correlates(
+            &context,
+            Some(&repository),
+            Some(&selector)
+        ));
     }
 
     fn correlation_source(

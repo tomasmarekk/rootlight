@@ -378,7 +378,7 @@ jobs:
               --rollout-percentage "$ROLLOUT_PERCENTAGE" \
               --catalog-schema 3 \
               --protocol-major 1 \
-              --protocol-minor 7 \
+              --protocol-minor 8 \
               --output-dir "$output"
           done
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"

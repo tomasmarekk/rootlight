@@ -1,8 +1,8 @@
 //! Bounded daemon-owned first-slice service and lifecycle workers.
 //!
-//! The service worker exclusively owns the in-memory generation set. A
-//! separate control worker keeps journal status and cancellation responsive
-//! while indexing or a query occupies the service lane.
+//! Query and semantic-refinement workers share the immutable generation view
+//! under read locks. Publication remains short and serialized, while a separate
+//! control worker keeps journal status and cancellation responsive.
 
 // The daemon-core port deliberately owns PublicError by value. Keeping that
 // exact boundary throughout this private adapter avoids repeated boxing and
@@ -14,7 +14,7 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
     },
@@ -40,9 +40,9 @@ use rootlight_ir::{
     RelationPredicate, SourceRef, SourceSpan,
 };
 use rootlight_operations::{
-    Cancellation, CancellationAuthority, ClientInstanceId, InternalCancellationAuthority,
-    OperationError, OperationKind, OperationRecord, OperationStage, OperationState,
-    OperationSubmission, PlanHash,
+    Cancellation, CancellationAuthority, CancellationReason, ClientInstanceId,
+    InternalCancellationAuthority, OperationError, OperationKind, OperationRecord, OperationStage,
+    OperationState, OperationSubmission, PlanHash,
 };
 use rootlight_protocol::{
     adapter_contract::ADAPTER_NONCE_BYTES,
@@ -56,9 +56,9 @@ use rootlight_service::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
     AdvancedAstNode, FirstSliceBudget, FirstSliceDurableOperation, FirstSliceError,
     FirstSliceGenerationContext, FirstSliceIndexAdmission, FirstSliceIndexMode,
-    FirstSliceIndexReceipt, FirstSliceOperationContext, FirstSliceProjectAnalysis,
-    FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer,
-    FirstSliceService, HistoryChangeKind, PlanChangeObjective,
+    FirstSliceIndexReceipt, FirstSliceObservedFreshness, FirstSliceOperationContext,
+    FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisRequest,
+    FirstSliceProjectAnalyzer, FirstSliceService, HistoryChangeKind, PlanChangeObjective,
     SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
@@ -339,6 +339,31 @@ enum WorkerCommand {
     },
 }
 
+struct SemanticRefinementCommand {
+    request: daemon::RepositoryIndexRequest,
+    context: FirstSliceIpcContext,
+    operation: OperationId,
+    repository: RepositoryId,
+    structural_generation: GenerationId,
+}
+
+struct PendingSemanticRefinement {
+    repository: RepositoryId,
+    cancellation: Cancellation,
+}
+
+type SharedFirstSliceService = Arc<RwLock<FirstSliceService>>;
+type IndexSerialization = Arc<Mutex<()>>;
+type SemanticRefinements = Arc<Mutex<BTreeMap<OperationId, PendingSemanticRefinement>>>;
+
+#[derive(Clone)]
+struct FirstSliceServiceLanes {
+    service: SharedFirstSliceService,
+    index_serialization: IndexSerialization,
+    semantic_refinements: SemanticRefinements,
+    refinement: SyncSender<SemanticRefinementCommand>,
+}
+
 struct PublicationBoundaryHook {
     boundary: PublicationBoundary,
     fail_commit: AtomicBool,
@@ -393,7 +418,7 @@ impl FirstSliceDaemon {
     /// # Errors
     ///
     /// Returns [`FirstSliceHostError`] when the first-slice service cannot
-    /// initialize or either bounded worker thread cannot start.
+    /// initialize or a bounded worker thread cannot start.
     #[cfg(test)]
     pub(crate) fn start(
         journal: JournalActorHandle,
@@ -492,6 +517,10 @@ impl FirstSliceDaemon {
             .enable_time()
             .build()
             .map_err(FirstSliceHostError::AsyncRuntime)?;
+        let refinement_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(FirstSliceHostError::AsyncRuntime)?;
         let mut operation_metadata = OperationMetadataSet::new(DEFAULT_OPERATION_METADATA);
         for (publication, record) in durable_publications {
             operation_metadata
@@ -500,16 +529,27 @@ impl FirstSliceDaemon {
         }
         let metadata = Arc::new(Mutex::new(operation_metadata));
         let stopping = Arc::new(AtomicBool::new(false));
+        let service = Arc::new(RwLock::new(service));
+        let index_serialization = Arc::new(Mutex::new(()));
+        let semantic_refinements = Arc::new(Mutex::new(BTreeMap::new()));
         let (work, work_receiver) = mpsc::sync_channel(DEFAULT_WORK_QUEUE);
         let (control, control_receiver) = mpsc::sync_channel(DEFAULT_CONTROL_QUEUE);
+        let (refinement, refinement_receiver) = mpsc::sync_channel(DEFAULT_OPERATION_METADATA);
+        let lanes = FirstSliceServiceLanes {
+            service,
+            index_serialization,
+            semantic_refinements,
+            refinement: refinement.clone(),
+        };
         let work_journal = journal.clone();
         let work_metadata = Arc::clone(&metadata);
         let work_stopping = Arc::clone(&stopping);
+        let work_lanes = lanes.clone();
         let work_thread = thread::Builder::new()
             .name("rootlight-first-slice".to_owned())
             .spawn(move || {
                 service_worker(
-                    service,
+                    work_lanes,
                     work_journal,
                     work_metadata,
                     work_stopping,
@@ -518,7 +558,29 @@ impl FirstSliceDaemon {
                     publication_hook,
                 );
             })
-            .map_err(FirstSliceHostError::Thread)?;
+            .map_err(|error| {
+                stopping.store(true, Ordering::Release);
+                FirstSliceHostError::Thread(error)
+            })?;
+        let refinement_journal = journal.clone();
+        let refinement_metadata = Arc::clone(&metadata);
+        let refinement_stopping = Arc::clone(&stopping);
+        let refinement_thread = thread::Builder::new()
+            .name("rootlight-semantic-refinement".to_owned())
+            .spawn(move || {
+                semantic_refinement_worker(
+                    lanes,
+                    refinement_journal,
+                    refinement_metadata,
+                    refinement_stopping,
+                    refinement_runtime,
+                    refinement_receiver,
+                );
+            })
+            .map_err(|error| {
+                stopping.store(true, Ordering::Release);
+                FirstSliceHostError::Thread(error)
+            })?;
         let control_journal = journal.clone();
         let control_stopping = Arc::clone(&stopping);
         let control_thread = thread::Builder::new()
@@ -532,7 +594,10 @@ impl FirstSliceDaemon {
                     control_receiver,
                 );
             })
-            .map_err(FirstSliceHostError::Thread)?;
+            .map_err(|error| {
+                stopping.store(true, Ordering::Release);
+                FirstSliceHostError::Thread(error)
+            })?;
         let daemon = Self {
             work: work.clone(),
             control: control.clone(),
@@ -542,10 +607,12 @@ impl FirstSliceDaemon {
             FirstSliceWorkers {
                 work: Some(work),
                 control: Some(control),
+                refinement: Some(refinement),
                 stopping,
                 journal,
                 work_thread: Some(work_thread),
                 control_thread: Some(control_thread),
+                refinement_thread: Some(refinement_thread),
             },
         ))
     }
@@ -674,10 +741,12 @@ fn operation_status_observation(
 pub(crate) struct FirstSliceWorkers {
     work: Option<SyncSender<WorkerCommand>>,
     control: Option<SyncSender<WorkerCommand>>,
+    refinement: Option<SyncSender<SemanticRefinementCommand>>,
     stopping: Arc<AtomicBool>,
     journal: JournalActorHandle,
     work_thread: Option<JoinHandle<()>>,
     control_thread: Option<JoinHandle<()>>,
+    refinement_thread: Option<JoinHandle<()>>,
 }
 
 impl FirstSliceWorkers {
@@ -701,13 +770,15 @@ impl FirstSliceWorkers {
             .map_err(FirstSliceHostError::Journal)?;
         self.work.take();
         self.control.take();
+        self.refinement.take();
         let work = self.work_thread.take();
         let control = self.control_thread.take();
+        let refinement = self.refinement_thread.take();
         let (joined, completion) = tokio::sync::oneshot::channel();
         thread::Builder::new()
             .name("rootlight-first-slice-join".to_owned())
             .spawn(move || {
-                let result = [control, work]
+                let result = [control, work, refinement]
                     .into_iter()
                     .flatten()
                     .try_for_each(|thread| {
@@ -731,6 +802,7 @@ impl Drop for FirstSliceWorkers {
         self.stopping.store(true, Ordering::Release);
         self.work.take();
         self.control.take();
+        self.refinement.take();
     }
 }
 
@@ -989,7 +1061,7 @@ impl OperationMetadataSet {
 }
 
 fn service_worker(
-    mut service: FirstSliceService,
+    lanes: FirstSliceServiceLanes,
     journal: JournalActorHandle,
     metadata: Arc<Mutex<OperationMetadataSet>>,
     stopping: Arc<AtomicBool>,
@@ -1024,11 +1096,63 @@ fn service_worker(
                     publication_hook: publication_hook.as_ref(),
                 };
                 let result =
-                    execute_service_request(&mut service, resources, request, context, &mut reply);
+                    execute_service_request(&lanes, resources, request, context, &mut reply);
                 if let Some(reply) = reply {
                     let _ = reply.send(result);
                 }
             }
+        }
+    }
+}
+
+fn semantic_refinement_worker(
+    lanes: FirstSliceServiceLanes,
+    journal: JournalActorHandle,
+    metadata: Arc<Mutex<OperationMetadataSet>>,
+    stopping: Arc<AtomicBool>,
+    runtime: tokio::runtime::Runtime,
+    commands: Receiver<SemanticRefinementCommand>,
+) {
+    let catalog_epoch = Instant::now();
+    loop {
+        if stopping.load(Ordering::Acquire) {
+            return;
+        }
+        let command = match commands.recv_timeout(Duration::from_millis(10)) {
+            Ok(command) => command,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        let cancelled = command.context.cancellation.check().is_err();
+        let superseded = read_service(&lanes.service).map_or(true, |service| {
+            service.active_generation_for(command.repository) != Some(command.structural_generation)
+        });
+        if cancelled || superseded {
+            if remove_semantic_refinement(&lanes.semantic_refinements, command.operation).is_err() {
+                return;
+            }
+            continue;
+        }
+        let resources = ServiceRequestResources {
+            journal: &journal,
+            metadata: metadata.as_ref(),
+            runtime: &runtime,
+            catalog_epoch,
+            publication_hook: None,
+        };
+        let mut reply = None;
+        drop(repository_index_with_intent(
+            &lanes,
+            resources,
+            command.request,
+            &command.context,
+            &mut reply,
+            RepositoryIndexIntent::SemanticRefinement {
+                structural_generation: command.structural_generation,
+            },
+        ));
+        if remove_semantic_refinement(&lanes.semantic_refinements, command.operation).is_err() {
+            return;
         }
     }
 }
@@ -1073,7 +1197,7 @@ fn lifecycle_worker(
 }
 
 fn execute_service_request(
-    service: &mut FirstSliceService,
+    lanes: &FirstSliceServiceLanes,
     resources: ServiceRequestResources<'_>,
     request: FirstSliceIpcRequest,
     context: FirstSliceIpcContext,
@@ -1083,29 +1207,37 @@ fn execute_service_request(
         .cancellation
         .check()
         .map_err(|_| cancelled_error())?;
-    match request {
+    let request = match request {
         FirstSliceIpcRequest::RepositoryIndex(request) => {
-            repository_index(service, resources, request, &context, reply)
-                .map(FirstSliceIpcResponse::RepositoryIndex)
-        }
-        FirstSliceIpcRequest::CodeLocate(request) => {
-            code_locate(service, request, &context).map(FirstSliceIpcResponse::CodeLocate)
-        }
-        FirstSliceIpcRequest::SymbolExplain(request) => {
-            symbol_explain(service, request, &context).map(FirstSliceIpcResponse::SymbolExplain)
-        }
-        FirstSliceIpcRequest::SourceRead(request) => {
-            source_read(service, request, &context).map(FirstSliceIpcResponse::SourceRead)
-        }
-        FirstSliceIpcRequest::RepositoryList(request) => {
-            repository_list(service, request).map(FirstSliceIpcResponse::RepositoryList)
+            let _index = try_lock_index_serialization(&lanes.index_serialization)?;
+            return repository_index(lanes, resources, request, &context, reply)
+                .map(FirstSliceIpcResponse::RepositoryIndex);
         }
         FirstSliceIpcRequest::RepositoryCatalogPage(request) => {
-            repository_catalog_page(service, request, resources.catalog_epoch)
-                .map(FirstSliceIpcResponse::RepositoryCatalogPage)
+            let mut service = write_service(&lanes.service)?;
+            return repository_catalog_page(&mut service, request, resources.catalog_epoch)
+                .map(FirstSliceIpcResponse::RepositoryCatalogPage);
         }
+        request => request,
+    };
+    let service = read_service(&lanes.service)?;
+    match request {
+        FirstSliceIpcRequest::RepositoryIndex(_) => Err(internal_error()),
+        FirstSliceIpcRequest::CodeLocate(request) => {
+            code_locate(&service, request, &context).map(FirstSliceIpcResponse::CodeLocate)
+        }
+        FirstSliceIpcRequest::SymbolExplain(request) => {
+            symbol_explain(&service, request, &context).map(FirstSliceIpcResponse::SymbolExplain)
+        }
+        FirstSliceIpcRequest::SourceRead(request) => {
+            source_read(&service, request, &context).map(FirstSliceIpcResponse::SourceRead)
+        }
+        FirstSliceIpcRequest::RepositoryList(request) => {
+            repository_list(&service, request).map(FirstSliceIpcResponse::RepositoryList)
+        }
+        FirstSliceIpcRequest::RepositoryCatalogPage(_) => Err(internal_error()),
         FirstSliceIpcRequest::RepositoryStatus(request) => repository_status(
-            service,
+            &service,
             resources.journal,
             resources.metadata,
             resources.runtime,
@@ -1114,39 +1246,65 @@ fn execute_service_request(
         )
         .map(FirstSliceIpcResponse::RepositoryStatus),
         FirstSliceIpcRequest::SymbolRelationships(request) => {
-            symbol_relationships(service, request, &context)
+            symbol_relationships(&service, request, &context)
                 .map(FirstSliceIpcResponse::SymbolRelationships)
         }
         FirstSliceIpcRequest::FlowTrace(request) => {
-            flow_trace(service, request, &context).map(FirstSliceIpcResponse::FlowTrace)
+            flow_trace(&service, request, &context).map(FirstSliceIpcResponse::FlowTrace)
         }
         FirstSliceIpcRequest::ArchitectureCycles(request) => {
-            architecture_cycles(service, request, &context)
+            architecture_cycles(&service, request, &context)
                 .map(FirstSliceIpcResponse::ArchitectureCycles)
         }
         FirstSliceIpcRequest::CodeDead(request) => {
-            code_dead(service, request, &context).map(FirstSliceIpcResponse::CodeDead)
+            code_dead(&service, request, &context).map(FirstSliceIpcResponse::CodeDead)
         }
         FirstSliceIpcRequest::ArchitectureOverview(request) => {
-            architecture_overview(service, request, &context)
+            architecture_overview(&service, request, &context)
                 .map(FirstSliceIpcResponse::ArchitectureOverview)
         }
         FirstSliceIpcRequest::TestsSelect(request) => {
-            tests_select(service, request, &context).map(FirstSliceIpcResponse::TestsSelect)
+            tests_select(&service, request, &context).map(FirstSliceIpcResponse::TestsSelect)
         }
         FirstSliceIpcRequest::ChangeImpact(request) => {
-            change_impact(service, request, &context).map(FirstSliceIpcResponse::ChangeImpact)
+            change_impact(&service, request, &context).map(FirstSliceIpcResponse::ChangeImpact)
         }
         FirstSliceIpcRequest::PlanChange(request) => {
-            plan_change(service, request, &context).map(FirstSliceIpcResponse::PlanChange)
+            plan_change(&service, request, &context).map(FirstSliceIpcResponse::PlanChange)
         }
         FirstSliceIpcRequest::HistoryCompare(request) => {
-            history_compare(service, request, &context).map(FirstSliceIpcResponse::HistoryCompare)
+            history_compare(&service, request, &context).map(FirstSliceIpcResponse::HistoryCompare)
         }
         FirstSliceIpcRequest::QueryAdvanced(request) => {
-            advanced_query(service, request, &context).map(FirstSliceIpcResponse::QueryAdvanced)
+            advanced_query(&service, request, &context).map(FirstSliceIpcResponse::QueryAdvanced)
         }
         FirstSliceIpcRequest::RepositoryOperationStatus(_) => Err(internal_error()),
+    }
+}
+
+fn read_service(
+    service: &RwLock<FirstSliceService>,
+) -> Result<RwLockReadGuard<'_, FirstSliceService>, PublicError> {
+    service.read().map_err(|_| internal_error())
+}
+
+fn write_service(
+    service: &RwLock<FirstSliceService>,
+) -> Result<RwLockWriteGuard<'_, FirstSliceService>, PublicError> {
+    service.write().map_err(|_| internal_error())
+}
+
+fn lock_index_serialization(serialization: &Mutex<()>) -> Result<MutexGuard<'_, ()>, PublicError> {
+    serialization.lock().map_err(|_| internal_error())
+}
+
+fn try_lock_index_serialization(
+    serialization: &Mutex<()>,
+) -> Result<MutexGuard<'_, ()>, PublicError> {
+    match serialization.try_lock() {
+        Ok(guard) => Ok(guard),
+        Err(TryLockError::WouldBlock) => Err(operation_in_progress()),
+        Err(TryLockError::Poisoned(_)) => Err(internal_error()),
     }
 }
 
@@ -1293,14 +1451,14 @@ fn reduce_optional_usize(current: usize, maximum: Option<u64>) -> Result<usize, 
 }
 
 fn repository_index(
-    service: &mut FirstSliceService,
+    lanes: &FirstSliceServiceLanes,
     resources: ServiceRequestResources<'_>,
     request: daemon::RepositoryIndexRequest,
     context: &FirstSliceIpcContext,
     reply: &mut Option<Reply>,
 ) -> Result<daemon::RepositoryIndexResponse, PublicError> {
     repository_index_with_intent(
-        service,
+        lanes,
         resources,
         request,
         context,
@@ -1316,13 +1474,17 @@ enum RepositoryIndexIntent {
 }
 
 fn repository_index_with_intent(
-    service: &mut FirstSliceService,
+    lanes: &FirstSliceServiceLanes,
     resources: ServiceRequestResources<'_>,
     request: daemon::RepositoryIndexRequest,
     context: &FirstSliceIpcContext,
     reply: &mut Option<Reply>,
     intent: RepositoryIndexIntent,
 ) -> Result<daemon::RepositoryIndexResponse, PublicError> {
+    let service = &lanes.service;
+    let index_serialization = &lanes.index_serialization;
+    let semantic_refinements = &lanes.semantic_refinements;
+    let refinement = &lanes.refinement;
     let ServiceRequestResources {
         journal,
         metadata,
@@ -1335,7 +1497,7 @@ fn repository_index_with_intent(
         daemon::RepositoryIndexMode::try_from(request.mode).map_err(|_| invalid_argument())?;
     let auto_refinement = matches!(intent, RepositoryIndexIntent::Requested)
         && requested_mode == daemon::RepositoryIndexMode::RepositoryIndexAuto
-        && service.deep_analysis_available();
+        && read_service(service)?.deep_analysis_available();
     let mode = match intent {
         RepositoryIndexIntent::SemanticRefinement { .. } => FirstSliceIndexMode::Deep,
         RepositoryIndexIntent::Requested => match requested_mode {
@@ -1355,7 +1517,7 @@ fn repository_index_with_intent(
         return Err(invalid_argument());
     }
     let root = PathBuf::from(&request.root);
-    let requested_repository = service
+    let requested_repository = read_service(service)?
         .registered_repository_for_root(&root, &context.cancellation)
         .map_err(service_error)?;
     let detached = request.detached;
@@ -1374,7 +1536,7 @@ fn repository_index_with_intent(
             // Preserve the original caller-plan identity across the two-stage
             // activation change so a durable Auto submission remains retryable.
             let plan_mode = if requested_mode == daemon::RepositoryIndexMode::RepositoryIndexAuto
-                && service.deep_analysis_available()
+                && read_service(service)?.deep_analysis_available()
             {
                 FirstSliceIndexMode::Deep
             } else {
@@ -1422,13 +1584,13 @@ fn repository_index_with_intent(
             let response = retry_index_response(metadata, existing, mode)?;
             if auto_refinement {
                 return complete_auto_structural_index(
-                    service,
-                    resources,
                     &request.root,
                     operation,
                     context,
                     reply,
                     response,
+                    semantic_refinements,
+                    refinement,
                 );
             }
             return Ok(response);
@@ -1436,6 +1598,11 @@ fn repository_index_with_intent(
         Err(error) if error.code() == ErrorCode::NotFound => {}
         Ok(_) => return Err(internal_error()),
         Err(error) => return Err(error),
+    }
+    if matches!(intent, RepositoryIndexIntent::Requested)
+        && let Some(repository) = requested_repository
+    {
+        cancel_semantic_refinements(semantic_refinements, repository)?;
     }
     let started_unix_ms = unix_time_ms()?;
     lock_metadata(metadata)?.reserve(operation, started_unix_ms, requested_repository)?;
@@ -1453,7 +1620,7 @@ fn repository_index_with_intent(
     if let Some(admission) = context.index_admission.as_ref() {
         admission.mark_inserted();
     }
-    let admission = match service.admit_rust_fixture(&root, &context.cancellation) {
+    let admission = match write_service(service)?.admit_rust_fixture(&root, &context.cancellation) {
         Ok(admission) => admission,
         Err(error) => {
             let public = service_error(error);
@@ -1512,6 +1679,9 @@ fn repository_index_with_intent(
             )?;
             return Err(error);
         }
+        if matches!(intent, RepositoryIndexIntent::SemanticRefinement { .. }) {
+            activate_semantic_refinement(semantic_refinements, operation, cancellation.clone())?;
+        }
         if let Some(hook) = publication_hook
             && let Err(error) = hook.pause(PublicationBoundary::AfterActivation)
         {
@@ -1526,13 +1696,18 @@ fn repository_index_with_intent(
             )?;
             return Err(error);
         }
-        let preparation = match intent {
-            RepositoryIndexIntent::Requested => {
-                service.prepare_repository_with_mode(&root, mode, &cancellation)
+        let preparation = {
+            let service = read_service(service)?;
+            match intent {
+                RepositoryIndexIntent::Requested => {
+                    service.prepare_repository_with_mode(&root, mode, &cancellation)
+                }
+                RepositoryIndexIntent::SemanticRefinement {
+                    structural_generation,
+                } => {
+                    service.prepare_semantic_refinement(&root, structural_generation, &cancellation)
+                }
             }
-            RepositoryIndexIntent::SemanticRefinement {
-                structural_generation,
-            } => service.prepare_semantic_refinement(&root, structural_generation, &cancellation),
         };
         match preparation {
             Ok(prepared) => {
@@ -1554,7 +1729,53 @@ fn repository_index_with_intent(
                     )?;
                     return Err(cancelled_error());
                 }
-                let staged = match service.stage_prepared(prepared, &cancellation) {
+                let _refinement_publication = match intent {
+                    RepositoryIndexIntent::Requested => None,
+                    RepositoryIndexIntent::SemanticRefinement {
+                        structural_generation,
+                    } => {
+                        // Preparation intentionally runs beside queries and a
+                        // successor structural index. Only this short boundary
+                        // is serialized, and the parent check rejects output
+                        // prepared against a generation superseded meanwhile.
+                        let guard = lock_index_serialization(index_serialization)?;
+                        if propagate_peer_cancellation(
+                            runtime,
+                            journal,
+                            operation,
+                            context,
+                            lifecycle_deadline,
+                        )? {
+                            finish_failed_index(
+                                runtime,
+                                lifecycle_deadline,
+                                journal,
+                                metadata,
+                                operation,
+                                &cancellation,
+                                &cancelled_error(),
+                            )?;
+                            return Err(cancelled_error());
+                        }
+                        let active =
+                            read_service(service)?.active_generation_for(admission.repository);
+                        if active != Some(structural_generation) {
+                            let error = stale_generation();
+                            finish_failed_index(
+                                runtime,
+                                lifecycle_deadline,
+                                journal,
+                                metadata,
+                                operation,
+                                &cancellation,
+                                &error,
+                            )?;
+                            return Err(error);
+                        }
+                        Some(guard)
+                    }
+                };
+                let staged = match write_service(service)?.stage_prepared(prepared, &cancellation) {
                     Ok(staged) => staged,
                     Err(error) => {
                         let public = service_error(error);
@@ -1575,7 +1796,9 @@ fn repository_index_with_intent(
                 if let Some(hook) = publication_hook
                     && let Err(error) = hook.pause(PublicationBoundary::BeforeCompletion)
                 {
-                    let discard = service.discard_staged(staged).map_err(service_error);
+                    let discard = write_service(service)?
+                        .discard_staged(staged)
+                        .map_err(service_error);
                     let terminal = finish_failed_index(
                         runtime,
                         lifecycle_deadline,
@@ -1597,7 +1820,7 @@ fn repository_index_with_intent(
                     context,
                     lifecycle_deadline,
                 )?;
-                let durable_publication = service.uses_durable_publication();
+                let durable_publication = read_service(service)?.uses_durable_publication();
                 let completion = if durable_publication {
                     journal_lifecycle_call(
                         runtime,
@@ -1626,7 +1849,7 @@ fn repository_index_with_intent(
                 let publication_record = match completion {
                     Ok(record) => record,
                     Err(error) => {
-                        if service.discard_staged(staged).is_err() {
+                        if write_service(service)?.discard_staged(staged).is_err() {
                             lock_metadata(metadata)?.fail_closed(operation);
                             return Err(internal_error());
                         }
@@ -1647,7 +1870,9 @@ fn repository_index_with_intent(
                     publication_record.state == OperationState::Succeeded
                 };
                 if !expected_publication_state {
-                    service.discard_staged(staged).map_err(service_error)?;
+                    write_service(service)?
+                        .discard_staged(staged)
+                        .map_err(service_error)?;
                     let mut metadata = lock_metadata(metadata)?;
                     metadata.discard(operation)?;
                     metadata.mark_terminal(operation);
@@ -1656,17 +1881,19 @@ fn repository_index_with_intent(
                 if let Some(hook) = publication_hook
                     && let Err(error) = hook.pause(PublicationBoundary::AfterSuccess)
                 {
-                    service.discard_staged(staged).map_err(service_error)?;
+                    write_service(service)?
+                        .discard_staged(staged)
+                        .map_err(service_error)?;
                     lock_metadata(metadata)?.fail_closed(operation);
                     return Err(error);
                 }
                 let commit = if publication_hook.is_some_and(PublicationBoundaryHook::fail_commit) {
-                    match service.discard_staged(staged) {
+                    match write_service(service)?.discard_staged(staged) {
                         Ok(()) => Err(FirstSliceError::Retention),
                         Err(error) => Err(error),
                     }
                 } else {
-                    service.commit_staged_for_operation(
+                    write_service(service)?.commit_staged_for_operation(
                         staged,
                         FirstSliceOperationContext {
                             operation,
@@ -1716,78 +1943,147 @@ fn repository_index_with_intent(
         }
     })();
     if result.is_err() {
-        service.release_index_admission(admission.repository);
+        write_service(service)?.release_index_admission(admission.repository);
     }
     match result {
         Ok(response) if auto_refinement => complete_auto_structural_index(
-            service,
-            resources,
             &request.root,
             operation,
             context,
             reply,
             response,
+            semantic_refinements,
+            refinement,
         ),
         result => result,
     }
 }
 
 fn complete_auto_structural_index(
-    service: &mut FirstSliceService,
-    resources: ServiceRequestResources<'_>,
     root: &str,
     operation: OperationId,
     context: &FirstSliceIpcContext,
     reply: &mut Option<Reply>,
     response: daemon::RepositoryIndexResponse,
+    semantic_refinements: &SemanticRefinements,
+    refinement: &SyncSender<SemanticRefinementCommand>,
 ) -> Result<daemon::RepositoryIndexResponse, PublicError> {
     let Some(published_generation) = response.published_generation.as_ref() else {
         return Ok(response);
     };
     let structural_generation = parse_generation(Some(published_generation))?;
-
-    // The structural response is released before the expensive follow-up. Its
-    // generation and operation marker are already durable at this point.
-    if let Some(reply) = reply.take() {
-        let _ = reply.send(Ok(FirstSliceIpcResponse::RepositoryIndex(response.clone())));
-    }
+    let repository = parse_repository(response.repository.as_ref())?;
+    let semantic_operation = semantic_refinement_operation(operation);
 
     let refinement_deadline = Instant::now()
         .checked_add(DETACHED_INDEX_TIMEOUT)
         .ok_or_else(internal_error)?;
+    let cancellation = Cancellation::with_deadline(refinement_deadline);
     let refinement_context = FirstSliceIpcContext {
         client_instance_id: context.client_instance_id,
         selected_protocol_minor: context.selected_protocol_minor,
-        cancellation: Cancellation::with_deadline(refinement_deadline),
+        cancellation: cancellation.clone(),
         deadline: refinement_deadline,
         effective_budget: context.effective_budget,
         index_admission: None,
     };
-    let refinement_request = daemon::RepositoryIndexRequest {
-        schema_version: Some(schema_version()),
-        root: root.to_owned(),
-        operation: Some(operation_to_wire(semantic_refinement_operation(operation))),
-        detached: true,
-        mode: daemon::RepositoryIndexMode::RepositoryIndexDeep as i32,
-    };
-    let mut refinement_reply = None;
-    let refinement_resources = ServiceRequestResources {
-        publication_hook: None,
-        ..resources
-    };
-    // Refinement failure is represented by its own durable operation while the
-    // successfully published structural generation remains authoritative.
-    drop(repository_index_with_intent(
-        service,
-        refinement_resources,
-        refinement_request,
-        &refinement_context,
-        &mut refinement_reply,
-        RepositoryIndexIntent::SemanticRefinement {
-            structural_generation,
+    let command = SemanticRefinementCommand {
+        request: daemon::RepositoryIndexRequest {
+            schema_version: Some(schema_version()),
+            root: root.to_owned(),
+            operation: Some(operation_to_wire(semantic_operation)),
+            detached: true,
+            mode: daemon::RepositoryIndexMode::RepositoryIndexDeep as i32,
         },
-    ));
+        context: refinement_context,
+        operation: semantic_operation,
+        repository,
+        structural_generation,
+    };
+    if register_semantic_refinement(
+        semantic_refinements,
+        semantic_operation,
+        repository,
+        cancellation,
+    )? {
+        match refinement.try_send(command) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                remove_semantic_refinement(semantic_refinements, semantic_operation)?;
+                return Err(operation_in_progress());
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                remove_semantic_refinement(semantic_refinements, semantic_operation)?;
+                return Err(internal_error());
+            }
+        }
+    }
+
+    // The bounded refinement lane now owns the expensive follow-up. Queries
+    // share the immutable service view while it prepares the next generation.
+    if let Some(reply) = reply.take() {
+        let _ = reply.send(Ok(FirstSliceIpcResponse::RepositoryIndex(response.clone())));
+    }
     Ok(response)
+}
+
+fn register_semantic_refinement(
+    refinements: &Mutex<BTreeMap<OperationId, PendingSemanticRefinement>>,
+    operation: OperationId,
+    repository: RepositoryId,
+    cancellation: Cancellation,
+) -> Result<bool, PublicError> {
+    let mut refinements = refinements.lock().map_err(|_| internal_error())?;
+    match refinements.entry(operation) {
+        std::collections::btree_map::Entry::Occupied(_) => Ok(false),
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(PendingSemanticRefinement {
+                repository,
+                cancellation,
+            });
+            Ok(true)
+        }
+    }
+}
+
+fn activate_semantic_refinement(
+    refinements: &Mutex<BTreeMap<OperationId, PendingSemanticRefinement>>,
+    operation: OperationId,
+    cancellation: Cancellation,
+) -> Result<(), PublicError> {
+    let mut refinements = refinements.lock().map_err(|_| internal_error())?;
+    let pending = refinements.get_mut(&operation).ok_or_else(internal_error)?;
+    if let Some(reason) = pending.cancellation.reason() {
+        let _ = cancellation.cancel(reason);
+    }
+    pending.cancellation = cancellation;
+    Ok(())
+}
+
+fn cancel_semantic_refinements(
+    refinements: &Mutex<BTreeMap<OperationId, PendingSemanticRefinement>>,
+    repository: RepositoryId,
+) -> Result<(), PublicError> {
+    let refinements = refinements.lock().map_err(|_| internal_error())?;
+    for pending in refinements.values() {
+        if pending.repository == repository {
+            let _ = pending
+                .cancellation
+                .cancel(CancellationReason::ParentCancelled);
+        }
+    }
+    Ok(())
+}
+
+fn remove_semantic_refinement(
+    refinements: &Mutex<BTreeMap<OperationId, PendingSemanticRefinement>>,
+    operation: OperationId,
+) -> Result<(), PublicError> {
+    refinements
+        .lock()
+        .map_err(|_| internal_error())?
+        .remove(&operation);
+    Ok(())
 }
 
 fn semantic_refinement_operation(operation: OperationId) -> OperationId {
@@ -2154,10 +2450,11 @@ fn code_locate(
     Ok(daemon::CodeLocateResponse {
         schema_version: Some(schema_version()),
         context: Some(query_context(
+            service,
             generation,
             &response.usage,
             &response.data.coverage,
-        )),
+        )?),
         hits,
         matched_candidates: response.data.matched_candidates,
         truncated: response.data.truncated,
@@ -2261,7 +2558,12 @@ fn symbol_explain(
     }
     Ok(daemon::SymbolExplainResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(generation, &usage.finish(), &coverage)),
+        context: Some(query_context(
+            service,
+            generation,
+            &usage.finish(),
+            &coverage,
+        )?),
         symbols,
         unresolved_symbols,
         truncated: !limiting_resources.is_empty(),
@@ -2349,7 +2651,7 @@ fn symbol_relationships(
     }
     Ok(daemon::SymbolRelationshipsResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(generation, &response.usage, &[])),
+        context: Some(query_context(service, generation, &response.usage, &[])?),
         groups,
         returned_edges: u64::from(response.data.returned_edges),
         total_edges: u64::from(response.data.total_edges),
@@ -2455,7 +2757,7 @@ fn flow_trace(
         };
         return Ok(daemon::FlowTraceResponse {
             schema_version: Some(schema_version()),
-            context: Some(query_context(generation, &response.usage, &[])),
+            context: Some(query_context(service, generation, &response.usage, &[])?),
             paths,
             frontier: Some(daemon::FirstSliceTraceFrontier {
                 reached_nodes,
@@ -2520,7 +2822,7 @@ fn flow_trace(
     let projection = response.data.projection;
     Ok(daemon::FlowTraceResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(generation, &response.usage, &[])),
+        context: Some(query_context(service, generation, &response.usage, &[])?),
         paths,
         frontier: Some(daemon::FirstSliceTraceFrontier {
             reached_nodes: frontier.reached_nodes,
@@ -2631,7 +2933,7 @@ fn architecture_cycles(
     let projection = response.data.projection;
     Ok(daemon::ArchitectureCyclesResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(generation, &response.usage, &[])),
+        context: Some(query_context(service, generation, &response.usage, &[])?),
         components,
         cycles,
         break_candidates,
@@ -2792,7 +3094,7 @@ fn code_dead(
     let entry_points = response.data.entry_points;
     Ok(daemon::CodeDeadResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(generation, &response.usage, &[])),
+        context: Some(query_context(service, generation, &response.usage, &[])?),
         candidates,
         entry_points: Some(daemon::FirstSliceEntryPointSummary {
             policy: entry_points.policy.as_str().to_owned(),
@@ -2915,7 +3217,7 @@ fn architecture_overview(
     }
     Ok(daemon::ArchitectureOverviewResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(generation, &response.usage, &[])),
+        context: Some(query_context(service, generation, &response.usage, &[])?),
         components,
         connections,
         hotspots,
@@ -2996,7 +3298,7 @@ fn tests_select(
     }
     Ok(daemon::TestsSelectResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(generation, &response.usage, &[])),
+        context: Some(query_context(service, generation, &response.usage, &[])?),
         tests,
         coverage_strategy: Some(daemon::FirstSliceTestCoverageStrategy {
             direct_edges: strategy.direct_edges,
@@ -3115,7 +3417,7 @@ fn change_impact(
     }
     Ok(daemon::ChangeImpactResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(generation, &response.usage, &[])),
+        context: Some(query_context(service, generation, &response.usage, &[])?),
         resolved_changes,
         impacted,
         tests,
@@ -3210,7 +3512,7 @@ fn plan_change(
     }
     Ok(daemon::PlanChangeResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(generation, &response.usage, &[])),
+        context: Some(query_context(service, generation, &response.usage, &[])?),
         plan,
         affected_scope: Some(daemon::FirstSlicePlanImpactSummary {
             affected_symbols: affected_scope.affected_symbols,
@@ -3315,7 +3617,7 @@ fn history_compare(
     }
     Ok(daemon::HistoryCompareResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(head_context, &response.usage, &[])),
+        context: Some(query_context(service, head_context, &response.usage, &[])?),
         matched_states: Some(daemon::FirstSliceMatchedStates {
             base_generation: Some(generation_to_wire(data.base_generation)),
             head_generation: Some(generation_to_wire(data.head_generation)),
@@ -3411,7 +3713,7 @@ fn advanced_query(
     let completeness = data.completeness.as_str().to_owned();
     Ok(daemon::AdvancedQueryResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(generation, &response.usage, &[])),
+        context: Some(query_context(service, generation, &response.usage, &[])?),
         columns,
         rows,
         plan,
@@ -3527,7 +3829,7 @@ fn source_read(
     }
     Ok(daemon::SourceReadResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(generation, &response.usage, &[])),
+        context: Some(query_context(service, generation, &response.usage, &[])?),
         chunks,
         total_source_bytes: response.usage.source_bytes,
         truncated: execution.is_truncated(),
@@ -3944,12 +4246,16 @@ impl UsageAccumulator {
 }
 
 fn query_context(
+    service: &FirstSliceService,
     generation: FirstSliceGenerationContext,
     usage: &QueryUsage,
     coverage: &[CoverageRecord],
-) -> daemon::FirstSliceQueryContext {
+) -> Result<daemon::FirstSliceQueryContext, PublicError> {
     let (tier, status, skipped) = aggregate_coverage(coverage, &generation.receipt);
-    daemon::FirstSliceQueryContext {
+    let freshness = service
+        .generation_freshness(generation.repository, generation.generation)
+        .map_err(service_error)?;
+    Ok(daemon::FirstSliceQueryContext {
         repository: Some(repository_to_wire(generation.repository)),
         generation: Some(generation_to_wire(generation.generation)),
         parent_generation: generation.parent.map(generation_to_wire),
@@ -3968,9 +4274,21 @@ fn query_context(
             token_accounting: Some(
                 daemon::FirstSliceTokenAccountingProfile::FirstSliceTokenAccountingUtf8ByteUpperBoundV1
                     as i32,
-            ),
+                ),
             memory_bytes: Some(usage.memory_bytes),
         }),
+        structural_freshness: query_freshness_label(freshness.structural).to_owned(),
+        semantic_freshness: query_freshness_label(freshness.semantic).to_owned(),
+    })
+}
+
+const fn query_freshness_label(freshness: FirstSliceObservedFreshness) -> &'static str {
+    match freshness {
+        FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan => "current",
+        FirstSliceObservedFreshness::PendingSemanticRefinement => "stale",
+        FirstSliceObservedFreshness::Superseded => "superseded",
+        // A newer service state must not be promoted to current by an older daemon.
+        _ => "stale",
     }
 }
 
@@ -4777,13 +5095,15 @@ mod tests {
         });
         let deadline = Instant::now() + Duration::from_secs(30);
         let cancellation = Cancellation::with_deadline(deadline);
-        let mut service = FirstSliceService::new_durable_with_project_analyzer(
-            3,
-            paths.state_dir(),
-            analyzer,
-            &cancellation,
-        )
-        .expect("durable semantic service initializes");
+        let service = Arc::new(RwLock::new(
+            FirstSliceService::new_durable_with_project_analyzer(
+                3,
+                paths.state_dir(),
+                analyzer,
+                &cancellation,
+            )
+            .expect("durable semantic service initializes"),
+        ));
         let journal = Arc::new(
             OperationJournal::open(&paths.operation_journal_path())
                 .expect("operation journal opens"),
@@ -4820,8 +5140,17 @@ mod tests {
         };
         let (reply_sender, reply_receiver) = tokio::sync::oneshot::channel();
         let mut reply = Some(reply_sender);
+        let index_serialization = Arc::new(Mutex::new(()));
+        let semantic_refinements = Arc::new(Mutex::new(BTreeMap::new()));
+        let (refinement, refinement_receiver) = mpsc::sync_channel(1);
+        let lanes = FirstSliceServiceLanes {
+            service: Arc::clone(&service),
+            index_serialization,
+            semantic_refinements,
+            refinement,
+        };
 
-        let response = repository_index(&mut service, resources, request, &context, &mut reply)
+        let response = repository_index(&lanes, resources, request, &context, &mut reply)
             .expect("structural stage publishes");
 
         assert!(reply.is_none());
@@ -4838,12 +5167,63 @@ mod tests {
             delivered,
             FirstSliceIpcResponse::RepositoryIndex(ref delivered) if delivered == &response
         ));
-        assert_eq!(calls.load(AtomicOrdering::Relaxed), 1);
-        let repositories = service.list_repositories();
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 0);
+        let repositories = read_service(&service)
+            .expect("service read lock is available")
+            .list_repositories();
         let [repository] = repositories.as_slice() else {
             panic!("only one repository is active");
         };
         assert_eq!(repository.semantic_freshness, "pending_refinement");
+        let catalog = {
+            let mut service = write_service(&service).expect("service write lock is available");
+            repository_catalog_page(
+                &mut service,
+                catalog_request(20, false, Vec::new(), None, None),
+                Instant::now(),
+            )
+            .expect("catalog remains available during semantic refinement")
+        };
+        assert_eq!(catalog.repositories.len(), 1);
+        assert_eq!(catalog.repositories[0].structural_freshness, "current");
+        assert_eq!(catalog.repositories[0].semantic_freshness, "stale");
+        let locate = {
+            let service = read_service(&service).expect("service read lock is available");
+            code_locate(
+                &service,
+                daemon::CodeLocateRequest {
+                    schema_version: Some(schema_version()),
+                    repository: Some(repository_to_wire(repository.repository)),
+                    generation: Some(daemon::GenerationSelector {
+                        selector: Some(daemon::generation_selector::Selector::Active(true)),
+                    }),
+                    query: "structural_stage".to_owned(),
+                    mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+                    maximum_results: 8,
+                    page_offset: 0,
+                },
+                &context,
+            )
+            .expect("the structural generation remains queryable")
+        };
+        let query_context = locate.context.expect("query context exists");
+        assert_eq!(query_context.structural_freshness, "current");
+        assert_eq!(query_context.semantic_freshness, "stale");
+        let refinement = refinement_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("semantic refinement is scheduled");
+        let mut refinement_reply = None;
+        drop(repository_index_with_intent(
+            &lanes,
+            resources,
+            refinement.request,
+            &refinement.context,
+            &mut refinement_reply,
+            RepositoryIndexIntent::SemanticRefinement {
+                structural_generation: refinement.structural_generation,
+            },
+        ));
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 1);
         assert_eq!(
             journal
                 .status(operation)
@@ -5836,6 +6216,7 @@ mod tests {
             "pub fn answer() -> u32 { 2 }\n",
         )
         .expect("updated source writes");
+        let service = Arc::new(RwLock::new(service));
 
         let operation = OperationId::from_bytes([74; 16]);
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
@@ -5866,8 +6247,17 @@ mod tests {
             release: release_receiver,
         };
         let mut reply = None;
+        let index_serialization = Arc::new(Mutex::new(()));
+        let semantic_refinements = Arc::new(Mutex::new(BTreeMap::new()));
+        let (refinement, _refinement_receiver) = mpsc::sync_channel(1);
+        let lanes = FirstSliceServiceLanes {
+            service: Arc::clone(&service),
+            index_serialization,
+            semantic_refinements,
+            refinement,
+        };
         let error = repository_index(
-            &mut service,
+            &lanes,
             ServiceRequestResources {
                 journal: &handle,
                 metadata: &metadata,
@@ -5897,8 +6287,11 @@ mod tests {
 
         let mut request = status_request(active.repository, None);
         request.include_operations = true;
-        let response = repository_status(&service, &handle, &metadata, &runtime, request, &context)
-            .expect("healthy active generation remains reportable");
+        let response = {
+            let service = read_service(&service).expect("service read lock is available");
+            repository_status(&service, &handle, &metadata, &runtime, request, &context)
+                .expect("healthy active generation remains reportable")
+        };
         assert_eq!(response.state, "ready");
         assert_eq!(response.operations.len(), 1);
         assert_eq!(

@@ -767,6 +767,12 @@ pub struct FirstSliceQueryContext {
     #[prost(message, optional, tag = "8")]
     #[allow(missing_docs)]
     pub usage: ::core::option::Option<FirstSliceQueryUsage>,
+    #[prost(string, tag = "9")]
+    #[allow(missing_docs)]
+    pub structural_freshness: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    #[allow(missing_docs)]
+    pub semantic_freshness: ::prost::alloc::string::String,
 }
 /// One source-free limiting-resource observation.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]

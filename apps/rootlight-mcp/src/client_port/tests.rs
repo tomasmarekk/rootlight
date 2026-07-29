@@ -323,8 +323,10 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             options,
         });
         Box::pin(async move {
+            let mut context = query_context(repository, generation, true);
+            context.semantic_freshness = rootlight_client::QueryFreshness::Stale;
             Ok(CodeLocate {
-                context: query_context(repository, generation, true),
+                context,
                 hits: Vec::new(),
                 matched_candidates: 0,
                 truncated: false,
@@ -918,6 +920,10 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
         locate.generation.structural_freshness
             == rootlight_mcp_contract::vertical::Freshness::Current
     );
+    assert_eq!(
+        locate.generation.semantic_freshness,
+        rootlight_mcp_contract::vertical::Freshness::Stale
+    );
     assert!(locate.data.query_interpretation.tokens.is_empty());
     assert_eq!(locate.coverage.languages.len(), 1);
     assert_eq!(locate.coverage.languages[0].language, "rust");
@@ -1245,12 +1251,19 @@ fn query_context(
         GenerationSelector::Active => generation(),
         GenerationSelector::Generation(generation) => generation,
     };
+    let freshness = if active_generation {
+        rootlight_client::QueryFreshness::Current
+    } else {
+        rootlight_client::QueryFreshness::Superseded
+    };
     QueryContext {
         repository,
         generation: resolved_generation,
         parent_generation: (resolved_generation != parent_generation())
             .then_some(parent_generation()),
         active_generation,
+        structural_freshness: freshness,
+        semantic_freshness: freshness,
         tier: ClientAnalysisTier::TierC,
         coverage_status: CoverageStatus::Complete,
         skipped_inputs: 0,

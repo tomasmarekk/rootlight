@@ -15,8 +15,8 @@ use std::{
 use rootlight_client::{
     AdvancedQuery, AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview,
     ChangeImpact, Client, ClientError, CodeDead, CodeLocate, CoverageStatus, FlowTrace,
-    GenerationSelector, HistoryCompare, LocateMode, PlanChange, RepositoryCatalogPage,
-    RepositoryCatalogPageRequest, RepositoryIndex,
+    GenerationSelector, HistoryCompare, LocateMode, PlanChange, QueryFreshness,
+    RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryIndex,
     RepositoryIndexMode as ClientRepositoryIndexMode, RepositoryOperationAction,
     RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
     RequestTimeout, SourceEncoding as ClientSourceEncoding, SourceRead,
@@ -1494,20 +1494,23 @@ fn read_metadata(
     context: &rootlight_client::QueryContext,
     languages: Vec<LanguageCoverage>,
 ) -> Result<ReadResponseMetadata, ClientPortError> {
-    let freshness = if context.active_generation {
-        Freshness::Current
-    } else {
-        Freshness::Superseded
-    };
     Ok(ReadResponseMetadata::new(
         context.repository.to_string(),
-        freshness,
-        freshness,
+        query_freshness(context.structural_freshness),
+        query_freshness(context.semantic_freshness),
         languages,
         CacheStatus::NotApplicable,
         bridge_trace_id()?,
         Vec::new(),
     ))
+}
+
+const fn query_freshness(freshness: QueryFreshness) -> Freshness {
+    match freshness {
+        QueryFreshness::Current => Freshness::Current,
+        QueryFreshness::Stale => Freshness::Stale,
+        QueryFreshness::Superseded => Freshness::Superseded,
+    }
 }
 
 fn locate_languages(result: &CodeLocate) -> Result<Vec<LanguageCoverage>, ClientPortError> {

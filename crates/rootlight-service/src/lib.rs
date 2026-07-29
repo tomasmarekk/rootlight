@@ -17,8 +17,9 @@ use std::{
 };
 
 use catalog::{
-    CATALOG_MAX_LABEL_BYTES, CatalogInstant, CatalogLanguageCoverage, CatalogPage,
-    CatalogPageRequest, CatalogRepositoryRecord, CatalogRepositoryState, CatalogSnapshotStore,
+    CATALOG_MAX_LABEL_BYTES, CatalogFreshness, CatalogInstant, CatalogLanguageCoverage,
+    CatalogPage, CatalogPageRequest, CatalogRepositoryRecord, CatalogRepositoryState,
+    CatalogSnapshotStore,
 };
 use durable::{
     DurableCatalog, DurablePreparedGeneration, DurablePublishedGeneration, RestoredGeneration,
@@ -590,6 +591,14 @@ const fn freshness_label(freshness: FirstSliceObservedFreshness) -> &'static str
         FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan => "current",
         FirstSliceObservedFreshness::PendingSemanticRefinement => "pending_refinement",
         FirstSliceObservedFreshness::Superseded => "superseded",
+    }
+}
+
+const fn catalog_freshness(freshness: FirstSliceObservedFreshness) -> CatalogFreshness {
+    match freshness {
+        FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan => CatalogFreshness::Current,
+        FirstSliceObservedFreshness::PendingSemanticRefinement => CatalogFreshness::Stale,
+        FirstSliceObservedFreshness::Superseded => CatalogFreshness::Superseded,
     }
 }
 
@@ -4975,9 +4984,8 @@ impl FirstSliceService {
     ///
     /// The result is deterministic because the underlying repository map is an
     /// ordered map keyed by repository identity. Each entry joins the active
-    /// generation document for languages and freshness. The active generation is
-    /// always current relative to the latest committed authoritative scan, so
-    /// every entry reports current freshness and the ready state.
+    /// generation document for languages and freshness. A structural stage is
+    /// ready and queryable while explicitly reporting pending semantic work.
     #[must_use]
     pub fn list_repositories(&self) -> Vec<RepositoryListEntryDto> {
         self.active_by_repository
@@ -5056,6 +5064,9 @@ impl FirstSliceService {
                 .generations
                 .generation(*active_generation)
                 .map_err(|_| catalog::CatalogError::CatalogInvariant)?;
+            let freshness = self
+                .generation_freshness(*repository, *active_generation)
+                .map_err(|_| catalog::CatalogError::CatalogInvariant)?;
             let mut coverage = Vec::new();
             for summary in language_coverage(snapshot.document()) {
                 coverage.push(CatalogLanguageCoverage::new(
@@ -5073,6 +5084,10 @@ impl FirstSliceService {
                 generation_count,
                 CatalogRepositoryState::Ready,
             )?
+            .with_freshness(
+                catalog_freshness(freshness.structural),
+                catalog_freshness(freshness.semantic),
+            )
             .with_coverage(coverage)?;
             records.push(record);
         }

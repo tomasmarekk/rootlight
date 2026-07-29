@@ -394,7 +394,16 @@ fn repository_status_distinguishes_empty_missing_failed_and_unavailable_results(
         empty_status["data"]["coverage"]["languages"][0]["files_indexed"],
         1
     );
-    assert_eq!(empty_status["data"]["recommended_actions"], json!([]));
+    assert_eq!(
+        empty_status["generation"]["structural_freshness"],
+        "current"
+    );
+    assert_eq!(empty_status["generation"]["semantic_freshness"], "stale");
+    assert_eq!(
+        empty_status["data"]["recommended_actions"],
+        json!(["index repository"])
+    );
+    assert_eq!(empty_status["warnings"][0]["code"], "stale_generation");
 
     let missing = mcp.call(
         "status-not-indexed",
@@ -436,8 +445,9 @@ fn repository_status_distinguishes_empty_missing_failed_and_unavailable_results(
     assert_eq!(failed_status["data"]["operations"][0]["state"], "failed");
     assert_eq!(
         failed_status["data"]["recommended_actions"],
-        json!(["inspect operation"])
+        json!(["index repository", "inspect operation"])
     );
+    assert_eq!(failed_status["warnings"][0]["code"], "stale_generation");
 
     mcp.finish();
     daemon.finish();

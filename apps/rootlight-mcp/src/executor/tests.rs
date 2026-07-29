@@ -1495,6 +1495,8 @@ fn context(results: u64, source_bytes: u64) -> QueryContext {
         generation: generation(),
         parent_generation: Some(parent_generation()),
         active_generation: true,
+        structural_freshness: client::QueryFreshness::Current,
+        semantic_freshness: client::QueryFreshness::Current,
         tier: ClientTier::TierC,
         coverage_status: ClientCoverage::Complete,
         skipped_inputs: 0,
