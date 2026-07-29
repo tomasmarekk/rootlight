@@ -518,6 +518,7 @@ fn nearest_rank(samples: &[u64], percentile: usize) -> Result<u64, PackageError>
         .ok_or_else(|| invalid_error("installed MCP percentile rank is unavailable"))
 }
 
+#[cfg(windows)]
 fn wait_for_exit_and_eof(
     child: &mut ExactChild,
     stdout: &JoinHandle<Result<Vec<u8>, std::io::Error>>,
