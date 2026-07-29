@@ -23,8 +23,9 @@ use std::{
 };
 
 use rootlight_adapter_host::{
-    AdapterHostError, execute_isolated_project_adapter, negotiate_project_adapter_session,
-    project_adapter_identity,
+    AdapterHostError, execute_isolated_project_adapter,
+    negotiate_project_adapter_session_with_cancellation,
+    project_adapter_identity_with_cancellation,
 };
 use rootlight_daemon_core::{
     ControlRequest, ControlResponse, FirstSliceEffectiveBudget, FirstSliceIpcContext,
@@ -108,7 +109,9 @@ struct InstalledProjectAnalyzer {
 }
 
 impl InstalledProjectAnalyzer {
-    fn discover() -> Result<Option<Arc<dyn FirstSliceProjectAnalyzer>>, FirstSliceError> {
+    fn discover(
+        cancellation: &Cancellation,
+    ) -> Result<Option<Arc<dyn FirstSliceProjectAnalyzer>>, FirstSliceError> {
         let mut executable = std::env::current_exe().map_err(|_| FirstSliceError::Adapter)?;
         executable.set_file_name(format!(
             "rootlight-adapter-host{}",
@@ -127,8 +130,13 @@ impl InstalledProjectAnalyzer {
         {
             return Err(FirstSliceError::Adapter);
         }
-        let identity =
-            project_adapter_identity(&executable).map_err(|_| FirstSliceError::Adapter)?;
+        let identity = project_adapter_identity_with_cancellation(&executable, cancellation)
+            .map_err(|error| match error {
+                AdapterHostError::Cancelled(cancelled) => {
+                    FirstSliceError::Cancelled(cancelled.reason())
+                }
+                _ => FirstSliceError::Adapter,
+            })?;
         let provider_identity =
             adapter_identity_digest(&identity).map_err(|_| FirstSliceError::Adapter)?;
         Ok(Some(Arc::new(Self {
@@ -148,13 +156,6 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
         request: FirstSliceProjectAnalysisRequest<'_>,
         cancellation: &Cancellation,
     ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
-        let observed_identity = project_adapter_identity(&self.executable)
-            .map_err(map_project_adapter_error)
-            .and_then(|identity| adapter_identity_digest(&identity))?;
-        if observed_identity != self.provider_identity {
-            return Err(FirstSliceProjectAnalysisError::Identity);
-        }
-
         let mut ordered_inputs: Vec<&rootlight_service::FirstSliceProjectInput<'_>> = Vec::new();
         ordered_inputs
             .try_reserve_exact(request.inputs().len())
@@ -192,8 +193,16 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
         if session_id.iter().all(|byte| *byte == 0) {
             return Err(FirstSliceProjectAnalysisError::Identity);
         }
-        let session = negotiate_project_adapter_session(&self.executable, session_id, limits)
-            .map_err(map_project_adapter_error)?;
+        let (observed_identity, session) = negotiate_project_adapter_session_with_cancellation(
+            &self.executable,
+            session_id,
+            limits,
+            cancellation,
+        )
+        .map_err(map_project_adapter_error)?;
+        if adapter_identity_digest(&observed_identity)? != self.provider_identity {
+            return Err(FirstSliceProjectAnalysisError::Identity);
+        }
 
         let mut request_id = [0_u8; ADAPTER_NONCE_BYTES];
         getrandom::fill(&mut request_id).map_err(|_| FirstSliceProjectAnalysisError::Identity)?;
@@ -441,8 +450,8 @@ impl FirstSliceDaemon {
                 .checked_add(STARTUP_RESTORE_TIMEOUT)
                 .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?,
         );
-        let project_analyzer =
-            InstalledProjectAnalyzer::discover().map_err(FirstSliceHostError::Service)?;
+        let project_analyzer = InstalledProjectAnalyzer::discover(&cancellation)
+            .map_err(FirstSliceHostError::Service)?;
         let service = match project_analyzer {
             Some(project_analyzer) => FirstSliceService::new_durable_with_project_analyzer(
                 DEFAULT_GENERATION_RETENTION,

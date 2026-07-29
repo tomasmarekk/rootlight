@@ -100,11 +100,30 @@ const MAX_DIAGNOSTICS: usize = 4_096;
 /// opened, read, or bounded.
 pub fn project_adapter_identity(executable: &Path) -> Result<AdapterIdentity, AdapterHostError> {
     let digest = project_adapter_binary_digest(executable)?;
-    Ok(AdapterIdentity {
+    Ok(project_adapter_identity_from_digest(digest))
+}
+
+/// Computes the exact executable identity with cooperative cancellation.
+///
+/// # Errors
+///
+/// Returns [`AdapterHostError::Cancelled`] when cancellation wins, or
+/// [`AdapterHostError::BinaryIdentity`] when the executable cannot be opened,
+/// read, or bounded.
+pub fn project_adapter_identity_with_cancellation(
+    executable: &Path,
+    cancellation: &Cancellation,
+) -> Result<AdapterIdentity, AdapterHostError> {
+    let digest = project_adapter_binary_digest_with_cancellation(executable, cancellation)?;
+    Ok(project_adapter_identity_from_digest(digest))
+}
+
+fn project_adapter_identity_from_digest(digest: ContentHash) -> AdapterIdentity {
+    AdapterIdentity {
         name: PROJECT_ADAPTER_NAME.to_owned(),
         version: PROJECT_ADAPTER_VERSION.to_owned(),
         source_digest: digest.as_bytes().to_vec(),
-    })
+    }
 }
 
 /// Builds and validates the production advertisement for one exact executable.
@@ -120,9 +139,16 @@ pub fn project_adapter_identity(executable: &Path) -> Result<AdapterIdentity, Ad
 pub fn project_adapter_advertisement(
     executable: &Path,
 ) -> Result<ValidatedAdvertisement, AdapterHostError> {
+    let identity = project_adapter_identity(executable)?;
+    project_adapter_advertisement_for_identity(identity)
+}
+
+fn project_adapter_advertisement_for_identity(
+    identity: AdapterIdentity,
+) -> Result<ValidatedAdvertisement, AdapterHostError> {
     let version = project_protocol_version();
     ValidatedAdvertisement::validate(CapabilityAdvertisement {
-        adapter: Some(project_adapter_identity(executable)?),
+        adapter: Some(identity),
         supported_protocols: Some(VersionRange {
             minimum: Some(version),
             maximum: Some(version),
@@ -151,11 +177,45 @@ pub fn negotiate_project_adapter_session(
     session_id: [u8; ADAPTER_NONCE_BYTES],
     granted_limits: ResourceLimits,
 ) -> Result<NegotiatedSession, AdapterHostError> {
-    let advertisement = project_adapter_advertisement(executable)?;
+    let identity = project_adapter_identity(executable)?;
+    negotiate_project_adapter_session_for_identity(identity, session_id, granted_limits)
+}
+
+/// Authenticates an executable once and negotiates a cancellable production session.
+///
+/// The returned identity is the exact digest used by the negotiated session, so
+/// callers can bind provider provenance without re-reading the executable.
+///
+/// # Errors
+///
+/// Returns a source-free cancellation, identity, or protocol error for an
+/// invalid nonce, executable, or resource grant.
+pub fn negotiate_project_adapter_session_with_cancellation(
+    executable: &Path,
+    session_id: [u8; ADAPTER_NONCE_BYTES],
+    granted_limits: ResourceLimits,
+    cancellation: &Cancellation,
+) -> Result<(AdapterIdentity, NegotiatedSession), AdapterHostError> {
+    let identity = project_adapter_identity_with_cancellation(executable, cancellation)?;
+    let session = negotiate_project_adapter_session_for_identity(
+        identity.clone(),
+        session_id,
+        granted_limits,
+    )?;
+    Ok((identity, session))
+}
+
+fn negotiate_project_adapter_session_for_identity(
+    identity: AdapterIdentity,
+    session_id: [u8; ADAPTER_NONCE_BYTES],
+    granted_limits: ResourceLimits,
+) -> Result<NegotiatedSession, AdapterHostError> {
+    let version = project_protocol_version();
+    let advertisement = project_adapter_advertisement_for_identity(identity)?;
     advertisement
         .negotiate(SessionRequirements {
             session_id: session_id.to_vec(),
-            selected_protocol: Some(project_protocol_version()),
+            selected_protocol: Some(version),
             expected_adapter: Some(advertisement.identity().clone()),
             required_capabilities: vec![crate::PROJECT_NORMALIZED_IR_CAPABILITY.to_owned()],
             required_extensions: project_extensions(),
@@ -807,6 +867,21 @@ fn fixed_wire_id<const N: usize>(value: Option<&[u8]>) -> Result<[u8; N], Adapte
 }
 
 fn project_adapter_binary_digest(executable: &Path) -> Result<ContentHash, AdapterHostError> {
+    project_adapter_binary_digest_inner(executable, None)
+}
+
+fn project_adapter_binary_digest_with_cancellation(
+    executable: &Path,
+    cancellation: &Cancellation,
+) -> Result<ContentHash, AdapterHostError> {
+    project_adapter_binary_digest_inner(executable, Some(cancellation))
+}
+
+fn project_adapter_binary_digest_inner(
+    executable: &Path,
+    cancellation: Option<&Cancellation>,
+) -> Result<ContentHash, AdapterHostError> {
+    check_optional_cancellation(cancellation)?;
     let mut file = File::open(executable).map_err(|_| AdapterHostError::BinaryIdentity)?;
     let metadata = file
         .metadata()
@@ -814,11 +889,20 @@ fn project_adapter_binary_digest(executable: &Path) -> Result<ContentHash, Adapt
     if metadata.len() == 0 || metadata.len() > MAX_ADAPTER_BINARY_BYTES {
         return Err(AdapterHostError::BinaryIdentity);
     }
+    project_adapter_binary_digest_reader(&mut file, metadata.len(), cancellation)
+}
+
+fn project_adapter_binary_digest_reader(
+    reader: &mut impl Read,
+    expected_bytes: u64,
+    cancellation: Option<&Cancellation>,
+) -> Result<ContentHash, AdapterHostError> {
     let mut hasher = blake3::Hasher::new();
     let mut buffer = [0_u8; 64 * 1024];
     let mut observed = 0_u64;
     loop {
-        let read = file
+        check_optional_cancellation(cancellation)?;
+        let read = reader
             .read(&mut buffer)
             .map_err(|_| AdapterHostError::BinaryIdentity)?;
         if read == 0 {
@@ -832,15 +916,59 @@ fn project_adapter_binary_digest(executable: &Path) -> Result<ContentHash, Adapt
         }
         hasher.update(&buffer[..read]);
     }
-    if observed != metadata.len() {
+    check_optional_cancellation(cancellation)?;
+    if observed != expected_bytes {
         return Err(AdapterHostError::BinaryIdentity);
     }
     Ok(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
 }
 
+fn check_optional_cancellation(
+    cancellation: Option<&Cancellation>,
+) -> Result<(), AdapterHostError> {
+    cancellation.map_or(Ok(()), |cancellation| {
+        cancellation.check().map_err(AdapterHostError::from)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CancellingReader {
+        cancellation: Cancellation,
+        emitted: bool,
+    }
+
+    impl Read for CancellingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.emitted {
+                return Ok(0);
+            }
+            buffer.fill(0x5a);
+            self.emitted = true;
+            let _ = self
+                .cancellation
+                .cancel(rootlight_cancel::CancellationReason::Shutdown);
+            Ok(buffer.len())
+        }
+    }
+
+    #[test]
+    fn executable_identity_hashing_observes_cancellation_between_chunks() {
+        let cancellation = Cancellation::new();
+        let mut reader = CancellingReader {
+            cancellation: cancellation.clone(),
+            emitted: false,
+        };
+
+        let error =
+            project_adapter_binary_digest_reader(&mut reader, 2 * 64 * 1024, Some(&cancellation))
+                .expect_err("the second chunk observes cancellation");
+
+        assert!(matches!(error, AdapterHostError::Cancelled(cancelled)
+            if cancelled.reason() == rootlight_cancel::CancellationReason::Shutdown));
+    }
 
     #[test]
     fn project_session_arguments_are_exact_and_bounded() {

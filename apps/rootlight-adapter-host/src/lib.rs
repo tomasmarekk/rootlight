@@ -34,8 +34,9 @@ use serde::Serialize;
 pub use process::{IsolatedProjectAnalysis, execute_isolated_project_adapter};
 pub use project::{
     PROJECT_ADAPTER_HARD_LIMITS, PROJECT_ADAPTER_NAME, PROJECT_ADAPTER_VERSION,
-    negotiate_project_adapter_session, project_adapter_advertisement, project_adapter_identity,
-    run_project_session,
+    negotiate_project_adapter_session, negotiate_project_adapter_session_with_cancellation,
+    project_adapter_advertisement, project_adapter_identity,
+    project_adapter_identity_with_cancellation, run_project_session,
 };
 pub use server::serve_project_session;
 

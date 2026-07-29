@@ -753,23 +753,28 @@ struct IndexReceipt {
 struct DaemonProcess {
     child: Option<Child>,
     input: Option<ChildStdin>,
+    stderr_path: PathBuf,
 }
 
 impl DaemonProcess {
     fn spawn(binary: &Path, state_dir: &Path, runtime_dir: &Path) -> Self {
+        let stderr_path = runtime_dir.join("change-daemon.stderr");
+        fs::create_dir_all(runtime_dir).expect("daemon runtime directory is available");
+        let stderr = fs::File::create(&stderr_path).expect("daemon stderr file is available");
         let mut child = Command::new(binary)
             .arg("--supervised-stdio")
             .env("ROOTLIGHT_STATE_DIR", state_dir)
             .env("ROOTLIGHT_RUNTIME_DIR", runtime_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr))
             .spawn()
             .expect("isolated daemon process starts");
         let input = child.stdin.take().expect("daemon stdin is piped");
         Self {
             child: Some(child),
             input: Some(input),
+            stderr_path,
         }
     }
 
@@ -801,7 +806,12 @@ impl DaemonProcess {
             self.child.as_mut().expect("daemon child is retained"),
             SHUTDOWN_TIMEOUT,
         );
-        assert!(status.success(), "daemon process exits successfully");
+        let stderr = fs::read_to_string(&self.stderr_path)
+            .unwrap_or_else(|error| format!("<daemon stderr unavailable: {error}>"));
+        assert!(
+            status.success(),
+            "daemon process exits successfully: status={status}; stderr={stderr}"
+        );
         self.child.take();
     }
 }
