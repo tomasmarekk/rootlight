@@ -56,6 +56,12 @@ const INVALID_PARAMS: i32 = -32_602;
 const SERVER_BUSY: i32 = -32_000;
 const SERVER_NOT_INITIALIZED: i32 = -32_002;
 const REQUEST_CANCELLED: i32 = -32_800;
+// Release builds carry product SemVer independently of internal workspace
+// crate versions, while ordinary development builds retain Cargo's version.
+const ROOTLIGHT_RELEASE_VERSION: &str = match option_env!("ROOTLIGHT_RELEASE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 /// Default maximum bytes in one newline-delimited standard-stream message.
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -607,7 +613,7 @@ impl Session {
             server_info: ServerImplementation {
                 name: "rootlight",
                 title: "Rootlight",
-                version: env!("CARGO_PKG_VERSION"),
+                version: ROOTLIGHT_RELEASE_VERSION,
                 description: "Local-first repository intelligence MCP bridge",
             },
         };

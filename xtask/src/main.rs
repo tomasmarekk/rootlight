@@ -20,6 +20,7 @@ mod mcp_vertical;
 mod package;
 mod policy;
 mod protobuf_compatibility;
+mod release;
 mod response_profile_evidence;
 mod schemas;
 mod token_accounting;
@@ -94,6 +95,10 @@ fn run() -> Result<(), XtaskError> {
         Some("package-verify") => {
             let options = package::VerifyOptions::parse(&mut args)?;
             package::verify(&options)?;
+        }
+        Some("release-plan") => {
+            let options = release::Options::parse(&mut args)?;
+            release::build(&options)?;
         }
         Some("update-release-metadata") => {
             let options = update_release::Options::parse(&mut args)?;
@@ -183,7 +188,7 @@ fn parse_required_bin_dir(
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|budget-conformance-check [--fixture-root PATH] [--refresh] [--runtime-report PATH --cancellation-report PATH --output PATH]|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|contract-matrix <--output PATH|--verify PATH> --source-revision REV|daemon-lifecycle-check --bin-dir PATH|dataset-check|dataset-cache --cache-dir PATH --output PATH --source-revision REV|incident-tabletop --output PATH --source-revision REV|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|package-check|package-build --target TARGET --version VERSION --source-revision REV --bin-dir PATH --output-dir PATH|package-smoke --baseline-archive PATH --archive PATH --source-revision REV --output PATH|package-verify --archive PATH|update-release-metadata --archive PATH --sbom PATH --provenance PATH --license-bundle PATH --target TARGET --version VERSION --key-id ID [--private-seed PATH --public-key-hex HEX] --valid-from UNIX --expires UNIX --rollout-percentage PERCENT --catalog-schema VERSION --protocol-major VERSION --protocol-minor VERSION --output-dir PATH|response-profile-check [--fixture-root PATH] [--refresh]|freeze-daemon-protocol|id-vectors|generate [--check]|license-check|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|budget-conformance-check [--fixture-root PATH] [--refresh] [--runtime-report PATH --cancellation-report PATH --output PATH]|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|contract-matrix <--output PATH|--verify PATH> --source-revision REV|daemon-lifecycle-check --bin-dir PATH|dataset-check|dataset-cache --cache-dir PATH --output PATH --source-revision REV|incident-tabletop --output PATH --source-revision REV|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|package-check|package-build --target TARGET --version VERSION --source-revision REV --bin-dir PATH --output-dir PATH|package-smoke --baseline-archive PATH --archive PATH --source-revision REV --output PATH|package-verify --archive PATH|release-plan --channel <alpha|final> --tags PATH [--exact-version VERSION] --output PATH|update-release-metadata --archive PATH --sbom PATH --provenance PATH --license-bundle PATH --target TARGET --version VERSION --key-id ID [--private-seed PATH --public-key-hex HEX] --valid-from UNIX --expires UNIX --rollout-percentage PERCENT --catalog-schema VERSION --protocol-major VERSION --protocol-minor VERSION --output-dir PATH|response-profile-check [--fixture-root PATH] [--refresh]|freeze-daemon-protocol|id-vectors|generate [--check]|license-check|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -220,6 +225,8 @@ enum XtaskError {
     Package(#[from] package::PackageError),
     #[error(transparent)]
     ReleaseUpdate(#[from] update_release::ReleaseUpdateError),
+    #[error(transparent)]
+    ReleasePlan(#[from] release::ReleasePlanError),
     #[error(transparent)]
     Policy(#[from] policy::PolicyError),
     #[error(transparent)]

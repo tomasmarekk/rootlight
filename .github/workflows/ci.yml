@@ -55,6 +55,10 @@ jobs:
           cargo run --locked --quiet --package xtask -- license-check
           cargo run --locked --quiet --package xtask -- package-check
           python scripts/test-validate-package-lifecycle.py
+          python scripts/test_orchestrate_release.py
+          python scripts/test_prepare_npm_packages.py
+          python scripts/test_publish_npm_packages.py
+          node --check packaging/npm/rootlight.mjs
           cargo run --locked --quiet --package xtask -- id-vectors > target/id-vectors.actual.json
           cmp tests/fixtures/id-vectors.json target/id-vectors.actual.json
       - name: Capability parity and evidence

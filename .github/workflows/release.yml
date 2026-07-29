@@ -1,38 +1,48 @@
 name: release
+run-name: release / ${{ inputs.channel }} / ${{ inputs.exact_final_version || 'automatic' }}
 
 on:
   workflow_dispatch:
     inputs:
-      candidate_run_id:
-        description: Successful release-candidate run ID for this exact source revision
+      channel:
+        description: Alpha increments alpha.N; final promotes the active alpha or advances minor
         required: true
+        default: alpha
+        type: choice
+        options:
+          - alpha
+          - final
+      exact_final_version:
+        description: Optional explicit final SemVer, for example 0.130.0
+        required: false
         type: string
-      candidate_run_attempt:
-        description: Release-candidate run attempt containing the immutable artifacts
+      notes_mode:
+        description: Empty notes, a bounded commit summary, or exact custom notes
         required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - commits
+          - custom
+      commit_count:
+        description: Commit subjects to include when notes mode is commits
+        required: true
+        default: 30
+        type: number
+      release_notes:
+        description: Exact Markdown used only when notes mode is custom
+        required: false
         type: string
-      nightly_run_id:
-        description: Successful nightly run ID for this exact source revision
-        required: true
-        type: string
-      nightly_run_attempt:
-        description: Nightly run attempt containing the exhaustive validation
-        required: true
-        type: string
-      tag_name:
-        description: Release tag matching the workspace version, for example v0.1.0
-        required: true
-        type: string
-      prerelease:
-        description: Publish as a prerelease
-        required: true
-        default: true
-        type: boolean
       rollout_percentage:
         description: Percentage of opted-in installations eligible for this update
         required: true
         default: 100
         type: number
+      verified_nightly_run_id:
+        description: Optional successful exact-revision nightly run to reuse
+        required: false
+        type: string
 
 permissions:
   actions: read
@@ -51,152 +61,148 @@ jobs:
     name: prepare exact native release
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     permissions:
-      actions: read
+      actions: write
       contents: read
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 360
     outputs:
-      version: ${{ steps.update_metadata.outputs.version }}
+      candidate_run_attempt: ${{ steps.gates.outputs.candidate_run_attempt }}
+      candidate_run_id: ${{ steps.gates.outputs.candidate_run_id }}
+      nightly_run_attempt: ${{ steps.gates.outputs.nightly_run_attempt }}
+      nightly_run_id: ${{ steps.gates.outputs.nightly_run_id }}
+      npm_tag: ${{ steps.plan.outputs.npm_tag }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Verify exact candidate, nightly aggregates, and release tag
+      - name: Resolve the next immutable release identity
+        id: plan
         env:
-          CANDIDATE_RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-          GH_TOKEN: ${{ github.token }}
-          NIGHTLY_RUN_ATTEMPT: ${{ inputs.nightly_run_attempt }}
-          NIGHTLY_RUN_ID: ${{ inputs.nightly_run_id }}
-          SOURCE_REVISION: ${{ github.sha }}
-          TAG_NAME: ${{ inputs.tag_name }}
+          CHANNEL: ${{ inputs.channel }}
+          EXACT_VERSION: ${{ inputs.exact_final_version }}
         run: |
-          test "$GITHUB_REF" = "refs/heads/main"
-          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          mkdir -p artifacts/release-plan
+          git tag --list 'v*' | LC_ALL=C sort \
+            > artifacts/release-plan/tags.txt
+          arguments=(
+            --channel "$CHANNEL"
+            --tags artifacts/release-plan/tags.txt
+            --output artifacts/release-plan/plan.json
+          )
+          if [[ -n "$EXACT_VERSION" ]]; then
+            arguments+=(--exact-version "$EXACT_VERSION")
+          fi
+          cargo run --locked --quiet --package xtask -- release-plan "${arguments[@]}"
           python - <<'PY'
           import json
           import os
-          import subprocess
+          from pathlib import Path
 
-          repository = os.environ["GITHUB_REPOSITORY"]
-          source_revision = os.environ["SOURCE_REVISION"]
-
-          def require_run(prefix, path, aggregate_name, events):
-              run_id = os.environ[f"{prefix}_RUN_ID"]
-              attempt = int(os.environ[f"{prefix}_RUN_ATTEMPT"])
-              run = json.loads(
-                  subprocess.check_output(
-                      ["gh", "api", f"/repos/{repository}/actions/runs/{run_id}"]
-                  )
-              )
-              expected = {
-                  "conclusion": "success",
-                  "head_sha": source_revision,
-                  "path": path,
-                  "run_attempt": attempt,
-              }
-              observed = {key: run.get(key) for key in expected}
-              if observed != expected or run.get("event") not in events:
-                  raise SystemExit(
-                      f"{prefix.lower()} run does not authorize this release: "
-                      f"observed={observed!r} event={run.get('event')!r}"
-                  )
-
-              jobs = json.loads(
-                  subprocess.check_output(
-                      [
-                          "gh",
-                          "api",
-                          f"/repos/{repository}/actions/runs/{run_id}/"
-                          "jobs?filter=latest&per_page=100",
-                      ]
-                  )
-              )["jobs"]
-              aggregates = [
-                  job for job in jobs
-                  if job.get("name") == aggregate_name
-                  and job.get("run_attempt") == attempt
-              ]
-              if len(aggregates) != 1 or aggregates[0].get("conclusion") != "success":
-                  raise SystemExit(
-                      f"{prefix.lower()} aggregate {aggregate_name!r} did not succeed"
-                  )
-
-          require_run(
-              "CANDIDATE",
-              ".github/workflows/release-candidate.yml",
-              "release-candidate-required",
-              {"workflow_dispatch", "workflow_call"},
+          plan = json.loads(Path("artifacts/release-plan/plan.json").read_bytes())
+          if set(plan) != {"npm_tag", "prerelease", "tag", "version"}:
+              raise SystemExit("release plan has an unexpected shape")
+          values = {
+              "npm_tag": plan["npm_tag"],
+              "prerelease": str(plan["prerelease"]).lower(),
+              "tag": plan["tag"],
+              "version": plan["version"],
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for name, value in values.items():
+                  if "\n" in value or "\r" in value:
+                      raise SystemExit("release plan output contains a line break")
+                  output.write(f"{name}={value}\n")
+          PY
+      - name: Run exact CI, nightly, and candidate gates
+        id: gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY_RUN_ID: ${{ inputs.verified_nightly_run_id }}
+          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          arguments=(
+            --source-revision "$SOURCE_REVISION"
+            --release-version "$RELEASE_VERSION"
+            --request-id "release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            --output artifacts/release-plan/gates.json
           )
-          require_run(
-              "NIGHTLY",
-              ".github/workflows/nightly.yml",
-              "nightly-required",
-              {"schedule", "workflow_dispatch"},
-          )
+          if [[ -n "$NIGHTLY_RUN_ID" ]]; then
+            arguments+=(--nightly-run-id "$NIGHTLY_RUN_ID")
+          fi
+          python scripts/orchestrate_release.py "${arguments[@]}"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
 
-          metadata = json.loads(
-              subprocess.check_output(
-                  ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"]
-              )
-          )
-          version = next(
-              package["version"]
-              for package in metadata["packages"]
-              if package["name"] == "rootlight"
-          )
-          expected_tag = f"v{version}"
-          if os.environ["TAG_NAME"] != expected_tag:
-              raise SystemExit(
-                  f"release tag must match the workspace version: {expected_tag}"
-              )
+          gates = json.loads(Path("artifacts/release-plan/gates.json").read_bytes())
+          expected = {
+              "candidate_run_attempt",
+              "candidate_run_id",
+              "ci_run_attempt",
+              "ci_run_id",
+              "nightly_run_attempt",
+              "nightly_run_id",
+          }
+          if set(gates) != expected or any(
+              not isinstance(value, int) or isinstance(value, bool) or value < 1
+              for value in gates.values()
+          ):
+              raise SystemExit("release gate output has an unexpected shape")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for name, value in sorted(gates.items()):
+                  output.write(f"{name}={value}\n")
           PY
       - name: Download exact native candidates
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: rootlight-release-candidate-*-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
+          pattern: rootlight-release-candidate-*-${{ github.sha }}-${{ steps.gates.outputs.candidate_run_id }}-${{ steps.gates.outputs.candidate_run_attempt }}
           path: artifacts/release-candidates
           merge-multiple: true
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.candidate_run_id }}
+          run-id: ${{ steps.gates.outputs.candidate_run_id }}
       - name: Download signature and attestation bundles
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: rootlight-release-trust-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
+          name: rootlight-release-trust-${{ github.sha }}-${{ steps.gates.outputs.candidate_run_id }}-${{ steps.gates.outputs.candidate_run_attempt }}
           path: artifacts/release-trust
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.candidate_run_id }}
+          run-id: ${{ steps.gates.outputs.candidate_run_id }}
       - name: Download target-specific SBOMs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: rootlight-release-sbom-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
+          name: rootlight-release-sbom-${{ github.sha }}-${{ steps.gates.outputs.candidate_run_id }}-${{ steps.gates.outputs.candidate_run_attempt }}
           path: artifacts/release-sbom
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.candidate_run_id }}
+          run-id: ${{ steps.gates.outputs.candidate_run_id }}
       - name: Download exact release-performance audit inputs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: rootlight-release-performance-*-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
+          pattern: rootlight-release-performance-*-${{ github.sha }}-${{ steps.gates.outputs.candidate_run_id }}-${{ steps.gates.outputs.candidate_run_attempt }}
           path: artifacts/release-performance
           merge-multiple: true
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.candidate_run_id }}
+          run-id: ${{ steps.gates.outputs.candidate_run_id }}
       - name: Download exact Windows unsafe audit input
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: rootlight-unsafe-windows-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
+          name: rootlight-unsafe-windows-${{ github.sha }}-${{ steps.gates.outputs.candidate_run_id }}-${{ steps.gates.outputs.candidate_run_attempt }}
           path: artifacts/release-unsafe-windows
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.candidate_run_id }}
+          run-id: ${{ steps.gates.outputs.candidate_run_id }}
       - name: Verify exact candidates and source binding
         env:
           SOURCE_REVISION: ${{ github.sha }}
+          VERSION: ${{ steps.plan.outputs.version }}
         run: |
-          version="$(
-            cargo metadata --locked --no-deps --format-version 1 |
-              python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rootlight"))'
-          )"
+          version="$VERSION"
           for target in \
             aarch64-apple-darwin \
             aarch64-unknown-linux-gnu \
@@ -312,6 +318,7 @@ jobs:
           EXPIRES_AFTER_SECONDS: "15552000"
           ROOTLIGHT_UPDATE_KEY_ID: ${{ vars.ROOTLIGHT_UPDATE_KEY_ID }}
           ROLLOUT_PERCENTAGE: ${{ inputs.rollout_percentage }}
+          VERSION: ${{ steps.plan.outputs.version }}
         run: |
           test "$ROOTLIGHT_UPDATE_KEY_ID" != ""
           [[ "$ROLLOUT_PERCENTAGE" =~ ^[0-9]+$ ]]
@@ -327,10 +334,7 @@ jobs:
           umask 077
           valid_from="$(date +%s)"
           expires="$((valid_from + EXPIRES_AFTER_SECONDS))"
-          version="$(
-            cargo metadata --locked --no-deps --format-version 1 |
-              python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rootlight"))'
-          )"
+          version="$VERSION"
           for target in \
             aarch64-apple-darwin \
             aarch64-unknown-linux-gnu \
@@ -401,7 +405,6 @@ jobs:
     permissions:
       actions: read
       contents: none
-      id-token: write
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -414,42 +417,24 @@ jobs:
         shell: bash
         env:
           ROOTLIGHT_UPDATE_KEY_ID: ${{ vars.ROOTLIGHT_UPDATE_KEY_ID }}
+          ROOTLIGHT_UPDATE_PRIVATE_SEED_HEX: ${{ secrets.ROOTLIGHT_UPDATE_PRIVATE_SEED_HEX }}
           ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX: ${{ vars.ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX }}
-          ROOTLIGHT_UPDATE_SIGNER_AUDIENCE: ${{ vars.ROOTLIGHT_UPDATE_SIGNER_AUDIENCE }}
-          ROOTLIGHT_UPDATE_SIGNER_URL: ${{ vars.ROOTLIGHT_UPDATE_SIGNER_URL }}
-          SOURCE_REVISION: ${{ github.sha }}
         run: |
           test "$ROOTLIGHT_UPDATE_KEY_ID" != ""
+          [[ "$ROOTLIGHT_UPDATE_PRIVATE_SEED_HEX" =~ ^[0-9a-f]{64}$ ]]
           [[ "$ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX" =~ ^[0-9a-f]{64}$ ]]
-          test "$ROOTLIGHT_UPDATE_SIGNER_AUDIENCE" != ""
-          [[ "$ROOTLIGHT_UPDATE_SIGNER_URL" == https://* ]]
-          test "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" != ""
-          test "$ACTIONS_ID_TOKEN_REQUEST_URL" != ""
-
-          oidc_response="$(
-            curl --fail-with-body --silent --show-error \
-              --header "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              --get \
-              --data-urlencode "audience=$ROOTLIGHT_UPDATE_SIGNER_AUDIENCE" \
-              "$ACTIONS_ID_TOKEN_REQUEST_URL"
-          )"
-          oidc_token="$(
-            OIDC_RESPONSE="$oidc_response" python - <<'PY'
-          import json
-          import os
-
-          response = json.loads(os.environ["OIDC_RESPONSE"])
-          if set(response) != {"value"} or not isinstance(response["value"], str):
-              raise SystemExit("GitHub OIDC response has an unexpected shape")
-          if response["value"].count(".") != 2:
-              raise SystemExit("GitHub OIDC response is not a JWT")
-          print(response["value"], end="")
-          PY
-          )"
-          unset oidc_response
 
           temporary="$(mktemp -d)"
           trap 'rm -rf "$temporary"' EXIT
+          umask 077
+          printf '302e020100300506032b657004220420%s' \
+            "$ROOTLIGHT_UPDATE_PRIVATE_SEED_HEX" |
+            xxd -r -p > "$temporary/private-key.der"
+          unset ROOTLIGHT_UPDATE_PRIVATE_SEED_HEX
+          openssl pkey \
+            -inform DER \
+            -in "$temporary/private-key.der" \
+            -out "$temporary/private-key.pem"
           printf '302a300506032b6570032100%s' "$ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX" |
             xxd -r -p > "$temporary/public-key.der"
           openssl pkey \
@@ -461,71 +446,23 @@ jobs:
           sign_payload() {
             local payload="$1"
             local signature="$2"
-            local payload_sha256
-            local response="$temporary/response.json"
-            payload_sha256="$(sha256sum "$payload" | cut -d ' ' -f 1)"
-            curl --fail-with-body --silent --show-error \
-              --request POST \
-              --header "Authorization: Bearer $oidc_token" \
-              --header "Content-Type: application/octet-stream" \
-              --header "X-Rootlight-Key-Id: $ROOTLIGHT_UPDATE_KEY_ID" \
-              --header "X-Rootlight-Payload-Sha256: $payload_sha256" \
-              --header "X-Rootlight-Source-Revision: $SOURCE_REVISION" \
-              --data-binary "@$payload" \
-              --output "$response" \
-              "$ROOTLIGHT_UPDATE_SIGNER_URL"
-            PAYLOAD="$payload" \
-              PAYLOAD_SHA256="$payload_sha256" \
-              RESPONSE="$response" \
-              ROOTLIGHT_UPDATE_KEY_ID="$ROOTLIGHT_UPDATE_KEY_ID" \
-              ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX="$ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX" \
-              SIGNATURE="$signature" \
-              python - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-
-          payload = Path(os.environ["PAYLOAD"]).read_bytes()
-          if hashlib.sha256(payload).hexdigest() != os.environ["PAYLOAD_SHA256"]:
-              raise SystemExit("payload changed across the protected signing request")
-          response = json.loads(Path(os.environ["RESPONSE"]).read_bytes())
-          expected_keys = {
-              "key_id",
-              "payload_sha256",
-              "public_key_hex",
-              "schema",
-              "signature_hex",
-          }
-          if set(response) != expected_keys:
-              raise SystemExit("protected signer response has an unexpected shape")
-          expected = {
-              "key_id": os.environ["ROOTLIGHT_UPDATE_KEY_ID"],
-              "payload_sha256": os.environ["PAYLOAD_SHA256"],
-              "public_key_hex": os.environ["ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX"],
-              "schema": "rootlight.protected-signature/1",
-          }
-          if {key: response.get(key) for key in expected} != expected:
-              raise SystemExit("protected signer identity or payload binding differs")
-          signature = response["signature_hex"]
-          if (
-              not isinstance(signature, str)
-              or len(signature) != 128
-              or any(character not in "0123456789abcdef" for character in signature)
-          ):
-              raise SystemExit("protected signer returned a non-canonical signature")
-          Path(os.environ["SIGNATURE"]).write_text(
-              f"{signature}\n", encoding="ascii", newline="\n"
-          )
-          PY
-            xxd -r -p < "$signature" > "$temporary/signature.bin"
+            local signature_binary="$temporary/signature.bin"
+            openssl pkeyutl \
+              -sign \
+              -inkey "$temporary/private-key.pem" \
+              -rawin \
+              -in "$payload" \
+              -out "$signature_binary"
+            test "$(wc -c < "$signature_binary")" -eq 64
+            xxd -p -c 256 "$signature_binary" > "$signature"
+            [[ "$(tr -d '\n' < "$signature")" =~ ^[0-9a-f]{128}$ ]]
             openssl pkeyutl \
               -verify \
               -pubin \
               -inkey "$temporary/public-key.pem" \
               -rawin \
               -in "$payload" \
-              -sigfile "$temporary/signature.bin"
+              -sigfile "$signature_binary"
           }
 
           mapfile -d '' metadata_files < <(
@@ -568,7 +505,6 @@ jobs:
             artifact_signature="${metadata%.update.json}.artifact.sig"
             sign_payload "$artifact_message" "$artifact_signature"
           done
-          unset oidc_token
           printf '%s\n' "$ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX" \
             > artifacts/update-release/rootlight-update-public-key.txt
           test "$(
@@ -583,42 +519,127 @@ jobs:
           retention-days: 1
 
   publish:
-    name: publish signed native release
+    name: publish signed native and npm release
     needs: [prepare, sign-update-metadata]
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     permissions:
       actions: read
       contents: write
+      id-token: write
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install pinned Node.js for npm trusted publishing
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.11.1
+          package-manager-cache: false
       - name: Download exact native candidates
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: rootlight-release-candidate-*-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
+          pattern: rootlight-release-candidate-*-${{ github.sha }}-${{ needs.prepare.outputs.candidate_run_id }}-${{ needs.prepare.outputs.candidate_run_attempt }}
           path: artifacts/release-candidates
           merge-multiple: true
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.candidate_run_id }}
+          run-id: ${{ needs.prepare.outputs.candidate_run_id }}
       - name: Download signature and attestation bundles
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: rootlight-release-trust-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
+          name: rootlight-release-trust-${{ github.sha }}-${{ needs.prepare.outputs.candidate_run_id }}-${{ needs.prepare.outputs.candidate_run_attempt }}
           path: artifacts/release-trust
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.candidate_run_id }}
+          run-id: ${{ needs.prepare.outputs.candidate_run_id }}
       - name: Download target-specific SBOMs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: rootlight-release-sbom-${{ github.sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
+          name: rootlight-release-sbom-${{ github.sha }}-${{ needs.prepare.outputs.candidate_run_id }}-${{ needs.prepare.outputs.candidate_run_attempt }}
           path: artifacts/release-sbom
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.candidate_run_id }}
+          run-id: ${{ needs.prepare.outputs.candidate_run_id }}
       - name: Download protected update signatures
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: rootlight-update-release-signed-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/update-release
+      - name: Publish exact native packages through npm trusted publishing
+        env:
+          NPM_TAG: ${{ needs.prepare.outputs.npm_tag }}
+          SOURCE_REVISION: ${{ github.sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python scripts/prepare_npm_packages.py release \
+            --candidates-dir artifacts/release-candidates \
+            --version "$VERSION" \
+            --source-revision "$SOURCE_REVISION" \
+            --output-dir artifacts/npm-packages
+          python scripts/publish_npm_packages.py \
+            --packages-dir artifacts/npm-packages \
+            --version "$VERSION" \
+            --tag "$NPM_TAG" \
+            --source-revision "$SOURCE_REVISION" \
+            --output artifacts/npm-publication.json
+      - name: Build bounded release notes
+        env:
+          COMMIT_COUNT: ${{ inputs.commit_count }}
+          NOTES_MODE: ${{ inputs.notes_mode }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          mkdir -p artifacts/release-notes
+          python - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+
+          mode = os.environ["NOTES_MODE"]
+          custom = os.environ["RELEASE_NOTES"]
+          try:
+              count = int(os.environ["COMMIT_COUNT"])
+          except ValueError as error:
+              raise SystemExit("commit_count must be an integer") from error
+          if not 1 <= count <= 100:
+              raise SystemExit("commit_count must be between 1 and 100")
+          if len(custom.encode("utf-8")) > 64 * 1024 or "\0" in custom:
+              raise SystemExit("custom release notes exceed their bound")
+
+          if mode == "none":
+              notes = ""
+          elif mode == "custom":
+              if not custom.strip():
+                  raise SystemExit("custom release notes are empty")
+              notes = custom.rstrip() + "\n"
+          elif mode == "commits":
+              fields = subprocess.check_output(
+                  [
+                      "git",
+                      "log",
+                      f"-n{count}",
+                      "--format=%H%x00%h%x00%s",
+                      "--no-merges",
+                  ],
+                  text=True,
+                  encoding="utf-8",
+              ).splitlines()
+              commits = []
+              for line in fields:
+                  revision, abbreviated, subject = line.split("\0", 2)
+                  commits.append(
+                      f"- {subject} "
+                      f"([`{abbreviated}`](https://github.com/"
+                      f"{os.environ['GITHUB_REPOSITORY']}/commit/{revision}))"
+                  )
+              if not commits:
+                  raise SystemExit("commit summary contains no commits")
+              notes = "## Changes\n\n" + "\n".join(commits) + "\n"
+          else:
+              raise SystemExit("release notes mode is invalid")
+          Path("artifacts/release-notes/notes.md").write_text(
+              notes, encoding="utf-8", newline="\n"
+          )
+          PY
       - name: Stage uniquely named release assets
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -656,6 +677,12 @@ jobs:
               )
 
           updates = Path("artifacts/update-release")
+          sources.append(
+              (
+                  Path("artifacts/npm-publication.json"),
+                  "rootlight-npm-publication.json",
+              )
+          )
           metadata = sorted(updates.rglob("*.update.json"))
           signatures = sorted(updates.rglob("*.update.sig"))
           artifact_signatures = sorted(updates.rglob("*.artifact.sig"))
@@ -704,9 +731,9 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          PRERELEASE: ${{ inputs.prerelease }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
           SOURCE_REVISION: ${{ github.sha }}
-          TAG_NAME: ${{ inputs.tag_name }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag }}
         run: |
           mapfile -d '' assets < <(
             find artifacts/release-assets -type f -print0 |
@@ -714,12 +741,15 @@ jobs:
           )
           test "${#assets[@]}" -gt 0
           prerelease_flag=()
+          latest_flag=(--latest)
           if [[ "$PRERELEASE" == "true" ]]; then
             prerelease_flag=(--prerelease)
+            latest_flag=(--latest=false)
           fi
           gh release create "$TAG_NAME" \
             --target "$SOURCE_REVISION" \
             --title "Rootlight $TAG_NAME" \
-            --generate-notes \
+            --notes-file artifacts/release-notes/notes.md \
             "${prerelease_flag[@]}" \
+            "${latest_flag[@]}" \
             "${assets[@]}"

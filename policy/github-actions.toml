@@ -13,6 +13,11 @@ commit = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 release = "v6.1.0"
 
 [[actions]]
+repository = "actions/setup-node"
+commit = "820762786026740c76f36085b0efc47a31fe5020"
+release = "v7.0.0"
+
+[[actions]]
 repository = "actions/attest"
 commit = "a1948c3f048ba23858d222213b7c278aabede763"
 release = "v4.2.0"
@@ -45,12 +50,11 @@ permissions = [
 
 [[write_permission_jobs]]
 workflow = ".github/workflows/release.yml"
-job = "sign-update-metadata"
+job = "prepare"
 condition = "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
 permissions = [
-  "actions=read",
-  "contents=none",
-  "id-token=write",
+  "actions=write",
+  "contents=read",
 ]
 
 [[write_permission_jobs]]
@@ -60,4 +64,5 @@ condition = "github.event_name == 'workflow_dispatch' && github.ref == 'refs/hea
 permissions = [
   "actions=read",
   "contents=write",
+  "id-token=write",
 ]
