@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const SUPERVISED_SHUTDOWN_COMMAND: &[u8] = b"shutdown\n";
 const FULL_TOKEN_BUDGET: u64 = 4_500;
 
 const CONTEXT_SOURCE: &str = r#"
@@ -431,23 +432,28 @@ fn build_daemon_binary() -> PathBuf {
 struct DaemonProcess {
     child: Option<Child>,
     input: Option<ChildStdin>,
+    stderr_path: PathBuf,
 }
 
 impl DaemonProcess {
     fn spawn(binary: &Path, state_dir: &Path, runtime_dir: &Path) -> Self {
+        fs::create_dir_all(runtime_dir).expect("daemon runtime directory is available");
+        let stderr_path = runtime_dir.join("context-daemon.stderr");
+        let stderr = fs::File::create(&stderr_path).expect("daemon stderr file is available");
         let mut child = Command::new(binary)
             .arg("--supervised-stdio")
             .env("ROOTLIGHT_STATE_DIR", state_dir)
             .env("ROOTLIGHT_RUNTIME_DIR", runtime_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr))
             .spawn()
             .expect("isolated daemon process starts");
         let input = child.stdin.take().expect("daemon stdin is piped");
         Self {
             child: Some(child),
             input: Some(input),
+            stderr_path,
         }
     }
 
@@ -474,12 +480,27 @@ impl DaemonProcess {
     }
 
     fn finish(&mut self) {
-        self.input.take();
-        let status = wait_for_exit(
+        let mut input = self.input.take().expect("daemon stdin is retained");
+        input
+            .write_all(SUPERVISED_SHUTDOWN_COMMAND)
+            .and_then(|()| input.flush())
+            .expect("supervised daemon shutdown request is delivered");
+        // Keep the pipe open until exit so this test proves the command, rather
+        // than an EOF race, initiated graceful shutdown.
+        let exit = wait_for_exit(
             self.child.as_mut().expect("daemon child is retained"),
             SHUTDOWN_TIMEOUT,
         );
-        assert!(status.success(), "daemon process exits successfully");
+        drop(input);
+        let stderr = fs::read_to_string(&self.stderr_path)
+            .unwrap_or_else(|error| format!("<daemon stderr unavailable: {error}>"));
+        assert!(
+            !exit.timed_out && exit.status.success(),
+            "daemon process exits successfully after supervised shutdown: \
+             timed_out={}; status={}; stderr={stderr}",
+            exit.timed_out,
+            exit.status
+        );
         self.child.take();
     }
 }
@@ -588,7 +609,7 @@ impl McpProcess {
     fn finish(&mut self) {
         self.input.take();
         let child = self.child.as_mut().expect("MCP child is retained");
-        let status = wait_for_exit(child, SHUTDOWN_TIMEOUT);
+        let exit = wait_for_exit(child, SHUTDOWN_TIMEOUT);
         let mut stderr = String::new();
         child
             .stderr
@@ -596,7 +617,12 @@ impl McpProcess {
             .expect("MCP stderr is piped")
             .read_to_string(&mut stderr)
             .expect("MCP stderr reads");
-        assert!(status.success(), "MCP process exits successfully: {stderr}");
+        assert!(
+            !exit.timed_out && exit.status.success(),
+            "MCP process exits successfully: timed_out={}; status={}; stderr={stderr}",
+            exit.timed_out,
+            exit.status
+        );
         self.reader
             .take()
             .expect("MCP response reader is retained")
@@ -616,16 +642,27 @@ impl Drop for McpProcess {
     }
 }
 
-fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
+struct ChildExit {
+    status: std::process::ExitStatus,
+    timed_out: bool,
+}
+
+fn wait_for_exit(child: &mut Child, timeout: Duration) -> ChildExit {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait().expect("child status is readable") {
-            return status;
+            return ChildExit {
+                status,
+                timed_out: false,
+            };
         }
         thread::sleep(Duration::from_millis(25));
     }
     child.kill().expect("timed-out child is terminated");
-    child.wait().expect("terminated child is reaped")
+    ChildExit {
+        status: child.wait().expect("terminated child is reaped"),
+        timed_out: true,
+    }
 }
 
 fn terminate(child: &mut Option<Child>) {
