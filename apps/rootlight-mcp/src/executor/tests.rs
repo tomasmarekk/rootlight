@@ -62,6 +62,7 @@ use rootlight_ir::{
 use rootlight_mcp_contract::{
     CodeLocateOutput, ErrorCode, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
     SymbolExplainOutput,
+    capability::{CapabilityStatus, capability_for, discovery_metadata},
     change::{
         ChangeClassification, ChangeImpactOutput, HistoryCompareOutput, PlanChangeOutput,
         PlanEvidenceOmissionReason, PlanEvidenceProvider, PlanProviderState, RiskLevel,
@@ -2940,6 +2941,41 @@ async fn maps_repository_index_without_replacing_stable_identities() {
             ..
         })
     ));
+}
+
+#[test]
+fn repository_detached_contract_matches_runtime_normalization() {
+    let schema: Value = serde_json::from_str(VerticalTool::RepoIndex.input_schema_json())
+        .expect("repository-index schema is valid JSON");
+    let description = schema
+        .pointer("/properties/detached/description")
+        .and_then(Value::as_str)
+        .expect("detached schema documentation is present");
+    assert!(description.contains("durable operation"));
+    assert!(description.contains("recoverable after daemon restart"));
+
+    let capability = capability_for(McpTool::RepoIndex);
+    assert_eq!(
+        capability.disposition("detached", Some("true")).status,
+        CapabilityStatus::Implemented
+    );
+    let lifecycle = discovery_metadata(McpTool::RepoIndex)
+        .lifecycle
+        .expect("repository indexing exposes lifecycle metadata");
+    assert!(lifecycle.detached);
+    assert_eq!(lifecycle.state_persistence, "durable");
+    assert_eq!(
+        lifecycle.restart_behavior,
+        "status_and_generation_recovered"
+    );
+
+    let request = normalize_repository_index(
+        decode_arguments(json!({"root": "C:/fixture", "detached": true})),
+        &normalization_error(),
+        &normalization_error(),
+    )
+    .expect("detached repository indexing normalizes");
+    assert!(request.detached());
 }
 
 #[tokio::test]

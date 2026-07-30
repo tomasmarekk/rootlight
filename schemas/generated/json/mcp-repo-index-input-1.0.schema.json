@@ -17,7 +17,7 @@
       }
     },
     "detached": {
-      "description": "Requests permission to continue after client disconnect.\n\nThe current versioned fallback rejects `true` before creating an\noperation because operation and generation handles are process-local.",
+      "description": "Requests permission to continue after client disconnect.\n\nWhen `true`, the daemon owns the durable operation independently of the\nrequesting transport. Status and a successfully published generation\nremain recoverable after daemon restart.",
       "type": "boolean"
     },
     "mode": {

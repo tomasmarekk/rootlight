@@ -66,7 +66,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/vertical.rs",
-      "blake3": "1b93c2fb017fc9407eebe558734e58be4ded4495ada3cac47ca616d1dcf46afd"
+      "blake3": "ab88a0637e483a61193007990d44603d2f0bfaf97d62a17a1317beb5a8bfc2e5"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
@@ -336,7 +336,7 @@
     },
     {
       "path": "schemas/generated/json/mcp-repo-index-input-1.0.schema.json",
-      "blake3": "ed60864de12adef9f51ef89795aee5ea0f6bb164267c132b9995a2b66bbb254e"
+      "blake3": "2b5dd59233a995a642367c098b7e99a1b0e8f9d05618194df780d7a9264415a6"
     },
     {
       "path": "schemas/generated/json/mcp-repo-index-output-1.0.schema.json",

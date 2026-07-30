@@ -588,8 +588,9 @@ pub struct RepoIndexInput {
     pub wait_ms: Option<u32>,
     /// Requests permission to continue after client disconnect.
     ///
-    /// The current versioned fallback rejects `true` before creating an
-    /// operation because operation and generation handles are process-local.
+    /// When `true`, the daemon owns the durable operation independently of the
+    /// requesting transport. Status and a successfully published generation
+    /// remain recoverable after daemon restart.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detached: Option<bool>,
 }
