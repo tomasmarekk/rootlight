@@ -42,6 +42,10 @@ const HANDSHAKE: &[u8] = b"rootlight-native-isolated/1\n";
 const MACOS_UNLINK_READY: &[u8] = b"rootlight-macos-unlink/1\n";
 #[cfg(target_os = "macos")]
 const MACOS_UNLINK_ACK: &[u8] = b"\x06";
+#[cfg(target_os = "macos")]
+const MACOS_FAILURE_PREFIX: &str = "rootlight-macos-launcher-failure/1:";
+#[cfg(target_os = "macos")]
+const MACOS_DIAGNOSTIC_LIMIT: u64 = 4096;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const EXECUTABLE_BUSY_RETRY_LIMIT: usize = 8;
@@ -351,6 +355,8 @@ pub(crate) fn spawn_isolated_adapter(
     let stderr = child.stderr.take().ok_or_else(|| {
         ProcessError::InvalidInput("isolated adapter diagnostics pipe is missing".to_owned())
     })?;
+    #[cfg(target_os = "macos")]
+    let mut stderr = stderr;
     #[cfg(target_os = "linux")]
     let verification = verify_record(&mut stdout, &mut child, HANDSHAKE);
     #[cfg(target_os = "macos")]
@@ -358,6 +364,9 @@ pub(crate) fn spawn_isolated_adapter(
     if let Err(error) = verification {
         let _ = killpg(process_group, Signal::SIGKILL);
         let _ = child.wait();
+        #[cfg(target_os = "macos")]
+        return Err(macos_verification_failure(error, &mut stderr));
+        #[cfg(target_os = "linux")]
         return Err(error);
     }
 
@@ -508,6 +517,60 @@ fn verify_record(
     nix::fcntl::fcntl(stdout.as_fd(), nix::fcntl::FcntlArg::F_SETFL(flags))
         .map_err(|error| nix_error("restore launcher handshake flags", error))?;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_verification_failure(fallback: ProcessError, stderr: &mut ChildStderr) -> ProcessError {
+    // The child has been reaped, so this bounded read cannot wait for more
+    // bytes. Only closed stage codes are promoted into the parent error.
+    let mut diagnostics = Vec::new();
+    if stderr
+        .take(MACOS_DIAGNOSTIC_LIMIT)
+        .read_to_end(&mut diagnostics)
+        .is_err()
+    {
+        return fallback;
+    }
+    let Ok(diagnostics) = std::str::from_utf8(&diagnostics) else {
+        return fallback;
+    };
+    if let Some(code) = diagnostics
+        .lines()
+        .find_map(|line| line.strip_prefix(MACOS_FAILURE_PREFIX))
+        .and_then(known_macos_failure_code)
+    {
+        return ProcessError::InvalidInput(format!("isolated adapter launcher failed at {code}"));
+    }
+    if diagnostics.contains("sandbox-exec") {
+        return ProcessError::InvalidInput(
+            "isolated adapter launcher failed at sandbox-entry".to_owned(),
+        );
+    }
+    fallback
+}
+
+#[cfg(target_os = "macos")]
+fn known_macos_failure_code(code: &str) -> Option<&'static str> {
+    [
+        "hard-limit-replacement",
+        "cpu-limit",
+        "descriptor-limit",
+        "core-limit",
+        "file-output-limit",
+        "resolve-executable",
+        "resolve-workspace",
+        "descriptor-closure",
+        "unlink-acknowledgement",
+        "resolve-final-executable",
+        "verify-unlink",
+        "handshake-write",
+        "launcher-io",
+        "launcher-contract",
+        "unsupported-platform",
+        "launcher-deadline",
+    ]
+    .into_iter()
+    .find(|known| *known == code)
 }
 
 #[cfg(target_os = "linux")]

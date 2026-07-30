@@ -21,6 +21,8 @@ use rootlight_adapter_host::{
     AdapterActivation, IsolationReport, encode_isolation_report, evaluate_adapter_activation,
     run_project_session,
 };
+#[cfg(target_os = "macos")]
+use rootlight_sandbox::ProcessError;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use rootlight_sandbox::enter_isolated_adapter_launcher;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -39,6 +41,13 @@ fn main() -> ExitCode {
         match enter_isolated_adapter_launcher(launcher_arguments) {
             Ok(arguments) => arguments,
             Err(error) => {
+                #[cfg(target_os = "macos")]
+                // The parent accepts only this closed stage code; arbitrary
+                // sandbox diagnostics and ephemeral paths remain private.
+                eprintln!(
+                    "rootlight-macos-launcher-failure/1:{}",
+                    macos_launcher_failure_code(&error)
+                );
                 eprintln!("error: native isolation launcher failed: {error}");
                 return ExitCode::FAILURE;
             }
@@ -47,6 +56,32 @@ fn main() -> ExitCode {
         arguments
     };
     dispatch(arguments.into_iter())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_launcher_failure_code(error: &ProcessError) -> &'static str {
+    match error {
+        ProcessError::Io { operation, .. } => match *operation {
+            "enter hard-limited Darwin sandbox" => "hard-limit-replacement",
+            "set adapter CPU limit" => "cpu-limit",
+            "set adapter descriptor limit" => "descriptor-limit",
+            "disable adapter core dumps" => "core-limit",
+            "disable adapter file output" => "file-output-limit",
+            "resolve staged adapter executable" => "resolve-executable",
+            "resolve staged adapter workspace" => "resolve-workspace",
+            "enumerate inherited descriptors"
+            | "inspect inherited descriptor"
+            | "close inherited descriptor" => "descriptor-closure",
+            "read staged adapter unlink acknowledgement" => "unlink-acknowledgement",
+            "resolve final staged adapter executable" => "resolve-final-executable",
+            "verify staged adapter executable unlink" => "verify-unlink",
+            "write isolation handshake" => "handshake-write",
+            _ => "launcher-io",
+        },
+        ProcessError::InvalidInput(_) => "launcher-contract",
+        ProcessError::UnsupportedPlatform => "unsupported-platform",
+        ProcessError::Deadline { .. } => "launcher-deadline",
+    }
 }
 
 fn dispatch(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> ExitCode {
