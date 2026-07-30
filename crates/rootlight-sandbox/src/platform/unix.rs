@@ -50,8 +50,6 @@ const STAGED_EXECUTABLE: &str = "adapter";
 #[cfg(target_os = "macos")]
 const MACOS_RESOURCE_STAGE: &str = "--rootlight-macos-resource-stage";
 #[cfg(target_os = "macos")]
-const MACOS_SANDBOX_STAGE: &str = "--rootlight-macos-sandbox-stage";
-#[cfg(target_os = "macos")]
 const MACOS_FINAL_STAGE: &str = "--rootlight-macos-final-stage";
 
 #[derive(Debug)]
@@ -536,9 +534,6 @@ pub(crate) fn enter_isolated_adapter_launcher(
         Some(stage) if stage == std::ffi::OsStr::new(MACOS_RESOURCE_STAGE) => {
             enter_macos_resource_stage(arguments)
         }
-        Some(stage) if stage == std::ffi::OsStr::new(MACOS_SANDBOX_STAGE) => {
-            enter_macos_sandbox_stage(arguments)
-        }
         Some(stage) if stage == std::ffi::OsStr::new(MACOS_FINAL_STAGE) => {
             enter_macos_final_stage(arguments)
         }
@@ -574,41 +569,15 @@ fn enter_macos_resource_stage(
         OsString::from(macos_profile(&executable, &workspace)),
         executable.as_os_str().to_owned(),
         OsString::from(LAUNCHER_ARGUMENT),
-        OsString::from(MACOS_SANDBOX_STAGE),
-        OsString::from(memory_bytes.to_string()),
-        OsString::from(LAUNCHER_SEPARATOR),
-    ];
-    sandbox_arguments.extend(adapter_arguments);
-    let error = Command::new(sandbox)
-        .args(sandbox_arguments)
-        .env_clear()
-        .exec();
-    Err(ProcessError::io("enter Darwin sandbox", error))
-}
-
-#[cfg(target_os = "macos")]
-fn enter_macos_sandbox_stage(
-    mut arguments: impl Iterator<Item = OsString>,
-) -> Result<Vec<OsString>, ProcessError> {
-    let memory_bytes = parse_launcher_limit(arguments.next(), "memory")?;
-    if arguments.next().as_deref() != Some(std::ffi::OsStr::new(LAUNCHER_SEPARATOR)) {
-        return Err(ProcessError::InvalidInput(
-            "isolated adapter launcher separator is invalid".to_owned(),
-        ));
-    }
-    let adapter_arguments = arguments.collect::<Vec<_>>();
-    let executable = std::env::current_exe()
-        .map_err(|error| ProcessError::io("resolve staged adapter executable", error))?;
-    close_inherited_descriptors()?;
-    let mut final_arguments = vec![
-        OsString::from(LAUNCHER_ARGUMENT),
         OsString::from(MACOS_FINAL_STAGE),
         OsString::from(LAUNCHER_SEPARATOR),
     ];
-    final_arguments.extend(adapter_arguments);
-    let never =
-        macos::replace_process_with_memory_limit(&executable, &final_arguments, memory_bytes)
-            .map_err(|error| ProcessError::io("enter hard-limited Darwin adapter", error))?;
+    sandbox_arguments.extend(adapter_arguments);
+    // SETEXEC applies the fatal ledger before sandbox-exec enters Seatbelt.
+    // Both subsequent execs retain the same process, limits, and process group,
+    // so the default-deny profile never needs to allow process creation.
+    let never = macos::replace_process_with_memory_limit(sandbox, &sandbox_arguments, memory_bytes)
+        .map_err(|error| ProcessError::io("enter hard-limited Darwin sandbox", error))?;
     match never {}
 }
 
