@@ -1012,20 +1012,9 @@ fn allowed_linux_syscalls() -> Vec<i64> {
     }
 }
 
-// The system profile supplies parser symbols such as `PIPE`. Its ambient
-// grants are neutralized by family before Rootlight adds narrower controls.
 #[cfg(target_os = "macos")]
 const MACOS_PROFILE_PREAMBLE: &str = r#"(version 1)
 (deny default)
-(import "system.sb")
-(deny file*)
-(deny network*)
-(deny process*)
-(deny mach*)
-(deny ipc*)
-(deny iokit*)
-(deny system*)
-(deny sysctl*)
 "#;
 
 #[cfg(target_os = "macos")]
@@ -1036,8 +1025,6 @@ fn macos_profile(executable: &Path, workspace: &Path) -> String {
         r#"{MACOS_PROFILE_PREAMBLE}(allow process-info* (target self))
 (allow signal (target self))
 (allow sysctl-read)
-(allow file-read-data (vnode-type PIPE))
-(allow file-write-data (vnode-type PIPE))
 (allow file-read*
     (literal "{executable}")
     (subpath "{workspace}")
@@ -1145,24 +1132,18 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_profile_limits_writes_to_bounded_standard_streams() {
+    fn macos_profile_grants_no_filesystem_writes() {
         let profile = macos_profile(
             Path::new("/private/tmp/rootlight-adapter/adapter"),
             Path::new("/private/tmp/rootlight-adapter"),
         );
 
         assert!(profile.starts_with("(version 1)\n(deny default)\n"));
-        assert!(profile.contains("(import \"system.sb\")"));
-        for denied_family in [
-            "file*", "network*", "process*", "mach*", "ipc*", "iokit*", "system*", "sysctl*",
-        ] {
-            assert!(profile.contains(&format!("(deny {denied_family})")));
-        }
-        assert!(profile.contains("(allow file-read-data (vnode-type PIPE))"));
-        assert!(profile.contains("(allow file-write-data (vnode-type PIPE))"));
-        assert_eq!(profile.matches("(allow file-write").count(), 1);
-        assert!(!profile.contains("(deny file-write"));
+        assert!(!profile.contains("(import "));
+        assert!(!profile.contains("(allow file-write"));
         assert!(!profile.contains("(allow process-exec"));
+        assert!(profile.contains("(deny network*)"));
+        assert!(profile.contains("(deny process-fork)"));
     }
 
     #[cfg(target_os = "macos")]
@@ -1170,13 +1151,11 @@ mod tests {
     fn macos_profile_compiles_in_fresh_process() {
         const PROBE_ENVIRONMENT: &str = "ROOTLIGHT_TEST_MACOS_PROFILE_STAGE";
         const TEST_NAME: &str = "platform::unix::tests::macos_profile_compiles_in_fresh_process";
-        const STAGES: [&str; 9] = [
+        const STAGES: [&str; 7] = [
             "baseline",
             "process-info",
             "self-signal",
             "sysctl-read",
-            "pipe-read",
-            "pipe-write",
             "filesystem-read",
             "network-deny",
             "process-fork-deny",
@@ -1193,7 +1172,24 @@ mod tests {
             eprintln!("{marker}");
             io::stderr().flush().expect("profile probe marker flushes");
             match macos::enter_sandbox(&macos_profile_prefix(stage)) {
-                Ok(()) => std::process::exit(0),
+                Ok(()) => {
+                    // Anonymous standard streams remain usable without granting
+                    // the sandbox access to any filesystem write operation.
+                    let mut input = [0_u8; 1];
+                    io::stdin()
+                        .read_exact(&mut input)
+                        .expect("sandboxed stdin remains readable");
+                    assert_eq!(input, [b'R']);
+                    println!("{marker}/stdout");
+                    io::stdout()
+                        .flush()
+                        .expect("sandboxed stdout remains writable");
+                    eprintln!("{marker}/stderr");
+                    io::stderr()
+                        .flush()
+                        .expect("sandboxed stderr remains writable");
+                    std::process::exit(0);
+                }
                 Err(_) => std::process::exit(70),
             }
         }
@@ -1203,20 +1199,34 @@ mod tests {
         let executable = std::env::current_exe().expect("current test executable resolves");
         for (stage, label) in STAGES.into_iter().enumerate() {
             let marker = format!("rootlight-seatbelt-profile-probe/{stage}");
-            let output = Command::new(&executable)
+            let mut child = Command::new(&executable)
                 .env_clear()
                 .env(PROBE_ENVIRONMENT, stage.to_string())
                 .arg("--exact")
                 .arg(TEST_NAME)
                 .arg("--nocapture")
                 .arg("--test-threads=1")
-                .output()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
                 .expect("profile probe process starts");
+            child
+                .stdin
+                .take()
+                .expect("profile probe stdin is piped")
+                .write_all(b"R")
+                .expect("profile probe input is written");
+            let output = child
+                .wait_with_output()
+                .expect("profile probe process completes");
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(
-                output.status.success() && stderr.contains(&marker),
-                "Darwin Seatbelt profile stage `{label}` failed to compile \
+                output.status.success()
+                    && stdout.contains(&format!("{marker}/stdout"))
+                    && stderr.contains(&format!("{marker}/stderr")),
+                "Darwin Seatbelt profile stage `{label}` failed validation \
                  (status={}, stdout={stdout}, stderr={stderr})",
                 output.status
             );
@@ -1225,12 +1235,10 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     fn macos_profile_prefix(stage: usize) -> String {
-        const FRAGMENTS: [&str; 8] = [
+        const FRAGMENTS: [&str; 6] = [
             "(allow process-info* (target self))\n",
             "(allow signal (target self))\n",
             "(allow sysctl-read)\n",
-            "(allow file-read-data (vnode-type PIPE))\n",
-            "(allow file-write-data (vnode-type PIPE))\n",
             r#"(allow file-read*
     (literal "/private/tmp/rootlight-adapter/adapter")
     (subpath "/private/tmp/rootlight-adapter")
