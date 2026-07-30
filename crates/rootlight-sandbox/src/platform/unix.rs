@@ -1089,7 +1089,10 @@ fn stdio(mode: StdioMode) -> Stdio {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Read as _, os::unix::fs::symlink};
+    use std::{
+        io::{Read as _, Write as _},
+        os::unix::fs::symlink,
+    };
 
     use nix::sys::stat::Mode;
     use nix::unistd::mkfifo;
@@ -1140,6 +1143,92 @@ mod tests {
         assert_eq!(profile.matches("(allow file-write").count(), 1);
         assert!(!profile.contains("(deny file-write"));
         assert!(!profile.contains("(allow process-exec"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_profile_compiles_in_fresh_process() {
+        const PROBE_ENVIRONMENT: &str = "ROOTLIGHT_TEST_MACOS_PROFILE_STAGE";
+        const TEST_NAME: &str = "platform::unix::tests::macos_profile_compiles_in_fresh_process";
+        const STAGES: [&str; 9] = [
+            "baseline",
+            "process-info",
+            "self-signal",
+            "sysctl-read",
+            "pipe-read",
+            "pipe-write",
+            "filesystem-read",
+            "network-deny",
+            "process-fork-deny",
+        ];
+
+        if let Some(stage) = std::env::var_os(PROBE_ENVIRONMENT) {
+            let stage = stage
+                .into_string()
+                .ok()
+                .and_then(|stage| stage.parse::<usize>().ok())
+                .filter(|stage| *stage < STAGES.len())
+                .expect("profile probe stage is valid");
+            let marker = format!("rootlight-seatbelt-profile-probe/{stage}");
+            eprintln!("{marker}");
+            io::stderr().flush().expect("profile probe marker flushes");
+            match macos::enter_sandbox(&macos_profile_prefix(stage)) {
+                Ok(()) => std::process::exit(0),
+                Err(_) => std::process::exit(70),
+            }
+        }
+
+        // Seatbelt is process-wide and irreversible, so each cumulative
+        // profile must be compiled in a separate test process.
+        let executable = std::env::current_exe().expect("current test executable resolves");
+        for (stage, label) in STAGES.into_iter().enumerate() {
+            let marker = format!("rootlight-seatbelt-profile-probe/{stage}");
+            let output = Command::new(&executable)
+                .env_clear()
+                .env(PROBE_ENVIRONMENT, stage.to_string())
+                .arg("--exact")
+                .arg(TEST_NAME)
+                .arg("--nocapture")
+                .arg("--test-threads=1")
+                .output()
+                .expect("profile probe process starts");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stderr.contains(&marker),
+                "Darwin Seatbelt profile stage `{label}` failed to compile \
+                 (status={}, stdout={stdout}, stderr={stderr})",
+                output.status
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_profile_prefix(stage: usize) -> String {
+        const FRAGMENTS: [&str; 8] = [
+            "(allow process-info* (target self))\n",
+            "(allow signal (target self))\n",
+            "(allow sysctl-read)\n",
+            "(allow file-read-data (vnode-type PIPE))\n",
+            "(allow file-write-data (vnode-type PIPE))\n",
+            r#"(allow file-read*
+    (literal "/private/tmp/rootlight-adapter/adapter")
+    (subpath "/private/tmp/rootlight-adapter")
+    (subpath "/usr/lib")
+    (subpath "/System/Library")
+    (subpath "/private/var/db/dyld")
+    (literal "/dev/null")
+    (literal "/dev/urandom"))
+"#,
+            "(deny network*)\n",
+            "(deny process-fork)\n",
+        ];
+
+        let mut profile = String::from("(version 1)\n(deny default)\n");
+        for fragment in &FRAGMENTS[..stage] {
+            profile.push_str(fragment);
+        }
+        profile
     }
 
     #[test]
