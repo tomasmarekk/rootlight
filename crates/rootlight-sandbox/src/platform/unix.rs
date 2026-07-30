@@ -1025,9 +1025,12 @@ fn macos_profile(executable: &Path, workspace: &Path) -> String {
     (subpath "/System/Library")
     (subpath "/private/var/db/dyld")
     (subpath "/dev/fd")
+    (literal "/dev/stdin")
     (literal "/dev/null")
     (literal "/dev/urandom"))
-(deny file-write*)
+(allow file-write-data
+    (literal "/dev/stdout")
+    (literal "/dev/stderr"))
 (deny network*)
 (deny process-fork)
 "#
@@ -1120,6 +1123,23 @@ mod tests {
 
         assert_eq!(error.raw_os_error(), Some(libc::ENOENT));
         assert_eq!(attempts, 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_profile_limits_writes_to_bounded_standard_streams() {
+        let profile = macos_profile(
+            Path::new("/private/tmp/rootlight-adapter/adapter"),
+            Path::new("/private/tmp/rootlight-adapter"),
+        );
+
+        assert!(profile.starts_with("(version 1)\n(deny default)\n"));
+        assert!(profile.contains("(literal \"/dev/stdin\")"));
+        assert!(profile.contains(
+            "(allow file-write-data\n    (literal \"/dev/stdout\")\n    (literal \"/dev/stderr\"))"
+        ));
+        assert_eq!(profile.matches("(allow file-write").count(), 1);
+        assert!(!profile.contains("(deny file-write"));
     }
 
     #[test]
