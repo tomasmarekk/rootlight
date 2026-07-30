@@ -40,7 +40,7 @@ use rootlight_resolve::{
 use rootlight_vfs::{RelativePath, RepositoryRoot};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tempfile::tempdir;
+use tempfile::tempdir_in;
 
 const MANIFEST_SCHEMA: &str = "rootlight.project-semantic-holdout-manifest/1";
 const ANSWER_KEY_SCHEMA: &str = "rootlight.project-semantic-holdout-answer-key/1";
@@ -1243,7 +1243,10 @@ fn analyze_case(
                 .map_err(|_| ProjectSemanticHoldoutError::Corpus)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let temporary = tempdir().map_err(|_| ProjectSemanticHoldoutError::Corpus)?;
+    let current = std::env::current_dir().map_err(|_| ProjectSemanticHoldoutError::Corpus)?;
+    // The VFS rejects link-bearing repository roots. In particular, macOS may
+    // expose its ambient temporary directory through a symlinked path.
+    let temporary = tempdir_in(current).map_err(|_| ProjectSemanticHoldoutError::Corpus)?;
     for (source, path) in manifest.sources.iter().zip(&validated_paths) {
         let bytes = embedded_source(&source.fixture).ok_or(ProjectSemanticHoldoutError::Fixture)?;
         let full = temporary.path().join(path.as_str());
