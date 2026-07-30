@@ -970,12 +970,21 @@ fn submit_guard_operations(
         return Err(LifecycleError::InvalidWorkerConfiguration);
     }
 
-    for (client, operations) in guards {
+    let mut submission_count = 0_usize;
+    for (_, operations) in guards {
         if operations.is_empty() {
             return Err(LifecycleError::InvalidWorkerConfiguration);
         }
-        let barrier = Arc::new(Barrier::new(operations.len()));
-        let mut submissions = Vec::with_capacity(operations.len());
+        submission_count = submission_count
+            .checked_add(operations.len())
+            .ok_or(LifecycleError::InvalidWorkerConfiguration)?;
+    }
+
+    // Release every guard client in one burst. Sequential per-client batches can
+    // let the first finite probes finish before slower hosts submit the last batch.
+    let barrier = Arc::new(Barrier::new(submission_count));
+    let mut submissions = Vec::with_capacity(submission_count);
+    for (client, operations) in guards {
         for operation in operations {
             let client = Arc::clone(client);
             let barrier = Arc::clone(&barrier);
@@ -992,12 +1001,12 @@ fn submit_guard_operations(
                 Ok(())
             }));
         }
+    }
 
-        for submission in submissions {
-            submission
-                .join()
-                .map_err(|_| LifecycleError::ClientThreadPanicked)??;
-        }
+    for submission in submissions {
+        submission
+            .join()
+            .map_err(|_| LifecycleError::ClientThreadPanicked)??;
     }
     Ok(())
 }
