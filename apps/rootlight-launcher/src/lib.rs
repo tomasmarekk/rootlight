@@ -5,6 +5,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(windows)]
+mod mcp_bootstrap;
+
 use std::{
     collections::BTreeSet,
     ffi::OsStr,
@@ -19,11 +22,18 @@ use std::fs::OpenOptions;
 #[cfg(windows)]
 use std::{
     ffi::OsString,
-    process::Child,
+    io::{BufRead as _, BufReader, Write as _},
+    process::{Child, ChildStdin, ChildStdout},
+    sync::mpsc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(windows)]
+use mcp_bootstrap::{
+    DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_RESPONSE_BYTES, bootstrap_initialize,
+    exposure_profile_policy_is_valid,
+};
 use semver::Version;
 use serde::Deserialize;
 
@@ -40,6 +50,14 @@ const DEFERRED_UNINSTALL_TOKEN_ENV: &str = "ROOTLIGHT_DEFERRED_UNINSTALL_TOKEN";
 const DEFERRED_UNINSTALL_LAUNCHER_PID_ENV: &str = "ROOTLIGHT_DEFERRED_UNINSTALL_LAUNCHER_PID";
 #[cfg(windows)]
 const INTERNAL_UNINSTALL_HELPER: &str = "--rootlight-internal-uninstall-helper";
+#[cfg(windows)]
+const MCP_PROFILE_CEILING_ENV: &str = "ROOTLIGHT_MCP_PROFILE_CEILING";
+#[cfg(windows)]
+const MCP_PROFILE_ENV: &str = "ROOTLIGHT_MCP_PROFILE";
+#[cfg(windows)]
+const MCP_INTERNAL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(windows)]
+const MCP_INTERNAL_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_ACTIVE_VERSION_BYTES: u64 = 128;
 const MAX_INSTALL_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_UPDATE_TRANSACTION_BYTES: u64 = 1024 * 1024;
@@ -76,13 +94,14 @@ pub fn run() -> Result<ExitCode, LauncherError> {
     }
     let binary = invocation_binary_name(executable.as_os_str())?;
     let install_root = install_root(&executable)?;
-    let target = resolve_payload(&install_root, binary)?;
+    let resolved = resolve_payload(&install_root, binary)?;
+    let target = &resolved.executable;
 
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
 
-        let error = Command::new(&target)
+        let error = Command::new(target)
             .args(arguments)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
@@ -92,7 +111,10 @@ pub fn run() -> Result<ExitCode, LauncherError> {
     }
     #[cfg(windows)]
     {
-        let mut command = Command::new(&target);
+        if binary == "rootlight-mcp" && arguments.is_empty() {
+            return run_lazy_mcp_payload(target, &resolved.version);
+        }
+        let mut command = Command::new(target);
         command
             .args(&arguments)
             .stdin(Stdio::inherit())
@@ -137,6 +159,298 @@ pub fn run() -> Result<ExitCode, LauncherError> {
         let _ = (target, arguments);
         Err(LauncherError::UnsupportedPlatform)
     }
+}
+
+#[cfg(windows)]
+fn run_lazy_mcp_payload(target: &Path, server_version: &str) -> Result<ExitCode, LauncherError> {
+    let mut input = BufReader::new(io::stdin());
+    let first_input = read_mcp_input_prefix(&mut input)?;
+    if first_input.is_empty() {
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let Some(frame) = first_input.strip_suffix(b"\n") else {
+        return proxy_mcp_payload(target, input, first_input, Vec::new(), None);
+    };
+    let ceiling = std::env::var_os(MCP_PROFILE_CEILING_ENV);
+    let requested = std::env::var_os(MCP_PROFILE_ENV);
+    if !exposure_profile_policy_is_valid(ceiling.as_deref(), requested.as_deref()) {
+        return proxy_mcp_payload(target, input, first_input, Vec::new(), None);
+    }
+    let Some(bootstrap) = bootstrap_initialize(frame, server_version)
+        .map_err(|_error| LauncherError::McpBootstrap)?
+    else {
+        return proxy_mcp_payload(target, input, first_input, Vec::new(), None);
+    };
+    let response = bootstrap.response();
+    let expected = response
+        .strip_suffix(b"\n")
+        .filter(|frame| !frame.is_empty() && !frame.contains(&b'\n'))
+        .ok_or(LauncherError::McpProxyInvariant)?
+        .to_vec();
+
+    {
+        let mut output = io::stdout().lock();
+        output
+            .write_all(response)
+            .and_then(|()| output.flush())
+            .map_err(LauncherError::McpProxy)?;
+    }
+
+    // A session that closes after `initialize` has no operating work, so the
+    // versioned payload never needs to enter the image loader or security scan.
+    let pending_input = read_mcp_input_prefix(&mut input)?;
+    if pending_input.is_empty() {
+        return Ok(ExitCode::SUCCESS);
+    }
+    // The full payload must reproduce the frozen initialize ABI exactly before
+    // buffered operating input is released, preventing silent launcher/payload
+    // protocol drift across side-by-side updates.
+    proxy_mcp_payload(target, input, first_input, pending_input, Some(expected))
+}
+
+#[cfg(windows)]
+fn read_mcp_input_prefix(reader: &mut impl io::BufRead) -> Result<Vec<u8>, LauncherError> {
+    let maximum = u64::try_from(DEFAULT_MAX_FRAME_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut frame = Vec::new();
+    reader
+        .take(maximum)
+        .read_until(b'\n', &mut frame)
+        .map_err(LauncherError::McpProxy)?;
+    Ok(frame)
+}
+
+#[cfg(windows)]
+fn proxy_mcp_payload(
+    target: &Path,
+    input: BufReader<io::Stdin>,
+    first_input: Vec<u8>,
+    pending_input: Vec<u8>,
+    expected_initialize: Option<Vec<u8>>,
+) -> Result<ExitCode, LauncherError> {
+    let mut child = Command::new(target)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(LauncherError::Spawn)?;
+    let Some(mut child_input) = child.stdin.take() else {
+        terminate_mcp_child(&mut child);
+        return Err(LauncherError::McpProxyInvariant);
+    };
+    let Some(child_output) = child.stdout.take() else {
+        terminate_mcp_child(&mut child);
+        return Err(LauncherError::McpProxyInvariant);
+    };
+    let mut child_output = BufReader::new(child_output);
+
+    if let Err(error) = child_input
+        .write_all(&first_input)
+        .and_then(|()| child_input.flush())
+    {
+        terminate_mcp_child(&mut child);
+        return Err(LauncherError::McpProxy(error));
+    }
+
+    if let Some(expected) = expected_initialize {
+        let (observed, returned_output) =
+            match read_mcp_output_frame_timed(&mut child, child_output) {
+                Ok(observed) => observed,
+                Err(error) => {
+                    terminate_mcp_child(&mut child);
+                    return Err(error);
+                }
+            };
+        child_output = returned_output;
+        if observed.strip_suffix(b"\n") != Some(expected.as_slice()) {
+            terminate_mcp_child(&mut child);
+            return Err(LauncherError::McpProxyInvariant);
+        }
+        if let Err(error) = child_input
+            .write_all(&pending_input)
+            .and_then(|()| child_input.flush())
+        {
+            terminate_mcp_child(&mut child);
+            return Err(LauncherError::McpProxy(error));
+        }
+    }
+
+    let input_worker = match spawn_mcp_input_proxy(input, child_input) {
+        Ok(worker) => worker,
+        Err(error) => {
+            terminate_mcp_child(&mut child);
+            return Err(error);
+        }
+    };
+    let output_worker = match spawn_mcp_output_proxy(child_output) {
+        Ok(worker) => worker,
+        Err(error) => {
+            terminate_mcp_child(&mut child);
+            return Err(error);
+        }
+    };
+    let mut input_worker = Some(input_worker);
+    let mut output_worker = Some(output_worker);
+    let mut settlement_deadline = None;
+    let status = loop {
+        if input_worker
+            .as_ref()
+            .is_some_and(thread::JoinHandle::is_finished)
+        {
+            input_worker
+                .take()
+                .ok_or(LauncherError::McpProxyInvariant)?
+                .join()
+                .map_err(|_| LauncherError::McpProxyThread)?
+                .map_err(LauncherError::McpProxy)?;
+            settlement_deadline.get_or_insert_with(|| {
+                Instant::now()
+                    .checked_add(MCP_INTERNAL_HANDSHAKE_TIMEOUT)
+                    .unwrap_or_else(Instant::now)
+            });
+        }
+        if output_worker
+            .as_ref()
+            .is_some_and(thread::JoinHandle::is_finished)
+        {
+            let result = output_worker
+                .take()
+                .ok_or(LauncherError::McpProxyInvariant)?
+                .join()
+                .map_err(|_| LauncherError::McpProxyThread)?;
+            if let Err(error) = result {
+                terminate_mcp_child(&mut child);
+                return Err(LauncherError::McpProxy(error));
+            }
+            settlement_deadline.get_or_insert_with(|| {
+                Instant::now()
+                    .checked_add(MCP_INTERNAL_HANDSHAKE_TIMEOUT)
+                    .unwrap_or_else(Instant::now)
+            });
+        }
+        if let Some(status) = child.try_wait().map_err(LauncherError::McpProxy)? {
+            break status;
+        }
+        if settlement_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            terminate_mcp_child(&mut child);
+            if let Some(worker) = output_worker.take() {
+                let _ = worker.join();
+            }
+            return Err(LauncherError::McpProxyTimeout);
+        }
+        thread::sleep(MCP_INTERNAL_POLL_INTERVAL);
+    };
+    if let Some(worker) = output_worker {
+        worker
+            .join()
+            .map_err(|_| LauncherError::McpProxyThread)?
+            .map_err(LauncherError::McpProxy)?;
+    }
+    if input_worker
+        .as_ref()
+        .is_some_and(thread::JoinHandle::is_finished)
+    {
+        input_worker
+            .take()
+            .ok_or(LauncherError::McpProxyInvariant)?
+            .join()
+            .map_err(|_| LauncherError::McpProxyThread)?
+            .map_err(LauncherError::McpProxy)?;
+    }
+    let code = status
+        .code()
+        .and_then(|value| u8::try_from(value).ok())
+        .unwrap_or(1);
+    Ok(ExitCode::from(code))
+}
+
+#[cfg(windows)]
+fn read_mcp_output_frame_timed(
+    child: &mut Child,
+    mut reader: BufReader<ChildStdout>,
+) -> Result<(Vec<u8>, BufReader<ChildStdout>), LauncherError> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let worker = thread::Builder::new()
+        .name("rootlight-mcp-initialize-output".to_owned())
+        .spawn(move || {
+            let result = read_mcp_output_frame(&mut reader);
+            let _ = sender.send((result, reader));
+        })
+        .map_err(LauncherError::McpProxy)?;
+    let received = receiver.recv_timeout(MCP_INTERNAL_HANDSHAKE_TIMEOUT);
+    match received {
+        Ok((result, reader)) => {
+            worker.join().map_err(|_| LauncherError::McpProxyThread)?;
+            result.map(|frame| (frame, reader))
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            terminate_mcp_child(child);
+            let _ = worker.join();
+            Err(LauncherError::McpProxyTimeout)
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            terminate_mcp_child(child);
+            let _ = worker.join();
+            Err(LauncherError::McpProxyThread)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn read_mcp_output_frame(reader: &mut impl io::BufRead) -> Result<Vec<u8>, LauncherError> {
+    let maximum = u64::try_from(DEFAULT_MAX_RESPONSE_BYTES).unwrap_or(u64::MAX);
+    let mut frame = Vec::new();
+    reader
+        .take(maximum.saturating_add(1))
+        .read_until(b'\n', &mut frame)
+        .map_err(LauncherError::McpProxy)?;
+    if frame.is_empty() || frame.len() > DEFAULT_MAX_RESPONSE_BYTES || frame.last() != Some(&b'\n')
+    {
+        return Err(LauncherError::McpProxyInvariant);
+    }
+    Ok(frame)
+}
+
+#[cfg(windows)]
+fn spawn_mcp_input_proxy(
+    mut input: BufReader<io::Stdin>,
+    mut child_input: ChildStdin,
+) -> Result<thread::JoinHandle<io::Result<()>>, LauncherError> {
+    thread::Builder::new()
+        .name("rootlight-mcp-input".to_owned())
+        .spawn(move || match io::copy(&mut input, &mut child_input) {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+            Err(error) => Err(error),
+        })
+        .map_err(LauncherError::McpProxy)
+}
+
+#[cfg(windows)]
+fn spawn_mcp_output_proxy(
+    mut child_output: BufReader<ChildStdout>,
+) -> Result<thread::JoinHandle<io::Result<()>>, LauncherError> {
+    thread::Builder::new()
+        .name("rootlight-mcp-output".to_owned())
+        .spawn(move || {
+            let mut output = io::stdout().lock();
+            if let Err(error) = io::copy(&mut child_output, &mut output) {
+                // Keep draining the trusted child so it cannot deadlock while
+                // the launcher reports a closed or failed client output pipe.
+                let _ = io::copy(&mut child_output, &mut io::sink());
+                return Err(error);
+            }
+            output.flush()
+        })
+        .map_err(LauncherError::McpProxy)
+}
+
+#[cfg(windows)]
+fn terminate_mcp_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[cfg(windows)]
@@ -623,7 +937,13 @@ fn install_root(executable: &Path) -> Result<PathBuf, LauncherError> {
     Ok(root.to_path_buf())
 }
 
-fn resolve_payload(root: &Path, binary: &str) -> Result<PathBuf, LauncherError> {
+struct ResolvedPayload {
+    executable: PathBuf,
+    #[cfg(any(test, windows))]
+    version: String,
+}
+
+fn resolve_payload(root: &Path, binary: &str) -> Result<ResolvedPayload, LauncherError> {
     validate_install_directory(root)?;
     let state = root.join("state");
     let manifest_bytes = read_regular_bounded(
@@ -669,7 +989,11 @@ fn resolve_payload(root: &Path, binary: &str) -> Result<PathBuf, LauncherError> 
         }
         let candidate = payload_path(root, &version, binary);
         if validate_payload(&candidate).is_ok() {
-            return Ok(candidate);
+            return Ok(ResolvedPayload {
+                executable: candidate,
+                #[cfg(any(test, windows))]
+                version,
+            });
         }
     }
     Err(LauncherError::NoTrustedPayload)
@@ -1104,6 +1428,21 @@ pub enum LauncherError {
     /// The selected payload could not replace or start from the launcher.
     #[error("Rootlight payload could not be started")]
     Spawn(#[source] io::Error),
+    /// The Windows MCP launcher could not forward bounded standard streams.
+    #[error("Rootlight MCP stream proxy failed")]
+    McpProxy(#[source] io::Error),
+    /// The conservative MCP bootstrap could not prepare its bounded response.
+    #[error("Rootlight MCP initialization bootstrap failed")]
+    McpBootstrap,
+    /// The selected MCP payload disagreed with the shared bootstrap protocol.
+    #[error("Rootlight MCP bootstrap invariant failed")]
+    McpProxyInvariant,
+    /// A bounded MCP stream worker terminated unexpectedly.
+    #[error("Rootlight MCP stream proxy worker failed")]
+    McpProxyThread,
+    /// An internal MCP bootstrap or handoff missed its fixed deadline.
+    #[error("Rootlight MCP bootstrap timed out")]
+    McpProxyTimeout,
     /// A private helper copy or its fixed supervisor process could not be prepared.
     #[error("Windows uninstall helper could not be prepared")]
     UninstallPreparation(#[source] io::Error),
@@ -1346,7 +1685,8 @@ mod tests {
 
         let target = resolve_payload(&root, "rootlight").expect("fallback resolves");
 
-        assert!(target.starts_with(root.join("versions/1.0.0")));
+        assert!(target.executable.starts_with(root.join("versions/1.0.0")));
+        assert_eq!(target.version, "1.0.0");
     }
 
     #[test]
@@ -1356,7 +1696,8 @@ mod tests {
 
         let target = resolve_payload(&root, "rootlight").expect("fallback resolves");
 
-        assert!(target.starts_with(root.join("versions/1.0.0")));
+        assert!(target.executable.starts_with(root.join("versions/1.0.0")));
+        assert_eq!(target.version, "1.0.0");
     }
 
     #[cfg(windows)]

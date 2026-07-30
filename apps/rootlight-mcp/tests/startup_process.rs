@@ -98,7 +98,10 @@ fn daemon_reaches_ready_within_release_startup_slo() {
 }
 
 fn initialize_process(state_dir: &Path, runtime_dir: &Path) -> u64 {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rootlight-mcp"));
+    let mcp_binary = std::env::var_os("ROOTLIGHT_TEST_MCP_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_rootlight-mcp")));
+    let mut command = Command::new(mcp_binary);
     command
         .env("ROOTLIGHT_STATE_DIR", state_dir)
         .env("ROOTLIGHT_RUNTIME_DIR", runtime_dir)

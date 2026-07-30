@@ -1,12 +1,12 @@
-//! Live Windows coverage for the production isolated project-session binary.
+//! Live native coverage for the production isolated project-session binary.
 //!
-//! These tests cross the real AppContainer, Job Object, bounded-pipe, SDK, and
+//! These tests cross the platform containment, bounded-pipe, SDK, and
 //! normalized-IR validation boundaries instead of substituting an in-process
 //! child handler.
 
-#![cfg(windows)]
-
 use std::{
+    fs,
+    io::{Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -233,6 +233,72 @@ fn actual_child_output_quota_and_parent_cancellation_fail_closed() {
     ));
 }
 
+#[test]
+fn negotiated_digest_rejects_a_replaced_executable_before_entry() {
+    let executable = adapter_executable();
+    let limits = resource_limits(8 * 1024 * 1024);
+    let session = negotiated_session(&executable, limits);
+    let replacement = TemporaryExecutable::copy_from(&executable);
+    replacement.corrupt_first_byte();
+    let request = project_request(
+        &session,
+        "rust",
+        &[(
+            "src/main.rs",
+            b"pub fn run() {}\n".as_slice(),
+            false,
+            Vec::new(),
+        )],
+    );
+
+    assert!(matches!(
+        execute_isolated_project_adapter(
+            replacement.path(),
+            &session,
+            &request,
+            &ExtensionSupport::default(),
+            &deadline(),
+        ),
+        Err(AdapterHostError::Process)
+    ));
+}
+
+struct TemporaryExecutable(PathBuf);
+
+impl TemporaryExecutable {
+    fn copy_from(source: &Path) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            ".rootlight-adapter-digest-test-{}{}",
+            std::process::id(),
+            std::env::consts::EXE_SUFFIX
+        ));
+        let _ = fs::remove_file(&path);
+        fs::copy(source, &path).expect("fixture executable copies");
+        Self(path)
+    }
+
+    fn corrupt_first_byte(&self) {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&self.0)
+            .expect("fixture executable opens for mutation");
+        file.seek(SeekFrom::Start(0))
+            .expect("fixture executable seeks");
+        file.write_all(&[0xa5]).expect("fixture executable mutates");
+        file.sync_all().expect("fixture mutation syncs");
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TemporaryExecutable {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
 fn adapter_executable() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_rootlight-adapter-host"))
 }
@@ -318,7 +384,7 @@ fn project_request(
 }
 
 fn repository() -> RepositoryId {
-    derive_repository(b"rootlight-project-session-windows").id()
+    derive_repository(b"rootlight-project-session-native").id()
 }
 
 fn deadline() -> Cancellation {

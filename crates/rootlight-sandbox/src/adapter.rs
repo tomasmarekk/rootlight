@@ -1,8 +1,9 @@
-//! Auditable Windows deep-adapter process isolation and capability evidence.
+//! Auditable native deep-adapter process isolation and capability evidence.
 //!
 //! A live report belongs to the exact process that was created, assigned to
-//! its Job Object, token-verified, and resumed. A separate conservative probe
-//! can verify pre-execution setup, but never claims runtime-only controls.
+//! its platform containment scope, verified, and started. A separate
+//! conservative probe can verify pre-execution setup on Windows, but never
+//! claims runtime-only controls.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -12,6 +13,29 @@ use std::{
 };
 
 use crate::{ProcessCommand, ProcessError, platform};
+
+/// Hard byte ceiling for an executable admitted to native adapter isolation.
+pub const MAX_ADAPTER_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
+
+const EXECUTABLE_COPY_BUFFER_BYTES: usize = 64 * 1024;
+
+/// Expected BLAKE3 identity of one negotiated adapter executable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdapterExecutableDigest([u8; blake3::OUT_LEN]);
+
+impl AdapterExecutableDigest {
+    /// Creates an executable identity from canonical BLAKE3 bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; blake3::OUT_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the canonical digest bytes.
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; blake3::OUT_LEN] {
+        self.0
+    }
+}
 
 /// Required isolation control for a deep adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +75,8 @@ pub enum AdapterIsolationMechanism {
     UserProfileDenied,
     /// The staged executable is immutable to the AppContainer token.
     StagedExecutableAppContainerAcl,
+    /// The operation-owned staged executable is immutable to the adapter.
+    OperationOwnedImmutableExecutable,
     /// A writable temporary directory has a private AppContainer ACL.
     PrivateTemporaryDirectoryAcl,
     /// Temporary writes are denied, establishing a hard zero-byte ceiling.
@@ -79,6 +105,44 @@ pub enum AdapterIsolationMechanism {
     CurrentDirectoryDllExclusion,
     /// Closing the owning Job Object terminates every assigned process.
     KillOnCloseJob,
+    /// Linux Landlock confines filesystem access to reviewed read-only paths.
+    LandlockReadOnlyView,
+    /// macOS Seatbelt confines filesystem access to reviewed read-only paths.
+    SeatbeltReadOnlyView,
+    /// The native filesystem policy grants no writable path.
+    NativeFilesystemWritesDenied,
+    /// Linux seccomp denies creation and use of network endpoints.
+    SeccompNetworkDenied,
+    /// macOS Seatbelt denies all network operations.
+    SeatbeltNetworkDenied,
+    /// Linux seccomp denies process and thread creation.
+    SeccompProcessCreationDenied,
+    /// macOS Seatbelt denies process forking.
+    SeatbeltProcessCreationDenied,
+    /// The process address-space resource limit is set before adapter entry.
+    AddressSpaceRlimit,
+    /// The process CPU-time resource limit is set before adapter entry.
+    CpuTimeRlimit,
+    /// The open-file-descriptor resource limit is set before adapter entry.
+    FileDescriptorRlimit,
+    /// Only standard input, output, and diagnostics are inherited.
+    StandardIoDescriptorAllowlist,
+    /// The child starts with an empty environment and a reviewed loader view.
+    SecureLoaderEnvironment,
+    /// A dedicated process group is killed and reaped by the owning host.
+    ProcessGroupCleanup,
+}
+
+/// Native platform family that produced exact-process isolation evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AdapterIsolationPlatform {
+    /// Linux Landlock, seccomp, rlimit, and process-group backend.
+    Linux,
+    /// macOS Seatbelt, rlimit, and process-group backend.
+    MacOs,
+    /// Windows AppContainer and Job Object backend.
+    Windows,
 }
 
 /// Observed status of one native mechanism.
@@ -108,7 +172,7 @@ impl AdapterMechanismEvidence {
         self.reason_code
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
     pub(crate) const fn enforced(
         mechanism: AdapterIsolationMechanism,
         reason_code: &'static str,
@@ -164,10 +228,17 @@ impl AdapterControlEvidence {
 /// Native-isolation evidence for a probe or an exact live adapter process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdapterIsolationReport {
+    platform: AdapterIsolationPlatform,
     mechanisms: Vec<AdapterMechanismEvidence>,
 }
 
 impl AdapterIsolationReport {
+    /// Returns the native platform family for the exact live process.
+    #[must_use]
+    pub const fn platform(&self) -> AdapterIsolationPlatform {
+        self.platform
+    }
+
     /// Returns evidence for every independently audited native mechanism.
     #[must_use]
     pub fn mechanisms(&self) -> &[AdapterMechanismEvidence] {
@@ -177,7 +248,7 @@ impl AdapterIsolationReport {
     /// Returns evidence for one required composite control.
     #[must_use]
     pub fn control(&self, control: AdapterControl) -> AdapterControlEvidence {
-        let required = required_mechanisms(control);
+        let required = required_mechanisms(self.platform, control);
         let enforced = required.iter().all(|required_mechanism| {
             self.mechanisms
                 .iter()
@@ -219,6 +290,7 @@ impl AdapterIsolationReport {
         };
 
         Self {
+            platform: AdapterIsolationPlatform::Windows,
             mechanisms: vec![
                 AdapterMechanismEvidence::unavailable(
                     StagedInputAppContainerAcl,
@@ -321,6 +393,142 @@ impl AdapterIsolationReport {
         }
         report
     }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn linux_isolated_process() -> Self {
+        use AdapterIsolationMechanism::{
+            AddressSpaceRlimit, CpuTimeRlimit, FileDescriptorRlimit, LandlockReadOnlyView,
+            NativeFilesystemWritesDenied, OperationOwnedImmutableExecutable, ProcessGroupCleanup,
+            RepositoryPathsWithheld, SeccompNetworkDenied, SeccompProcessCreationDenied,
+            SecureLoaderEnvironment, SourceViaBoundedStdin, StandardIoDescriptorAllowlist,
+        };
+
+        Self {
+            platform: AdapterIsolationPlatform::Linux,
+            mechanisms: vec![
+                AdapterMechanismEvidence::enforced(
+                    SourceViaBoundedStdin,
+                    "source_crosses_quota_limited_anonymous_pipe",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    RepositoryPathsWithheld,
+                    "command_contract_has_no_source_or_repository_path",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    OperationOwnedImmutableExecutable,
+                    "operation_owned_executable_is_immutable",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    LandlockReadOnlyView,
+                    "landlock_v3_read_only_allowlist_is_fully_enforced",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    NativeFilesystemWritesDenied,
+                    "landlock_handles_all_filesystem_write_rights",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    SeccompNetworkDenied,
+                    "seccomp_allowlist_excludes_network_endpoint_syscalls",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    SeccompProcessCreationDenied,
+                    "seccomp_allowlist_excludes_process_creation_syscalls",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    AddressSpaceRlimit,
+                    "address_space_limit_configured_before_adapter_entry",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    CpuTimeRlimit,
+                    "cpu_time_limit_configured_before_adapter_entry",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    FileDescriptorRlimit,
+                    "open_descriptor_limit_configured_before_adapter_entry",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    StandardIoDescriptorAllowlist,
+                    "only_three_standard_descriptors_are_inherited",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    SecureLoaderEnvironment,
+                    "empty_environment_and_landlock_loader_allowlist",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    ProcessGroupCleanup,
+                    "dedicated_session_is_killed_and_reaped_by_owner",
+                ),
+            ],
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn macos_isolated_process() -> Self {
+        use AdapterIsolationMechanism::{
+            AddressSpaceRlimit, CpuTimeRlimit, FileDescriptorRlimit, NativeFilesystemWritesDenied,
+            OperationOwnedImmutableExecutable, ProcessGroupCleanup, RepositoryPathsWithheld,
+            SeatbeltNetworkDenied, SeatbeltProcessCreationDenied, SeatbeltReadOnlyView,
+            SecureLoaderEnvironment, SourceViaBoundedStdin, StandardIoDescriptorAllowlist,
+        };
+
+        Self {
+            platform: AdapterIsolationPlatform::MacOs,
+            mechanisms: vec![
+                AdapterMechanismEvidence::enforced(
+                    SourceViaBoundedStdin,
+                    "source_crosses_quota_limited_anonymous_pipe",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    RepositoryPathsWithheld,
+                    "command_contract_has_no_source_or_repository_path",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    OperationOwnedImmutableExecutable,
+                    "operation_owned_executable_is_immutable",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    SeatbeltReadOnlyView,
+                    "seatbelt_default_deny_read_only_profile_is_active",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    NativeFilesystemWritesDenied,
+                    "seatbelt_profile_grants_no_filesystem_write_operation",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    SeatbeltNetworkDenied,
+                    "seatbelt_profile_grants_no_network_operation",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    SeatbeltProcessCreationDenied,
+                    "seatbelt_profile_denies_process_fork",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    AddressSpaceRlimit,
+                    "address_space_limit_configured_before_adapter_entry",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    CpuTimeRlimit,
+                    "cpu_time_limit_configured_before_adapter_entry",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    FileDescriptorRlimit,
+                    "open_descriptor_limit_configured_before_adapter_entry",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    StandardIoDescriptorAllowlist,
+                    "only_three_standard_descriptors_are_inherited",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    SecureLoaderEnvironment,
+                    "empty_environment_and_seatbelt_loader_allowlist",
+                ),
+                AdapterMechanismEvidence::enforced(
+                    ProcessGroupCleanup,
+                    "dedicated_session_is_killed_and_reaped_by_owner",
+                ),
+            ],
+        }
+    }
 }
 
 /// Executable and bounded stream contract for one isolated adapter process.
@@ -328,6 +536,7 @@ impl AdapterIsolationReport {
 pub struct AdapterProcessCommand {
     pub(crate) program: PathBuf,
     pub(crate) arguments: Vec<OsString>,
+    pub(crate) expected_executable_digest: Option<AdapterExecutableDigest>,
     pub(crate) input_limit: usize,
     pub(crate) output_limit: usize,
     pub(crate) diagnostic_limit: usize,
@@ -353,10 +562,18 @@ impl AdapterProcessCommand {
         Ok(Self {
             program: program.into(),
             arguments: Vec::new(),
+            expected_executable_digest: None,
             input_limit,
             output_limit,
             diagnostic_limit,
         })
+    }
+
+    /// Binds staging to the executable identity authenticated by negotiation.
+    #[must_use]
+    pub fn expected_executable_digest(mut self, digest: AdapterExecutableDigest) -> Self {
+        self.expected_executable_digest = Some(digest);
+        self
     }
 
     /// Appends one non-path literal argument.
@@ -388,6 +605,64 @@ impl AdapterProcessCommand {
     }
 }
 
+pub(crate) fn copy_authenticated_executable(
+    input: &mut impl Read,
+    declared_bytes: u64,
+    expected_digest: Option<AdapterExecutableDigest>,
+    output: &mut impl Write,
+) -> Result<AdapterExecutableDigest, ProcessError> {
+    if declared_bytes == 0 || declared_bytes > MAX_ADAPTER_EXECUTABLE_BYTES {
+        return Err(ProcessError::InvalidInput(
+            "the adapter executable size is outside the hard limit".to_owned(),
+        ));
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; EXECUTABLE_COPY_BUFFER_BYTES];
+    let mut observed_bytes = 0_u64;
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| ProcessError::io("read opened adapter executable", error))?;
+        if read == 0 {
+            break;
+        }
+        observed_bytes = observed_bytes
+            .checked_add(u64::try_from(read).map_err(|_| {
+                ProcessError::InvalidInput(
+                    "the adapter executable size is not representable".to_owned(),
+                )
+            })?)
+            .ok_or_else(|| {
+                ProcessError::InvalidInput(
+                    "the adapter executable size is not representable".to_owned(),
+                )
+            })?;
+        if observed_bytes > MAX_ADAPTER_EXECUTABLE_BYTES || observed_bytes > declared_bytes {
+            return Err(ProcessError::InvalidInput(
+                "the opened adapter executable changed during staging".to_owned(),
+            ));
+        }
+        hasher.update(&buffer[..read]);
+        output
+            .write_all(&buffer[..read])
+            .map_err(|error| ProcessError::io("write staged adapter executable", error))?;
+    }
+    if observed_bytes != declared_bytes {
+        return Err(ProcessError::InvalidInput(
+            "the opened adapter executable changed during staging".to_owned(),
+        ));
+    }
+
+    let digest = AdapterExecutableDigest::from_bytes(*hasher.finalize().as_bytes());
+    if expected_digest.is_some_and(|expected| expected != digest) {
+        return Err(ProcessError::InvalidInput(
+            "the opened adapter executable identity does not match negotiation".to_owned(),
+        ));
+    }
+    Ok(digest)
+}
+
 fn contains_path_syntax(argument: &OsStr) -> bool {
     let rendered = argument.to_string_lossy();
     let bytes = rendered.as_bytes();
@@ -400,7 +675,7 @@ fn contains_path_syntax(argument: &OsStr) -> bool {
         })
 }
 
-/// Live Windows adapter process held inside its exact native isolation scope.
+/// Live adapter process held inside its exact native isolation scope.
 #[derive(Debug)]
 pub struct IsolatedAdapterProcess {
     inner: platform::IsolatedAdapterProcess,
@@ -453,7 +728,7 @@ impl IsolatedAdapterProcess {
         self.inner.try_wait()
     }
 
-    /// Terminates the complete adapter Job Object.
+    /// Terminates the complete native adapter process scope.
     ///
     /// # Errors
     ///
@@ -462,7 +737,7 @@ impl IsolatedAdapterProcess {
         self.inner.terminate()
     }
 
-    /// Waits until every process in the adapter Job Object has exited.
+    /// Waits until every process in the native adapter scope has exited.
     ///
     /// # Errors
     ///
@@ -560,7 +835,7 @@ macro_rules! bounded_reader {
 bounded_reader!(AdapterStdout, platform::ChildStdout);
 bounded_reader!(AdapterStderr, platform::ChildStderr);
 
-/// Starts an adapter inside the verified Windows native isolation scope.
+/// Starts an adapter inside the verified native isolation scope.
 ///
 /// The executable is copied into an operation-owned immutable runtime
 /// directory. The child receives no repository path or user environment, and
@@ -569,28 +844,46 @@ bounded_reader!(AdapterStderr, platform::ChildStderr);
 ///
 /// # Errors
 ///
-/// Returns [`ProcessError`] when policy preparation, staging, suspended
-/// creation, native verification, profile removal, Job assignment, or primary
-/// thread resumption fails. No adapter code runs before every step succeeds.
-pub fn spawn_windows_isolated_adapter(
+/// Returns [`ProcessError`] when policy preparation, staging, native process
+/// creation, verification, or containment fails. No adapter entry point runs
+/// before every platform requirement succeeds.
+pub fn spawn_isolated_adapter(
     command: AdapterProcessCommand,
     limits: AdapterSandboxLimits,
 ) -> Result<IsolatedAdapterProcess, ProcessError> {
-    let (inner, report) = platform::spawn_windows_isolated_adapter(command, limits)?;
+    let (inner, report) = platform::spawn_isolated_adapter(command, limits)?;
     if !report.permits_deep_adapter() {
         inner.fail_closed_cleanup()?;
         return Err(ProcessError::InvalidInput(
-            "Windows adapter isolation remains incomplete".to_owned(),
+            "native adapter isolation remains incomplete".to_owned(),
         ));
     }
     Ok(IsolatedAdapterProcess { inner, report })
 }
 
-/// Hard limits applied to a Windows adapter probe.
+/// Applies the Unix native profile and replaces the launcher with the adapter.
+///
+/// This entry point is reserved for the operation-owned executable staged by
+/// [`spawn_isolated_adapter`]. It writes a private parent handshake only after
+/// all native controls are active.
+///
+/// # Errors
+///
+/// Returns [`ProcessError`] when launcher arguments are invalid or a required
+/// native control cannot be established. A successful call never returns.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn enter_isolated_adapter_launcher(
+    arguments: impl Iterator<Item = OsString>,
+) -> Result<std::convert::Infallible, ProcessError> {
+    platform::enter_isolated_adapter_launcher(arguments)
+}
+
+/// Hard limits applied to a native isolated adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdapterSandboxLimits {
     memory_bytes: usize,
     cpu_ticks: i64,
+    cpu_seconds: u64,
 }
 
 impl AdapterSandboxLimits {
@@ -599,7 +892,7 @@ impl AdapterSandboxLimits {
     /// # Errors
     ///
     /// Returns [`ProcessError::InvalidInput`] when either limit is zero or the
-    /// CPU duration cannot be represented by the Windows 100-nanosecond unit.
+    /// CPU duration cannot be represented by a native hard-limit unit.
     pub fn new(memory_bytes: usize, cpu_time: Duration) -> Result<Self, ProcessError> {
         if memory_bytes == 0 {
             return Err(ProcessError::InvalidInput(
@@ -617,13 +910,22 @@ impl AdapterSandboxLimits {
                 "adapter CPU-time limit exceeds the Windows representation".to_owned(),
             )
         })?;
+        let cpu_seconds = cpu_time
+            .as_secs()
+            .checked_add(u64::from(cpu_time.subsec_nanos() != 0))
+            .ok_or_else(|| {
+                ProcessError::InvalidInput(
+                    "adapter CPU-time limit exceeds the Unix representation".to_owned(),
+                )
+            })?;
         Ok(Self {
             memory_bytes,
             cpu_ticks,
+            cpu_seconds,
         })
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     pub(crate) const fn memory_bytes(self) -> usize {
         self.memory_bytes
     }
@@ -631,6 +933,11 @@ impl AdapterSandboxLimits {
     #[cfg(windows)]
     pub(crate) const fn cpu_ticks(self) -> i64 {
         self.cpu_ticks
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) const fn cpu_seconds(self) -> u64 {
+        self.cpu_seconds
     }
 }
 
@@ -667,7 +974,18 @@ const fn required_controls() -> [AdapterControl; 9] {
     ]
 }
 
-fn required_mechanisms(control: AdapterControl) -> &'static [AdapterIsolationMechanism] {
+fn required_mechanisms(
+    platform: AdapterIsolationPlatform,
+    control: AdapterControl,
+) -> &'static [AdapterIsolationMechanism] {
+    match platform {
+        AdapterIsolationPlatform::Linux => linux_required_mechanisms(control),
+        AdapterIsolationPlatform::MacOs => macos_required_mechanisms(control),
+        AdapterIsolationPlatform::Windows => windows_required_mechanisms(control),
+    }
+}
+
+fn windows_required_mechanisms(control: AdapterControl) -> &'static [AdapterIsolationMechanism] {
     use AdapterIsolationMechanism::{
         AppContainerProfileStorageRemoved, AppContainerWithoutNetworkCapabilities,
         ControlledReadOnlyCurrentDirectory, HardTemporaryByteLimit, ImageLoadMitigations,
@@ -700,6 +1018,58 @@ fn required_mechanisms(control: AdapterControl) -> &'static [AdapterIsolationMec
     }
 }
 
+fn linux_required_mechanisms(control: AdapterControl) -> &'static [AdapterIsolationMechanism] {
+    use AdapterIsolationMechanism::{
+        AddressSpaceRlimit, CpuTimeRlimit, FileDescriptorRlimit, LandlockReadOnlyView,
+        NativeFilesystemWritesDenied, OperationOwnedImmutableExecutable, ProcessGroupCleanup,
+        RepositoryPathsWithheld, SeccompNetworkDenied, SeccompProcessCreationDenied,
+        SecureLoaderEnvironment, SourceViaBoundedStdin, StandardIoDescriptorAllowlist,
+    };
+
+    match control {
+        AdapterControl::FilesystemView => &[
+            SourceViaBoundedStdin,
+            RepositoryPathsWithheld,
+            OperationOwnedImmutableExecutable,
+            LandlockReadOnlyView,
+        ],
+        AdapterControl::TemporaryDirectory => &[NativeFilesystemWritesDenied],
+        AdapterControl::NetworkEgress => &[SeccompNetworkDenied],
+        AdapterControl::ProcessCreation => &[SeccompProcessCreationDenied],
+        AdapterControl::Memory => &[AddressSpaceRlimit],
+        AdapterControl::Cpu => &[CpuTimeRlimit],
+        AdapterControl::Handles => &[StandardIoDescriptorAllowlist, FileDescriptorRlimit],
+        AdapterControl::DynamicLibrarySearch => &[SecureLoaderEnvironment, LandlockReadOnlyView],
+        AdapterControl::DescendantCleanup => &[ProcessGroupCleanup],
+    }
+}
+
+fn macos_required_mechanisms(control: AdapterControl) -> &'static [AdapterIsolationMechanism] {
+    use AdapterIsolationMechanism::{
+        AddressSpaceRlimit, CpuTimeRlimit, FileDescriptorRlimit, NativeFilesystemWritesDenied,
+        OperationOwnedImmutableExecutable, ProcessGroupCleanup, RepositoryPathsWithheld,
+        SeatbeltNetworkDenied, SeatbeltProcessCreationDenied, SeatbeltReadOnlyView,
+        SecureLoaderEnvironment, SourceViaBoundedStdin, StandardIoDescriptorAllowlist,
+    };
+
+    match control {
+        AdapterControl::FilesystemView => &[
+            SourceViaBoundedStdin,
+            RepositoryPathsWithheld,
+            OperationOwnedImmutableExecutable,
+            SeatbeltReadOnlyView,
+        ],
+        AdapterControl::TemporaryDirectory => &[NativeFilesystemWritesDenied],
+        AdapterControl::NetworkEgress => &[SeatbeltNetworkDenied],
+        AdapterControl::ProcessCreation => &[SeatbeltProcessCreationDenied],
+        AdapterControl::Memory => &[AddressSpaceRlimit],
+        AdapterControl::Cpu => &[CpuTimeRlimit],
+        AdapterControl::Handles => &[StandardIoDescriptorAllowlist, FileDescriptorRlimit],
+        AdapterControl::DynamicLibrarySearch => &[SecureLoaderEnvironment, SeatbeltReadOnlyView],
+        AdapterControl::DescendantCleanup => &[ProcessGroupCleanup],
+    }
+}
+
 const fn unavailable_reason(control: AdapterControl) -> &'static str {
     match control {
         AdapterControl::FilesystemView => "approved_immutable_input_view_unavailable",
@@ -716,12 +1086,50 @@ const fn unavailable_reason(control: AdapterControl) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use super::*;
 
     #[test]
     fn zero_limits_are_rejected() {
         assert!(AdapterSandboxLimits::new(0, Duration::from_secs(1)).is_err());
         assert!(AdapterSandboxLimits::new(1, Duration::ZERO).is_err());
+    }
+
+    #[test]
+    fn executable_copy_is_bound_to_declared_size_and_digest() {
+        let executable = b"reviewed adapter executable";
+        let expected = AdapterExecutableDigest::from_bytes(*blake3::hash(executable).as_bytes());
+        let mut output = Vec::new();
+        let observed = copy_authenticated_executable(
+            &mut Cursor::new(executable),
+            u64::try_from(executable.len()).expect("fixture length fits u64"),
+            Some(expected),
+            &mut output,
+        )
+        .expect("matching executable stages");
+        assert_eq!(observed, expected);
+        assert_eq!(output, executable);
+
+        let mismatch = AdapterExecutableDigest::from_bytes([0xa5; blake3::OUT_LEN]);
+        assert!(matches!(
+            copy_authenticated_executable(
+                &mut Cursor::new(executable),
+                u64::try_from(executable.len()).expect("fixture length fits u64"),
+                Some(mismatch),
+                &mut Vec::new(),
+            ),
+            Err(ProcessError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            copy_authenticated_executable(
+                &mut Cursor::new(executable),
+                u64::try_from(executable.len() - 1).expect("fixture length fits u64"),
+                Some(expected),
+                &mut Vec::new(),
+            ),
+            Err(ProcessError::InvalidInput(_))
+        ));
     }
 
     #[cfg(windows)]

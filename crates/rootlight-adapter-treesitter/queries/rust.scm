@@ -40,8 +40,7 @@
       field: (field_identifier))
   ] @call)
 (call_expression
-  function: (scoped_identifier
-    name: (identifier) @scoped_call))
+  function: (scoped_identifier) @scoped_call)
 ((attribute_item) @test_attribute
   (#match? @test_attribute "^#\\[\\s*test\\s*\\]$"))
 (identifier) @reference

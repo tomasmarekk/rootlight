@@ -21,6 +21,7 @@ PACKAGE_NAMES = (
     "@tomasmarekk/rootlight-win32-x64-msvc",
     "@tomasmarekk/rootlight",
 )
+PACKAGE_LICENSE = "AGPL-3.0-only"
 VERSION_PATTERN = re.compile(
     r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
     r"(?:-alpha\.(?:0|[1-9][0-9]*))?$"
@@ -173,7 +174,7 @@ def validate_package_json(
         raise NpmPublicationError("npm package manifest is invalid")
     expected = {
         "gitHead": source_revision,
-        "license": "Apache-2.0",
+        "license": PACKAGE_LICENSE,
         "name": name,
         "version": version,
     }

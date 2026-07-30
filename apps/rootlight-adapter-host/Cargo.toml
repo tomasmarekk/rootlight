@@ -22,5 +22,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["process", "signal"] }
+
+[dev-dependencies]
+rootlight-bench = { path = "../../crates/rootlight-bench" }
+
 [lints]
 workspace = true

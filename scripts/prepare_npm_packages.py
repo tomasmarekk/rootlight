@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 
 PACKAGE_SCOPE = "@tomasmarekk"
 ROOT_PACKAGE = f"{PACKAGE_SCOPE}/rootlight"
+PACKAGE_LICENSE = "AGPL-3.0-only"
 BOOTSTRAP_VERSION = "0.0.0-security-bootstrap.0"
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
@@ -386,7 +387,7 @@ def common_package_json(
         "name": name,
         "version": version,
         "description": description,
-        "license": "Apache-2.0",
+        "license": PACKAGE_LICENSE,
         "type": "module",
         "engines": {"node": ">=22.14.0"},
         "repository": {

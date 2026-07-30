@@ -135,7 +135,7 @@ impl SemanticProjectLanguage {
                     EntityKind::TypeAlias
                 } else if header.contains("function ") {
                     EntityKind::Function
-                } else if is_nested {
+                } else if is_nested || (header.contains('(') && !header.contains('=')) {
                     EntityKind::Method
                 } else {
                     EntityKind::Variable
@@ -146,7 +146,7 @@ impl SemanticProjectLanguage {
                     EntityKind::Class
                 } else if header.contains("function ") {
                     EntityKind::Function
-                } else if is_nested {
+                } else if is_nested || (header.contains('(') && !header.contains('=')) {
                     EntityKind::Method
                 } else {
                     EntityKind::Variable
@@ -162,9 +162,9 @@ impl SemanticProjectLanguage {
                 }
             }
             Self::Go => {
-                if starts_with_word(header, "type") && header.contains(" interface") {
+                if header.contains("interface") {
                     EntityKind::Interface
-                } else if starts_with_word(header, "type") && header.contains(" struct") {
+                } else if header.contains("struct") {
                     EntityKind::Struct
                 } else if starts_with_word(header, "type") {
                     EntityKind::TypeAlias
@@ -410,6 +410,7 @@ struct DeclarationDraft {
     name: String,
     header: String,
     kind: EntityKind,
+    visibility: EntityVisibility,
     container: Option<SymbolId>,
     source: SourceRef,
 }
@@ -423,20 +424,35 @@ struct ImportDraft {
     bindings: Vec<ImportBinding>,
 }
 
-#[derive(Debug, Clone)]
-struct ImportBinding {
-    local: String,
-    imported: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImportBinding {
+    Named { local: String, imported: String },
+    Namespace { local: String },
+    Wildcard,
+    SideEffect,
 }
 
 #[derive(Debug, Clone)]
 struct OccurrenceDraft {
     file: FileId,
     name: String,
+    qualifier: Option<String>,
     syntax_kind: String,
     role: OccurrenceRole,
     enclosing: Option<SymbolId>,
     source: SourceRef,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolutionKind {
+    Binding,
+    DynamicDispatch,
+}
+
+#[derive(Debug, Clone)]
+struct ResolutionCandidates {
+    symbols: Vec<SymbolId>,
+    kind: ResolutionKind,
 }
 
 #[derive(Debug)]
@@ -713,7 +729,13 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                             && !is_call_fact(fact)
                             && contains_span(declaration.span(), fact.span())
                     })
-                    .min_by_key(|fact| (fact.span().start_byte(), span_len(fact.span())));
+                    .min_by_key(|fact| {
+                        (
+                            !is_definition_fact(fact),
+                            fact.span().start_byte(),
+                            span_len(fact.span()),
+                        )
+                    });
                 let Some(definition) = definition else {
                     continue;
                 };
@@ -738,6 +760,13 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         entity.symbol == candidate && entity.kind != EntityKind::Module
                     })
                 });
+                let visibility = declaration_visibility(
+                    self.analyzer.language,
+                    bytes,
+                    declaration.span(),
+                    &header,
+                    name,
+                );
                 self.declarations.push(DeclarationDraft {
                     file: definition.span().file(),
                     span: declaration.span(),
@@ -747,6 +776,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         .analyzer
                         .language
                         .entity_kind(declaration_text, is_nested),
+                    visibility,
                     container,
                     source: source_for_span(input, declaration.span()),
                 });
@@ -759,7 +789,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         let Some(text) = source_text(bytes, fact.span()) else {
                             continue;
                         };
-                        if let Some(import) = parse_import(self.analyzer.language, text) {
+                        for import in parse_import(self.analyzer.language, text) {
                             self.imports.push(ImportDraft {
                                 file: fact.span().file(),
                                 span: fact.span(),
@@ -770,12 +800,13 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         }
                     }
                     SyntaxFactKind::Occurrence => {
-                        let Some(name) = source_text(bytes, fact.span()) else {
+                        let Some(observed_name) = source_text(bytes, fact.span()) else {
                             continue;
                         };
-                        if !is_identifier(name) {
+                        let call = is_call_fact(fact);
+                        let Some(parsed_name) = occurrence_name(observed_name, call) else {
                             continue;
-                        }
+                        };
                         let in_import = self.imports.iter().any(|import| {
                             import.file == fact.span().file()
                                 && contains_span(import.span, fact.span())
@@ -784,7 +815,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                             OccurrenceRole::Definition
                         } else if in_import {
                             OccurrenceRole::ImportUse
-                        } else if is_call_fact(fact) {
+                        } else if call {
                             OccurrenceRole::CallSite
                         } else {
                             OccurrenceRole::Reference
@@ -793,7 +824,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                             .or_else(|| self.module_by_file.get(&fact.span().file()).copied());
                         self.occurrences.push(OccurrenceDraft {
                             file: fact.span().file(),
-                            name: name.to_owned(),
+                            name: parsed_name.name.to_owned(),
+                            qualifier: parsed_name.qualifier.map(str::to_owned),
                             syntax_kind: fact.syntax_kind().as_str().to_owned(),
                             role,
                             enclosing,
@@ -862,7 +894,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 display_name: draft.name.clone(),
                 qualified_name,
                 container: Some(container),
-                visibility: infer_visibility(self.analyzer.language, &draft.header),
+                visibility: draft.visibility,
                 flags: generated_flag(self.input_for_file(draft.file)?.is_generated()),
                 provenance,
                 evidence: direct_evidence(draft.source.clone()),
@@ -952,7 +984,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         for index in 0..self.occurrences.len() {
             check_periodically(index, self.cancellation)?;
             let draft = self.occurrences[index].clone();
-            let candidates = self.resolve_occurrence(&draft, &definitions, &import_targets, false);
+            let resolution = self.resolve_occurrence(&draft, &definitions, &import_targets, false);
+            let candidates = &resolution.symbols;
             let confidence_value = match draft.role {
                 OccurrenceRole::Definition => EXACT_CONFIDENCE,
                 OccurrenceRole::ImportUse => IMPORT_CONFIDENCE,
@@ -965,7 +998,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     }
                 }
             };
-            let target = occurrence_target(&draft.name, &candidates)?;
+            let target = occurrence_target(&draft.name, &resolution)?;
             let provenance = self.provenance_for_file(draft.file)?;
             let mut record = OccurrenceRecord {
                 id: FactId::from_bytes([0; 20]),
@@ -985,11 +1018,11 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             record.id = derive_occurrence_record_id(&record)
                 .map_err(|_| provider_failure("project-occurrence-identity"))?;
             if draft.role == OccurrenceRole::Definition {
-                for symbol in &candidates {
+                for symbol in candidates {
                     definition_occurrences.insert(*symbol, record.id);
                 }
             }
-            self.add_occurrence_relations(&record, &candidates)?;
+            self.add_occurrence_relations(&record, candidates)?;
             self.records.push(IrRecord::Occurrence(record));
             self.state_mut_by_file(draft.file)?
                 .increment(FactDomain::Occurrences)?;
@@ -1462,18 +1495,128 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         definitions: &BTreeMap<String, Vec<SemanticEntity>>,
         import_targets: &BTreeMap<(FileId, String), Vec<FileId>>,
         permit_global_fallback: bool,
-    ) -> Vec<SymbolId> {
+    ) -> ResolutionCandidates {
         if occurrence.role == OccurrenceRole::Definition {
-            return definitions
+            return ResolutionCandidates {
+                symbols: definitions
+                    .get(&occurrence.name)
+                    .into_iter()
+                    .flatten()
+                    .filter(|entity| {
+                        entity.file == occurrence.file
+                            && contains_span(entity.span, occurrence.source.span())
+                    })
+                    .map(|entity| entity.symbol)
+                    .collect(),
+                kind: ResolutionKind::Binding,
+            };
+        }
+        if let Some(qualifier) = occurrence.qualifier.as_deref() {
+            let mut namespace_symbols = BTreeSet::new();
+            for import in self
+                .imports
+                .iter()
+                .filter(|import| import.file == occurrence.file)
+                .filter(|import| {
+                    import.bindings.iter().any(|binding| {
+                        matches!(
+                            binding,
+                            ImportBinding::Namespace { local } if local == qualifier
+                        )
+                    })
+                })
+            {
+                let target_files = import_targets
+                    .get(&(import.file, import.module.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(candidates) = definitions.get(&occurrence.name) {
+                    namespace_symbols.extend(
+                        candidates
+                            .iter()
+                            .filter(|entity| target_files.contains(&entity.file))
+                            .map(|entity| entity.symbol),
+                    );
+                }
+            }
+            if !namespace_symbols.is_empty() {
+                return ResolutionCandidates {
+                    symbols: namespace_symbols.into_iter().collect(),
+                    kind: ResolutionKind::Binding,
+                };
+            }
+
+            if self.analyzer.language == SemanticProjectLanguage::Rust
+                && occurrence.syntax_kind.ends_with(".scoped_call")
+            {
+                let qualifier_tail = qualifier.rsplit("::").next().unwrap_or(qualifier);
+                let qualifier_is_type =
+                    definitions
+                        .get(qualifier_tail)
+                        .into_iter()
+                        .flatten()
+                        .any(|entity| {
+                            matches!(
+                                entity.kind,
+                                EntityKind::Class
+                                    | EntityKind::Enum
+                                    | EntityKind::Interface
+                                    | EntityKind::Struct
+                                    | EntityKind::Trait
+                                    | EntityKind::TypeAlias
+                            )
+                        });
+                if !qualifier_is_type {
+                    let module = qualifier
+                        .trim_start_matches("crate::")
+                        .trim_start_matches("self::")
+                        .trim_start_matches("super::")
+                        .replace("::", "/");
+                    let current_path = self
+                        .path_by_file
+                        .get(&occurrence.file)
+                        .map(String::as_str)
+                        .unwrap_or_default();
+                    let target_files = self
+                        .path_by_file
+                        .iter()
+                        .filter_map(|(file, path)| {
+                            module_matches(
+                                SemanticProjectLanguage::Rust,
+                                current_path,
+                                &module,
+                                path,
+                            )
+                            .then_some(*file)
+                        })
+                        .collect::<BTreeSet<_>>();
+                    let symbols = definitions
+                        .get(&occurrence.name)
+                        .into_iter()
+                        .flatten()
+                        .filter(|entity| target_files.contains(&entity.file))
+                        .map(|entity| entity.symbol)
+                        .collect::<BTreeSet<_>>();
+                    if !symbols.is_empty() {
+                        return ResolutionCandidates {
+                            symbols: symbols.into_iter().collect(),
+                            kind: ResolutionKind::Binding,
+                        };
+                    }
+                }
+            }
+
+            let dispatch_candidates = definitions
                 .get(&occurrence.name)
                 .into_iter()
                 .flatten()
-                .filter(|entity| {
-                    entity.file == occurrence.file
-                        && contains_span(entity.span, occurrence.source.span())
-                })
+                .filter(|entity| entity.kind == EntityKind::Method)
                 .map(|entity| entity.symbol)
-                .collect();
+                .collect::<BTreeSet<_>>();
+            return ResolutionCandidates {
+                symbols: dispatch_candidates.into_iter().collect(),
+                kind: ResolutionKind::DynamicDispatch,
+            };
         }
         let mut symbols = definitions
             .get(&occurrence.name)
@@ -1487,17 +1630,19 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             .iter()
             .filter(|import| import.file == occurrence.file)
         {
-            let imported_names = import
+            let lookup_names = import
                 .bindings
                 .iter()
-                .filter(|binding| binding.local == occurrence.name)
-                .map(|binding| binding.imported.as_str())
+                .filter_map(|binding| match binding {
+                    ImportBinding::Named { local, imported } if local == &occurrence.name => {
+                        Some(imported.as_str())
+                    }
+                    ImportBinding::Wildcard => Some(occurrence.name.as_str()),
+                    ImportBinding::Named { .. }
+                    | ImportBinding::Namespace { .. }
+                    | ImportBinding::SideEffect => None,
+                })
                 .collect::<BTreeSet<_>>();
-            let lookup_names = if imported_names.is_empty() {
-                BTreeSet::from([occurrence.name.as_str()])
-            } else {
-                imported_names
-            };
             let target_files = import_targets
                 .get(&(import.file, import.module.clone()))
                 .cloned()
@@ -1519,7 +1664,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         {
             symbols.extend(candidates.iter().map(|entity| entity.symbol));
         }
-        symbols.into_iter().collect()
+        ResolutionCandidates {
+            symbols: symbols.into_iter().collect(),
+            kind: ResolutionKind::Binding,
+        }
     }
 
     fn add_occurrence_relations(
@@ -1531,7 +1679,11 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             return Ok(());
         }
         let predicate = match occurrence.role {
-            OccurrenceRole::CallSite if candidates.len() == 1 => RelationPredicate::Calls,
+            OccurrenceRole::CallSite
+                if matches!(occurrence.target, OccurrenceTarget::Resolved { .. }) =>
+            {
+                RelationPredicate::Calls
+            }
             OccurrenceRole::CallSite => RelationPredicate::DispatchCandidate,
             _ => RelationPredicate::RefersTo,
         };
@@ -1727,7 +1879,39 @@ fn generated_flag(generated: bool) -> Vec<EntityFlag> {
     }
 }
 
-fn infer_visibility(language: SemanticProjectLanguage, header: &str) -> EntityVisibility {
+fn declaration_visibility(
+    language: SemanticProjectLanguage,
+    source: &[u8],
+    span: SourceSpan,
+    header: &str,
+    name: &str,
+) -> EntityVisibility {
+    if matches!(
+        language,
+        SemanticProjectLanguage::TypeScript | SemanticProjectLanguage::JavaScript
+    ) && let Ok(start) = usize::try_from(span.start_byte())
+        && let Some(prefix) = source.get(..start)
+    {
+        let line_start = prefix
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index.saturating_add(1));
+        if prefix
+            .get(line_start..)
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .is_some_and(|value| value.trim_start().starts_with("export "))
+        {
+            return EntityVisibility::Public;
+        }
+    }
+    infer_visibility(language, header, name)
+}
+
+fn infer_visibility(
+    language: SemanticProjectLanguage,
+    header: &str,
+    name: &str,
+) -> EntityVisibility {
     match language {
         SemanticProjectLanguage::Rust => {
             if header.trim_start().starts_with("pub") {
@@ -1744,22 +1928,13 @@ fn infer_visibility(language: SemanticProjectLanguage, header: &str) -> EntityVi
             }
         }
         SemanticProjectLanguage::Python => {
-            if header
-                .trim_start_matches("async ")
-                .split_whitespace()
-                .nth(1)
-                .is_some_and(|name| name.starts_with('_'))
-            {
+            if name.starts_with('_') {
                 EntityVisibility::Private
             } else {
                 EntityVisibility::Unknown
             }
         }
         SemanticProjectLanguage::Go => {
-            let name = tokenize_identifiers(header)
-                .into_iter()
-                .nth(1)
-                .unwrap_or_default();
             if name.starts_with(|character: char| character.is_ascii_uppercase()) {
                 EntityVisibility::Public
             } else {
@@ -1771,18 +1946,23 @@ fn infer_visibility(language: SemanticProjectLanguage, header: &str) -> EntityVi
 
 fn occurrence_target(
     name: &str,
-    candidates: &[SymbolId],
+    resolution: &ResolutionCandidates,
 ) -> Result<OccurrenceTarget, AdapterError> {
-    match candidates {
+    match resolution.symbols.as_slice() {
         [] => Ok(OccurrenceTarget::Unresolved {
             text_hash: content_hash(name.as_bytes()),
         }),
-        [symbol] => Ok(OccurrenceTarget::Resolved { symbol: *symbol }),
+        [symbol] if resolution.kind == ResolutionKind::Binding => {
+            Ok(OccurrenceTarget::Resolved { symbol: *symbol })
+        }
         symbols => Ok(OccurrenceTarget::Candidates {
             symbols: symbols.to_vec(),
             total_count: u64::try_from(symbols.len())
                 .map_err(|_| provider_failure("project-candidate-count"))?,
-            completeness: CoverageStatus::Complete,
+            completeness: match resolution.kind {
+                ResolutionKind::Binding => CoverageStatus::Complete,
+                ResolutionKind::DynamicDispatch => CoverageStatus::Unknown,
+            },
         }),
     }
 }
@@ -1832,6 +2012,41 @@ fn is_call_fact(fact: &SyntaxFact) -> bool {
     label.ends_with(".call") || label.ends_with(".scoped_call")
 }
 
+fn is_definition_fact(fact: &SyntaxFact) -> bool {
+    fact.syntax_kind().as_str().ends_with(".definition")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParsedOccurrenceName<'a> {
+    name: &'a str,
+    qualifier: Option<&'a str>,
+}
+
+fn occurrence_name(value: &str, call: bool) -> Option<ParsedOccurrenceName<'_>> {
+    if is_identifier(value) {
+        return Some(ParsedOccurrenceName {
+            name: value,
+            qualifier: None,
+        });
+    }
+    if !call {
+        return None;
+    }
+    [".", "::"].into_iter().find_map(|separator| {
+        let (qualifier, name) = value.rsplit_once(separator)?;
+        if !is_identifier(name)
+            || qualifier.is_empty()
+            || !qualifier.split(separator).all(is_identifier)
+        {
+            return None;
+        }
+        Some(ParsedOccurrenceName {
+            name,
+            qualifier: Some(qualifier),
+        })
+    })
+}
+
 fn is_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.chars().next().is_some_and(|character| {
@@ -1857,6 +2072,18 @@ fn declaration_header(language: SemanticProjectLanguage, declaration: &str) -> S
             .unwrap_or(declaration)
             .trim()
             .to_owned(),
+        SemanticProjectLanguage::Go
+            if declaration
+                .get(..line_end)
+                .unwrap_or(declaration)
+                .contains(" interface") =>
+        {
+            declaration
+                .get(..line_end)
+                .unwrap_or(declaration)
+                .trim()
+                .to_owned()
+        }
         _ => {
             let brace = declaration.find('{').unwrap_or(line_end);
             declaration
@@ -1880,100 +2107,277 @@ fn module_name(path: &str) -> String {
 fn parse_import(
     language: SemanticProjectLanguage,
     text: &str,
-) -> Option<(String, Vec<ImportBinding>)> {
+) -> Vec<(String, Vec<ImportBinding>)> {
     match language {
-        SemanticProjectLanguage::Rust => parse_rust_import(text),
+        SemanticProjectLanguage::Rust => parse_rust_imports(text),
         SemanticProjectLanguage::TypeScript | SemanticProjectLanguage::JavaScript => {
-            parse_ecmascript_import(text)
+            parse_ecmascript_import(text).into_iter().collect()
         }
-        SemanticProjectLanguage::Python => parse_python_import(text),
-        SemanticProjectLanguage::Go => parse_go_import(text),
+        SemanticProjectLanguage::Python => parse_python_imports(text),
+        SemanticProjectLanguage::Go => parse_go_imports(text),
     }
 }
 
-fn parse_rust_import(text: &str) -> Option<(String, Vec<ImportBinding>)> {
-    let body = text
-        .trim()
-        .strip_prefix("use ")?
-        .trim_end_matches(';')
-        .trim();
-    let normalized = body
-        .trim_start_matches("crate::")
-        .trim_start_matches("self::")
-        .trim_start_matches("super::");
-    let module = normalized
-        .split("::{")
-        .next()
-        .unwrap_or(normalized)
-        .rsplit_once("::")
-        .map_or(normalized, |(module, _)| module)
-        .replace("::", "/");
-    let mut bindings = Vec::new();
-    if let Some((_, items)) = normalized.split_once("::{") {
-        for item in items.trim_end_matches('}').split(',') {
-            push_alias_binding(&mut bindings, item.trim(), " as ");
+fn parse_rust_imports(text: &str) -> Vec<(String, Vec<ImportBinding>)> {
+    let Some(body) = text.trim().strip_prefix("use ") else {
+        return Vec::new();
+    };
+    let normalized = trim_rust_path_root(body.trim_end_matches(';').trim());
+    let mut imports = Vec::new();
+    parse_rust_use_tree("", normalized, &mut imports);
+    imports
+}
+
+fn parse_rust_use_tree(prefix: &str, tree: &str, imports: &mut Vec<(String, Vec<ImportBinding>)>) {
+    let tree = tree.trim();
+    if let Some((group_prefix, items)) = rust_use_group(tree) {
+        let prefix = join_rust_path(prefix, group_prefix);
+        for item in split_top_level_commas(items) {
+            parse_rust_use_tree(&prefix, item, imports);
         }
-    } else if let Some(item) = normalized.rsplit("::").next() {
-        push_alias_binding(&mut bindings, item.trim(), " as ");
+        return;
     }
-    Some((module, bindings))
+
+    let (path, alias) = tree
+        .split_once(" as ")
+        .map_or((tree, None), |(path, alias)| {
+            (path.trim(), Some(alias.trim()))
+        });
+    let full_path = join_rust_path(prefix, path);
+    let mut components = full_path
+        .split("::")
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    let Some(imported) = components.pop() else {
+        return;
+    };
+
+    if imported == "*" {
+        push_import_binding(imports, &components.join("/"), ImportBinding::Wildcard);
+        return;
+    }
+
+    if imported == "self" {
+        let module = components.join("/");
+        let local = alias.unwrap_or_else(|| components.last().copied().unwrap_or_default());
+        push_namespace_or_side_effect(imports, &module, local);
+        return;
+    }
+
+    if components.is_empty() {
+        let local = alias.unwrap_or(imported);
+        push_namespace_or_side_effect(imports, imported, local);
+        return;
+    }
+
+    let binding = match alias.unwrap_or(imported) {
+        "_" => ImportBinding::SideEffect,
+        local if is_identifier(local) && is_identifier(imported) => ImportBinding::Named {
+            local: local.to_owned(),
+            imported: imported.to_owned(),
+        },
+        _ => return,
+    };
+    push_import_binding(imports, &components.join("/"), binding);
+}
+
+fn trim_rust_path_root(mut path: &str) -> &str {
+    while let Some(remainder) = ["crate::", "self::", "super::"]
+        .into_iter()
+        .find_map(|root| path.strip_prefix(root))
+    {
+        path = remainder;
+    }
+    path
+}
+
+fn rust_use_group(tree: &str) -> Option<(&str, &str)> {
+    let tree = tree.strip_suffix('}')?;
+    if let Some(items) = tree.strip_prefix('{') {
+        return Some(("", items));
+    }
+    tree.split_once("::{")
+}
+
+fn split_top_level_commas(value: &str) -> Vec<&str> {
+    let mut depth = 0_u32;
+    let mut start = 0;
+    let mut parts = Vec::new();
+    for (offset, character) in value.char_indices() {
+        match character {
+            '{' => depth = depth.saturating_add(1),
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                if let Some(part) = value.get(start..offset).map(str::trim)
+                    && !part.is_empty()
+                {
+                    parts.push(part);
+                }
+                start = offset + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if let Some(part) = value.get(start..).map(str::trim)
+        && !part.is_empty()
+    {
+        parts.push(part);
+    }
+    parts
+}
+
+fn join_rust_path(prefix: &str, suffix: &str) -> String {
+    if prefix.is_empty() {
+        suffix.trim().to_owned()
+    } else if suffix.trim().is_empty() {
+        prefix.to_owned()
+    } else {
+        format!("{prefix}::{}", suffix.trim())
+    }
+}
+
+fn push_namespace_or_side_effect(
+    imports: &mut Vec<(String, Vec<ImportBinding>)>,
+    module: &str,
+    local: &str,
+) {
+    let binding = match local {
+        "_" => ImportBinding::SideEffect,
+        local if is_identifier(local) => ImportBinding::Namespace {
+            local: local.to_owned(),
+        },
+        _ => return,
+    };
+    push_import_binding(imports, module, binding);
+}
+
+fn push_import_binding(
+    imports: &mut Vec<(String, Vec<ImportBinding>)>,
+    module: &str,
+    binding: ImportBinding,
+) {
+    if module.is_empty() {
+        return;
+    }
+    if let Some((_, bindings)) = imports
+        .iter_mut()
+        .find(|(existing_module, _)| existing_module == module)
+    {
+        bindings.push(binding);
+    } else {
+        imports.push((module.to_owned(), vec![binding]));
+    }
 }
 
 fn parse_ecmascript_import(text: &str) -> Option<(String, Vec<ImportBinding>)> {
     let module = first_quoted(text)?;
     let mut bindings = Vec::new();
     if let Some((head, _)) = text.rsplit_once(" from ") {
-        if let Some((_, named)) = head.split_once('{') {
-            for item in named.trim_end_matches('}').split(',') {
-                push_alias_binding(&mut bindings, item.trim(), " as ");
-            }
-        } else if let Some((_, alias)) = head.split_once("* as ") {
-            bindings.push(ImportBinding {
-                local: alias.trim().to_owned(),
-                imported: "*".to_owned(),
-            });
-        } else if let Some(default) = head.trim().strip_prefix("import ") {
-            let local = default.split(',').next().unwrap_or(default).trim();
-            if is_identifier(local) {
-                bindings.push(ImportBinding {
-                    local: local.to_owned(),
+        let body = head.trim().strip_prefix("import ")?.trim();
+        let remainder = if !body.starts_with('{')
+            && !body.starts_with('*')
+            && let Some((default, remainder)) = body.split_once(',')
+        {
+            let default = default.trim();
+            if is_identifier(default) {
+                bindings.push(ImportBinding::Named {
+                    local: default.to_owned(),
                     imported: "default".to_owned(),
                 });
             }
+            remainder.trim()
+        } else {
+            body
+        };
+        if let Some(named) = remainder.strip_prefix('{') {
+            for item in named.trim_end_matches('}').split(',') {
+                push_alias_binding(&mut bindings, item.trim(), " as ");
+            }
+        } else if let Some(alias) = remainder.strip_prefix("* as ") {
+            if is_identifier(alias.trim()) {
+                bindings.push(ImportBinding::Namespace {
+                    local: alias.trim().to_owned(),
+                });
+            }
+        } else if !body.contains(',') && is_identifier(remainder) {
+            bindings.push(ImportBinding::Named {
+                local: remainder.to_owned(),
+                imported: "default".to_owned(),
+            });
         }
+    } else {
+        bindings.push(ImportBinding::SideEffect);
     }
     Some((module, bindings))
 }
 
-fn parse_python_import(text: &str) -> Option<(String, Vec<ImportBinding>)> {
+fn parse_python_imports(text: &str) -> Vec<(String, Vec<ImportBinding>)> {
     let trimmed = text.trim();
     if let Some(rest) = trimmed.strip_prefix("from ") {
-        let (module, items) = rest.split_once(" import ")?;
+        let Some((module, items)) = rest.split_once(" import ") else {
+            return Vec::new();
+        };
         let bindings = items
             .trim_matches(['(', ')'])
             .split(',')
-            .filter_map(|item| alias_binding(item.trim(), " as "))
+            .filter_map(|item| {
+                let item = item.trim();
+                (item == "*")
+                    .then_some(ImportBinding::Wildcard)
+                    .or_else(|| alias_binding(item, " as "))
+            })
             .collect();
-        Some((module.trim().to_owned(), bindings))
+        vec![(module.trim().to_owned(), bindings)]
     } else {
-        let rest = trimmed.strip_prefix("import ")?;
-        let first = rest.split(',').next()?.trim();
-        let binding = alias_binding(first, " as ")?;
-        Some((binding.imported.clone(), vec![binding]))
+        let Some(rest) = trimmed.strip_prefix("import ") else {
+            return Vec::new();
+        };
+        rest.split(',')
+            .filter_map(|item| {
+                let item = item.trim();
+                let (module, local) = item.split_once(" as ").map_or_else(
+                    || (item, item.split('.').next().unwrap_or(item)),
+                    |(module, local)| (module.trim(), local.trim()),
+                );
+                is_identifier(local).then(|| {
+                    (
+                        module.to_owned(),
+                        vec![ImportBinding::Namespace {
+                            local: local.to_owned(),
+                        }],
+                    )
+                })
+            })
+            .collect()
     }
 }
 
-fn parse_go_import(text: &str) -> Option<(String, Vec<ImportBinding>)> {
+fn parse_go_imports(text: &str) -> Vec<(String, Vec<ImportBinding>)> {
+    let Some(body) = text.trim().strip_prefix("import") else {
+        return Vec::new();
+    };
+    if body.trim_start().starts_with('(') {
+        body.trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .lines()
+            .filter_map(parse_go_import_spec)
+            .collect()
+    } else {
+        parse_go_import_spec(body).into_iter().collect()
+    }
+}
+
+fn parse_go_import_spec(text: &str) -> Option<(String, Vec<ImportBinding>)> {
+    let text = text.trim().trim_end_matches(';').trim();
     let module = first_quoted(text)?;
     let before_quote = text
         .split(['"', '`'])
         .next()
         .unwrap_or_default()
         .trim()
-        .trim_start_matches("import")
-        .trim_matches(['(', ')'])
         .trim();
-    let local = if before_quote.is_empty() || matches!(before_quote, "_" | ".") {
+    let local = if before_quote.is_empty() {
         module.rsplit('/').next().unwrap_or(&module).to_owned()
     } else {
         before_quote
@@ -1982,17 +2386,18 @@ fn parse_go_import(text: &str) -> Option<(String, Vec<ImportBinding>)> {
             .unwrap_or_default()
             .to_owned()
     };
-    Some((
-        module,
-        vec![ImportBinding {
-            local,
-            imported: "*".to_owned(),
-        }],
-    ))
+    let binding = match local.as_str() {
+        "_" => ImportBinding::SideEffect,
+        "." => ImportBinding::Wildcard,
+        _ => ImportBinding::Namespace { local },
+    };
+    Some((module, vec![binding]))
 }
 
 fn push_alias_binding(bindings: &mut Vec<ImportBinding>, value: &str, separator: &str) {
-    if let Some(binding) = alias_binding(value, separator) {
+    if value == "*" {
+        bindings.push(ImportBinding::Wildcard);
+    } else if let Some(binding) = alias_binding(value, separator) {
         bindings.push(binding);
     }
 }
@@ -2006,7 +2411,7 @@ fn alias_binding(value: &str, separator: &str) -> Option<ImportBinding> {
         .map_or((value, value), |(imported, local)| {
             (imported.trim(), local.trim())
         });
-    is_identifier(local).then(|| ImportBinding {
+    is_identifier(local).then(|| ImportBinding::Named {
         local: local.to_owned(),
         imported: imported.to_owned(),
     })
@@ -2294,5 +2699,279 @@ fn check_periodically(index: usize, cancellation: &Cancellation) -> Result<(), A
 fn provider_failure(code: &'static str) -> AdapterError {
     AdapterError::ProviderFailed {
         code: DiagnosticCode::new(code).expect("built-in project failure code is valid"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rootlight_ids::SymbolId;
+    use rootlight_ir::{CoverageStatus, EntityVisibility, OccurrenceTarget};
+
+    use super::{
+        ImportBinding, ParsedOccurrenceName, ResolutionCandidates, ResolutionKind,
+        SemanticProjectLanguage, infer_visibility, occurrence_name, occurrence_target,
+        parse_import,
+    };
+
+    #[test]
+    fn qualified_call_names_retain_the_receiver_and_terminal_identifier() {
+        assert_eq!(
+            occurrence_name("package.Run", true),
+            Some(ParsedOccurrenceName {
+                name: "Run",
+                qualifier: Some("package"),
+            })
+        );
+        assert_eq!(
+            occurrence_name("crate::module::run", true),
+            Some(ParsedOccurrenceName {
+                name: "run",
+                qualifier: Some("crate::module"),
+            })
+        );
+        assert_eq!(
+            occurrence_name("plain", true),
+            Some(ParsedOccurrenceName {
+                name: "plain",
+                qualifier: None,
+            })
+        );
+        assert_eq!(occurrence_name("package.Run", false), None);
+        assert_eq!(occurrence_name("package..Run", true), None);
+        assert_eq!(occurrence_name("package.Run()", true), None);
+    }
+
+    #[test]
+    fn language_imports_preserve_explicit_binding_kinds() {
+        assert_eq!(
+            parse_import(SemanticProjectLanguage::Rust, "use crate::module as local;"),
+            [(
+                "module".to_owned(),
+                vec![ImportBinding::Namespace {
+                    local: "local".to_owned(),
+                }]
+            )]
+        );
+        assert_eq!(
+            parse_import(
+                SemanticProjectLanguage::TypeScript,
+                "import primary, { named as local } from \"./dep\";"
+            )[0]
+            .1,
+            [
+                ImportBinding::Named {
+                    local: "primary".to_owned(),
+                    imported: "default".to_owned(),
+                },
+                ImportBinding::Named {
+                    local: "local".to_owned(),
+                    imported: "named".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(
+            parse_import(
+                SemanticProjectLanguage::TypeScript,
+                "import { first, second as local } from \"./dep\";"
+            )[0]
+            .1,
+            [
+                ImportBinding::Named {
+                    local: "first".to_owned(),
+                    imported: "first".to_owned(),
+                },
+                ImportBinding::Named {
+                    local: "local".to_owned(),
+                    imported: "second".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(
+            parse_import(SemanticProjectLanguage::Python, "import package as local")[0].1,
+            [ImportBinding::Namespace {
+                local: "local".to_owned(),
+            }]
+        );
+        assert_eq!(
+            parse_import(
+                SemanticProjectLanguage::Go,
+                "import (\n\"example/one\"\n_ \"example/two\"\n. \"example/three\"\n)"
+            ),
+            [
+                (
+                    "example/one".to_owned(),
+                    vec![ImportBinding::Namespace {
+                        local: "one".to_owned(),
+                    }]
+                ),
+                ("example/two".to_owned(), vec![ImportBinding::SideEffect]),
+                ("example/three".to_owned(), vec![ImportBinding::Wildcard]),
+            ]
+        );
+    }
+
+    #[test]
+    fn rust_grouped_imports_preserve_each_module_boundary() {
+        assert_eq!(
+            parse_import(
+                SemanticProjectLanguage::Rust,
+                "use crate::{alpha, beta as local_beta};"
+            ),
+            [
+                (
+                    "alpha".to_owned(),
+                    vec![ImportBinding::Namespace {
+                        local: "alpha".to_owned(),
+                    }]
+                ),
+                (
+                    "beta".to_owned(),
+                    vec![ImportBinding::Namespace {
+                        local: "local_beta".to_owned(),
+                    }]
+                ),
+            ]
+        );
+        assert_eq!(
+            parse_import(
+                SemanticProjectLanguage::Rust,
+                "use crate::{alpha::{first, second as local_second}, beta::third};"
+            ),
+            [
+                (
+                    "alpha".to_owned(),
+                    vec![
+                        ImportBinding::Named {
+                            local: "first".to_owned(),
+                            imported: "first".to_owned(),
+                        },
+                        ImportBinding::Named {
+                            local: "local_second".to_owned(),
+                            imported: "second".to_owned(),
+                        },
+                    ]
+                ),
+                (
+                    "beta".to_owned(),
+                    vec![ImportBinding::Named {
+                        local: "third".to_owned(),
+                        imported: "third".to_owned(),
+                    }]
+                ),
+            ]
+        );
+        assert!(
+            parse_import(SemanticProjectLanguage::Rust, "use crate::{alpha, beta};")
+                .into_iter()
+                .flat_map(|(_, bindings)| bindings)
+                .all(|binding| matches!(binding, ImportBinding::Namespace { .. }))
+        );
+    }
+
+    #[test]
+    fn python_multi_imports_create_only_declared_namespaces() {
+        assert_eq!(
+            parse_import(
+                SemanticProjectLanguage::Python,
+                "import alpha, package.beta, gamma.delta as local_gamma"
+            ),
+            [
+                (
+                    "alpha".to_owned(),
+                    vec![ImportBinding::Namespace {
+                        local: "alpha".to_owned(),
+                    }]
+                ),
+                (
+                    "package.beta".to_owned(),
+                    vec![ImportBinding::Namespace {
+                        local: "package".to_owned(),
+                    }]
+                ),
+                (
+                    "gamma.delta".to_owned(),
+                    vec![ImportBinding::Namespace {
+                        local: "local_gamma".to_owned(),
+                    }]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn ecmascript_default_and_namespace_imports_retain_both_bindings() {
+        assert_eq!(
+            parse_import(
+                SemanticProjectLanguage::TypeScript,
+                "import primary, * as dependency from \"./dep\";"
+            ),
+            [(
+                "./dep".to_owned(),
+                vec![
+                    ImportBinding::Named {
+                        local: "primary".to_owned(),
+                        imported: "default".to_owned(),
+                    },
+                    ImportBinding::Namespace {
+                        local: "dependency".to_owned(),
+                    },
+                ]
+            )]
+        );
+        assert!(
+            parse_import(
+                SemanticProjectLanguage::JavaScript,
+                "import primary, * as dependency from \"./dep\";"
+            )[0]
+            .1
+            .iter()
+            .all(|binding| !matches!(binding, ImportBinding::Wildcard))
+        );
+    }
+
+    #[test]
+    fn dynamic_dispatch_never_promotes_a_single_candidate_to_exact() {
+        let symbol = SymbolId::from_bytes([7; 20]);
+        let dynamic = ResolutionCandidates {
+            symbols: vec![symbol],
+            kind: ResolutionKind::DynamicDispatch,
+        };
+        assert_eq!(
+            occurrence_target("run", &dynamic).expect("dynamic target is valid"),
+            OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Unknown,
+            }
+        );
+
+        let binding = ResolutionCandidates {
+            symbols: vec![symbol],
+            kind: ResolutionKind::Binding,
+        };
+        assert_eq!(
+            occurrence_target("run", &binding).expect("binding target is valid"),
+            OccurrenceTarget::Resolved { symbol }
+        );
+    }
+
+    #[test]
+    fn go_and_python_visibility_uses_the_declared_identifier() {
+        assert_eq!(
+            infer_visibility(
+                SemanticProjectLanguage::Go,
+                "ExportedType struct{}",
+                "ExportedType"
+            ),
+            EntityVisibility::Public
+        );
+        assert_eq!(
+            infer_visibility(SemanticProjectLanguage::Go, "holdoutA struct{}", "holdoutA"),
+            EntityVisibility::Private
+        );
+        assert_eq!(
+            infer_visibility(SemanticProjectLanguage::Python, "def _hidden():", "_hidden"),
+            EntityVisibility::Private
+        );
     }
 }

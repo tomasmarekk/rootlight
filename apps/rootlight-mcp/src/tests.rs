@@ -96,6 +96,79 @@ fn official_initialize_fixture_reaches_operation_with_truthful_capabilities() {
 }
 
 #[test]
+fn bootstrap_initialize_matches_the_handler_backed_session_exactly() {
+    let (profile_sender, _profile_receiver) = watch::channel(ExposureProfile::Developer);
+    let mut session = Session::with_profile(ExposureProfile::Developer, profile_sender);
+    session.capabilities = HandlerCapabilities::tools();
+    let expected = session
+        .handle_frame(INITIALIZE.as_bytes(), StdioLimits::default())
+        .expect("handler-backed initialize is processed")
+        .expect("handler-backed initialize has a response");
+
+    let bootstrap = bootstrap_initialize(
+        INITIALIZE.as_bytes(),
+        ExposureProfile::Developer,
+        ExposureProfile::Developer,
+        ROOTLIGHT_RELEASE_VERSION,
+        StdioLimits::default(),
+    )
+    .expect("bootstrap initialize is processed")
+    .expect("valid initialize is eligible for bootstrapping");
+
+    assert_eq!(bootstrap.response(), expected);
+}
+
+#[test]
+fn bootstrap_initialize_never_answers_a_non_initialize_frame() {
+    let bootstrap = bootstrap_initialize(
+        br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
+        ExposureProfile::Developer,
+        ExposureProfile::Developer,
+        ROOTLIGHT_RELEASE_VERSION,
+        StdioLimits::default(),
+    )
+    .expect("non-initialize frame is processed");
+
+    assert!(bootstrap.is_none());
+}
+
+#[test]
+fn bootstrap_initialize_has_a_frozen_launcher_compatibility_frame() {
+    let bootstrap = bootstrap_initialize(
+        INITIALIZE.as_bytes(),
+        ExposureProfile::Developer,
+        ExposureProfile::Developer,
+        "9.8.7-alpha.6",
+        StdioLimits::default(),
+    )
+    .expect("bootstrap initialize is processed")
+    .expect("valid initialize is eligible for bootstrapping");
+
+    assert_eq!(
+        bootstrap.response(),
+        br#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"rootlight","title":"Rootlight","version":"9.8.7-alpha.6","description":"Local-first repository intelligence MCP bridge"}}}
+"#
+    );
+}
+
+#[test]
+fn bootstrap_initialize_rejects_an_invalid_selected_version() {
+    let error = bootstrap_initialize(
+        INITIALIZE.as_bytes(),
+        ExposureProfile::Developer,
+        ExposureProfile::Developer,
+        "1.0.0\nspoofed",
+        StdioLimits::default(),
+    )
+    .expect_err("invalid version is rejected");
+
+    assert!(matches!(
+        error,
+        BootstrapInitializeError::InvalidServerVersion
+    ));
+}
+
+#[test]
 fn version_negotiation_returns_the_supported_revision() {
     let mut session = Session::rootlight();
     let request = INITIALIZE.replace("2025-11-25", "2099-01-01");

@@ -1,7 +1,7 @@
-//! Deterministic source-bound semantic fallback evidence generator.
+//! Exact-source in-process Tier B semantic holdout generator.
 //!
-//! The fixed contract corpus measures exact, ambiguous, and unsupported
-//! resolution outcomes without executing repository code.
+//! The versioned five-language corpus runs through the shipping Tree-sitter
+//! provider and whole-project analyzer without executing repository code.
 
 #![forbid(unsafe_code)]
 
@@ -11,20 +11,12 @@ use std::{
     process::ExitCode,
 };
 
-use rootlight_adapters::initial_semantic_registry;
-use rootlight_bench::{build_semantic_evidence, encode_semantic_evidence_envelope};
-use rootlight_ids::{FactId, GenerationId, RepositoryId, SymbolId};
-use rootlight_ir::{Confidence, CoverageStatus};
-use rootlight_resolve::{
-    ExpectedResolution, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionBatch,
-    ResolutionDecision, ResolutionExpectation, ResolutionExplanation, ResolutionOutcome,
-    ResolutionRule, UnresolvedReason,
-};
+use rootlight_bench::{build_project_semantic_holdout, encode_project_semantic_holdout_envelope};
 
 const MAX_ARGUMENT_BYTES: usize = 16 * 1024;
 
 fn main() -> ExitCode {
-    match run() {
+    match run(std::env::args_os().skip(1)) {
         Ok(encoded) => {
             let mut stdout = io::stdout().lock();
             if stdout
@@ -45,14 +37,11 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<Vec<u8>, &'static str> {
-    let source_revision = parse_arguments(std::env::args_os().skip(1))?;
-    let registry =
-        initial_semantic_registry().map_err(|_| "semantic language registry is invalid")?;
-    let (batch, expectations) = contract_fixture()?;
-    let evidence = build_semantic_evidence(&registry, &batch, &expectations)
-        .map_err(|_| "semantic contract evidence is invalid")?;
-    encode_semantic_evidence_envelope(&evidence, &source_revision)
+fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Vec<u8>, &'static str> {
+    let source_revision = parse_arguments(arguments)?;
+    let evidence =
+        build_project_semantic_holdout().map_err(|_| "production semantic holdout is invalid")?;
+    encode_project_semantic_holdout_envelope(&evidence, &source_revision)
         .map_err(|_| "semantic evidence envelope is invalid")
 }
 
@@ -84,103 +73,27 @@ where
     Ok(Some(argument))
 }
 
-fn contract_fixture() -> Result<(ResolutionBatch, Vec<ResolutionExpectation>), &'static str> {
-    let exact_occurrence = FactId::from_bytes([1; 20]);
-    let ambiguous_occurrence = FactId::from_bytes([2; 20]);
-    let unresolved_occurrence = FactId::from_bytes([3; 20]);
-    let exact_symbol = SymbolId::from_bytes([11; 20]);
-    let candidate_symbol = SymbolId::from_bytes([12; 20]);
-    let exact_confidence =
-        Confidence::new(1_000).map_err(|_| "semantic fixture confidence is invalid")?;
-    let candidate_confidence =
-        Confidence::new(900).map_err(|_| "semantic fixture confidence is invalid")?;
-    let unresolved_confidence =
-        Confidence::new(0).map_err(|_| "semantic fixture confidence is invalid")?;
-    let decisions = vec![
-        decision(
-            exact_occurrence,
-            ResolutionOutcome::Resolved {
-                symbol: exact_symbol,
-                confidence: exact_confidence,
-            },
-        ),
-        decision(
-            ambiguous_occurrence,
-            ResolutionOutcome::Candidates {
-                symbols: vec![candidate_symbol, SymbolId::from_bytes([13; 20])],
-                total_count: 2,
-                completeness: CoverageStatus::Complete,
-                confidence: candidate_confidence,
-            },
-        ),
-        decision(
-            unresolved_occurrence,
-            ResolutionOutcome::Unresolved {
-                reason: UnresolvedReason::NoCandidate,
-                confidence: unresolved_confidence,
-            },
-        ),
-    ];
-    let expectations = vec![
-        ResolutionExpectation {
-            occurrence: exact_occurrence,
-            expected: ExpectedResolution::Exact(exact_symbol),
-        },
-        ResolutionExpectation {
-            occurrence: ambiguous_occurrence,
-            expected: ExpectedResolution::CandidateContains(candidate_symbol),
-        },
-        ResolutionExpectation {
-            occurrence: unresolved_occurrence,
-            expected: ExpectedResolution::Unresolved,
-        },
-    ];
-    Ok((
-        ResolutionBatch {
-            repository: RepositoryId::from_bytes([21; 16]),
-            generation: GenerationId::from_bytes([22; 20]),
-            decisions,
-        },
-        expectations,
-    ))
-}
-
-fn decision(occurrence: FactId, outcome: ResolutionOutcome) -> ResolutionDecision {
-    ResolutionDecision {
-        occurrence,
-        outcome,
-        explanation: ResolutionExplanation {
-            rule: ResolutionRule::LexicalScope,
-            provider_name: RESOLVER_PROVIDER_NAME,
-            provider_version: RESOLVER_PROVIDER_VERSION,
-            candidates: Vec::new(),
-            rejected_candidates: Vec::new(),
-            rejected_total: 0,
-            completeness_assumptions: Vec::new(),
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
     #[test]
     fn arguments_reject_missing_extra_and_oversized_values() {
-        let revision = "0123456789abcdef0123456789abcdef01234567";
         assert_eq!(
             parse_arguments(
-                ["--source-revision", revision]
+                ["--source-revision", REVISION]
                     .into_iter()
                     .map(OsString::from)
             )
             .expect("canonical arguments are accepted"),
-            revision
+            REVISION
         );
         assert!(parse_arguments(std::iter::empty()).is_err());
         assert!(
             parse_arguments(
-                ["--source-revision", revision, "--extra"]
+                ["--source-revision", REVISION, "--extra"]
                     .into_iter()
                     .map(OsString::from)
             )
@@ -196,34 +109,31 @@ mod tests {
     }
 
     #[test]
-    fn fixed_fixture_reports_exact_ambiguous_and_unsupported_outcomes() {
-        let registry = initial_semantic_registry().expect("shared registry is valid");
-        let (batch, expectations) = contract_fixture().expect("contract fixture is valid");
-        let evidence = build_semantic_evidence(&registry, &batch, &expectations)
-            .expect("contract fixture evidence builds");
-        let encoded = encode_semantic_evidence_envelope(
-            &evidence,
-            "0123456789abcdef0123456789abcdef01234567",
-        )
-        .expect("source-bound contract fixture encodes");
+    fn production_holdout_is_source_bound_and_deterministic() {
+        let first = run(["--source-revision", REVISION]
+            .into_iter()
+            .map(OsString::from))
+        .expect("production holdout encodes");
+        let repeated = run(["--source-revision", REVISION]
+            .into_iter()
+            .map(OsString::from))
+        .expect("production holdout repeats");
+        assert_eq!(first, repeated);
+
         let value: serde_json::Value =
-            serde_json::from_slice(&encoded).expect("semantic envelope decodes");
-        assert_eq!(value["evidence"]["resolver_quality"]["exact_outcomes"], 1);
+            serde_json::from_slice(&first).expect("semantic envelope decodes");
         assert_eq!(
-            value["evidence"]["resolver_quality"]["candidate_outcomes"],
-            1
+            value["schema"],
+            "rootlight.project-semantic-holdout-envelope/1"
+        );
+        assert_eq!(value["source_revision"], REVISION);
+        assert_eq!(
+            value["evidence"]["schema"],
+            "rootlight.project-semantic-holdout/2"
         );
         assert_eq!(
-            value["evidence"]["resolver_quality"]["unresolved_outcomes"],
-            1
-        );
-        assert_eq!(
-            value["evidence"]["resolver_quality"]["ambiguous_hidden_exact"],
-            0
-        );
-        assert_eq!(
-            value["evidence"]["resolver_quality"]["holdout_available"],
-            false
+            value["evidence"]["languages"].as_array().map(Vec::len),
+            Some(5)
         );
     }
 }

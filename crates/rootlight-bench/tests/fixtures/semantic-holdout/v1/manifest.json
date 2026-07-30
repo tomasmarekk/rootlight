@@ -1,0 +1,111 @@
+{
+  "schema": "rootlight.project-semantic-holdout-manifest/1",
+  "corpus_id": "rootlight-project-semantic-holdout-v1",
+  "languages": [
+    {
+      "language": "rust",
+      "ordinal": 1,
+      "sources": [
+        {
+          "fixture": "rust/dep_a.rs",
+          "project_path": "holdout/dep_a.rs",
+          "sha256": "e51f77b5649ab48de985738995a1491640c1b63228bb418bb2873a9803256068"
+        },
+        {
+          "fixture": "rust/dep_b.rs",
+          "project_path": "holdout/dep_b.rs",
+          "sha256": "e5b02a017133fe30eb5bbb5758f582755bee4133004e1aee7cda9c146667c829"
+        },
+        {
+          "fixture": "rust/main.rs",
+          "project_path": "holdout/main.rs",
+          "sha256": "071bfc8e297de603808b45016f51f68d0d8afa10ecaca5c8dba8a6e107e79c01"
+        }
+      ]
+    },
+    {
+      "language": "typescript",
+      "ordinal": 2,
+      "sources": [
+        {
+          "fixture": "typescript/dep-a.ts",
+          "project_path": "holdout/dep-a.ts",
+          "sha256": "643195b154ce9373c0cb50baa9b56b28dd0b7c554f26a828b68447c337270d36"
+        },
+        {
+          "fixture": "typescript/dep-b.ts",
+          "project_path": "holdout/dep-b.ts",
+          "sha256": "1221ff1553c6fa52429d127555807bcaac9c51dc0138979dc057def9c1c93317"
+        },
+        {
+          "fixture": "typescript/main.ts",
+          "project_path": "holdout/main.ts",
+          "sha256": "8eae92521aea53b9745fa79759ea07966368ad054dae373e9f749e7c7ec4fa75"
+        }
+      ]
+    },
+    {
+      "language": "javascript",
+      "ordinal": 3,
+      "sources": [
+        {
+          "fixture": "javascript/dep-a.js",
+          "project_path": "holdout/dep-a.js",
+          "sha256": "643195b154ce9373c0cb50baa9b56b28dd0b7c554f26a828b68447c337270d36"
+        },
+        {
+          "fixture": "javascript/dep-b.js",
+          "project_path": "holdout/dep-b.js",
+          "sha256": "1221ff1553c6fa52429d127555807bcaac9c51dc0138979dc057def9c1c93317"
+        },
+        {
+          "fixture": "javascript/main.js",
+          "project_path": "holdout/main.js",
+          "sha256": "eb2917cf168d2beb58115cc7bb9499f1867ce8777e9b65803c7e3e3386b1cb30"
+        }
+      ]
+    },
+    {
+      "language": "python",
+      "ordinal": 4,
+      "sources": [
+        {
+          "fixture": "python/holdout_dep_a.py",
+          "project_path": "holdout_dep_a.py",
+          "sha256": "c4929a0e392b7ff633add8f891cfc42ba874b0f78dfb10226fcb054251943ce3"
+        },
+        {
+          "fixture": "python/holdout_dep_b.py",
+          "project_path": "holdout_dep_b.py",
+          "sha256": "b43c67c8933a0fd0f33ba68d927a6668f5ad1705761c62ba7dc204823c0d11f8"
+        },
+        {
+          "fixture": "python/holdout_main.py",
+          "project_path": "holdout_main.py",
+          "sha256": "d1633da9089b1cb7c0ca218b1544ccd56e5cb51049fba0dbd00c229a632c75e0"
+        }
+      ]
+    },
+    {
+      "language": "go",
+      "ordinal": 5,
+      "sources": [
+        {
+          "fixture": "go/dep_a/dep.go",
+          "project_path": "holdout/dep_a/dep_a.go",
+          "sha256": "eadade7d14c785ef14845e86bb19ae7f1f3a42196a0eeb0b74cc0c6a5cf92fe2"
+        },
+        {
+          "fixture": "go/dep_b/dep.go",
+          "project_path": "holdout/dep_b/dep_b.go",
+          "sha256": "44138a0e165ae6b10fcae49c06e6c746eb944eff92924f1b6ef935b3afdcf13b"
+        },
+        {
+          "fixture": "go/main/main.go",
+          "project_path": "holdout/main/main.go",
+          "sha256": "1e1f1cde164e2da00a24ccf2c7039d765aa31f387be68797cb56e7ecef7d5ded"
+        }
+      ]
+    }
+  ]
+}

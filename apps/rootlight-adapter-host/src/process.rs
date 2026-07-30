@@ -16,14 +16,15 @@ use rootlight_cancel::Cancellation;
 use rootlight_ir::{ExtensionSupport, NormalizedIrDocument};
 use rootlight_protocol::{
     adapter_contract::{
-        ADAPTER_FRAME_PREFIX_BYTES, AdapterFrameDecoder, MAX_ADAPTER_FRAME_BYTES,
-        NegotiatedSession, encode_adapter_frame, encode_length_delimited_adapter_frame,
+        ADAPTER_DIGEST_BYTES, ADAPTER_FRAME_PREFIX_BYTES, AdapterFrameDecoder,
+        MAX_ADAPTER_FRAME_BYTES, NegotiatedSession, encode_adapter_frame,
+        encode_length_delimited_adapter_frame,
     },
     generated::adapter::v1::{AdapterFrame, ProjectAnalysisRequest, adapter_frame},
 };
 use rootlight_sandbox::{
-    AdapterProcessCommand, AdapterSandboxLimits, AdapterStderr, AdapterStdin, AdapterStdout,
-    IsolatedAdapterProcess, spawn_windows_isolated_adapter,
+    AdapterExecutableDigest, AdapterProcessCommand, AdapterSandboxLimits, AdapterStderr,
+    AdapterStdin, AdapterStdout, IsolatedAdapterProcess, spawn_isolated_adapter,
 };
 
 use crate::project::{
@@ -88,6 +89,12 @@ pub fn execute_isolated_project_adapter(
     let output_limit = MAX_ADAPTER_FRAME_BYTES
         .checked_add(ADAPTER_FRAME_PREFIX_BYTES)
         .ok_or(AdapterHostError::Limit)?;
+    let expected_executable_digest: [u8; ADAPTER_DIGEST_BYTES] = session
+        .adapter()
+        .source_digest
+        .as_slice()
+        .try_into()
+        .map_err(|_| AdapterHostError::Process)?;
     let command = AdapterProcessCommand::new(
         executable,
         packet.len(),
@@ -95,6 +102,9 @@ pub fn execute_isolated_project_adapter(
         MAX_ADAPTER_DIAGNOSTIC_BYTES,
     )
     .map_err(|_| AdapterHostError::Process)?
+    .expected_executable_digest(AdapterExecutableDigest::from_bytes(
+        expected_executable_digest,
+    ))
     .arg(PROJECT_SESSION_ARGUMENT)
     .and_then(|command| command.arg(WALL_TIME_ARGUMENT))
     .and_then(|command| command.arg(session.limits().wall_time_ms.to_string()))
@@ -112,9 +122,9 @@ pub fn execute_isolated_project_adapter(
     let cpu_time = Duration::from_millis(session.limits().cpu_time_ms);
     let sandbox_limits =
         AdapterSandboxLimits::new(memory_bytes, cpu_time).map_err(|_| AdapterHostError::Process)?;
-    let mut process = spawn_windows_isolated_adapter(command, sandbox_limits)
-        .map_err(|_| AdapterHostError::Process)?;
-    let isolation = IsolationReport::from_windows_process(process.report());
+    let mut process =
+        spawn_isolated_adapter(command, sandbox_limits).map_err(|_| AdapterHostError::Process)?;
+    let isolation = IsolationReport::from_process(process.report());
 
     let stdin = process.take_stdin().ok_or(AdapterHostError::ProcessIo)?;
     let stdout = process.take_stdout().ok_or(AdapterHostError::ProcessIo)?;

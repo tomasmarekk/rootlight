@@ -15,10 +15,23 @@ mod executor;
 mod json;
 mod tools;
 
-use std::{cmp::Ordering, collections::BTreeMap, fmt, future::Future, io, pin::Pin, sync::Arc};
+use std::{
+    borrow::Cow, cmp::Ordering, collections::BTreeMap, fmt, future::Future, io, pin::Pin, sync::Arc,
+};
 
 use json::{JsonIssue, JsonLimits, ParseFailure, parse_bounded};
-use rootlight_mcp_contract::{ExposureProfile, MCP_SPECIFICATION_DATE};
+use rootlight_mcp_contract::initialize::{
+    BootstrapLimits, encode_initialize_response, negotiate_initialize_profile,
+};
+pub use rootlight_mcp_contract::{
+    ExposureProfile, MCP_SPECIFICATION_DATE,
+    initialize::{
+        BootstrapInitialize, BootstrapInitializeError, DEFAULT_MAX_ARRAY_ITEMS,
+        DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_JSON_DEPTH, DEFAULT_MAX_JSON_NODES,
+        DEFAULT_MAX_OBJECT_PROPERTIES, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_STRING_BYTES,
+        ExposureProfilePolicyError, resolve_exposure_profile_policy,
+    },
+};
 use serde::Serialize;
 use serde_json::{Map, Number, Value};
 use thiserror::Error;
@@ -63,22 +76,8 @@ const ROOTLIGHT_RELEASE_VERSION: &str = match option_env!("ROOTLIGHT_RELEASE_VER
     None => env!("CARGO_PKG_VERSION"),
 };
 
-/// Default maximum bytes in one newline-delimited standard-stream message.
-pub const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
-/// Default maximum bytes emitted for one JSON-RPC response, including newline.
-pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
-/// Default maximum JSON object or array nesting below the top-level value.
-pub const DEFAULT_MAX_JSON_DEPTH: usize = 32;
 /// Maximum configured JSON depth supported by the bounded recursive visitor.
 pub const MAX_SUPPORTED_JSON_DEPTH: usize = 64;
-/// Default maximum UTF-8 bytes in one JSON string or object key.
-pub const DEFAULT_MAX_STRING_BYTES: usize = 64 * 1024;
-/// Default maximum raw properties accepted in one JSON object.
-pub const DEFAULT_MAX_OBJECT_PROPERTIES: usize = 128;
-/// Default maximum values accepted in one JSON array.
-pub const DEFAULT_MAX_ARRAY_ITEMS: usize = 256;
-/// Default maximum aggregate JSON values accepted in one message.
-pub const DEFAULT_MAX_JSON_NODES: usize = 16 * 1024;
 /// Default invalid-message count tolerated before closing the session.
 pub const DEFAULT_MAX_INVALID_MESSAGES: usize = 8;
 /// Default maximum concurrently executing MCP requests.
@@ -90,16 +89,8 @@ pub const DEFAULT_MAX_BLOCKING_WORKERS: usize = 4;
 
 const MAX_METHOD_BYTES: usize = 256;
 pub(crate) const MAX_REQUEST_ID_BYTES: usize = 4_096;
+#[cfg(test)]
 const MAX_IMPLEMENTATION_NAME_BYTES: usize = 256;
-const MAX_IMPLEMENTATION_VERSION_BYTES: usize = 256;
-const MAX_IMPLEMENTATION_TITLE_BYTES: usize = 512;
-const MAX_IMPLEMENTATION_DESCRIPTION_BYTES: usize = 4 * 1024;
-const MAX_IMPLEMENTATION_ICONS: usize = 16;
-const MAX_ICON_SOURCE_BYTES: usize = 4 * 1024;
-const MAX_ICON_MIME_BYTES: usize = 256;
-const MAX_ICON_SIZES: usize = 32;
-const MAX_ICON_SIZE_BYTES: usize = 64;
-const MAX_WEBSITE_BYTES: usize = 4 * 1024;
 const MAX_CANCELLATION_REASON_BYTES: usize = 1024;
 
 /// Hard limits applied before lifecycle or method dispatch.
@@ -327,6 +318,7 @@ impl PartialOrd for RequestId {
 pub struct Session {
     state: LifecycleState,
     capabilities: HandlerCapabilities,
+    server_version: Cow<'static, str>,
     /// Server policy ceiling a client-selected profile cannot exceed.
     profile_ceiling: ExposureProfile,
     /// Write handle for the profile negotiated during `initialize`.
@@ -346,6 +338,7 @@ impl Session {
         Self {
             state: LifecycleState::AwaitInitialize,
             capabilities: HandlerCapabilities::none(),
+            server_version: Cow::Borrowed(ROOTLIGHT_RELEASE_VERSION),
             profile_ceiling: ExposureProfile::Developer,
             profile_sender,
         }
@@ -365,6 +358,7 @@ impl Session {
         Self {
             state: LifecycleState::AwaitInitialize,
             capabilities: HandlerCapabilities::none(),
+            server_version: Cow::Borrowed(ROOTLIGHT_RELEASE_VERSION),
             profile_ceiling: ceiling,
             profile_sender,
         }
@@ -574,7 +568,10 @@ impl Session {
             .map(ProcessedFrame::invalid)
             .map(Dispatch::Immediate);
         }
-        if !initialize_params_are_valid(params.as_ref()) {
+        let default_profile = *self.profile_sender.borrow();
+        let Some(negotiated_profile) =
+            negotiate_initialize_profile(params.as_ref(), self.profile_ceiling, default_profile)
+        else {
             return static_error(
                 Some(&id),
                 INVALID_PARAMS,
@@ -583,43 +580,73 @@ impl Session {
             )
             .map(ProcessedFrame::invalid)
             .map(Dispatch::Immediate);
-        }
+        };
 
         // The exposure profile is negotiated once here, before any tools/list.
         // A client-selected profile is clamped to the server policy ceiling
         // ("cannot exceed" is enforced by clamping, not rejection). When the
         // client makes no request, the server-configured default already held by
         // the channel is left untouched.
-        if let Some(requested) = requested_exposure_profile(params.as_ref()) {
-            let resolved = requested.clamped_to(self.profile_ceiling);
-            let _previous = self.profile_sender.send_replace(resolved);
-        }
+        let _previous = self.profile_sender.send_replace(negotiated_profile);
 
         // The server returns its supported revision when the requested revision
         // differs; the client then decides whether it can continue.
-        let result = InitializeResult {
-            protocol_version: MCP_SPECIFICATION_DATE,
-            capabilities: ServerCapabilities {
-                tools: self.capabilities.tools.then_some(ToolsCapability {
-                    // The profile is negotiated once during initialize, before any
-                    // tools/list, so the advertised tool list never changes
-                    // mid-session. A future mid-session profile-change feature
-                    // would set this to true and emit
-                    // notifications/tools/list_changed when the negotiated MCP
-                    // revision supports it.
-                    list_changed: false,
-                }),
-            },
-            server_info: ServerImplementation {
-                name: "rootlight",
-                title: "Rootlight",
-                version: ROOTLIGHT_RELEASE_VERSION,
-                description: "Local-first repository intelligence MCP bridge",
-            },
-        };
-        let response = result_response(&id, &result, limits)?;
+        // The shared encoder freezes the launcher's optimistic response and
+        // the full payload's response to the same byte-for-byte contract.
+        let response = encode_initialize_response(
+            &id,
+            self.capabilities.tools,
+            self.server_version.as_ref(),
+            limits.max_response_bytes,
+        )
+        .map_err(map_bootstrap_error)?;
         self.state = LifecycleState::AwaitInitialized;
         Ok(Dispatch::Immediate(ProcessedFrame::valid(Some(response))))
+    }
+}
+
+/// Prepares Rootlight's exact shared response for a valid first `initialize`
+/// request.
+///
+/// `Ok(None)` means the frame was not an accepted first `initialize` request
+/// and must be handled by the full session without an optimistic response.
+///
+/// # Errors
+///
+/// Returns [`BootstrapInitializeError`] when the selected release version or
+/// limits are invalid, or when the bounded response cannot be prepared.
+pub fn bootstrap_initialize(
+    frame: &[u8],
+    ceiling: ExposureProfile,
+    default_profile: ExposureProfile,
+    server_version: &str,
+    limits: StdioLimits,
+) -> Result<Option<BootstrapInitialize>, BootstrapInitializeError> {
+    let limits = BootstrapLimits::new(
+        limits.max_frame_bytes,
+        limits.max_response_bytes,
+        limits.max_json_depth,
+        limits.max_string_bytes,
+        limits.max_object_properties,
+        limits.max_array_items,
+        limits.max_json_nodes,
+    );
+    rootlight_mcp_contract::initialize::bootstrap_initialize(
+        frame,
+        ceiling,
+        default_profile,
+        server_version,
+        limits,
+    )
+}
+
+fn map_bootstrap_error(error: BootstrapInitializeError) -> SessionError {
+    match error {
+        BootstrapInitializeError::InvalidServerVersion
+        | BootstrapInitializeError::InvalidLimits => SessionError::SerializationInvariant,
+        BootstrapInitializeError::MemoryUnavailable => SessionError::MemoryUnavailable,
+        BootstrapInitializeError::ResponseTooLarge => SessionError::ResponseTooLarge,
+        BootstrapInitializeError::Serialization(source) => SessionError::Serialization(source),
     }
 }
 
@@ -1190,35 +1217,6 @@ enum Dispatch {
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct InitializeResult<'a> {
-    protocol_version: &'a str,
-    capabilities: ServerCapabilities,
-    server_info: ServerImplementation<'a>,
-}
-
-#[derive(Serialize)]
-struct ServerCapabilities {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<ToolsCapability>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ToolsCapability {
-    list_changed: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ServerImplementation<'a> {
-    name: &'a str,
-    title: &'a str,
-    version: &'a str,
-    description: &'a str,
-}
-
-#[derive(Serialize)]
 struct EmptyObject {}
 
 #[derive(Serialize)]
@@ -1424,223 +1422,12 @@ fn decode_inbound(value: Value) -> Result<InboundMessage, DecodeIssue> {
     })
 }
 
-fn initialize_params_are_valid(params: Option<&Value>) -> bool {
-    let Some(Value::Object(params)) = params else {
-        return false;
-    };
-    if params.keys().any(|key| {
-        !matches!(
-            key.as_str(),
-            "_meta" | "protocolVersion" | "capabilities" | "clientInfo" | "initializationOptions"
-        )
-    }) || params
-        .get("_meta")
-        .is_some_and(|meta| !request_meta_is_valid(meta))
-    {
-        return false;
-    }
-    let Some(Value::String(protocol_version)) = params.get("protocolVersion") else {
-        return false;
-    };
-    if protocol_version.is_empty()
-        || protocol_version.len() > MAX_IMPLEMENTATION_VERSION_BYTES
-        || !client_capabilities_are_valid(params.get("capabilities"))
-        || !client_implementation_is_valid(params.get("clientInfo"))
-        || params
-            .get("initializationOptions")
-            .is_some_and(|options| !initialization_options_are_valid(options))
-    {
-        return false;
-    }
-    true
-}
-
-/// Validates Rootlight's `initializationOptions` profile negotiation payload.
-///
-/// The object must carry exactly one documented key,
-/// `rootlight_exposure_profile`, whose value is a known profile name. Any other
-/// key or value is rejected so a client cannot smuggle unsupported negotiation
-/// fields past the boundary.
-fn initialization_options_are_valid(value: &Value) -> bool {
-    let Some(options) = value.as_object() else {
-        return false;
-    };
-    options.len() == 1
-        && options
-            .get("rootlight_exposure_profile")
-            .and_then(Value::as_str)
-            .and_then(ExposureProfile::from_name)
-            .is_some()
-}
-
-/// Extracts the client-requested exposure profile from `initialize` params.
-///
-/// Returns `None` when the client makes no request; callers then keep the
-/// server-configured default. Assumes [`initialize_params_are_valid`] already
-/// accepted the payload.
-fn requested_exposure_profile(params: Option<&Value>) -> Option<ExposureProfile> {
-    let options = params?.get("initializationOptions")?.as_object()?;
-    options
-        .get("rootlight_exposure_profile")?
-        .as_str()
-        .and_then(ExposureProfile::from_name)
-}
-
-fn client_capabilities_are_valid(capabilities: Option<&Value>) -> bool {
-    let Some(Value::Object(capabilities)) = capabilities else {
-        return false;
-    };
-    for (name, value) in capabilities {
-        let valid = match name.as_str() {
-            "experimental" => {
-                matches!(value, Value::Object(values) if values.values().all(Value::is_object))
-            }
-            "roots" => object_has_typed_fields(value, &[("listChanged", JsonKind::Boolean)]),
-            "sampling" => object_has_typed_fields(
-                value,
-                &[("context", JsonKind::Object), ("tools", JsonKind::Object)],
-            ),
-            "elicitation" => object_has_typed_fields(
-                value,
-                &[("form", JsonKind::Object), ("url", JsonKind::Object)],
-            ),
-            "tasks" => tasks_capability_is_valid(value),
-            // The official capability set is explicitly open. Unknown
-            // capability payloads retain their vendor-defined JSON shape.
-            _ => true,
-        };
-        if !valid {
-            return false;
-        }
-    }
-    true
-}
-
-fn tasks_capability_is_valid(value: &Value) -> bool {
-    let Some(tasks) = value.as_object() else {
-        return false;
-    };
-    if tasks.get("list").is_some_and(|value| !value.is_object())
-        || tasks.get("cancel").is_some_and(|value| !value.is_object())
-    {
-        return false;
-    }
-    let Some(requests) = tasks.get("requests") else {
-        return true;
-    };
-    let Some(requests) = requests.as_object() else {
-        return false;
-    };
-    requests
-        .get("sampling")
-        .is_none_or(|value| object_has_typed_fields(value, &[("createMessage", JsonKind::Object)]))
-        && requests
-            .get("elicitation")
-            .is_none_or(|value| object_has_typed_fields(value, &[("create", JsonKind::Object)]))
-}
-
-fn client_implementation_is_valid(value: Option<&Value>) -> bool {
-    let Some(Value::Object(implementation)) = value else {
-        return false;
-    };
-    if implementation.keys().any(|key| {
-        !matches!(
-            key.as_str(),
-            "name" | "title" | "version" | "description" | "icons" | "websiteUrl"
-        )
-    }) {
-        return false;
-    }
-    let Some(Value::String(name)) = implementation.get("name") else {
-        return false;
-    };
-    let Some(Value::String(version)) = implementation.get("version") else {
-        return false;
-    };
-    if name.is_empty()
-        || name.len() > MAX_IMPLEMENTATION_NAME_BYTES
-        || version.is_empty()
-        || version.len() > MAX_IMPLEMENTATION_VERSION_BYTES
-        || !optional_bounded_string(implementation.get("title"), MAX_IMPLEMENTATION_TITLE_BYTES)
-        || !optional_bounded_string(
-            implementation.get("description"),
-            MAX_IMPLEMENTATION_DESCRIPTION_BYTES,
-        )
-        || !optional_bounded_string(implementation.get("websiteUrl"), MAX_WEBSITE_BYTES)
-    {
-        return false;
-    }
-    let Some(icons) = implementation.get("icons") else {
-        return true;
-    };
-    matches!(icons, Value::Array(icons) if icons.len() <= MAX_IMPLEMENTATION_ICONS && icons.iter().all(client_icon_is_valid))
-}
-
-fn client_icon_is_valid(value: &Value) -> bool {
-    let Some(icon) = value.as_object() else {
-        return false;
-    };
-    if icon
-        .keys()
-        .any(|key| !matches!(key.as_str(), "src" | "mimeType" | "sizes" | "theme"))
-    {
-        return false;
-    }
-    let Some(Value::String(source)) = icon.get("src") else {
-        return false;
-    };
-    if source.is_empty()
-        || source.len() > MAX_ICON_SOURCE_BYTES
-        || !optional_bounded_string(icon.get("mimeType"), MAX_ICON_MIME_BYTES)
-        || !valid_icon_theme(icon.get("theme"))
-    {
-        return false;
-    }
-    let Some(sizes) = icon.get("sizes") else {
-        return true;
-    };
-    matches!(
-        sizes,
-        Value::Array(sizes)
-            if sizes.len() <= MAX_ICON_SIZES
-                && sizes.iter().all(|size| {
-                    matches!(size, Value::String(size) if !size.is_empty() && size.len() <= MAX_ICON_SIZE_BYTES)
-                })
-    )
-}
-
-fn valid_icon_theme(theme: Option<&Value>) -> bool {
-    match theme {
-        None => true,
-        Some(Value::String(theme)) => matches!(theme.as_str(), "light" | "dark"),
-        Some(_) => false,
-    }
-}
-
 fn optional_bounded_string(value: Option<&Value>, maximum: usize) -> bool {
     match value {
         None => true,
         Some(Value::String(value)) => value.len() <= maximum,
         Some(_) => false,
     }
-}
-
-#[derive(Clone, Copy)]
-enum JsonKind {
-    Boolean,
-    Object,
-}
-
-fn object_has_typed_fields(value: &Value, fields: &[(&str, JsonKind)]) -> bool {
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    fields.iter().all(|(name, kind)| {
-        object.get(*name).is_none_or(|value| match kind {
-            JsonKind::Boolean => value.is_boolean(),
-            JsonKind::Object => value.is_object(),
-        })
-    })
 }
 
 fn request_params_are_valid(params: Option<&Value>) -> bool {

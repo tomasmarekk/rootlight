@@ -88,6 +88,7 @@ allowed_proc_macros = [
   "derive_arbitrary@1.4.2",
   "doctest-file@1.1.1",
   "displaydoc@0.2.6",
+  "enumflags2_derive@0.7.12",
   "futures-macro@0.3.32",
   "prost-derive@0.14.4",
   "ref-cast-impl@1.0.25",

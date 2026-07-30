@@ -38,7 +38,7 @@ const EXPECTED_PROFILES: [ExpectedProfile; 11] = [
     ExpectedProfile::new("c", AnalysisTier::TierB, LanguageSemantics::Static),
     ExpectedProfile::new("cpp", AnalysisTier::TierB, LanguageSemantics::Static),
     ExpectedProfile::new("csharp", AnalysisTier::TierB, LanguageSemantics::Static),
-    ExpectedProfile::new("go", AnalysisTier::TierA, LanguageSemantics::Static),
+    ExpectedProfile::new("go", AnalysisTier::TierB, LanguageSemantics::Static),
     ExpectedProfile::new("java", AnalysisTier::TierB, LanguageSemantics::Static),
     ExpectedProfile::new(
         "javascript",
@@ -48,8 +48,8 @@ const EXPECTED_PROFILES: [ExpectedProfile; 11] = [
     ExpectedProfile::new("kotlin", AnalysisTier::TierB, LanguageSemantics::Static),
     ExpectedProfile::new("php", AnalysisTier::TierB, LanguageSemantics::Dynamic),
     ExpectedProfile::new("python", AnalysisTier::TierB, LanguageSemantics::Dynamic),
-    ExpectedProfile::new("rust", AnalysisTier::TierA, LanguageSemantics::Static),
-    ExpectedProfile::new("typescript", AnalysisTier::TierA, LanguageSemantics::Static),
+    ExpectedProfile::new("rust", AnalysisTier::TierB, LanguageSemantics::Static),
+    ExpectedProfile::new("typescript", AnalysisTier::TierB, LanguageSemantics::Static),
 ];
 
 /// Opaque, source-free semantic conformance and quality report.

@@ -34,7 +34,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 const SPEC_PATH: &str = "packaging/package.toml";
 const SPEC_SCHEMA: &str = "rootlight.package-spec/1";
 const ARCHIVE_SCHEMA: &str = "rootlight.package-manifest/1";
-const LIFECYCLE_SCHEMA: &str = "rootlight.package-lifecycle/2";
+const LIFECYCLE_SCHEMA: &str = "rootlight.package-lifecycle/4";
 const MAX_SPEC_BYTES: u64 = 256 * 1024;
 const MAX_TEMPLATE_BYTES: u64 = 1024 * 1024;
 const MAX_LICENSE_BYTES: u64 = 1024 * 1024;
@@ -412,7 +412,6 @@ fn validate_spec(workspace: &Path, spec: &PackageSpec) -> Result<(), PackageErro
             return invalid_spec(format!("{} must use mode 0755", binary.name));
         }
     }
-
     let targets = spec
         .platforms
         .iter()
@@ -1643,6 +1642,8 @@ pub(crate) enum PackageError {
         #[source]
         source: rootlight_runtime::RuntimeError,
     },
+    #[error("installed stable-launcher MCP vertical check failed")]
+    InstalledMcpVertical(#[source] crate::mcp_vertical::VerticalError),
     #[error("installed package client check failed during {operation}")]
     InstalledClient {
         operation: &'static str,

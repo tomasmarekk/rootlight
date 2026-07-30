@@ -572,11 +572,12 @@ fn fixture_facts(source: &str, file: rootlight_ids::FileId, language: &str) -> V
                 .get(offset + name.len()..)
                 .is_some_and(|tail| tail.trim_start().starts_with('('))
             {
+                let call_start = qualified_call_start(before, line_start);
                 facts.push(SyntaxFact::new(
                     local_id,
                     Some(1),
                     SyntaxFactKind::Occurrence,
-                    span(file, offset, offset + name.len()),
+                    span(file, call_start, offset + name.len()),
                     1,
                     SyntaxKindLabel::new(&format!("{language}.call")).expect("label is valid"),
                 ));
@@ -585,6 +586,18 @@ fn fixture_facts(source: &str, file: rootlight_ids::FileId, language: &str) -> V
         }
     }
     facts
+}
+
+fn qualified_call_start(before: &str, line_start: usize) -> usize {
+    let bytes = before.as_bytes();
+    let mut start = bytes.len();
+    while start > 0
+        && (bytes[start - 1].is_ascii_alphanumeric()
+            || matches!(bytes[start - 1], b'_' | b'$' | b'.' | b':'))
+    {
+        start -= 1;
+    }
+    line_start.saturating_add(start)
 }
 
 fn next_local_id(facts: &[SyntaxFact]) -> u64 {
@@ -650,7 +663,7 @@ fn language_cases() -> [LanguageCase; 5] {
             paths: ["dep/dep.go", "main/main.go"],
             sources: [
                 "package dep\nfunc Ping() {}\n",
-                "package main\nimport \"example/dep\"\nfunc Run() { Ping() }\n",
+                "package main\nimport \"example/dep\"\nfunc Run() { dep.Ping() }\n",
             ],
         },
     ]

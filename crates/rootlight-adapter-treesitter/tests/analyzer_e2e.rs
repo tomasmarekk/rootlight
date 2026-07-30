@@ -438,16 +438,16 @@ fn reviewed_rust_structural_profile_marks_tests_and_scoped_calls() {
         .iter()
         .find(|occurrence| {
             occurrence.role == OccurrenceRole::CallSite
-                && occurrence.syntactic_text_hash == content_hash(b"handle")
+                && occurrence.syntactic_text_hash == content_hash(b"crate::worker::handle")
         })
-        .expect("terminal name of the scoped call is captured");
+        .expect("qualified scoped call is captured");
     assert_eq!(
         scoped_call.syntax_kind, "rust.scoped_call.scoped_call",
         "the reviewed Rust profile preserves scoped-call evidence for resolution"
     );
     assert_eq!(
         scoped_call.source.span().end_byte() - scoped_call.source.span().start_byte(),
-        u64::try_from("handle".len()).expect("fixture length fits")
+        u64::try_from("crate::worker::handle".len()).expect("fixture length fits")
     );
 }
 

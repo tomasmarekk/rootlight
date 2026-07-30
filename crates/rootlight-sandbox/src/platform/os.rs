@@ -9,11 +9,12 @@ use std::{
     cmp::Ordering,
     env,
     ffi::{OsStr, c_void},
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
     mem::{size_of, size_of_val},
     os::windows::{
         ffi::OsStrExt as _,
+        fs::{MetadataExt as _, OpenOptionsExt as _},
         io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle, RawHandle},
         process::ExitStatusExt as _,
     },
@@ -48,8 +49,9 @@ use windows::{
         },
         Storage::FileSystem::{
             CreateDirectoryW, CreateFileW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL,
-            FILE_ATTRIBUTE_READONLY, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, OPEN_EXISTING, SetFileAttributesW,
+            FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            OPEN_EXISTING, SetFileAttributesW,
         },
         System::{
             JobObjects::{
@@ -79,8 +81,9 @@ use windows::{
 };
 
 use crate::{
-    AdapterIsolationReport, AdapterProcessCommand, AdapterSandboxLimits, ProcessCommand,
-    ProcessError, StdioMode,
+    AdapterExecutableDigest, AdapterIsolationReport, AdapterProcessCommand, AdapterSandboxLimits,
+    MAX_ADAPTER_EXECUTABLE_BYTES, ProcessCommand, ProcessError, StdioMode,
+    adapter::copy_authenticated_executable,
 };
 
 const PROCESS_TERMINATION_EXIT_CODE: u32 = 1;
@@ -532,28 +535,18 @@ pub(crate) fn spawn_windows_isolated_adapter(
     command: AdapterProcessCommand,
     limits: AdapterSandboxLimits,
 ) -> Result<(IsolatedAdapterProcess, AdapterIsolationReport), ProcessError> {
-    if !command.program.is_absolute() {
-        return Err(ProcessError::InvalidInput(
-            "the adapter executable path must be absolute".to_owned(),
-        ));
-    }
-    if !fs::metadata(&command.program)
-        .map_err(|source| ProcessError::io("inspect adapter executable", source))?
-        .is_file()
-    {
-        return Err(ProcessError::InvalidInput(
-            "the adapter executable must be a regular file".to_owned(),
-        ));
-    }
-
     let lock = SPAWN_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut app_container = AppContainerSid::create_ephemeral()?;
     let current_user = CurrentUserSid::load()?;
-    let workspace =
-        PrivateAdapterWorkspace::create(&command.program, &current_user, app_container.sid)?;
+    let workspace = PrivateAdapterWorkspace::create(
+        &command.program,
+        command.expected_executable_digest,
+        &current_user,
+        app_container.sid,
+    )?;
     let mut process_command = ProcessCommand::new(&workspace.executable)
         .env_clear()
         .current_dir(&workspace.current_directory)
@@ -1402,9 +1395,11 @@ struct PrivateAdapterWorkspace {
 impl PrivateAdapterWorkspace {
     fn create(
         source_executable: &Path,
+        expected_digest: Option<AdapterExecutableDigest>,
         current_user: &CurrentUserSid,
         app_container: PSID,
     ) -> Result<Self, ProcessError> {
+        let (mut source, source_bytes) = open_adapter_executable(source_executable)?;
         let mut security =
             DirectorySecurity::appcontainer_read_only(current_user.sid, app_container)?;
         let attributes = security.attributes()?;
@@ -1435,11 +1430,34 @@ impl PrivateAdapterWorkspace {
             return Err(error);
         }
         let executable = runtime.join("adapter.exe");
-        if let Err(source) = fs::copy(source_executable, &executable) {
+        let mut staged = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&executable)
+        {
+            Ok(staged) => staged,
+            Err(source) => {
+                let _ = fs::remove_dir_all(&root);
+                return Err(ProcessError::io("create staged adapter executable", source));
+            }
+        };
+        if let Err(error) =
+            copy_authenticated_executable(&mut source, source_bytes, expected_digest, &mut staged)
+                .and_then(|_| {
+                    staged.sync_all().map_err(|source| {
+                        ProcessError::io("sync staged adapter executable", source)
+                    })
+                })
+        {
+            drop(staged);
             let _ = fs::remove_dir_all(&root);
-            return Err(ProcessError::io("stage adapter executable", source));
+            return Err(error);
         }
-        set_file_attributes(&executable, FILE_ATTRIBUTE_READONLY)?;
+        drop(staged);
+        if let Err(error) = set_file_attributes(&executable, FILE_ATTRIBUTE_READONLY) {
+            let _ = fs::remove_dir_all(&root);
+            return Err(error);
+        }
         Ok(Self {
             root,
             executable,
@@ -1491,6 +1509,34 @@ impl PrivateAdapterWorkspace {
         self.removed = true;
         Ok(())
     }
+}
+
+fn open_adapter_executable(source: &Path) -> Result<(File, u64), ProcessError> {
+    if !source.is_absolute() {
+        return Err(ProcessError::InvalidInput(
+            "the adapter executable path must be absolute".to_owned(),
+        ));
+    }
+    let input = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(source)
+        .map_err(|error| ProcessError::io("open adapter executable without reparse", error))?;
+    let metadata = input
+        .metadata()
+        .map_err(|error| ProcessError::io("inspect opened adapter executable", error))?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        return Err(ProcessError::InvalidInput(
+            "the adapter executable must be a regular non-reparse file".to_owned(),
+        ));
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_ADAPTER_EXECUTABLE_BYTES {
+        return Err(ProcessError::InvalidInput(
+            "the adapter executable size is outside the hard limit".to_owned(),
+        ));
+    }
+    Ok((input, metadata.len()))
 }
 
 impl Drop for PrivateAdapterWorkspace {
@@ -1776,6 +1822,86 @@ mod tests {
     }
 
     #[test]
+    fn opened_executable_handle_blocks_path_replacement_until_copy_finishes() {
+        let directory = tempfile::tempdir().expect("fixture directory opens");
+        let source = directory.path().join("adapter.exe");
+        let original = b"authenticated executable";
+        fs::write(&source, original).expect("fixture executable writes");
+        let expected = AdapterExecutableDigest::from_bytes(*blake3::hash(original).as_bytes());
+        let (mut opened, declared_bytes) =
+            open_adapter_executable(&source).expect("fixture executable opens");
+
+        assert!(
+            OpenOptions::new().write(true).open(&source).is_err(),
+            "opened executable allowed concurrent mutation"
+        );
+        assert!(
+            fs::remove_file(&source).is_err(),
+            "opened executable allowed path removal"
+        );
+        let mut staged = Vec::new();
+        let observed =
+            copy_authenticated_executable(&mut opened, declared_bytes, Some(expected), &mut staged)
+                .expect("opened executable stages");
+
+        assert_eq!(observed, expected);
+        assert_eq!(staged, original);
+    }
+
+    #[test]
+    fn executable_reparse_point_is_rejected_when_symlinks_are_available() {
+        use std::os::windows::fs::symlink_file;
+
+        let directory = tempfile::tempdir().expect("fixture directory opens");
+        let target = directory.path().join("target.exe");
+        let link = directory.path().join("adapter.exe");
+        fs::write(&target, b"executable").expect("fixture target writes");
+        if symlink_file(&target, &link).is_err() {
+            return;
+        }
+
+        assert!(matches!(
+            open_adapter_executable(&link),
+            Err(ProcessError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn device_and_sparse_oversize_executables_are_rejected() {
+        assert!(open_adapter_executable(Path::new(r"\\.\NUL")).is_err());
+
+        let directory = tempfile::tempdir().expect("fixture directory opens");
+        let source = directory.path().join("adapter.exe");
+        let file = File::create(&source).expect("fixture executable creates");
+        file.set_len(MAX_ADAPTER_EXECUTABLE_BYTES + 1)
+            .expect("fixture executable becomes sparse");
+        drop(file);
+        assert!(matches!(
+            open_adapter_executable(&source),
+            Err(ProcessError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn staged_executable_must_match_negotiated_digest() {
+        let directory = tempfile::tempdir().expect("fixture directory opens");
+        let source = directory.path().join("adapter.exe");
+        fs::write(&source, b"unexpected executable").expect("fixture executable writes");
+        let expected =
+            AdapterExecutableDigest::from_bytes(*blake3::hash(b"negotiated executable").as_bytes());
+        let mut app_container =
+            AppContainerSid::create_ephemeral().expect("fixture AppContainer opens");
+        let owner = CurrentUserSid::load().expect("current user SID reads");
+
+        let result =
+            PrivateAdapterWorkspace::create(&source, Some(expected), &owner, app_container.sid);
+        app_container
+            .delete()
+            .expect("fixture AppContainer deletes");
+        assert!(matches!(result, Err(ProcessError::InvalidInput(_))));
+    }
+
+    #[test]
     fn adapter_job_records_hard_process_memory_and_cpu_limits() {
         let limits = AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_millis(750))
             .expect("adapter limits validate");
@@ -1978,6 +2104,7 @@ mod tests {
         let owner = CurrentUserSid::load().expect("current user SID reads");
         let workspace = PrivateAdapterWorkspace::create(
             &env::current_exe().expect("test executable path resolves"),
+            None,
             &owner,
             foreign_profile.sid,
         )
@@ -2097,8 +2224,8 @@ mod tests {
         .expect("test flag is a literal");
         let limits = AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_secs(2))
             .expect("adapter limits validate");
-        let mut adapter = crate::spawn_windows_isolated_adapter(command, limits)
-            .expect("isolated adapter starts");
+        let mut adapter =
+            crate::spawn_isolated_adapter(command, limits).expect("isolated adapter starts");
         let workspace_root = adapter.workspace_root().to_path_buf();
         let mut stdin = adapter.take_stdin().expect("adapter stdin is retained");
         assert!(stdin.write_all(b"too large").is_err());

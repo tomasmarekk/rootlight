@@ -48,6 +48,7 @@ use rootlight_protocol::{
         },
     },
 };
+use rootlight_sandbox::MAX_ADAPTER_EXECUTABLE_BYTES;
 use rootlight_vfs::{RelativePath, SourceSnapshot};
 
 use crate::{AdapterHostError, serve_project_session};
@@ -79,7 +80,6 @@ pub(crate) const FILES_ARGUMENT: &str = "--files";
 const MAX_PROJECT_PATH_BYTES: usize = 4_096;
 const MAX_PROJECT_CONTEXT_BYTES: usize = 1024 * 1024;
 const MAX_PROTOCOL_LABEL_BYTES: usize = 128;
-const MAX_ADAPTER_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SYNTAX_NODES: usize = 16 * 1024 * 1024;
 const MAX_SYNTAX_DEPTH: usize = 4_096;
 const MAX_INCREMENTAL_CACHE_BYTES: usize = u32::MAX as usize;
@@ -886,7 +886,7 @@ fn project_adapter_binary_digest_inner(
     let metadata = file
         .metadata()
         .map_err(|_| AdapterHostError::BinaryIdentity)?;
-    if metadata.len() == 0 || metadata.len() > MAX_ADAPTER_BINARY_BYTES {
+    if metadata.len() == 0 || metadata.len() > MAX_ADAPTER_EXECUTABLE_BYTES {
         return Err(AdapterHostError::BinaryIdentity);
     }
     project_adapter_binary_digest_reader(&mut file, metadata.len(), cancellation)
@@ -911,7 +911,7 @@ fn project_adapter_binary_digest_reader(
         observed = observed
             .checked_add(u64::try_from(read).map_err(|_| AdapterHostError::BinaryIdentity)?)
             .ok_or(AdapterHostError::BinaryIdentity)?;
-        if observed > MAX_ADAPTER_BINARY_BYTES {
+        if observed > MAX_ADAPTER_EXECUTABLE_BYTES {
             return Err(AdapterHostError::BinaryIdentity);
         }
         hasher.update(&buffer[..read]);

@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -772,7 +772,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   semantic-evidence:
-    name: semantic fallback evidence / linux
+    name: in-process Tier B semantic holdout / linux
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -781,19 +781,19 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust
         run: rustup show active-toolchain
-      - name: Generate deterministic semantic fallback envelope
+      - name: Generate deterministic in-process semantic holdout
         env:
           SOURCE_REVISION: ${{ github.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
           cargo build --locked --release --package rootlight-bench --bin semantic-evidence
           target/release/semantic-evidence \
-            --source-revision "$SOURCE_REVISION" > target/rootlight-semantic-evidence-v1.json
+            --source-revision "$SOURCE_REVISION" > target/rootlight-semantic-evidence-v2.json
           target/release/semantic-evidence \
-            --source-revision "$SOURCE_REVISION" > target/rootlight-semantic-evidence-v1.second.json
-          cmp target/rootlight-semantic-evidence-v1.json target/rootlight-semantic-evidence-v1.second.json
+            --source-revision "$SOURCE_REVISION" > target/rootlight-semantic-evidence-v2.second.json
+          cmp target/rootlight-semantic-evidence-v2.json target/rootlight-semantic-evidence-v2.second.json
           if grep --fixed-strings --binary-files=without-match "$PWD" \
-            target/rootlight-semantic-evidence-v1.json; then
+            target/rootlight-semantic-evidence-v2.json; then
             echo "semantic evidence contains the checkout path" >&2
             exit 1
           fi
@@ -803,11 +803,11 @@ jobs:
           import os
           from pathlib import Path
 
-          path = Path("target/rootlight-semantic-evidence-v1.json")
+          path = Path("target/rootlight-semantic-evidence-v2.json")
           encoded = path.read_bytes()
           envelope = json.loads(encoded)
           expected_envelope = {
-              "schema": "rootlight.semantic-evidence-envelope/1",
+              "schema": "rootlight.project-semantic-holdout-envelope/1",
               "source_revision": os.environ["SOURCE_REVISION"],
           }
           observed_envelope = {
@@ -822,9 +822,16 @@ jobs:
           if not isinstance(evidence, dict):
               raise SystemExit("semantic evidence payload is missing")
           expected_evidence = {
-              "schema_version": "2.0",
-              "corpus_id": "rootlight-semantic-contract-fixture-v1",
-              "adapter_crate": "rootlight-adapters",
+              "schema": "rootlight.project-semantic-holdout/2",
+              "corpus_id": "rootlight-project-semantic-holdout-v1",
+              "analyzer": "rootlight-project-semantics",
+              "parser": "rootlight-audited-tree-sitter",
+              "execution_path": "in_process_analyzer",
+              "observed_tier": "tier_b",
+              "compiler_assisted_observed": False,
+              "compiler_build_context_observed": False,
+              "holdout_available": True,
+              "language_breakdown_available": True,
           }
           observed_evidence = {
               key: evidence.get(key) for key in expected_evidence
@@ -836,64 +843,120 @@ jobs:
 
           languages = evidence.get("languages")
           expected_languages = [
-              "c",
-              "cpp",
-              "csharp",
-              "go",
-              "java",
-              "javascript",
-              "kotlin",
-              "php",
-              "python",
               "rust",
               "typescript",
+              "javascript",
+              "python",
+              "go",
           ]
           if not isinstance(languages, list):
               raise SystemExit("semantic language evidence is missing")
           if [item.get("language") for item in languages] != expected_languages:
               raise SystemExit("semantic language evidence differs")
-          if any(item.get("observed_context_imports") != 0 for item in languages):
-              raise SystemExit("semantic context-import observations differ")
+          for item in languages:
+              expected_counts = {
+                  "source_files": 3,
+                  "annotated_call_sites": 12,
+                  "observed_annotated_call_sites": 12,
+                  "exact_expected": 8,
+                  "ambiguous_expected": 2,
+                  "unresolved_expected": 2,
+                  "unresolved_correct": 2,
+                  "ambiguous_hidden_exact": 0,
+                  "unexpected_decisions": 0,
+                  "calibration_samples": 10,
+              }
+              if any(item.get(key) != value for key, value in expected_counts.items()):
+                  raise SystemExit(
+                      f"semantic category evidence differs: {item!r}"
+                  )
+              if (
+                  item.get("observed_tier") != "tier_b"
+                  or item.get("compiler_assisted_observed") is not False
+                  or item.get("exact_precision_basis_points", 0) < 9500
+                  or item.get("exact_recall_basis_points", 0) < 9000
+                  or item.get("candidate_recall_basis_points", 0) < 9000
+                  or item.get("expected_calibration_error_milli", 1001) > 400
+                  or not all(item.get(field) is True for field in (
+                      "analysis_coverage_complete",
+                      "build_context_identity_bound",
+                      "provenance_complete",
+                      "repeated_output_identical",
+                  ))
+              ):
+                  raise SystemExit(
+                      f"semantic Tier B behavior differs: {item!r}"
+                  )
+              capabilities = item.get("capabilities")
+              expected_capabilities = {
+                  "import_edges": 2,
+                  "signatures": 2,
+                  "type_entities": 2,
+                  "hierarchy_relations": 1,
+                  "visibility": 2,
+                  "inferred_calls": 12,
+                  "dispatch_candidates": 2,
+              }
+              if not isinstance(capabilities, dict):
+                  raise SystemExit("semantic capability scores are missing")
+              for capability, expected in expected_capabilities.items():
+                  score = capabilities.get(capability)
+                  if score != {
+                      "expected": expected,
+                      "observed": expected,
+                      "correct": expected,
+                  }:
+                      raise SystemExit(
+                          f"semantic capability score differs: "
+                          f"{capability}={score!r}"
+                      )
 
-          quality = evidence.get("resolver_quality")
-          if not isinstance(quality, dict):
-              raise SystemExit("semantic resolver evidence is missing")
-          expected_quality = {
-              "corpus_scope": "caller_supplied_contract_fixture",
-              "language_breakdown_available": False,
-              "holdout_available": False,
+          aggregate = evidence.get("aggregate")
+          if not isinstance(aggregate, dict):
+              raise SystemExit("semantic aggregate evidence is missing")
+          expected_aggregate = {
+              "annotated_call_sites": 60,
+              "observed_annotated_call_sites": 60,
+              "exact_expected": 40,
+              "ambiguous_expected": 10,
+              "unresolved_expected": 10,
+              "unresolved_correct": 10,
+              "ambiguous_hidden_exact": 0,
+              "unexpected_decisions": 0,
+              "calibration_samples": 50,
           }
-          observed_quality = {
-              key: quality.get(key) for key in expected_quality
-          }
-          if observed_quality != expected_quality:
-              raise SystemExit(
-                  f"semantic resolver evidence overstates capability: {observed_quality!r}"
-              )
-
-          execution = evidence.get("repository_execution")
-          if not isinstance(execution, dict):
-              raise SystemExit("repository execution evidence is missing")
+          if any(aggregate.get(key) != value for key, value in expected_aggregate.items()):
+              raise SystemExit("semantic aggregate category evidence differs")
           if (
-              execution.get("command_surface_available") is not False
-              or execution.get("observed_command_attempts") != 0
-              or execution.get("network_egress_available") is not False
+              aggregate.get("exact_precision_basis_points", 0) < 9500
+              or aggregate.get("exact_recall_basis_points", 0) < 9000
+              or aggregate.get("candidate_recall_basis_points", 0) < 9000
+              or aggregate.get("maximum_expected_calibration_error_milli", 1001) > 400
           ):
-              raise SystemExit("repository execution evidence differs")
-          if len(encoded) > 128 * 1024:
+              raise SystemExit("semantic aggregate quality evidence differs")
+          expected_corpus_sha256 = (
+              "c5d11cf027df0f588bc98a4cd4e168bf"
+              "531b395d34fe19685d8f20ec6666f004"
+          )
+          if evidence.get("corpus_sha256") != expected_corpus_sha256:
+              raise SystemExit("semantic corpus digest differs")
+          if '"observed_tier":"tier_a"' in encoded.decode() or \
+                  '"compiler_assisted_observed":true' in encoded.decode():
+              raise SystemExit("semantic holdout overstates Tier A capability")
+          if len(encoded) > 64 * 1024:
               raise SystemExit("semantic evidence exceeds its single-file ceiling")
           print(
-              "verified semantic fallback envelope "
+              "verified in-process Tier B semantic holdout "
               f"bytes={len(encoded)} sha256={hashlib.sha256(encoded).hexdigest()}"
           )
           PY
-      - name: Upload immutable semantic fallback envelope
+      - name: Upload immutable semantic holdout envelope
         if: failure()
         id: evidence-upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rootlight-semantic-evidence-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/rootlight-semantic-evidence-v1.json
+          name: rootlight-semantic-evidence-v2-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/rootlight-semantic-evidence-v2.json
           if-no-files-found: warn
           retention-days: 7
           overwrite: false
@@ -906,7 +969,7 @@ jobs:
           ARTIFACT_DIGEST: ${{ steps.evidence-upload.outputs.artifact-digest }}
         run: |
           {
-            echo "### Semantic fallback evidence"
+            echo "### In-process Tier B semantic holdout"
             echo
             echo "- artifact id: \`$ARTIFACT_ID\`"
             echo "- artifact url: $ARTIFACT_URL"
@@ -1140,7 +1203,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   capability-evidence:
-    name: capability fallback evidence / linux
+    name: measured capability evidence / linux
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -1161,14 +1224,17 @@ jobs:
           SOURCE_REVISION: ${{ github.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
-          cargo build --locked --release --package rootlight-bench --bin capability-evidence
+          cargo build --locked --release --package rootlight-bench \
+            --bin capability-evidence --bin semantic-evidence
           target/release/capability-evidence \
-            --source-revision "$SOURCE_REVISION" > target/rootlight-capability-evidence-v2.json
+            --source-revision "$SOURCE_REVISION" > target/rootlight-capability-evidence-v3.json
           target/release/capability-evidence \
-            --source-revision "$SOURCE_REVISION" > target/rootlight-capability-evidence-v2.second.json
-          cmp target/rootlight-capability-evidence-v2.json target/rootlight-capability-evidence-v2.second.json
+            --source-revision "$SOURCE_REVISION" > target/rootlight-capability-evidence-v3.second.json
+          target/release/semantic-evidence \
+            --source-revision "$SOURCE_REVISION" > target/rootlight-capability-semantic-reference.json
+          cmp target/rootlight-capability-evidence-v3.json target/rootlight-capability-evidence-v3.second.json
           if grep --fixed-strings --binary-files=without-match "$PWD" \
-            target/rootlight-capability-evidence-v2.json; then
+            target/rootlight-capability-evidence-v3.json; then
             echo "capability evidence contains the checkout path" >&2
             exit 1
           fi
@@ -1178,11 +1244,11 @@ jobs:
           import os
           from pathlib import Path
 
-          path = Path("target/rootlight-capability-evidence-v2.json")
+          path = Path("target/rootlight-capability-evidence-v3.json")
           encoded = path.read_bytes()
           evidence = json.loads(encoded)
           expected_root = {
-              "schema": "rootlight.capability-evidence/2",
+              "schema": "rootlight.capability-evidence/3",
               "source_revision": os.environ["SOURCE_REVISION"],
           }
           observed_root = {
@@ -1194,23 +1260,21 @@ jobs:
               )
 
           semantic = evidence.get("semantic")
-          expected_semantic = {
-              "status": "contract_fixture_only",
-              "declared_languages": [
-                  "go",
-                  "javascript",
-                  "python",
-                  "rust",
-                  "typescript",
-              ],
-              "observed_language_reports": 0,
-              "holdout_available": False,
-              "language_breakdown_available": False,
-          }
-          if semantic != expected_semantic:
+          semantic_reference = json.loads(
+              Path("target/rootlight-capability-semantic-reference.json").read_bytes()
+          ).get("evidence")
+          if semantic != semantic_reference:
               raise SystemExit(
-                  f"semantic capability evidence differs: {semantic!r}"
+                  "capability semantic evidence differs from the reviewed holdout"
               )
+          if (
+              semantic.get("schema") != "rootlight.project-semantic-holdout/2"
+              or semantic.get("observed_tier") != "tier_b"
+              or semantic.get("compiler_assisted_observed") is not False
+              or semantic.get("holdout_available") is not True
+              or len(semantic.get("languages", [])) != 5
+          ):
+              raise SystemExit("semantic capability evidence differs")
 
           incremental = evidence.get("incremental")
           if not isinstance(incremental, dict):
@@ -1247,18 +1311,18 @@ jobs:
 
           isolation = evidence.get("isolation")
           expected_isolation = {
-              "activation": "structural_fallback",
+              "authoritative_artifact_schema": "rootlight.adapter-isolation/1",
               "required_platforms": ["linux", "mac_os", "windows"],
               "cross_platform_reports_required": True,
-              "native_controls_enforced": False,
-              "deep_adapter_permitted": False,
+              "platform_scoped_observations_required": True,
+              "integrated_project_session_required": True,
           }
           if isolation != expected_isolation:
               raise SystemExit(
                   f"isolation capability evidence differs: {isolation!r}"
               )
 
-          if len(encoded) > 32 * 1024:
+          if len(encoded) > 64 * 1024:
               raise SystemExit("capability evidence exceeds its single-file ceiling")
           print(
               "verified capability evidence "
@@ -1270,8 +1334,8 @@ jobs:
         id: evidence-upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rootlight-capability-evidence-v2-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/rootlight-capability-evidence-v2.json
+          name: rootlight-capability-evidence-v3-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/rootlight-capability-evidence-v3.json
           if-no-files-found: warn
           retention-days: 7
           overwrite: false
@@ -1284,7 +1348,7 @@ jobs:
           ARTIFACT_DIGEST: ${{ steps.evidence-upload.outputs.artifact-digest }}
         run: |
           {
-            echo "### Capability fallback evidence"
+            echo "### Measured capability evidence"
             echo
             echo "- artifact id: \`$ARTIFACT_ID\`"
             echo "- artifact url: $ARTIFACT_URL"
@@ -1292,22 +1356,28 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   adapter-isolation:
-    name: adapter isolation evidence / ${{ matrix.platform }}
+    name: adapter isolation evidence / ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
+            target: linux-x86_64
             platform: linux
-            reason_prefix: linux
+          - os: ubuntu-24.04-arm
+            target: linux-aarch64
+            platform: linux
           - os: windows-2025
+            target: windows-x86_64
             platform: windows
-            reason_prefix: windows
           - os: macos-15
+            target: macos-aarch64
             platform: mac_os
-            reason_prefix: macos
+          - os: macos-15-intel
+            target: macos-x86_64
+            platform: mac_os
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -1315,24 +1385,36 @@ jobs:
       - name: Install pinned Rust
         shell: bash
         run: rustup show active-toolchain
+      - name: Exercise native controls against an exact live process
+        shell: bash
+        run: |
+          cargo test --locked --package rootlight-adapter-host \
+            --test native_isolation -- --nocapture
+      - name: Execute real isolated semantic project transactions
+        shell: bash
+        run: |
+          cargo test --locked --package rootlight-adapter-host \
+            --test project_session_native -- --nocapture
+          cargo test --locked --package rootlight-adapter-host \
+            --test semantic_holdout_native -- --nocapture
       - name: Generate deterministic exact-process isolation evidence
         shell: bash
         env:
           SOURCE_REVISION: ${{ github.sha }}
           EXPECTED_PLATFORM: ${{ matrix.platform }}
-          EXPECTED_REASON_PREFIX: ${{ matrix.reason_prefix }}
+          TARGET_ID: ${{ matrix.target }}
         run: |
           test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
           mkdir -p artifacts/adapter-isolation
           cargo run --locked --quiet --package rootlight-adapter-host -- \
             --report --source-revision "$SOURCE_REVISION" \
-            > "artifacts/adapter-isolation/$EXPECTED_PLATFORM.json"
+            > "artifacts/adapter-isolation/$TARGET_ID.json"
           cargo run --locked --quiet --package rootlight-adapter-host -- \
             --report --source-revision "$SOURCE_REVISION" \
-            > "artifacts/adapter-isolation/$EXPECTED_PLATFORM.second.json"
+            > "artifacts/adapter-isolation/$TARGET_ID.second.json"
           cmp \
-            "artifacts/adapter-isolation/$EXPECTED_PLATFORM.json" \
-            "artifacts/adapter-isolation/$EXPECTED_PLATFORM.second.json"
+            "artifacts/adapter-isolation/$TARGET_ID.json" \
+            "artifacts/adapter-isolation/$TARGET_ID.second.json"
           python - <<'PY'
           import json
           import os
@@ -1350,16 +1432,17 @@ jobs:
               "descendant_cleanup",
           ]
           platform = os.environ["EXPECTED_PLATFORM"]
-          path = Path(f"artifacts/adapter-isolation/{platform}.json")
+          path = Path(
+              f"artifacts/adapter-isolation/{os.environ['TARGET_ID']}.json"
+          )
           evidence = json.loads(path.read_bytes())
-          windows = platform == "windows"
           expected = {
               "schema": "rootlight.adapter-isolation/1",
               "source_revision": os.environ["SOURCE_REVISION"],
               "platform": platform,
-              "activation": "isolated_deep" if windows else "structural_fallback",
-              "deep_adapter_permitted": windows,
-              "structural_fallback_active": not windows,
+              "activation": "isolated_deep",
+              "deep_adapter_permitted": True,
+              "structural_fallback_active": False,
           }
           observed = {key: evidence.get(key) for key in expected}
           if observed != expected:
@@ -1371,17 +1454,10 @@ jobs:
               raise SystemExit("adapter isolation controls are missing")
           if [item.get("control") for item in controls] != expected_controls:
               raise SystemExit("adapter isolation controls differ")
-          expected_reason = (
-              "all_required_native_mechanisms_enforced"
-              if windows
-              else (
-                  f"{os.environ['EXPECTED_REASON_PREFIX']}"
-                  "_native_enforcement_not_implemented"
-              )
-          )
           if any(
-              item.get("enforced") is not windows
-              or item.get("reason_code") != expected_reason
+              item.get("enforced") is not True
+              or item.get("reason_code")
+              != "all_required_native_mechanisms_enforced"
               for item in controls
           ):
               raise SystemExit("adapter isolation enforcement evidence differs")
@@ -1389,7 +1465,7 @@ jobs:
               raise SystemExit("adapter isolation evidence exceeds its ceiling")
           PY
           if grep --fixed-strings --binary-files=without-match "$PWD" \
-            "artifacts/adapter-isolation/$EXPECTED_PLATFORM.json"; then
+            "artifacts/adapter-isolation/$TARGET_ID.json"; then
             echo "adapter isolation evidence contains the checkout path" >&2
             exit 1
           fi
@@ -1397,8 +1473,8 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: adapter-isolation-${{ matrix.platform }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/adapter-isolation/${{ matrix.platform }}.json
+          name: adapter-isolation-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/adapter-isolation/${{ matrix.target }}.json
           if-no-files-found: warn
           retention-days: 7
           overwrite: false
@@ -1788,10 +1864,108 @@ jobs:
           overwrite: false
           include-hidden-files: false
 
+  installed-package:
+    name: installed package / ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup show active-toolchain
+      - name: Restore exact installed-package build inputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rootlight-ci-installed-package-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-release-v1
+      - name: Build, install, and exercise the native package
+        shell: bash
+        env:
+          CANDIDATE_VERSION: 0.0.1-alpha.1
+          ROOTLIGHT_RELEASE_VERSION: 0.0.1-alpha.1
+          SOURCE_REVISION: ${{ github.sha }}
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          test "$host" = "$TARGET_TRIPLE"
+          cargo run --locked --quiet --package xtask -- package-check
+          cargo build --locked --release --target "$TARGET_TRIPLE" \
+            --package rootlight \
+            --package rootlight-adapter-host \
+            --package rootlight-daemon \
+            --package rootlight-launcher \
+            --package rootlight-mcp \
+            --package rootlight-semantic-host
+          bin_dir="target/$TARGET_TRIPLE/release"
+          candidate_dir="artifacts/ci-package/candidate"
+          baseline_dir="artifacts/ci-package/baseline"
+          cargo run --locked --quiet --package xtask -- package-build \
+            --target "$TARGET_TRIPLE" \
+            --version "$CANDIDATE_VERSION" \
+            --source-revision "$SOURCE_REVISION" \
+            --bin-dir "$bin_dir" \
+            --output-dir "$candidate_dir"
+          cargo run --locked --quiet --package xtask -- package-build \
+            --target "$TARGET_TRIPLE" \
+            --version 0.0.0 \
+            --source-revision "$SOURCE_REVISION" \
+            --bin-dir "$bin_dir" \
+            --output-dir "$baseline_dir"
+          candidate="$candidate_dir/rootlight-$CANDIDATE_VERSION-$TARGET_TRIPLE.zip"
+          baseline="$baseline_dir/rootlight-0.0.0-$TARGET_TRIPLE.zip"
+          cargo run --locked --quiet --package xtask -- package-verify \
+            --archive "$candidate"
+          cargo run --locked --quiet --package xtask -- package-verify \
+            --archive "$baseline"
+          lifecycle="artifacts/ci-package/$TARGET_TRIPLE.lifecycle.json"
+          cargo run --locked --quiet --package xtask -- package-smoke \
+            --baseline-archive "$baseline" \
+            --archive "$candidate" \
+            --source-revision "$SOURCE_REVISION" \
+            --output "$lifecycle"
+          python scripts/validate-package-lifecycle.py \
+            --path "$lifecycle" \
+            --target "$TARGET_TRIPLE" \
+            --candidate-version "$CANDIDATE_VERSION" \
+            --source-revision "$SOURCE_REVISION" \
+            --candidate-archive "$(basename "$candidate")" \
+            --candidate-sha256 "$(cut -d ' ' -f 1 "${candidate}.sha256")"
+      - name: Upload installed-package failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installed-package-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-package
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+
   ci-required:
     name: ci-required
     if: always()
-    needs: [fast, msrv, current-stable, platform, daemon-lifecycle, vertical-slice, durability-platform, durability-evidence, incident-evidence, dataset-evidence, supply-chain, unsafe-inventory-windows, offline, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, agent-workflow-quality]
+    needs: [fast, msrv, current-stable, platform, daemon-lifecycle, vertical-slice, durability-platform, durability-evidence, incident-evidence, dataset-evidence, supply-chain, unsafe-inventory-windows, offline, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, agent-workflow-quality, installed-package]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

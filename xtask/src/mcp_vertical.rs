@@ -122,6 +122,15 @@ pub(crate) struct Options {
 }
 
 impl Options {
+    /// Creates options for a caller that already owns both output paths.
+    #[must_use]
+    pub(crate) fn new(bin_dir: PathBuf, output_dir: PathBuf) -> Self {
+        Self {
+            bin_dir,
+            output_dir,
+        }
+    }
+
     /// Parses `--bin-dir PATH` and the optional `--output-dir PATH`.
     ///
     /// When no output path is supplied, evidence is written next to the Cargo
@@ -166,17 +175,30 @@ impl Options {
 ///
 /// Returns [`VerticalError`] when a binary, fixture, protocol, tool, process,
 /// determinism, restart, or artifact invariant fails.
-pub(crate) fn check(options: &Options) -> Result<(), VerticalError> {
+pub(crate) fn check(options: &Options) -> Result<CheckEvidence, VerticalError> {
     let evidence = EvidencePaths::prepare(&options.output_dir)?;
     match run(options, &evidence) {
         Ok(summary) => {
+            let completion = CheckEvidence {
+                malformed_partial_result_observed: summary
+                    .fixture
+                    .malformed_file_partial_result_observed_through_mcp,
+                malformed_incomplete_coverage_observed: summary
+                    .fixture
+                    .malformed_scenario_incomplete_coverage_observed_through_mcp,
+                syntax_recovery_diagnostic_observed: summary
+                    .fixture
+                    .syntax_recovery_diagnostic_observed,
+                incremental_lineage_observed: summary.lineage.base_generation_id
+                    != summary.lineage.head_generation_id,
+            };
             evidence.write_summary(&summary)?;
             evidence.remove_failure()?;
             println!(
                 "MCP vertical check completed with durable restart recovery; evidence={}",
                 evidence.root.display()
             );
-            Ok(())
+            Ok(completion)
         }
         Err(error) => {
             evidence.write_failure(error.category())?;
@@ -294,6 +316,8 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         42,
         43,
     )?;
+    let malformed_source =
+        exercise_malformed_source(&mut mcp, &catalog, &mut transcript, &v1_index, &v1)?;
     let architecture_communities = exercise_architecture_communities(
         &mut mcp,
         &catalog,
@@ -539,8 +563,8 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     let tools_list_tokens = estimated_tokens(tools_list_bytes);
     let source_revision = command_output("git", &["rev-parse", "HEAD"])?;
     let rustc_version = command_output("rustc", &["--version"])?;
-    let syntax_recovery_diagnostic_observed =
-        v1_index.syntax_recovery_diagnostic_observed || v1.syntax_recovery_diagnostic_observed;
+    let syntax_recovery_diagnostic_observed = malformed_source.syntax_recovery_diagnostic_observed
+        || v1.syntax_recovery_diagnostic_observed;
     let daemon_ready = LatencySeries::new(daemon_ready_samples)?;
     let bridge_start = LatencySeries::new(bridge_start_samples)?;
     let transport = LatencySeries::new(transport_samples)?;
@@ -568,13 +592,9 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         "durable_index_size_ephemeral_fallback",
         "tantivy_index_bytes_not_present_in_first_slice",
         "first_slice_health_operation_counters_are_scheduler_only",
-        "malformed_file_coverage_through_current_mcp_surface",
     ];
     if peak_rss_bytes.is_none() {
         unavailable_metrics.push("true_process_rss_operation_status_reported_zero");
-    }
-    if !syntax_recovery_diagnostic_observed {
-        unavailable_metrics.push("malformed_source_diagnostic_text_and_code");
     }
     Ok(Summary {
         schema_version: EVIDENCE_SCHEMA_VERSION,
@@ -619,7 +639,15 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
             ignored_sentinel_absent: true,
             outside_root_sentinel_absent: true,
             expected_malformed_file_coverage_status: "unknown",
-            malformed_file_coverage_observed_through_mcp: false,
+            malformed_file_partial_result_observed_through_mcp: malformed_source
+                .partial_result_observed,
+            malformed_scenario_incomplete_coverage_observed_through_mcp: true,
+            malformed_query_skipped_inputs: malformed_source.skipped_inputs,
+            observed_malformed_query_coverage_status: malformed_source.coverage.overall_status,
+            observed_malformed_query_rust_coverage_status: malformed_source
+                .coverage
+                .language_status,
+            observed_malformed_query_rust_coverage_tier: malformed_source.coverage.tier,
             observed_valid_query_coverage_status: "complete",
             observed_valid_query_rust_coverage_status: "complete",
             observed_valid_query_rust_coverage_tier: "B",
@@ -1793,6 +1821,75 @@ fn operation_status(
             "action": "get"
         }),
     )
+}
+
+fn exercise_malformed_source(
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+    index: &IndexReceipt,
+    healthy_snapshot: &SnapshotEvidence,
+) -> Result<MalformedSourceEvidence, VerticalError> {
+    if !index.syntax_recovery_diagnostic_observed {
+        return Err(VerticalError::Invariant(
+            "repo.index did not expose the malformed-source recovery diagnostic",
+        ));
+    }
+    let locate = call_tool(
+        "v1-malformed.code-locate",
+        process,
+        catalog,
+        transcript,
+        "code.locate",
+        json!({
+            "repository": {"repository_id": index.repository},
+            "generation": index.generation,
+            "query": "broken",
+            "search_modes": ["exact"],
+            "max_results": 10,
+            "response_profile": "compact"
+        }),
+    )?;
+    require_tool_success(&locate, "code.locate")?;
+    require_trust_labels(&locate.structured)?;
+    assert_control_value_omits_sentinels(&locate.structured)?;
+    assert_read_correlation(&locate.structured, &index.repository, &index.generation)?;
+    let matches =
+        locate.structured["data"]["matches"]
+            .as_array()
+            .ok_or(VerticalError::Invariant(
+                "malformed-source code.locate matches were not an array",
+            ))?;
+    if !matches.is_empty() {
+        return Err(VerticalError::Invariant(
+            "malformed-source code.locate invented a declaration from invalid syntax",
+        ));
+    }
+    let coverage = observe_rust_coverage(&locate.structured);
+    let skipped_inputs = required_u64(
+        &locate.structured["coverage"]["skipped_inputs"],
+        "malformed-source skipped inputs",
+    )?;
+    if coverage.overall_status != "bounded"
+        || coverage.language_status.as_deref() != Some("bounded")
+        || coverage.tier.as_deref() != Some("B")
+        || skipped_inputs == 0
+        || !diagnostic_code_is_present(
+            &locate.structured["warnings"],
+            "negative_claims_inconclusive",
+        )
+        || healthy_snapshot.symbol.is_empty()
+    {
+        return Err(VerticalError::Invariant(
+            "malformed-source scenario did not retain partial results with bounded coverage",
+        ));
+    }
+    Ok(MalformedSourceEvidence {
+        partial_result_observed: true,
+        syntax_recovery_diagnostic_observed: true,
+        skipped_inputs,
+        coverage,
+    })
 }
 
 #[expect(
@@ -5275,6 +5372,13 @@ struct DiscoveryPolicyEvidence {
     kept_source_read: bool,
 }
 
+struct MalformedSourceEvidence {
+    partial_result_observed: bool,
+    syntax_recovery_diagnostic_observed: bool,
+    skipped_inputs: u64,
+    coverage: RustCoverageObservation,
+}
+
 struct RustCoverageObservation {
     overall_status: String,
     language_status: Option<String>,
@@ -5652,6 +5756,15 @@ struct Summary {
     artifacts: ArtifactEvidence,
 }
 
+/// Behavioral facts enforced by one completed real-process vertical check.
+#[derive(Debug, Serialize)]
+pub(crate) struct CheckEvidence {
+    malformed_partial_result_observed: bool,
+    malformed_incomplete_coverage_observed: bool,
+    syntax_recovery_diagnostic_observed: bool,
+    incremental_lineage_observed: bool,
+}
+
 #[derive(Serialize)]
 struct ArchitectureCommunityEvidence {
     scenario: &'static str,
@@ -5737,7 +5850,12 @@ struct FixtureEvidence {
     ignored_sentinel_absent: bool,
     outside_root_sentinel_absent: bool,
     expected_malformed_file_coverage_status: &'static str,
-    malformed_file_coverage_observed_through_mcp: bool,
+    malformed_file_partial_result_observed_through_mcp: bool,
+    malformed_scenario_incomplete_coverage_observed_through_mcp: bool,
+    malformed_query_skipped_inputs: u64,
+    observed_malformed_query_coverage_status: String,
+    observed_malformed_query_rust_coverage_status: Option<String>,
+    observed_malformed_query_rust_coverage_tier: Option<String>,
     observed_valid_query_coverage_status: &'static str,
     observed_valid_query_rust_coverage_status: &'static str,
     observed_valid_query_rust_coverage_tier: &'static str,

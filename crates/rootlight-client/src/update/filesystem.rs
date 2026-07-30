@@ -507,7 +507,12 @@ pub fn install_package_with_policy(
         published
             .sync_all()
             .map_err(FilesystemUpdateError::PrivateTree)?;
-        install_launchers(layout.open_bootstrap_copy()?, &package, &current_bin)?;
+        install_launchers(
+            layout.open_bootstrap_copy()?,
+            &package,
+            &current_bin,
+            install_root,
+        )?;
         current_bin
             .sync_all()
             .map_err(FilesystemUpdateError::PrivateTree)?;
@@ -1743,6 +1748,7 @@ fn install_launchers(
     file: File,
     manifest: &PackageManifest,
     current_bin: &PrivateDirectory<'_>,
+    install_root: &Path,
 ) -> Result<(), FilesystemUpdateError> {
     let declared = manifest
         .entries
@@ -1750,7 +1756,9 @@ fn install_launchers(
         .find(|entry| entry.path == manifest.launcher_binary && entry.kind == "launcher")
         .ok_or(FilesystemUpdateError::InvalidArchive)?;
     let mut archive = ZipArchive::new(file).map_err(FilesystemUpdateError::Zip)?;
-    for binary in EXPECTED_BINARIES {
+    #[cfg(windows)]
+    {
+        let primary_name = platform_executable_name(EXPECTED_BINARIES[0]);
         let index = find_archive_entry(&mut archive, &manifest.launcher_binary)?
             .ok_or(FilesystemUpdateError::InvalidArchive)?;
         let mut entry = archive
@@ -1758,14 +1766,44 @@ fn install_launchers(
             .map_err(FilesystemUpdateError::Zip)?;
         write_zip_file(
             current_bin,
-            &platform_executable_name(binary),
+            &primary_name,
             &mut entry,
             declared.bytes,
             Some(&declared.sha256),
             0o755,
         )?;
+        let primary = install_root.join(LAUNCHER_DIRECTORY).join(primary_name);
+        for binary in EXPECTED_BINARIES.iter().skip(1) {
+            fs::hard_link(
+                &primary,
+                install_root
+                    .join(LAUNCHER_DIRECTORY)
+                    .join(platform_executable_name(binary)),
+            )
+            .map_err(FilesystemUpdateError::Io)?;
+        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        let _ = install_root;
+        for binary in EXPECTED_BINARIES {
+            let index = find_archive_entry(&mut archive, &manifest.launcher_binary)?
+                .ok_or(FilesystemUpdateError::InvalidArchive)?;
+            let mut entry = archive
+                .by_index(index)
+                .map_err(FilesystemUpdateError::Zip)?;
+            write_zip_file(
+                current_bin,
+                &platform_executable_name(binary),
+                &mut entry,
+                declared.bytes,
+                Some(&declared.sha256),
+                0o755,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 fn copy_bootstrap_artifact(
@@ -3191,6 +3229,18 @@ mod tests {
                 .join(&semantic_host)
                 .is_file()
         );
+        #[cfg(windows)]
+        {
+            let rootlight = root
+                .join("current/bin")
+                .join(platform_executable_name("rootlight"));
+            fs::write(&rootlight, b"linked-launcher").expect("primary launcher link writes");
+            assert_eq!(
+                fs::read(root.join("current/bin").join(&semantic_host))
+                    .expect("secondary launcher link reads"),
+                b"linked-launcher"
+            );
+        }
         let removed = uninstall_package(&root).expect("package uninstalls");
         assert!(removed.user_data_preserved);
         assert_eq!(

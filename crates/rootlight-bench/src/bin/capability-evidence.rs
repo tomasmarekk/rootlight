@@ -1,7 +1,7 @@
 //! Deterministic source-bound report of measured capability facts.
 //!
-//! The report distinguishes durable platform controls from semantic and
-//! deep-adapter capabilities that are currently unavailable.
+//! Production semantic observations are embedded directly. Native isolation
+//! remains platform-scoped and is proven by separate exact-process artifacts.
 
 #![forbid(unsafe_code)]
 
@@ -11,10 +11,11 @@ use std::{
     process::ExitCode,
 };
 
+use rootlight_bench::{ProjectSemanticHoldoutEvidence, build_project_semantic_holdout};
 use serde::Serialize;
 
-const CAPABILITY_EVIDENCE_SCHEMA: &str = "rootlight.capability-evidence/2";
-const CAPABILITY_EVIDENCE_MAX_BYTES: usize = 32 * 1024;
+const CAPABILITY_EVIDENCE_SCHEMA: &str = "rootlight.capability-evidence/3";
+const CAPABILITY_EVIDENCE_MAX_BYTES: usize = 64 * 1024;
 const MAX_ARGUMENT_BYTES: usize = 16 * 1024;
 
 fn main() -> ExitCode {
@@ -83,16 +84,12 @@ fn encode_evidence(source_revision: &str) -> Result<Vec<u8>, &'static str> {
     if !is_source_revision(source_revision) {
         return Err("capability evidence source revision is invalid");
     }
+    let semantic =
+        build_project_semantic_holdout().map_err(|_| "semantic holdout evidence is invalid")?;
     let evidence = CapabilityEvidence {
         schema: CAPABILITY_EVIDENCE_SCHEMA,
         source_revision,
-        semantic: SemanticCapability {
-            status: SemanticStatus::ContractFixtureOnly,
-            declared_languages: ["go", "javascript", "python", "rust", "typescript"],
-            observed_language_reports: 0,
-            holdout_available: false,
-            language_breakdown_available: false,
-        },
+        semantic,
         incremental: IncrementalCapability {
             status: IncrementalStatus::DurableGenerationReuse,
             authoritative_reconcile_contract_available: true,
@@ -116,11 +113,11 @@ fn encode_evidence(source_revision: &str) -> Result<Vec<u8>, &'static str> {
             two_stage_publication_active: false,
         },
         isolation: IsolationCapability {
-            activation: IsolationActivation::StructuralFallback,
+            authoritative_artifact_schema: "rootlight.adapter-isolation/1",
             required_platforms: ["linux", "mac_os", "windows"],
             cross_platform_reports_required: true,
-            native_controls_enforced: false,
-            deep_adapter_permitted: false,
+            platform_scoped_observations_required: true,
+            integrated_project_session_required: true,
         },
     };
     let encoded =
@@ -135,25 +132,10 @@ fn encode_evidence(source_revision: &str) -> Result<Vec<u8>, &'static str> {
 struct CapabilityEvidence<'a> {
     schema: &'static str,
     source_revision: &'a str,
-    semantic: SemanticCapability,
+    semantic: ProjectSemanticHoldoutEvidence,
     incremental: IncrementalCapability,
     storage: StorageCapability,
     isolation: IsolationCapability,
-}
-
-#[derive(Debug, Serialize)]
-struct SemanticCapability {
-    status: SemanticStatus,
-    declared_languages: [&'static str; 5],
-    observed_language_reports: u8,
-    holdout_available: bool,
-    language_breakdown_available: bool,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum SemanticStatus {
-    ContractFixtureOnly,
 }
 
 #[derive(Debug, Serialize)]
@@ -202,17 +184,11 @@ enum SegmentStatus {
 
 #[derive(Debug, Serialize)]
 struct IsolationCapability {
-    activation: IsolationActivation,
+    authoritative_artifact_schema: &'static str,
     required_platforms: [&'static str; 3],
     cross_platform_reports_required: bool,
-    native_controls_enforced: bool,
-    deep_adapter_permitted: bool,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum IsolationActivation {
-    StructuralFallback,
+    platform_scoped_observations_required: bool,
+    integrated_project_session_required: bool,
 }
 
 #[cfg(test)]
@@ -255,13 +231,28 @@ mod tests {
     }
 
     #[test]
-    fn missing_native_isolation_disables_deep_adapters() {
+    fn semantic_and_isolation_claims_reference_observed_artifacts() {
         let encoded = encode_evidence(REVISION).expect("capability evidence encodes");
         let value: serde_json::Value =
             serde_json::from_slice(&encoded).expect("capability evidence decodes");
-        assert_eq!(value["isolation"]["activation"], "structural_fallback");
-        assert_eq!(value["isolation"]["native_controls_enforced"], false);
-        assert_eq!(value["isolation"]["deep_adapter_permitted"], false);
+        assert_eq!(
+            value["semantic"]["schema"],
+            rootlight_bench::PROJECT_SEMANTIC_HOLDOUT_SCHEMA
+        );
+        assert_eq!(value["semantic"]["observed_tier"], "tier_b");
+        assert_eq!(value["semantic"]["compiler_assisted_observed"], false);
+        assert_eq!(
+            value["isolation"]["authoritative_artifact_schema"],
+            "rootlight.adapter-isolation/1"
+        );
+        assert_eq!(
+            value["isolation"]["platform_scoped_observations_required"],
+            true
+        );
+        assert_eq!(
+            value["isolation"]["integrated_project_session_required"],
+            true
+        );
     }
 
     #[test]

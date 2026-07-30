@@ -12,6 +12,19 @@ import publish_npm_packages
 
 
 class PublicationTests(unittest.TestCase):
+    @staticmethod
+    def package_manifest() -> dict[str, object]:
+        return {
+            "gitHead": "0" * 40,
+            "license": publish_npm_packages.PACKAGE_LICENSE,
+            "name": "@tomasmarekk/rootlight",
+            "version": "0.1.0",
+            "publishConfig": {"access": "public", "provenance": True},
+            "repository": {
+                "url": "git+https://github.com/tomasmarekk/rootlight.git"
+            },
+        }
+
     def test_publish_order_requires_platforms_before_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -29,17 +42,20 @@ class PublicationTests(unittest.TestCase):
             )
 
     def test_package_manifest_forbids_lifecycle_scripts(self) -> None:
-        package = {
-            "gitHead": "0" * 40,
-            "license": "Apache-2.0",
-            "name": "@tomasmarekk/rootlight",
-            "version": "0.1.0",
-            "publishConfig": {"access": "public", "provenance": True},
-            "repository": {
-                "url": "git+https://github.com/tomasmarekk/rootlight.git"
-            },
-            "scripts": {"postinstall": "download-binary"},
-        }
+        package = self.package_manifest()
+        package["scripts"] = {"postinstall": "download-binary"}
+        with self.assertRaises(publish_npm_packages.NpmPublicationError):
+            publish_npm_packages.validate_package_json(
+                package, "@tomasmarekk/rootlight", "0.1.0", "0" * 40
+            )
+
+    def test_package_manifest_requires_the_project_license(self) -> None:
+        package = self.package_manifest()
+        publish_npm_packages.validate_package_json(
+            package, "@tomasmarekk/rootlight", "0.1.0", "0" * 40
+        )
+
+        package["license"] = "Apache-2.0"
         with self.assertRaises(publish_npm_packages.NpmPublicationError):
             publish_npm_packages.validate_package_json(
                 package, "@tomasmarekk/rootlight", "0.1.0", "0" * 40

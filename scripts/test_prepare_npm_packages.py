@@ -36,6 +36,7 @@ class PackagePreparationTests(unittest.TestCase):
             root_package = json.loads((output / "rootlight/package.json").read_bytes())
             self.assertEqual(root_package["version"], VERSION)
             self.assertEqual(root_package["gitHead"], REVISION)
+            self.assertEqual(root_package["license"], npm_packages.PACKAGE_LICENSE)
             self.assertEqual(root_package["publishConfig"]["provenance"], True)
             self.assertEqual(
                 root_package["bin"],
@@ -55,6 +56,7 @@ class PackagePreparationTests(unittest.TestCase):
                 package_dir = output / target.directory_name
                 package = json.loads((package_dir / "package.json").read_bytes())
                 self.assertEqual(package["name"], target.package_name)
+                self.assertEqual(package["license"], npm_packages.PACKAGE_LICENSE)
                 self.assertEqual(package["os"], [target.os_name])
                 self.assertEqual(package["cpu"], [target.cpu])
                 suffix = ".exe" if target.os_name == "win32" else ""
@@ -113,6 +115,7 @@ class PackagePreparationTests(unittest.TestCase):
             order = json.loads((output / "publish-order.json").read_bytes())
             self.assertEqual(len(order), 6)
             package = json.loads((output / "rootlight/package.json").read_bytes())
+            self.assertEqual(package["license"], npm_packages.PACKAGE_LICENSE)
             self.assertNotIn("bin", package)
             self.assertNotIn("optionalDependencies", package)
 

@@ -113,7 +113,7 @@ fn shared_registry_keeps_language_profiles_bounded_and_independent() {
             ("c", AnalysisTier::TierB, LanguageSemantics::Static),
             ("cpp", AnalysisTier::TierB, LanguageSemantics::Static),
             ("csharp", AnalysisTier::TierB, LanguageSemantics::Static),
-            ("go", AnalysisTier::TierA, LanguageSemantics::Static),
+            ("go", AnalysisTier::TierB, LanguageSemantics::Static),
             ("java", AnalysisTier::TierB, LanguageSemantics::Static),
             (
                 "javascript",
@@ -123,8 +123,8 @@ fn shared_registry_keeps_language_profiles_bounded_and_independent() {
             ("kotlin", AnalysisTier::TierB, LanguageSemantics::Static),
             ("php", AnalysisTier::TierB, LanguageSemantics::Dynamic),
             ("python", AnalysisTier::TierB, LanguageSemantics::Dynamic,),
-            ("rust", AnalysisTier::TierA, LanguageSemantics::Static),
-            ("typescript", AnalysisTier::TierA, LanguageSemantics::Static,),
+            ("rust", AnalysisTier::TierB, LanguageSemantics::Static),
+            ("typescript", AnalysisTier::TierB, LanguageSemantics::Static,),
         ]
     );
     let uncertainties = registry

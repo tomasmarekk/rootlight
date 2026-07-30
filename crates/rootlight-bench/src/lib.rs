@@ -15,6 +15,7 @@ mod language_workspace;
 mod model;
 mod parser;
 mod performance;
+mod project_semantic_holdout;
 mod sampler;
 mod semantic_contract;
 mod token_accounting;
@@ -82,6 +83,13 @@ pub use performance::{
     ToolMeasurementPlan, UnavailablePolicy, build_performance_evidence,
     decode_performance_evidence, encode_performance_evidence, nearest_rank_distribution,
     performance_evidence_sha256, performance_protocol_sha256, validate_performance_evidence,
+};
+pub use project_semantic_holdout::{
+    PROJECT_SEMANTIC_HOLDOUT_ENVELOPE_MAX_BYTES, PROJECT_SEMANTIC_HOLDOUT_ENVELOPE_SCHEMA,
+    PROJECT_SEMANTIC_HOLDOUT_MAX_BYTES, PROJECT_SEMANTIC_HOLDOUT_SCHEMA,
+    ProjectSemanticHoldoutError, ProjectSemanticHoldoutEvidence, build_project_semantic_holdout,
+    encode_project_semantic_holdout, encode_project_semantic_holdout_envelope,
+    verify_project_semantic_holdout_document,
 };
 #[cfg(target_os = "linux")]
 pub use sampler::{LinuxProcTreeSample, LinuxProcTreeSampler, LinuxProcTreeSamplerError};

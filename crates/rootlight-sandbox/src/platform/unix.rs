@@ -1,0 +1,884 @@
+//! Native Unix process backend and fail-closed adapter isolation launcher.
+
+use std::{
+    ffi::OsString,
+    fs::{self, File, OpenOptions, Permissions},
+    io::{self, Read as _, Write as _},
+    os::unix::{
+        fs::{OpenOptionsExt as _, PermissionsExt as _},
+        process::CommandExt as _,
+    },
+    path::{Path, PathBuf},
+    process::{
+        Child as StdChild, ChildStderr as StdChildStderr, ChildStdin as StdChildStdin,
+        ChildStdout as StdChildStdout, Command, ExitStatus, Stdio,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+use nix::{
+    errno::Errno,
+    sys::{
+        resource::{Resource, rlim_t, setrlimit},
+        signal::{Signal, killpg},
+    },
+    unistd::{Pid, setsid},
+};
+
+use crate::{
+    AdapterExecutableDigest, AdapterIsolationReport, AdapterProcessCommand, AdapterSandboxLimits,
+    MAX_ADAPTER_EXECUTABLE_BYTES, ProcessCommand, ProcessError, StdioMode,
+    adapter::copy_authenticated_executable,
+};
+
+const LAUNCHER_ARGUMENT: &str = "--rootlight-native-isolation-launcher";
+const LAUNCHER_SEPARATOR: &str = "--";
+const HANDSHAKE: &[u8] = b"rootlight-native-isolated/1\n";
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
+const ADAPTER_DESCRIPTOR_LIMIT: u64 = 64;
+const STAGED_EXECUTABLE: &str = "adapter";
+
+#[derive(Debug)]
+pub(crate) struct ChildProcess {
+    child: StdChild,
+}
+
+pub(crate) type ChildStdin = StdChildStdin;
+pub(crate) type ChildStdout = StdChildStdout;
+pub(crate) type ChildStderr = StdChildStderr;
+
+impl ChildProcess {
+    pub(crate) fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub(crate) fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    pub(crate) fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    pub(crate) fn take_stderr(&mut self) -> Option<ChildStderr> {
+        self.child.stderr.take()
+    }
+
+    pub(crate) fn try_wait(&mut self) -> Result<Option<ExitStatus>, ProcessError> {
+        self.child
+            .try_wait()
+            .map_err(|source| ProcessError::io("query child status", source))
+    }
+
+    pub(crate) fn terminate(&mut self) -> Result<(), ProcessError> {
+        self.child
+            .kill()
+            .map_err(|source| ProcessError::io("terminate child", source))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct KillOnCloseJob;
+
+impl KillOnCloseJob {
+    pub(crate) fn new() -> Result<Self, ProcessError> {
+        Err(ProcessError::UnsupportedPlatform)
+    }
+
+    pub(crate) fn active_processes(&self) -> Result<u32, ProcessError> {
+        Err(ProcessError::UnsupportedPlatform)
+    }
+
+    pub(crate) fn terminate(&self, _exit_code: u32) -> Result<(), ProcessError> {
+        Err(ProcessError::UnsupportedPlatform)
+    }
+
+    pub(crate) fn wait_empty(&self, _deadline: Instant) -> Result<(), ProcessError> {
+        Err(ProcessError::UnsupportedPlatform)
+    }
+}
+
+#[derive(Debug)]
+struct ImmutableWorkspace {
+    directory: tempfile::TempDir,
+    executable: PathBuf,
+}
+
+impl ImmutableWorkspace {
+    fn stage(
+        source: &Path,
+        expected_digest: Option<AdapterExecutableDigest>,
+    ) -> Result<Self, ProcessError> {
+        let (mut input, source_bytes) = open_adapter_executable(source)?;
+        let directory = tempfile::Builder::new()
+            .prefix("rootlight-adapter-")
+            .tempdir()
+            .map_err(|error| ProcessError::io("create adapter workspace", error))?;
+        let executable = directory.path().join(STAGED_EXECUTABLE);
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&executable)
+            .map_err(|error| ProcessError::io("create staged adapter executable", error))?;
+        copy_authenticated_executable(&mut input, source_bytes, expected_digest, &mut output)?;
+        output
+            .sync_all()
+            .map_err(|error| ProcessError::io("sync staged adapter executable", error))?;
+        drop(output);
+        fs::set_permissions(&executable, Permissions::from_mode(0o555))
+            .map_err(|error| ProcessError::io("seal staged adapter executable", error))?;
+        fs::set_permissions(directory.path(), Permissions::from_mode(0o555))
+            .map_err(|error| ProcessError::io("seal adapter workspace", error))?;
+
+        Ok(Self {
+            directory,
+            executable,
+        })
+    }
+
+    fn root(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+fn open_adapter_executable(source: &Path) -> Result<(File, u64), ProcessError> {
+    if !source.is_absolute() {
+        return Err(ProcessError::InvalidInput(
+            "the adapter executable path must be absolute".to_owned(),
+        ));
+    }
+    let input = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(source)
+        .map_err(|error| ProcessError::io("open adapter executable without links", error))?;
+    let metadata = input
+        .metadata()
+        .map_err(|error| ProcessError::io("inspect opened adapter executable", error))?;
+    if !metadata.is_file() {
+        return Err(ProcessError::InvalidInput(
+            "the adapter executable must be a regular file".to_owned(),
+        ));
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_ADAPTER_EXECUTABLE_BYTES {
+        return Err(ProcessError::InvalidInput(
+            "the adapter executable size is outside the hard limit".to_owned(),
+        ));
+    }
+    Ok((input, metadata.len()))
+}
+
+impl Drop for ImmutableWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(self.directory.path(), Permissions::from_mode(0o700));
+        let _ = fs::set_permissions(&self.executable, Permissions::from_mode(0o700));
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct IsolatedAdapterProcess {
+    child: StdChild,
+    stderr: Option<ChildStderr>,
+    workspace: ImmutableWorkspace,
+    input_limit: usize,
+    output_limit: usize,
+    diagnostic_limit: usize,
+    process_group: Pid,
+}
+
+impl IsolatedAdapterProcess {
+    pub(crate) fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub(crate) const fn input_limit(&self) -> usize {
+        self.input_limit
+    }
+
+    pub(crate) const fn output_limit(&self) -> usize {
+        self.output_limit
+    }
+
+    pub(crate) const fn diagnostic_limit(&self) -> usize {
+        self.diagnostic_limit
+    }
+
+    pub(crate) fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    pub(crate) fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    pub(crate) fn take_stderr(&mut self) -> Option<ChildStderr> {
+        self.stderr.take()
+    }
+
+    pub(crate) fn try_wait(&mut self) -> Result<Option<ExitStatus>, ProcessError> {
+        self.child
+            .try_wait()
+            .map_err(|error| ProcessError::io("query isolated adapter status", error))
+    }
+
+    pub(crate) fn terminate(&self) -> Result<(), ProcessError> {
+        match killpg(self.process_group, Signal::SIGKILL) {
+            Ok(()) | Err(Errno::ESRCH) => Ok(()),
+            Err(error) => Err(nix_error("terminate adapter process group", error)),
+        }
+    }
+
+    pub(crate) fn wait_empty(&self, deadline: Instant) -> Result<(), ProcessError> {
+        loop {
+            match killpg(self.process_group, None) {
+                Err(Errno::ESRCH) => return Ok(()),
+                Ok(()) | Err(Errno::EPERM) => {}
+                Err(error) => return Err(nix_error("query adapter process group", error)),
+            }
+            if Instant::now() >= deadline {
+                return Err(ProcessError::Deadline {
+                    operation: "wait for adapter process group",
+                });
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+    }
+
+    pub(crate) fn fail_closed_cleanup(mut self) -> Result<(), ProcessError> {
+        self.terminate()?;
+        let _ = self.child.wait();
+        self.wait_empty(Instant::now() + Duration::from_secs(2))
+    }
+}
+
+impl Drop for IsolatedAdapterProcess {
+    fn drop(&mut self) {
+        let _ = self.terminate();
+        let _ = self.child.wait();
+        let _ = self.wait_empty(Instant::now() + Duration::from_secs(2));
+        let _ = self.workspace.root();
+    }
+}
+
+pub(crate) fn spawn(command: ProcessCommand) -> Result<ChildProcess, ProcessError> {
+    validate_command(&command)?;
+    let mut process = Command::new(command.program);
+    process.args(command.arguments);
+    if command.clear_environment {
+        process.env_clear();
+    }
+    process.envs(command.environment);
+    if let Some(directory) = command.current_directory {
+        process.current_dir(directory);
+    }
+    process
+        .stdin(stdio(command.stdin))
+        .stdout(stdio(command.stdout))
+        .stderr(stdio(command.stderr));
+    process
+        .spawn()
+        .map(|child| ChildProcess { child })
+        .map_err(|source| ProcessError::io("create child", source))
+}
+
+pub(crate) fn spawn_in_job(
+    _command: ProcessCommand,
+    _job: &KillOnCloseJob,
+) -> Result<ChildProcess, ProcessError> {
+    Err(ProcessError::UnsupportedPlatform)
+}
+
+pub(crate) fn probe_windows_adapter_isolation(
+    _command: ProcessCommand,
+    _limits: AdapterSandboxLimits,
+) -> Result<AdapterIsolationReport, ProcessError> {
+    Err(ProcessError::UnsupportedPlatform)
+}
+
+pub(crate) fn spawn_isolated_adapter(
+    command: AdapterProcessCommand,
+    limits: AdapterSandboxLimits,
+) -> Result<(IsolatedAdapterProcess, AdapterIsolationReport), ProcessError> {
+    let workspace =
+        ImmutableWorkspace::stage(&command.program, command.expected_executable_digest)?;
+    let mut process = isolated_command(&workspace, &command, limits)?;
+    let mut child = process
+        .spawn()
+        .map_err(|error| ProcessError::io("create isolated adapter launcher", error))?;
+    let process_group = Pid::from_raw(i32::try_from(child.id()).map_err(|_| {
+        ProcessError::InvalidInput("adapter process identifier is not representable".to_owned())
+    })?);
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        ProcessError::InvalidInput("isolated adapter diagnostics pipe is missing".to_owned())
+    })?;
+    if let Err(error) = verify_handshake(&mut stderr, &mut child) {
+        let _ = killpg(process_group, Signal::SIGKILL);
+        let _ = child.wait();
+        return Err(error);
+    }
+
+    let report = platform_report();
+    Ok((
+        IsolatedAdapterProcess {
+            child,
+            stderr: Some(stderr),
+            workspace,
+            input_limit: command.input_limit,
+            output_limit: command.output_limit,
+            diagnostic_limit: command.diagnostic_limit,
+            process_group,
+        },
+        report,
+    ))
+}
+
+fn isolated_command(
+    workspace: &ImmutableWorkspace,
+    command: &AdapterProcessCommand,
+    limits: AdapterSandboxLimits,
+) -> Result<Command, ProcessError> {
+    let mut arguments = vec![
+        OsString::from(LAUNCHER_ARGUMENT),
+        OsString::from(limits.memory_bytes().to_string()),
+        OsString::from(limits.cpu_seconds().to_string()),
+        OsString::from(ADAPTER_DESCRIPTOR_LIMIT.to_string()),
+        OsString::from(LAUNCHER_SEPARATOR),
+    ];
+    arguments.extend(command.arguments.iter().cloned());
+
+    #[cfg(target_os = "linux")]
+    let mut process = {
+        let mut process = Command::new(&workspace.executable);
+        process.args(arguments);
+        process
+    };
+    #[cfg(target_os = "macos")]
+    let mut process = {
+        let sandbox = Path::new("/usr/bin/sandbox-exec");
+        if !sandbox.is_file() {
+            return Err(ProcessError::UnsupportedPlatform);
+        }
+        let profile = macos_profile(&workspace.executable, workspace.root());
+        let mut process = Command::new(sandbox);
+        process
+            .arg("-p")
+            .arg(profile)
+            .arg(&workspace.executable)
+            .args(arguments);
+        process
+    };
+
+    process
+        .env_clear()
+        .current_dir(workspace.root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    Ok(process)
+}
+
+fn verify_handshake(stderr: &mut ChildStderr, child: &mut StdChild) -> Result<(), ProcessError> {
+    use std::os::fd::AsFd as _;
+
+    let original = nix::fcntl::fcntl(stderr.as_fd(), nix::fcntl::FcntlArg::F_GETFL)
+        .map_err(|error| nix_error("query launcher diagnostics flags", error))?;
+    let flags = nix::fcntl::OFlag::from_bits_truncate(original);
+    nix::fcntl::fcntl(
+        stderr.as_fd(),
+        nix::fcntl::FcntlArg::F_SETFL(flags | nix::fcntl::OFlag::O_NONBLOCK),
+    )
+    .map_err(|error| nix_error("set launcher diagnostics nonblocking", error))?;
+
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let mut observed = vec![0_u8; HANDSHAKE.len()];
+    let mut offset = 0;
+    while offset < observed.len() {
+        match stderr.read(&mut observed[offset..]) {
+            Ok(0) => {
+                return Err(ProcessError::InvalidInput(
+                    "isolated adapter launcher closed before verification".to_owned(),
+                ));
+            }
+            Ok(read) => offset += read,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if child
+                    .try_wait()
+                    .map_err(|source| ProcessError::io("query adapter launcher", source))?
+                    .is_some()
+                {
+                    return Err(ProcessError::InvalidInput(
+                        "isolated adapter launcher exited before verification".to_owned(),
+                    ));
+                }
+                if Instant::now() >= deadline {
+                    return Err(ProcessError::Deadline {
+                        operation: "verify isolated adapter launcher",
+                    });
+                }
+                thread::sleep(PROCESS_POLL_INTERVAL);
+            }
+            Err(error) => return Err(ProcessError::io("read isolation handshake", error)),
+        }
+    }
+    if observed != HANDSHAKE {
+        return Err(ProcessError::InvalidInput(
+            "isolated adapter launcher verification failed".to_owned(),
+        ));
+    }
+    nix::fcntl::fcntl(stderr.as_fd(), nix::fcntl::FcntlArg::F_SETFL(flags))
+        .map_err(|error| nix_error("restore launcher diagnostics flags", error))?;
+    Ok(())
+}
+
+pub(crate) fn enter_isolated_adapter_launcher(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<std::convert::Infallible, ProcessError> {
+    let memory_bytes = parse_launcher_limit(arguments.next(), "memory")?;
+    let cpu_seconds = parse_launcher_limit(arguments.next(), "CPU")?;
+    let descriptor_limit = parse_launcher_limit(arguments.next(), "descriptor")?;
+    if arguments.next().as_deref() != Some(std::ffi::OsStr::new(LAUNCHER_SEPARATOR)) {
+        return Err(ProcessError::InvalidInput(
+            "isolated adapter launcher separator is invalid".to_owned(),
+        ));
+    }
+    let adapter_arguments = arguments.collect::<Vec<_>>();
+    let executable = std::env::current_exe()
+        .map_err(|error| ProcessError::io("resolve staged adapter executable", error))?;
+    close_inherited_descriptors()?;
+    establish_resource_limits(memory_bytes, cpu_seconds, descriptor_limit)?;
+    setsid().map_err(|error| nix_error("create adapter process session", error))?;
+    establish_platform_isolation()?;
+    io::stderr()
+        .lock()
+        .write_all(HANDSHAKE)
+        .and_then(|()| io::stderr().lock().flush())
+        .map_err(|error| ProcessError::io("write isolation handshake", error))?;
+
+    let error = Command::new(&executable)
+        .args(adapter_arguments)
+        .env_clear()
+        .exec();
+    Err(ProcessError::io("enter isolated adapter executable", error))
+}
+
+fn close_inherited_descriptors() -> Result<(), ProcessError> {
+    #[cfg(target_os = "linux")]
+    const DESCRIPTOR_DIRECTORY: &str = "/proc/self/fd";
+    #[cfg(target_os = "macos")]
+    const DESCRIPTOR_DIRECTORY: &str = "/dev/fd";
+
+    let mut entries = fs::read_dir(DESCRIPTOR_DIRECTORY)
+        .map_err(|error| ProcessError::io("enumerate inherited descriptors", error))?;
+    let mut descriptors = Vec::new();
+    for entry in entries.by_ref() {
+        let entry =
+            entry.map_err(|error| ProcessError::io("inspect inherited descriptor", error))?;
+        let Some(descriptor) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if descriptor > 2 {
+            descriptors.push(descriptor);
+        }
+    }
+    drop(entries);
+    for descriptor in descriptors {
+        match nix::unistd::close(descriptor) {
+            Ok(()) | Err(Errno::EBADF) => {}
+            Err(error) => return Err(nix_error("close inherited descriptor", error)),
+        }
+    }
+    Ok(())
+}
+
+fn parse_launcher_limit(value: Option<OsString>, label: &str) -> Result<u64, ProcessError> {
+    value
+        .and_then(|value| value.into_string().ok())
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value != 0)
+        .ok_or_else(|| {
+            ProcessError::InvalidInput(format!("isolated adapter {label} limit is invalid"))
+        })
+}
+
+fn establish_resource_limits(
+    memory_bytes: u64,
+    cpu_seconds: u64,
+    descriptor_limit: u64,
+) -> Result<(), ProcessError> {
+    let memory = rlim_t::try_from(memory_bytes).map_err(|_| {
+        ProcessError::InvalidInput("adapter memory limit is not representable".to_owned())
+    })?;
+    let cpu = rlim_t::try_from(cpu_seconds).map_err(|_| {
+        ProcessError::InvalidInput("adapter CPU limit is not representable".to_owned())
+    })?;
+    let descriptors = rlim_t::try_from(descriptor_limit).map_err(|_| {
+        ProcessError::InvalidInput("adapter descriptor limit is not representable".to_owned())
+    })?;
+    setrlimit(Resource::RLIMIT_AS, memory, memory)
+        .map_err(|error| nix_error("set adapter address-space limit", error))?;
+    setrlimit(Resource::RLIMIT_CPU, cpu, cpu)
+        .map_err(|error| nix_error("set adapter CPU limit", error))?;
+    setrlimit(Resource::RLIMIT_NOFILE, descriptors, descriptors)
+        .map_err(|error| nix_error("set adapter descriptor limit", error))?;
+    setrlimit(Resource::RLIMIT_CORE, 0, 0)
+        .map_err(|error| nix_error("disable adapter core dumps", error))?;
+    setrlimit(Resource::RLIMIT_FSIZE, 0, 0)
+        .map_err(|error| nix_error("disable adapter file output", error))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn establish_platform_isolation() -> Result<(), ProcessError> {
+    establish_linux_landlock()?;
+    establish_linux_seccomp()
+}
+
+#[cfg(target_os = "macos")]
+fn establish_platform_isolation() -> Result<(), ProcessError> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn establish_linux_landlock() -> Result<(), ProcessError> {
+    use landlock::{
+        ABI, Access as _, AccessFs, CompatLevel, Compatible as _, PathBeneath, PathFd, Ruleset,
+        RulesetAttr as _, RulesetCreatedAttr as _, RulesetStatus,
+    };
+
+    let abi = ABI::V3;
+    let mut ruleset = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .handle_access(AccessFs::from_all(abi))
+        .map_err(|error| invalid_native_policy("configure Landlock access", error))?
+        .create()
+        .map_err(|error| invalid_native_policy("create Landlock ruleset", error))?;
+    for path in linux_read_only_paths()? {
+        let access = if path.is_dir() {
+            AccessFs::from_read(abi)
+        } else {
+            AccessFs::Execute | AccessFs::ReadFile
+        };
+        ruleset = ruleset
+            .add_rule(PathBeneath::new(
+                PathFd::new(&path)
+                    .map_err(|error| invalid_native_policy("open Landlock path", error))?,
+                access,
+            ))
+            .map_err(|error| invalid_native_policy("add Landlock path rule", error))?;
+    }
+    let status = ruleset
+        .restrict_self()
+        .map_err(|error| invalid_native_policy("enforce Landlock ruleset", error))?;
+    if status.ruleset != RulesetStatus::FullyEnforced || !status.no_new_privs {
+        return Err(ProcessError::InvalidInput(
+            "Landlock did not fully enforce the adapter profile".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_read_only_paths() -> Result<Vec<PathBuf>, ProcessError> {
+    let executable = std::env::current_exe()
+        .map_err(|error| ProcessError::io("resolve staged adapter executable", error))?;
+    let directory = executable
+        .parent()
+        .ok_or_else(|| {
+            ProcessError::InvalidInput("staged adapter executable has no parent".to_owned())
+        })?
+        .to_path_buf();
+    let mut paths = vec![directory, executable];
+    for candidate in [
+        "/usr",
+        "/lib",
+        "/lib64",
+        "/etc/ld.so.cache",
+        "/dev/null",
+        "/dev/urandom",
+    ] {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
+#[cfg(target_os = "linux")]
+fn establish_linux_seccomp() -> Result<(), ProcessError> {
+    use std::collections::BTreeMap;
+
+    use seccompiler::{
+        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+        SeccompRule, TargetArch, apply_filter_all_threads,
+    };
+
+    let mut rules = allowed_linux_syscalls()
+        .into_iter()
+        .map(|syscall| (syscall, Vec::new()))
+        .collect::<BTreeMap<_, _>>();
+    let self_process = SeccompCondition::new(0, SeccompCmpArgLen::Qword, SeccompCmpOp::Eq, 0)
+        .map_err(|error| invalid_native_policy("compile self-process seccomp condition", error))?;
+    let self_process_rule = SeccompRule::new(vec![self_process])
+        .map_err(|error| invalid_native_policy("compile self-process seccomp rule", error))?;
+    rules.insert(libc::SYS_prlimit64, vec![self_process_rule.clone()]);
+    rules.insert(libc::SYS_sched_getaffinity, vec![self_process_rule]);
+    let target = TargetArch::try_from(std::env::consts::ARCH)
+        .map_err(|error| invalid_native_policy("select seccomp architecture", error))?;
+    let filter = SeccompFilter::new(
+        rules,
+        SeccompAction::Errno(libc::EPERM.cast_unsigned()),
+        SeccompAction::Allow,
+        target,
+    )
+    .map_err(|error| invalid_native_policy("compile seccomp policy", error))?;
+    let program = BpfProgram::try_from(filter)
+        .map_err(|error| invalid_native_policy("compile seccomp BPF", error))?;
+    apply_filter_all_threads(&program)
+        .map_err(|error| invalid_native_policy("install seccomp policy", error))
+}
+
+#[cfg(target_os = "linux")]
+fn allowed_linux_syscalls() -> Vec<i64> {
+    let syscalls = vec![
+        libc::SYS_read,
+        libc::SYS_write,
+        libc::SYS_readv,
+        libc::SYS_writev,
+        libc::SYS_close,
+        libc::SYS_fstat,
+        libc::SYS_lseek,
+        libc::SYS_pread64,
+        libc::SYS_fcntl,
+        libc::SYS_ioctl,
+        libc::SYS_dup,
+        libc::SYS_dup3,
+        libc::SYS_pipe2,
+        libc::SYS_openat,
+        libc::SYS_newfstatat,
+        libc::SYS_statx,
+        libc::SYS_getdents64,
+        libc::SYS_readlinkat,
+        libc::SYS_faccessat,
+        libc::SYS_faccessat2,
+        libc::SYS_getcwd,
+        libc::SYS_mmap,
+        libc::SYS_mprotect,
+        libc::SYS_munmap,
+        libc::SYS_mremap,
+        libc::SYS_madvise,
+        libc::SYS_brk,
+        libc::SYS_rt_sigaction,
+        libc::SYS_rt_sigprocmask,
+        libc::SYS_rt_sigreturn,
+        libc::SYS_sigaltstack,
+        libc::SYS_futex,
+        libc::SYS_membarrier,
+        libc::SYS_ppoll,
+        libc::SYS_sched_yield,
+        libc::SYS_nanosleep,
+        libc::SYS_clock_gettime,
+        libc::SYS_clock_nanosleep,
+        libc::SYS_restart_syscall,
+        libc::SYS_getrandom,
+        libc::SYS_uname,
+        libc::SYS_sysinfo,
+        libc::SYS_getpid,
+        libc::SYS_gettid,
+        libc::SYS_getuid,
+        libc::SYS_geteuid,
+        libc::SYS_getgid,
+        libc::SYS_getegid,
+        libc::SYS_set_tid_address,
+        libc::SYS_set_robust_list,
+        libc::SYS_rseq,
+        libc::SYS_getrlimit,
+        libc::SYS_execve,
+        libc::SYS_execveat,
+        libc::SYS_exit,
+        libc::SYS_exit_group,
+    ];
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut extended = syscalls;
+        extended.extend([
+            libc::SYS_arch_prctl,
+            libc::SYS_access,
+            libc::SYS_poll,
+            libc::SYS_readlink,
+        ]);
+        extended
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        syscalls
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_profile(executable: &Path, workspace: &Path) -> String {
+    let executable = sandbox_literal(executable);
+    let workspace = sandbox_literal(workspace);
+    format!(
+        r#"(version 1)
+(deny default)
+(allow process-exec (literal "{executable}"))
+(allow process-info* (target self))
+(allow signal (target self))
+(allow sysctl-read)
+(allow file-read*
+    (literal "{executable}")
+    (subpath "{workspace}")
+    (subpath "/usr/lib")
+    (subpath "/System/Library")
+    (subpath "/private/var/db/dyld")
+    (subpath "/dev/fd")
+    (literal "/dev/null")
+    (literal "/dev/urandom"))
+(deny file-write*)
+(deny network*)
+(deny process-fork)
+"#
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn sandbox_literal(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
+#[cfg(target_os = "linux")]
+fn platform_report() -> AdapterIsolationReport {
+    AdapterIsolationReport::linux_isolated_process()
+}
+
+#[cfg(target_os = "macos")]
+fn platform_report() -> AdapterIsolationReport {
+    AdapterIsolationReport::macos_isolated_process()
+}
+
+#[cfg(target_os = "linux")]
+fn invalid_native_policy(operation: &'static str, error: impl std::fmt::Display) -> ProcessError {
+    ProcessError::InvalidInput(format!("{operation} failed: {error}"))
+}
+
+fn nix_error(operation: &'static str, error: Errno) -> ProcessError {
+    ProcessError::io(operation, io::Error::from_raw_os_error(error as i32))
+}
+
+fn validate_command(command: &ProcessCommand) -> Result<(), ProcessError> {
+    if !command.program.is_absolute() {
+        return Err(ProcessError::InvalidInput(
+            "the executable path must be absolute".to_owned(),
+        ));
+    }
+    if let Some(directory) = &command.current_directory
+        && !directory.is_absolute()
+    {
+        return Err(ProcessError::InvalidInput(
+            "the working directory must be absolute".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn stdio(mode: StdioMode) -> Stdio {
+    match mode {
+        StdioMode::Null => Stdio::null(),
+        StdioMode::Piped => Stdio::piped(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use nix::sys::stat::Mode;
+    use nix::unistd::mkfifo;
+
+    use super::*;
+
+    #[test]
+    fn opened_handle_remains_bound_when_path_is_replaced() {
+        let directory = tempfile::tempdir().expect("fixture directory opens");
+        let source = directory.path().join("adapter");
+        let moved = directory.path().join("adapter-opened");
+        let original = b"authenticated executable";
+        fs::write(&source, original).expect("fixture executable writes");
+        let expected = executable_digest(original);
+        let (mut opened, declared_bytes) =
+            open_adapter_executable(&source).expect("fixture executable opens");
+
+        fs::rename(&source, &moved).expect("opened fixture path renames");
+        fs::write(&source, b"replacement executable").expect("replacement executable writes");
+        let mut staged = Vec::new();
+        let observed =
+            copy_authenticated_executable(&mut opened, declared_bytes, Some(expected), &mut staged)
+                .expect("opened executable stages");
+
+        assert_eq!(observed, expected);
+        assert_eq!(staged, original);
+    }
+
+    #[test]
+    fn executable_symlink_is_rejected_without_following_it() {
+        let directory = tempfile::tempdir().expect("fixture directory opens");
+        let target = directory.path().join("target");
+        let link = directory.path().join("adapter");
+        fs::write(&target, b"executable").expect("fixture target writes");
+        symlink(&target, &link).expect("fixture symlink creates");
+
+        assert!(open_adapter_executable(&link).is_err());
+    }
+
+    #[test]
+    fn executable_fifo_is_rejected_without_blocking_for_a_writer() {
+        let directory = tempfile::tempdir().expect("fixture directory opens");
+        let fifo = directory.path().join("adapter");
+        mkfifo(&fifo, Mode::S_IRUSR | Mode::S_IWUSR).expect("fixture FIFO creates");
+
+        assert!(matches!(
+            open_adapter_executable(&fifo),
+            Err(ProcessError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn sparse_oversize_executable_is_rejected_before_copying() {
+        let directory = tempfile::tempdir().expect("fixture directory opens");
+        let source = directory.path().join("adapter");
+        let file = File::create(&source).expect("fixture executable creates");
+        file.set_len(MAX_ADAPTER_EXECUTABLE_BYTES + 1)
+            .expect("fixture executable becomes sparse");
+
+        assert!(matches!(
+            open_adapter_executable(&source),
+            Err(ProcessError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn negotiated_digest_mismatch_is_rejected_before_spawn() {
+        let directory = tempfile::tempdir().expect("fixture directory opens");
+        let source = directory.path().join("adapter");
+        fs::write(&source, b"unexpected executable").expect("fixture executable writes");
+        let expected = executable_digest(b"negotiated executable");
+
+        assert!(matches!(
+            ImmutableWorkspace::stage(&source, Some(expected)),
+            Err(ProcessError::InvalidInput(_))
+        ));
+    }
+
+    fn executable_digest(bytes: &[u8]) -> AdapterExecutableDigest {
+        AdapterExecutableDigest::from_bytes(*blake3::hash(bytes).as_bytes())
+    }
+}

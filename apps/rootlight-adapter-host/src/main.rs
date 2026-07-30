@@ -10,7 +10,7 @@ use std::{
     io::{self, Write as _},
     process::ExitCode,
 };
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use std::{
     io::Read as _,
     thread,
@@ -21,18 +21,32 @@ use rootlight_adapter_host::{
     AdapterActivation, IsolationReport, encode_isolation_report, evaluate_adapter_activation,
     run_project_session,
 };
-#[cfg(windows)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use rootlight_sandbox::enter_isolated_adapter_launcher;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use rootlight_sandbox::{
-    AdapterProcessCommand, AdapterSandboxLimits, IsolatedAdapterProcess,
-    spawn_windows_isolated_adapter,
+    AdapterProcessCommand, AdapterSandboxLimits, IsolatedAdapterProcess, spawn_isolated_adapter,
 };
 
 fn main() -> ExitCode {
     let mut arguments = std::env::args_os().skip(1);
     match arguments.next().as_deref() {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Some(value) if value == OsStr::new("--rootlight-native-isolation-launcher") => {
+            return match enter_isolated_adapter_launcher(arguments) {
+                Ok(never) => match never {},
+                Err(error) => {
+                    eprintln!("error: native isolation launcher failed: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         Some(value) if value == OsStr::new("--report") => return report(arguments),
         Some(value) if value == OsStr::new("--isolation-witness") => {
             return isolation_witness(arguments);
+        }
+        Some(value) if value == OsStr::new("--isolation-adversary") => {
+            return isolation_adversary(arguments);
         }
         Some(value) if value == OsStr::new("--project-session") => {
             return project_session(arguments);
@@ -111,7 +125,80 @@ fn isolation_witness(mut arguments: impl Iterator<Item = std::ffi::OsString>) ->
     ExitCode::SUCCESS
 }
 
-#[cfg(windows)]
+fn isolation_adversary(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> ExitCode {
+    let Some(mode) = arguments.next() else {
+        return ExitCode::FAILURE;
+    };
+    let extra = arguments.next();
+    if arguments.next().is_some() {
+        return ExitCode::FAILURE;
+    }
+    let denied = if mode == OsStr::new("write") {
+        extra.is_none() && std::fs::write("forbidden-output", b"forbidden").is_err()
+    } else if mode == OsStr::new("network") {
+        extra
+            .and_then(|port| port.into_string().ok())
+            .and_then(|port| port.parse::<u16>().ok())
+            .is_some_and(|port| {
+                std::net::TcpStream::connect_timeout(
+                    &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                    std::time::Duration::from_millis(250),
+                )
+                .is_err()
+            })
+    } else if mode == OsStr::new("child") {
+        extra.is_none()
+            && std::process::Command::new(
+                std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("missing")),
+            )
+            .arg("--isolation-witness")
+            .status()
+            .is_err()
+    } else if mode == OsStr::new("signal-parent") {
+        extra.is_none() && parent_signal_is_denied()
+    } else if mode == OsStr::new("hold") {
+        return if extra.is_none() {
+            hold_isolated_process()
+        } else {
+            ExitCode::FAILURE
+        };
+    } else {
+        return ExitCode::FAILURE;
+    };
+    if denied && io::stdout().lock().write_all(b"denied\n").is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+#[cfg(unix)]
+fn parent_signal_is_denied() -> bool {
+    nix::sys::signal::kill(nix::unistd::getppid(), None).is_err()
+}
+
+#[cfg(not(unix))]
+const fn parent_signal_is_denied() -> bool {
+    false
+}
+
+fn hold_isolated_process() -> ExitCode {
+    if io::stdout()
+        .lock()
+        .write_all(b"ready\n")
+        .and_then(|()| io::stdout().lock().flush())
+        .is_err()
+    {
+        return ExitCode::FAILURE;
+    }
+    let mut byte = [0_u8; 1];
+    match std::io::Read::read(&mut io::stdin().lock(), &mut byte) {
+        Ok(0) => ExitCode::SUCCESS,
+        _ => ExitCode::FAILURE,
+    }
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn exact_process_isolation_report() -> Result<IsolationReport, ()> {
     let command = AdapterProcessCommand::new(std::env::current_exe().map_err(|_| ())?, 1, 64, 64)
         .map_err(|_| ())?
@@ -119,7 +206,7 @@ fn exact_process_isolation_report() -> Result<IsolationReport, ()> {
         .map_err(|_| ())?;
     let limits =
         AdapterSandboxLimits::new(128 * 1024 * 1024, Duration::from_secs(5)).map_err(|_| ())?;
-    let mut process = spawn_windows_isolated_adapter(command, limits).map_err(|_| ())?;
+    let mut process = spawn_isolated_adapter(command, limits).map_err(|_| ())?;
     drop(process.take_stdin().ok_or(())?);
     let mut stdout = process.take_stdout().ok_or(())?;
     let mut stderr = process.take_stderr().ok_or(())?;
@@ -134,15 +221,15 @@ fn exact_process_isolation_report() -> Result<IsolationReport, ()> {
     if !status.success() || output != b"rootlight-isolated\n" || !diagnostic.is_empty() {
         return Err(());
     }
-    Ok(IsolationReport::from_windows_process(process.report()))
+    Ok(IsolationReport::from_process(process.report()))
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn exact_process_isolation_report() -> Result<IsolationReport, ()> {
     Ok(IsolationReport::current())
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn wait_for_exit(
     process: &mut IsolatedAdapterProcess,
     deadline: Instant,

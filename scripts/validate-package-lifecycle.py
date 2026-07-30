@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-SCHEMA = "rootlight.package-lifecycle/2"
+SCHEMA = "rootlight.package-lifecycle/4"
 TARGETS = {
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",
@@ -75,6 +75,12 @@ MCP_FIELDS = {
     "daemon_exit_count",
     "steady_state_active_processes",
     "post_cleanup_active_processes",
+}
+MCP_VERTICAL_FIELDS = {
+    "malformed_partial_result_observed",
+    "malformed_incomplete_coverage_observed",
+    "syntax_recovery_diagnostic_observed",
+    "incremental_lineage_observed",
 }
 HEX_256 = re.compile(r"[0-9a-f]{64}")
 MAX_EVIDENCE_BYTES = 64 * 1024
@@ -215,6 +221,18 @@ def _validate_mcp(document: Any, target: str) -> None:
         )
 
 
+def _validate_mcp_vertical(document: Any) -> None:
+    vertical = _exact_fields(
+        document,
+        MCP_VERTICAL_FIELDS,
+        "installed MCP vertical evidence",
+    )
+    if any(vertical[field] is not True for field in MCP_VERTICAL_FIELDS):
+        raise LifecycleValidationError(
+            "installed MCP vertical behavior is not fully observed"
+        )
+
+
 def validate_document(
     document: Any,
     *,
@@ -257,11 +275,22 @@ def validate_document(
         raise LifecycleValidationError("package uninstall did not remove both versions")
     installed = _exact_fields(
         lifecycle["installed_release"],
-        {"windows_first_health", "mcp_initialize"},
+        {
+            "windows_first_health",
+            "mcp_initialize",
+            "lazy_payload_handoff_observed",
+            "mcp_vertical",
+        },
         "installed release evidence",
     )
     _validate_health(installed["windows_first_health"], target)
     _validate_mcp(installed["mcp_initialize"], target)
+    expected_handoff = True if target == "x86_64-pc-windows-msvc" else None
+    if installed["lazy_payload_handoff_observed"] is not expected_handoff:
+        raise LifecycleValidationError(
+            "lazy MCP payload handoff evidence differs from the target contract"
+        )
+    _validate_mcp_vertical(installed["mcp_vertical"])
 
 
 def validate_path(

@@ -3,7 +3,7 @@
 use std::{
     io::{BufRead, BufReader, Read, Write as _},
     path::{Path, PathBuf},
-    process::ExitStatus,
+    process::{Command, ExitStatus, Stdio},
     sync::mpsc,
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -14,7 +14,7 @@ use rootlight_runtime::RuntimePaths;
 #[cfg(windows)]
 use rootlight_sandbox::KillOnCloseJob;
 use rootlight_sandbox::{ChildProcess, ChildStdin, ProcessCommand, ProcessError, StdioMode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::PackageError;
@@ -42,6 +42,8 @@ const INITIALIZE_REQUEST: &[u8] = br#"{"jsonrpc":"2.0","id":"initialize","method
 pub(super) struct InstalledReleaseEvidence {
     windows_first_health: Option<WindowsFirstHealthEvidence>,
     mcp_initialize: McpInitializeEvidence,
+    lazy_payload_handoff_observed: Option<bool>,
+    mcp_vertical: crate::mcp_vertical::CheckEvidence,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,7 +58,7 @@ struct WindowsFirstHealthEvidence {
     post_cleanup_active_processes: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct McpInitializeEvidence {
     warmup_samples_micros: Vec<u64>,
     measured_samples_micros: Vec<u64>,
@@ -78,9 +80,20 @@ pub(super) fn exercise(
     install_root: &Path,
     candidate_version: &str,
 ) -> Result<InstalledReleaseEvidence, PackageError> {
+    let windows_first_health = exercise_windows_first_health(install_root)?;
+    let mcp_initialize = exercise_mcp_initialize(install_root, candidate_version)?;
+    let vertical_sandbox = private_tempdir("rootlight-installed-vertical-")?;
+    let vertical_options = crate::mcp_vertical::Options::new(
+        install_root.join("current/bin"),
+        vertical_sandbox.path().join("evidence"),
+    );
+    let mcp_vertical = crate::mcp_vertical::check(&vertical_options)
+        .map_err(PackageError::InstalledMcpVertical)?;
     Ok(InstalledReleaseEvidence {
-        windows_first_health: exercise_windows_first_health(install_root)?,
-        mcp_initialize: exercise_mcp_initialize(install_root, candidate_version)?,
+        windows_first_health,
+        mcp_initialize,
+        lazy_payload_handoff_observed: cfg!(windows).then_some(true),
+        mcp_vertical,
     })
 }
 
@@ -171,9 +184,27 @@ fn exercise_windows_first_health(
     Ok(None)
 }
 
+#[cfg(windows)]
 fn exercise_mcp_initialize(
     install_root: &Path,
     candidate_version: &str,
+) -> Result<McpInitializeEvidence, PackageError> {
+    exercise_mcp_initialize_in_process(install_root, candidate_version, ProcessTree::new()?, true)
+}
+
+#[cfg(not(windows))]
+fn exercise_mcp_initialize(
+    install_root: &Path,
+    candidate_version: &str,
+) -> Result<McpInitializeEvidence, PackageError> {
+    exercise_mcp_initialize_in_process(install_root, candidate_version, ProcessTree::new()?, false)
+}
+
+fn exercise_mcp_initialize_in_process(
+    install_root: &Path,
+    candidate_version: &str,
+    mut tree: ProcessTree,
+    standard_client_spawn: bool,
 ) -> Result<McpInitializeEvidence, PackageError> {
     let mcp_launcher = installed_binary(install_root, "rootlight-mcp");
     let daemon = candidate_binary(install_root, candidate_version, "rootlight-daemon");
@@ -189,10 +220,13 @@ fn exercise_mcp_initialize(
             source,
         }
     })?;
-    // Keep one reader blocked across all samples so the latency distribution
-    // measures process output, not per-sample reader-thread creation.
-    let response_reader = TimedResponseReader::new()?;
-    let mut tree = ProcessTree::new()?;
+    // Windows uses the same standard process launch and synchronous read as the
+    // canonical startup SLO. The daemon remains independently job-contained.
+    let response_reader = if standard_client_spawn {
+        None
+    } else {
+        Some(TimedResponseReader::new()?)
+    };
     let daemon_command = ProcessCommand::new(daemon)
         .arg("--coordinated-stdio")
         .env("ROOTLIGHT_STATE_DIR", &state)
@@ -207,7 +241,7 @@ fn exercise_mcp_initialize(
     wait_for_daemon_ready(&paths, &mut daemon)?;
     // Windows Job accounting includes the console host paired with this
     // console-subsystem daemon. Both processes remain in the same owned tree.
-    let daemon_processes = if cfg!(windows) {
+    let daemon_processes = if tree.active_processes()?.is_some() {
         Some(wait_for_bounded_active_processes(
             &tree,
             1,
@@ -220,35 +254,55 @@ fn exercise_mcp_initialize(
 
     let mut warmups = Vec::with_capacity(MCP_WARMUP_SAMPLES);
     for _ in 0..MCP_WARMUP_SAMPLES {
-        warmups.push(measure_initialize(
-            &tree,
-            &response_reader,
-            &mcp_launcher,
-            &state,
-            &runtime,
-            daemon_processes,
-        )?);
+        warmups.push(if standard_client_spawn {
+            measure_initialize_synchronous(&mcp_launcher, &state, &runtime)?
+        } else {
+            measure_initialize_timed(
+                &tree,
+                response_reader
+                    .as_ref()
+                    .ok_or_else(|| invalid_error("installed MCP response reader is unavailable"))?,
+                &mcp_launcher,
+                &state,
+                &runtime,
+                daemon_processes,
+            )?
+        });
     }
     let mut measurements = Vec::with_capacity(MCP_MEASURED_SAMPLES);
     for _ in 0..MCP_MEASURED_SAMPLES {
-        measurements.push(measure_initialize(
-            &tree,
-            &response_reader,
-            &mcp_launcher,
-            &state,
-            &runtime,
-            daemon_processes,
-        )?);
+        measurements.push(if standard_client_spawn {
+            measure_initialize_synchronous(&mcp_launcher, &state, &runtime)?
+        } else {
+            measure_initialize_timed(
+                &tree,
+                response_reader
+                    .as_ref()
+                    .ok_or_else(|| invalid_error("installed MCP response reader is unavailable"))?,
+                &mcp_launcher,
+                &state,
+                &runtime,
+                daemon_processes,
+            )?
+        });
     }
     let p50 = nearest_rank(&measurements, 50)?;
     let p95 = nearest_rank(&measurements, 95)?;
     let p99 = nearest_rank(&measurements, 99)?;
     if p50 > MCP_P50_LIMIT_MICROS || p95 > MCP_P95_LIMIT_MICROS || p99 > MCP_P99_LIMIT_MICROS {
+        let over_limit = measurements
+            .iter()
+            .enumerate()
+            .filter(|(_, sample)| **sample > MCP_P95_LIMIT_MICROS)
+            .map(|(index, sample)| format!("{index}:{sample}us"))
+            .collect::<Vec<_>>()
+            .join(",");
         return invalid(format!(
             "installed stable MCP launcher exceeded its release latency limits: \
              p50={p50}us (limit {MCP_P50_LIMIT_MICROS}us), \
              p95={p95}us (limit {MCP_P95_LIMIT_MICROS}us), \
-             p99={p99}us (limit {MCP_P99_LIMIT_MICROS}us)"
+             p99={p99}us (limit {MCP_P99_LIMIT_MICROS}us), \
+             p95 over-limit samples=[{over_limit}]"
         ));
     }
 
@@ -341,7 +395,7 @@ fn daemon_is_starting(error: &ClientError) -> bool {
     }
 }
 
-fn measure_initialize(
+fn measure_initialize_timed(
     tree: &ProcessTree,
     response_reader: &TimedResponseReader,
     launcher: &Path,
@@ -407,6 +461,84 @@ fn measure_initialize(
         "installed MCP launcher process settlement",
     )?;
     Ok(elapsed)
+}
+
+#[cfg(windows)]
+fn measure_initialize_synchronous(
+    launcher: &Path,
+    state: &Path,
+    runtime: &Path,
+) -> Result<u64, PackageError> {
+    let started = Instant::now();
+    let mut command = Command::new(launcher);
+    command
+        .env("ROOTLIGHT_STATE_DIR", state)
+        .env("ROOTLIGHT_RUNTIME_DIR", runtime)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // This is the same client spawn path as the canonical startup SLO. The
+    // separately owned daemon tree still proves bounded process cleanup.
+    let mut child =
+        ExactStandardChild::new(
+            command
+                .spawn()
+                .map_err(|source| PackageError::InstalledIo {
+                    operation: "spawn installed MCP launcher",
+                    source,
+                })?,
+        );
+    let mut stdin = child
+        .take_stdin()
+        .ok_or_else(|| invalid_error("installed MCP stdin was not retained"))?;
+    let stdout = child
+        .take_stdout()
+        .ok_or_else(|| invalid_error("installed MCP stdout was not retained"))?;
+    let stderr = child
+        .take_stderr()
+        .ok_or_else(|| invalid_error("installed MCP stderr was not retained"))?;
+
+    stdin
+        .write_all(INITIALIZE_REQUEST)
+        .and_then(|()| stdin.flush())
+        .map_err(|source| PackageError::InstalledIo {
+            operation: "write installed MCP initialize request",
+            source,
+        })?;
+    let mut stdout = BufReader::new(stdout);
+    let (elapsed, response) =
+        read_timed_response(&mut stdout, started).map_err(|source| PackageError::InstalledIo {
+            operation: "read installed MCP initialize response",
+            source,
+        })?;
+    validate_initialize_response(&response)?;
+    let stderr_reader = bounded_reader(stderr, "installed-mcp-stderr")?;
+    drop(stdin);
+    let trailing_stdout = read_bounded(stdout).map_err(|source| PackageError::InstalledIo {
+        operation: "read trailing installed MCP stdout",
+        source,
+    })?;
+    let status = child.wait()?;
+    let stderr = join_reader(stderr_reader, "installed MCP stderr")?;
+    if !status.success() {
+        return invalid("installed MCP launcher returned a non-success status");
+    }
+    if !trailing_stdout.is_empty() {
+        return invalid("installed MCP launcher emitted more than one response");
+    }
+    if !stderr.is_empty() {
+        return invalid("installed MCP launcher wrote to stderr");
+    }
+    Ok(elapsed)
+}
+
+#[cfg(not(windows))]
+fn measure_initialize_synchronous(
+    _launcher: &Path,
+    _state: &Path,
+    _runtime: &Path,
+) -> Result<u64, PackageError> {
+    invalid("synchronous installed MCP measurement is unavailable")
 }
 
 fn wait_for_active_processes(
@@ -859,9 +991,74 @@ impl Drop for ExactChild {
     }
 }
 
+#[cfg(windows)]
+struct ExactStandardChild {
+    child: std::process::Child,
+    reaped: bool,
+}
+
+#[cfg(windows)]
+impl ExactStandardChild {
+    const fn new(child: std::process::Child) -> Self {
+        Self {
+            child,
+            reaped: false,
+        }
+    }
+
+    fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.stderr.take()
+    }
+
+    fn wait(&mut self) -> Result<ExitStatus, PackageError> {
+        let status = self
+            .child
+            .wait()
+            .map_err(|source| PackageError::InstalledIo {
+                operation: "wait for installed MCP launcher",
+                source,
+            })?;
+        self.reaped = true;
+        Ok(status)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ExactStandardChild {
+    fn drop(&mut self) {
+        if self.reaped {
+            return;
+        }
+        let deadline = Instant::now()
+            .checked_add(PROCESS_CLEANUP_TIMEOUT)
+            .unwrap_or_else(Instant::now);
+        loop {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            let _ = self.child.kill();
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                return;
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+    }
+}
+
 struct ProcessTree {
     #[cfg(windows)]
-    job: KillOnCloseJob,
+    job: Option<KillOnCloseJob>,
     #[cfg(windows)]
     disarmed: bool,
 }
@@ -873,7 +1070,7 @@ impl ProcessTree {
             let job = KillOnCloseJob::new()
                 .map_err(|source| process_error("create installed process Job Object", source))?;
             Ok(Self {
-                job,
+                job: Some(job),
                 disarmed: false,
             })
         }
@@ -885,7 +1082,10 @@ impl ProcessTree {
 
     fn spawn(&self, command: ProcessCommand) -> Result<ChildProcess, PackageError> {
         #[cfg(windows)]
-        let result = self.job.spawn(command);
+        let result = match self.job.as_ref() {
+            Some(job) => job.spawn(command),
+            None => command.spawn(),
+        };
         #[cfg(not(windows))]
         let result = command.spawn();
         result.map_err(|source| process_error("spawn installed package process", source))
@@ -895,8 +1095,9 @@ impl ProcessTree {
         #[cfg(windows)]
         {
             self.job
-                .active_processes()
-                .map(Some)
+                .as_ref()
+                .map(KillOnCloseJob::active_processes)
+                .transpose()
                 .map_err(|source| process_error("query installed process accounting", source))
         }
         #[cfg(not(windows))]
@@ -907,8 +1108,10 @@ impl ProcessTree {
 
     #[cfg(windows)]
     fn terminate_and_wait(&mut self) -> Result<Option<u32>, PackageError> {
-        self.job
-            .terminate(PROCESS_TERMINATION_EXIT_CODE)
+        let Some(job) = self.job.as_ref() else {
+            return Ok(None);
+        };
+        job.terminate(PROCESS_TERMINATION_EXIT_CODE)
             .map_err(|source| process_error("terminate installed process tree", source))?;
         self.wait_empty()
     }
@@ -916,14 +1119,16 @@ impl ProcessTree {
     fn wait_empty(&mut self) -> Result<Option<u32>, PackageError> {
         #[cfg(windows)]
         {
+            let Some(job) = self.job.as_ref() else {
+                return Ok(None);
+            };
             let deadline = Instant::now()
                 .checked_add(PROCESS_CLEANUP_TIMEOUT)
                 .ok_or(PackageError::Clock)?;
-            self.job.wait_empty(deadline).map_err(|source| {
+            job.wait_empty(deadline).map_err(|source| {
                 process_error("wait for installed process tree cleanup", source)
             })?;
-            let active = self
-                .job
+            let active = job
                 .active_processes()
                 .map_err(|source| process_error("verify installed process tree cleanup", source))?;
             self.disarmed = active == 0;
@@ -939,9 +1144,11 @@ impl ProcessTree {
 #[cfg(windows)]
 impl Drop for ProcessTree {
     fn drop(&mut self) {
-        if !self.disarmed {
-            let _ = self.job.terminate(PROCESS_TERMINATION_EXIT_CODE);
-            let _ = self.job.wait_empty(
+        if !self.disarmed
+            && let Some(job) = self.job.as_ref()
+        {
+            let _ = job.terminate(PROCESS_TERMINATION_EXIT_CODE);
+            let _ = job.wait_empty(
                 Instant::now()
                     .checked_add(PROCESS_CLEANUP_TIMEOUT)
                     .unwrap_or_else(Instant::now),

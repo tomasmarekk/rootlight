@@ -147,9 +147,9 @@ pub struct IsolationReport {
 impl IsolationReport {
     /// Probes the current platform conservatively.
     ///
-    /// The initial backend intentionally reports every native enforcement
-    /// control unavailable. This makes the documented structural-tier fallback
-    /// active until audited Linux, macOS, and Windows backends land.
+    /// A platform-only report intentionally marks every process-bound control
+    /// unavailable. Exact enforcement evidence is produced only while starting
+    /// a concrete adapter with the native sandbox backend.
     #[must_use]
     pub fn current() -> Self {
         let (platform, reason) = current_platform_and_reason();
@@ -162,10 +162,10 @@ impl IsolationReport {
         }
     }
 
-    /// Converts enforcement evidence from an exact live Windows process.
+    /// Converts enforcement evidence from an exact live native process.
     #[must_use]
-    pub fn from_windows_process(report: &rootlight_sandbox::AdapterIsolationReport) -> Self {
-        use rootlight_sandbox::AdapterControl;
+    pub fn from_process(report: &rootlight_sandbox::AdapterIsolationReport) -> Self {
+        use rootlight_sandbox::{AdapterControl, AdapterIsolationPlatform};
 
         let controls = [
             (
@@ -206,7 +206,12 @@ impl IsolationReport {
         })
         .collect();
         Self {
-            platform: HostPlatform::Windows,
+            platform: match report.platform() {
+                AdapterIsolationPlatform::Linux => HostPlatform::Linux,
+                AdapterIsolationPlatform::MacOs => HostPlatform::MacOs,
+                AdapterIsolationPlatform::Windows => HostPlatform::Windows,
+                _ => HostPlatform::Unsupported,
+            },
             controls,
         }
     }

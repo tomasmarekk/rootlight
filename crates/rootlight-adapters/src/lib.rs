@@ -305,7 +305,7 @@ pub fn initial_semantic_registry() -> Result<LanguageAdapterRegistry, InitialReg
         ),
         (
             "go",
-            AnalysisTier::TierA,
+            AnalysisTier::TierB,
             LanguageSemantics::Static,
             &["build_tags", "code_generation", "runtime_registration"][..],
         ),
@@ -367,13 +367,13 @@ pub fn initial_semantic_registry() -> Result<LanguageAdapterRegistry, InitialReg
         ),
         (
             "rust",
-            AnalysisTier::TierA,
+            AnalysisTier::TierB,
             LanguageSemantics::Static,
             &["generated_code", "macro_expansion", "procedural_macros"][..],
         ),
         (
             "typescript",
-            AnalysisTier::TierA,
+            AnalysisTier::TierB,
             LanguageSemantics::Static,
             &["dynamic_imports", "generated_code", "runtime_registration"][..],
         ),

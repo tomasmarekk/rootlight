@@ -317,7 +317,7 @@ jobs:
               "committed_active_version": os.environ["VERSION"],
               "committed_last_good_version": "0.0.0",
               "rollback_active_version": "0.0.0",
-              "schema": "rootlight.package-lifecycle/2",
+              "schema": "rootlight.package-lifecycle/4",
               "source_revision": os.environ["SOURCE_REVISION"],
           }
           if {
@@ -490,7 +490,7 @@ jobs:
                   "committed_active_version": version,
                   "committed_last_good_version": "0.0.0",
                   "rollback_active_version": "0.0.0",
-                  "schema": "rootlight.package-lifecycle/2",
+                  "schema": "rootlight.package-lifecycle/4",
                   "source_revision": os.environ["SOURCE_REVISION"],
               }
               if {

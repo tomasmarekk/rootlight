@@ -1,0 +1,311 @@
+{
+  "schema": "rootlight.project-semantic-holdout-answer-key/1",
+  "corpus_id": "rootlight-project-semantic-holdout-v1",
+  "languages": [
+    {
+      "language": "rust",
+      "call_path": "holdout/main.rs",
+      "exact": [
+        { "call": "fixture_node_01", "call_line": 15, "target": "fixture_node_01", "target_path": "holdout/dep_a.rs", "target_line": 1 },
+        { "call": "fixture_node_02", "call_line": 16, "target": "fixture_node_02", "target_path": "holdout/dep_a.rs", "target_line": 2 },
+        { "call": "fixture_node_03", "call_line": 17, "target": "fixture_node_03", "target_path": "holdout/dep_a.rs", "target_line": 3 },
+        { "call": "fixture_node_04", "call_line": 18, "target": "fixture_node_04", "target_path": "holdout/dep_a.rs", "target_line": 4 },
+        { "call": "fixture_node_05", "call_line": 19, "target": "fixture_node_05", "target_path": "holdout/dep_a.rs", "target_line": 5 },
+        { "call": "fixture_node_06", "call_line": 20, "target": "fixture_node_06", "target_path": "holdout/dep_a.rs", "target_line": 6 },
+        { "call": "fixture_node_07", "call_line": 21, "target": "fixture_node_07", "target_path": "holdout/dep_a.rs", "target_line": 7 },
+        { "call": "fixture_node_08_local", "call_line": 22, "target": "fixture_node_08", "target_path": "holdout/dep_a.rs", "target_line": 8 }
+      ],
+      "candidates": [
+        {
+          "call": "fixture_node_09",
+          "call_line": 23,
+          "targets": [
+            { "name": "fixture_node_09", "path": "holdout/dep_a.rs", "line": 18 },
+            { "name": "fixture_node_09", "path": "holdout/dep_b.rs", "line": 6 }
+          ]
+        },
+        {
+          "call": "fixture_node_10",
+          "call_line": 24,
+          "targets": [
+            { "name": "fixture_node_10", "path": "holdout/dep_a.rs", "line": 19 },
+            { "name": "fixture_node_10", "path": "holdout/dep_b.rs", "line": 7 }
+          ]
+        }
+      ],
+      "unresolved": [
+        { "call": "fixture_node_11", "call_line": 25 },
+        { "call": "fixture_node_12", "call_line": 26 }
+      ],
+      "capabilities": {
+        "import_edges": [
+          { "from_path": "holdout/main.rs", "to_path": "holdout/dep_a.rs" },
+          { "from_path": "holdout/dep_b.rs", "to_path": "holdout/dep_a.rs" }
+        ],
+        "signatures": [
+          { "name": "fixture_node_01", "path": "holdout/dep_a.rs", "line": 1 },
+          { "name": "FixtureVariantA", "path": "holdout/dep_a.rs", "line": 15 }
+        ],
+        "type_entities": [
+          { "name": "FixtureProtocol", "path": "holdout/dep_a.rs", "line": 10, "kind": "trait" },
+          { "name": "FixtureVariantA", "path": "holdout/dep_a.rs", "line": 15, "kind": "struct" }
+        ],
+        "hierarchy_relations": [
+          {
+            "subject": { "name": "FixtureVariantA", "path": "holdout/dep_a.rs", "line": 15 },
+            "predicate": "implements",
+            "object": { "name": "FixtureProtocol", "path": "holdout/dep_a.rs", "line": 10 }
+          }
+        ],
+        "visibility": [
+          { "name": "fixture_node_01", "path": "holdout/dep_a.rs", "line": 1, "visibility": "public" },
+          { "name": "FixtureVariantA", "path": "holdout/dep_a.rs", "line": 15, "visibility": "public" }
+        ]
+      }
+    },
+    {
+      "language": "typescript",
+      "call_path": "holdout/main.ts",
+      "exact": [
+        { "call": "fixtureNode01", "call_line": 12, "target": "fixtureNode01", "target_path": "holdout/dep-a.ts", "target_line": 1 },
+        { "call": "fixtureNode02", "call_line": 13, "target": "fixtureNode02", "target_path": "holdout/dep-a.ts", "target_line": 2 },
+        { "call": "fixtureNode03", "call_line": 14, "target": "fixtureNode03", "target_path": "holdout/dep-a.ts", "target_line": 3 },
+        { "call": "fixtureNode04", "call_line": 15, "target": "fixtureNode04", "target_path": "holdout/dep-a.ts", "target_line": 4 },
+        { "call": "fixtureNode05", "call_line": 16, "target": "fixtureNode05", "target_path": "holdout/dep-a.ts", "target_line": 5 },
+        { "call": "fixtureNode06", "call_line": 17, "target": "fixtureNode06", "target_path": "holdout/dep-a.ts", "target_line": 6 },
+        { "call": "fixtureNode07", "call_line": 18, "target": "fixtureNode07", "target_path": "holdout/dep-a.ts", "target_line": 7 },
+        { "call": "fixtureNode08Local", "call_line": 19, "target": "fixtureNode08", "target_path": "holdout/dep-a.ts", "target_line": 8 }
+      ],
+      "candidates": [
+        {
+          "call": "fixtureNode09",
+          "call_line": 20,
+          "targets": [
+            { "name": "fixtureNode09", "path": "holdout/dep-a.ts", "line": 13 },
+            { "name": "fixtureNode09", "path": "holdout/dep-b.ts", "line": 4 }
+          ]
+        },
+        {
+          "call": "fixtureNode10",
+          "call_line": 21,
+          "targets": [
+            { "name": "fixtureNode10", "path": "holdout/dep-a.ts", "line": 14 },
+            { "name": "fixtureNode10", "path": "holdout/dep-b.ts", "line": 5 }
+          ]
+        }
+      ],
+      "unresolved": [
+        { "call": "fixtureNode11", "call_line": 22 },
+        { "call": "fixtureNode12", "call_line": 23 }
+      ],
+      "capabilities": {
+        "import_edges": [
+          { "from_path": "holdout/main.ts", "to_path": "holdout/dep-a.ts" },
+          { "from_path": "holdout/main.ts", "to_path": "holdout/dep-b.ts" }
+        ],
+        "signatures": [
+          { "name": "fixtureNode01", "path": "holdout/dep-a.ts", "line": 1 },
+          { "name": "FixtureVariantA", "path": "holdout/dep-a.ts", "line": 12 }
+        ],
+        "type_entities": [
+          { "name": "FixtureBase", "path": "holdout/dep-a.ts", "line": 10, "kind": "class" },
+          { "name": "FixtureVariantA", "path": "holdout/dep-a.ts", "line": 12, "kind": "class" }
+        ],
+        "hierarchy_relations": [
+          {
+            "subject": { "name": "FixtureVariantA", "path": "holdout/dep-a.ts", "line": 12 },
+            "predicate": "extends",
+            "object": { "name": "FixtureBase", "path": "holdout/dep-a.ts", "line": 10 }
+          }
+        ],
+        "visibility": [
+          { "name": "fixtureNode01", "path": "holdout/dep-a.ts", "line": 1, "visibility": "public" },
+          { "name": "FixtureVariantA", "path": "holdout/dep-a.ts", "line": 12, "visibility": "public" }
+        ]
+      }
+    },
+    {
+      "language": "javascript",
+      "call_path": "holdout/main.js",
+      "exact": [
+        { "call": "fixtureNode01", "call_line": 13, "target": "fixtureNode01", "target_path": "holdout/dep-a.js", "target_line": 1 },
+        { "call": "fixtureNode02", "call_line": 14, "target": "fixtureNode02", "target_path": "holdout/dep-a.js", "target_line": 2 },
+        { "call": "fixtureNode03", "call_line": 15, "target": "fixtureNode03", "target_path": "holdout/dep-a.js", "target_line": 3 },
+        { "call": "fixtureNode04", "call_line": 16, "target": "fixtureNode04", "target_path": "holdout/dep-a.js", "target_line": 4 },
+        { "call": "fixtureNode05", "call_line": 17, "target": "fixtureNode05", "target_path": "holdout/dep-a.js", "target_line": 5 },
+        { "call": "fixtureNode06", "call_line": 18, "target": "fixtureNode06", "target_path": "holdout/dep-a.js", "target_line": 6 },
+        { "call": "fixtureNode07", "call_line": 19, "target": "fixtureNode07", "target_path": "holdout/dep-a.js", "target_line": 7 },
+        { "call": "fixtureNode08Local", "call_line": 20, "target": "fixtureNode08", "target_path": "holdout/dep-a.js", "target_line": 8 }
+      ],
+      "candidates": [
+        {
+          "call": "fixtureNode09",
+          "call_line": 21,
+          "targets": [
+            { "name": "fixtureNode09", "path": "holdout/dep-a.js", "line": 13 },
+            { "name": "fixtureNode09", "path": "holdout/dep-b.js", "line": 4 }
+          ]
+        },
+        {
+          "call": "fixtureNode10",
+          "call_line": 22,
+          "targets": [
+            { "name": "fixtureNode10", "path": "holdout/dep-a.js", "line": 14 },
+            { "name": "fixtureNode10", "path": "holdout/dep-b.js", "line": 5 }
+          ]
+        }
+      ],
+      "unresolved": [
+        { "call": "fixtureNode11", "call_line": 23 },
+        { "call": "fixtureNode12", "call_line": 24 }
+      ],
+      "capabilities": {
+        "import_edges": [
+          { "from_path": "holdout/main.js", "to_path": "holdout/dep-a.js" },
+          { "from_path": "holdout/main.js", "to_path": "holdout/dep-b.js" }
+        ],
+        "signatures": [
+          { "name": "fixtureNode01", "path": "holdout/dep-a.js", "line": 1 },
+          { "name": "FixtureVariantA", "path": "holdout/dep-a.js", "line": 12 }
+        ],
+        "type_entities": [
+          { "name": "FixtureBase", "path": "holdout/dep-a.js", "line": 10, "kind": "class" },
+          { "name": "FixtureVariantA", "path": "holdout/dep-a.js", "line": 12, "kind": "class" }
+        ],
+        "hierarchy_relations": [
+          {
+            "subject": { "name": "FixtureVariantA", "path": "holdout/dep-a.js", "line": 12 },
+            "predicate": "extends",
+            "object": { "name": "FixtureBase", "path": "holdout/dep-a.js", "line": 10 }
+          }
+        ],
+        "visibility": [
+          { "name": "fixtureNode01", "path": "holdout/dep-a.js", "line": 1, "visibility": "public" },
+          { "name": "FixtureVariantA", "path": "holdout/dep-a.js", "line": 12, "visibility": "public" }
+        ]
+      }
+    },
+    {
+      "language": "python",
+      "call_path": "holdout_main.py",
+      "exact": [
+        { "call": "fixture_node_01", "call_line": 12, "target": "fixture_node_01", "target_path": "holdout_dep_a.py", "target_line": 1 },
+        { "call": "fixture_node_02", "call_line": 13, "target": "fixture_node_02", "target_path": "holdout_dep_a.py", "target_line": 4 },
+        { "call": "fixture_node_03", "call_line": 14, "target": "fixture_node_03", "target_path": "holdout_dep_a.py", "target_line": 7 },
+        { "call": "fixture_node_04", "call_line": 15, "target": "fixture_node_04", "target_path": "holdout_dep_a.py", "target_line": 10 },
+        { "call": "fixture_node_05", "call_line": 16, "target": "fixture_node_05", "target_path": "holdout_dep_a.py", "target_line": 13 },
+        { "call": "fixture_node_06", "call_line": 17, "target": "fixture_node_06", "target_path": "holdout_dep_a.py", "target_line": 16 },
+        { "call": "fixture_node_07", "call_line": 18, "target": "fixture_node_07", "target_path": "holdout_dep_a.py", "target_line": 19 },
+        { "call": "fixture_node_08_local", "call_line": 19, "target": "fixture_node_08", "target_path": "holdout_dep_a.py", "target_line": 22 }
+      ],
+      "candidates": [
+        {
+          "call": "fixture_node_09",
+          "call_line": 20,
+          "targets": [
+            { "name": "fixture_node_09", "path": "holdout_dep_a.py", "line": 29 },
+            { "name": "fixture_node_09", "path": "holdout_dep_b.py", "line": 4 }
+          ]
+        },
+        {
+          "call": "fixture_node_10",
+          "call_line": 21,
+          "targets": [
+            { "name": "fixture_node_10", "path": "holdout_dep_a.py", "line": 32 },
+            { "name": "fixture_node_10", "path": "holdout_dep_b.py", "line": 7 }
+          ]
+        }
+      ],
+      "unresolved": [
+        { "call": "fixture_node_11", "call_line": 22 },
+        { "call": "fixture_node_12", "call_line": 23 }
+      ],
+      "capabilities": {
+        "import_edges": [
+          { "from_path": "holdout_main.py", "to_path": "holdout_dep_a.py" },
+          { "from_path": "holdout_main.py", "to_path": "holdout_dep_b.py" }
+        ],
+        "signatures": [
+          { "name": "fixture_node_01", "path": "holdout_dep_a.py", "line": 1 },
+          { "name": "FixtureVariantA", "path": "holdout_dep_a.py", "line": 28 }
+        ],
+        "type_entities": [
+          { "name": "FixtureBase", "path": "holdout_dep_a.py", "line": 25, "kind": "class" },
+          { "name": "FixtureVariantA", "path": "holdout_dep_a.py", "line": 28, "kind": "class" }
+        ],
+        "hierarchy_relations": [
+          {
+            "subject": { "name": "FixtureVariantA", "path": "holdout_dep_a.py", "line": 28 },
+            "predicate": "extends",
+            "object": { "name": "FixtureBase", "path": "holdout_dep_a.py", "line": 25 }
+          }
+        ],
+        "visibility": [
+          { "name": "fixture_node_01", "path": "holdout_dep_a.py", "line": 1, "visibility": "unknown" },
+          { "name": "FixtureVariantA", "path": "holdout_dep_a.py", "line": 28, "visibility": "unknown" }
+        ]
+      }
+    },
+    {
+      "language": "go",
+      "call_path": "holdout/main/main.go",
+      "exact": [
+        { "call": "FixtureNode01", "call_line": 21, "target": "FixtureNode01", "target_path": "holdout/dep_a/dep_a.go", "target_line": 3 },
+        { "call": "FixtureNode02", "call_line": 22, "target": "FixtureNode02", "target_path": "holdout/dep_a/dep_a.go", "target_line": 4 },
+        { "call": "FixtureNode03", "call_line": 23, "target": "FixtureNode03", "target_path": "holdout/dep_a/dep_a.go", "target_line": 5 },
+        { "call": "FixtureNode04", "call_line": 24, "target": "FixtureNode04", "target_path": "holdout/dep_a/dep_a.go", "target_line": 6 },
+        { "call": "FixtureNode05", "call_line": 25, "target": "FixtureNode05", "target_path": "holdout/dep_a/dep_a.go", "target_line": 7 },
+        { "call": "FixtureNode06", "call_line": 26, "target": "FixtureNode06", "target_path": "holdout/dep_a/dep_a.go", "target_line": 8 },
+        { "call": "FixtureNode07", "call_line": 27, "target": "FixtureNode07", "target_path": "holdout/dep_a/dep_a.go", "target_line": 9 },
+        { "call": "FixtureNode08", "call_line": 28, "target": "FixtureNode08", "target_path": "holdout/dep_a/dep_a.go", "target_line": 10 }
+      ],
+      "candidates": [
+        {
+          "call": "FixtureNode09",
+          "call_line": 29,
+          "targets": [
+            { "name": "FixtureNode09", "path": "holdout/dep_a/dep_a.go", "line": 14 },
+            { "name": "FixtureNode09", "path": "holdout/dep_b/dep_b.go", "line": 5 }
+          ]
+        },
+        {
+          "call": "FixtureNode10",
+          "call_line": 30,
+          "targets": [
+            { "name": "FixtureNode10", "path": "holdout/dep_a/dep_a.go", "line": 15 },
+            { "name": "FixtureNode10", "path": "holdout/dep_b/dep_b.go", "line": 6 }
+          ]
+        }
+      ],
+      "unresolved": [
+        { "call": "FixtureNode11", "call_line": 31 },
+        { "call": "FixtureNode12", "call_line": 32 }
+      ],
+      "capabilities": {
+        "import_edges": [
+          { "from_path": "holdout/main/main.go", "to_path": "holdout/dep_a/dep_a.go" },
+          { "from_path": "holdout/main/main.go", "to_path": "holdout/dep_b/dep_b.go" }
+        ],
+        "signatures": [
+          { "name": "FixtureNode01", "path": "holdout/dep_a/dep_a.go", "line": 3 },
+          { "name": "FixtureVariantA", "path": "holdout/dep_a/dep_a.go", "line": 12 }
+        ],
+        "type_entities": [
+          { "name": "FixtureVariantA", "path": "holdout/dep_a/dep_a.go", "line": 12, "kind": "struct" },
+          { "name": "FixtureVariantB", "path": "holdout/dep_b/dep_b.go", "line": 3, "kind": "struct" }
+        ],
+        "hierarchy_relations": [
+          {
+            "subject": { "name": "FixtureDerived", "path": "holdout/main/main.go", "line": 9 },
+            "predicate": "embeds",
+            "object": { "name": "FixtureBase", "path": "holdout/main/main.go", "line": 8 }
+          }
+        ],
+        "visibility": [
+          { "name": "FixtureNode01", "path": "holdout/dep_a/dep_a.go", "line": 3, "visibility": "public" },
+          { "name": "FixtureVariantA", "path": "holdout/dep_a/dep_a.go", "line": 12, "visibility": "public" }
+        ]
+      }
+    }
+  ]
+}

@@ -15,7 +15,8 @@ use rootlight_mcp::{
     BoundedBlockingPool, FirstSliceClientPort, FirstSliceToolExecutor, HandlerCapabilities,
     HandlerFuture, HandlerResponse, NativeFirstSliceClientPort, OperatingRequest,
     RequestCancellation, RequestHandler, Session, StdioLimits, ToolExecutorBuildError,
-    ToolRegistryError, ToolRouter, UnavailableFirstSliceClientPort, serve,
+    ToolRegistryError, ToolRouter, UnavailableFirstSliceClientPort,
+    resolve_exposure_profile_policy, serve,
 };
 use rootlight_mcp_contract::ExposureProfile;
 use rootlight_runtime::RuntimePaths;
@@ -150,24 +151,7 @@ fn profile_policy_from_overrides(
     ceiling: Option<OsString>,
     requested: Option<OsString>,
 ) -> Result<(ExposureProfile, ExposureProfile), ()> {
-    let ceiling = parse_profile_override(ceiling, ExposureProfile::Developer)?;
-    let requested = parse_profile_override(requested, ceiling)?;
-    Ok((ceiling, requested.clamped_to(ceiling)))
-}
-
-/// Parses one optional profile override, falling back to `default` when the
-/// value is absent or empty.
-fn parse_profile_override(
-    raw: Option<OsString>,
-    default: ExposureProfile,
-) -> Result<ExposureProfile, ()> {
-    let Some(raw) = raw else {
-        return Ok(default);
-    };
-    if raw.is_empty() {
-        return Ok(default);
-    }
-    raw.to_str().and_then(ExposureProfile::from_name).ok_or(())
+    resolve_exposure_profile_policy(ceiling.as_deref(), requested.as_deref()).map_err(|_| ())
 }
 
 fn tool_handler<P>(

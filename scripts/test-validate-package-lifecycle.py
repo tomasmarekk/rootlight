@@ -64,7 +64,7 @@ def _document(target: str) -> dict[str, object]:
             "post_cleanup_active_processes": 0,
         }
     return {
-        "schema": "rootlight.package-lifecycle/2",
+        "schema": "rootlight.package-lifecycle/4",
         "source_revision": REVISION,
         "candidate_target": target,
         "candidate_version": VERSION,
@@ -81,6 +81,13 @@ def _document(target: str) -> dict[str, object]:
         "installed_release": {
             "windows_first_health": health,
             "mcp_initialize": _mcp(0 if windows else None),
+            "lazy_payload_handoff_observed": True if windows else None,
+            "mcp_vertical": {
+                "malformed_partial_result_observed": True,
+                "malformed_incomplete_coverage_observed": True,
+                "syntax_recovery_diagnostic_observed": True,
+                "incremental_lineage_observed": True,
+            },
         },
         "installed_command_uninstall_observed": True,
         "launcher_probe_observed": True,
@@ -151,6 +158,15 @@ class PackageLifecycleValidatorTests(unittest.TestCase):
         with self.assertRaises(VALIDATOR.LifecycleValidationError):
             _validate(document, target)
 
+    def test_rejects_unobserved_installed_vertical_behavior(self) -> None:
+        target = "x86_64-unknown-linux-gnu"
+        document = _document(target)
+        document["installed_release"]["mcp_vertical"][
+            "malformed_partial_result_observed"
+        ] = False
+        with self.assertRaises(VALIDATOR.LifecycleValidationError):
+            _validate(document, target)
+
     def test_rejects_boolean_numeric_evidence(self) -> None:
         target = "x86_64-unknown-linux-gnu"
         document = _document(target)
@@ -161,7 +177,7 @@ class PackageLifecycleValidatorTests(unittest.TestCase):
     def test_rejects_stale_schema(self) -> None:
         target = "x86_64-unknown-linux-gnu"
         document = copy.deepcopy(_document(target))
-        document["schema"] = "rootlight.package-lifecycle/1"
+        document["schema"] = "rootlight.package-lifecycle/3"
         with self.assertRaises(VALIDATOR.LifecycleValidationError):
             _validate(document, target)
 
