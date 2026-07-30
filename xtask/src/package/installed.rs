@@ -368,6 +368,9 @@ fn wait_for_daemon_ready(
                 drop(client);
                 return Ok(());
             }
+            // Owner setup publishes each directory before its handle-bound permission and
+            // macOS ACL hardening completes. Retry only while the exact child remains alive;
+            // readiness still requires the fully secured directories to validate.
             Err(source) if daemon_is_starting(&source) => {}
             Err(source) => {
                 return Err(PackageError::InstalledClient {
@@ -388,6 +391,7 @@ fn daemon_is_starting(error: &ClientError) -> bool {
         ClientError::DaemonUnavailable => true,
         ClientError::Runtime(
             rootlight_runtime::RuntimeError::OwnerSetupIncomplete
+            | rootlight_runtime::RuntimeError::InsecureDirectory
             | rootlight_runtime::RuntimeError::WindowsSecurityPolicy,
         ) => true,
         ClientError::Runtime(rootlight_runtime::RuntimeError::Io(source)) => {
@@ -1228,10 +1232,13 @@ mod tests {
     }
 
     #[test]
-    fn direct_daemon_readiness_retries_only_startup_absence() {
+    fn direct_daemon_readiness_retries_bounded_owner_setup_transitions() {
         assert!(daemon_is_starting(&ClientError::DaemonUnavailable));
         assert!(daemon_is_starting(&ClientError::Runtime(
             rootlight_runtime::RuntimeError::OwnerSetupIncomplete,
+        )));
+        assert!(daemon_is_starting(&ClientError::Runtime(
+            rootlight_runtime::RuntimeError::InsecureDirectory,
         )));
         assert!(!daemon_is_starting(&ClientError::Runtime(
             rootlight_runtime::RuntimeError::InvalidDiscovery,
