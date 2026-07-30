@@ -62,18 +62,20 @@ fn main() -> ExitCode {
 fn macos_launcher_failure_code(error: &ProcessError) -> &'static str {
     match error {
         ProcessError::Io { operation, .. } => match *operation {
-            "enter hard-limited Darwin sandbox" => "hard-limit-replacement",
+            "enter hard-limited Darwin adapter stage" => "hard-limit-replacement",
+            "enter Darwin sandbox" => "sandbox-entry",
             "set adapter CPU limit" => "cpu-limit",
             "set adapter descriptor limit" => "descriptor-limit",
             "disable adapter core dumps" => "core-limit",
             "disable adapter file output" => "file-output-limit",
             "resolve staged adapter executable" => "resolve-executable",
             "resolve staged adapter workspace" => "resolve-workspace",
+            "resolve sandboxed adapter executable" => "resolve-sandboxed-executable",
+            "resolve sandboxed adapter workspace" => "resolve-sandboxed-workspace",
             "enumerate inherited descriptors"
             | "inspect inherited descriptor"
             | "close inherited descriptor" => "descriptor-closure",
             "read staged adapter unlink acknowledgement" => "unlink-acknowledgement",
-            "resolve final staged adapter executable" => "resolve-final-executable",
             "verify staged adapter executable unlink" => "verify-unlink",
             "write isolation handshake" => "handshake-write",
             _ => "launcher-io",

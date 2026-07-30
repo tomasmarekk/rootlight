@@ -1,8 +1,8 @@
-//! Audited Darwin process-replacement boundary for hard memory enforcement.
+//! Audited Darwin boundaries for Seatbelt entry and hard memory enforcement.
 
 #![allow(
     unsafe_code,
-    reason = "Darwin exposes fatal physical-footprint spawn attributes only through C FFI"
+    reason = "Darwin exposes Seatbelt entry and fatal physical-footprint spawn attributes only through C FFI"
 )]
 
 use std::{
@@ -28,6 +28,24 @@ unsafe extern "C" {
         memory_limit_active: c_int,
         memory_limit_inactive: c_int,
     ) -> c_int;
+}
+
+#[link(name = "sandbox")]
+unsafe extern "C" {
+    fn sandbox_init(profile: *const c_char, flags: u64, error_buffer: *mut *mut c_char) -> c_int;
+    fn sandbox_free_error(error_buffer: *mut c_char);
+}
+
+struct SandboxErrorBuffer(*mut c_char);
+
+impl Drop for SandboxErrorBuffer {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: `sandbox_init` returned this diagnostics allocation and
+            // this guard owns the only pointer that may release it.
+            unsafe { sandbox_free_error(self.0) };
+        }
+    }
 }
 
 struct SpawnAttributes {
@@ -73,6 +91,25 @@ impl Drop for SpawnAttributes {
         // SAFETY: this guard is the sole owner of an attribute handle that was
         // initialized successfully and has not otherwise been destroyed.
         let _ = unsafe { libc::posix_spawnattr_destroy(&mut self.raw) };
+    }
+}
+
+pub(super) fn enter_sandbox(profile: &str) -> io::Result<()> {
+    let profile = CString::new(profile).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Darwin sandbox profile contains an embedded NUL",
+        )
+    })?;
+    let mut error_buffer = ptr::null_mut();
+    // SAFETY: the profile is a live NUL-terminated string, flags zero selects
+    // a literal profile, and `error_buffer` is writable for the complete call.
+    let result = unsafe { sandbox_init(profile.as_ptr(), 0, &mut error_buffer) };
+    let _error_buffer = SandboxErrorBuffer(error_buffer);
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::other("Darwin sandbox initialization failed"))
     }
 }
 
@@ -171,5 +208,15 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
         assert!(memory_limit_mebibytes(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn sandbox_profile_rejects_embedded_nul_before_native_entry() {
+        assert_eq!(
+            enter_sandbox("(deny default)\0(allow default)")
+                .expect_err("embedded NUL is rejected")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 }

@@ -54,7 +54,7 @@ const STAGED_EXECUTABLE: &str = "adapter";
 #[cfg(target_os = "macos")]
 const MACOS_RESOURCE_STAGE: &str = "--rootlight-macos-resource-stage";
 #[cfg(target_os = "macos")]
-const MACOS_FINAL_STAGE: &str = "--rootlight-macos-final-stage";
+const MACOS_SANDBOX_STAGE: &str = "--rootlight-macos-sandbox-stage";
 
 #[derive(Debug)]
 pub(crate) struct ChildProcess {
@@ -553,15 +553,17 @@ fn macos_verification_failure(fallback: ProcessError, stderr: &mut ChildStderr) 
 fn known_macos_failure_code(code: &str) -> Option<&'static str> {
     [
         "hard-limit-replacement",
+        "sandbox-entry",
         "cpu-limit",
         "descriptor-limit",
         "core-limit",
         "file-output-limit",
         "resolve-executable",
         "resolve-workspace",
+        "resolve-sandboxed-executable",
+        "resolve-sandboxed-workspace",
         "descriptor-closure",
         "unlink-acknowledgement",
-        "resolve-final-executable",
         "verify-unlink",
         "handshake-write",
         "launcher-io",
@@ -597,8 +599,8 @@ pub(crate) fn enter_isolated_adapter_launcher(
         Some(stage) if stage == std::ffi::OsStr::new(MACOS_RESOURCE_STAGE) => {
             enter_macos_resource_stage(arguments)
         }
-        Some(stage) if stage == std::ffi::OsStr::new(MACOS_FINAL_STAGE) => {
-            enter_macos_final_stage(arguments)
+        Some(stage) if stage == std::ffi::OsStr::new(MACOS_SANDBOX_STAGE) => {
+            enter_macos_sandbox_stage(arguments)
         }
         _ => Err(ProcessError::InvalidInput(
             "isolated adapter Darwin launcher stage is invalid".to_owned(),
@@ -623,37 +625,42 @@ fn enter_macos_resource_stage(
             "staged adapter executable does not belong to its workspace".to_owned(),
         ));
     }
-    let sandbox = Path::new("/usr/bin/sandbox-exec");
-    if !sandbox.is_file() {
-        return Err(ProcessError::UnsupportedPlatform);
-    }
     let mut sandbox_arguments = vec![
-        OsString::from("-p"),
-        OsString::from(macos_profile(&executable, &workspace)),
-        executable.as_os_str().to_owned(),
         OsString::from(LAUNCHER_ARGUMENT),
-        OsString::from(MACOS_FINAL_STAGE),
+        OsString::from(MACOS_SANDBOX_STAGE),
         OsString::from(LAUNCHER_SEPARATOR),
     ];
     sandbox_arguments.extend(adapter_arguments);
-    // SETEXEC applies the fatal ledger before sandbox-exec enters Seatbelt.
-    // Both subsequent execs retain the same process, limits, and process group,
-    // so the default-deny profile never needs to allow process creation.
-    let never = macos::replace_process_with_memory_limit(sandbox, &sandbox_arguments, memory_bytes)
-        .map_err(|error| ProcessError::io("enter hard-limited Darwin sandbox", error))?;
+    // SETEXEC applies the fatal ledger without creating a descendant. The next
+    // trusted stage enters Seatbelt in-process, completes the unlink protocol,
+    // and returns directly into dispatch with both fork and exec still denied.
+    let never =
+        macos::replace_process_with_memory_limit(&executable, &sandbox_arguments, memory_bytes)
+            .map_err(|error| ProcessError::io("enter hard-limited Darwin adapter stage", error))?;
     match never {}
 }
 
 #[cfg(target_os = "macos")]
-fn enter_macos_final_stage(
+fn enter_macos_sandbox_stage(
     mut arguments: impl Iterator<Item = OsString>,
 ) -> Result<Vec<OsString>, ProcessError> {
     if arguments.next().as_deref() != Some(std::ffi::OsStr::new(LAUNCHER_SEPARATOR)) {
         return Err(ProcessError::InvalidInput(
-            "isolated adapter launcher separator is invalid".to_owned(),
+            "isolated adapter sandbox stage separator is invalid".to_owned(),
         ));
     }
     close_inherited_descriptors()?;
+    let executable = std::env::current_exe()
+        .map_err(|error| ProcessError::io("resolve sandboxed adapter executable", error))?;
+    let workspace = std::env::current_dir()
+        .map_err(|error| ProcessError::io("resolve sandboxed adapter workspace", error))?;
+    if executable.parent() != Some(workspace.as_path()) {
+        return Err(ProcessError::InvalidInput(
+            "sandboxed adapter executable does not belong to its workspace".to_owned(),
+        ));
+    }
+    macos::enter_sandbox(&macos_profile(&executable, &workspace))
+        .map_err(|error| ProcessError::io("enter Darwin sandbox", error))?;
     write_record(MACOS_UNLINK_READY)?;
     let mut acknowledgement = [0_u8; MACOS_UNLINK_ACK.len()];
     io::stdin()
@@ -665,8 +672,6 @@ fn enter_macos_final_stage(
             "staged adapter unlink acknowledgement is invalid".to_owned(),
         ));
     }
-    let executable = std::env::current_exe()
-        .map_err(|error| ProcessError::io("resolve final staged adapter executable", error))?;
     match fs::symlink_metadata(&executable) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Ok(_) => {
@@ -1014,23 +1019,19 @@ fn macos_profile(executable: &Path, workspace: &Path) -> String {
     format!(
         r#"(version 1)
 (deny default)
-(allow process-exec (literal "{executable}"))
 (allow process-info* (target self))
 (allow signal (target self))
 (allow sysctl-read)
+(allow file-read-data (vnode-type PIPE))
+(allow file-write-data (vnode-type PIPE))
 (allow file-read*
     (literal "{executable}")
     (subpath "{workspace}")
     (subpath "/usr/lib")
     (subpath "/System/Library")
     (subpath "/private/var/db/dyld")
-    (subpath "/dev/fd")
-    (literal "/dev/stdin")
     (literal "/dev/null")
     (literal "/dev/urandom"))
-(allow file-write-data
-    (literal "/dev/stdout")
-    (literal "/dev/stderr"))
 (deny network*)
 (deny process-fork)
 "#
@@ -1134,12 +1135,11 @@ mod tests {
         );
 
         assert!(profile.starts_with("(version 1)\n(deny default)\n"));
-        assert!(profile.contains("(literal \"/dev/stdin\")"));
-        assert!(profile.contains(
-            "(allow file-write-data\n    (literal \"/dev/stdout\")\n    (literal \"/dev/stderr\"))"
-        ));
+        assert!(profile.contains("(allow file-read-data (vnode-type PIPE))"));
+        assert!(profile.contains("(allow file-write-data (vnode-type PIPE))"));
         assert_eq!(profile.matches("(allow file-write").count(), 1);
         assert!(!profile.contains("(deny file-write"));
+        assert!(!profile.contains("(allow process-exec"));
     }
 
     #[test]
