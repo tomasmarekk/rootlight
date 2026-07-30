@@ -102,7 +102,8 @@ impl KillOnCloseJob {
 
 #[derive(Debug)]
 struct ImmutableWorkspace {
-    directory: tempfile::TempDir,
+    _directory: tempfile::TempDir,
+    root: PathBuf,
     executable: PathBuf,
 }
 
@@ -127,19 +128,29 @@ impl ImmutableWorkspace {
             .sync_all()
             .map_err(|error| ProcessError::io("sync staged adapter executable", error))?;
         drop(output);
+        let root = fs::canonicalize(directory.path())
+            .map_err(|error| ProcessError::io("resolve staged adapter workspace", error))?;
+        let executable = fs::canonicalize(&executable)
+            .map_err(|error| ProcessError::io("resolve staged adapter executable", error))?;
+        if executable.parent() != Some(root.as_path()) {
+            return Err(ProcessError::InvalidInput(
+                "the staged adapter executable escaped its workspace".to_owned(),
+            ));
+        }
         fs::set_permissions(&executable, Permissions::from_mode(0o555))
             .map_err(|error| ProcessError::io("seal staged adapter executable", error))?;
-        fs::set_permissions(directory.path(), Permissions::from_mode(0o555))
+        fs::set_permissions(&root, Permissions::from_mode(0o555))
             .map_err(|error| ProcessError::io("seal adapter workspace", error))?;
 
         Ok(Self {
-            directory,
+            _directory: directory,
+            root,
             executable,
         })
     }
 
     fn root(&self) -> &Path {
-        self.directory.path()
+        &self.root
     }
 }
 
@@ -172,7 +183,7 @@ fn open_adapter_executable(source: &Path) -> Result<(File, u64), ProcessError> {
 
 impl Drop for ImmutableWorkspace {
     fn drop(&mut self) {
-        let _ = fs::set_permissions(self.directory.path(), Permissions::from_mode(0o700));
+        let _ = fs::set_permissions(&self.root, Permissions::from_mode(0o700));
         let _ = fs::set_permissions(&self.executable, Permissions::from_mode(0o700));
     }
 }
@@ -180,6 +191,7 @@ impl Drop for ImmutableWorkspace {
 #[derive(Debug)]
 pub(crate) struct IsolatedAdapterProcess {
     child: StdChild,
+    stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
     workspace: ImmutableWorkspace,
     input_limit: usize,
@@ -210,7 +222,7 @@ impl IsolatedAdapterProcess {
     }
 
     pub(crate) fn take_stdout(&mut self) -> Option<ChildStdout> {
-        self.child.stdout.take()
+        self.stdout.take()
     }
 
     pub(crate) fn take_stderr(&mut self) -> Option<ChildStderr> {
@@ -310,10 +322,13 @@ pub(crate) fn spawn_isolated_adapter(
     let process_group = Pid::from_raw(i32::try_from(child.id()).map_err(|_| {
         ProcessError::InvalidInput("adapter process identifier is not representable".to_owned())
     })?);
-    let mut stderr = child.stderr.take().ok_or_else(|| {
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        ProcessError::InvalidInput("isolated adapter output pipe is missing".to_owned())
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
         ProcessError::InvalidInput("isolated adapter diagnostics pipe is missing".to_owned())
     })?;
-    if let Err(error) = verify_handshake(&mut stderr, &mut child) {
+    if let Err(error) = verify_handshake(&mut stdout, &mut child) {
         let _ = killpg(process_group, Signal::SIGKILL);
         let _ = child.wait();
         return Err(error);
@@ -323,6 +338,7 @@ pub(crate) fn spawn_isolated_adapter(
     Ok((
         IsolatedAdapterProcess {
             child,
+            stdout: Some(stdout),
             stderr: Some(stderr),
             workspace,
             input_limit: command.input_limit,
@@ -379,23 +395,23 @@ fn isolated_command(
     Ok(process)
 }
 
-fn verify_handshake(stderr: &mut ChildStderr, child: &mut StdChild) -> Result<(), ProcessError> {
+fn verify_handshake(stdout: &mut ChildStdout, child: &mut StdChild) -> Result<(), ProcessError> {
     use std::os::fd::AsFd as _;
 
-    let original = nix::fcntl::fcntl(stderr.as_fd(), nix::fcntl::FcntlArg::F_GETFL)
-        .map_err(|error| nix_error("query launcher diagnostics flags", error))?;
+    let original = nix::fcntl::fcntl(stdout.as_fd(), nix::fcntl::FcntlArg::F_GETFL)
+        .map_err(|error| nix_error("query launcher handshake flags", error))?;
     let flags = nix::fcntl::OFlag::from_bits_truncate(original);
     nix::fcntl::fcntl(
-        stderr.as_fd(),
+        stdout.as_fd(),
         nix::fcntl::FcntlArg::F_SETFL(flags | nix::fcntl::OFlag::O_NONBLOCK),
     )
-    .map_err(|error| nix_error("set launcher diagnostics nonblocking", error))?;
+    .map_err(|error| nix_error("set launcher handshake nonblocking", error))?;
 
     let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     let mut observed = vec![0_u8; HANDSHAKE.len()];
     let mut offset = 0;
     while offset < observed.len() {
-        match stderr.read(&mut observed[offset..]) {
+        match stdout.read(&mut observed[offset..]) {
             Ok(0) => {
                 return Err(ProcessError::InvalidInput(
                     "isolated adapter launcher closed before verification".to_owned(),
@@ -427,8 +443,8 @@ fn verify_handshake(stderr: &mut ChildStderr, child: &mut StdChild) -> Result<()
             "isolated adapter launcher verification failed".to_owned(),
         ));
     }
-    nix::fcntl::fcntl(stderr.as_fd(), nix::fcntl::FcntlArg::F_SETFL(flags))
-        .map_err(|error| nix_error("restore launcher diagnostics flags", error))?;
+    nix::fcntl::fcntl(stdout.as_fd(), nix::fcntl::FcntlArg::F_SETFL(flags))
+        .map_err(|error| nix_error("restore launcher handshake flags", error))?;
     Ok(())
 }
 
@@ -450,10 +466,12 @@ pub(crate) fn enter_isolated_adapter_launcher(
     establish_resource_limits(memory_bytes, cpu_seconds, descriptor_limit)?;
     setsid().map_err(|error| nix_error("create adapter process session", error))?;
     establish_platform_isolation()?;
-    io::stderr()
+    // Keep the private verification record separate from sandbox-exec and
+    // adapter diagnostics, which both intentionally use standard error.
+    io::stdout()
         .lock()
         .write_all(HANDSHAKE)
-        .and_then(|()| io::stderr().lock().flush())
+        .and_then(|()| io::stdout().lock().flush())
         .map_err(|error| ProcessError::io("write isolation handshake", error))?;
 
     let error = Command::new(&executable)
@@ -799,7 +817,7 @@ fn stdio(mode: StdioMode) -> Stdio {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::symlink;
+    use std::{io::Read as _, os::unix::fs::symlink};
 
     use nix::sys::stat::Mode;
     use nix::unistd::mkfifo;
@@ -876,6 +894,57 @@ mod tests {
             ImmutableWorkspace::stage(&source, Some(expected)),
             Err(ProcessError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn staged_workspace_uses_one_canonical_path_identity() {
+        let directory = tempfile::tempdir().expect("fixture directory opens");
+        let source = directory.path().join("adapter");
+        fs::write(&source, b"authenticated executable").expect("fixture executable writes");
+
+        let workspace =
+            ImmutableWorkspace::stage(&source, None).expect("fixture executable stages");
+
+        assert_eq!(
+            workspace.root,
+            fs::canonicalize(workspace._directory.path()).expect("workspace canonicalizes")
+        );
+        assert_eq!(workspace.executable, workspace.root.join(STAGED_EXECUTABLE));
+        assert_eq!(
+            workspace.executable,
+            fs::canonicalize(&workspace.executable).expect("executable canonicalizes")
+        );
+    }
+
+    #[test]
+    fn launcher_handshake_is_separate_from_diagnostics_and_adapter_output() {
+        let script = format!(
+            "printf wrapper-diagnostic >&2; printf '{}'; printf adapter-output",
+            String::from_utf8_lossy(HANDSHAKE)
+        );
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("fixture launcher starts");
+        let mut stdout = child.stdout.take().expect("fixture stdout exists");
+        let mut stderr = child.stderr.take().expect("fixture stderr exists");
+
+        verify_handshake(&mut stdout, &mut child).expect("handshake verifies");
+
+        let mut adapter_output = Vec::new();
+        stdout
+            .read_to_end(&mut adapter_output)
+            .expect("adapter output reads");
+        let mut diagnostics = Vec::new();
+        stderr
+            .read_to_end(&mut diagnostics)
+            .expect("diagnostics read");
+        assert!(child.wait().expect("fixture launcher exits").success());
+        assert_eq!(adapter_output, b"adapter-output");
+        assert_eq!(diagnostics, b"wrapper-diagnostic");
     }
 
     fn executable_digest(bytes: &[u8]) -> AdapterExecutableDigest {
