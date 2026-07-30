@@ -1012,14 +1012,28 @@ fn allowed_linux_syscalls() -> Vec<i64> {
     }
 }
 
+// The system profile supplies parser symbols such as `PIPE`. Its ambient
+// grants are neutralized by family before Rootlight adds narrower controls.
+#[cfg(target_os = "macos")]
+const MACOS_PROFILE_PREAMBLE: &str = r#"(version 1)
+(deny default)
+(import "system.sb")
+(deny file*)
+(deny network*)
+(deny process*)
+(deny mach*)
+(deny ipc*)
+(deny iokit*)
+(deny system*)
+(deny sysctl*)
+"#;
+
 #[cfg(target_os = "macos")]
 fn macos_profile(executable: &Path, workspace: &Path) -> String {
     let executable = sandbox_literal(executable);
     let workspace = sandbox_literal(workspace);
     format!(
-        r#"(version 1)
-(deny default)
-(allow process-info* (target self))
+        r#"{MACOS_PROFILE_PREAMBLE}(allow process-info* (target self))
 (allow signal (target self))
 (allow sysctl-read)
 (allow file-read-data (vnode-type PIPE))
@@ -1138,6 +1152,12 @@ mod tests {
         );
 
         assert!(profile.starts_with("(version 1)\n(deny default)\n"));
+        assert!(profile.contains("(import \"system.sb\")"));
+        for denied_family in [
+            "file*", "network*", "process*", "mach*", "ipc*", "iokit*", "system*", "sysctl*",
+        ] {
+            assert!(profile.contains(&format!("(deny {denied_family})")));
+        }
         assert!(profile.contains("(allow file-read-data (vnode-type PIPE))"));
         assert!(profile.contains("(allow file-write-data (vnode-type PIPE))"));
         assert_eq!(profile.matches("(allow file-write").count(), 1);
@@ -1224,7 +1244,7 @@ mod tests {
             "(deny process-fork)\n",
         ];
 
-        let mut profile = String::from("(version 1)\n(deny default)\n");
+        let mut profile = String::from(MACOS_PROFILE_PREAMBLE);
         for fragment in &FRAGMENTS[..stage] {
             profile.push_str(fragment);
         }
