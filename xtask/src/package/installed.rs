@@ -1,9 +1,11 @@
 //! Installed-package health and MCP release gates.
 
+#[cfg(windows)]
+use std::process::{Command, Stdio};
 use std::{
     io::{BufRead, BufReader, Read, Write as _},
     path::{Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
+    process::ExitStatus,
     sync::mpsc,
     thread::{self, JoinHandle},
     time::{Duration, Instant},
