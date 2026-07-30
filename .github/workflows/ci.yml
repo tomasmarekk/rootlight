@@ -1416,6 +1416,13 @@ jobs:
       - name: Install pinned Rust
         shell: bash
         run: rustup show active-toolchain
+      - name: Compile the native Seatbelt profile
+        if: runner.os == 'macOS'
+        shell: bash
+        run: >-
+          cargo test --locked --package rootlight-sandbox --lib
+          platform::unix::tests::macos_profile_compiles_in_fresh_process
+          -- --exact --nocapture --test-threads=1
       - name: Exercise native controls against an exact live process
         shell: bash
         run: |
