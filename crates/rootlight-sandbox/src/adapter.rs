@@ -121,6 +121,8 @@ pub enum AdapterIsolationMechanism {
     SeatbeltProcessCreationDenied,
     /// The process address-space resource limit is set before adapter entry.
     AddressSpaceRlimit,
+    /// Darwin enforces a fatal physical-footprint ledger on the final process image.
+    JetsamPhysicalFootprintLimit,
     /// The process CPU-time resource limit is set before adapter entry.
     CpuTimeRlimit,
     /// The open-file-descriptor resource limit is set before adapter entry.
@@ -139,7 +141,7 @@ pub enum AdapterIsolationMechanism {
 pub enum AdapterIsolationPlatform {
     /// Linux Landlock, seccomp, rlimit, and process-group backend.
     Linux,
-    /// macOS Seatbelt, rlimit, and process-group backend.
+    /// macOS Seatbelt, fatal footprint ledger, rlimit, and process-group backend.
     MacOs,
     /// Windows AppContainer and Job Object backend.
     Windows,
@@ -465,10 +467,11 @@ impl AdapterIsolationReport {
     #[cfg(target_os = "macos")]
     pub(crate) fn macos_isolated_process() -> Self {
         use AdapterIsolationMechanism::{
-            AddressSpaceRlimit, CpuTimeRlimit, FileDescriptorRlimit, NativeFilesystemWritesDenied,
-            OperationOwnedImmutableExecutable, ProcessGroupCleanup, RepositoryPathsWithheld,
-            SeatbeltNetworkDenied, SeatbeltProcessCreationDenied, SeatbeltReadOnlyView,
-            SecureLoaderEnvironment, SourceViaBoundedStdin, StandardIoDescriptorAllowlist,
+            CpuTimeRlimit, FileDescriptorRlimit, JetsamPhysicalFootprintLimit,
+            NativeFilesystemWritesDenied, OperationOwnedImmutableExecutable, ProcessGroupCleanup,
+            RepositoryPathsWithheld, SeatbeltNetworkDenied, SeatbeltProcessCreationDenied,
+            SeatbeltReadOnlyView, SecureLoaderEnvironment, SourceViaBoundedStdin,
+            StandardIoDescriptorAllowlist,
         };
 
         Self {
@@ -484,7 +487,7 @@ impl AdapterIsolationReport {
                 ),
                 AdapterMechanismEvidence::enforced(
                     OperationOwnedImmutableExecutable,
-                    "operation_owned_executable_is_immutable",
+                    "operation_owned_executable_is_unlinked_before_adapter_dispatch",
                 ),
                 AdapterMechanismEvidence::enforced(
                     SeatbeltReadOnlyView,
@@ -503,8 +506,8 @@ impl AdapterIsolationReport {
                     "seatbelt_profile_denies_process_fork",
                 ),
                 AdapterMechanismEvidence::enforced(
-                    AddressSpaceRlimit,
-                    "address_space_limit_configured_before_adapter_entry",
+                    JetsamPhysicalFootprintLimit,
+                    "fatal_physical_footprint_limit_configured_before_adapter_entry",
                 ),
                 AdapterMechanismEvidence::enforced(
                     CpuTimeRlimit,
@@ -861,7 +864,7 @@ pub fn spawn_isolated_adapter(
     Ok(IsolatedAdapterProcess { inner, report })
 }
 
-/// Applies the Unix native profile and replaces the launcher with the adapter.
+/// Applies the Unix native profile and enters the adapter dispatch contract.
 ///
 /// This entry point is reserved for the operation-owned executable staged by
 /// [`spawn_isolated_adapter`]. It writes a private parent handshake only after
@@ -870,11 +873,13 @@ pub fn spawn_isolated_adapter(
 /// # Errors
 ///
 /// Returns [`ProcessError`] when launcher arguments are invalid or a required
-/// native control cannot be established. A successful call never returns.
+/// native control cannot be established. Linux replaces the process and never
+/// returns; macOS returns the verified final-stage adapter arguments so the
+/// already hard-limited process can dispatch without another `exec`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn enter_isolated_adapter_launcher(
     arguments: impl Iterator<Item = OsString>,
-) -> Result<std::convert::Infallible, ProcessError> {
+) -> Result<Vec<OsString>, ProcessError> {
     platform::enter_isolated_adapter_launcher(arguments)
 }
 
@@ -1046,10 +1051,11 @@ fn linux_required_mechanisms(control: AdapterControl) -> &'static [AdapterIsolat
 
 fn macos_required_mechanisms(control: AdapterControl) -> &'static [AdapterIsolationMechanism] {
     use AdapterIsolationMechanism::{
-        AddressSpaceRlimit, CpuTimeRlimit, FileDescriptorRlimit, NativeFilesystemWritesDenied,
-        OperationOwnedImmutableExecutable, ProcessGroupCleanup, RepositoryPathsWithheld,
-        SeatbeltNetworkDenied, SeatbeltProcessCreationDenied, SeatbeltReadOnlyView,
-        SecureLoaderEnvironment, SourceViaBoundedStdin, StandardIoDescriptorAllowlist,
+        CpuTimeRlimit, FileDescriptorRlimit, JetsamPhysicalFootprintLimit,
+        NativeFilesystemWritesDenied, OperationOwnedImmutableExecutable, ProcessGroupCleanup,
+        RepositoryPathsWithheld, SeatbeltNetworkDenied, SeatbeltProcessCreationDenied,
+        SeatbeltReadOnlyView, SecureLoaderEnvironment, SourceViaBoundedStdin,
+        StandardIoDescriptorAllowlist,
     };
 
     match control {
@@ -1062,7 +1068,7 @@ fn macos_required_mechanisms(control: AdapterControl) -> &'static [AdapterIsolat
         AdapterControl::TemporaryDirectory => &[NativeFilesystemWritesDenied],
         AdapterControl::NetworkEgress => &[SeatbeltNetworkDenied],
         AdapterControl::ProcessCreation => &[SeatbeltProcessCreationDenied],
-        AdapterControl::Memory => &[AddressSpaceRlimit],
+        AdapterControl::Memory => &[JetsamPhysicalFootprintLimit],
         AdapterControl::Cpu => &[CpuTimeRlimit],
         AdapterControl::Handles => &[StandardIoDescriptorAllowlist, FileDescriptorRlimit],
         AdapterControl::DynamicLibrarySearch => &[SecureLoaderEnvironment, SeatbeltReadOnlyView],

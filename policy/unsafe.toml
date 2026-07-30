@@ -1,4 +1,4 @@
-schema_version = "3.0"
+schema_version = "4.0"
 
 [[boundaries]]
 package = "rootlight-vfs"
@@ -38,3 +38,16 @@ reason = "Win32 AppContainer profiles and tokens, protected ACLs, cryptographic 
 expected_source_tokens = 53
 expected_geiger_count = 265
 geiger_host_os = "windows"
+
+[[boundaries]]
+package = "rootlight-sandbox"
+package_version = "0.1.0"
+manifest = "crates/rootlight-sandbox/Cargo.toml"
+module = "rootlight_sandbox::platform::macos"
+source = "crates/rootlight-sandbox/src/platform/macos.rs"
+status = "enabled"
+owner = "@tomasmarekk"
+reason = "Darwin fatal physical-footprint spawn attributes require a reviewed C FFI boundary"
+expected_source_tokens = 6
+expected_geiger_count = 1
+geiger_host_os = "macos"

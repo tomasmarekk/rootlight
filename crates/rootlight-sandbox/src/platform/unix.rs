@@ -17,16 +17,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "linux")]
+use nix::unistd::setsid;
 use nix::{
     errno::Errno,
+    sys::resource::{Resource, rlim_t, setrlimit},
     sys::signal::{Signal, killpg},
     unistd::Pid,
 };
-#[cfg(target_os = "linux")]
-use nix::{
-    sys::resource::{Resource, rlim_t, setrlimit},
-    unistd::setsid,
-};
+
+#[cfg(target_os = "macos")]
+use super::macos;
 
 use crate::{
     AdapterExecutableDigest, AdapterIsolationReport, AdapterProcessCommand, AdapterSandboxLimits,
@@ -37,20 +38,21 @@ use crate::{
 const LAUNCHER_ARGUMENT: &str = "--rootlight-native-isolation-launcher";
 const LAUNCHER_SEPARATOR: &str = "--";
 const HANDSHAKE: &[u8] = b"rootlight-native-isolated/1\n";
+#[cfg(target_os = "macos")]
+const MACOS_UNLINK_READY: &[u8] = b"rootlight-macos-unlink/1\n";
+#[cfg(target_os = "macos")]
+const MACOS_UNLINK_ACK: &[u8] = b"\x06";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const EXECUTABLE_BUSY_RETRY_LIMIT: usize = 8;
 const ADAPTER_DESCRIPTOR_LIMIT: u64 = 64;
 const STAGED_EXECUTABLE: &str = "adapter";
 #[cfg(target_os = "macos")]
-const MACOS_RESOURCE_LAUNCH_SCRIPT: &str = r#"ulimit -S -H -t "$1" || exit 70
-ulimit -S -H -n "$2" || exit 71
-ulimit -S -H -c 0 || exit 72
-ulimit -S -H -f 0 || exit 73
-ulimit -S -H -v "$3" || exit 74
-shift 3
-exec "$@"
-"#;
+const MACOS_RESOURCE_STAGE: &str = "--rootlight-macos-resource-stage";
+#[cfg(target_os = "macos")]
+const MACOS_SANDBOX_STAGE: &str = "--rootlight-macos-sandbox-stage";
+#[cfg(target_os = "macos")]
+const MACOS_FINAL_STAGE: &str = "--rootlight-macos-final-stage";
 
 #[derive(Debug)]
 pub(crate) struct ChildProcess {
@@ -163,6 +165,18 @@ impl ImmutableWorkspace {
 
     fn root(&self) -> &Path {
         &self.root
+    }
+
+    #[cfg(target_os = "macos")]
+    fn unlink_executable(&self) -> Result<(), ProcessError> {
+        fs::set_permissions(&self.root, Permissions::from_mode(0o700))
+            .map_err(|error| ProcessError::io("open adapter workspace for unlink", error))?;
+        let unlink_result = fs::remove_file(&self.executable)
+            .map_err(|error| ProcessError::io("unlink staged adapter executable", error));
+        let seal_result = fs::set_permissions(&self.root, Permissions::from_mode(0o500))
+            .map_err(|error| ProcessError::io("reseal unlinked adapter workspace", error));
+        unlink_result?;
+        seal_result
     }
 }
 
@@ -339,7 +353,11 @@ pub(crate) fn spawn_isolated_adapter(
     let stderr = child.stderr.take().ok_or_else(|| {
         ProcessError::InvalidInput("isolated adapter diagnostics pipe is missing".to_owned())
     })?;
-    if let Err(error) = verify_handshake(&mut stdout, &mut child) {
+    #[cfg(target_os = "linux")]
+    let verification = verify_record(&mut stdout, &mut child, HANDSHAKE);
+    #[cfg(target_os = "macos")]
+    let verification = verify_macos_unlink_handshake(&workspace, &mut stdout, &mut child);
+    if let Err(error) = verification {
         let _ = killpg(process_group, Signal::SIGKILL);
         let _ = child.wait();
         return Err(error);
@@ -385,6 +403,8 @@ fn isolated_command(
 ) -> Result<Command, ProcessError> {
     let mut arguments = vec![
         OsString::from(LAUNCHER_ARGUMENT),
+        #[cfg(target_os = "macos")]
+        OsString::from(MACOS_RESOURCE_STAGE),
         OsString::from(limits.memory_bytes().to_string()),
         OsString::from(limits.cpu_seconds().to_string()),
         OsString::from(ADAPTER_DESCRIPTOR_LIMIT.to_string()),
@@ -400,33 +420,10 @@ fn isolated_command(
     };
     #[cfg(target_os = "macos")]
     let mut process = {
-        let sandbox = Path::new("/usr/bin/sandbox-exec");
-        let shell = Path::new("/bin/sh");
-        if !sandbox.is_file() || !shell.is_file() {
-            return Err(ProcessError::UnsupportedPlatform);
-        }
-        let memory_kib = limits.memory_bytes() / 1024;
-        if memory_kib == 0 {
-            return Err(ProcessError::InvalidInput(
-                "adapter memory limit is below one kibibyte".to_owned(),
-            ));
-        }
-        let profile = macos_profile(&workspace.executable, workspace.root());
-        let mut process = Command::new(shell);
-        process
-            .arg("-c")
-            .arg(MACOS_RESOURCE_LAUNCH_SCRIPT)
-            .arg("rootlight-resource-launcher")
-            .arg(limits.cpu_seconds().to_string())
-            .arg(ADAPTER_DESCRIPTOR_LIMIT.to_string())
-            .arg(memory_kib.to_string())
-            .arg(sandbox)
-            .arg("-p")
-            .arg(profile)
-            .arg(&workspace.executable)
-            .args(arguments);
-        // The fixed script interprets no untrusted text. Separate argv values
-        // carry every path and adapter argument through exec without reparsing.
+        let mut process = Command::new(&workspace.executable);
+        process.args(arguments);
+        // SETEXEC preserves this operation-owned process group across both
+        // Darwin replacement stages and the final adapter entry.
         process.process_group(0);
         process
     };
@@ -440,7 +437,29 @@ fn isolated_command(
     Ok(process)
 }
 
-fn verify_handshake(stdout: &mut ChildStdout, child: &mut StdChild) -> Result<(), ProcessError> {
+#[cfg(target_os = "macos")]
+fn verify_macos_unlink_handshake(
+    workspace: &ImmutableWorkspace,
+    stdout: &mut ChildStdout,
+    child: &mut StdChild,
+) -> Result<(), ProcessError> {
+    verify_record(stdout, child, MACOS_UNLINK_READY)?;
+    workspace.unlink_executable()?;
+    let stdin = child.stdin.as_mut().ok_or_else(|| {
+        ProcessError::InvalidInput("isolated adapter input pipe is missing".to_owned())
+    })?;
+    stdin
+        .write_all(MACOS_UNLINK_ACK)
+        .and_then(|()| stdin.flush())
+        .map_err(|error| ProcessError::io("acknowledge staged adapter unlink", error))?;
+    verify_record(stdout, child, HANDSHAKE)
+}
+
+fn verify_record(
+    stdout: &mut ChildStdout,
+    child: &mut StdChild,
+    expected: &[u8],
+) -> Result<(), ProcessError> {
     use std::os::fd::AsFd as _;
 
     let original = nix::fcntl::fcntl(stdout.as_fd(), nix::fcntl::FcntlArg::F_GETFL)
@@ -453,7 +472,7 @@ fn verify_handshake(stdout: &mut ChildStdout, child: &mut StdChild) -> Result<()
     .map_err(|error| nix_error("set launcher handshake nonblocking", error))?;
 
     let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-    let mut observed = vec![0_u8; HANDSHAKE.len()];
+    let mut observed = vec![0_u8; expected.len()];
     let mut offset = 0;
     while offset < observed.len() {
         match stdout.read(&mut observed[offset..]) {
@@ -483,7 +502,7 @@ fn verify_handshake(stdout: &mut ChildStdout, child: &mut StdChild) -> Result<()
             Err(error) => return Err(ProcessError::io("read isolation handshake", error)),
         }
     }
-    if observed != HANDSHAKE {
+    if observed != expected {
         return Err(ProcessError::InvalidInput(
             "isolated adapter launcher verification failed".to_owned(),
         ));
@@ -493,12 +512,85 @@ fn verify_handshake(stdout: &mut ChildStdout, child: &mut StdChild) -> Result<()
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn enter_isolated_adapter_launcher(
     mut arguments: impl Iterator<Item = OsString>,
-) -> Result<std::convert::Infallible, ProcessError> {
+) -> Result<Vec<OsString>, ProcessError> {
+    let (memory_bytes, cpu_seconds, descriptor_limit, adapter_arguments) =
+        parse_launcher_contract(&mut arguments)?;
+    let executable = std::env::current_exe()
+        .map_err(|error| ProcessError::io("resolve staged adapter executable", error))?;
+    close_inherited_descriptors()?;
+    establish_linux_resource_limits(memory_bytes, cpu_seconds, descriptor_limit)?;
+    setsid().map_err(|error| nix_error("create adapter process session", error))?;
+    establish_linux_platform_isolation()?;
+    let never = enter_verified_adapter(&executable, adapter_arguments)?;
+    match never {}
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn enter_isolated_adapter_launcher(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<Vec<OsString>, ProcessError> {
+    match arguments.next().as_deref() {
+        Some(stage) if stage == std::ffi::OsStr::new(MACOS_RESOURCE_STAGE) => {
+            enter_macos_resource_stage(arguments)
+        }
+        Some(stage) if stage == std::ffi::OsStr::new(MACOS_SANDBOX_STAGE) => {
+            enter_macos_sandbox_stage(arguments)
+        }
+        Some(stage) if stage == std::ffi::OsStr::new(MACOS_FINAL_STAGE) => {
+            enter_macos_final_stage(arguments)
+        }
+        _ => Err(ProcessError::InvalidInput(
+            "isolated adapter Darwin launcher stage is invalid".to_owned(),
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn enter_macos_resource_stage(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<Vec<OsString>, ProcessError> {
+    let (memory_bytes, cpu_seconds, descriptor_limit, adapter_arguments) =
+        parse_launcher_contract(&mut arguments)?;
+    close_inherited_descriptors()?;
+    establish_macos_resource_limits(cpu_seconds, descriptor_limit)?;
+    let executable = std::env::current_exe()
+        .map_err(|error| ProcessError::io("resolve staged adapter executable", error))?;
+    let workspace = std::env::current_dir()
+        .map_err(|error| ProcessError::io("resolve staged adapter workspace", error))?;
+    if executable.parent() != Some(workspace.as_path()) {
+        return Err(ProcessError::InvalidInput(
+            "staged adapter executable does not belong to its workspace".to_owned(),
+        ));
+    }
+    let sandbox = Path::new("/usr/bin/sandbox-exec");
+    if !sandbox.is_file() {
+        return Err(ProcessError::UnsupportedPlatform);
+    }
+    let mut sandbox_arguments = vec![
+        OsString::from("-p"),
+        OsString::from(macos_profile(&executable, &workspace)),
+        executable.as_os_str().to_owned(),
+        OsString::from(LAUNCHER_ARGUMENT),
+        OsString::from(MACOS_SANDBOX_STAGE),
+        OsString::from(memory_bytes.to_string()),
+        OsString::from(LAUNCHER_SEPARATOR),
+    ];
+    sandbox_arguments.extend(adapter_arguments);
+    let error = Command::new(sandbox)
+        .args(sandbox_arguments)
+        .env_clear()
+        .exec();
+    Err(ProcessError::io("enter Darwin sandbox", error))
+}
+
+#[cfg(target_os = "macos")]
+fn enter_macos_sandbox_stage(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<Vec<OsString>, ProcessError> {
     let memory_bytes = parse_launcher_limit(arguments.next(), "memory")?;
-    let cpu_seconds = parse_launcher_limit(arguments.next(), "CPU")?;
-    let descriptor_limit = parse_launcher_limit(arguments.next(), "descriptor")?;
     if arguments.next().as_deref() != Some(std::ffi::OsStr::new(LAUNCHER_SEPARATOR)) {
         return Err(ProcessError::InvalidInput(
             "isolated adapter launcher separator is invalid".to_owned(),
@@ -508,43 +600,84 @@ pub(crate) fn enter_isolated_adapter_launcher(
     let executable = std::env::current_exe()
         .map_err(|error| ProcessError::io("resolve staged adapter executable", error))?;
     close_inherited_descriptors()?;
-    establish_launcher_controls(memory_bytes, cpu_seconds, descriptor_limit)?;
-    establish_platform_isolation()?;
-    // Keep the private verification record separate from sandbox-exec and
-    // adapter diagnostics, which both intentionally use standard error.
-    io::stdout()
-        .lock()
-        .write_all(HANDSHAKE)
-        .and_then(|()| io::stdout().lock().flush())
-        .map_err(|error| ProcessError::io("write isolation handshake", error))?;
+    let mut final_arguments = vec![
+        OsString::from(LAUNCHER_ARGUMENT),
+        OsString::from(MACOS_FINAL_STAGE),
+        OsString::from(LAUNCHER_SEPARATOR),
+    ];
+    final_arguments.extend(adapter_arguments);
+    let never =
+        macos::replace_process_with_memory_limit(&executable, &final_arguments, memory_bytes)
+            .map_err(|error| ProcessError::io("enter hard-limited Darwin adapter", error))?;
+    match never {}
+}
 
-    let error = Command::new(&executable)
+#[cfg(target_os = "macos")]
+fn enter_macos_final_stage(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<Vec<OsString>, ProcessError> {
+    if arguments.next().as_deref() != Some(std::ffi::OsStr::new(LAUNCHER_SEPARATOR)) {
+        return Err(ProcessError::InvalidInput(
+            "isolated adapter launcher separator is invalid".to_owned(),
+        ));
+    }
+    close_inherited_descriptors()?;
+    write_record(MACOS_UNLINK_READY)?;
+    let mut acknowledgement = [0_u8; MACOS_UNLINK_ACK.len()];
+    io::stdin()
+        .lock()
+        .read_exact(&mut acknowledgement)
+        .map_err(|error| ProcessError::io("read staged adapter unlink acknowledgement", error))?;
+    if acknowledgement != MACOS_UNLINK_ACK {
+        return Err(ProcessError::InvalidInput(
+            "staged adapter unlink acknowledgement is invalid".to_owned(),
+        ));
+    }
+    let executable = std::env::current_exe()
+        .map_err(|error| ProcessError::io("resolve final staged adapter executable", error))?;
+    match fs::symlink_metadata(&executable) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(ProcessError::InvalidInput(
+                "staged adapter executable remains reachable after unlink".to_owned(),
+            ));
+        }
+        Err(error) => {
+            return Err(ProcessError::io(
+                "verify staged adapter executable unlink",
+                error,
+            ));
+        }
+    }
+    write_handshake()?;
+    Ok(arguments.collect())
+}
+
+#[cfg(target_os = "linux")]
+fn enter_verified_adapter(
+    executable: &Path,
+    adapter_arguments: Vec<OsString>,
+) -> Result<std::convert::Infallible, ProcessError> {
+    write_handshake()?;
+    let error = Command::new(executable)
         .args(adapter_arguments)
         .env_clear()
         .exec();
     Err(ProcessError::io("enter isolated adapter executable", error))
 }
 
-#[cfg(target_os = "linux")]
-fn establish_launcher_controls(
-    memory_bytes: u64,
-    cpu_seconds: u64,
-    descriptor_limit: u64,
-) -> Result<(), ProcessError> {
-    establish_resource_limits(memory_bytes, cpu_seconds, descriptor_limit)?;
-    setsid().map_err(|error| nix_error("create adapter process session", error))?;
-    Ok(())
+fn write_handshake() -> Result<(), ProcessError> {
+    write_record(HANDSHAKE)
 }
 
-#[cfg(target_os = "macos")]
-fn establish_launcher_controls(
-    _memory_bytes: u64,
-    _cpu_seconds: u64,
-    _descriptor_limit: u64,
-) -> Result<(), ProcessError> {
-    // The fixed resource launcher applies these controls before sandbox-exec,
-    // so Darwin never loads the adapter outside the requested hard limits.
-    Ok(())
+fn write_record(record: &[u8]) -> Result<(), ProcessError> {
+    // Keep the private verification record separate from sandbox-exec and
+    // adapter diagnostics, which both intentionally use standard error.
+    io::stdout()
+        .lock()
+        .write_all(record)
+        .and_then(|()| io::stdout().lock().flush())
+        .map_err(|error| ProcessError::io("write isolation handshake", error))
 }
 
 fn close_inherited_descriptors() -> Result<(), ProcessError> {
@@ -590,8 +723,27 @@ fn parse_launcher_limit(value: Option<OsString>, label: &str) -> Result<u64, Pro
         })
 }
 
+fn parse_launcher_contract(
+    arguments: &mut impl Iterator<Item = OsString>,
+) -> Result<(u64, u64, u64, Vec<OsString>), ProcessError> {
+    let memory_bytes = parse_launcher_limit(arguments.next(), "memory")?;
+    let cpu_seconds = parse_launcher_limit(arguments.next(), "CPU")?;
+    let descriptor_limit = parse_launcher_limit(arguments.next(), "descriptor")?;
+    if arguments.next().as_deref() != Some(std::ffi::OsStr::new(LAUNCHER_SEPARATOR)) {
+        return Err(ProcessError::InvalidInput(
+            "isolated adapter launcher separator is invalid".to_owned(),
+        ));
+    }
+    Ok((
+        memory_bytes,
+        cpu_seconds,
+        descriptor_limit,
+        arguments.collect(),
+    ))
+}
+
 #[cfg(target_os = "linux")]
-fn establish_resource_limits(
+fn establish_linux_resource_limits(
     memory_bytes: u64,
     cpu_seconds: u64,
     descriptor_limit: u64,
@@ -619,13 +771,30 @@ fn establish_resource_limits(
 }
 
 #[cfg(target_os = "linux")]
-fn establish_platform_isolation() -> Result<(), ProcessError> {
+fn establish_linux_platform_isolation() -> Result<(), ProcessError> {
     establish_linux_landlock()?;
     establish_linux_seccomp()
 }
 
 #[cfg(target_os = "macos")]
-fn establish_platform_isolation() -> Result<(), ProcessError> {
+fn establish_macos_resource_limits(
+    cpu_seconds: u64,
+    descriptor_limit: u64,
+) -> Result<(), ProcessError> {
+    let cpu = rlim_t::try_from(cpu_seconds).map_err(|_| {
+        ProcessError::InvalidInput("adapter CPU limit is not representable".to_owned())
+    })?;
+    let descriptors = rlim_t::try_from(descriptor_limit).map_err(|_| {
+        ProcessError::InvalidInput("adapter descriptor limit is not representable".to_owned())
+    })?;
+    setrlimit(Resource::RLIMIT_CPU, cpu, cpu)
+        .map_err(|error| nix_error("set adapter CPU limit", error))?;
+    setrlimit(Resource::RLIMIT_NOFILE, descriptors, descriptors)
+        .map_err(|error| nix_error("set adapter descriptor limit", error))?;
+    setrlimit(Resource::RLIMIT_CORE, 0, 0)
+        .map_err(|error| nix_error("disable adapter core dumps", error))?;
+    setrlimit(Resource::RLIMIT_FSIZE, 0, 0)
+        .map_err(|error| nix_error("disable adapter file output", error))?;
     Ok(())
 }
 
@@ -1042,7 +1211,7 @@ mod tests {
         let mut stdout = child.stdout.take().expect("fixture stdout exists");
         let mut stderr = child.stderr.take().expect("fixture stderr exists");
 
-        verify_handshake(&mut stdout, &mut child).expect("handshake verifies");
+        verify_record(&mut stdout, &mut child, HANDSHAKE).expect("handshake verifies");
 
         let mut adapter_output = Vec::new();
         stdout

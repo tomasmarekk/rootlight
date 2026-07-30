@@ -61,7 +61,7 @@ class GeigerValidationTests(unittest.TestCase):
         self.policy_path.write_text(
             "\n".join(
                 (
-                    'schema_version = "3.0"',
+                    'schema_version = "4.0"',
                     "",
                     "[[boundaries]]",
                     'package = "rootlight-vfs"',
@@ -292,6 +292,60 @@ class GeigerValidationTests(unittest.TestCase):
                 self.policy_path, self.inventory, "windows"
             ),
             {self.cargo_id: 1},
+        )
+
+    def test_multiple_enabled_boundaries_sum_for_the_current_host(self) -> None:
+        second_source = self.package_root / "src" / "macos.rs"
+        second_source.write_text(
+            "#![allow(unsafe_code, reason = \"reviewed macOS boundary\")]\n",
+            encoding="utf-8",
+        )
+        enabled = (
+            self.policy_path.read_text(encoding="utf-8")
+            .replace('status = "disabled"', 'status = "enabled"')
+            .replace("expected_source_tokens = 0", "expected_source_tokens = 1")
+            .replace("expected_geiger_count = 0", "expected_geiger_count = 2")
+            .replace('geiger_host_os = "all"', 'geiger_host_os = "windows"')
+        )
+        self.policy_path.write_text(
+            enabled
+            + "\n".join(
+                (
+                    "[[boundaries]]",
+                    'package = "rootlight-vfs"',
+                    'package_version = "0.1.0"',
+                    'manifest = "crates/rootlight-vfs/Cargo.toml"',
+                    'module = "rootlight_vfs::macos"',
+                    'source = "crates/rootlight-vfs/src/macos.rs"',
+                    'status = "enabled"',
+                    'owner = "@tomasmarekk"',
+                    'reason = "Darwin APIs require a reviewed boundary"',
+                    "expected_source_tokens = 1",
+                    "expected_geiger_count = 3",
+                    'geiger_host_os = "macos"',
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            VALIDATOR.load_approved_counts(
+                self.policy_path, self.inventory, "windows"
+            ),
+            {self.cargo_id: 2},
+        )
+        self.assertEqual(
+            VALIDATOR.load_approved_counts(
+                self.policy_path, self.inventory, "macos"
+            ),
+            {self.cargo_id: 3},
+        )
+        self.assertEqual(
+            VALIDATOR.load_approved_counts(
+                self.policy_path, self.inventory, "linux"
+            ),
+            {self.cargo_id: 0},
         )
 
     def test_host_specific_boundary_requires_zero_off_host(self) -> None:
@@ -593,8 +647,8 @@ class GeigerValidationTests(unittest.TestCase):
     def test_policy_root_rejects_unknown_fields(self) -> None:
         self.policy_path.write_text(
             self.policy_path.read_text(encoding="utf-8").replace(
-                'schema_version = "3.0"\n',
-                'schema_version = "3.0"\nunexpected = true\n',
+                'schema_version = "4.0"\n',
+                'schema_version = "4.0"\nunexpected = true\n',
                 1,
             ),
             encoding="utf-8",

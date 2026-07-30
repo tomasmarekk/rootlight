@@ -24,7 +24,7 @@ const TOOLCHAIN_POLICY_PATH: &str = "policy/toolchain.toml";
 const UNSAFE_POLICY_PATH: &str = "policy/unsafe.toml";
 const WORKFLOW_ROOT: &str = ".github/workflows";
 const CURRENT_SCHEMA_VERSION: &str = "1.0";
-const UNSAFE_SCHEMA_VERSION: &str = "3.0";
+const UNSAFE_SCHEMA_VERSION: &str = "4.0";
 
 pub(crate) fn check() -> Result<(), PolicyError> {
     let metadata = MetadataCommand::new()
@@ -866,7 +866,23 @@ fn validate_unsafe_boundaries<'a>(
                 ),
             });
         }
-        validate_unsafe_boundary_governance(package, &package_root, &absolute_source, boundary)?;
+        let enabled_boundary_count = policy
+            .boundaries
+            .iter()
+            .filter(|candidate| {
+                candidate.package == boundary.package
+                    && candidate.package_version == boundary.package_version
+                    && candidate.manifest == boundary.manifest
+                    && candidate.status == UnsafeBoundaryStatus::Enabled
+            })
+            .count();
+        validate_unsafe_boundary_governance(
+            package,
+            &package_root,
+            &absolute_source,
+            boundary,
+            enabled_boundary_count,
+        )?;
         if !modules.insert(boundary.module.as_str())
             || by_source
                 .insert(boundary.source.clone(), boundary)
@@ -1131,6 +1147,7 @@ fn validate_unsafe_boundary_governance(
     package_root: &Path,
     source: &Path,
     boundary: &UnsafeBoundary,
+    enabled_boundary_count: usize,
 ) -> Result<(), PolicyError> {
     let manifest_path = package.manifest_path.as_std_path();
     let manifest_text = fs::read_to_string(manifest_path).map_err(|source| PolicyError::Read {
@@ -1157,15 +1174,42 @@ fn validate_unsafe_boundary_governance(
             detail: format!("package {} target source escapes its package", package.name),
         });
     }
+    let source_text = fs::read_to_string(source).map_err(|error| PolicyError::Read {
+        path: source.to_path_buf(),
+        source: error,
+    })?;
+    let source_lints = unsafe_lint_declarations(&source_text).ok_or_else(|| {
+        PolicyError::InvalidUnsafeBoundary {
+            detail: format!(
+                "{} has an invalid unsafe lint declaration",
+                boundary.source.display()
+            ),
+        }
+    })?;
+    let source_lint_is_valid = match boundary.status {
+        UnsafeBoundaryStatus::Enabled => {
+            source_lints
+                == vec![UnsafeLintDeclaration {
+                    level: UnsafeLintLevel::Allow,
+                    is_inner: true,
+                }]
+        }
+        UnsafeBoundaryStatus::Disabled => !source_lints
+            .iter()
+            .any(|declaration| declaration.level == UnsafeLintLevel::Allow),
+    };
     let lint_inventory = module_graph_unsafe_lint_inventory(&module_graph)?;
     let lints = manifest.get("lints");
-    if !boundary_lint_state_is_valid(
-        boundary.status,
-        lints,
-        lint_inventory.as_ref(),
-        boundary.expected_source_tokens,
-        boundary.expected_geiger_count,
-    ) {
+    if !source_lint_is_valid
+        || !boundary_lint_state_is_valid(
+            boundary.status,
+            lints,
+            lint_inventory.as_ref(),
+            boundary.expected_source_tokens,
+            boundary.expected_geiger_count,
+            enabled_boundary_count,
+        )
+    {
         return Err(PolicyError::InvalidUnsafeBoundary {
             detail: format!(
                 "{} boundary {} has an invalid manifest lint, module override, or evidence count",
@@ -1186,9 +1230,30 @@ fn boundary_lint_state_is_valid(
     lint_inventory: Option<&UnsafeLintInventory>,
     expected_source_tokens: usize,
     expected_geiger_count: usize,
+    enabled_boundary_count: usize,
 ) -> bool {
+    let package_denies_unsafe = lints
+        .and_then(|value| value.get("rust"))
+        .and_then(|value| value.get("unsafe_code"))
+        .and_then(toml::Value::as_str)
+        == Some("deny");
+    let enabled_inventory_is_exact = lint_inventory.is_some_and(|inventory| {
+        inventory.target
+            == vec![UnsafeLintDeclaration {
+                level: UnsafeLintLevel::Deny,
+                is_inner: true,
+            }]
+            && inventory.reachable_non_target
+                == vec![
+                    UnsafeLintDeclaration {
+                        level: UnsafeLintLevel::Allow,
+                        is_inner: true,
+                    };
+                    enabled_boundary_count
+                ]
+    });
     match status {
-        UnsafeBoundaryStatus::Disabled => {
+        UnsafeBoundaryStatus::Disabled if enabled_boundary_count == 0 => {
             let inherits_workspace = lints
                 .and_then(|value| value.get("workspace"))
                 .and_then(toml::Value::as_bool)
@@ -1205,25 +1270,16 @@ fn boundary_lint_state_is_valid(
                 && expected_source_tokens == 0
                 && expected_geiger_count == 0
         }
-        UnsafeBoundaryStatus::Enabled => {
-            let package_denies_unsafe = lints
-                .and_then(|value| value.get("rust"))
-                .and_then(|value| value.get("unsafe_code"))
-                .and_then(toml::Value::as_str)
-                == Some("deny");
+        UnsafeBoundaryStatus::Disabled => {
             package_denies_unsafe
-                && lint_inventory.is_some_and(|inventory| {
-                    inventory.target
-                        == vec![UnsafeLintDeclaration {
-                            level: UnsafeLintLevel::Deny,
-                            is_inner: true,
-                        }]
-                        && inventory.reachable_non_target
-                            == vec![UnsafeLintDeclaration {
-                                level: UnsafeLintLevel::Allow,
-                                is_inner: true,
-                            }]
-                })
+                && enabled_inventory_is_exact
+                && expected_source_tokens == 0
+                && expected_geiger_count == 0
+        }
+        UnsafeBoundaryStatus::Enabled => {
+            package_denies_unsafe
+                && enabled_boundary_count > 0
+                && enabled_inventory_is_exact
                 && expected_source_tokens > 0
                 && expected_geiger_count > 0
         }
@@ -2214,11 +2270,13 @@ mod tests {
             Some(&exact_disabled),
             0,
             0,
+            0,
         ));
         assert!(!boundary_lint_state_is_valid(
             UnsafeBoundaryStatus::Disabled,
             enabled_manifest.get("lints"),
             Some(&exact_disabled),
+            0,
             0,
             0,
         ));
@@ -2227,6 +2285,7 @@ mod tests {
             enabled_manifest.get("lints"),
             Some(&exact_enabled),
             2,
+            1,
             1,
         ));
         assert!(!boundary_lint_state_is_valid(
@@ -2237,6 +2296,7 @@ mod tests {
                 &[]
             )
             .as_ref(),
+            0,
             0,
             0,
         ));
@@ -2254,6 +2314,7 @@ mod tests {
                 inventory.as_ref(),
                 0,
                 0,
+                0,
             ));
         }
         let reachable_override = lint_inventory(
@@ -2267,6 +2328,7 @@ mod tests {
             UnsafeBoundaryStatus::Disabled,
             disabled_manifest.get("lints"),
             reachable_override.as_ref(),
+            0,
             0,
             0,
         ));
@@ -2319,6 +2381,7 @@ mod tests {
             UnsafeBoundaryStatus::Disabled,
             manifest.get("lints"),
             Some(&inventory),
+            0,
             0,
             0,
         ));

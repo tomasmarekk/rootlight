@@ -621,10 +621,39 @@ jobs:
           overwrite: false
           include-hidden-files: false
 
+  unsafe-inventory-macos:
+    name: unsafe inventory / macos
+    needs: [prepare]
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Install checksum-verified cargo-geiger
+        run: bash scripts/install-geiger.sh "$HOME/.local/bin"
+      - name: Inventory macOS unsafe boundary
+        run: |
+          bash scripts/run-geiger.sh \
+            "$HOME/.local/bin/cargo-geiger" \
+            artifacts/geiger \
+            rootlight-sandbox
+      - name: Upload macOS unsafe inventory
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-unsafe-macos-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/geiger
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
   release-signing:
     name: release signatures and provenance / main
     if: github.ref == 'refs/heads/main' && inputs.source_sha == github.sha
-    needs: [prepare, release-package-candidate, release-candidate-evidence, supply-chain, unsafe-inventory-windows]
+    needs: [prepare, release-package-candidate, release-candidate-evidence, supply-chain, unsafe-inventory-windows, unsafe-inventory-macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -978,7 +1007,7 @@ jobs:
   release-candidate-required:
     name: release-candidate-required
     if: always()
-    needs: [prepare, release-package-candidate, release-candidate-evidence, supply-chain, unsafe-inventory-windows, release-signing, release-trust-evidence, release-performance]
+    needs: [prepare, release-package-candidate, release-candidate-evidence, supply-chain, unsafe-inventory-windows, unsafe-inventory-macos, release-signing, release-trust-evidence, release-performance]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

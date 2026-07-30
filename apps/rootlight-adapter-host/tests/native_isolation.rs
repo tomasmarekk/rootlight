@@ -85,6 +85,33 @@ fn native_profile_denies_filesystem_network_and_process_creation() {
     );
 }
 
+#[test]
+fn native_profile_enforces_the_hard_memory_ceiling() {
+    let command = adversary_command("memory");
+    let limits = AdapterSandboxLimits::new(128 * 1024 * 1024, Duration::from_secs(30))
+        .expect("memory adversary limits validate");
+    let (status, output, _) = run_adversary_command_with_limits(command, limits);
+
+    assert!(
+        !status.success(),
+        "memory adversary survived the native hard limit"
+    );
+    assert!(output.is_empty(), "memory adversary produced output");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_profile_removes_the_only_allowed_exec_path_before_dispatch() {
+    let (status, output, diagnostics) = run_adversary("self-exec");
+    assert!(
+        status.success(),
+        "self-exec adversary failed: {}",
+        String::from_utf8_lossy(&diagnostics)
+    );
+    assert_eq!(output, b"denied\n");
+    assert!(diagnostics.is_empty());
+}
+
 #[cfg(unix)]
 #[test]
 fn native_profile_denies_signalling_the_parent() {
@@ -162,8 +189,15 @@ fn run_adversary(mode: &str) -> (std::process::ExitStatus, Vec<u8>, Vec<u8>) {
 fn run_adversary_command(
     command: AdapterProcessCommand,
 ) -> (std::process::ExitStatus, Vec<u8>, Vec<u8>) {
+    run_adversary_command_with_limits(command, sandbox_limits())
+}
+
+fn run_adversary_command_with_limits(
+    command: AdapterProcessCommand,
+    limits: AdapterSandboxLimits,
+) -> (std::process::ExitStatus, Vec<u8>, Vec<u8>) {
     let mut process =
-        spawn_isolated_adapter(command, sandbox_limits()).expect("native isolation is established");
+        spawn_isolated_adapter(command, limits).expect("native isolation is established");
     drop(process.take_stdin().expect("adversary stdin is present"));
     let mut stdout = process.take_stdout().expect("adversary stdout is present");
     let mut stderr = process.take_stderr().expect("adversary stderr is present");

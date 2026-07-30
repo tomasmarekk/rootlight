@@ -24,7 +24,7 @@ from typing import Any, Sequence
 
 
 SCHEMA_VERSION = "1.0"
-UNSAFE_POLICY_SCHEMA_VERSION = "3.0"
+UNSAFE_POLICY_SCHEMA_VERSION = "4.0"
 SUPPORTED_CARGO_GEIGER_VERSION = "cargo-geiger 0.13.0"
 SUPPORTED_CARGO_GEIGER_POLICY_VERSION = "0.13.0"
 SOURCE_INPUT_MODE = "workspace-rust-source-digest-v1"
@@ -444,15 +444,11 @@ def load_approved_counts(
         if status == "enabled" and (source_count == 0 or geiger_count == 0):
             raise fail("enabled unsafe boundaries must retain nonzero evidence counts")
         if status == "enabled":
-            if cargo_id in approved_counts:
-                raise fail(f"workspace package has multiple enabled boundaries: {cargo_id}")
+            approved_counts.setdefault(cargo_id, 0)
             if geiger_host_os in {"all", host_operating_system}:
-                approved_counts[cargo_id] = geiger_count
-            else:
-                # Keep an explicit zero for a host-specific boundary. Cargo-geiger
-                # cannot evaluate cfg_attr lint state, but its off-host count is
-                # still authoritative and must remain zero.
-                approved_counts[cargo_id] = 0
+                approved_counts[cargo_id] += geiger_count
+            # Keep an explicit zero when every boundary is host-specific and
+            # off-host. Cargo-geiger's package total must remain authoritative.
 
     return approved_counts
 

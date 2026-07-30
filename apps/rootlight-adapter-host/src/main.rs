@@ -29,18 +29,28 @@ use rootlight_sandbox::{
 };
 
 fn main() -> ExitCode {
-    let mut arguments = std::env::args_os().skip(1);
-    match arguments.next().as_deref() {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        Some(value) if value == OsStr::new("--rootlight-native-isolation-launcher") => {
-            return match enter_isolated_adapter_launcher(arguments) {
-                Ok(never) => match never {},
-                Err(error) => {
-                    eprintln!("error: native isolation launcher failed: {error}");
-                    ExitCode::FAILURE
-                }
-            };
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let arguments = if arguments.first().map(std::ffi::OsString::as_os_str)
+        == Some(OsStr::new("--rootlight-native-isolation-launcher"))
+    {
+        let mut launcher_arguments = arguments.into_iter();
+        launcher_arguments.next();
+        match enter_isolated_adapter_launcher(launcher_arguments) {
+            Ok(arguments) => arguments,
+            Err(error) => {
+                eprintln!("error: native isolation launcher failed: {error}");
+                return ExitCode::FAILURE;
+            }
         }
+    } else {
+        arguments
+    };
+    dispatch(arguments.into_iter())
+}
+
+fn dispatch(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> ExitCode {
+    match arguments.next().as_deref() {
         Some(value) if value == OsStr::new("--report") => return report(arguments),
         Some(value) if value == OsStr::new("--isolation-witness") => {
             return isolation_witness(arguments);
@@ -156,6 +166,21 @@ fn isolation_adversary(mut arguments: impl Iterator<Item = std::ffi::OsString>) 
             .is_err()
     } else if mode == OsStr::new("signal-parent") {
         extra.is_none() && parent_signal_is_denied()
+    } else if mode == OsStr::new("memory") {
+        return if extra.is_none() {
+            exhaust_memory_limit()
+        } else {
+            ExitCode::FAILURE
+        };
+    } else if mode == OsStr::new("self-exec") {
+        #[cfg(target_os = "macos")]
+        {
+            extra.is_none() && self_exec_is_denied()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
     } else if mode == OsStr::new("hold") {
         return if extra.is_none() {
             hold_isolated_process()
@@ -170,6 +195,34 @@ fn isolation_adversary(mut arguments: impl Iterator<Item = std::ffi::OsString>) 
     } else {
         ExitCode::FAILURE
     }
+}
+
+#[cfg(target_os = "macos")]
+fn self_exec_is_denied() -> bool {
+    use std::os::unix::process::CommandExt as _;
+
+    let executable =
+        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("missing"));
+    std::process::Command::new(executable)
+        .arg("--isolation-witness")
+        .exec()
+        .kind()
+        == io::ErrorKind::NotFound
+}
+
+fn exhaust_memory_limit() -> ExitCode {
+    const BLOCK_BYTES: usize = 1024 * 1024;
+    const BLOCKS: usize = 512;
+
+    let mut allocations = Vec::with_capacity(BLOCKS);
+    for index in 0..BLOCKS {
+        // A nonzero fill commits each block instead of reserving only virtual
+        // address space, so the native physical/committed-memory limit decides.
+        let fill = u8::try_from(index % 251 + 1).unwrap_or(u8::MAX);
+        allocations.push(vec![fill; BLOCK_BYTES]);
+    }
+    std::hint::black_box(&allocations);
+    ExitCode::SUCCESS
 }
 
 #[cfg(unix)]

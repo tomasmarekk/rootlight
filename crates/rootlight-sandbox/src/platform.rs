@@ -1,5 +1,7 @@
 //! Operating-system process backend selection.
 
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(windows)]
 mod os;
 #[cfg(all(not(windows), not(any(target_os = "linux", target_os = "macos"))))]
