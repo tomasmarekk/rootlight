@@ -31,7 +31,7 @@ use super::macos;
 
 use crate::{
     AdapterExecutableDigest, AdapterIsolationReport, AdapterProcessCommand, AdapterSandboxLimits,
-    MAX_ADAPTER_EXECUTABLE_BYTES, ProcessCommand, ProcessError, StdioMode,
+    IsolatedAdapterEntry, MAX_ADAPTER_EXECUTABLE_BYTES, ProcessCommand, ProcessError, StdioMode,
     adapter::copy_authenticated_executable,
 };
 
@@ -121,6 +121,8 @@ struct ImmutableWorkspace {
     _directory: tempfile::TempDir,
     root: PathBuf,
     executable: PathBuf,
+    #[cfg(target_os = "macos")]
+    executable_digest: AdapterExecutableDigest,
 }
 
 impl ImmutableWorkspace {
@@ -139,7 +141,10 @@ impl ImmutableWorkspace {
             .write(true)
             .open(&executable)
             .map_err(|error| ProcessError::io("create staged adapter executable", error))?;
-        copy_authenticated_executable(&mut input, source_bytes, expected_digest, &mut output)?;
+        let executable_digest =
+            copy_authenticated_executable(&mut input, source_bytes, expected_digest, &mut output)?;
+        #[cfg(not(target_os = "macos"))]
+        let _ = executable_digest;
         output
             .sync_all()
             .map_err(|error| ProcessError::io("sync staged adapter executable", error))?;
@@ -162,11 +167,18 @@ impl ImmutableWorkspace {
             _directory: directory,
             root,
             executable,
+            #[cfg(target_os = "macos")]
+            executable_digest,
         })
     }
 
     fn root(&self) -> &Path {
         &self.root
+    }
+
+    #[cfg(target_os = "macos")]
+    const fn executable_digest(&self) -> AdapterExecutableDigest {
+        self.executable_digest
     }
 
     #[cfg(target_os = "macos")]
@@ -457,6 +469,7 @@ fn verify_macos_unlink_handshake(
     })?;
     stdin
         .write_all(MACOS_UNLINK_ACK)
+        .and_then(|()| stdin.write_all(&workspace.executable_digest().as_bytes()))
         .and_then(|()| stdin.flush())
         .map_err(|error| ProcessError::io("acknowledge staged adapter unlink", error))?;
     verify_record(stdout, child, HANDSHAKE)
@@ -564,6 +577,7 @@ fn known_macos_failure_code(code: &str) -> Option<&'static str> {
         "resolve-sandboxed-workspace",
         "descriptor-closure",
         "unlink-acknowledgement",
+        "executable-identity",
         "verify-unlink",
         "handshake-write",
         "launcher-io",
@@ -578,7 +592,7 @@ fn known_macos_failure_code(code: &str) -> Option<&'static str> {
 #[cfg(target_os = "linux")]
 pub(crate) fn enter_isolated_adapter_launcher(
     mut arguments: impl Iterator<Item = OsString>,
-) -> Result<Vec<OsString>, ProcessError> {
+) -> Result<IsolatedAdapterEntry, ProcessError> {
     let (memory_bytes, cpu_seconds, descriptor_limit, adapter_arguments) =
         parse_launcher_contract(&mut arguments)?;
     let executable = std::env::current_exe()
@@ -594,7 +608,7 @@ pub(crate) fn enter_isolated_adapter_launcher(
 #[cfg(target_os = "macos")]
 pub(crate) fn enter_isolated_adapter_launcher(
     mut arguments: impl Iterator<Item = OsString>,
-) -> Result<Vec<OsString>, ProcessError> {
+) -> Result<IsolatedAdapterEntry, ProcessError> {
     match arguments.next().as_deref() {
         Some(stage) if stage == std::ffi::OsStr::new(MACOS_RESOURCE_STAGE) => {
             enter_macos_resource_stage(arguments)
@@ -611,7 +625,7 @@ pub(crate) fn enter_isolated_adapter_launcher(
 #[cfg(target_os = "macos")]
 fn enter_macos_resource_stage(
     mut arguments: impl Iterator<Item = OsString>,
-) -> Result<Vec<OsString>, ProcessError> {
+) -> Result<IsolatedAdapterEntry, ProcessError> {
     let (memory_bytes, cpu_seconds, descriptor_limit, adapter_arguments) =
         parse_launcher_contract(&mut arguments)?;
     close_inherited_descriptors()?;
@@ -643,7 +657,7 @@ fn enter_macos_resource_stage(
 #[cfg(target_os = "macos")]
 fn enter_macos_sandbox_stage(
     mut arguments: impl Iterator<Item = OsString>,
-) -> Result<Vec<OsString>, ProcessError> {
+) -> Result<IsolatedAdapterEntry, ProcessError> {
     if arguments.next().as_deref() != Some(std::ffi::OsStr::new(LAUNCHER_SEPARATOR)) {
         return Err(ProcessError::InvalidInput(
             "isolated adapter sandbox stage separator is invalid".to_owned(),
@@ -672,6 +686,11 @@ fn enter_macos_sandbox_stage(
             "staged adapter unlink acknowledgement is invalid".to_owned(),
         ));
     }
+    let mut executable_digest = [0_u8; blake3::OUT_LEN];
+    io::stdin()
+        .lock()
+        .read_exact(&mut executable_digest)
+        .map_err(|error| ProcessError::io("read staged adapter executable identity", error))?;
     match fs::symlink_metadata(&executable) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Ok(_) => {
@@ -687,7 +706,10 @@ fn enter_macos_sandbox_stage(
         }
     }
     write_handshake()?;
-    Ok(arguments.collect())
+    Ok(IsolatedAdapterEntry::new(
+        arguments.collect(),
+        AdapterExecutableDigest::from_bytes(executable_digest),
+    ))
 }
 
 #[cfg(target_os = "linux")]

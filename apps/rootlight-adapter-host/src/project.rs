@@ -48,7 +48,7 @@ use rootlight_protocol::{
         },
     },
 };
-use rootlight_sandbox::MAX_ADAPTER_EXECUTABLE_BYTES;
+use rootlight_sandbox::{AuthenticatedAdapterExecutable, MAX_ADAPTER_EXECUTABLE_BYTES};
 use rootlight_vfs::{RelativePath, SourceSnapshot};
 
 use crate::{AdapterHostError, serve_project_session};
@@ -240,19 +240,55 @@ fn negotiate_project_adapter_session_for_identity(
 pub fn run_project_session(
     arguments: impl Iterator<Item = OsString>,
 ) -> Result<(), AdapterHostError> {
+    let (limits, cancellation) = prepare_project_session(arguments)?;
+    let executable = std::env::current_exe().map_err(|_| AdapterHostError::BinaryIdentity)?;
+    let binary_digest = project_adapter_binary_digest(&executable)?;
+    run_project_session_with_digest(limits, &cancellation, binary_digest)
+}
+
+/// Runs one production `--project-session` with a staging-authenticated binary identity.
+///
+/// macOS removes the staged executable from the filesystem after Seatbelt is
+/// active. The native launcher therefore supplies the digest computed from the
+/// same securely opened source handle that populated the staged executable.
+///
+/// # Errors
+///
+/// Returns a source-free [`AdapterHostError`] under the same conditions as
+/// [`run_project_session`].
+pub fn run_authenticated_project_session(
+    arguments: impl Iterator<Item = OsString>,
+    executable: AuthenticatedAdapterExecutable,
+) -> Result<(), AdapterHostError> {
+    let (limits, cancellation) = prepare_project_session(arguments)?;
+    run_project_session_with_digest(
+        limits,
+        &cancellation,
+        ContentHash::from_bytes(executable.digest_bytes()),
+    )
+}
+
+fn prepare_project_session(
+    arguments: impl Iterator<Item = OsString>,
+) -> Result<(ProjectSessionLimits, Cancellation), AdapterHostError> {
     let limits = ProjectSessionLimits::parse(arguments)?;
     let deadline = Instant::now()
         .checked_add(Duration::from_millis(limits.wall_time_ms))
         .ok_or(AdapterHostError::Limit)?;
-    let cancellation = Cancellation::with_deadline(deadline);
-    let executable = std::env::current_exe().map_err(|_| AdapterHostError::BinaryIdentity)?;
-    let binary_digest = project_adapter_binary_digest(&executable)?;
+    Ok((limits, Cancellation::with_deadline(deadline)))
+}
+
+fn run_project_session_with_digest(
+    limits: ProjectSessionLimits,
+    cancellation: &Cancellation,
+    binary_digest: ContentHash,
+) -> Result<(), AdapterHostError> {
     let mut reader = std::io::stdin().lock();
     let mut writer = std::io::stdout().lock();
     serve_project_session(
         &mut reader,
         &mut writer,
-        &cancellation,
+        cancellation,
         |request, cancellation| {
             analyze_project_request(request, limits, binary_digest, cancellation)
         },

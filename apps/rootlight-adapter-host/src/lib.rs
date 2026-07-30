@@ -36,7 +36,8 @@ pub use project::{
     PROJECT_ADAPTER_HARD_LIMITS, PROJECT_ADAPTER_NAME, PROJECT_ADAPTER_VERSION,
     negotiate_project_adapter_session, negotiate_project_adapter_session_with_cancellation,
     project_adapter_advertisement, project_adapter_identity,
-    project_adapter_identity_with_cancellation, run_project_session,
+    project_adapter_identity_with_cancellation, run_authenticated_project_session,
+    run_project_session,
 };
 pub use server::serve_project_session;
 

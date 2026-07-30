@@ -37,6 +37,59 @@ impl AdapterExecutableDigest {
     }
 }
 
+/// Opaque proof that native staging authenticated one executable.
+///
+/// Values are created only after the executable has been copied and hashed
+/// from a securely opened source handle. Callers can carry this proof across
+/// the in-process dispatch boundary but cannot construct it from arbitrary
+/// digest bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthenticatedAdapterExecutable(AdapterExecutableDigest);
+
+impl AuthenticatedAdapterExecutable {
+    /// Returns the authenticated executable identity as canonical BLAKE3 bytes.
+    #[must_use]
+    pub const fn digest_bytes(self) -> [u8; blake3::OUT_LEN] {
+        self.0.as_bytes()
+    }
+}
+
+/// Authenticated dispatch state returned by a native isolation launcher.
+///
+/// The executable digest is bound to the bytes copied from the securely
+/// opened source handle during staging. On macOS, preserving it in this typed
+/// state avoids reopening the deliberately unlinked executable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsolatedAdapterEntry {
+    arguments: Vec<OsString>,
+    executable: AuthenticatedAdapterExecutable,
+}
+
+impl IsolatedAdapterEntry {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn new(
+        arguments: Vec<OsString>,
+        executable_digest: AdapterExecutableDigest,
+    ) -> Self {
+        Self {
+            arguments,
+            executable: AuthenticatedAdapterExecutable(executable_digest),
+        }
+    }
+
+    /// Returns proof of the exact executable bytes admitted to staging.
+    #[must_use]
+    pub const fn authenticated_executable(&self) -> AuthenticatedAdapterExecutable {
+        self.executable
+    }
+
+    /// Consumes the entry and returns the verified adapter arguments.
+    #[must_use]
+    pub fn into_arguments(self) -> Vec<OsString> {
+        self.arguments
+    }
+}
+
 /// Required isolation control for a deep adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -879,7 +932,7 @@ pub fn spawn_isolated_adapter(
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn enter_isolated_adapter_launcher(
     arguments: impl Iterator<Item = OsString>,
-) -> Result<Vec<OsString>, ProcessError> {
+) -> Result<IsolatedAdapterEntry, ProcessError> {
     platform::enter_isolated_adapter_launcher(arguments)
 }
 
