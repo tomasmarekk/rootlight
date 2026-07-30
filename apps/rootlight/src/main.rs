@@ -17,10 +17,12 @@ use std::{
 use rootlight_client::{
     Client, ClientError, ConnectPolicy, DaemonLifecycle as ClientDaemonLifecycle,
     DetachedArtifactSignature, DetachedUpdateSignature, DiagnosticsQuick, FilesystemUpdateError,
-    FilesystemUpdateOutcome, Health, HealthStatus as ClientHealthStatus, MAX_UPDATE_ARTIFACT_BYTES,
-    MAX_UPDATE_LICENSE_BUNDLE_BYTES, MAX_UPDATE_METADATA_BYTES, MAX_UPDATE_PROVENANCE_BYTES,
-    MAX_UPDATE_SBOM_BYTES, OperationKind, OperationStage, OperationStatus, PackageInstallOutcome,
-    PackageUninstallOutcome, ProcessCandidateHealthCheck, RecoveryClass,
+    FilesystemUpdateOutcome, GenerationSelector as ClientGenerationSelector, Health,
+    HealthStatus as ClientHealthStatus, MAX_UPDATE_ARTIFACT_BYTES, MAX_UPDATE_LICENSE_BUNDLE_BYTES,
+    MAX_UPDATE_METADATA_BYTES, MAX_UPDATE_PROVENANCE_BYTES, MAX_UPDATE_SBOM_BYTES, OperationKind,
+    OperationStage, OperationStatus, PackageInstallOutcome, PackageUninstallOutcome,
+    ProcessCandidateHealthCheck, RecoveryClass, RepositoryIndex, RepositoryIndexMode,
+    RepositoryList, RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
     ResourcePressure as ClientResourcePressure, SupportBundle as ClientSupportBundle,
     TrustedUpdatePolicy, UPDATE_HEALTH_STATE_DIR_ENV, UpdateContext, UpdateInputPaths,
     UpdatePublicKey, UpdateRuntimeStatus, UpdateSignatures, UpdateSupportingEvidence,
@@ -73,36 +75,177 @@ const UPDATE_PROTOCOL_MINOR: u32 = 7;
 const INSTALL_VERSIONS_DIRECTORY: &str = "versions";
 const FIRST_SLICE_SOURCE_BEFORE: &str = "pub fn answer() -> u32 {\n    42\n}\n";
 const FIRST_SLICE_SOURCE_AFTER: &str = "pub fn answer() -> u32 {\n    43\n}\n";
+const CLI_HELP: &str = "\
+Rootlight
+
+Usage:
+  rootlight <command> [options]
+
+Repository commands:
+  repo index <root> [--mode auto|structural|deep] [--detached]
+  repo list [--max-results <count>] [--query <text>]
+  repo status <repository-id> [--generation active|<generation-id>]
+  operation status <operation-id> [--wait-ms <ms>] [--after-revision <revision>]
+  operation cancel <operation-id>
+
+Service commands:
+  health [--json]
+  diagnostics quick
+  support-bundle --output <file>
+  repair --dry-run <action> [--inventory <file>]
+  update <install|uninstall|apply|recover|status|verify> [options]
+
+Discovery:
+  --help [--json]
+  --version [--json]
+";
 
 fn main() -> ExitCode {
-    match run() {
-        Ok(result) => match render_json(&CliEnvelope::success(result)) {
-            Ok(json) => {
-                println!("{json}");
-                ExitCode::SUCCESS
-            }
-            Err(()) => {
-                eprintln!("rootlight: output serialization failed");
-                ExitCode::from(ExitFamily::Internal.code())
-            }
-        },
-        Err(error) => {
-            let exit = error.exit_family();
-            let public_error = match error.public_error() {
-                Ok(public_error) => public_error,
-                Err(_) => {
-                    eprintln!("rootlight: public error construction failed");
-                    return ExitCode::from(ExitFamily::Internal.code());
-                }
-            };
-            let envelope = CliEnvelope::failure(exit, public_error);
-            match render_json(&envelope) {
-                Ok(json) => eprintln!("{json}"),
-                Err(()) => eprintln!("rootlight: output serialization failed"),
-            }
-            ExitCode::from(exit.code())
+    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    match discovery_output(&arguments) {
+        Some(DiscoveryOutput::Human(output)) => {
+            print!("{output}");
+            ExitCode::SUCCESS
+        }
+        Some(DiscoveryOutput::Json(result)) => render_success(*result),
+        None => render_execution(run(arguments)),
+    }
+}
+
+fn render_execution(result: Result<CommandResult, CliError>) -> ExitCode {
+    match result {
+        Ok(result) => render_success(result),
+        Err(error) => render_failure(error),
+    }
+}
+
+fn render_success(result: CommandResult) -> ExitCode {
+    match render_json(&CliEnvelope::success(result)) {
+        Ok(json) => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        Err(()) => {
+            eprintln!("rootlight: output serialization failed");
+            ExitCode::from(ExitFamily::Internal.code())
         }
     }
+}
+
+fn render_failure(error: CliError) -> ExitCode {
+    let exit = error.exit_family();
+    let public_error = match error.public_error() {
+        Ok(public_error) => public_error,
+        Err(_) => {
+            eprintln!("rootlight: public error construction failed");
+            return ExitCode::from(ExitFamily::Internal.code());
+        }
+    };
+    let envelope = CliEnvelope::failure(exit, public_error);
+    match render_json(&envelope) {
+        Ok(json) => eprintln!("{json}"),
+        Err(()) => eprintln!("rootlight: output serialization failed"),
+    }
+    ExitCode::from(exit.code())
+}
+
+fn discovery_output(arguments: &[std::ffi::OsString]) -> Option<DiscoveryOutput> {
+    let human_help = arguments.is_empty()
+        || matches!(arguments, [value] if value == "--help" || value == "help");
+    if human_help {
+        return Some(DiscoveryOutput::Human(CLI_HELP));
+    }
+    if matches!(arguments, [value] if value == "--version") {
+        return Some(DiscoveryOutput::Human(concat!(
+            "rootlight ",
+            env!("CARGO_PKG_VERSION"),
+            "\n"
+        )));
+    }
+    if matches!(
+        arguments,
+        [first, second]
+            if (first == "--help" && second == "--json")
+                || (first == "--json" && second == "--help")
+    ) {
+        return Some(DiscoveryOutput::Json(Box::new(CommandResult::Help(
+            CliHelp::current(),
+        ))));
+    }
+    if matches!(
+        arguments,
+        [first, second]
+            if (first == "--version" && second == "--json")
+                || (first == "--json" && second == "--version")
+    ) {
+        return Some(DiscoveryOutput::Json(Box::new(CommandResult::Version(
+            CliVersion::current(),
+        ))));
+    }
+    None
+}
+
+enum DiscoveryOutput {
+    Human(&'static str),
+    Json(Box<CommandResult>),
+}
+
+// Keep command execution separate from discovery rendering so help and version
+// remain available even when daemon state is absent or damaged.
+fn run(arguments: Vec<std::ffi::OsString>) -> Result<CommandResult, CliError> {
+    let mut arguments = arguments.into_iter();
+    let first = arguments.next().ok_or(CliError::Usage)?;
+    let (standalone, command) = if first == "--standalone" {
+        (true, arguments.next().ok_or(CliError::Usage)?)
+    } else {
+        (false, first)
+    };
+    let trailing = arguments.collect::<Vec<_>>();
+
+    if command == "--update-health-probe" && trailing.is_empty() && !standalone {
+        return execute_update_health_probe();
+    }
+    if command == "first-slice-demo" {
+        return execute_first_slice_demo(&trailing);
+    }
+    if command == "repair" {
+        return execute_repair(&runtime_paths()?, &trailing);
+    }
+    if command == "update" {
+        return execute_update(&trailing);
+    }
+    if command == "generation-import" {
+        return execute_generation_import(&trailing);
+    }
+    if (command == "generation-export" || command == "runtime-trace-import") && !standalone {
+        return Err(CliError::Usage);
+    }
+
+    dispatch_after_command_preflight(standalone, &command, &trailing, |standalone| {
+        let paths = runtime_paths()?;
+        if standalone {
+            execute_standalone(&paths, command.to_string_lossy().as_ref(), &trailing)
+        } else {
+            let client_instance_id = if command == "repo"
+                || command == "operation"
+                || command == "operation-submit"
+                || command == "operation-status"
+                || command == "operation-cancel"
+            {
+                CLI_CLIENT_INSTANCE_ID
+            } else {
+                let mut identity = [0_u8; 16];
+                getrandom::fill(&mut identity).map_err(|_| CliError::RandomUnavailable)?;
+                identity
+            };
+            let client = Client::connect_or_start(
+                &paths,
+                client_instance_id,
+                ConnectPolicy::StartIfMissing,
+            )?;
+            execute_client(&client, command.to_string_lossy().as_ref(), &trailing)
+        }
+    })
 }
 
 fn render_json(value: &CliEnvelope) -> Result<String, ()> {
@@ -149,60 +292,6 @@ impl std::io::Write for BoundedJsonBuffer {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
-}
-
-fn run() -> Result<CommandResult, CliError> {
-    let mut arguments = env::args_os().skip(1);
-    let first = arguments.next().ok_or(CliError::Usage)?;
-    let (standalone, command) = if first == "--standalone" {
-        (true, arguments.next().ok_or(CliError::Usage)?)
-    } else {
-        (false, first)
-    };
-    let trailing = arguments.collect::<Vec<_>>();
-
-    if command == "--update-health-probe" && trailing.is_empty() && !standalone {
-        return execute_update_health_probe();
-    }
-    if command == "first-slice-demo" {
-        return execute_first_slice_demo(&trailing);
-    }
-    if command == "repair" {
-        return execute_repair(&runtime_paths()?, &trailing);
-    }
-    if command == "update" {
-        return execute_update(&trailing);
-    }
-    if command == "generation-import" {
-        return execute_generation_import(&trailing);
-    }
-    if (command == "generation-export" || command == "runtime-trace-import") && !standalone {
-        return Err(CliError::Usage);
-    }
-
-    dispatch_after_command_preflight(standalone, &command, &trailing, |standalone| {
-        let paths = runtime_paths()?;
-        if standalone {
-            execute_standalone(&paths, command.to_string_lossy().as_ref(), &trailing)
-        } else {
-            let client_instance_id = if command == "operation-submit"
-                || command == "operation-status"
-                || command == "operation-cancel"
-            {
-                CLI_CLIENT_INSTANCE_ID
-            } else {
-                let mut identity = [0_u8; 16];
-                getrandom::fill(&mut identity).map_err(|_| CliError::RandomUnavailable)?;
-                identity
-            };
-            let client = Client::connect_or_start(
-                &paths,
-                client_instance_id,
-                ConnectPolicy::StartIfMissing,
-            )?;
-            execute_client(&client, command.to_string_lossy().as_ref(), &trailing)
-        }
-    })
 }
 
 fn execute_repair(
@@ -778,6 +867,13 @@ fn execute_client(
     arguments: &[std::ffi::OsString],
 ) -> Result<CommandResult, CliError> {
     match (command, arguments) {
+        ("repo", arguments) => {
+            execute_repository_client(client, parse_repository_command(arguments)?)
+        }
+        ("operation", arguments) => execute_repository_operation_client(
+            client,
+            parse_repository_operation_command(arguments)?,
+        ),
         ("health", []) => Ok(CommandResult::Health(client.health()?)),
         ("health", [json]) if json == "--json" => Ok(CommandResult::Health(client.health()?)),
         ("diagnostics", [quick]) if quick == "quick" => {
@@ -849,6 +945,275 @@ fn execute_client(
         }
         _ => Err(CliError::Usage),
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RepositoryCliCommand {
+    Index {
+        root: String,
+        mode: RepositoryIndexMode,
+        detached: bool,
+    },
+    List {
+        max_results: Option<u32>,
+        query: Option<String>,
+    },
+    Status {
+        repository: RepositoryId,
+        generation: ClientGenerationSelector,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RepositoryOperationCliCommand {
+    Status {
+        operation: OperationId,
+        wait_ms: Option<u32>,
+        after_revision: Option<u64>,
+    },
+    Cancel {
+        operation: OperationId,
+    },
+}
+
+fn execute_repository_client(
+    client: &Client,
+    command: RepositoryCliCommand,
+) -> Result<CommandResult, CliError> {
+    match command {
+        RepositoryCliCommand::Index {
+            root,
+            mode,
+            detached,
+        } => {
+            let operation = random_operation_id()?;
+            Ok(CommandResult::RepositoryIndex(
+                client.repository_index_with_mode(&root, operation, detached, mode)?,
+            ))
+        }
+        RepositoryCliCommand::List { max_results, query } => Ok(CommandResult::RepositoryList(
+            client.repository_list(max_results, query.as_deref())?,
+        )),
+        RepositoryCliCommand::Status {
+            repository,
+            generation,
+        } => Ok(CommandResult::RepositoryStatus(
+            client.repository_status(repository, generation)?,
+        )),
+    }
+}
+
+fn execute_repository_operation_client(
+    client: &Client,
+    command: RepositoryOperationCliCommand,
+) -> Result<CommandResult, CliError> {
+    let status = match command {
+        RepositoryOperationCliCommand::Status {
+            operation,
+            wait_ms,
+            after_revision,
+        } => client.repository_operation_status(
+            operation,
+            RepositoryOperationAction::Get,
+            wait_ms,
+            after_revision,
+        )?,
+        RepositoryOperationCliCommand::Cancel { operation } => client.repository_operation_status(
+            operation,
+            RepositoryOperationAction::Cancel,
+            None,
+            None,
+        )?,
+    };
+    Ok(CommandResult::RepositoryOperationStatus(status))
+}
+
+fn parse_repository_command(
+    arguments: &[std::ffi::OsString],
+) -> Result<RepositoryCliCommand, CliError> {
+    let Some((command, arguments)) = arguments.split_first() else {
+        return Err(CliError::Usage);
+    };
+    match command.to_str() {
+        Some("index") => parse_repository_index_arguments(arguments),
+        Some("list") => parse_repository_list_arguments(arguments),
+        Some("status") => parse_repository_status_arguments(arguments),
+        _ => Err(CliError::Usage),
+    }
+}
+
+fn parse_repository_index_arguments(
+    arguments: &[std::ffi::OsString],
+) -> Result<RepositoryCliCommand, CliError> {
+    let Some((root, flags)) = arguments.split_first() else {
+        return Err(CliError::Usage);
+    };
+    let root = root
+        .to_str()
+        .filter(|root| !root.is_empty() && !root.starts_with("--"))
+        .ok_or(CliError::InvalidRepositoryRoot)?
+        .to_owned();
+    let mut mode = RepositoryIndexMode::Auto;
+    let mut mode_seen = false;
+    let mut detached = false;
+    let mut detached_seen = false;
+    let mut flags = flags.iter();
+    while let Some(flag) = flags.next() {
+        match flag.to_str() {
+            Some("--mode") if !mode_seen => {
+                mode = parse_repository_index_mode(flags.next().ok_or(CliError::Usage)?)?;
+                mode_seen = true;
+            }
+            Some("--detached") if !detached_seen => {
+                detached = true;
+                detached_seen = true;
+            }
+            _ => return Err(CliError::Usage),
+        }
+    }
+    Ok(RepositoryCliCommand::Index {
+        root,
+        mode,
+        detached,
+    })
+}
+
+fn parse_repository_list_arguments(
+    arguments: &[std::ffi::OsString],
+) -> Result<RepositoryCliCommand, CliError> {
+    let mut max_results = None;
+    let mut query = None;
+    let mut arguments = arguments.iter();
+    while let Some(flag) = arguments.next() {
+        match flag.to_str() {
+            Some("--max-results") if max_results.is_none() => {
+                max_results = Some(parse_u32_argument(
+                    arguments.next().ok_or(CliError::Usage)?,
+                )?);
+            }
+            Some("--query") if query.is_none() => {
+                query = Some(
+                    arguments
+                        .next()
+                        .and_then(|value| value.to_str())
+                        .filter(|value| !value.is_empty())
+                        .ok_or(CliError::InvalidRepositoryQuery)?
+                        .to_owned(),
+                );
+            }
+            _ => return Err(CliError::Usage),
+        }
+    }
+    Ok(RepositoryCliCommand::List { max_results, query })
+}
+
+fn parse_repository_status_arguments(
+    arguments: &[std::ffi::OsString],
+) -> Result<RepositoryCliCommand, CliError> {
+    let (repository, generation) = match arguments {
+        [repository] => (
+            parse_repository(repository)?,
+            ClientGenerationSelector::Active,
+        ),
+        [repository, flag, generation] if flag == "--generation" => (
+            parse_repository(repository)?,
+            parse_generation_selector(generation)?,
+        ),
+        _ => return Err(CliError::Usage),
+    };
+    Ok(RepositoryCliCommand::Status {
+        repository,
+        generation,
+    })
+}
+
+fn parse_repository_operation_command(
+    arguments: &[std::ffi::OsString],
+) -> Result<RepositoryOperationCliCommand, CliError> {
+    let Some((command, arguments)) = arguments.split_first() else {
+        return Err(CliError::Usage);
+    };
+    match command.to_str() {
+        Some("status") => parse_repository_operation_status_arguments(arguments),
+        Some("cancel") => match arguments {
+            [operation] => Ok(RepositoryOperationCliCommand::Cancel {
+                operation: parse_operation(operation)?,
+            }),
+            _ => Err(CliError::Usage),
+        },
+        _ => Err(CliError::Usage),
+    }
+}
+
+fn parse_repository_operation_status_arguments(
+    arguments: &[std::ffi::OsString],
+) -> Result<RepositoryOperationCliCommand, CliError> {
+    let Some((operation, flags)) = arguments.split_first() else {
+        return Err(CliError::Usage);
+    };
+    let operation = parse_operation(operation)?;
+    let mut wait_ms = None;
+    let mut after_revision = None;
+    let mut flags = flags.iter();
+    while let Some(flag) = flags.next() {
+        match flag.to_str() {
+            Some("--wait-ms") if wait_ms.is_none() => {
+                wait_ms = Some(parse_u32_argument(flags.next().ok_or(CliError::Usage)?)?);
+            }
+            Some("--after-revision") if after_revision.is_none() => {
+                after_revision = Some(parse_u64_argument(flags.next().ok_or(CliError::Usage)?)?);
+            }
+            _ => return Err(CliError::Usage),
+        }
+    }
+    Ok(RepositoryOperationCliCommand::Status {
+        operation,
+        wait_ms,
+        after_revision,
+    })
+}
+
+fn parse_repository_index_mode(
+    argument: &std::ffi::OsStr,
+) -> Result<RepositoryIndexMode, CliError> {
+    match argument.to_str() {
+        Some("auto") => Ok(RepositoryIndexMode::Auto),
+        Some("structural") => Ok(RepositoryIndexMode::Structural),
+        Some("deep") => Ok(RepositoryIndexMode::Deep),
+        _ => Err(CliError::InvalidRepositoryIndexMode),
+    }
+}
+
+fn parse_generation_selector(
+    argument: &std::ffi::OsStr,
+) -> Result<ClientGenerationSelector, CliError> {
+    if argument == "active" {
+        Ok(ClientGenerationSelector::Active)
+    } else {
+        parse_generation(argument).map(ClientGenerationSelector::Generation)
+    }
+}
+
+fn parse_u32_argument(argument: &std::ffi::OsStr) -> Result<u32, CliError> {
+    argument
+        .to_str()
+        .ok_or(CliError::InvalidNumericArgument)?
+        .parse()
+        .map_err(|_| CliError::InvalidNumericArgument)
+}
+
+fn parse_u64_argument(argument: &std::ffi::OsStr) -> Result<u64, CliError> {
+    argument
+        .to_str()
+        .ok_or(CliError::InvalidNumericArgument)?
+        .parse()
+        .map_err(|_| CliError::InvalidNumericArgument)
+}
+
+fn random_operation_id() -> Result<OperationId, CliError> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| CliError::RandomUnavailable)?;
+    Ok(OperationId::from_bytes(bytes))
 }
 
 fn execute_runtime_trace_import(
@@ -1025,9 +1390,9 @@ fn generation_transfer_cancellation() -> Result<Cancellation, CliError> {
 fn parse_repository(argument: &std::ffi::OsStr) -> Result<RepositoryId, CliError> {
     argument
         .to_str()
-        .ok_or(CliError::InvalidGenerationInput)?
+        .ok_or(CliError::InvalidRepository)?
         .parse()
-        .map_err(|_| CliError::InvalidGenerationInput)
+        .map_err(|_| CliError::InvalidRepository)
 }
 
 fn parse_generation(argument: &std::ffi::OsStr) -> Result<GenerationId, CliError> {
@@ -1666,12 +2031,62 @@ impl CliEnvelope {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CliHelp {
+    usage: &'static str,
+    repository_commands: [&'static str; 5],
+    service_commands: [&'static str; 5],
+}
+
+impl CliHelp {
+    const fn current() -> Self {
+        Self {
+            usage: "rootlight <command> [options]",
+            repository_commands: [
+                "repo index <root> [--mode auto|structural|deep] [--detached]",
+                "repo list [--max-results <count>] [--query <text>]",
+                "repo status <repository-id> [--generation active|<generation-id>]",
+                "operation status <operation-id> [--wait-ms <ms>] [--after-revision <revision>]",
+                "operation cancel <operation-id>",
+            ],
+            service_commands: [
+                "health [--json]",
+                "diagnostics quick",
+                "support-bundle --output <file>",
+                "repair --dry-run <action> [--inventory <file>]",
+                "update <install|uninstall|apply|recover|status|verify> [options]",
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CliVersion {
+    name: &'static str,
+    version: &'static str,
+}
+
+impl CliVersion {
+    const fn current() -> Self {
+        Self {
+            name: "rootlight",
+            version: env!("CARGO_PKG_VERSION"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 enum CommandResult {
+    Help(CliHelp),
+    Version(CliVersion),
     Health(Health),
     DiagnosticsQuick(DiagnosticsQuick),
     SupportBundle(SupportBundleReceipt),
+    RepositoryIndex(RepositoryIndex),
+    RepositoryList(RepositoryList),
+    RepositoryStatus(RepositoryStatus),
+    RepositoryOperationStatus(RepositoryOperationStatus),
     RepairPlan(RepairPlan),
     UpdateVerified(VerifiedUpdate),
     UpdateInstalled(PackageInstallOutcome),
@@ -1852,7 +2267,7 @@ impl ExitFamily {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: rootlight [--standalone] first-slice-demo|health [--json]|diagnostics quick|support-bundle --output <file>|--standalone generation-export --repository <id> [--generation <id>] --output <file>|generation-import --input <file> --repository <id> --source-set-hash <hash> [--generation <id>]|--standalone runtime-trace-import --input <file> --repository <id> --generation <id>|repair --dry-run <verify-catalog|verify-generation-headers|full-scrub|select-last-good-generation|rebuild-lexical-index|rebuild-derived-overlays|rebuild-repository|reconstruct-catalog|purge-quarantine> [--inventory <file>]|update install --root <dir> --artifact <file> --checksum <file> --public-key <file> --key-id <id> --channel <channel>|update uninstall --root <dir>|update apply --metadata <file> --metadata-signature <file> --artifact-signature <file> --artifact <file> --sbom <file> --provenance <file> --license-bundle <file>|update recover|update status|update verify --metadata <file> --metadata-signature <file> --artifact-signature <file> --artifact <file> --sbom <file> --provenance <file> --license-bundle <file> --public-key <file> --context <file>|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
+        "usage: rootlight <repo index|repo list|repo status|operation status|operation cancel|health|diagnostics|support-bundle|repair|update> [options]"
     )]
     Usage,
     #[error("daemon path overrides must provide both state and runtime directories")]
@@ -1921,6 +2336,16 @@ enum CliError {
     Runtime(#[from] rootlight_runtime::RuntimeError),
     #[error("operation identifier is invalid")]
     InvalidOperation,
+    #[error("repository root is invalid")]
+    InvalidRepositoryRoot,
+    #[error("repository identifier is invalid")]
+    InvalidRepository,
+    #[error("repository indexing mode is invalid")]
+    InvalidRepositoryIndexMode,
+    #[error("repository query is invalid")]
+    InvalidRepositoryQuery,
+    #[error("numeric command argument is invalid")]
+    InvalidNumericArgument,
     #[error("operation timeout is invalid")]
     InvalidTimeout,
     #[error("daemon resource limits are invalid")]
@@ -1976,6 +2401,11 @@ impl CliError {
                 | FilesystemUpdateError::InstallParentMissing,
             )
             | Self::InvalidOperation
+            | Self::InvalidRepositoryRoot
+            | Self::InvalidRepository
+            | Self::InvalidRepositoryIndexMode
+            | Self::InvalidRepositoryQuery
+            | Self::InvalidNumericArgument
             | Self::InvalidTimeout
             | Self::FirstSlice(FirstSliceError::Sharing | FirstSliceError::RuntimeTrace(_)) => {
                 ExitFamily::Usage
@@ -2165,6 +2595,113 @@ mod tests {
             lease_expires_unix_ms: None,
             recovery_class: RecoveryClass::NotApplicable,
         }
+    }
+
+    fn arguments(values: &[&str]) -> Vec<std::ffi::OsString> {
+        values.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    #[test]
+    fn discovery_commands_do_not_require_daemon_state() {
+        assert!(matches!(
+            discovery_output(&[]),
+            Some(DiscoveryOutput::Human(CLI_HELP))
+        ));
+        assert!(matches!(
+            discovery_output(&arguments(&["--version"])),
+            Some(DiscoveryOutput::Human(_))
+        ));
+        let Some(DiscoveryOutput::Json(result)) =
+            discovery_output(&arguments(&["--help", "--json"]))
+        else {
+            panic!("JSON help is selected");
+        };
+        let CommandResult::Help(help) = *result else {
+            panic!("JSON discovery returns help");
+        };
+        assert_eq!(help.usage, "rootlight <command> [options]");
+        assert!(
+            help.repository_commands
+                .iter()
+                .any(|command| command.starts_with("repo index"))
+        );
+    }
+
+    #[test]
+    fn repository_lifecycle_commands_preserve_all_cli_options() {
+        let index = parse_repository_command(&arguments(&[
+            "index",
+            "C:/source",
+            "--detached",
+            "--mode",
+            "structural",
+        ]))
+        .expect("repository index arguments parse");
+        assert_eq!(
+            index,
+            RepositoryCliCommand::Index {
+                root: "C:/source".to_owned(),
+                mode: RepositoryIndexMode::Structural,
+                detached: true,
+            }
+        );
+
+        let list = parse_repository_command(&arguments(&[
+            "list",
+            "--query",
+            "root",
+            "--max-results",
+            "25",
+        ]))
+        .expect("repository list arguments parse");
+        assert_eq!(
+            list,
+            RepositoryCliCommand::List {
+                max_results: Some(25),
+                query: Some("root".to_owned()),
+            }
+        );
+
+        let repository = RepositoryId::from_bytes([3; 16]);
+        let generation = GenerationId::from_bytes([4; 20]);
+        let status = parse_repository_command(&arguments(&[
+            "status",
+            &repository.to_string(),
+            "--generation",
+            &generation.to_string(),
+        ]))
+        .expect("repository status arguments parse");
+        assert_eq!(
+            status,
+            RepositoryCliCommand::Status {
+                repository,
+                generation: ClientGenerationSelector::Generation(generation),
+            }
+        );
+
+        let operation = OperationId::from_bytes([5; 16]);
+        let operation_status = parse_repository_operation_command(&arguments(&[
+            "status",
+            &operation.to_string(),
+            "--after-revision",
+            "7",
+            "--wait-ms",
+            "30000",
+        ]))
+        .expect("operation status arguments parse");
+        assert_eq!(
+            operation_status,
+            RepositoryOperationCliCommand::Status {
+                operation,
+                wait_ms: Some(30_000),
+                after_revision: Some(7),
+            }
+        );
+        assert_eq!(
+            parse_repository_operation_command(&arguments(&["cancel", &operation.to_string(),]))
+                .expect("operation cancel arguments parse"),
+            RepositoryOperationCliCommand::Cancel { operation }
+        );
     }
 
     #[test]
