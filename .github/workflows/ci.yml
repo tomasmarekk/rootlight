@@ -248,6 +248,13 @@ jobs:
             ~/.cargo/git
             target
           key: rootlight-ci-platform-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-all-features-debug-v1
+      - name: Compile the native Seatbelt profile
+        if: runner.os == 'macOS'
+        shell: bash
+        run: >-
+          cargo test --locked --package rootlight-sandbox --lib
+          platform::unix::tests::macos_profile_compiles_in_fresh_process
+          -- --exact --nocapture --test-threads=1
       - name: Platform contract suite
         shell: bash
         run: |
@@ -1416,13 +1423,6 @@ jobs:
       - name: Install pinned Rust
         shell: bash
         run: rustup show active-toolchain
-      - name: Compile the native Seatbelt profile
-        if: runner.os == 'macOS'
-        shell: bash
-        run: >-
-          cargo test --locked --package rootlight-sandbox --lib
-          platform::unix::tests::macos_profile_compiles_in_fresh_process
-          -- --exact --nocapture --test-threads=1
       - name: Exercise native controls against an exact live process
         shell: bash
         run: |

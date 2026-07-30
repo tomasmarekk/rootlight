@@ -1089,10 +1089,10 @@ fn stdio(mode: StdioMode) -> Stdio {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::{Read as _, Write as _},
-        os::unix::fs::symlink,
-    };
+    use std::{io::Read as _, os::unix::fs::symlink};
+
+    #[cfg(target_os = "macos")]
+    use std::io::Write as _;
 
     use nix::sys::stat::Mode;
     use nix::unistd::mkfifo;
