@@ -19,11 +19,13 @@ use std::{
 
 use nix::{
     errno::Errno,
-    sys::{
-        resource::{Resource, rlim_t, setrlimit},
-        signal::{Signal, killpg},
-    },
-    unistd::{Pid, setsid},
+    sys::signal::{Signal, killpg},
+    unistd::Pid,
+};
+#[cfg(target_os = "linux")]
+use nix::{
+    sys::resource::{Resource, rlim_t, setrlimit},
+    unistd::setsid,
 };
 
 use crate::{
@@ -37,8 +39,18 @@ const LAUNCHER_SEPARATOR: &str = "--";
 const HANDSHAKE: &[u8] = b"rootlight-native-isolated/1\n";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
+const EXECUTABLE_BUSY_RETRY_LIMIT: usize = 8;
 const ADAPTER_DESCRIPTOR_LIMIT: u64 = 64;
 const STAGED_EXECUTABLE: &str = "adapter";
+#[cfg(target_os = "macos")]
+const MACOS_RESOURCE_LAUNCH_SCRIPT: &str = r#"ulimit -S -H -t "$1" || exit 70
+ulimit -S -H -n "$2" || exit 71
+ulimit -S -H -c 0 || exit 72
+ulimit -S -H -f 0 || exit 73
+ulimit -S -H -v "$3" || exit 74
+shift 3
+exec "$@"
+"#;
 
 #[derive(Debug)]
 pub(crate) struct ChildProcess {
@@ -316,8 +328,7 @@ pub(crate) fn spawn_isolated_adapter(
     let workspace =
         ImmutableWorkspace::stage(&command.program, command.expected_executable_digest)?;
     let mut process = isolated_command(&workspace, &command, limits)?;
-    let mut child = process
-        .spawn()
+    let mut child = retry_executable_busy(|| process.spawn())
         .map_err(|error| ProcessError::io("create isolated adapter launcher", error))?;
     let process_group = Pid::from_raw(i32::try_from(child.id()).map_err(|_| {
         ProcessError::InvalidInput("adapter process identifier is not representable".to_owned())
@@ -350,6 +361,23 @@ pub(crate) fn spawn_isolated_adapter(
     ))
 }
 
+fn retry_executable_busy<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    for attempt in 0..=EXECUTABLE_BUSY_RETRY_LIMIT {
+        match operation() {
+            Err(error)
+                if error.raw_os_error() == Some(libc::ETXTBSY)
+                    && attempt < EXECUTABLE_BUSY_RETRY_LIMIT =>
+            {
+                // Some Unix filesystems briefly retain the writer lease after
+                // a sealed staged executable is closed and synced.
+                thread::sleep(PROCESS_POLL_INTERVAL);
+            }
+            result => return result,
+        }
+    }
+    unreachable!("the bounded executable retry loop always returns")
+}
+
 fn isolated_command(
     workspace: &ImmutableWorkspace,
     command: &AdapterProcessCommand,
@@ -373,16 +401,33 @@ fn isolated_command(
     #[cfg(target_os = "macos")]
     let mut process = {
         let sandbox = Path::new("/usr/bin/sandbox-exec");
-        if !sandbox.is_file() {
+        let shell = Path::new("/bin/sh");
+        if !sandbox.is_file() || !shell.is_file() {
             return Err(ProcessError::UnsupportedPlatform);
         }
+        let memory_kib = limits.memory_bytes() / 1024;
+        if memory_kib == 0 {
+            return Err(ProcessError::InvalidInput(
+                "adapter memory limit is below one kibibyte".to_owned(),
+            ));
+        }
         let profile = macos_profile(&workspace.executable, workspace.root());
-        let mut process = Command::new(sandbox);
+        let mut process = Command::new(shell);
         process
+            .arg("-c")
+            .arg(MACOS_RESOURCE_LAUNCH_SCRIPT)
+            .arg("rootlight-resource-launcher")
+            .arg(limits.cpu_seconds().to_string())
+            .arg(ADAPTER_DESCRIPTOR_LIMIT.to_string())
+            .arg(memory_kib.to_string())
+            .arg(sandbox)
             .arg("-p")
             .arg(profile)
             .arg(&workspace.executable)
             .args(arguments);
+        // The fixed script interprets no untrusted text. Separate argv values
+        // carry every path and adapter argument through exec without reparsing.
+        process.process_group(0);
         process
     };
 
@@ -463,8 +508,7 @@ pub(crate) fn enter_isolated_adapter_launcher(
     let executable = std::env::current_exe()
         .map_err(|error| ProcessError::io("resolve staged adapter executable", error))?;
     close_inherited_descriptors()?;
-    establish_resource_limits(memory_bytes, cpu_seconds, descriptor_limit)?;
-    setsid().map_err(|error| nix_error("create adapter process session", error))?;
+    establish_launcher_controls(memory_bytes, cpu_seconds, descriptor_limit)?;
     establish_platform_isolation()?;
     // Keep the private verification record separate from sandbox-exec and
     // adapter diagnostics, which both intentionally use standard error.
@@ -479,6 +523,28 @@ pub(crate) fn enter_isolated_adapter_launcher(
         .env_clear()
         .exec();
     Err(ProcessError::io("enter isolated adapter executable", error))
+}
+
+#[cfg(target_os = "linux")]
+fn establish_launcher_controls(
+    memory_bytes: u64,
+    cpu_seconds: u64,
+    descriptor_limit: u64,
+) -> Result<(), ProcessError> {
+    establish_resource_limits(memory_bytes, cpu_seconds, descriptor_limit)?;
+    setsid().map_err(|error| nix_error("create adapter process session", error))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn establish_launcher_controls(
+    _memory_bytes: u64,
+    _cpu_seconds: u64,
+    _descriptor_limit: u64,
+) -> Result<(), ProcessError> {
+    // The fixed resource launcher applies these controls before sandbox-exec,
+    // so Darwin never loads the adapter outside the requested hard limits.
+    Ok(())
 }
 
 fn close_inherited_descriptors() -> Result<(), ProcessError> {
@@ -524,6 +590,7 @@ fn parse_launcher_limit(value: Option<OsString>, label: &str) -> Result<u64, Pro
         })
 }
 
+#[cfg(target_os = "linux")]
 fn establish_resource_limits(
     memory_bytes: u64,
     cpu_seconds: u64,
@@ -823,6 +890,49 @@ mod tests {
     use nix::unistd::mkfifo;
 
     use super::*;
+
+    #[test]
+    fn executable_busy_spawn_is_retried_with_a_hard_limit() {
+        let mut attempts = 0_usize;
+        let value = retry_executable_busy(|| {
+            attempts += 1;
+            if attempts <= 2 {
+                Err(io::Error::from_raw_os_error(libc::ETXTBSY))
+            } else {
+                Ok(42_u8)
+            }
+        })
+        .expect("transient executable lease clears");
+
+        assert_eq!(value, 42);
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn unrelated_spawn_error_is_not_retried() {
+        let mut attempts = 0_usize;
+        let error = retry_executable_busy(|| {
+            attempts += 1;
+            Err::<(), _>(io::Error::from_raw_os_error(libc::ENOENT))
+        })
+        .expect_err("unrelated spawn error remains terminal");
+
+        assert_eq!(error.raw_os_error(), Some(libc::ENOENT));
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn persistent_executable_busy_error_exhausts_the_retry_budget() {
+        let mut attempts = 0_usize;
+        let error = retry_executable_busy(|| {
+            attempts += 1;
+            Err::<(), _>(io::Error::from_raw_os_error(libc::ETXTBSY))
+        })
+        .expect_err("persistent executable lease remains terminal");
+
+        assert_eq!(error.raw_os_error(), Some(libc::ETXTBSY));
+        assert_eq!(attempts, EXECUTABLE_BUSY_RETRY_LIMIT + 1);
+    }
 
     #[test]
     fn opened_handle_remains_bound_when_path_is_replaced() {

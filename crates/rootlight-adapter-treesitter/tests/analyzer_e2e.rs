@@ -438,7 +438,7 @@ fn reviewed_rust_structural_profile_marks_tests_and_scoped_calls() {
         .iter()
         .find(|occurrence| {
             occurrence.role == OccurrenceRole::CallSite
-                && occurrence.syntactic_text_hash == content_hash(b"crate::worker::handle")
+                && occurrence.syntactic_text_hash == content_hash(b"handle")
         })
         .expect("qualified scoped call is captured");
     assert_eq!(

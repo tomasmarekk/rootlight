@@ -1076,6 +1076,88 @@ fn flow_trace_returns_a_resolved_rust_call_path() {
 }
 
 #[test]
+fn flow_trace_resolves_a_multifile_rust_scoped_call_path() {
+    let fixture = TempDir::new().expect("fixture root exists");
+    fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+    fs::write(
+        fixture.path().join("src/lib.rs"),
+        "pub mod gateway;\npub mod service;\npub mod worker;\n",
+    )
+    .expect("module root writes");
+    fs::write(
+        fixture.path().join("src/gateway.rs"),
+        "pub fn submit_budget_request(value: usize) -> usize {\n    crate::worker::handle_budget_message(value)\n}\n",
+    )
+    .expect("gateway source writes");
+    fs::write(
+        fixture.path().join("src/service.rs"),
+        "pub fn transform(value: usize) -> usize { value }\n",
+    )
+    .expect("service source writes");
+    fs::write(
+        fixture.path().join("src/worker.rs"),
+        "pub fn handle_budget_message(value: usize) -> usize {\n    crate::service::transform(value)\n}\n",
+    )
+    .expect("worker source writes");
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("multifile fixture indexes");
+    let locate = |name: &str| {
+        service
+            .code_locate(
+                indexed.generation,
+                name.to_owned(),
+                LocateMode::Exact,
+                8,
+                0,
+                &cancellation,
+            )
+            .expect("fixture symbol locates")
+            .data
+            .hits
+            .into_iter()
+            .next()
+            .expect("fixture symbol is present")
+            .symbol
+    };
+    let gateway = locate("submit_budget_request");
+    let worker = locate("handle_budget_message");
+    let transform = locate("transform");
+
+    let trace = service
+        .flow_trace(
+            indexed.generation,
+            gateway,
+            Some(transform),
+            vec![RelationFamily::Calls],
+            Some(RelationDirection::Outbound),
+            0,
+            5,
+            20,
+            &cancellation,
+        )
+        .expect("multifile flow trace succeeds");
+
+    assert_eq!(trace.data.paths.len(), 1);
+    assert_eq!(trace.data.paths[0].nodes, vec![gateway, worker, transform]);
+    assert_eq!(trace.data.paths[0].edges.len(), 2);
+    assert!(
+        trace.data.paths[0]
+            .edges
+            .iter()
+            .all(|edge| edge.family == RelationFamily::Calls)
+    );
+    assert!(
+        trace.data.paths[0]
+            .edges
+            .iter()
+            .all(|edge| !edge.source_refs.is_empty())
+    );
+}
+
+#[test]
 fn architecture_cycles_reports_an_honest_empty_result_for_a_known_fixture() {
     // The first-slice oracle records a direct call as a `DispatchCandidate`
     // occurrence and structural containment as a file-to-entity `Contains`

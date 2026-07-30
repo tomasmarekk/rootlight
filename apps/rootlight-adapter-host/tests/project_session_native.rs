@@ -5,6 +5,7 @@
 //! child handler.
 
 use std::{
+    collections::BTreeSet,
     fs,
     io::{Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
@@ -22,7 +23,7 @@ use rootlight_ids::{
 };
 use rootlight_ir::{
     AnalysisTier, CoverageScope, CoverageStatus, ExtensionSupport, FactDomain, OccurrenceRole,
-    RelationPredicate,
+    OccurrenceTarget, RelationPredicate,
 };
 use rootlight_protocol::{
     adapter_contract::{ADAPTER_NONCE_BYTES, NegotiatedSession},
@@ -132,6 +133,86 @@ fn actual_isolated_binary_returns_multifile_tier_b() {
             mapping_coverage.skipped,
         ),
         (1, 1, 0)
+    );
+}
+
+#[test]
+fn actual_isolated_binary_resolves_rust_module_call_chain() {
+    let executable = adapter_executable();
+    let limits = resource_limits(8 * 1024 * 1024);
+    let session = negotiated_session(&executable, limits);
+    let request = project_request(
+        &session,
+        "rust",
+        &[
+            (
+                "src/gateway.rs",
+                b"pub fn submit_budget_request(value: usize) -> usize {\n    crate::worker::handle_budget_message(value)\n}\n"
+                    .as_slice(),
+                false,
+                Vec::new(),
+            ),
+            (
+                "src/lib.rs",
+                b"pub mod gateway;\npub mod service;\npub mod worker;\n".as_slice(),
+                false,
+                Vec::new(),
+            ),
+            (
+                "src/service.rs",
+                b"pub fn transform(value: usize) -> usize { value }\n".as_slice(),
+                false,
+                Vec::new(),
+            ),
+            (
+                "src/worker.rs",
+                b"pub fn handle_budget_message(value: usize) -> usize {\n    crate::service::transform(value)\n}\n"
+                    .as_slice(),
+                false,
+                Vec::new(),
+            ),
+        ],
+    );
+
+    let output = execute_isolated_project_adapter(
+        &executable,
+        &session,
+        &request,
+        &ExtensionSupport::default(),
+        &deadline(),
+    )
+    .expect("the real isolated project adapter succeeds");
+    let document = output.document();
+    let resolved_call_targets = document
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+        .filter_map(|occurrence| match occurrence.target {
+            OccurrenceTarget::Resolved { symbol } => document
+                .entities
+                .iter()
+                .find(|entity| entity.id == symbol)
+                .map(|entity| entity.display_name.as_str()),
+            OccurrenceTarget::Candidates { .. } | OccurrenceTarget::Unresolved { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+
+    assert!(
+        resolved_call_targets.contains("handle_budget_message"),
+        "the gateway-to-worker call must resolve: {resolved_call_targets:?}"
+    );
+    assert!(
+        resolved_call_targets.contains("transform"),
+        "the worker-to-service call must resolve: {resolved_call_targets:?}"
+    );
+    assert!(
+        document
+            .relations
+            .iter()
+            .filter(|relation| relation.predicate == RelationPredicate::Calls)
+            .count()
+            >= 2,
+        "the two resolved call sites must materialize call relations"
     );
 }
 

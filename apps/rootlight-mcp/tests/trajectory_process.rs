@@ -494,9 +494,17 @@ fn preregistered_trajectories_run_through_daemon_and_mcp_processes() {
             ))
         })
         .collect::<Vec<_>>();
+    let cross_service_flow_responses = rootlight
+        .workflow_observations
+        .iter()
+        .filter(|execution| execution.task.workflow_id == "cross-service-trace")
+        .flat_map(|execution| &execution.calls)
+        .filter(|call| call.tool == "flow.trace")
+        .map(|call| &call.response)
+        .collect::<Vec<_>>();
     assert!(
         quality.threshold_passed,
-        "every workflow must retain Rootlight quality within two points of the task-driven baseline: summaries={:#?}; missing_facts={rootlight_missing_facts:#?}",
+        "every workflow must retain Rootlight quality within two points of the task-driven baseline: summaries={:#?}; missing_facts={rootlight_missing_facts:#?}; cross_service_flow_responses={cross_service_flow_responses:#?}",
         quality.workflows,
     );
     assert!(

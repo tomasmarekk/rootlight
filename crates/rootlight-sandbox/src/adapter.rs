@@ -524,7 +524,7 @@ impl AdapterIsolationReport {
                 ),
                 AdapterMechanismEvidence::enforced(
                     ProcessGroupCleanup,
-                    "dedicated_session_is_killed_and_reaped_by_owner",
+                    "dedicated_process_group_is_killed_and_reaped_by_owner",
                 ),
             ],
         }

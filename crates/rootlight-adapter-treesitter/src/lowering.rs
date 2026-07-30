@@ -942,6 +942,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
 
             if let Some(role) = occurrence_role(fact) {
                 let text = self.text_for_span(fact.span())?;
+                let resolution_text =
+                    structural_resolution_text(self.request.language().as_str(), fact, text);
                 let enclosing = entity_plan
                     .nearest_entity_ancestor
                     .get(&fact.local_id())
@@ -956,7 +958,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     provenance_id,
                     syntax_confidence,
                     source.clone(),
-                    text,
+                    resolution_text,
                 )?;
                 let occurrence_id = occurrence.id;
                 occurrences.insert(occurrence_id, occurrence);
@@ -1909,6 +1911,20 @@ fn unresolved_occurrence(
     record.id = derive_occurrence_record_id(&record)
         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
     Ok(record)
+}
+
+fn structural_resolution_text<'a>(language: &str, fact: &SyntaxFact, text: &'a str) -> &'a str {
+    // Structural resolution matches entity-name hashes. The full scoped Rust
+    // spelling remains available through the occurrence's source span.
+    if language == "rust" && fact.syntax_kind().as_str().ends_with(".scoped_call") {
+        text.rsplit("::")
+            .next()
+            .map(str::trim)
+            .filter(|terminal| !terminal.is_empty())
+            .unwrap_or(text)
+    } else {
+        text
+    }
 }
 
 fn containment_relation(
