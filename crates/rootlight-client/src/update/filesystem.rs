@@ -2283,6 +2283,9 @@ fn prepare_private_install_root(path: &Path) -> Result<(), FilesystemUpdateError
                 }
             }
         }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            return Err(FilesystemUpdateError::InstallParentMissing);
+        }
         Err(source) => return Err(FilesystemUpdateError::Io(source)),
     }
     #[cfg(unix)]
@@ -2652,6 +2655,9 @@ pub enum FilesystemUpdateError {
     /// Installation layout or ownership state is invalid.
     #[error("update installation is invalid")]
     InvalidInstall,
+    /// The installation root cannot be created until its parent exists.
+    #[error("update installation parent is missing")]
+    InstallParentMissing,
     /// Active selector and ownership state disagree.
     #[error("update installation state is inconsistent")]
     InconsistentState,
@@ -3254,6 +3260,19 @@ mod tests {
         assert!(!root.join("current").exists());
         assert!(!root.join("versions").exists());
         assert!(!root.join("state").exists());
+    }
+
+    #[test]
+    fn bootstrap_reports_a_missing_install_parent_without_creating_ancestors() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let missing_parent = temporary.path().join("missing");
+        let root = missing_parent.join("install");
+
+        assert!(matches!(
+            prepare_private_install_root(&root),
+            Err(FilesystemUpdateError::InstallParentMissing)
+        ));
+        assert!(!missing_parent.exists());
     }
 
     #[test]

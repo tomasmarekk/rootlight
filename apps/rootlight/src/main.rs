@@ -34,7 +34,7 @@ use rootlight_daemon_core::{
     OperationPreparationError, PreparedOperationSubmission,
     ResourcePressure as DomainResourcePressure, ServiceError, SupportBundle as DomainSupportBundle,
 };
-use rootlight_error::{ErrorCode, PublicError};
+use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
 use rootlight_ids::{ContentHash, GenerationId, OperationId, RepositoryId, content_hash};
 use rootlight_operations::{
     CancellationAuthority, CatalogWriterLock, ClientInstanceId, GenerationRepairCandidate,
@@ -1972,7 +1972,8 @@ impl CliError {
             | Self::FilesystemUpdate(
                 FilesystemUpdateError::InvalidInput
                 | FilesystemUpdateError::InputTooLarge
-                | FilesystemUpdateError::InvalidSignature,
+                | FilesystemUpdateError::InvalidSignature
+                | FilesystemUpdateError::InstallParentMissing,
             )
             | Self::InvalidOperation
             | Self::InvalidTimeout
@@ -2035,6 +2036,22 @@ impl CliError {
         }
         if matches!(self, Self::FirstSlice(FirstSliceError::Cancelled(_))) {
             return PublicError::builder(ErrorCode::Cancelled, "operation was cancelled").build();
+        }
+        if matches!(
+            self,
+            Self::FilesystemUpdate(FilesystemUpdateError::InstallParentMissing)
+        ) {
+            let field = DetailKey::parse("root")?;
+            return PublicError::builder(
+                ErrorCode::InvalidArgument,
+                "installation parent directory does not exist",
+            )
+            .detail(
+                DetailKey::parse("precondition")?,
+                PublicValue::Label(SafeLabel::parse("parent_exists")?),
+            )
+            .next_action(NextAction::CorrectField { field })
+            .build();
         }
         let (code, message, retryable) = match self.exit_family() {
             ExitFamily::Success => (ErrorCode::Internal, "internal operation failed", false),
@@ -2487,6 +2504,31 @@ mod tests {
         assert_eq!(json["exit_family"], "usage");
         assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
         assert!(json.get("result").is_none());
+    }
+
+    #[test]
+    fn missing_install_parent_reports_the_required_precondition() {
+        let error = CliError::FilesystemUpdate(FilesystemUpdateError::InstallParentMissing);
+        let envelope = CliEnvelope::failure(
+            error.exit_family(),
+            error
+                .public_error()
+                .expect("missing-parent public error is valid"),
+        );
+        let json = serde_json::to_value(envelope).expect("CLI envelope serializes");
+
+        assert_eq!(json["exit_family"], "usage");
+        assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            json["error"]["message"],
+            "installation parent directory does not exist"
+        );
+        assert_eq!(
+            json["error"]["details"]["precondition"]["value"],
+            "parent_exists"
+        );
+        assert_eq!(json["error"]["next_actions"][0]["action"], "correct_field");
+        assert_eq!(json["error"]["next_actions"][0]["field"], "root");
     }
 
     #[test]
