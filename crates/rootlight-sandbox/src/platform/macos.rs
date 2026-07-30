@@ -109,12 +109,14 @@ pub(super) fn replace_process_with_memory_limit(
     let mut attributes = SpawnAttributes::new()?;
     attributes.set_replace_process()?;
     attributes.set_fatal_footprint_limit(memory_mebibytes)?;
+    let mut process_identifier: libc::pid_t = 0;
     // SAFETY: every argv pointer refers to a live `CString`, both pointer
-    // arrays are null-terminated, the environment is intentionally empty, and
-    // the initialized attributes remain alive for the complete call.
+    // arrays are null-terminated, `process_identifier` is writable for the
+    // complete call, the environment is intentionally empty, and the
+    // initialized attributes remain alive for the complete call.
     let result = unsafe {
         libc::posix_spawn(
-            ptr::null_mut(),
+            &mut process_identifier,
             program_c.as_ptr(),
             ptr::null(),
             &attributes.raw,

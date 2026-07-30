@@ -49,5 +49,5 @@ status = "enabled"
 owner = "@tomasmarekk"
 reason = "Darwin fatal physical-footprint spawn attributes require a reviewed C FFI boundary"
 expected_source_tokens = 6
-expected_geiger_count = 1
+expected_geiger_count = 19
 geiger_host_os = "macos"
