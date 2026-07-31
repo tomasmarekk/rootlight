@@ -4963,6 +4963,15 @@ const PLAN_CHANGE_MAX_CONTEXT_ITEMS: usize = 64;
 /// Maximum target symbols attached to one `plan.change` step.
 const PLAN_CHANGE_MAX_STEP_TARGETS: usize = 32;
 
+/// Maximum relation rows inspected while expanding one change-plan target set.
+const PLAN_CHANGE_MAX_RELATION_SCAN_ROWS: u64 = 100_000;
+
+/// Maximum rows inspected by each file-target resolution projection.
+const PLAN_CHANGE_MAX_FILE_SCAN_ROWS: u64 = 50_000;
+
+/// Maximum rows admitted for the optional whole-generation test projection.
+const PLAN_CHANGE_MAX_TEST_SCAN_ROWS: u64 = 50_000;
+
 /// Change plan assembled before bounded result emission.
 struct PlanChangeAnalysis {
     plan: Vec<PlanChangeStepRecord>,
@@ -4974,14 +4983,13 @@ struct PlanChangeAnalysis {
 
 /// Builds a bounded change plan for the explicit target set.
 ///
-/// The explicit symbol and file targets are resolved to concrete symbols, the
-/// reused `change.impact` forward closure propagates the targets to their
-/// dependents over the served relation families, the reused `tests.select`
-/// ranking relates test entities to the impacted surface, and a deterministic
-/// ordered plan is built from the objective class and the measured impact. The
-/// impact summary, open decisions, and context-pack request are all source-free
-/// and honest: no dependent or repository content is fabricated. Rows, edges,
-/// results, and memory are bounded exactly like `change.impact`.
+/// Explicit symbols are resolved through the generation's ordered identity
+/// index. File targets use a bounded entity scan, and the forward impact closure
+/// scans only for dependents of the current breadth-first frontier instead of
+/// materializing a repository-wide adjacency map. The reused `tests.select`
+/// ranking runs only when its complete projection fits a smaller optional-work
+/// allowance. The impact summary, open decisions, and context-pack request
+/// remain source-free and honest: omitted work is reported as truncation.
 fn build_plan_change(
     document: &NormalizedIrDocument,
     plan: &PlanChangePlan,
@@ -4989,115 +4997,108 @@ fn build_plan_change(
     tracker: &mut UsageTracker,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<PlanChangeAnalysis, QueryError> {
-    // Resolve per-entity metadata: declaring file, kind label, and public
-    // surface membership, exactly like `change.impact`.
     let mut entity_file: BTreeMap<SymbolId, FileId> = BTreeMap::new();
     let mut entity_kind: BTreeMap<SymbolId, String> = BTreeMap::new();
     let mut entity_public: BTreeSet<SymbolId> = BTreeSet::new();
-    for entity in &document.entities {
-        control.check()?;
-        if !tracker.can_add(QueryResource::Rows, 1) {
-            record_limit(limiting_resources, QueryResource::Rows)?;
-            break;
-        }
-        tracker.add_rows(1)?;
-        if let Some(source) = entity.evidence.source.as_ref() {
-            entity_file.insert(entity.id, source.span().file());
-        }
-        entity_kind.insert(entity.id, serialized_label(&entity.kind)?);
-        if entity_is_exported(entity) {
-            entity_public.insert(entity.id);
-        }
-    }
-
-    // Single bounded relation scan: `Contains` relations confirm the owning file
-    // of each entity, while served family relations contribute the reverse
-    // dependent adjacency reused from `change.impact`.
-    let allowed: BTreeSet<RelationPredicate> = CHANGE_IMPACT_FAMILIES
-        .iter()
-        .flat_map(|family| family.predicates().iter().copied())
-        .collect();
-    let mut dependents: BTreeMap<SymbolId, Vec<(SymbolId, RelationFamily, u16)>> = BTreeMap::new();
-    for relation in &document.relations {
-        control.check()?;
-        if !tracker.can_add(QueryResource::Rows, 1) {
-            record_limit(limiting_resources, QueryResource::Rows)?;
-            break;
-        }
-        tracker.add_rows(1)?;
-        if relation.predicate == RelationPredicate::Contains {
-            if let (RelationEndpoint::File(file), RelationEndpoint::Entity(symbol)) =
-                (relation.subject, relation.object)
-            {
-                entity_file.insert(symbol, file);
-            }
-            continue;
-        }
-        if !allowed.contains(&relation.predicate) {
-            continue;
-        }
-        let Some(family) = predicate_family(CHANGE_IMPACT_FAMILIES, relation.predicate) else {
-            continue;
-        };
-        let Some(subject) = endpoint_entity(document, relation.subject) else {
-            continue;
-        };
-        let Some(object) = endpoint_entity(document, relation.object) else {
-            continue;
-        };
-        if subject == object {
-            continue;
-        }
-        if !tracker.can_add(QueryResource::Edges, 1) {
-            record_limit(limiting_resources, QueryResource::Edges)?;
-            break;
-        }
-        tracker.add_edges(1)?;
-        dependents
-            .entry(object)
-            .or_default()
-            .push((subject, family, relation.confidence.get()));
-    }
-    for edges in dependents.values_mut() {
-        edges.sort_by(|left, right| {
-            left.0
-                .cmp(&right.0)
-                .then_with(|| left.1.as_str().cmp(right.1.as_str()))
-                .then_with(|| right.2.cmp(&left.2))
-        });
-    }
-
-    // Build the file-to-entity map after containment is fully resolved.
-    let mut file_entities: BTreeMap<FileId, BTreeSet<SymbolId>> = BTreeMap::new();
-    for (symbol, file) in &entity_file {
-        file_entities.entry(*file).or_default().insert(*symbol);
-    }
-
-    // Resolve the explicit targets to concrete symbols: symbol targets carry
-    // their identity directly, while file targets expand to the entities
-    // declared in the matching file.
-    let mut resolved_targets: BTreeSet<SymbolId> = BTreeSet::new();
+    let mut resolved_targets = plan.target_symbols.clone();
     for symbol in &plan.target_symbols {
-        resolved_targets.insert(*symbol);
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            break;
+        }
+        tracker.add_rows(1)?;
+        insert_plan_entity_metadata(
+            document,
+            *symbol,
+            &mut entity_file,
+            &mut entity_kind,
+            &mut entity_public,
+        )?;
     }
+
     let mut resolved_target_files: BTreeSet<FileId> = BTreeSet::new();
     for file in &plan.target_files {
         resolved_target_files.insert(*file);
-        if let Some(declared) = file_entities.get(file) {
-            for symbol in declared {
-                resolved_targets.insert(*symbol);
+    }
+    if !resolved_target_files.is_empty() {
+        let mut scanned_rows = 0_u64;
+        for entity in &document.entities {
+            control.check()?;
+            if scanned_rows >= PLAN_CHANGE_MAX_FILE_SCAN_ROWS
+                || !tracker.can_add(QueryResource::Rows, 1)
+            {
+                record_limit(limiting_resources, QueryResource::Rows)?;
+                break;
+            }
+            tracker.add_rows(1)?;
+            scanned_rows = scanned_rows.saturating_add(1);
+            let Some(source) = entity.evidence.source.as_ref() else {
+                continue;
+            };
+            if !resolved_target_files.contains(&source.span().file()) {
+                continue;
+            }
+            resolved_targets.insert(entity.id);
+            insert_plan_entity_metadata(
+                document,
+                entity.id,
+                &mut entity_file,
+                &mut entity_kind,
+                &mut entity_public,
+            )?;
+        }
+
+        // Some normalized entities have containment evidence without a direct
+        // source span. Preserve file-target resolution through a separately
+        // bounded `Contains` projection.
+        scanned_rows = 0;
+        for relation in &document.relations {
+            control.check()?;
+            if scanned_rows >= PLAN_CHANGE_MAX_FILE_SCAN_ROWS
+                || !tracker.can_add(QueryResource::Rows, 1)
+            {
+                record_limit(limiting_resources, QueryResource::Rows)?;
+                break;
+            }
+            tracker.add_rows(1)?;
+            scanned_rows = scanned_rows.saturating_add(1);
+            if relation.predicate != RelationPredicate::Contains {
+                continue;
+            }
+            let (RelationEndpoint::File(file), RelationEndpoint::Entity(symbol)) =
+                (relation.subject, relation.object)
+            else {
+                continue;
+            };
+            if !resolved_target_files.contains(&file) {
+                continue;
+            }
+            resolved_targets.insert(symbol);
+            entity_file.insert(symbol, file);
+            if tracker.can_add(QueryResource::Rows, 1) {
+                tracker.add_rows(1)?;
+                insert_plan_entity_metadata(
+                    document,
+                    symbol,
+                    &mut entity_file,
+                    &mut entity_kind,
+                    &mut entity_public,
+                )?;
+            } else {
+                record_limit(limiting_resources, QueryResource::Rows)?;
             }
         }
     }
 
-    // Run the reused bounded forward impact closure from the resolved targets.
-    let closure = impact_closure(
-        &dependents,
+    let closure = plan_change_impact_closure(
+        document,
         &resolved_targets,
         plan.max_depth,
-        &entity_kind,
-        &entity_public,
         plan.max_dependents,
+        &mut entity_file,
+        &mut entity_kind,
+        &mut entity_public,
         tracker,
         limiting_resources,
         control,
@@ -5178,6 +5179,173 @@ fn build_plan_change(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the target-centered projection updates each bounded metadata view explicitly"
+)]
+fn plan_change_impact_closure(
+    document: &NormalizedIrDocument,
+    roots: &BTreeSet<SymbolId>,
+    max_depth: u8,
+    max_dependents: usize,
+    entity_file: &mut BTreeMap<SymbolId, FileId>,
+    entity_kind: &mut BTreeMap<SymbolId, String>,
+    entity_public: &mut BTreeSet<SymbolId>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+    control: &QueryControl<'_>,
+) -> Result<Vec<ImpactEntryRecord>, QueryError> {
+    let allowed: BTreeSet<RelationPredicate> = CHANGE_IMPACT_FAMILIES
+        .iter()
+        .flat_map(|family| family.predicates().iter().copied())
+        .collect();
+    let mut visited = roots.clone();
+    let mut frontier: BTreeMap<SymbolId, (u16, Vec<String>)> = roots
+        .iter()
+        .copied()
+        .map(|symbol| (symbol, (1_000, Vec::new())))
+        .collect();
+    let mut entries = Vec::new();
+    let mut scanned_rows = 0_u64;
+    let mut depth_limited = false;
+
+    for distance in 1..=max_depth {
+        control.check()?;
+        let mut next_frontier: BTreeMap<SymbolId, (u16, Vec<String>)> = BTreeMap::new();
+        let mut results_limited = false;
+        for relation in &document.relations {
+            control.check()?;
+            if scanned_rows >= PLAN_CHANGE_MAX_RELATION_SCAN_ROWS
+                || !tracker.can_add(QueryResource::Rows, 1)
+            {
+                record_limit(limiting_resources, QueryResource::Rows)?;
+                return Ok(entries);
+            }
+            tracker.add_rows(1)?;
+            scanned_rows = scanned_rows.saturating_add(1);
+            if !allowed.contains(&relation.predicate) {
+                continue;
+            }
+            let Some(family) = predicate_family(CHANGE_IMPACT_FAMILIES, relation.predicate) else {
+                continue;
+            };
+            let Some(subject) = endpoint_entity(document, relation.subject) else {
+                continue;
+            };
+            let Some(object) = endpoint_entity(document, relation.object) else {
+                continue;
+            };
+            let Some((parent_confidence, parent_path)) = frontier.get(&object) else {
+                continue;
+            };
+            if subject == object || visited.contains(&subject) {
+                continue;
+            }
+            if !tracker.can_add(QueryResource::Edges, 1) {
+                record_limit(limiting_resources, QueryResource::Edges)?;
+                return Ok(entries);
+            }
+            tracker.add_edges(1)?;
+            let confidence = (*parent_confidence).min(relation.confidence.get());
+            let mut path = parent_path.clone();
+            path.push(family.as_str().to_owned());
+            path.truncate(16);
+            let candidate = (confidence, path);
+            let dependent_cap_reached =
+                entries.len().saturating_add(next_frontier.len()) >= max_dependents;
+            match next_frontier.entry(subject) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    if dependent_cap_reached {
+                        record_limit(limiting_resources, QueryResource::Results)?;
+                        results_limited = true;
+                    } else {
+                        entry.insert(candidate);
+                    }
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if candidate.0 > entry.get().0
+                        || (candidate.0 == entry.get().0 && candidate.1 < entry.get().1)
+                    {
+                        entry.insert(candidate);
+                    }
+                }
+            }
+        }
+
+        if next_frontier.is_empty() {
+            frontier.clear();
+            break;
+        }
+        let mut retained_frontier = BTreeMap::new();
+        for (symbol, (confidence, via)) in next_frontier {
+            if entries.len() >= max_dependents {
+                record_limit(limiting_resources, QueryResource::Results)?;
+                return Ok(entries);
+            }
+            visited.insert(symbol);
+            if tracker.can_add(QueryResource::Rows, 1) {
+                tracker.add_rows(1)?;
+                insert_plan_entity_metadata(
+                    document,
+                    symbol,
+                    entity_file,
+                    entity_kind,
+                    entity_public,
+                )?;
+            } else {
+                record_limit(limiting_resources, QueryResource::Rows)?;
+            }
+            let entry = ImpactEntryRecord {
+                symbol_id: symbol,
+                kind: entity_kind
+                    .get(&symbol)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                distance,
+                confidence,
+                via: via.clone(),
+                is_public: entity_public.contains(&symbol),
+            };
+            let previous_len = entries.len();
+            emit_cycle_value(&mut entries, entry, tracker, limiting_resources, control)?;
+            if entries.len() == previous_len {
+                return Ok(entries);
+            }
+            retained_frontier.insert(symbol, (confidence, via));
+        }
+        frontier = retained_frontier;
+        if results_limited {
+            return Ok(entries);
+        }
+        depth_limited = distance == max_depth && !frontier.is_empty();
+    }
+
+    if depth_limited {
+        record_limit(limiting_resources, QueryResource::Depth)?;
+    }
+    Ok(entries)
+}
+
+fn insert_plan_entity_metadata(
+    document: &NormalizedIrDocument,
+    symbol: SymbolId,
+    entity_file: &mut BTreeMap<SymbolId, FileId>,
+    entity_kind: &mut BTreeMap<SymbolId, String>,
+    entity_public: &mut BTreeSet<SymbolId>,
+) -> Result<(), QueryError> {
+    let Some(entity) = find_entity(document, symbol) else {
+        return Ok(());
+    };
+    if let Some(source) = entity.evidence.source.as_ref() {
+        entity_file.insert(symbol, source.span().file());
+    }
+    entity_kind.insert(symbol, serialized_label(&entity.kind)?);
+    if entity_is_exported(entity) {
+        entity_public.insert(symbol);
+    }
+    Ok(())
+}
+
 /// Relates test entities to the targets and impacted dependents.
 ///
 /// The reused `tests.select` ranking is seeded from the resolved targets and
@@ -5216,6 +5384,25 @@ fn build_plan_change_tests(
             .take(PLAN_CHANGE_MAX_CONTEXT_ITEMS)
             .collect();
         record_limit(limiting_resources, QueryResource::Results)?;
+    }
+    let projection_rows = u64::try_from(document.entities.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(u64::try_from(document.relations.len()).unwrap_or(u64::MAX));
+    if limiting_resources.contains(&QueryResource::Rows)
+        || projection_rows > tracker.remaining_rows()
+        || projection_rows > PLAN_CHANGE_MAX_TEST_SCAN_ROWS
+    {
+        record_limit(limiting_resources, QueryResource::Rows)?;
+        return Ok(TestsSelectAnalysis {
+            tests: Vec::new(),
+            coverage_strategy: TestsSelectCoverage {
+                direct_edges: false,
+                transitive_signals: false,
+                history_signals: false,
+                file_colocation_signals: false,
+            },
+            gaps: Vec::new(),
+        });
     }
     let selection_plan = TestsSelectPlan {
         seeds,
@@ -7408,6 +7595,10 @@ impl UsageTracker {
             .max_memory_bytes
             .saturating_sub(self.memory_bytes)
     }
+
+    const fn remaining_rows(&self) -> u64 {
+        self.budget.max_rows.saturating_sub(self.rows)
+    }
 }
 
 struct QueryControl<'a> {
@@ -9479,6 +9670,35 @@ mod tests {
                 .iter()
                 .any(|decision| decision.question == "confirm_public_surface_change")
         );
+    }
+
+    #[test]
+    fn plan_change_prioritizes_explicit_symbols_over_unrelated_entities() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        for byte in 1..=40 {
+            add_entity(&mut document, byte, 1, EntityKind::Function);
+        }
+        add_public_entity(&mut document, 200, 1, EntityKind::Function);
+        add_entity(&mut document, 201, 1, EntityKind::Function);
+        add_calls(&mut document, 210, 201, 200, 900);
+
+        let mut plan = plan_change_plan(
+            PlanChangeObjective::BugFix,
+            BTreeSet::from([symbol(200)]),
+            BTreeSet::new(),
+            6,
+        );
+        plan.budget = plan.budget.with_max_rows(8);
+        let (analysis, execution) = run_plan_change_with_execution(&document, &plan);
+
+        assert_eq!(analysis.plan[0].targets, vec![symbol(200)]);
+        assert_eq!(analysis.plan[2].targets, vec![symbol(201)]);
+        assert_eq!(analysis.affected_scope.affected_symbols, 2);
+        assert_eq!(analysis.affected_scope.affected_files, 1);
+        assert!(analysis.affected_scope.touches_public_surface);
+        assert!(execution.is_truncated());
+        assert_eq!(execution.limiting_resources(), &[QueryResource::Rows]);
     }
 
     #[test]
