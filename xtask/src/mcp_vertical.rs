@@ -1871,8 +1871,8 @@ fn exercise_malformed_source(
         "malformed-source skipped inputs",
     )?;
     if coverage.overall_status != "bounded"
-        || coverage.language_status.as_deref() != Some("bounded")
-        || coverage.tier.as_deref() != Some("B")
+        || coverage.language_status.is_some()
+        || coverage.tier.is_some()
         || skipped_inputs == 0
         || !diagnostic_code_is_present(
             &locate.structured["warnings"],
@@ -1881,7 +1881,7 @@ fn exercise_malformed_source(
         || healthy_snapshot.symbol.is_empty()
     {
         return Err(VerticalError::Invariant(
-            "malformed-source scenario did not retain partial results with bounded coverage",
+            "malformed-source scenario did not retain bounded aggregate coverage without inventing language metadata",
         ));
     }
     Ok(MalformedSourceEvidence {
