@@ -5116,12 +5116,6 @@
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "languages",
-                "status": "unsupported_stable_error",
-                "summary": "language filtering is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "related_to",
                 "status": "unsupported_stable_error",
                 "summary": "relationship-constrained lookup is not served"
