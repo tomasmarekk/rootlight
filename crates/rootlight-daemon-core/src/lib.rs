@@ -1202,6 +1202,13 @@ enum JournalCommand {
         claim: MutationClaim,
         reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
+    UpdateResources {
+        operation: OperationId,
+        peak_rss_bytes: u64,
+        written_bytes: u64,
+        claim: MutationClaim,
+        reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
+    },
     CompletePublication {
         operation: OperationId,
         admission: Option<FirstSliceAdmission>,
@@ -1587,6 +1594,33 @@ impl JournalActorHandle {
             JournalCommand::UpdateProgress {
                 operation,
                 progress,
+                claim: claim.clone(),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
+    }
+
+    /// Persists operation resource high-water marks before an absolute deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, actor, range, or journal failure.
+    pub async fn update_resources_until(
+        &self,
+        operation: OperationId,
+        peak_rss_bytes: u64,
+        written_bytes: u64,
+        deadline: Instant,
+    ) -> Result<OperationRecord, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::UpdateResources {
+                operation,
+                peak_rss_bytes,
+                written_bytes,
                 claim: claim.clone(),
                 reply,
             },
@@ -2348,6 +2382,17 @@ fn execute_journal_command(
         } => {
             let _ = reply.send(execute_claimed(Some(&claim), || {
                 journal.update_progress(operation, progress)
+            }));
+        }
+        JournalCommand::UpdateResources {
+            operation,
+            peak_rss_bytes,
+            written_bytes,
+            claim,
+            reply,
+        } => {
+            let _ = reply.send(execute_claimed(Some(&claim), || {
+                journal.update_resources(operation, peak_rss_bytes, written_bytes)
             }));
         }
         JournalCommand::CompletePublication {
@@ -9665,6 +9710,7 @@ fn operation_error_to_public(
             false,
         ),
         OperationError::RevisionOverflow
+        | OperationError::ResourceUsageOverflow
         | OperationError::UnsupportedCancellationReason
         | OperationError::MutexPoisoned
         | OperationError::SerializePublicError(_)
@@ -9749,6 +9795,7 @@ impl ServiceError {
                 | OperationError::CatalogTooLarge
                 | OperationError::CatalogRowLimitExceeded
                 | OperationError::RevisionOverflow
+                | OperationError::ResourceUsageOverflow
                 | OperationError::UnsupportedCancellationReason
                 | OperationError::MutexPoisoned
                 | OperationError::SerializePublicError(_)
@@ -11862,6 +11909,47 @@ mod tests {
                 .progress,
             completed.progress
         );
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test]
+    async fn journal_actor_resources_are_monotonic_and_deadline_bounded() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = OperationId::from_bytes([32; 16]);
+        journal.enqueue(operation).expect("operation enqueues");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let handle = actor.handle();
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(1))
+            .expect("test deadline is representable");
+
+        let first = handle
+            .update_resources_until(operation, 4_096, 2_048, deadline)
+            .await
+            .expect("resources persist");
+        let advanced = handle
+            .update_resources_until(operation, 1_024, 8_192, deadline)
+            .await
+            .expect("later resources persist");
+        assert_eq!(advanced.peak_rss_bytes, 4_096);
+        assert_eq!(advanced.written_bytes, 8_192);
+        assert!(advanced.revision > first.revision);
+
+        let expired = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("test instant can move backward");
+        assert!(matches!(
+            handle
+                .update_resources_until(operation, 16_384, 16_384, expired)
+                .await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+        let persisted = journal.status(operation).expect("resources reload");
+        assert_eq!(persisted.peak_rss_bytes, 4_096);
+        assert_eq!(persisted.written_bytes, 8_192);
         actor.join().expect("actor joins");
     }
 

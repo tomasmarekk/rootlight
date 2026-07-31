@@ -53,16 +53,21 @@ pub const MAX_CATALOG_SHM_BYTES: u64 = 8 * 1024 * 1024;
 /// Minimum bundled SQLite version required by the P1 catalog.
 pub const MIN_SQLITE_VERSION_NUMBER: i32 = 3_051_003;
 /// Current operation-journal schema version.
-pub const OPERATION_SCHEMA_VERSION: u32 = 3;
+pub const OPERATION_SCHEMA_VERSION: u32 = 4;
 /// SQLite application identifier for Rootlight's per-user catalog.
 pub const CATALOG_APPLICATION_ID: u32 = 0x5254_4c54;
 /// Bounded wait for transient catalog contention.
 pub const CATALOG_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
-const OPERATION_SCHEMA_MIGRATION_ID: u32 = 3;
+const OPERATION_SCHEMA_MIGRATION_ID: u32 = 4;
 // SHA-256 of the three canonical schema statements in `migration_checksum_input`;
 // change this reviewed ledger value rather than silently accepting schema drift.
 const OPERATION_SCHEMA_MIGRATION_CHECKSUM: [u8; 32] = [
+    0x87, 0xc2, 0xa3, 0x13, 0xeb, 0x69, 0x7e, 0x2d, 0x12, 0x4d, 0x86, 0x95, 0x0d, 0x44, 0x15, 0xca,
+    0x0b, 0x7f, 0x5c, 0x8d, 0xea, 0x0a, 0x41, 0xa8, 0xe1, 0xc5, 0x9d, 0xfa, 0xff, 0x6f, 0x94, 0xd3,
+];
+const VERSION_THREE_MIGRATION_ID: u32 = 3;
+const VERSION_THREE_MIGRATION_CHECKSUM: [u8; 32] = [
     0x7e, 0x4d, 0xbe, 0x02, 0x6e, 0x5d, 0x52, 0x66, 0xf2, 0x65, 0x18, 0xec, 0x94, 0x92, 0x59, 0x97,
     0xc5, 0x3e, 0x7b, 0x45, 0x6f, 0x23, 0x54, 0x80, 0xd2, 0x65, 0xdf, 0xeb, 0xb9, 0xc7, 0x1a, 0xaf,
 ];
@@ -465,10 +470,14 @@ pub struct OperationRecord {
     pub cancellation_reason: Option<CancellationReason>,
     /// Restart or expiry classification.
     pub recovery_class: RecoveryClass,
-    /// Monotonically increasing state, stage, or progress revision.
+    /// Monotonically increasing lifecycle, progress, or resource revision.
     pub revision: u64,
     /// Monotonic progress snapshot.
     pub progress: Progress,
+    /// Peak resident bytes observed so far for the operation.
+    pub peak_rss_bytes: u64,
+    /// Cumulative confirmed durable bytes written by the operation.
+    pub written_bytes: u64,
     /// Stable public terminal failure.
     pub error: Option<PublicError>,
     /// Reports that a persisted failure envelope exists after restart.
@@ -1078,6 +1087,56 @@ impl OperationJournal {
             return Err(OperationError::ConcurrentUpdate);
         }
         self.status(operation)
+    }
+
+    /// Persists monotonic operation resource high-water marks.
+    ///
+    /// Stale samples are accepted idempotently: each stored value remains the
+    /// maximum ever observed for the operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::ResourceUsageOverflow`] when either value
+    /// exceeds the durable SQLite range, or a typed storage error.
+    pub fn update_resources(
+        &self,
+        operation: OperationId,
+        peak_rss_bytes: u64,
+        written_bytes: u64,
+    ) -> Result<OperationRecord, OperationError> {
+        let peak_rss_bytes = resource_bytes_to_i64(peak_rss_bytes)?;
+        let written_bytes = resource_bytes_to_i64(written_bytes)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
+        let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        let current_peak_rss_bytes = resource_bytes_to_i64(current.peak_rss_bytes)?;
+        let current_written_bytes = resource_bytes_to_i64(current.written_bytes)?;
+        let peak_rss_bytes = peak_rss_bytes.max(current_peak_rss_bytes);
+        let written_bytes = written_bytes.max(current_written_bytes);
+        if peak_rss_bytes == current_peak_rss_bytes && written_bytes == current_written_bytes {
+            return Ok(current);
+        }
+        let revision = next_revision(current.revision)?;
+        let updated = transaction
+            .execute(
+                "UPDATE operations
+                 SET revision = ?1, peak_rss_bytes = ?2, written_bytes = ?3
+                 WHERE operation = ?4 AND revision = ?5",
+                params![
+                    u64_to_i64(revision)?,
+                    peak_rss_bytes,
+                    written_bytes,
+                    operation.as_bytes().as_slice(),
+                    u64_to_i64(current.revision)?,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        if updated != 1 {
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        let updated = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(updated)
     }
 
     /// Durably authorizes and requests cancellation before signalling workers.
@@ -2571,6 +2630,9 @@ fn migrate_schema(
         0 if is_prototype_schema(&transaction)? => migrate_prototype(&transaction)?,
         1 if is_version_one_operations_schema(&transaction)? => migrate_version_one(&transaction)?,
         2 if is_version_two_operations_schema(&transaction)? => migrate_version_two(&transaction)?,
+        3 if is_version_three_operations_schema(&transaction)? => {
+            migrate_version_three(&transaction)?
+        }
         _ => return Err(OperationError::UnsupportedLegacySchema),
     }
     record_catalog_metadata(&transaction)?;
@@ -2664,7 +2726,7 @@ const VERSION_TWO_OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
                 CHECK((state = 'interrupted' AND recovery_class != 'not_applicable')
                    OR (state != 'interrupted' AND recovery_class = 'not_applicable'))
             ) STRICT";
-const OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
+const VERSION_THREE_OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
                 operation BLOB PRIMARY KEY NOT NULL CHECK(length(operation) = 16),
                 kind TEXT NOT NULL CHECK(kind IN ('control_probe', 'repository_index')),
                 plan_hash BLOB NOT NULL CHECK(length(plan_hash) = 32),
@@ -2700,6 +2762,44 @@ const OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
                 CHECK((state = 'interrupted' AND recovery_class != 'not_applicable')
                    OR (state != 'interrupted' AND recovery_class = 'not_applicable'))
             ) STRICT";
+const OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
+                operation BLOB PRIMARY KEY NOT NULL CHECK(length(operation) = 16),
+                kind TEXT NOT NULL CHECK(kind IN ('control_probe', 'repository_index')),
+                plan_hash BLOB NOT NULL CHECK(length(plan_hash) = 32),
+                owner BLOB NOT NULL CHECK(length(owner) = 16),
+                detached INTEGER NOT NULL CHECK(detached IN (0, 1)),
+                deadline_unix_ms INTEGER CHECK(deadline_unix_ms > 0),
+                lease_expires_unix_ms INTEGER CHECK(lease_expires_unix_ms > 0),
+                state TEXT NOT NULL CHECK(state IN (
+                    'queued', 'running', 'cancelling', 'succeeded', 'failed',
+                    'cancelled', 'interrupted'
+                )),
+                stage TEXT NOT NULL CHECK(stage IN ('accepted', 'executing', 'cleanup')),
+                cancellation_requested INTEGER NOT NULL CHECK(cancellation_requested IN (0, 1)),
+                cancellation_reason TEXT CHECK(cancellation_reason IN (
+                    'client_request', 'parent_cancelled', 'deadline_exceeded',
+                    'shutdown', 'resource_limit'
+                )),
+                recovery_class TEXT NOT NULL CHECK(recovery_class IN (
+                    'not_applicable', 'interrupted_by_restart', 'deadline_elapsed', 'lease_expired'
+                )),
+                revision INTEGER NOT NULL CHECK(revision >= 1),
+                completed INTEGER NOT NULL CHECK(completed >= 0 AND completed <= 4294967295),
+                total INTEGER NOT NULL CHECK(total >= 0 AND total <= 4294967295),
+                error_json TEXT CHECK(length(error_json) <= 16384),
+                sequence INTEGER NOT NULL UNIQUE CHECK(sequence >= 1),
+                peak_rss_bytes INTEGER NOT NULL DEFAULT 0 CHECK(peak_rss_bytes >= 0),
+                written_bytes INTEGER NOT NULL DEFAULT 0 CHECK(written_bytes >= 0),
+                CHECK(total = 0 OR completed <= total),
+                CHECK((detached = 1 AND lease_expires_unix_ms IS NULL)
+                   OR (detached = 0 AND lease_expires_unix_ms IS NOT NULL)),
+                CHECK((cancellation_requested = 0 AND cancellation_reason IS NULL)
+                   OR (cancellation_requested = 1 AND cancellation_reason IS NOT NULL)),
+                CHECK((state = 'failed' AND error_json IS NOT NULL)
+                   OR (state != 'failed' AND error_json IS NULL)),
+                CHECK((state = 'interrupted' AND recovery_class != 'not_applicable')
+                   OR (state != 'interrupted' AND recovery_class = 'not_applicable'))
+            ) STRICT";
 
 fn migration_checksum_input() -> String {
     [
@@ -2720,6 +2820,18 @@ fn version_two_migration_checksum() -> [u8; 32] {
             APPLICATION_META_SCHEMA_SQL,
             MIGRATIONS_SCHEMA_SQL,
             VERSION_TWO_OPERATIONS_SCHEMA_SQL,
+        ]
+        .join("\n"),
+    )
+    .into()
+}
+
+fn version_three_migration_checksum() -> [u8; 32] {
+    Sha256::digest(
+        [
+            APPLICATION_META_SCHEMA_SQL,
+            MIGRATIONS_SCHEMA_SQL,
+            VERSION_THREE_OPERATIONS_SCHEMA_SQL,
         ]
         .join("\n"),
     )
@@ -2813,6 +2925,30 @@ fn migrate_version_two(transaction: &Transaction<'_>) -> Result<(), OperationErr
         .map_err(map_sqlite_error)
 }
 
+fn migrate_version_three(transaction: &Transaction<'_>) -> Result<(), OperationError> {
+    transaction
+        .execute_batch("ALTER TABLE operations RENAME TO operations_v3;")
+        .map_err(map_sqlite_error)?;
+    transaction
+        .execute_batch(OPERATIONS_SCHEMA_SQL)
+        .map_err(map_sqlite_error)?;
+    transaction
+        .execute_batch(
+            "INSERT INTO operations (
+                operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                lease_expires_unix_ms, state, stage, cancellation_requested,
+                cancellation_reason, recovery_class, revision, completed, total,
+                error_json, sequence, peak_rss_bytes, written_bytes
+             ) SELECT operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                      lease_expires_unix_ms, state, stage, cancellation_requested,
+                      cancellation_reason, recovery_class, revision, completed, total,
+                      error_json, sequence, 0, 0
+               FROM operations_v3;
+             DROP TABLE operations_v3;",
+        )
+        .map_err(map_sqlite_error)
+}
+
 fn record_catalog_metadata(connection: &Connection) -> Result<(), OperationError> {
     validate_frozen_migration_checksums()?;
     if migration_ledger(connection)?.into_iter().any(|entry| {
@@ -2820,6 +2956,10 @@ fn record_catalog_metadata(connection: &Connection) -> Result<(), OperationError
             entry,
             (VERSION_TWO_MIGRATION_ID, checksum)
                 if checksum == VERSION_TWO_MIGRATION_CHECKSUM
+        ) && !matches!(
+            entry,
+            (VERSION_THREE_MIGRATION_ID, checksum)
+                if checksum == VERSION_THREE_MIGRATION_CHECKSUM
         ) && !matches!(
             entry,
             (OPERATION_SCHEMA_MIGRATION_ID, checksum)
@@ -2865,6 +3005,16 @@ fn record_catalog_metadata(connection: &Connection) -> Result<(), OperationError
             "INSERT INTO migrations(migration_id, checksum) VALUES (?1, ?2)
              ON CONFLICT(migration_id) DO NOTHING",
             params![
+                VERSION_THREE_MIGRATION_ID,
+                VERSION_THREE_MIGRATION_CHECKSUM.as_slice(),
+            ],
+        )
+        .map_err(map_sqlite_error)?;
+    connection
+        .execute(
+            "INSERT INTO migrations(migration_id, checksum) VALUES (?1, ?2)
+             ON CONFLICT(migration_id) DO NOTHING",
+            params![
                 OPERATION_SCHEMA_MIGRATION_ID,
                 OPERATION_SCHEMA_MIGRATION_CHECKSUM.as_slice(),
             ],
@@ -2894,6 +3044,7 @@ fn validate_catalog_identity(connection: &Connection) -> Result<(), OperationErr
     if migration_ledger(connection)?
         != [
             (VERSION_TWO_MIGRATION_ID, VERSION_TWO_MIGRATION_CHECKSUM),
+            (VERSION_THREE_MIGRATION_ID, VERSION_THREE_MIGRATION_CHECKSUM),
             (
                 OPERATION_SCHEMA_MIGRATION_ID,
                 OPERATION_SCHEMA_MIGRATION_CHECKSUM,
@@ -2907,6 +3058,7 @@ fn validate_catalog_identity(connection: &Connection) -> Result<(), OperationErr
 
 fn validate_frozen_migration_checksums() -> Result<(), OperationError> {
     if version_two_migration_checksum() != VERSION_TWO_MIGRATION_CHECKSUM
+        || version_three_migration_checksum() != VERSION_THREE_MIGRATION_CHECKSUM
         || operation_schema_migration_checksum() != OPERATION_SCHEMA_MIGRATION_CHECKSUM
     {
         return Err(OperationError::MigrationChecksumMismatch);
@@ -2953,6 +3105,8 @@ fn validate_schema(connection: &Connection, storage: CatalogStorage) -> Result<(
         "total",
         "error_json",
         "sequence",
+        "peak_rss_bytes",
+        "written_bytes",
     ];
     if columns != expected
         || table_columns_named(connection, "application_meta")? != ["key", "value"]
@@ -3133,6 +3287,53 @@ fn is_version_two_operations_schema(connection: &Connection) -> Result<bool, Ope
         && version_two_migration_checksum() == VERSION_TWO_MIGRATION_CHECKSUM)
 }
 
+fn is_version_three_operations_schema(connection: &Connection) -> Result<bool, OperationError> {
+    if !has_exact_auxiliary_schema(connection)? {
+        return Ok(false);
+    }
+    let catalog_kind: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT value FROM application_meta WHERE key = 'catalog_kind'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    Ok(table_columns(connection)?
+        == [
+            "operation",
+            "kind",
+            "plan_hash",
+            "owner",
+            "detached",
+            "deadline_unix_ms",
+            "lease_expires_unix_ms",
+            "state",
+            "stage",
+            "cancellation_requested",
+            "cancellation_reason",
+            "recovery_class",
+            "revision",
+            "completed",
+            "total",
+            "error_json",
+            "sequence",
+        ]
+        && table_is_strict(connection, "operations")?
+        && normalize_sql(&table_definition(connection, "operations")?)
+            == normalize_sql(VERSION_THREE_OPERATIONS_SCHEMA_SQL)
+        && pragma_u32(connection, "application_id")? == CATALOG_APPLICATION_ID
+        && pragma_u32(connection, "user_version")? == VERSION_THREE_MIGRATION_ID
+        && catalog_kind.as_deref() == Some(b"rootlight".as_slice())
+        && migration_ledger(connection)?
+            == [
+                (VERSION_TWO_MIGRATION_ID, VERSION_TWO_MIGRATION_CHECKSUM),
+                (VERSION_THREE_MIGRATION_ID, VERSION_THREE_MIGRATION_CHECKSUM),
+            ]
+        && version_two_migration_checksum() == VERSION_TWO_MIGRATION_CHECKSUM
+        && version_three_migration_checksum() == VERSION_THREE_MIGRATION_CHECKSUM)
+}
+
 fn has_exact_auxiliary_schema(connection: &Connection) -> Result<bool, OperationError> {
     if !table_exists(connection, "application_meta")? || !table_exists(connection, "migrations")? {
         return Ok(false);
@@ -3305,7 +3506,7 @@ fn load_record_with_retry_intent(
             "SELECT kind, plan_hash, owner, detached, deadline_unix_ms,
                     lease_expires_unix_ms, state, stage, cancellation_requested,
                     cancellation_reason, recovery_class, revision, completed, total,
-                    error_json
+                    error_json, peak_rss_bytes, written_bytes
              FROM operations WHERE operation = ?1",
             [operation.as_bytes().as_slice()],
             |row| {
@@ -3325,6 +3526,8 @@ fn load_record_with_retry_intent(
                     completed: row.get(12)?,
                     total: row.get(13)?,
                     error_json: row.get(14)?,
+                    peak_rss_bytes: row.get(15)?,
+                    written_bytes: row.get(16)?,
                 })
             },
         )
@@ -3359,6 +3562,8 @@ struct RawRecord {
     completed: i64,
     total: i64,
     error_json: Option<String>,
+    peak_rss_bytes: i64,
+    written_bytes: i64,
 }
 
 fn decode_record(
@@ -3422,6 +3627,8 @@ fn decode_record(
             nonnegative_i64_to_u32(raw.completed)?,
             nonnegative_i64_to_u32(raw.total)?,
         )?,
+        peak_rss_bytes: nonnegative_i64_to_u64(raw.peak_rss_bytes)?,
+        written_bytes: nonnegative_i64_to_u64(raw.written_bytes)?,
         error,
         has_persisted_error,
     })
@@ -3747,6 +3954,10 @@ fn u64_to_i64(value: u64) -> Result<i64, OperationError> {
     i64::try_from(value).map_err(|_| OperationError::TimestampOverflow)
 }
 
+fn resource_bytes_to_i64(value: u64) -> Result<i64, OperationError> {
+    i64::try_from(value).map_err(|_| OperationError::ResourceUsageOverflow)
+}
+
 fn optional_u64_to_i64(value: Option<u64>) -> Result<Option<i64>, OperationError> {
     value.map(u64_to_i64).transpose()
 }
@@ -3959,6 +4170,9 @@ pub enum OperationError {
     /// Operation stage was inconsistent or moved backward.
     #[error("operation stage is invalid")]
     InvalidStage,
+    /// A resource measurement cannot be represented by durable storage.
+    #[error("operation resource usage is out of range")]
+    ResourceUsageOverflow,
     /// A monotonic revision cannot be represented.
     #[error("operation revision overflowed")]
     RevisionOverflow,
@@ -4186,6 +4400,57 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn resource_high_water_marks_are_monotonic_and_restart_safe() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let operation = operation(33);
+        {
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            journal.enqueue(operation).expect("operation enqueues");
+            journal
+                .start_execution(operation)
+                .expect("operation starts");
+
+            let first = journal
+                .update_resources(operation, 4_096, 2_048)
+                .expect("initial resources persist");
+            assert_eq!(first.peak_rss_bytes, 4_096);
+            assert_eq!(first.written_bytes, 2_048);
+
+            let stale = journal
+                .update_resources(operation, 1_024, 1_024)
+                .expect("stale resources are idempotent");
+            assert_eq!(stale, first);
+
+            let advanced = journal
+                .update_resources(operation, 2_048, 8_192)
+                .expect("one resource advances");
+            assert_eq!(advanced.peak_rss_bytes, 4_096);
+            assert_eq!(advanced.written_bytes, 8_192);
+            assert!(advanced.revision > first.revision);
+
+            journal
+                .transition(operation, OperationState::Succeeded, None)
+                .expect("operation succeeds");
+            let terminal = journal
+                .update_resources(operation, 16_384, 4_096)
+                .expect("terminal resources persist");
+            assert_eq!(terminal.peak_rss_bytes, 16_384);
+            assert_eq!(terminal.written_bytes, 8_192);
+            assert!(matches!(
+                journal.update_resources(operation, u64::MAX, 8_192),
+                Err(OperationError::ResourceUsageOverflow)
+            ));
+        }
+
+        let reopened = OperationJournal::open(&path).expect("journal reopens");
+        let persisted = reopened.status(operation).expect("resources reload");
+        assert_eq!(persisted.peak_rss_bytes, 16_384);
+        assert_eq!(persisted.written_bytes, 8_192);
+        assert_eq!(persisted.state, OperationState::Succeeded);
     }
 
     #[test]
@@ -6363,8 +6628,12 @@ mod tests {
                         VERSION_TWO_MIGRATION_CHECKSUM.to_vec()
                     ),
                     (
+                        VERSION_THREE_MIGRATION_ID,
+                        VERSION_THREE_MIGRATION_CHECKSUM.to_vec()
+                    ),
+                    (
                         OPERATION_SCHEMA_MIGRATION_ID,
-                        OPERATION_SCHEMA_MIGRATION_CHECKSUM.to_vec()
+                        OPERATION_SCHEMA_MIGRATION_CHECKSUM.to_vec(),
                     ),
                 ]
             );
@@ -6375,6 +6644,96 @@ mod tests {
             .expect("current schema reopens idempotently")
             .quick_check()
             .expect("reopened current catalog validates");
+    }
+
+    #[test]
+    fn version_three_schema_migrates_resource_defaults_atomically() {
+        assert_eq!(
+            version_three_migration_checksum(),
+            VERSION_THREE_MIGRATION_CHECKSUM
+        );
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let operation = operation(34);
+        {
+            let connection = Connection::open(&path).expect("database opens");
+            for statement in [
+                APPLICATION_META_SCHEMA_SQL,
+                MIGRATIONS_SCHEMA_SQL,
+                VERSION_THREE_OPERATIONS_SCHEMA_SQL,
+            ] {
+                connection
+                    .execute_batch(statement)
+                    .expect("version-three schema creates");
+            }
+            connection
+                .execute(
+                    "INSERT INTO application_meta(key, value) VALUES ('catalog_kind', ?1)",
+                    [b"rootlight".as_slice()],
+                )
+                .expect("catalog identity inserts");
+            for (migration_id, checksum) in [
+                (VERSION_TWO_MIGRATION_ID, VERSION_TWO_MIGRATION_CHECKSUM),
+                (VERSION_THREE_MIGRATION_ID, VERSION_THREE_MIGRATION_CHECKSUM),
+            ] {
+                connection
+                    .execute(
+                        "INSERT INTO migrations(migration_id, checksum) VALUES (?1, ?2)",
+                        params![migration_id, checksum.as_slice()],
+                    )
+                    .expect("migration ledger row inserts");
+            }
+            connection
+                .execute(
+                    "INSERT INTO operations (
+                        operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                        lease_expires_unix_ms, state, stage, cancellation_requested,
+                        cancellation_reason, recovery_class, revision, completed, total,
+                        error_json, sequence
+                     ) VALUES (?1, 'repository_index', zeroblob(32), zeroblob(16), 1,
+                               NULL, NULL, 'succeeded', 'cleanup', 0, NULL,
+                               'not_applicable', 3, 1, 1, NULL, 1)",
+                    [operation.as_bytes().as_slice()],
+                )
+                .expect("version-three operation inserts");
+            connection
+                .pragma_update(None, "application_id", CATALOG_APPLICATION_ID)
+                .expect("application ID writes");
+            connection
+                .pragma_update(None, "user_version", VERSION_THREE_MIGRATION_ID)
+                .expect("version-three marker writes");
+        }
+
+        let migrated = OperationJournal::open(&path).expect("version-three catalog migrates");
+        let record = migrated.status(operation).expect("migrated row loads");
+        assert_eq!(record.peak_rss_bytes, 0);
+        assert_eq!(record.written_bytes, 0);
+        assert_eq!(
+            table_columns(&migrated.lock_connection().expect("catalog lock is healthy"))
+                .expect("operation columns read"),
+            [
+                "operation",
+                "kind",
+                "plan_hash",
+                "owner",
+                "detached",
+                "deadline_unix_ms",
+                "lease_expires_unix_ms",
+                "state",
+                "stage",
+                "cancellation_requested",
+                "cancellation_reason",
+                "recovery_class",
+                "revision",
+                "completed",
+                "total",
+                "error_json",
+                "sequence",
+                "peak_rss_bytes",
+                "written_bytes",
+            ]
+        );
+        migrated.quick_check().expect("migrated catalog validates");
     }
 
     #[test]
@@ -6682,6 +7041,8 @@ mod tests {
                 "total",
                 "error_json",
                 "sequence",
+                "peak_rss_bytes",
+                "written_bytes",
             ]
         );
         assert_eq!(
@@ -7108,6 +7469,7 @@ mod tests {
             migration_ledger(&connection).expect("complete ledger reads"),
             [
                 (VERSION_TWO_MIGRATION_ID, VERSION_TWO_MIGRATION_CHECKSUM),
+                (VERSION_THREE_MIGRATION_ID, VERSION_THREE_MIGRATION_CHECKSUM),
                 (
                     OPERATION_SCHEMA_MIGRATION_ID,
                     OPERATION_SCHEMA_MIGRATION_CHECKSUM
