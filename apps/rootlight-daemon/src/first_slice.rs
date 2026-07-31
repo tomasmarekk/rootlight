@@ -23,7 +23,7 @@ use std::{
 };
 
 use rootlight_adapter_host::{
-    AdapterHostError, execute_isolated_project_adapter,
+    AdapterHostError, PROJECT_ADAPTER_HARD_LIMITS, execute_isolated_project_adapter,
     negotiate_project_adapter_session_with_cancellation,
     project_adapter_identity_with_cancellation,
 };
@@ -38,8 +38,8 @@ use rootlight_ids::{
     ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId, content_hash,
 };
 use rootlight_ir::{
-    AnalysisTier, CoverageRecord, CoverageStatus, LineRange, OccurrenceRole, RelationEndpoint,
-    RelationPredicate, SourceRef, SourceSpan,
+    AnalysisTier, CoverageRecord, CoverageStatus, LineRange, NormalizedIrDocument, OccurrenceRole,
+    RelationEndpoint, RelationPredicate, SourceRef, SourceSpan,
 };
 use rootlight_observability::{
     SupportAdapterInventory, SupportChecksumStatus, SupportGenerationInventory,
@@ -52,7 +52,11 @@ use rootlight_operations::{
 };
 use rootlight_protocol::{
     MAX_CODE_LOCATE_LANGUAGE_BYTES, MAX_CODE_LOCATE_LANGUAGES,
-    adapter_contract::ADAPTER_NONCE_BYTES,
+    adapter_contract::{
+        ADAPTER_NONCE_BYTES, MAX_ADAPTER_FRAME_BYTES, NegotiatedSession,
+        project_analysis_frame_bytes, project_analysis_input_field_bytes,
+        project_analysis_request_payload_bytes,
+    },
     generated::{adapter::v1 as adapter, common::v1 as common, daemon::v1 as daemon},
 };
 use rootlight_query::{
@@ -111,6 +115,7 @@ const PROJECT_ADAPTER_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 const PROJECT_ADAPTER_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const PROJECT_ADAPTER_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 const PROJECT_ADAPTER_HANDLES: u32 = 64;
+const PROJECT_PARTITION_IDENTITY_SEED: &[u8] = b"rootlight.project-partition/1";
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
 
@@ -173,21 +178,12 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
         ordered_inputs.extend(request.inputs().iter());
         ordered_inputs.sort_unstable_by(|left, right| left.path().cmp(right.path()));
-        let input_bytes = ordered_inputs
-            .iter()
-            .try_fold(request.context_manifest().len(), |total, input| {
-                total.checked_add(project_input_wire_bytes(input)?)
-            });
-        if input_bytes.is_none_or(|bytes| {
-            u64::try_from(bytes).map_or(true, |bytes| bytes > PROJECT_ADAPTER_INPUT_BYTES)
-        }) {
+        if ordered_inputs.is_empty() {
             return Err(FirstSliceProjectAnalysisError::Analysis);
         }
         let files = u32::try_from(ordered_inputs.len())
-            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
-        if files == 0 {
-            return Err(FirstSliceProjectAnalysisError::Analysis);
-        }
+            .unwrap_or(u32::MAX)
+            .min(PROJECT_ADAPTER_HARD_LIMITS.files);
         let limits = adapter::ResourceLimits {
             wall_time_ms: PROJECT_ADAPTER_WALL_TIME_MS,
             cpu_time_ms: PROJECT_ADAPTER_CPU_TIME_MS,
@@ -215,110 +211,285 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
             return Err(FirstSliceProjectAnalysisError::Identity);
         }
 
+        let sizing_request = build_project_analysis_request(
+            &request,
+            session.session_id(),
+            &[1; ADAPTER_NONCE_BYTES],
+            request.build_context(),
+            Vec::new(),
+        );
+        let base_request_payload_bytes = project_analysis_request_payload_bytes(&sizing_request);
+        let mut partition = ProjectPartitionBuffer::new(
+            base_request_payload_bytes,
+            request.context_manifest().len(),
+            usize::try_from(files).map_err(|_| FirstSliceProjectAnalysisError::Analysis)?,
+        )?;
+        let mut documents = Vec::new();
+        let maximum_partitions = ordered_inputs.len();
+        documents
+            .try_reserve(maximum_partitions.min(16))
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        let mut isolation_permits_deep_adapter = true;
+        let mut partition_ordinal = 0_u64;
+        for input in ordered_inputs {
+            let wire_input = project_input_to_wire(&request, input)?;
+            if let Some(rejected) = partition.try_push(wire_input)? {
+                let batch = partition.take();
+                if batch.is_empty() {
+                    return Err(FirstSliceProjectAnalysisError::Analysis);
+                }
+                let (document, isolated) = self.execute_partition(
+                    &request,
+                    &session,
+                    partition_ordinal,
+                    batch,
+                    cancellation,
+                )?;
+                documents.push(document);
+                isolation_permits_deep_adapter &= isolated;
+                partition_ordinal = partition_ordinal
+                    .checked_add(1)
+                    .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                if partition.try_push(rejected)?.is_some() {
+                    return Err(FirstSliceProjectAnalysisError::Analysis);
+                }
+            }
+        }
+        let batch = partition.take();
+        if batch.is_empty() {
+            return Err(FirstSliceProjectAnalysisError::Analysis);
+        }
+        let (document, isolated) =
+            self.execute_partition(&request, &session, partition_ordinal, batch, cancellation)?;
+        documents.push(document);
+        isolation_permits_deep_adapter &= isolated;
+        Ok(FirstSliceProjectAnalysis::new_partitioned(
+            documents,
+            isolation_permits_deep_adapter,
+        ))
+    }
+}
+
+impl InstalledProjectAnalyzer {
+    fn execute_partition(
+        &self,
+        request: &FirstSliceProjectAnalysisRequest<'_>,
+        session: &NegotiatedSession,
+        partition_ordinal: u64,
+        inputs: Vec<adapter::ProjectInput>,
+        cancellation: &Cancellation,
+    ) -> Result<(NormalizedIrDocument, bool), FirstSliceProjectAnalysisError> {
         let mut request_id = [0_u8; ADAPTER_NONCE_BYTES];
         getrandom::fill(&mut request_id).map_err(|_| FirstSliceProjectAnalysisError::Identity)?;
         if request_id.iter().all(|byte| *byte == 0) {
             return Err(FirstSliceProjectAnalysisError::Identity);
         }
-        let mut inputs = Vec::new();
-        inputs
-            .try_reserve_exact(ordered_inputs.len())
-            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
-        for input in ordered_inputs {
-            let mut source = Vec::new();
-            source
-                .try_reserve_exact(input.source().len())
-                .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
-            source.extend_from_slice(input.source());
-            let mut origins = Vec::new();
-            origins
-                .try_reserve_exact(input.origins().len())
-                .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
-            for mapping in input.origins() {
-                origins.push(adapter::GeneratedOrigin {
-                    generated_start_byte: mapping.generated().start_byte(),
-                    generated_end_byte: mapping.generated().end_byte(),
-                    origin_path: mapping.origin_path().as_str().to_owned(),
-                    origin_start_byte: mapping.origin().start_byte(),
-                    origin_end_byte: mapping.origin().end_byte(),
-                    transformation: mapping.transformation().as_str().to_owned(),
-                    generator_digest: mapping.generator_digest().map(|digest| {
-                        common::ContentHash {
-                            value: digest.as_bytes().to_vec(),
-                        }
-                    }),
-                });
-            }
-            inputs.push(adapter::ProjectInput {
-                file: Some(common::FileId {
-                    value: input.file().as_bytes().to_vec(),
-                }),
-                path: input.path().to_owned(),
-                language: request.language().to_owned(),
-                source_digest: Some(common::ContentHash {
-                    value: input.content_hash().as_bytes().to_vec(),
-                }),
-                source,
-                generated: input.generated(),
-                origins,
-            });
-        }
-        let context_manifest = request.context_manifest().to_vec();
-        let project_request = adapter::ProjectAnalysisRequest {
-            session_id: session.session_id().to_vec(),
-            request_id: request_id.to_vec(),
-            repository: Some(common::RepositoryId {
-                value: request.repository().as_bytes().to_vec(),
-            }),
-            generation: Some(common::GenerationId {
-                value: request.generation().as_bytes().to_vec(),
-            }),
-            analysis_unit: format!("first-slice.{}", request.language()),
-            target: format!("//rootlight:{}", request.language()),
-            build_context: Some(common::ContentHash {
-                value: request.build_context().as_bytes().to_vec(),
-            }),
-            config_digest: Some(common::ContentHash {
-                value: content_hash(&context_manifest).as_bytes().to_vec(),
-            }),
+        let build_context =
+            project_partition_build_context(request.build_context(), partition_ordinal, &inputs)?;
+        let project_request = build_project_analysis_request(
+            request,
+            session.session_id(),
+            &request_id,
+            build_context,
             inputs,
-            context_manifest,
-            requested_tier: adapter::RequestedAnalysisTier::TierB as i32,
-        };
+        );
+        let payload_bytes = project_analysis_request_payload_bytes(&project_request);
+        if project_analysis_frame_bytes(payload_bytes)
+            .is_none_or(|bytes| bytes > MAX_ADAPTER_FRAME_BYTES)
+        {
+            return Err(FirstSliceProjectAnalysisError::Analysis);
+        }
         let output = execute_isolated_project_adapter(
             &self.executable,
-            &session,
+            session,
             &project_request,
             &rootlight_ir::ExtensionSupport::default(),
             cancellation,
         )
         .map_err(map_project_adapter_error)?;
-        Ok(FirstSliceProjectAnalysis::new(
+        Ok((
             output.document().clone(),
             output.isolation().permits_deep_adapter(),
         ))
     }
 }
 
-fn project_input_wire_bytes(
-    input: &rootlight_service::FirstSliceProjectInput<'_>,
-) -> Option<usize> {
-    input
-        .origins()
-        .iter()
-        .try_fold(input.source().len(), |total, mapping| {
-            total
-                .checked_add(mapping.origin_path().identity_bytes().len())
-                .and_then(|bytes| bytes.checked_add(mapping.transformation().as_str().len()))
-                .and_then(|bytes| bytes.checked_add(4 * size_of::<u64>()))
-                .and_then(|bytes| {
-                    bytes.checked_add(
-                        mapping
-                            .generator_digest()
-                            .map_or(0, |digest| digest.as_bytes().len()),
-                    )
-                })
+struct ProjectPartitionBuffer {
+    inputs: Vec<adapter::ProjectInput>,
+    base_request_payload_bytes: usize,
+    request_payload_bytes: usize,
+    source_bytes: usize,
+    context_bytes: usize,
+    max_files: usize,
+}
+
+impl ProjectPartitionBuffer {
+    fn new(
+        base_request_payload_bytes: usize,
+        context_bytes: usize,
+        max_files: usize,
+    ) -> Result<Self, FirstSliceProjectAnalysisError> {
+        if context_bytes
+            > usize::try_from(PROJECT_ADAPTER_INPUT_BYTES)
+                .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?
+            || max_files == 0
+        {
+            return Err(FirstSliceProjectAnalysisError::Analysis);
+        }
+        Ok(Self {
+            inputs: Vec::new(),
+            base_request_payload_bytes,
+            request_payload_bytes: base_request_payload_bytes,
+            source_bytes: context_bytes,
+            context_bytes,
+            max_files,
         })
+    }
+
+    fn try_push(
+        &mut self,
+        input: adapter::ProjectInput,
+    ) -> Result<Option<adapter::ProjectInput>, FirstSliceProjectAnalysisError> {
+        let input_field_bytes = project_analysis_input_field_bytes(&input)
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        let request_payload_bytes = self
+            .request_payload_bytes
+            .checked_add(input_field_bytes)
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        let source_bytes = self
+            .source_bytes
+            .checked_add(input.source.len())
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        let input_limit = usize::try_from(PROJECT_ADAPTER_INPUT_BYTES)
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        let fits = self.inputs.len() < self.max_files
+            && source_bytes <= input_limit
+            && project_analysis_frame_bytes(request_payload_bytes)
+                .is_some_and(|bytes| bytes <= MAX_ADAPTER_FRAME_BYTES);
+        if !fits {
+            return Ok(Some(input));
+        }
+        self.inputs
+            .try_reserve(1)
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        self.inputs.push(input);
+        self.request_payload_bytes = request_payload_bytes;
+        self.source_bytes = source_bytes;
+        Ok(None)
+    }
+
+    fn take(&mut self) -> Vec<adapter::ProjectInput> {
+        self.request_payload_bytes = self.base_request_payload_bytes;
+        self.source_bytes = self.context_bytes;
+        std::mem::take(&mut self.inputs)
+    }
+}
+
+fn project_input_to_wire(
+    request: &FirstSliceProjectAnalysisRequest<'_>,
+    input: &rootlight_service::FirstSliceProjectInput<'_>,
+) -> Result<adapter::ProjectInput, FirstSliceProjectAnalysisError> {
+    let mut source = Vec::new();
+    source
+        .try_reserve_exact(input.source().len())
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+    source.extend_from_slice(input.source());
+    let mut origins = Vec::new();
+    origins
+        .try_reserve_exact(input.origins().len())
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+    for mapping in input.origins() {
+        origins.push(adapter::GeneratedOrigin {
+            generated_start_byte: mapping.generated().start_byte(),
+            generated_end_byte: mapping.generated().end_byte(),
+            origin_path: mapping.origin_path().as_str().to_owned(),
+            origin_start_byte: mapping.origin().start_byte(),
+            origin_end_byte: mapping.origin().end_byte(),
+            transformation: mapping.transformation().as_str().to_owned(),
+            generator_digest: mapping
+                .generator_digest()
+                .map(|digest| common::ContentHash {
+                    value: digest.as_bytes().to_vec(),
+                }),
+        });
+    }
+    Ok(adapter::ProjectInput {
+        file: Some(common::FileId {
+            value: input.file().as_bytes().to_vec(),
+        }),
+        path: input.path().to_owned(),
+        language: request.language().to_owned(),
+        source_digest: Some(common::ContentHash {
+            value: input.content_hash().as_bytes().to_vec(),
+        }),
+        source,
+        generated: input.generated(),
+        origins,
+    })
+}
+
+fn build_project_analysis_request(
+    request: &FirstSliceProjectAnalysisRequest<'_>,
+    session_id: &[u8],
+    request_id: &[u8],
+    build_context: ContentHash,
+    inputs: Vec<adapter::ProjectInput>,
+) -> adapter::ProjectAnalysisRequest {
+    let context_manifest = request.context_manifest().to_vec();
+    adapter::ProjectAnalysisRequest {
+        session_id: session_id.to_vec(),
+        request_id: request_id.to_vec(),
+        repository: Some(common::RepositoryId {
+            value: request.repository().as_bytes().to_vec(),
+        }),
+        generation: Some(common::GenerationId {
+            value: request.generation().as_bytes().to_vec(),
+        }),
+        analysis_unit: format!("first-slice.{}.partition", request.language()),
+        target: format!("//rootlight:{}/partition", request.language()),
+        build_context: Some(common::ContentHash {
+            value: build_context.as_bytes().to_vec(),
+        }),
+        config_digest: Some(common::ContentHash {
+            value: content_hash(&context_manifest).as_bytes().to_vec(),
+        }),
+        inputs,
+        context_manifest,
+        requested_tier: adapter::RequestedAnalysisTier::TierB as i32,
+    }
+}
+
+fn project_partition_build_context(
+    build_context: ContentHash,
+    partition_ordinal: u64,
+    inputs: &[adapter::ProjectInput],
+) -> Result<ContentHash, FirstSliceProjectAnalysisError> {
+    let identity_bytes = PROJECT_PARTITION_IDENTITY_SEED
+        .len()
+        .checked_add(build_context.as_bytes().len())
+        .and_then(|bytes| bytes.checked_add(partition_ordinal.to_be_bytes().len()))
+        .and_then(|bytes| bytes.checked_add(inputs.len().checked_mul(52)?))
+        .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+    let mut identity = Vec::new();
+    identity
+        .try_reserve_exact(identity_bytes)
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+    identity.extend_from_slice(PROJECT_PARTITION_IDENTITY_SEED);
+    identity.extend_from_slice(build_context.as_bytes());
+    identity.extend_from_slice(&partition_ordinal.to_be_bytes());
+    for input in inputs {
+        let file = input
+            .file
+            .as_ref()
+            .ok_or(FirstSliceProjectAnalysisError::Protocol)?;
+        let source_digest = input
+            .source_digest
+            .as_ref()
+            .ok_or(FirstSliceProjectAnalysisError::Protocol)?;
+        identity.extend_from_slice(&file.value);
+        identity.extend_from_slice(&source_digest.value);
+    }
+    Ok(content_hash(&identity))
 }
 
 fn adapter_identity_digest(
@@ -5702,6 +5873,129 @@ mod tests {
 
         assert_eq!(error.code(), ErrorCode::BudgetExceeded);
         assert!(!error.retryable());
+    }
+
+    #[test]
+    fn project_partition_buffer_splits_oversized_input_deterministically() {
+        fn input(file_byte: u8, path: &str, source_bytes: usize) -> adapter::ProjectInput {
+            adapter::ProjectInput {
+                file: Some(common::FileId {
+                    value: vec![file_byte; 20],
+                }),
+                path: path.to_owned(),
+                language: "python".to_owned(),
+                source_digest: Some(common::ContentHash {
+                    value: vec![file_byte; 32],
+                }),
+                source: vec![file_byte; source_bytes],
+                generated: false,
+                origins: Vec::new(),
+            }
+        }
+
+        let base_request = adapter::ProjectAnalysisRequest {
+            session_id: vec![1; ADAPTER_NONCE_BYTES],
+            request_id: vec![2; ADAPTER_NONCE_BYTES],
+            repository: Some(common::RepositoryId { value: vec![3; 16] }),
+            generation: Some(common::GenerationId { value: vec![4; 20] }),
+            analysis_unit: "first-slice.python.partition".to_owned(),
+            target: "//rootlight:python/partition".to_owned(),
+            build_context: Some(common::ContentHash { value: vec![5; 32] }),
+            config_digest: Some(common::ContentHash { value: vec![6; 32] }),
+            inputs: Vec::new(),
+            context_manifest: b"context".to_vec(),
+            requested_tier: adapter::RequestedAnalysisTier::TierB as i32,
+        };
+        let base_payload = project_analysis_request_payload_bytes(&base_request);
+        let first = input(7, "Lib/first.py", 9 * 1024 * 1024);
+        let second = input(8, "Lib/second.py", 9 * 1024 * 1024);
+        let original_context = ContentHash::from_bytes([9; 32]);
+        let mut buffer = ProjectPartitionBuffer::new(base_payload, 7, 4_096)
+            .expect("partition buffer initializes");
+
+        assert!(
+            buffer
+                .try_push(first)
+                .expect("first input is measurable")
+                .is_none()
+        );
+        let rejected = buffer
+            .try_push(second)
+            .expect("second input is measurable")
+            .expect("aggregate input crosses the partition limit");
+        assert!(
+            project_analysis_frame_bytes(buffer.request_payload_bytes)
+                .is_some_and(|bytes| bytes <= MAX_ADAPTER_FRAME_BYTES)
+        );
+        let first_batch = buffer.take();
+        assert_eq!(first_batch.len(), 1);
+        assert!(
+            buffer
+                .try_push(rejected)
+                .expect("rejected input fits an empty partition")
+                .is_none()
+        );
+        let second_batch = buffer.take();
+        assert_eq!(second_batch.len(), 1);
+        assert!(
+            first_batch[0]
+                .source
+                .len()
+                .checked_add(second_batch[0].source.len())
+                .is_some_and(|bytes| bytes > 16 * 1024 * 1024)
+        );
+        assert_eq!(
+            project_partition_build_context(original_context, 0, &first_batch)
+                .expect("partition identity derives"),
+            project_partition_build_context(original_context, 0, &first_batch)
+                .expect("partition identity is stable")
+        );
+        assert_ne!(
+            project_partition_build_context(original_context, 0, &first_batch)
+                .expect("first partition identity derives"),
+            project_partition_build_context(original_context, 1, &second_batch)
+                .expect("second partition identity derives")
+        );
+    }
+
+    #[test]
+    fn project_partition_buffer_enforces_the_adapter_file_ceiling() {
+        let mut buffer =
+            ProjectPartitionBuffer::new(128, 8, 2).expect("partition buffer initializes");
+        for file_byte in [1_u8, 2] {
+            assert!(
+                buffer
+                    .try_push(adapter::ProjectInput {
+                        file: Some(common::FileId {
+                            value: vec![file_byte; 20],
+                        }),
+                        path: format!("Lib/{file_byte}.py"),
+                        language: "python".to_owned(),
+                        source_digest: Some(common::ContentHash {
+                            value: vec![file_byte; 32],
+                        }),
+                        source: b"pass\n".to_vec(),
+                        generated: false,
+                        origins: Vec::new(),
+                    })
+                    .expect("input is measurable")
+                    .is_none()
+            );
+        }
+        assert!(
+            buffer
+                .try_push(adapter::ProjectInput {
+                    file: Some(common::FileId { value: vec![3; 20] }),
+                    path: "Lib/3.py".to_owned(),
+                    language: "python".to_owned(),
+                    source_digest: Some(common::ContentHash { value: vec![3; 32] }),
+                    source: b"pass\n".to_vec(),
+                    generated: false,
+                    origins: Vec::new(),
+                })
+                .expect("input is measurable")
+                .is_some()
+        );
     }
 
     #[test]

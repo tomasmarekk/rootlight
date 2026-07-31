@@ -14,7 +14,7 @@ use crate::generated::{
     adapter::v1::{
         AdapterFrame, AdapterIdentity, AdapterTrustLevel, AnalysisRequest, AnalysisResult,
         CancelRequest, CapabilityAdvertisement, ProjectAnalysisRequest, ProjectAnalysisResult,
-        RequestedAnalysisTier, ResourceLimits, SessionRequirements, adapter_frame,
+        ProjectInput, RequestedAnalysisTier, ResourceLimits, SessionRequirements, adapter_frame,
     },
     common::v1::{ContractVersion, ExtensionDescriptor, VersionRange},
 };
@@ -554,6 +554,35 @@ pub fn encode_adapter_frame(frame: &AdapterFrame) -> Result<Vec<u8>, AdapterCont
     }
     let encoded = frame.encode_to_vec();
     Ok(encoded)
+}
+
+/// Returns the exact encoded payload bytes for one project-analysis request.
+#[must_use]
+pub fn project_analysis_request_payload_bytes(request: &ProjectAnalysisRequest) -> usize {
+    request.encode_to_vec().len()
+}
+
+/// Returns the exact repeated-field bytes occupied by one project input.
+///
+/// This encodes only the individual input so callers can plan large requests
+/// incrementally without duplicating every source body in a candidate frame.
+#[must_use]
+pub fn project_analysis_input_field_bytes(input: &ProjectInput) -> Option<usize> {
+    let payload_bytes = input.encode_to_vec().len();
+    length_delimited_field_bytes(9, payload_bytes)
+}
+
+/// Returns the exact outer-frame bytes for a project request payload length.
+#[must_use]
+pub fn project_analysis_frame_bytes(request_payload_bytes: usize) -> Option<usize> {
+    length_delimited_field_bytes(7, request_payload_bytes)
+}
+
+fn length_delimited_field_bytes(tag: u32, payload_bytes: usize) -> Option<usize> {
+    let payload_bytes_u64 = u64::try_from(payload_bytes).ok()?;
+    prost::encoding::key_len(tag)
+        .checked_add(prost::encoding::encoded_len_varint(payload_bytes_u64))?
+        .checked_add(payload_bytes)
 }
 
 /// Incremental length-prefix decoder for one hostile adapter byte stream.
@@ -1126,10 +1155,28 @@ mod tests {
             })
             .expect("bounded project result validates");
 
+        let payload_bytes = project_analysis_request_payload_bytes(&request);
+        let mut request_without_inputs = request.clone();
+        request_without_inputs.inputs.clear();
+        let mut request_with_one_input = request_without_inputs.clone();
+        request_with_one_input
+            .inputs
+            .push(request.inputs[0].clone());
+        assert_eq!(
+            project_analysis_input_field_bytes(&request.inputs[0]),
+            Some(
+                project_analysis_request_payload_bytes(&request_with_one_input)
+                    - project_analysis_request_payload_bytes(&request_without_inputs)
+            )
+        );
         let frame = AdapterFrame {
             message: Some(adapter_frame::Message::ProjectAnalysisRequest(request)),
         };
         let encoded = encode_adapter_frame(&frame).expect("project frame encodes");
+        assert_eq!(
+            project_analysis_frame_bytes(payload_bytes),
+            Some(encoded.len())
+        );
         let decoded = decode_adapter_frame(&encoded).expect("project frame decodes");
         assert_eq!(frame_kind(&decoded), "project_analysis_request");
     }

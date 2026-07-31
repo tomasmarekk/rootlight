@@ -1978,22 +1978,42 @@ impl FirstSliceProjectAnalysisRequest<'_> {
 /// Validated project output plus evidence from its exact producing process.
 #[derive(Debug)]
 pub struct FirstSliceProjectAnalysis {
-    document: NormalizedIrDocument,
+    documents: Vec<NormalizedIrDocument>,
     isolation_permits_deep_adapter: bool,
+    partitioned: bool,
 }
 
 impl FirstSliceProjectAnalysis {
     /// Creates one project output at the daemon-owned adapter boundary.
     #[must_use]
-    pub const fn new(document: NormalizedIrDocument, isolation_permits_deep_adapter: bool) -> Self {
+    pub fn new(document: NormalizedIrDocument, isolation_permits_deep_adapter: bool) -> Self {
         Self {
-            document,
+            documents: vec![document],
             isolation_permits_deep_adapter,
+            partitioned: false,
         }
     }
 
-    fn into_parts(self) -> (NormalizedIrDocument, bool) {
-        (self.document, self.isolation_permits_deep_adapter)
+    /// Creates deterministic partition outputs from one daemon-owned analysis.
+    #[must_use]
+    pub fn new_partitioned(
+        documents: Vec<NormalizedIrDocument>,
+        isolation_permits_deep_adapter: bool,
+    ) -> Self {
+        let partitioned = documents.len() > 1;
+        Self {
+            documents,
+            isolation_permits_deep_adapter,
+            partitioned,
+        }
+    }
+
+    fn into_parts(self) -> (Vec<NormalizedIrDocument>, bool, bool) {
+        (
+            self.documents,
+            self.isolation_permits_deep_adapter,
+            self.partitioned,
+        )
     }
 }
 
@@ -3355,28 +3375,47 @@ impl FirstSliceService {
                 };
                 match project_analyzer.analyze(request, cancellation) {
                     Ok(output) => {
-                        let (document, isolation_permits_deep_adapter) = output.into_parts();
+                        let (documents, isolation_permits_deep_adapter, partitioned) =
+                            output.into_parts();
                         if !isolation_permits_deep_adapter {
                             fallback_error = Some(FirstSliceProjectAnalysisError::Isolation);
-                        } else if !project_document_matches_inputs(
-                            &document,
+                        } else if !project_documents_match_inputs(
+                            &documents,
                             target.repository,
                             target.generation,
                             project_analyzer.provider_identity(),
                             &inputs,
                         ) {
                             fallback_error = Some(FirstSliceProjectAnalysisError::Protocol);
-                        } else if append_normalized_document(
-                            target,
-                            document,
-                            self.analysis_limits.ir(),
-                            &mut append_state,
-                        )
-                        .is_ok()
-                        {
-                            continue;
                         } else {
-                            fallback_error = Some(FirstSliceProjectAnalysisError::Analysis);
+                            match merge_project_documents(documents) {
+                                Ok(mut document) => {
+                                    let preparation = if partitioned {
+                                        append_project_partition_diagnostic(
+                                            &mut document,
+                                            &language,
+                                            self.analysis_limits.ir(),
+                                        )
+                                    } else {
+                                        Ok(())
+                                    };
+                                    if preparation.is_ok()
+                                        && append_normalized_document(
+                                            target,
+                                            document,
+                                            self.analysis_limits.ir(),
+                                            &mut append_state,
+                                        )
+                                        .is_ok()
+                                    {
+                                        continue;
+                                    }
+                                    fallback_error = Some(FirstSliceProjectAnalysisError::Analysis);
+                                }
+                                Err(_) => {
+                                    fallback_error = Some(FirstSliceProjectAnalysisError::Analysis);
+                                }
+                            }
                         }
                     }
                     Err(FirstSliceProjectAnalysisError::Cancelled(reason)) => {
@@ -7097,6 +7136,7 @@ fn project_context_manifest(
     Ok(manifest)
 }
 
+#[cfg(test)]
 fn project_document_matches_inputs(
     document: &NormalizedIrDocument,
     repository: RepositoryId,
@@ -7104,12 +7144,31 @@ fn project_document_matches_inputs(
     provider_identity: ContentHash,
     inputs: &[FirstSliceProjectInput<'_>],
 ) -> bool {
-    if document.repository != repository
-        || document.generation != generation
-        || document.files.len() != inputs.len()
-        || document.provenance.is_empty()
-        || document.provenance.iter().any(|provenance| {
-            provenance.tier != AnalysisTier::TierB || provenance.binary_digest != provider_identity
+    project_documents_match_inputs(
+        std::slice::from_ref(document),
+        repository,
+        generation,
+        provider_identity,
+        inputs,
+    )
+}
+
+fn project_documents_match_inputs(
+    documents: &[NormalizedIrDocument],
+    repository: RepositoryId,
+    generation: GenerationId,
+    provider_identity: ContentHash,
+    inputs: &[FirstSliceProjectInput<'_>],
+) -> bool {
+    if documents.is_empty()
+        || documents.iter().any(|document| {
+            document.repository != repository
+                || document.generation != generation
+                || document.provenance.is_empty()
+                || document.provenance.iter().any(|provenance| {
+                    provenance.tier != AnalysisTier::TierB
+                        || provenance.binary_digest != provider_identity
+                })
         })
     {
         return false;
@@ -7118,19 +7177,28 @@ fn project_document_matches_inputs(
         .iter()
         .map(|input| (input.file(), input))
         .collect::<BTreeMap<_, _>>();
-    if expected_files.len() != inputs.len()
-        || document.files.iter().any(|file| {
-            let Some(input) = expected_files.get(&file.id) else {
-                return true;
-            };
-            file.repository != repository
-                || file.generation != generation
-                || file.path != input.path()
-                || file.content_hash != input.content_hash()
-                || usize::try_from(file.byte_length) != Ok(input.source().len())
-                || file.generated != input.generated()
-        })
-    {
+    if expected_files.len() != inputs.len() {
+        return false;
+    }
+    let mut observed_files = BTreeMap::new();
+    for file in documents.iter().flat_map(|document| &document.files) {
+        if observed_files.insert(file.id, file).is_some() {
+            return false;
+        }
+        let Some(input) = expected_files.get(&file.id) else {
+            return false;
+        };
+        if file.repository != repository
+            || file.generation != generation
+            || file.path != input.path()
+            || file.content_hash != input.content_hash()
+            || usize::try_from(file.byte_length) != Ok(input.source().len())
+            || file.generated != input.generated()
+        {
+            return false;
+        }
+    }
+    if observed_files.len() != inputs.len() {
         return false;
     }
 
@@ -7146,32 +7214,159 @@ fn project_document_matches_inputs(
     if expected_mappings.len() != expected_mapping_count {
         return false;
     }
+    let mut provenance = BTreeMap::new();
+    for record in documents.iter().flat_map(|document| &document.provenance) {
+        if provenance.insert(record.id, record).is_some() {
+            return false;
+        }
+    }
+    let mut observed_mapping_keys = BTreeSet::new();
+    let mut observed_mapping_count = 0_usize;
+    for observed in documents
+        .iter()
+        .flat_map(|document| &document.source_mappings)
+        .filter(|mapping| mapping.kind == SourceMappingKind::GeneratedToOrigin)
+    {
+        observed_mapping_count = match observed_mapping_count.checked_add(1) {
+            Some(count) => count,
+            None => return false,
+        };
+        let key = (observed.from.span(), observed.to.span());
+        if !observed_mapping_keys.insert(key) {
+            return false;
+        }
+        let Some(expected) = expected_mappings.get(&key) else {
+            return false;
+        };
+        let Some(mapping_provenance) = provenance.get(&observed.provenance) else {
+            return false;
+        };
+        if mapping_provenance.producer_kind != ProducerKind::Derivation
+            || mapping_provenance.rule.as_deref() != Some(expected.provenance_rule().as_str())
+            || mapping_provenance.evidence_sources != [observed.from.clone(), observed.to.clone()]
+            || observed.evidence.source.as_ref() != Some(&observed.from)
+            || observed.evidence.derivation != [FactRef::File(observed.to.span().file())]
+        {
+            return false;
+        }
+    }
+    observed_mapping_count == expected_mapping_count
+}
+
+fn merge_project_documents(
+    documents: Vec<NormalizedIrDocument>,
+) -> Result<NormalizedIrDocument, FirstSliceError> {
+    let mut documents = documents.into_iter();
+    let mut merged = documents.next().ok_or(FirstSliceError::Identity)?;
+    for mut document in documents {
+        if document.version != merged.version
+            || document.repository != merged.repository
+            || document.generation != merged.generation
+        {
+            return Err(FirstSliceError::Identity);
+        }
+        merged
+            .files
+            .try_reserve_exact(document.files.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        merged
+            .entities
+            .try_reserve_exact(document.entities.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        merged
+            .occurrences
+            .try_reserve_exact(document.occurrences.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        merged
+            .relations
+            .try_reserve_exact(document.relations.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        merged
+            .provenance
+            .try_reserve_exact(document.provenance.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        merged
+            .source_mappings
+            .try_reserve_exact(document.source_mappings.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        merged
+            .coverage_records
+            .try_reserve_exact(document.coverage_records.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        merged
+            .skipped_regions
+            .try_reserve_exact(document.skipped_regions.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        merged
+            .diagnostics
+            .try_reserve_exact(document.diagnostics.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        merged
+            .extensions
+            .try_reserve_exact(document.extensions.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        merged.files.append(&mut document.files);
+        merged.entities.append(&mut document.entities);
+        merged.occurrences.append(&mut document.occurrences);
+        merged.relations.append(&mut document.relations);
+        merged.provenance.append(&mut document.provenance);
+        merged.source_mappings.append(&mut document.source_mappings);
+        merged
+            .coverage_records
+            .append(&mut document.coverage_records);
+        merged.skipped_regions.append(&mut document.skipped_regions);
+        merged.diagnostics.append(&mut document.diagnostics);
+        merged.extensions.append(&mut document.extensions);
+    }
+    Ok(merged)
+}
+
+fn append_project_partition_diagnostic(
+    document: &mut NormalizedIrDocument,
+    language: &str,
+    limits: &IrLimits,
+) -> Result<(), FirstSliceError> {
+    for coverage in &mut document.coverage_records {
+        if coverage.tier == AnalysisTier::TierB && coverage.status == CoverageStatus::Complete {
+            coverage.status = CoverageStatus::Bounded;
+            coverage.id =
+                derive_coverage_record_id(coverage).map_err(|_| FirstSliceError::Identity)?;
+        }
+    }
     let provenance = document
         .provenance
-        .iter()
-        .map(|record| (record.id, record))
-        .collect::<BTreeMap<_, _>>();
-    let observed_mappings = document
-        .source_mappings
-        .iter()
-        .filter(|mapping| mapping.kind == SourceMappingKind::GeneratedToOrigin)
-        .collect::<Vec<_>>();
-    observed_mappings.len() == expected_mapping_count
-        && observed_mappings.iter().all(|observed| {
-            let key = (observed.from.span(), observed.to.span());
-            let Some(expected) = expected_mappings.get(&key) else {
-                return false;
-            };
-            let Some(mapping_provenance) = provenance.get(&observed.provenance) else {
-                return false;
-            };
-            mapping_provenance.producer_kind == ProducerKind::Derivation
-                && mapping_provenance.rule.as_deref() == Some(expected.provenance_rule().as_str())
-                && mapping_provenance.evidence_sources
-                    == [observed.from.clone(), observed.to.clone()]
-                && observed.evidence.source.as_ref() == Some(&observed.from)
-                && observed.evidence.derivation == [FactRef::File(observed.to.span().file())]
-        })
+        .first()
+        .map(|record| record.id)
+        .ok_or(FirstSliceError::Identity)?;
+    let evidence_file = document
+        .files
+        .first()
+        .map(|record| record.id)
+        .ok_or(FirstSliceError::Identity)?;
+    let total = normalized_record_count(document)?;
+    checked_combined_length(total, 1, limits.max_total_records)?;
+    reserve_records(&mut document.diagnostics, 1, limits.max_diagnostics)?;
+    let mut diagnostic = DiagnosticRecord {
+        id: FactId::from_bytes([0; 20]),
+        repository: document.repository,
+        generation: document.generation,
+        code: "project-adapter-partitioned-coverage".to_owned(),
+        message: format!(
+            "project analysis for {language} was partitioned and cross-partition relationships are bounded"
+        ),
+        severity: DiagnosticSeverity::Warning,
+        source: None,
+        coverage_effect: CoverageStatus::Bounded,
+        provenance,
+        evidence: FactEvidence {
+            source: None,
+            derivation: vec![FactRef::File(evidence_file)],
+        },
+    };
+    diagnostic.id =
+        derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
+    document.diagnostics.push(diagnostic);
+    Ok(())
 }
 
 fn is_project_fallback_code(code: &str) -> bool {
@@ -8607,6 +8802,7 @@ mod tests {
     struct SuccessfulProjectAnalyzer {
         identity: ContentHash,
         calls: Arc<AtomicUsize>,
+        partitioned: bool,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8678,9 +8874,23 @@ mod tests {
             _cancellation: &Cancellation,
         ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            let mut document =
-                NormalizedIrDocument::empty(request.repository(), request.generation());
+            let mut documents = Vec::new();
+            if !self.partitioned {
+                documents.push(NormalizedIrDocument::empty(
+                    request.repository(),
+                    request.generation(),
+                ));
+            }
             for input in request.inputs() {
+                if self.partitioned {
+                    documents.push(NormalizedIrDocument::empty(
+                        request.repository(),
+                        request.generation(),
+                    ));
+                }
+                let document = documents
+                    .last_mut()
+                    .expect("test analyzer has an output document");
                 let relative = RelativePath::parse(Path::new(input.path()))
                     .expect("test project path is canonical");
                 let length = u64::try_from(input.source().len())
@@ -8733,6 +8943,26 @@ mod tests {
                         derivation: Vec::new(),
                     },
                 });
+                let mut coverage = rootlight_ir::CoverageRecord {
+                    id: FactId::from_bytes([0; 20]),
+                    repository: request.repository(),
+                    generation: request.generation(),
+                    scope: CoverageScope::File(input.file()),
+                    domain: rootlight_ir::FactDomain::Relations,
+                    tier: AnalysisTier::TierB,
+                    status: CoverageStatus::Complete,
+                    discovered: 1,
+                    indexed: 1,
+                    skipped: 0,
+                    provenance: provenance_id,
+                    evidence: FactEvidence {
+                        source: Some(source.clone()),
+                        derivation: Vec::new(),
+                    },
+                };
+                coverage.id = derive_coverage_record_id(&coverage)
+                    .expect("test project coverage identity derives");
+                document.coverage_records.push(coverage);
                 let claim = FileIdentityClaim {
                     file: input.file(),
                     repository: request.repository(),
@@ -8751,7 +8981,16 @@ mod tests {
                     .expect("test file identity claim encodes"),
                 );
             }
-            Ok(FirstSliceProjectAnalysis::new(document, true))
+            if self.partitioned {
+                Ok(FirstSliceProjectAnalysis::new_partitioned(documents, true))
+            } else {
+                Ok(FirstSliceProjectAnalysis::new(
+                    documents
+                        .pop()
+                        .expect("test analyzer has one output document"),
+                    true,
+                ))
+            }
         }
     }
 
@@ -9052,6 +9291,68 @@ mod tests {
     }
 
     #[test]
+    fn partitioned_project_analysis_marks_cross_partition_coverage_as_bounded() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[
+                ("src/first.py", "def first_value():\n    return 1\n"),
+                ("src/second.py", "def second_value():\n    return 2\n"),
+            ],
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer = Arc::new(SuccessfulProjectAnalyzer {
+            identity: content_hash(b"partitioned-project-adapter"),
+            calls: Arc::clone(&calls),
+            partitioned: true,
+        });
+        let mut service =
+            FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("service initializes with a project adapter");
+
+        let receipt = service
+            .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
+            .expect("partitioned deep analysis remains publishable");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(receipt.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "project-adapter-partitioned-coverage"
+                && diagnostic.message
+                    == "project analysis for python was partitioned and cross-partition relationships are bounded"
+        }));
+        let document = service
+            .generations
+            .generation(receipt.generation)
+            .expect("partitioned generation resolves")
+            .document();
+        assert!(document.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "project-adapter-partitioned-coverage"
+                && diagnostic.coverage_effect == CoverageStatus::Bounded
+        }));
+        assert_eq!(
+            document
+                .coverage_records
+                .iter()
+                .filter(|coverage| coverage.tier == AnalysisTier::TierB)
+                .count(),
+            2
+        );
+        assert!(
+            document
+                .coverage_records
+                .iter()
+                .filter(|coverage| coverage.tier == AnalysisTier::TierB)
+                .all(|coverage| coverage.status == CoverageStatus::Bounded)
+        );
+        assert!(
+            receipt
+                .diagnostics
+                .iter()
+                .all(|diagnostic| !is_project_fallback_code(&diagnostic.code))
+        );
+    }
+
+    #[test]
     fn deep_project_path_forwards_only_reliable_generated_origin_headers() {
         let fixture = TempDir::new().expect("fixture root exists");
         write_language_fixture(
@@ -9209,6 +9510,7 @@ mod tests {
         let analyzer: Arc<dyn FirstSliceProjectAnalyzer> = Arc::new(SuccessfulProjectAnalyzer {
             identity,
             calls: Arc::clone(&calls),
+            partitioned: false,
         });
         let cancellation = deadline();
 
