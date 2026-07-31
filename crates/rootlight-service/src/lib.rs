@@ -2854,8 +2854,8 @@ impl FirstSliceService {
         let mut estimated_disk_bytes = durable_staging_reservation(source_preflight.source_bytes)?;
         self.ensure_durable_staging_capacity(estimated_disk_bytes)?;
         let source_count = source_preflight.file_count;
-        let repository_analysis_limits =
-            partitioned_analysis_limits(&self.analysis_limits, source_count)?;
+        let source_bytes =
+            usize::try_from(source_preflight.source_bytes).map_err(|_| FirstSliceError::Limits)?;
         let mut file_claims = Vec::new();
         file_claims
             .try_reserve_exact(source_count)
@@ -2865,6 +2865,7 @@ impl FirstSliceService {
             .try_reserve_exact(source_count)
             .map_err(|_| FirstSliceError::Limits)?;
         let mut source_languages = BTreeMap::new();
+        let mut source_analysis_limits = BTreeMap::new();
         let maximum_source_bytes = u64::try_from(self.analysis_limits.max_source_bytes())
             .map_err(|_| FirstSliceError::Limits)?;
         for input in &manifest.inputs {
@@ -2893,6 +2894,18 @@ impl FirstSliceService {
             });
             if source_languages
                 .insert(input.file, language.to_owned())
+                .is_some()
+            {
+                return Err(FirstSliceError::Identity);
+            }
+            let analysis_limits = partitioned_analysis_limits(
+                &self.analysis_limits,
+                source_count,
+                source_bytes,
+                snapshot.content().len(),
+            )?;
+            if source_analysis_limits
+                .insert(input.file, analysis_limits)
                 .is_some()
             {
                 return Err(FirstSliceError::Identity);
@@ -2945,9 +2958,9 @@ impl FirstSliceService {
             .and_then(|generation| self.structural_artifacts.generation(generation))
             .filter(|artifacts| {
                 artifacts.iter().all(|(_, entry)| {
-                    entry
-                        .artifact
-                        .is_compatible_with_limits(&repository_analysis_limits)
+                    source_analysis_limits
+                        .get(&entry.artifact.file())
+                        .is_some_and(|limits| entry.artifact.is_compatible_with_limits(limits))
                 })
             });
         let parent_incremental_inputs =
@@ -2983,6 +2996,9 @@ impl FirstSliceService {
                 .analyzers
                 .get(language)
                 .ok_or(FirstSliceError::Adapter)?;
+            let analysis_limits = source_analysis_limits
+                .get(&snapshot.file())
+                .ok_or(FirstSliceError::Adapter)?;
             let source = SourceRef::new(
                 repository,
                 generation,
@@ -2999,7 +3015,7 @@ impl FirstSliceService {
                 Vec::new(),
                 analysis_tier_for_language(language),
                 BuildContextIdentity::new(content_hash(BUILD_CONTEXT_SEED)),
-                &repository_analysis_limits,
+                analysis_limits,
             )
             .map_err(|_| FirstSliceError::Adapter)?
             .with_generated_status(input.generated);
@@ -8203,16 +8219,41 @@ fn map_query_error(error: QueryError, cancellation: &Cancellation) -> FirstSlice
 fn partitioned_analysis_limits(
     limits: &AnalysisLimits,
     source_files: usize,
+    total_source_bytes: usize,
+    file_source_bytes: usize,
 ) -> Result<AnalysisLimits, FirstSliceError> {
     if source_files == 0 {
         return Ok(limits.clone());
     }
     let syntax = limits.syntax_stream();
-    let maximum_records = MAX_FIRST_SLICE_STRUCTURAL_FACTS
-        .checked_div(source_files)
-        .ok_or(FirstSliceError::Limits)?
-        .max(1)
-        .min(syntax.max_records());
+    let record_budget = MAX_FIRST_SLICE_STRUCTURAL_FACTS.min(syntax.max_records());
+    let maximum_records = if total_source_bytes == 0 {
+        record_budget
+            .checked_div(source_files)
+            .ok_or(FirstSliceError::Limits)?
+    } else {
+        if file_source_bytes > total_source_bytes {
+            return Err(FirstSliceError::Limits);
+        }
+        // Keep small files queryable while giving large source units enough facts to
+        // retain symbols that occur late in the parse stream.
+        let proportional_budget = record_budget / 2;
+        let even_budget = record_budget
+            .checked_sub(proportional_budget)
+            .ok_or(FirstSliceError::Limits)?;
+        let even_records = even_budget
+            .checked_div(source_files)
+            .ok_or(FirstSliceError::Limits)?;
+        let proportional_records = proportional_budget
+            .checked_mul(file_source_bytes)
+            .and_then(|value| value.checked_div(total_source_bytes))
+            .ok_or(FirstSliceError::Limits)?;
+        even_records
+            .checked_add(proportional_records)
+            .ok_or(FirstSliceError::Limits)?
+    }
+    .max(1)
+    .min(syntax.max_records());
     if maximum_records == syntax.max_records() {
         return Ok(limits.clone());
     }
@@ -9619,34 +9660,43 @@ mod tests {
     }
 
     #[test]
-    fn repository_analysis_partitions_structural_facts_across_sources() {
+    fn repository_analysis_partitions_structural_facts_across_count_and_size() {
         let limits = analysis_limits(16 * 1024 * 1024).expect("analysis limits are valid");
-        let unpartitioned =
-            partitioned_analysis_limits(&limits, 1).expect("one source retains its full budget");
+        let unpartitioned = partitioned_analysis_limits(&limits, 1, 1024, 1024)
+            .expect("one source retains its full budget");
         assert_eq!(
             unpartitioned.syntax_stream().max_records(),
             limits.syntax_stream().max_records()
         );
 
-        let source_files = 2_835;
-        let partitioned = partitioned_analysis_limits(&limits, source_files)
-            .expect("substantial repositories receive a fair per-file partition");
-        assert_eq!(
-            partitioned.syntax_stream().max_records(),
-            MAX_FIRST_SLICE_STRUCTURAL_FACTS / source_files
+        let small = partitioned_analysis_limits(&limits, 2, 10, 1)
+            .expect("small sources retain an even base partition");
+        let large = partitioned_analysis_limits(&limits, 2, 10, 9)
+            .expect("large sources receive a proportional partition");
+        assert!(large.syntax_stream().max_records() > small.syntax_stream().max_records());
+        assert!(
+            large
+                .syntax_stream()
+                .max_records()
+                .checked_add(small.syntax_stream().max_records())
+                .is_some_and(|total| total <= MAX_FIRST_SLICE_STRUCTURAL_FACTS)
         );
         assert_eq!(
-            partitioned.syntax_stream().batch().max_records(),
+            small.syntax_stream().batch().max_records(),
             limits.syntax_stream().batch().max_records()
         );
 
         let source_files = MAX_FIRST_SLICE_STRUCTURAL_FACTS
             .checked_add(1)
             .expect("test source count is representable");
-        let minimum = partitioned_analysis_limits(&limits, source_files)
+        let minimum = partitioned_analysis_limits(&limits, source_files, 0, 0)
             .expect("extreme source counts retain a nonzero bounded partition");
         assert_eq!(minimum.syntax_stream().max_records(), 1);
         assert_eq!(minimum.syntax_stream().batch().max_records(), 1);
+        assert!(matches!(
+            partitioned_analysis_limits(&limits, 2, 1, 2),
+            Err(FirstSliceError::Limits)
+        ));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
