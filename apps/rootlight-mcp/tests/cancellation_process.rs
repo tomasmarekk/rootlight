@@ -327,7 +327,9 @@ fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str)
     if index["result"]["structuredContent"]["data"]["state"] == "published" {
         return;
     }
-    for attempt in 0..30 {
+    // Publication is setup for the cancellation assertions below. Keep it
+    // bounded while allowing loaded CI runners to finish durable finalization.
+    for attempt in 0..60 {
         let status = mcp.call(
             &format!("operation-{attempt}"),
             "operation.status",
