@@ -61,7 +61,7 @@ use rootlight_protocol::{
     generated::{common::v1 as common, daemon::v1 as daemon},
 };
 use rootlight_runtime::{LaunchLock, RuntimePaths};
-use rootlight_sandbox::{ChildProcess, ProcessCommand, ProcessError, StdioMode};
+use rootlight_sandbox::{ChildProcess, KillOnCloseJob, ProcessCommand, ProcessError, StdioMode};
 use sha2::{Digest as _, Sha256};
 use tokio::time::Instant as TokioInstant;
 use unicode_casefold::UnicodeCaseFold as _;
@@ -95,7 +95,7 @@ const COORDINATED_START_TIMEOUT: Duration = Duration::from_secs(3);
 const COORDINATED_START_TIMEOUT: Duration = Duration::from_secs(30);
 const COORDINATED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const START_CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
-const START_CHILD_RETAIN_ATTEMPTS: usize = 3;
+const START_CHILD_CLEANUP_ATTEMPTS: usize = 3;
 const START_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const MAX_REPOSITORY_CATALOG_PAGE_SIZE: u16 = 200;
@@ -2298,19 +2298,72 @@ pub struct Client {
     next_request_id: AtomicU64,
 }
 
-/// Exact child-process ownership retained by a lifecycle startup winner.
-///
-/// The daemon is a process-tree leaf: it starts threads but no descendant
-/// processes. Retaining and reaping this handle therefore owns the complete
-/// lifecycle. That invariant must move to a process group or job object before
-/// the daemon is allowed to spawn descendants. If bounded cleanup cannot prove
-/// that the child was reaped, the exact handle is deliberately retained rather
-/// than risking PID-based cleanup of an unrelated process.
+#[derive(Debug)]
+struct CoordinatedDaemonProcess {
+    child: ChildProcess,
+    containment: Option<KillOnCloseJob>,
+    cleanup_on_drop: bool,
+}
+
+impl CoordinatedDaemonProcess {
+    #[cfg(not(windows))]
+    fn uncontained(child: ChildProcess) -> Self {
+        Self {
+            child,
+            containment: None,
+            cleanup_on_drop: true,
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn take_stdin(&mut self) -> Option<rootlight_sandbox::ChildStdin> {
+        self.child.take_stdin()
+    }
+
+    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>, ProcessError> {
+        self.child.try_wait()
+    }
+
+    fn handoff(mut self) -> Result<(), ClientError> {
+        if let Some(containment) = self.containment.take() {
+            containment
+                .handoff(&self.child)
+                .map_err(launch_process_error)?;
+        }
+        self.cleanup_on_drop = false;
+        Ok(())
+    }
+}
+
+impl Drop for CoordinatedDaemonProcess {
+    fn drop(&mut self) {
+        if !self.cleanup_on_drop || self.containment.is_some() {
+            return;
+        }
+        // Platforms without native kill-on-close containment still own the
+        // exact child handle. Reap it on every non-handoff path so ordinary
+        // errors and unwinds cannot detach a supervised daemon.
+        for attempt in 0..START_CHILD_CLEANUP_ATTEMPTS {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            let _ = self.child.terminate();
+            if attempt.saturating_add(1) < START_CHILD_CLEANUP_ATTEMPTS {
+                std::thread::sleep(START_POLL_INTERVAL);
+            }
+        }
+    }
+}
+
+/// Exact contained process ownership retained by a lifecycle startup winner.
 #[derive(Debug)]
 pub struct OwnedDaemon {
     paths: RuntimePaths,
     identity: ReadyDaemonIdentity,
-    child: Option<ChildProcess>,
+    child: Option<CoordinatedDaemonProcess>,
 }
 
 impl OwnedDaemon {
@@ -2325,7 +2378,7 @@ impl OwnedDaemon {
         let discovery = self.paths.discover().map_err(ClientError::Runtime)?;
         let observed = ReadyDaemonIdentity::from_discovery(&discovery);
         if observed != self.identity || child.id() != self.identity.pid {
-            self.terminate_or_retain();
+            self.terminate_owned();
             return Err(ClientError::DaemonLaunchFailed);
         }
         let mut stdin = child.take_stdin().ok_or(ClientError::DaemonLaunchFailed)?;
@@ -2347,23 +2400,23 @@ impl OwnedDaemon {
                 };
             }
             if Instant::now() >= deadline {
-                self.terminate_or_retain();
+                self.terminate_owned();
                 return Err(ClientError::DaemonLaunchCleanupTimedOut);
             }
             std::thread::sleep(START_POLL_INTERVAL);
         }
     }
 
-    fn terminate_or_retain(&mut self) {
+    fn terminate_owned(&mut self) {
         if let Some(child) = self.child.take() {
-            terminate_or_retain_startup_process(child, || {});
+            terminate_startup_process(child);
         }
     }
 }
 
 impl Drop for OwnedDaemon {
     fn drop(&mut self) {
-        self.terminate_or_retain();
+        self.terminate_owned();
     }
 }
 
@@ -5518,7 +5571,7 @@ fn wait_for_ready_daemon(
 struct CoordinatedStartup {
     authority: Option<LaunchLock>,
     ownership: StartupOwnership,
-    child: Option<ChildProcess>,
+    child: Option<CoordinatedDaemonProcess>,
 }
 
 impl CoordinatedStartup {
@@ -5555,7 +5608,7 @@ impl CoordinatedStartup {
         let child = self.child.take().ok_or(ClientError::DaemonLaunchFailed)?;
         let owned = match self.ownership {
             StartupOwnership::Detached => {
-                drop(child);
+                child.handoff()?;
                 None
             }
             StartupOwnership::Retained => Some(OwnedDaemon {
@@ -5597,37 +5650,27 @@ impl Drop for CoordinatedStartup {
             return;
         };
         let authority = self.authority.take();
-        terminate_or_retain_startup_process(child, move || {
-            if let Some(authority) = authority {
-                std::mem::forget(authority);
-            }
-        });
+        terminate_startup_process(child);
+        drop(authority);
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupCleanup {
     Reaped,
-    Retained,
+    AttemptsExhausted,
 }
 
-fn terminate_or_retain_startup_process(
-    process: impl StartupProcess,
-    retain_authority: impl FnOnce(),
-) -> StartupCleanup {
-    terminate_or_retain_startup_process_with(
-        process,
-        START_CHILD_RETAIN_ATTEMPTS,
-        || std::thread::sleep(START_POLL_INTERVAL),
-        retain_authority,
-    )
+fn terminate_startup_process(process: impl StartupProcess) -> StartupCleanup {
+    terminate_startup_process_with(process, START_CHILD_CLEANUP_ATTEMPTS, || {
+        std::thread::sleep(START_POLL_INTERVAL)
+    })
 }
 
-fn terminate_or_retain_startup_process_with(
+fn terminate_startup_process_with(
     mut process: impl StartupProcess,
     max_attempts: usize,
     mut pause: impl FnMut(),
-    retain_authority: impl FnOnce(),
 ) -> StartupCleanup {
     for attempt in 0..max_attempts {
         if matches!(process.try_exited(), Ok(true)) {
@@ -5641,14 +5684,13 @@ fn terminate_or_retain_startup_process_with(
             pause();
         }
     }
-    // INTENTIONAL: losing the handles would release startup authority without
-    // proof that the exact child exited. Bounded retention is safer than PID reuse.
-    std::mem::forget(process);
-    retain_authority();
-    StartupCleanup::Retained
+    // The production process wrapper retains kill-on-close containment while
+    // these exact-handle attempts run. Dropping it after bounded retries is the
+    // final fail-closed termination action, never an ownership leak.
+    StartupCleanup::AttemptsExhausted
 }
 
-fn terminate_startup_child(child: &mut ChildProcess) -> Result<(), ClientError> {
+fn terminate_startup_child(child: &mut impl StartupProcess) -> Result<(), ClientError> {
     let deadline = Instant::now()
         .checked_add(START_CHILD_STOP_TIMEOUT)
         .ok_or(ClientError::InvalidRequestTimeout)?;
@@ -5660,15 +5702,20 @@ trait StartupProcess {
     fn terminate(&mut self) -> io::Result<()>;
 }
 
-impl StartupProcess for ChildProcess {
+impl StartupProcess for CoordinatedDaemonProcess {
     fn try_exited(&mut self) -> io::Result<bool> {
-        ChildProcess::try_wait(self)
+        self.child
+            .try_wait()
             .map(|status| status.is_some())
             .map_err(process_io_error)
     }
 
     fn terminate(&mut self) -> io::Result<()> {
-        ChildProcess::terminate(self).map_err(process_io_error)
+        if let Some(containment) = self.containment.as_ref() {
+            containment.terminate(1).map_err(process_io_error)
+        } else {
+            self.child.terminate().map_err(process_io_error)
+        }
     }
 }
 
@@ -5837,7 +5884,7 @@ fn ipc_unavailable(error: &IpcError) -> bool {
 fn spawn_coordinated_daemon(
     ownership: StartupOwnership,
     paths: &RuntimePaths,
-) -> Result<ChildProcess, ClientError> {
+) -> Result<CoordinatedDaemonProcess, ClientError> {
     let executable = std::env::current_exe().map_err(ClientError::LaunchIo)?;
     let directory = executable
         .parent()
@@ -5850,14 +5897,36 @@ fn spawn_coordinated_daemon(
         StartupOwnership::Detached => ("--coordinated-start", StdioMode::Null),
         StartupOwnership::Retained => ("--coordinated-stdio", StdioMode::Piped),
     };
-    ProcessCommand::new(daemon)
+    let command = ProcessCommand::new(daemon)
         .arg(argument)
         .env("ROOTLIGHT_STATE_DIR", paths.state_dir())
         .env("ROOTLIGHT_RUNTIME_DIR", paths.runtime_dir())
         .stdin(stdin)
         .stdout(StdioMode::Null)
-        .stderr(StdioMode::Null)
+        .stderr(StdioMode::Null);
+    spawn_coordinated_process(command)
+}
+
+#[cfg(windows)]
+fn spawn_coordinated_process(
+    command: ProcessCommand,
+) -> Result<CoordinatedDaemonProcess, ClientError> {
+    let containment = KillOnCloseJob::new().map_err(launch_process_error)?;
+    let child = containment.spawn(command).map_err(launch_process_error)?;
+    Ok(CoordinatedDaemonProcess {
+        child,
+        containment: Some(containment),
+        cleanup_on_drop: true,
+    })
+}
+
+#[cfg(not(windows))]
+fn spawn_coordinated_process(
+    command: ProcessCommand,
+) -> Result<CoordinatedDaemonProcess, ClientError> {
+    command
         .spawn()
+        .map(CoordinatedDaemonProcess::uncontained)
         .map_err(launch_process_error)
 }
 
@@ -11407,11 +11476,11 @@ mod tests {
             .expect("server observes peer close");
     }
 
-    fn spawn_cleanup_child(root: &std::path::Path) -> (ChildProcess, RuntimePaths) {
+    fn spawn_cleanup_child(root: &std::path::Path) -> (CoordinatedDaemonProcess, RuntimePaths) {
         let child_paths = RuntimePaths::new(root.join("state"), root.join("runtime"))
             .expect("child runtime paths are valid");
         let marker = root.join("ready");
-        let mut child =
+        let command =
             ProcessCommand::new(std::env::current_exe().expect("test executable resolves"))
                 .arg("--exact")
                 .arg("tests::coordinated_startup_cleanup_child")
@@ -11419,9 +11488,8 @@ mod tests {
                 .env(STARTUP_CHILD_ROOT_ENV, root)
                 .stdin(StdioMode::Null)
                 .stdout(StdioMode::Null)
-                .stderr(StdioMode::Null)
-                .spawn()
-                .expect("cleanup child starts");
+                .stderr(StdioMode::Null);
+        let mut child = spawn_coordinated_process(command).expect("cleanup child starts");
         let marker_deadline = Instant::now()
             .checked_add(Duration::from_secs(5))
             .expect("marker deadline is representable");
@@ -11738,35 +11806,21 @@ mod tests {
         };
         let mut pauses = 0_usize;
 
-        let outcome = terminate_or_retain_startup_process_with(
-            process,
-            START_CHILD_RETAIN_ATTEMPTS,
-            || pauses = pauses.saturating_add(1),
-            || panic!("successful cleanup must not retain startup authority"),
-        );
+        let outcome = terminate_startup_process_with(process, START_CHILD_CLEANUP_ATTEMPTS, || {
+            pauses = pauses.saturating_add(1)
+        });
 
         assert_eq!(outcome, StartupCleanup::Reaped);
         assert_eq!(
             terminate_calls.load(AtomicOrdering::SeqCst),
-            START_CHILD_RETAIN_ATTEMPTS
+            START_CHILD_CLEANUP_ATTEMPTS
         );
-        assert_eq!(pauses, START_CHILD_RETAIN_ATTEMPTS.saturating_sub(1));
+        assert_eq!(pauses, START_CHILD_CLEANUP_ATTEMPTS.saturating_sub(1));
         assert!(dropped.load(AtomicOrdering::SeqCst));
     }
 
     #[test]
-    fn permanent_cleanup_failure_retains_process_and_startup_authority() {
-        let temporary = tempfile::tempdir().expect("temporary directory is available");
-        let paths = RuntimePaths::new(
-            temporary.path().join("state"),
-            temporary.path().join("runtime"),
-        )
-        .expect("runtime paths are valid");
-        paths.prepare_owner().expect("runtime paths are private");
-        let authority = paths
-            .acquire_launch_lock()
-            .expect("startup authority is acquired");
-        let retained_authority = std::cell::RefCell::new(None);
+    fn permanent_cleanup_failure_releases_process_ownership_after_bounded_attempts() {
         let terminate_calls = Arc::new(AtomicUsize::new(0));
         let dropped = Arc::new(AtomicBool::new(false));
         let process = FakeStartupProcess {
@@ -11779,30 +11833,17 @@ mod tests {
         };
         let mut pauses = 0_usize;
 
-        let outcome = terminate_or_retain_startup_process_with(
-            process,
-            START_CHILD_RETAIN_ATTEMPTS,
-            || pauses = pauses.saturating_add(1),
-            || {
-                retained_authority.replace(Some(authority));
-            },
-        );
+        let outcome = terminate_startup_process_with(process, START_CHILD_CLEANUP_ATTEMPTS, || {
+            pauses = pauses.saturating_add(1)
+        });
 
-        assert_eq!(outcome, StartupCleanup::Retained);
+        assert_eq!(outcome, StartupCleanup::AttemptsExhausted);
         assert_eq!(
             terminate_calls.load(AtomicOrdering::SeqCst),
-            START_CHILD_RETAIN_ATTEMPTS
+            START_CHILD_CLEANUP_ATTEMPTS
         );
-        assert_eq!(pauses, START_CHILD_RETAIN_ATTEMPTS.saturating_sub(1));
-        assert!(!dropped.load(AtomicOrdering::SeqCst));
-        assert!(matches!(
-            paths.acquire_launch_lock(),
-            Err(rootlight_runtime::RuntimeError::LaunchBusy)
-        ));
-        drop(retained_authority.take());
-        paths
-            .acquire_launch_lock()
-            .expect("test releases retained startup authority explicitly");
+        assert_eq!(pauses, START_CHILD_CLEANUP_ATTEMPTS.saturating_sub(1));
+        assert!(dropped.load(AtomicOrdering::SeqCst));
     }
 
     #[test]

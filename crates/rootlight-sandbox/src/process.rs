@@ -272,4 +272,18 @@ impl KillOnCloseJob {
     pub fn wait_empty(&self, deadline: Instant) -> Result<(), ProcessError> {
         self.inner.wait_empty(deadline)
     }
+
+    /// Transfers the final kill-on-close lease into the contained child.
+    ///
+    /// This is intended only for an authenticated detached-process handoff.
+    /// The parent-side job handle closes after the duplicate is installed in
+    /// the child, so failed handoff still terminates the contained tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the platform cannot duplicate the containment
+    /// lease into the exact child process.
+    pub fn handoff(self, child: &ChildProcess) -> Result<(), ProcessError> {
+        self.inner.handoff(&child.inner)
+    }
 }

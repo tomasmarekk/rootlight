@@ -32,9 +32,9 @@ use std::{
 use windows::{
     Win32::{
         Foundation::{
-            CompareObjectHandles, GENERIC_READ, GENERIC_WRITE, GetHandleInformation, HANDLE,
-            HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0,
-            WAIT_TIMEOUT,
+            CompareObjectHandles, DUPLICATE_SAME_ACCESS, DuplicateHandle, GENERIC_READ,
+            GENERIC_WRITE, GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS,
+            SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Globalization::{CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal},
         Security::{
@@ -369,6 +369,26 @@ impl KillOnCloseJob {
             }
             thread::sleep(WAIT_POLL_INTERVAL);
         }
+    }
+
+    pub(crate) fn handoff(self, child: &ChildProcess) -> Result<(), ProcessError> {
+        let mut remote_handle = HANDLE::default();
+        // SAFETY: both source handles are owned by this process, the target is
+        // the exact child created by this module, and the output slot is valid
+        // for the complete synchronous duplication call. The returned numeric
+        // value belongs to the child process and must not be closed here.
+        unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                as_handle(&self.job),
+                as_handle(&child.process),
+                &mut remote_handle,
+                0,
+                false,
+                DUPLICATE_SAME_ACCESS,
+            )
+        }
+        .map_err(|source| ProcessError::windows("handoff Job Object", source))
     }
 
     fn with_adapter_limits(limits: AdapterSandboxLimits) -> Result<Self, ProcessError> {
@@ -2363,6 +2383,34 @@ mod tests {
         let _input = child.take_stdin().expect("control stdin is retained");
         assert_eq!(job.active_processes().expect("accounting reads"), 1);
         drop(job);
+        wait_for_exit(&mut child, Instant::now() + Duration::from_secs(2));
+    }
+
+    #[test]
+    fn handed_off_job_stays_live_until_its_exact_child_exits() {
+        let job = KillOnCloseJob::new().expect("Job Object opens");
+        let mut child = spawn_in_job(
+            ProcessCommand::new(command_interpreter())
+                .arg("/D")
+                .arg("/Q")
+                .arg("/C")
+                .arg("set /p value=")
+                .stdin(StdioMode::Piped),
+            &job,
+        )
+        .expect("contained child starts");
+        let input = child.take_stdin().expect("control stdin is retained");
+
+        job.handoff(&child)
+            .expect("containment lease transfers to the exact child");
+        assert!(
+            child
+                .try_wait()
+                .expect("handed-off child status reads")
+                .is_none()
+        );
+
+        drop(input);
         wait_for_exit(&mut child, Instant::now() + Duration::from_secs(2));
     }
 

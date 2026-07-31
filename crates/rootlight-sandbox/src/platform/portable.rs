@@ -71,6 +71,10 @@ impl KillOnCloseJob {
     pub(crate) fn wait_empty(&self, _deadline: Instant) -> Result<(), ProcessError> {
         Err(ProcessError::UnsupportedPlatform)
     }
+
+    pub(crate) fn handoff(self, _child: &ChildProcess) -> Result<(), ProcessError> {
+        Err(ProcessError::UnsupportedPlatform)
+    }
 }
 
 pub(crate) fn spawn(command: ProcessCommand) -> Result<ChildProcess, ProcessError> {
