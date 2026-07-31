@@ -531,6 +531,7 @@ message CodeLocateRequest {
   FirstSliceLocateMode mode = 5;
   uint32 maximum_results = 6;
   uint64 page_offset = 7;
+  repeated string languages = 8;
 }
 
 // One typed lexical lookup result.

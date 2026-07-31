@@ -688,6 +688,7 @@ where
             generation: client::GenerationSelector::Generation(invocation.generation()),
             query,
             mode: LocateMode::Text,
+            languages: Vec::new(),
             maximum_results,
             page_offset: 0,
         };

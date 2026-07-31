@@ -840,6 +840,7 @@ async fn analytic_request_options_reach_the_port_unchanged() {
         generation: ClientGenerationSelector::Active,
         query: "transport options".to_owned(),
         mode: LocateMode::Text,
+        languages: Vec::new(),
         maximum_results: 3,
         page_offset: 0,
     };
@@ -1213,7 +1214,8 @@ fn final_serialization_enforces_exact_byte_and_conservative_token_boundaries() {
         ("query".to_owned(), json!("publish")),
     ]))
     .expect("fixture input decodes");
-    let request = normalize_code_locate(input, &unsupported).expect("fixture input normalizes");
+    let request = normalize_code_locate(input, &unsupported, &normalization_error())
+        .expect("fixture input normalizes");
     let output = map_code_locate(locate_response(), &request, None).expect("fixture output maps");
     let measured = serialize_measured_read_success(
         output.clone(),
@@ -1410,6 +1412,14 @@ fn schema_valid_invalid_inputs() -> Vec<(VerticalTool, Value)> {
         (
             VerticalTool::RepoIndex,
             json!({"root": "C:/fixture\0invalid"}),
+        ),
+        (
+            VerticalTool::CodeLocate,
+            json!({
+                "repository": {"repository_id": repository()},
+                "query": "publish",
+                "languages": ["rust/lang"]
+            }),
         ),
         (
             VerticalTool::SourceRead,
@@ -1934,8 +1944,8 @@ fn pagination_cursor_context(
             let budget =
                 AnalyticalBudget::new(input.budget.as_ref()).expect("fixture budget is valid");
             let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
-            let request =
-                normalize_code_locate(input, &unsupported).expect("code locate fixture normalizes");
+            let request = normalize_code_locate(input, &unsupported, &normalization_error())
+                .expect("code locate fixture normalizes");
             code_locate_cursor_context(
                 &request,
                 generation(),
@@ -2194,6 +2204,17 @@ async fn repository_read_cursors_bind_every_cross_tool_execution_dimension() {
             tool,
             VerticalTool::CodeLocate | VerticalTool::SymbolRelationships
         ) {
+            if tool == VerticalTool::CodeLocate {
+                cases.push((
+                    "language domain",
+                    with_argument(
+                        with_argument(base.clone(), "languages", json!(["rust"])),
+                        "cursor",
+                        json!(valid_cursor.clone()),
+                    ),
+                    ExposureProfile::Developer,
+                ));
+            }
             cases.push((
                 "response profile",
                 with_argument(
@@ -8508,10 +8529,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         ),
         (
             VerticalTool::CodeLocate,
-            json!({"repository": {"repository_id": repository()}, "query": "x", "languages": ["rust"]}),
-        ),
-        (
-            VerticalTool::CodeLocate,
             json!({"repository": {"repository_id": repository()}, "query": "x", "search_modes": ["structural"]}),
         ),
         (
@@ -9860,6 +9877,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         NormalizedDelta,
         [
             "generation",
+            "languages",
             "max_results",
             "query",
             "repository",
@@ -10179,7 +10197,7 @@ fn accepted_schema_paths_have_effect_evidence() {
     let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
     assert_eq!(
         accepted_digest.as_str(),
-        "2e4079ef2c5ef2c8797a23b28b8e98a7534663135cc5b9bd1557f3ee1c94764d",
+        "d3f02a179f08977b1d4f9f828aa8713b0c4c485b86a960d74501285ded5924bb",
         "accepted path universe changed"
     );
     let categorized: Vec<_> = accepted
@@ -10244,8 +10262,8 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[10],
         counts[11],
     );
-    assert_eq!(counts, [130, 97, 3, 69, 28, 16, 5, 16, 25, 1, 1, 4]);
-    assert_eq!(categorized.len(), 395);
+    assert_eq!(counts, [132, 97, 3, 69, 28, 16, 5, 16, 25, 1, 1, 4]);
+    assert_eq!(categorized.len(), 397);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
@@ -10478,6 +10496,7 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
             false,
         ),
         ("generation", json!(alternate_generation()), true),
+        ("languages", json!(["rust"]), true),
         ("query", json!(format!("publish-{seed}")), false),
         ("search_modes", json!(["exact"]), true),
         ("max_results", bounded.clone(), true),
@@ -10764,12 +10783,17 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
             }
         }
         VerticalTool::CodeLocate => {
-            let request = normalize_code_locate(decode_arguments(arguments), &unsupported)
-                .expect("accepted locate fixture normalizes");
+            let request = normalize_code_locate(
+                decode_arguments(arguments),
+                &unsupported,
+                &normalization_error(),
+            )
+            .expect("accepted locate fixture normalizes");
             match field {
                 "repository" => json!(request.repository()),
                 "generation" => json!(format!("{:?}", request.generation())),
                 "query" => json!(request.query()),
+                "languages" => json!(request.languages()),
                 "search_modes" => json!(format!("{:?}", request.mode())),
                 "max_results" => json!(request.maximum_results()),
                 _ => panic!("unknown code.locate observation field"),
@@ -12276,6 +12300,11 @@ async fn accepted_effect_code_locate_controls_change_the_normalized_request() {
         json!({
             "repository": {"repository_id": repository()},
             "query": "publish",
+            "languages": ["Rust", "python"]
+        }),
+        json!({
+            "repository": {"repository_id": repository()},
+            "query": "publish",
             "max_results": 7
         }),
         json!({
@@ -12298,16 +12327,25 @@ async fn accepted_effect_code_locate_controls_change_the_normalized_request() {
             let ObservedCall::CodeLocate(request) = call else {
                 panic!("expected only locate requests");
             };
-            (request.mode(), request.maximum_results())
+            (
+                request.mode(),
+                request.languages().to_vec(),
+                request.maximum_results(),
+            )
         })
         .collect();
     assert_eq!(
         requests,
         [
-            (LocateMode::Text, 20),
-            (LocateMode::Exact, 20),
-            (LocateMode::Text, 7),
-            (LocateMode::Text, 5),
+            (LocateMode::Text, Vec::<String>::new(), 20),
+            (LocateMode::Exact, Vec::new(), 20),
+            (
+                LocateMode::Text,
+                vec!["python".to_owned(), "rust".to_owned()],
+                20,
+            ),
+            (LocateMode::Text, Vec::new(), 7),
+            (LocateMode::Text, Vec::new(), 5),
         ]
     );
 }

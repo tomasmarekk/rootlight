@@ -52,11 +52,11 @@ use rootlight_observability::{
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
-    MAX_CODE_DEAD_CLASSIFICATION_BYTES, MAX_FIRST_SLICE_BUDGET_DEPTH,
-    MAX_FIRST_SLICE_BUDGET_DURATION_MICROS, MAX_FIRST_SLICE_BUDGET_EDGES,
-    MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS, MAX_FIRST_SLICE_BUDGET_JSON_BYTES,
-    MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES, MAX_FIRST_SLICE_BUDGET_PATHS,
-    MAX_FIRST_SLICE_BUDGET_RESULTS, MAX_FIRST_SLICE_BUDGET_ROWS,
+    MAX_CODE_DEAD_CLASSIFICATION_BYTES, MAX_CODE_LOCATE_LANGUAGE_BYTES, MAX_CODE_LOCATE_LANGUAGES,
+    MAX_FIRST_SLICE_BUDGET_DEPTH, MAX_FIRST_SLICE_BUDGET_DURATION_MICROS,
+    MAX_FIRST_SLICE_BUDGET_EDGES, MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS,
+    MAX_FIRST_SLICE_BUDGET_JSON_BYTES, MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES,
+    MAX_FIRST_SLICE_BUDGET_PATHS, MAX_FIRST_SLICE_BUDGET_RESULTS, MAX_FIRST_SLICE_BUDGET_ROWS,
     MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES, MINIMUM_PROTOCOL_MINOR,
     generated::{common::v1 as common, daemon::v1 as daemon},
 };
@@ -2905,6 +2905,7 @@ impl Client {
                 generation,
                 query,
                 mode,
+                &[],
                 maximum_results,
                 page_offset,
             )?,
@@ -2994,6 +2995,61 @@ impl Client {
                     generation,
                     query,
                     mode,
+                    &[],
+                    maximum_results,
+                    page_offset,
+                )?,
+                options,
+            )
+            .await?
+        {
+            daemon::response_envelope::Response::CodeLocate(response) => parse_code_locate(
+                response,
+                repository,
+                generation,
+                maximum_results,
+                page_offset,
+            ),
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously executes one bounded lexical lookup over a language union.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for an invalid language filter, query or budget
+    /// bounds, unavailable protocol support, transport failure, timeout, or a
+    /// malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded asynchronous lookup or transport dimension"
+    )]
+    pub async fn code_locate_async_with_languages_and_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query: &str,
+        mode: LocateMode,
+        languages: &[String],
+        maximum_results: u32,
+        page_offset: u64,
+        options: RequestOptions,
+    ) -> Result<CodeLocate, ClientError> {
+        match self
+            .request_async_with_options(
+                build_code_locate_request(
+                    repository,
+                    generation,
+                    query,
+                    mode,
+                    languages,
                     maximum_results,
                     page_offset,
                 )?,
@@ -5863,6 +5919,9 @@ fn ensure_request_supported(
     selected_protocol_minor: u32,
 ) -> Result<(), ClientError> {
     let required_minor = match request {
+        daemon::request_envelope::Request::CodeLocate(request) if !request.languages.is_empty() => {
+            8
+        }
         daemon::request_envelope::Request::RepositoryIndex(_)
         | daemon::request_envelope::Request::RepositoryOperationStatus(_)
         | daemon::request_envelope::Request::CodeLocate(_)
@@ -6594,10 +6653,15 @@ fn build_code_locate_request(
     generation: GenerationSelector,
     query: &str,
     mode: LocateMode,
+    languages: &[String],
     maximum_results: u32,
     page_offset: u64,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
-    if query.is_empty() || query.len() > 2048 || !(1..=200).contains(&maximum_results) {
+    if query.is_empty()
+        || query.len() > 2048
+        || !(1..=200).contains(&maximum_results)
+        || !valid_language_filter(languages)
+    {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
     Ok(daemon::request_envelope::Request::CodeLocate(
@@ -6609,8 +6673,23 @@ fn build_code_locate_request(
             mode: locate_mode_to_wire(mode) as i32,
             maximum_results,
             page_offset,
+            languages: languages.to_vec(),
         },
     ))
+}
+
+fn valid_language_filter(languages: &[String]) -> bool {
+    languages.len() <= MAX_CODE_LOCATE_LANGUAGES
+        && languages.windows(2).all(|pair| pair[0] < pair[1])
+        && languages.iter().all(|language| {
+            !language.is_empty()
+                && language.len() <= MAX_CODE_LOCATE_LANGUAGE_BYTES
+                && language.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-' | b'.' | b'+' | b'#')
+                })
+        })
 }
 
 fn build_symbol_explain_request(
@@ -11880,6 +11959,16 @@ mod tests {
             Err(ClientError::ProtocolFeatureUnavailable)
         ));
         assert!(ensure_request_supported(&first_slice, 5).is_ok());
+        let language_filtered =
+            daemon::request_envelope::Request::CodeLocate(daemon::CodeLocateRequest {
+                languages: vec!["rust".to_owned()],
+                ..daemon::CodeLocateRequest::default()
+            });
+        assert!(matches!(
+            ensure_request_supported(&language_filtered, 7),
+            Err(ClientError::ProtocolFeatureUnavailable)
+        ));
+        assert!(ensure_request_supported(&language_filtered, 8).is_ok());
         for capability in [
             "code.locate.v1",
             "repository.index.v1",
@@ -12153,6 +12242,40 @@ mod tests {
             ),
             Err(ClientError::InvalidFirstSliceRequest)
         ));
+        let valid_languages = ["python".to_owned(), "rust".to_owned()];
+        let request = build_code_locate_request(
+            test_repository(),
+            GenerationSelector::Active,
+            "publish",
+            LocateMode::Text,
+            &valid_languages,
+            1,
+            0,
+        )
+        .expect("canonical language filters build");
+        let daemon::request_envelope::Request::CodeLocate(request) = request else {
+            panic!("language-filtered lookup builds a code-locate request");
+        };
+        assert_eq!(request.languages, valid_languages);
+        for invalid_languages in [
+            vec!["Rust".to_owned()],
+            vec!["rust".to_owned(), "python".to_owned()],
+            vec!["rust/lang".to_owned()],
+            vec!["rust".to_owned(), "rust".to_owned()],
+        ] {
+            assert!(matches!(
+                build_code_locate_request(
+                    test_repository(),
+                    GenerationSelector::Active,
+                    "publish",
+                    LocateMode::Text,
+                    &invalid_languages,
+                    1,
+                    0,
+                ),
+                Err(ClientError::InvalidFirstSliceRequest)
+            ));
+        }
         assert!(matches!(
             client.symbol_explain(test_repository(), GenerationSelector::Active, &[]),
             Err(ClientError::InvalidFirstSliceRequest)

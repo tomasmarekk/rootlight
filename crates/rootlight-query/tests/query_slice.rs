@@ -43,11 +43,26 @@ impl LexicalSearch for FakeSearch {
     fn search_with_stats(
         &self,
         request: &SearchRequest,
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
+        self.search_with_language_filter_and_stats(request, &[], budget, cancellation)
+    }
+
+    fn search_with_language_filter_and_stats(
+        &self,
+        request: &SearchRequest,
+        languages: &[String],
         _budget: SearchBudget,
         cancellation: &Cancellation,
     ) -> Result<SearchOutcome, SearchError> {
         cancellation.check()?;
-        let materialized_text_bytes = self.hits.iter().try_fold(0_u64, |total, hit| {
+        let filtered: Vec<_> = self
+            .hits
+            .iter()
+            .filter(|hit| languages.is_empty() || languages.binary_search(&hit.language).is_ok())
+            .collect();
+        let materialized_text_bytes = filtered.iter().try_fold(0_u64, |total, hit| {
             [
                 hit.identifier.len(),
                 hit.qualified_name.len(),
@@ -62,14 +77,13 @@ impl LexicalSearch for FakeSearch {
             })
         });
         Ok(SearchOutcome {
-            hits: self
-                .hits
+            hits: filtered
                 .iter()
                 .skip(request.page_offset)
                 .take(request.max_results)
-                .cloned()
+                .map(|hit| (*hit).clone())
                 .collect(),
-            matched_candidates: u64::try_from(self.hits.len())
+            matched_candidates: u64::try_from(filtered.len())
                 .map_err(|_| SearchError::CandidateBudgetExceeded)?,
             materialized_text_bytes: materialized_text_bytes
                 .ok_or(SearchError::ReturnedTextBudgetExceeded)?,
@@ -95,6 +109,23 @@ impl LexicalSearch for UnderreportedSearch {
         cancellation: &Cancellation,
     ) -> Result<SearchOutcome, SearchError> {
         let mut outcome = self.0.search_with_stats(request, budget, cancellation)?;
+        outcome.materialized_text_bytes = 0;
+        Ok(outcome)
+    }
+
+    fn search_with_language_filter_and_stats(
+        &self,
+        request: &SearchRequest,
+        languages: &[String],
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
+        let mut outcome = self.0.search_with_language_filter_and_stats(
+            request,
+            languages,
+            budget,
+            cancellation,
+        )?;
         outcome.materialized_text_bytes = 0;
         Ok(outcome)
     }
@@ -125,6 +156,26 @@ impl LexicalSearch for TruncatedSearch {
         Ok(outcome)
     }
 
+    fn search_with_language_filter_and_stats(
+        &self,
+        request: &SearchRequest,
+        languages: &[String],
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
+        let mut outcome = self.0.search_with_language_filter_and_stats(
+            request,
+            languages,
+            budget,
+            cancellation,
+        )?;
+        outcome.matched_candidates = outcome
+            .matched_candidates
+            .checked_add(1)
+            .ok_or(SearchError::CandidateBudgetExceeded)?;
+        Ok(outcome)
+    }
+
     fn document_count(&self) -> u64 {
         self.0.document_count().saturating_add(1)
     }
@@ -140,6 +191,16 @@ impl LexicalSearch for BackendCancelledSearch {
     fn search_with_stats(
         &self,
         _request: &SearchRequest,
+        _budget: SearchBudget,
+        _cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
+        Err(SearchError::Cancelled(CancellationReason::ClientRequest))
+    }
+
+    fn search_with_language_filter_and_stats(
+        &self,
+        _request: &SearchRequest,
+        _languages: &[String],
         _budget: SearchBudget,
         _cancellation: &Cancellation,
     ) -> Result<SearchOutcome, SearchError> {
@@ -306,6 +367,23 @@ fn locate_and_explain_use_deterministic_typed_plans() {
     assert!(located.usage.rows >= 2);
     assert!(located.usage.json_bytes > 0);
     assert_exact_response_accounting(&located);
+
+    let filtered = service
+        .plan_code_locate_with_languages(
+            search.hits[0].identifier.clone(),
+            LocateMode::Exact,
+            vec!["unknown".to_owned()],
+            10,
+            0,
+            SearchBudget::default(),
+            QueryBudget::new(),
+        )
+        .expect("canonical language filter is admitted");
+    let filtered = service
+        .execute_code_locate(&filtered, &cancellation)
+        .expect("language-filtered query succeeds");
+    assert_eq!(filtered.data.matched_candidates, 0);
+    assert!(filtered.data.hits.is_empty());
 
     let explain = service
         .plan_symbol_explain(search.hits[0].symbol_id, QueryBudget::new())

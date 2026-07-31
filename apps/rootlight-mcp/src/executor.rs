@@ -121,6 +121,8 @@ use crate::{
 };
 
 const DEFAULT_LOCATE_RESULTS: u16 = 20;
+const MAX_LOCATE_LANGUAGES: usize = 32;
+const MAX_LOCATE_LANGUAGE_BYTES: usize = 64;
 const DEFAULT_ADVANCED_RESULTS: u16 = 100;
 const ANALYTICAL_TRANSPORT_OVERHEAD: Duration = Duration::from_secs(1);
 #[cfg(test)]
@@ -540,6 +542,7 @@ pub struct CodeLocatePortRequest {
     generation: client::GenerationSelector,
     query: String,
     mode: LocateMode,
+    languages: Vec<String>,
     maximum_results: u32,
     page_offset: u64,
 }
@@ -569,6 +572,12 @@ impl CodeLocatePortRequest {
         self.mode
     }
 
+    /// Returns the canonical language union in deterministic order.
+    #[must_use]
+    pub fn languages(&self) -> &[String] {
+        &self.languages
+    }
+
     /// Returns the effective result ceiling.
     #[must_use]
     pub const fn maximum_results(&self) -> u32 {
@@ -590,6 +599,7 @@ impl fmt::Debug for CodeLocatePortRequest {
             .field("generation", &self.generation)
             .field("query_bytes", &self.query.len())
             .field("mode", &self.mode)
+            .field("languages", &self.languages)
             .field("maximum_results", &self.maximum_results)
             .field("page_offset", &self.page_offset)
             .finish()
@@ -1815,6 +1825,7 @@ where
                         },
                         cancellation,
                         &unsupported,
+                        &invalid_arguments,
                         &invalid_cursor,
                         cursor_key,
                     )
@@ -2530,6 +2541,7 @@ where
                 },
                 cancellation,
                 unsupported,
+                invalid_arguments,
                 invalid_cursor,
                 cursor_key,
             )
@@ -3316,6 +3328,13 @@ fn code_locate_cursor_context(
     request_hasher.update(request.query.as_bytes());
     request_hasher.update(&[locate_mode_tag(request.mode)]);
     request_hasher.update(&request.maximum_results.to_le_bytes());
+    if !request.languages.is_empty() {
+        request_hasher.update(b"\0languages\0");
+        for language in &request.languages {
+            request_hasher.update(language.as_bytes());
+            request_hasher.update(&[0]);
+        }
+    }
     hash_budget_limits(&mut request_hasher, budget);
     let query_fingerprint = *request_hasher.finalize().as_bytes();
     let mut plan_material = Vec::from(query_fingerprint);
@@ -3832,12 +3851,17 @@ where
     serialize_success(output)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the executor keeps independent capability, argument, cursor, and signing policies explicit"
+)]
 async fn execute_code_locate<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
     presentation: CursorPresentation,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
+    invalid_arguments: &PublicError,
     invalid_cursor: &PublicError,
     cursor_key: CursorSigningKey,
 ) -> Result<Map<String, Value>, ToolExecutionError>
@@ -3853,7 +3877,7 @@ where
         return Err(ToolExecutionError::new(invalid_cursor.clone()));
     }
     let cursor = input.cursor.clone();
-    let mut request = normalize_code_locate(input, unsupported)?;
+    let mut request = normalize_code_locate(input, unsupported, invalid_arguments)?;
     if let Some(parsed) = parse_repository_cursor(cursor.as_ref(), invalid_cursor)? {
         pin_request_generation(&mut request.generation, &parsed, invalid_cursor)?;
         request.page_offset = decode_page_offset(parsed.last_sort_key(), invalid_cursor)?;
@@ -6367,17 +6391,18 @@ fn normalize_repository_index(
 fn normalize_code_locate(
     input: CodeLocateInput,
     unsupported: &PublicError,
+    invalid_arguments: &PublicError,
 ) -> Result<CodeLocatePortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
     if input.kinds.is_some()
         || input.scope.is_some()
-        || input.languages.is_some()
         || input.related_to.is_some()
         || input.min_confidence.is_some()
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let mode = locate_mode(input.search_modes.as_ref(), unsupported)?;
+    let languages = canonical_locate_languages(input.languages, invalid_arguments)?;
     let maximum_results = input
         .max_results
         .into_iter()
@@ -6389,9 +6414,36 @@ fn normalize_code_locate(
         generation: client_generation(input.generation),
         query: input.query,
         mode,
+        languages,
         maximum_results: u32::from(maximum_results),
         page_offset: 0,
     })
+}
+
+fn canonical_locate_languages(
+    languages: Option<BTreeSet<String>>,
+    invalid_arguments: &PublicError,
+) -> Result<Vec<String>, ToolExecutionError> {
+    let Some(languages) = languages else {
+        return Ok(Vec::new());
+    };
+    if languages.len() > MAX_LOCATE_LANGUAGES
+        || languages.iter().any(|language| {
+            language.is_empty()
+                || language.len() > MAX_LOCATE_LANGUAGE_BYTES
+                || !language.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+' | b'#')
+                })
+        })
+    {
+        return Err(ToolExecutionError::new(invalid_arguments.clone()));
+    }
+    Ok(languages
+        .into_iter()
+        .map(|language| language.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
 }
 
 fn normalize_symbol_explain(

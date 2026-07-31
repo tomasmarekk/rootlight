@@ -49,11 +49,11 @@ use rootlight_operations::{
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
-    MAX_CODE_DEAD_CLASSIFICATION_BYTES, MAX_FIRST_SLICE_BUDGET_DEPTH,
-    MAX_FIRST_SLICE_BUDGET_DURATION_MICROS, MAX_FIRST_SLICE_BUDGET_EDGES,
-    MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS, MAX_FIRST_SLICE_BUDGET_JSON_BYTES,
-    MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES, MAX_FIRST_SLICE_BUDGET_PATHS,
-    MAX_FIRST_SLICE_BUDGET_RESULTS, MAX_FIRST_SLICE_BUDGET_ROWS,
+    MAX_CODE_DEAD_CLASSIFICATION_BYTES, MAX_CODE_LOCATE_LANGUAGE_BYTES, MAX_CODE_LOCATE_LANGUAGES,
+    MAX_FIRST_SLICE_BUDGET_DEPTH, MAX_FIRST_SLICE_BUDGET_DURATION_MICROS,
+    MAX_FIRST_SLICE_BUDGET_EDGES, MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS,
+    MAX_FIRST_SLICE_BUDGET_JSON_BYTES, MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES,
+    MAX_FIRST_SLICE_BUDGET_PATHS, MAX_FIRST_SLICE_BUDGET_RESULTS, MAX_FIRST_SLICE_BUDGET_ROWS,
     MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES, MINIMUM_PROTOCOL_MINOR, PROTOCOL_VERSION,
     generated::{common::v1 as common, daemon::v1 as daemon},
 };
@@ -6433,17 +6433,16 @@ async fn dispatch_first_slice(
     request: FirstSliceIpcRequest,
     context: FirstSliceIpcContext,
 ) -> daemon::response_envelope::Response {
-    let required_protocol_minor =
-        if matches!(&request, FirstSliceIpcRequest::RepositoryCatalogPage(_)) {
-            6
-        } else {
-            5
-        };
+    let required_protocol_minor = match &request {
+        FirstSliceIpcRequest::CodeLocate(request) if !request.languages.is_empty() => 8,
+        FirstSliceIpcRequest::RepositoryCatalogPage(_) => 6,
+        _ => 5,
+    };
     if context.selected_protocol_minor < required_protocol_minor {
-        let message = if required_protocol_minor == 6 {
-            "repository catalog pages need protocol minor six"
-        } else {
-            "first-slice requests need protocol minor five"
+        let message = match required_protocol_minor {
+            8 => "code locate language filters need protocol minor eight",
+            6 => "repository catalog pages need protocol minor six",
+            _ => "first-slice requests need protocol minor five",
         };
         return daemon::response_envelope::Response::Error(public_error_to_wire(
             &protocol_mismatch(message),
@@ -8084,6 +8083,7 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
             if request.query.is_empty()
                 || request.query.len() > 2048
                 || !(1..=200).contains(&request.maximum_results)
+                || !valid_code_locate_languages(&request.languages)
                 || !matches!(
                     daemon::FirstSliceLocateMode::try_from(request.mode),
                     Ok(daemon::FirstSliceLocateMode::FirstSliceLocateExact
@@ -8632,6 +8632,20 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
         }
     }
     Ok(())
+}
+
+fn valid_code_locate_languages(languages: &[String]) -> bool {
+    languages.len() <= MAX_CODE_LOCATE_LANGUAGES
+        && languages.windows(2).all(|pair| pair[0] < pair[1])
+        && languages.iter().all(|language| {
+            !language.is_empty()
+                && language.len() <= MAX_CODE_LOCATE_LANGUAGE_BYTES
+                && language.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-' | b'.' | b'+' | b'#')
+                })
+        })
 }
 
 fn require_first_slice_schema(
@@ -11447,6 +11461,7 @@ mod tests {
             mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
             maximum_results: 1,
             page_offset: 0,
+            languages: Vec::new(),
         });
 
         let response = dispatch_first_slice(
@@ -15603,6 +15618,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn code_locate_language_filter_validation_is_canonical_and_bounded() {
+        let request = |languages| {
+            FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+                schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+                repository: Some(common::RepositoryId { value: vec![1; 16] }),
+                generation: Some(daemon::GenerationSelector {
+                    selector: Some(daemon::generation_selector::Selector::Active(true)),
+                }),
+                query: "answer".to_owned(),
+                mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+                maximum_results: 1,
+                page_offset: 0,
+                languages,
+            })
+        };
+        assert!(
+            validate_first_slice_request(&request(vec!["c++".to_owned(), "rust".to_owned()]))
+                .is_ok()
+        );
+        for languages in [
+            vec!["Rust".to_owned()],
+            vec!["rust".to_owned(), "c++".to_owned()],
+            vec!["rust/lang".to_owned()],
+            vec!["rust".to_owned(), "rust".to_owned()],
+        ] {
+            assert!(validate_first_slice_request(&request(languages)).is_err());
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn repository_catalog_page_requires_negotiated_minor_six() {
         let request = catalog_page_request(None, None);
@@ -15626,6 +15671,63 @@ mod tests {
             FirstSliceIpcContext {
                 client_instance_id: ClientInstanceId::SYSTEM,
                 selected_protocol_minor: 6,
+                cancellation: Cancellation::new(),
+                deadline,
+                effective_budget: None,
+                index_admission: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            legacy,
+            daemon::response_envelope::Response::Error(common::PublicError {
+                code,
+                ..
+            }) if code == common::ErrorCode::ProtocolMismatch as i32
+        ));
+        assert!(matches!(
+            current,
+            daemon::response_envelope::Response::Error(common::PublicError {
+                code,
+                ..
+            }) if code == common::ErrorCode::UnsupportedCapability as i32
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn code_locate_language_filter_requires_negotiated_minor_eight() {
+        let request = FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+            schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+            repository: Some(common::RepositoryId { value: vec![1; 16] }),
+            generation: Some(daemon::GenerationSelector {
+                selector: Some(daemon::generation_selector::Selector::Active(true)),
+            }),
+            query: "answer".to_owned(),
+            mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+            maximum_results: 1,
+            page_offset: 0,
+            languages: vec!["rust".to_owned()],
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let legacy = dispatch_first_slice(
+            &UnavailableFirstSliceIpcHandler,
+            request.clone(),
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::SYSTEM,
+                selected_protocol_minor: 7,
+                cancellation: Cancellation::new(),
+                deadline,
+                effective_budget: None,
+                index_admission: None,
+            },
+        )
+        .await;
+        let current = dispatch_first_slice(
+            &UnavailableFirstSliceIpcHandler,
+            request,
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::SYSTEM,
+                selected_protocol_minor: 8,
                 cancellation: Cancellation::new(),
                 deadline,
                 effective_budget: None,
@@ -16155,6 +16257,7 @@ mod tests {
             mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
             maximum_results: 2,
             page_offset: 0,
+            languages: Vec::new(),
         });
         let locate_hit =
             |symbol_byte: u8, source: &daemon::FirstSliceSourceRef| daemon::FirstSliceLocateHit {
@@ -16250,6 +16353,7 @@ mod tests {
             mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
             maximum_results: 2,
             page_offset: 0,
+            languages: Vec::new(),
         });
         assert!(first_slice_response_correlates(
             &pinned_locate_request,

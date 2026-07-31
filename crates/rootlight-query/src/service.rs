@@ -11,7 +11,9 @@ use rootlight_ir::{
     EntityKind, EntityVisibility, NormalizedIrDocument, OccurrenceTarget, RelationEndpoint,
     RelationPredicate, SourceRef,
 };
-use rootlight_search::{LexicalSearch, SearchBudget, SearchRequest, validate_search_request};
+use rootlight_search::{
+    LexicalSearch, SearchBudget, SearchRequest, validate_search_request_with_languages,
+};
 use rootlight_source::{
     SourceBudget, SourceEncoding as ServiceSourceEncoding, SourceError, SourceReadOptions,
     SourceService,
@@ -86,6 +88,37 @@ where
         mode: LocateMode,
         max_results: usize,
         page_offset: usize,
+        search_budget: SearchBudget,
+        budget: QueryBudget,
+    ) -> Result<CodeLocatePlan, QueryError> {
+        self.plan_code_locate_with_languages(
+            query,
+            mode,
+            Vec::new(),
+            max_results,
+            page_offset,
+            search_budget,
+            budget,
+        )
+    }
+
+    /// Builds a deterministic bounded `code.locate` plan over a language union.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for an invalid language filter, budget, result
+    /// limit, arithmetic overflow, or a conservative estimate that cannot be admitted.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the language union is an independent bounded locate dimension"
+    )]
+    pub fn plan_code_locate_with_languages(
+        &self,
+        query: String,
+        mode: LocateMode,
+        languages: Vec<String>,
+        max_results: usize,
+        page_offset: usize,
         mut search_budget: SearchBudget,
         budget: QueryBudget,
     ) -> Result<CodeLocatePlan, QueryError> {
@@ -105,7 +138,7 @@ where
             max_results,
             page_offset,
         };
-        validate_search_request(&request, search_budget)?;
+        validate_search_request_with_languages(&request, &languages, search_budget)?;
         let mandatory_rows = checked_add(
             checked_usize_to_u64(search_budget.max_candidates)?,
             checked_usize_to_u64(max_results)?,
@@ -145,6 +178,7 @@ where
         Ok(CodeLocatePlan {
             query: request.query,
             mode,
+            languages,
             max_results,
             page_offset,
             search_budget,
@@ -174,9 +208,12 @@ where
             max_results: plan.max_results,
             page_offset: plan.page_offset,
         };
-        let outcome = self
-            .search
-            .search_with_stats(&request, plan.search_budget, cancellation)?;
+        let outcome = self.search.search_with_language_filter_and_stats(
+            &request,
+            &plan.languages,
+            plan.search_budget,
+            cancellation,
+        )?;
         control.check()?;
         let returned_end = checked_add(
             checked_usize_to_u64(plan.page_offset)?,

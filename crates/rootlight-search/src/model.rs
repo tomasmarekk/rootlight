@@ -264,6 +264,9 @@ pub enum SearchError {
     /// Query syntax or bounds were invalid.
     #[error("lexical query is invalid: {0:?}")]
     InvalidQuery(QueryViolation),
+    /// A language filter was empty, noncanonical, duplicated, or oversized.
+    #[error("lexical language filter is invalid")]
+    InvalidLanguageFilter,
     /// More matches existed than the deterministic materialization budget.
     #[error("lexical candidate budget exceeded")]
     CandidateBudgetExceeded,

@@ -598,6 +598,10 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
     accepted_fallback("generation"),
     accepted_fallback("query"),
     accepted_fallback("search_modes"),
+    implemented(
+        "languages",
+        "filters lexical candidates by canonical language",
+    ),
     accepted_fallback("max_results"),
     implemented("budget", "reduces the common hard execution budget"),
     implemented(
@@ -612,7 +616,6 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
     ),
     unsupported("kinds", "kind filtering is not served"),
     unsupported("scope", "structural scope filtering is not served"),
-    unsupported("languages", "language filtering is not served"),
     unsupported(
         "related_to",
         "relationship-constrained lookup is not served",

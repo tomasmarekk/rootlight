@@ -57,6 +57,8 @@ const HARD_MAX_EXAMINED_TERMS: usize = 100_000;
 const HARD_MAX_QUERY_POSTINGS: u64 = 1_000_000;
 const HARD_MAX_RETURNED_TEXT_BYTES: usize = 64 * 1024 * 1024;
 const HARD_MAX_QUERY_DURATION: Duration = Duration::from_secs(10);
+const MAX_LANGUAGE_FILTERS: usize = 32;
+const MAX_LANGUAGE_FILTER_BYTES: usize = 64;
 const SORT_CHECKPOINT_STRIDE: usize = 1_024;
 
 type QueryClause = (Occur, Box<dyn Query>);
@@ -136,6 +138,20 @@ pub trait LexicalSearch: Send + Sync {
         cancellation: &Cancellation,
     ) -> Result<SearchOutcome, SearchError>;
 
+    /// Executes one bounded domain query over a canonical language union.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError`] when the filter, input, budgets, cancellation,
+    /// durable data, or backend prevents a truthful result.
+    fn search_with_language_filter_and_stats(
+        &self,
+        request: &SearchRequest,
+        languages: &[String],
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError>;
+
     /// Executes one bounded domain query and returns only its ordered hits.
     ///
     /// # Errors
@@ -177,6 +193,21 @@ pub fn validate_search_request(
     budget: SearchBudget,
 ) -> Result<(), SearchError> {
     validate_request(request, budget)
+}
+
+/// Validates one query, canonical language union, and lexical budget.
+///
+/// # Errors
+///
+/// Returns [`SearchError`] for an invalid language filter, syntax, result
+/// limit, or resource field outside the backend hard ceilings.
+pub fn validate_search_request_with_languages(
+    request: &SearchRequest,
+    languages: &[String],
+    budget: SearchBudget,
+) -> Result<(), SearchError> {
+    validate_request(request, budget)?;
+    validate_language_filter(languages)
 }
 
 /// A read-only lexical index pinned to one immutable generation.
@@ -304,11 +335,30 @@ impl LexicalIndex {
         budget: SearchBudget,
         cancellation: &Cancellation,
     ) -> Result<SearchOutcome, SearchError> {
+        self.search_with_language_filter_and_stats(request, &[], budget, cancellation)
+    }
+
+    /// Executes a bounded query over a canonical language union before ranking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError`] for invalid input, cancellation, candidate
+    /// overflow, incompatible stored data, or redacted Tantivy failures.
+    pub fn search_with_language_filter_and_stats(
+        &self,
+        request: &SearchRequest,
+        languages: &[String],
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
         let control = SearchControl::new(cancellation, budget.max_duration);
         control.check()?;
         validate_request(request, budget)?;
+        validate_language_filter(languages)?;
         let searcher = self.reader.searcher();
-        let query = self.fields.query(request, &searcher, budget, &control)?;
+        let query = self
+            .fields
+            .query(request, languages, &searcher, budget, &control)?;
         control.check()?;
         let weight = query
             .weight(EnableScoring::enabled_from_searcher(&searcher))
@@ -402,6 +452,16 @@ impl LexicalSearch for LexicalIndex {
         cancellation: &Cancellation,
     ) -> Result<SearchOutcome, SearchError> {
         self.search_with_stats(request, budget, cancellation)
+    }
+
+    fn search_with_language_filter_and_stats(
+        &self,
+        request: &SearchRequest,
+        languages: &[String],
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
+        self.search_with_language_filter_and_stats(request, languages, budget, cancellation)
     }
 
     fn document_count(&self) -> u64 {
@@ -748,13 +808,14 @@ impl Fields {
     fn query(
         &self,
         request: &SearchRequest,
+        languages: &[String],
         searcher: &tantivy::Searcher,
         budget: SearchBudget,
         control: &SearchControl<'_>,
     ) -> Result<Box<dyn Query>, SearchError> {
         let normalized = normalize_exact(request.query.trim());
         let mut work = QueryWork::new(searcher, budget, control);
-        let query = match request.mode {
+        let lexical_query = match request.mode {
             SearchMode::Exact => self.exact_query(&normalized, &mut work)?,
             SearchMode::Prefix => self.prefix_query(&normalized, &mut work)?,
             SearchMode::Text => self.text_query(&normalized, &mut work)?,
@@ -762,6 +823,26 @@ impl Fields {
                 self.pattern_query(&compile_safe_regex(&normalized)?, &mut work)?
             }
             SearchMode::Glob => self.pattern_query(&compile_safe_glob(&normalized)?, &mut work)?,
+        };
+        let query = if languages.is_empty() {
+            lexical_query
+        } else {
+            let mut language_clauses = Vec::with_capacity(languages.len());
+            for language in languages {
+                language_clauses.push(work.term_clause(
+                    self.language,
+                    language,
+                    IndexRecordOption::Basic,
+                    1.0,
+                )?);
+            }
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Must, lexical_query),
+                (
+                    Occur::Must,
+                    Box::new(BooleanQuery::new(language_clauses)) as Box<dyn Query>,
+                ),
+            ]))
         };
         control.check()?;
         Ok(query)
@@ -1564,6 +1645,24 @@ fn validate_request(request: &SearchRequest, budget: SearchBudget) -> Result<(),
     Ok(())
 }
 
+fn validate_language_filter(languages: &[String]) -> Result<(), SearchError> {
+    let valid = languages.len() <= MAX_LANGUAGE_FILTERS
+        && languages.windows(2).all(|pair| pair[0] < pair[1])
+        && languages.iter().all(|language| {
+            !language.is_empty()
+                && language.len() <= MAX_LANGUAGE_FILTER_BYTES
+                && language.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-' | b'.' | b'+' | b'#')
+                })
+        });
+    if !valid {
+        return Err(SearchError::InvalidLanguageFilter);
+    }
+    Ok(())
+}
+
 fn validate_search_budget(budget: SearchBudget) -> Result<(), SearchError> {
     for (resource, value, hard_maximum) in [
         ("query_bytes", budget.max_query_bytes, HARD_MAX_QUERY_BYTES),
@@ -1938,6 +2037,75 @@ mod tests {
                 &Cancellation::new(),
             )
             .expect("query succeeds")
+    }
+
+    #[test]
+    fn language_union_filters_candidates_before_ranking_and_pagination() {
+        let mut rust = document(1, "shared_name", "src/rust.rs");
+        rust.language = "rust".to_owned();
+        let mut python = document(2, "shared_name", "src/python.py");
+        python.language = "python".to_owned();
+        let mut c = document(3, "shared_name", "src/native.c");
+        c.language = "c".to_owned();
+        let (_directory, _manifest, index) = build(vec![c, python, rust]);
+        let request = SearchRequest {
+            query: "shared_name".to_owned(),
+            mode: SearchMode::Exact,
+            max_results: 1,
+            page_offset: 1,
+        };
+
+        let outcome = index
+            .search_with_language_filter_and_stats(
+                &request,
+                &["python".to_owned(), "rust".to_owned()],
+                SearchBudget::default(),
+                &Cancellation::new(),
+            )
+            .expect("canonical multi-language union searches");
+        assert_eq!(outcome.matched_candidates, 2);
+        assert_eq!(outcome.hits.len(), 1);
+        assert_eq!(outcome.hits[0].language, "python");
+
+        let no_match = index
+            .search_with_language_filter_and_stats(
+                &SearchRequest {
+                    page_offset: 0,
+                    ..request.clone()
+                },
+                &["unknown".to_owned()],
+                SearchBudget::default(),
+                &Cancellation::new(),
+            )
+            .expect("unknown canonical language is a deterministic empty domain");
+        assert_eq!(no_match.matched_candidates, 0);
+        assert!(no_match.hits.is_empty());
+    }
+
+    #[test]
+    fn language_filter_rejects_noncanonical_order_and_labels() {
+        let (_directory, _manifest, index) = build(vec![document(1, "shared_name", "src/lib.rs")]);
+        let request = SearchRequest {
+            query: "shared_name".to_owned(),
+            mode: SearchMode::Exact,
+            max_results: 1,
+            page_offset: 0,
+        };
+        for languages in [
+            vec!["rust".to_owned(), "python".to_owned()],
+            vec!["Rust".to_owned()],
+            vec!["rust/lang".to_owned()],
+        ] {
+            assert_eq!(
+                index.search_with_language_filter_and_stats(
+                    &request,
+                    &languages,
+                    SearchBudget::default(),
+                    &Cancellation::new(),
+                ),
+                Err(SearchError::InvalidLanguageFilter)
+            );
+        }
     }
 
     #[test]

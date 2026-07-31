@@ -520,6 +520,7 @@ impl From<LocateMode> for SearchMode {
 pub struct CodeLocatePlan {
     pub(crate) query: String,
     pub(crate) mode: LocateMode,
+    pub(crate) languages: Vec<String>,
     pub(crate) max_results: usize,
     pub(crate) page_offset: usize,
     pub(crate) search_budget: SearchBudget,

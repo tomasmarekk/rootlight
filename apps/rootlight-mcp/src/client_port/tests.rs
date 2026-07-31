@@ -67,6 +67,7 @@ enum Call {
         generation: GenerationSelector,
         query: String,
         mode: LocateMode,
+        languages: Vec<String>,
         maximum_results: u32,
         page_offset: u64,
         options: RequestOptions,
@@ -311,6 +312,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         generation: GenerationSelector,
         query: String,
         mode: LocateMode,
+        languages: Vec<String>,
         maximum_results: u32,
         page_offset: u64,
         options: RequestOptions,
@@ -320,6 +322,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             generation,
             query,
             mode,
+            languages,
             maximum_results,
             page_offset,
             options,
@@ -912,6 +915,7 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
             "generation": "active",
             "query": "answer",
             "search_modes": ["exact"],
+            "languages": ["Rust"],
             "max_results": 7
         }),
     )
@@ -1013,11 +1017,13 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
             generation: GenerationSelector::Active,
             query,
             mode: LocateMode::Exact,
+            languages,
             maximum_results: 7,
             options,
             ..
         } if *observed == repository()
             && query == "answer"
+            && languages == &["rust".to_owned()]
             && options.timeout().is_some()
             && options.effective_budget().is_some()
     ));

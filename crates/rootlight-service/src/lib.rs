@@ -4429,6 +4429,39 @@ impl FirstSliceService {
         budget: FirstSliceBudget,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<CodeLocateResult>, FirstSliceError> {
+        self.code_locate_with_languages_and_budget(
+            generation,
+            query,
+            mode,
+            Vec::new(),
+            maximum_results,
+            page_offset,
+            budget,
+            cancellation,
+        )
+    }
+
+    /// Executes a generation-pinned `code.locate` query over a language union.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid filter or
+    /// plan, or bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the explicit policy and language union accompany one bounded locate request"
+    )]
+    pub fn code_locate_with_languages_and_budget(
+        &self,
+        generation: GenerationId,
+        query: String,
+        mode: LocateMode,
+        languages: Vec<String>,
+        maximum_results: usize,
+        page_offset: usize,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<CodeLocateResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
@@ -4441,9 +4474,10 @@ impl FirstSliceService {
             effective_maximum_results = effective_maximum_results.min(query_maximum_results);
         }
         let plan = service
-            .plan_code_locate(
+            .plan_code_locate_with_languages(
                 query,
                 mode,
+                languages,
                 effective_maximum_results,
                 page_offset,
                 search_budget,

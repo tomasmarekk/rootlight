@@ -51,6 +51,7 @@ use rootlight_operations::{
     OperationState, OperationSubmission, PlanHash, Progress,
 };
 use rootlight_protocol::{
+    MAX_CODE_LOCATE_LANGUAGE_BYTES, MAX_CODE_LOCATE_LANGUAGES,
     adapter_contract::ADAPTER_NONCE_BYTES,
     generated::{adapter::v1 as adapter, common::v1 as common, daemon::v1 as daemon},
 };
@@ -2598,11 +2599,13 @@ fn code_locate(
         daemon::FirstSliceLocateMode::FirstSliceLocateGlob => LocateMode::Glob,
         daemon::FirstSliceLocateMode::Unspecified => return Err(invalid_argument()),
     };
+    let languages = parse_code_locate_languages(request.languages)?;
     let response = service
-        .code_locate_with_budget(
+        .code_locate_with_languages_and_budget(
             generation.generation,
             request.query,
             mode,
+            languages,
             usize::try_from(request.maximum_results).map_err(|_| invalid_argument())?,
             usize::try_from(request.page_offset).map_err(|_| invalid_argument())?,
             service_budget(context),
@@ -2647,6 +2650,24 @@ fn code_locate(
         next_page_offset: response.data.next_page_offset,
         completeness: Some(completeness),
     })
+}
+
+fn parse_code_locate_languages(languages: Vec<String>) -> Result<Vec<String>, PublicError> {
+    let valid = languages.len() <= MAX_CODE_LOCATE_LANGUAGES
+        && languages.windows(2).all(|pair| pair[0] < pair[1])
+        && languages.iter().all(|language| {
+            !language.is_empty()
+                && language.len() <= MAX_CODE_LOCATE_LANGUAGE_BYTES
+                && language.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-' | b'.' | b'+' | b'#')
+                })
+        });
+    if !valid {
+        return Err(invalid_argument());
+    }
+    Ok(languages)
 }
 
 fn symbol_explain(
@@ -5885,14 +5906,46 @@ mod tests {
                     mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
                     maximum_results: 8,
                     page_offset: 0,
+                    languages: vec!["rust".to_owned()],
                 },
                 &context,
             )
             .expect("the structural generation remains queryable")
         };
         let query_context = locate.context.expect("query context exists");
+        assert!(!locate.hits.is_empty());
+        assert!(locate.hits.iter().all(|hit| hit.language == "rust"));
         assert_eq!(query_context.structural_freshness, "current");
         assert_eq!(query_context.semantic_freshness, "stale");
+        let unknown_language = {
+            let service = read_service(&service).expect("service read lock is available");
+            code_locate(
+                &service,
+                daemon::CodeLocateRequest {
+                    schema_version: Some(schema_version()),
+                    repository: Some(repository_to_wire(repository.repository)),
+                    generation: Some(daemon::GenerationSelector {
+                        selector: Some(daemon::generation_selector::Selector::Active(true)),
+                    }),
+                    query: "structural_stage".to_owned(),
+                    mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+                    maximum_results: 8,
+                    page_offset: 0,
+                    languages: vec!["unknown".to_owned()],
+                },
+                &context,
+            )
+            .expect("an unknown canonical language selects an empty query domain")
+        };
+        assert!(unknown_language.hits.is_empty());
+        assert_eq!(unknown_language.matched_candidates, 0);
+        assert_eq!(
+            unknown_language
+                .context
+                .expect("query context exists")
+                .coverage_status,
+            daemon::FirstSliceCoverageStatus::FirstSliceCoverageComplete as i32
+        );
         let refinement = refinement_receiver
             .recv_timeout(Duration::from_secs(1))
             .expect("semantic refinement is scheduled");
@@ -6117,6 +6170,7 @@ mod tests {
                 mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
                 maximum_results: 8,
                 page_offset: 0,
+                languages: Vec::new(),
             }),
         );
         let FirstSliceIpcResponse::CodeLocate(located) = located else {
@@ -6210,6 +6264,7 @@ mod tests {
                 mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
                 maximum_results: 8,
                 page_offset: 0,
+                languages: Vec::new(),
             }),
         );
         let FirstSliceIpcResponse::CodeLocate(located) = located else {
@@ -7808,6 +7863,7 @@ mod tests {
                 mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
                 maximum_results: 8,
                 page_offset: 0,
+                languages: Vec::new(),
             }),
         );
         let FirstSliceIpcResponse::CodeLocate(locate) = locate else {
@@ -7939,6 +7995,7 @@ mod tests {
                 mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
                 maximum_results: 8,
                 page_offset: 0,
+                languages: Vec::new(),
             }),
         );
         let FirstSliceIpcResponse::CodeLocate(locate) = locate else {

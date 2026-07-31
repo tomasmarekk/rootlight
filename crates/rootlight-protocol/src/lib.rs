@@ -47,6 +47,10 @@ pub const MAX_FIRST_SLICE_BUDGET_DEPTH: u64 = 16;
 pub const MAX_FIRST_SLICE_BUDGET_PATHS: u64 = 1_000;
 /// Hard transport admission maximum for one dead-code classification label.
 pub const MAX_CODE_DEAD_CLASSIFICATION_BYTES: usize = 64;
+/// Hard transport admission maximum for `code.locate` language filters.
+pub const MAX_CODE_LOCATE_LANGUAGES: usize = 32;
+/// Hard transport admission maximum for one canonical language filter.
+pub const MAX_CODE_LOCATE_LANGUAGE_BYTES: usize = 64;
 
 #[cfg(test)]
 mod tests {
