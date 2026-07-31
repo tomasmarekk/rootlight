@@ -45,9 +45,10 @@ use rootlight_observability::{
     DiagnosticsQuickSnapshot as SupportDiagnosticsQuick, HealthSnapshot as SupportHealth,
     OperationsSummary as SupportOperations, PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION,
     RECENT_LOG_CAPACITY, RECENT_TRACE_CAPACITY, RedactionReport, SUPPORT_BUNDLE_SCHEMA_VERSION,
-    SUPPORT_ENTRY_NAMES, SUPPORT_ENTRY_NAMES_V2, SUPPORT_ENTRY_NAMES_V3, SupportBundleInput,
-    SupportBundleSchema, SupportManifest, TELEMETRY_SCHEMA_VERSION, TelemetrySnapshot,
-    build_support_bundle_for_schema,
+    SUPPORT_BUNDLE_SCHEMA_VERSION_V3, SUPPORT_ENTRY_NAMES, SUPPORT_ENTRY_NAMES_V2,
+    SUPPORT_ENTRY_NAMES_V3, SUPPORT_ENTRY_NAMES_V4, SupportBundleInput, SupportBundleSchema,
+    SupportInventory, SupportManifest, SupportOperationsV4, SupportTerminalOperation,
+    TELEMETRY_SCHEMA_VERSION, TelemetrySnapshot, build_support_bundle_for_schema,
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
@@ -252,8 +253,12 @@ pub struct SupportBundle {
     pub archive_bytes: u64,
     /// Always false for the default support contract.
     pub contains_source: bool,
-    /// Normalized bounded telemetry included by schema v2.
+    /// Normalized bounded telemetry included by schema v2 and later.
     pub telemetry: Option<TelemetrySnapshot>,
+    /// Production runtime and repository inventory included by schema v4.
+    pub inventory: Option<SupportInventory>,
+    /// Recent durable terminal operations included by schema v4.
+    pub terminal_operations: Vec<SupportTerminalOperation>,
 }
 
 /// Client-facing operation kind.
@@ -831,6 +836,10 @@ pub struct SymbolExplanation {
     pub provider: String,
     /// Stable evidence label.
     pub evidence: String,
+    /// Stable normalized language label for the definition.
+    pub language: String,
+    /// Authoritative analysis tier of the definition file.
+    pub tier: AnalysisTier,
     /// Fixed-point confidence in the range 0 through 1000.
     pub confidence: u32,
 }
@@ -846,6 +855,7 @@ impl std::fmt::Debug for SymbolExplanation {
             .field("inbound_exact", &self.inbound_exact)
             .field("inbound_candidates", &self.inbound_candidates)
             .field("references_exact", &self.references_exact)
+            .field("tier", &self.tier)
             .field("confidence", &self.confidence)
             .finish_non_exhaustive()
     }
@@ -934,6 +944,8 @@ pub struct SourceChunk {
     pub content_hash: ContentHash,
     /// Stable normalized language label.
     pub language: String,
+    /// Authoritative analysis tier of the source file.
+    pub tier: AnalysisTier,
     /// Whether generated-code policy applies.
     pub generated: bool,
 }
@@ -950,6 +962,7 @@ impl std::fmt::Debug for SourceChunk {
             .field("content_bytes", &self.content.len())
             .field("content_hash", &self.content_hash)
             .field("language", &self.language)
+            .field("tier", &self.tier)
             .field("generated", &self.generated)
             .finish_non_exhaustive()
     }
@@ -2788,12 +2801,9 @@ impl Client {
         wait_ms: Option<u32>,
         after_revision: Option<u64>,
     ) -> Result<RepositoryOperationStatus, ClientError> {
-        match self.request(build_repository_operation_status_request(
-            operation,
-            action,
-            wait_ms,
-            after_revision,
-        )?)? {
+        let request =
+            build_repository_operation_status_request(operation, action, wait_ms, after_revision)?;
+        match self.request_with_options(request, operation_status_request_options(wait_ms)?)? {
             daemon::response_envelope::Response::RepositoryOperationStatus(response) => {
                 parse_repository_operation_status(response, operation)
             }
@@ -6019,8 +6029,10 @@ fn parse_support_bundle(
     response: daemon::SupportBundleResponse,
     selected_protocol_minor: u32,
 ) -> Result<SupportBundle, ClientError> {
-    let expected_schema = if selected_protocol_minor >= 5 {
+    let expected_schema = if selected_protocol_minor >= 8 {
         CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+    } else if selected_protocol_minor >= 5 {
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V3
     } else if selected_protocol_minor >= 4 {
         PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION
     } else {
@@ -6042,25 +6054,34 @@ fn parse_support_bundle(
     if <[u8; 32]>::from(Sha256::digest(&response.archive)) != sha256 {
         return Err(ClientError::InvalidSupportBundle);
     }
-    let telemetry = validate_support_archive(&response.archive, response.schema_version)?;
+    let validated = validate_support_archive(&response.archive, response.schema_version)?;
     Ok(SupportBundle {
         schema_version: response.schema_version,
         archive: response.archive,
         sha256,
         archive_bytes: response.archive_bytes,
         contains_source: false,
-        telemetry,
+        telemetry: validated.telemetry,
+        inventory: validated.inventory,
+        terminal_operations: validated.terminal_operations,
     })
+}
+
+struct ValidatedSupportArchive {
+    telemetry: Option<TelemetrySnapshot>,
+    inventory: Option<SupportInventory>,
+    terminal_operations: Vec<SupportTerminalOperation>,
 }
 
 fn validate_support_archive(
     archive: &[u8],
     schema_version: u32,
-) -> Result<Option<TelemetrySnapshot>, ClientError> {
+) -> Result<ValidatedSupportArchive, ClientError> {
     let expected_names: &[&str] = match schema_version {
         SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES,
         PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V2,
-        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V3,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V3 => &SUPPORT_ENTRY_NAMES_V3,
+        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V4,
         _ => return Err(ClientError::InvalidSupportBundle),
     };
     let mut zip = zip::ZipArchive::new(Cursor::new(archive))
@@ -6095,9 +6116,24 @@ fn validate_support_archive(
     let diagnostics: SupportDiagnosticsQuick =
         decode_support_entry(&entries, "diagnostics/quick.json")?;
     let health: SupportHealth = decode_support_entry(&entries, "health.json")?;
-    let operations: SupportOperations = decode_support_entry(&entries, "operations-summary.json")?;
+    let (operations, terminal_operations) =
+        if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION {
+            let operations: SupportOperationsV4 =
+                decode_support_entry(&entries, "operations-summary.json")?;
+            (operations.current, operations.recent_terminal)
+        } else {
+            (
+                decode_support_entry(&entries, "operations-summary.json")?,
+                Vec::new(),
+            )
+        };
     let manifest: SupportManifest = decode_support_entry(&entries, "manifest.json")?;
     let redaction: RedactionReport = decode_support_entry(&entries, "redaction-report.json")?;
+    let inventory = if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION {
+        Some(decode_support_entry(&entries, "inventory.json")?)
+    } else {
+        None
+    };
     let telemetry = if schema_version != SUPPORT_BUNDLE_SCHEMA_VERSION {
         Some(decode_support_entry(&entries, "telemetry.json")?)
     } else {
@@ -6105,12 +6141,15 @@ fn validate_support_archive(
     };
     validate_support_semantics(
         &entries,
-        &diagnostics,
-        &health,
-        &operations,
-        &manifest,
-        &redaction,
-        telemetry.as_ref(),
+        &SupportDocumentSet {
+            diagnostics: &diagnostics,
+            health: &health,
+            operations: &operations,
+            manifest: &manifest,
+            redaction: &redaction,
+            telemetry: telemetry.as_ref(),
+            inventory: inventory.as_ref(),
+        },
     )?;
     let canonical = build_support_bundle_for_schema(
         &SupportBundleInput {
@@ -6120,21 +6159,29 @@ fn validate_support_archive(
             health,
             diagnostics,
             operations,
+            terminal_operations: terminal_operations.clone(),
+            inventory: inventory.clone(),
             telemetry: telemetry.clone(),
         },
         if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION {
             SupportBundleSchema::V1
         } else if schema_version == PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION {
             SupportBundleSchema::V2
-        } else {
+        } else if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION_V3 {
             SupportBundleSchema::V3
+        } else {
+            SupportBundleSchema::V4
         },
     )
     .map_err(|_| ClientError::InvalidSupportBundle)?;
     if canonical.archive() != archive {
         return Err(ClientError::InvalidSupportBundle);
     }
-    Ok(telemetry)
+    Ok(ValidatedSupportArchive {
+        telemetry,
+        inventory,
+        terminal_operations,
+    })
 }
 
 fn decode_support_entry<T: serde::de::DeserializeOwned>(
@@ -6145,23 +6192,39 @@ fn decode_support_entry<T: serde::de::DeserializeOwned>(
         .map_err(|_| ClientError::InvalidSupportBundle)
 }
 
+struct SupportDocumentSet<'a> {
+    diagnostics: &'a SupportDiagnosticsQuick,
+    health: &'a SupportHealth,
+    operations: &'a SupportOperations,
+    manifest: &'a SupportManifest,
+    redaction: &'a RedactionReport,
+    telemetry: Option<&'a TelemetrySnapshot>,
+    inventory: Option<&'a SupportInventory>,
+}
+
 fn validate_support_semantics(
     entries: &std::collections::BTreeMap<&str, Vec<u8>>,
-    diagnostics: &SupportDiagnosticsQuick,
-    health: &SupportHealth,
-    operations: &SupportOperations,
-    manifest: &SupportManifest,
-    redaction: &RedactionReport,
-    telemetry: Option<&TelemetrySnapshot>,
+    documents: &SupportDocumentSet<'_>,
 ) -> Result<(), ClientError> {
+    let SupportDocumentSet {
+        diagnostics,
+        health,
+        operations,
+        manifest,
+        redaction,
+        telemetry,
+        inventory,
+    } = documents;
     let schema_version = manifest.schema_version;
     let expected_omissions = if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION {
         rootlight_observability::OMITTED_DATA_CLASSES.as_slice()
     } else if matches!(
         schema_version,
-        PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+        PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION | SUPPORT_BUNDLE_SCHEMA_VERSION_V3
     ) {
         rootlight_observability::OMITTED_DATA_CLASSES_V2.as_slice()
+    } else if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION {
+        rootlight_observability::OMITTED_DATA_CLASSES_V4.as_slice()
     } else {
         return Err(ClientError::InvalidSupportBundle);
     };
@@ -6183,27 +6246,35 @@ fn validate_support_semantics(
                 .collect::<Vec<_>>()
         || (schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION && telemetry.is_some())
         || (schema_version != SUPPORT_BUNDLE_SCHEMA_VERSION && telemetry.is_none())
+        || (schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION) != inventory.is_some()
     {
         return Err(ClientError::InvalidSupportBundle);
     }
     if let Some(telemetry) = telemetry {
         validate_telemetry_snapshot(telemetry, schema_version)?;
     }
-    let expected_manifest_names: &[&str] = if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION {
-        &[
+    let expected_manifest_names: &[&str] = match schema_version {
+        SUPPORT_BUNDLE_SCHEMA_VERSION => &[
             "diagnostics/quick.json",
             "health.json",
             "operations-summary.json",
             "redaction-report.json",
-        ]
-    } else {
-        &[
+        ],
+        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &[
+            "diagnostics/quick.json",
+            "health.json",
+            "inventory.json",
+            "operations-summary.json",
+            "redaction-report.json",
+            "telemetry.json",
+        ],
+        _ => &[
             "diagnostics/quick.json",
             "health.json",
             "operations-summary.json",
             "redaction-report.json",
             "telemetry.json",
-        ]
+        ],
     };
     if manifest.entries.len() != expected_manifest_names.len() {
         return Err(ClientError::InvalidSupportBundle);
@@ -6504,6 +6575,18 @@ fn build_repository_operation_status_request(
             },
         ),
     )
+}
+
+fn operation_status_request_options(wait_ms: Option<u32>) -> Result<RequestOptions, ClientError> {
+    let wait = Duration::from_millis(u64::from(wait_ms.unwrap_or(0)));
+    if wait < DEFAULT_REQUEST_TIMEOUT {
+        return Ok(RequestOptions::new());
+    }
+    let timeout = wait
+        .checked_add(Duration::from_millis(250))
+        .unwrap_or(RequestTimeout::MAXIMUM)
+        .min(RequestTimeout::MAXIMUM);
+    Ok(RequestOptions::new().with_timeout(RequestTimeout::new(timeout)?))
 }
 
 fn build_code_locate_request(
@@ -9088,6 +9171,8 @@ fn parse_symbol_explain(
             references_exact: explanation.references_exact,
             provider: explanation.provider,
             evidence: explanation.evidence,
+            language: explanation.language,
+            tier: parse_analysis_tier(explanation.tier)?,
             confidence: explanation.confidence,
         });
     }
@@ -9213,6 +9298,7 @@ fn parse_source_read(
             encoding,
             content_hash,
             language: chunk.language,
+            tier: parse_analysis_tier(chunk.tier)?,
             generated: chunk.generated,
         });
     }
@@ -10556,6 +10642,8 @@ mod tests {
                 provider: "tree-sitter".to_owned(),
                 evidence: "parser".to_owned(),
                 confidence: 1_000,
+                language: "rust".to_owned(),
+                tier: daemon::FirstSliceAnalysisTier::FirstSliceTierB as i32,
             }],
             unresolved_symbols: Vec::new(),
             truncated: false,
@@ -10582,6 +10670,7 @@ mod tests {
                 included_start_line: Some(1),
                 included_end_line: Some(1),
                 exact_content: b"abc".to_vec(),
+                tier: daemon::FirstSliceAnalysisTier::FirstSliceTierB as i32,
             }],
             total_source_bytes: 3,
             truncated: false,
@@ -12106,6 +12195,32 @@ mod tests {
     }
 
     #[test]
+    fn synchronous_operation_wait_extends_the_transport_deadline() {
+        assert_eq!(
+            operation_status_request_options(None)
+                .expect("immediate status options validate")
+                .timeout(),
+            None
+        );
+        assert_eq!(
+            operation_status_request_options(Some(5_000))
+                .expect("five second status options validate")
+                .timeout()
+                .expect("long poll selects an explicit deadline")
+                .duration(),
+            Duration::from_millis(5_250)
+        );
+        assert_eq!(
+            operation_status_request_options(Some(30_000))
+                .expect("maximum status options validate")
+                .timeout()
+                .expect("maximum long poll selects an explicit deadline")
+                .duration(),
+            RequestTimeout::MAXIMUM
+        );
+    }
+
+    #[test]
     fn first_slice_decoders_validate_schema_identity_and_nested_correlation() {
         let operation = OperationId::from_bytes([8; 16]);
         let foreign_operation = OperationId::from_bytes([9; 16]);
@@ -12385,6 +12500,8 @@ mod tests {
                 provider: "tree-sitter".to_owned(),
                 evidence: "parser".to_owned(),
                 confidence: 1_000,
+                language: "rust".to_owned(),
+                tier: daemon::FirstSliceAnalysisTier::FirstSliceTierB as i32,
             }],
             unresolved_symbols: vec![symbol_to_wire(second_symbol)],
             truncated: false,
@@ -12429,6 +12546,7 @@ mod tests {
                 included_start_line: Some(1),
                 included_end_line: Some(1),
                 exact_content: content.as_bytes().to_vec(),
+                tier: daemon::FirstSliceAnalysisTier::FirstSliceTierB as i32,
             }
         };
         let source_read = daemon::SourceReadResponse {
@@ -12565,6 +12683,8 @@ mod tests {
                 running: 0,
                 cancelling: 0,
             },
+            terminal_operations: Vec::new(),
+            inventory: None,
             telemetry: None,
         };
         rootlight_observability::build_support_bundle(&input)
@@ -12605,13 +12725,32 @@ mod tests {
         )
     }
 
+    fn valid_support_archive_v4() -> Vec<u8> {
+        let mut input = telemetry_support_input(rootlight_observability::ProtocolVersion::V1_8);
+        input.inventory = Some(test_support_inventory());
+        build_support_bundle_for_schema(&input, SupportBundleSchema::V4)
+            .expect("test production support bundle builds")
+            .archive()
+            .to_vec()
+    }
+
     fn valid_telemetry_support_archive(
         protocol_version: rootlight_observability::ProtocolVersion,
         schema: SupportBundleSchema,
     ) -> Vec<u8> {
+        let input = telemetry_support_input(protocol_version);
+        build_support_bundle_for_schema(&input, schema)
+            .expect("test telemetry support bundle builds")
+            .archive()
+            .to_vec()
+    }
+
+    fn telemetry_support_input(
+        protocol_version: rootlight_observability::ProtocolVersion,
+    ) -> rootlight_observability::SupportBundleInput {
         let telemetry = rootlight_observability::Telemetry::default();
         telemetry.record_lifecycle(rootlight_observability::DaemonLifecycle::Ready);
-        let input = rootlight_observability::SupportBundleInput {
+        rootlight_observability::SupportBundleInput {
             protocol_version,
             operating_system: rootlight_observability::OperatingSystem::Windows,
             architecture: rootlight_observability::Architecture::X86_64,
@@ -12646,12 +12785,61 @@ mod tests {
                 running: 0,
                 cancelling: 0,
             },
+            terminal_operations: Vec::new(),
+            inventory: None,
             telemetry: Some(telemetry.snapshot()),
-        };
-        build_support_bundle_for_schema(&input, schema)
-            .expect("test telemetry support bundle builds")
-            .archive()
-            .to_vec()
+        }
+    }
+
+    fn test_support_inventory() -> rootlight_observability::SupportInventory {
+        rootlight_observability::SupportInventory {
+            runtime: rootlight_observability::SupportRuntimeInventory {
+                product_version: "0.1.0".to_owned(),
+                binary_name: "rootlight-daemon".to_owned(),
+                binary_sha256: Some("aa".repeat(32)),
+                feature_profile: vec!["standard".to_owned()],
+                protocol_major: 1,
+                protocol_minor: 8,
+                logical_processors: 8,
+                physical_memory_bytes: None,
+            },
+            dependencies: vec![rootlight_observability::SupportDependencyInventory {
+                name: "sqlite".to_owned(),
+                version: "3.51.3".to_owned(),
+                sha256: None,
+            }],
+            adapters: Vec::new(),
+            repositories: Vec::new(),
+            generations: Vec::new(),
+            configuration: rootlight_observability::SupportConfigurationInventory {
+                schema_version: 1,
+                connection_limit: 8,
+                client_connection_limit: 2,
+                control_queue_limit: 4,
+                operation_queue_limit: 8,
+                client_operation_limit: 2,
+                operation_workers: 1,
+                request_timeout_ms: 1_000,
+                maintenance_interval_ms: 1_000,
+                shutdown_grace_ms: 1_000,
+            },
+            storage: rootlight_observability::SupportStorageInventory {
+                catalog_schema_version: 2,
+                generation_format_version: None,
+                sqlite_version: "3.51.3".to_owned(),
+                persistent: false,
+                defensive: true,
+                foreign_keys: true,
+                trusted_schema: false,
+                catalog_allocated_bytes: 4096,
+                maximum_catalog_bytes: 1024 * 1024,
+                maximum_wal_bytes: 256 * 1024,
+                maximum_shm_bytes: 64 * 1024,
+                generation_disk_bytes: 0,
+                unreclaimed_temporary_bytes: 0,
+                disk_margin_bytes: None,
+            },
+        }
     }
 
     fn support_entries(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
@@ -12873,14 +13061,33 @@ mod tests {
 
         let v3 = support_response_with_schema(
             valid_support_archive_v3(),
-            CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+            SUPPORT_BUNDLE_SCHEMA_VERSION_V3,
         );
         let parsed = parse_support_bundle(v3.clone(), 5)
             .expect("protocol 1.5 accepts schema v3 support evidence");
-        assert_eq!(parsed.schema_version, CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(parsed.schema_version, SUPPORT_BUNDLE_SCHEMA_VERSION_V3);
         assert!(parsed.telemetry.is_some());
         assert!(matches!(
-            parse_support_bundle(v3, 4),
+            parse_support_bundle(v3.clone(), 4),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+        assert!(matches!(
+            parse_support_bundle(v3, 8),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+
+        let v4 = support_response_with_schema(
+            valid_support_archive_v4(),
+            CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        );
+        let parsed = parse_support_bundle(v4.clone(), 8)
+            .expect("protocol 1.8 accepts schema v4 support evidence");
+        assert_eq!(parsed.schema_version, CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION);
+        assert!(parsed.telemetry.is_some());
+        assert!(parsed.inventory.is_some());
+        assert!(parsed.terminal_operations.is_empty());
+        assert!(matches!(
+            parse_support_bundle(v4, 5),
             Err(ClientError::InvalidSupportBundle)
         ));
         assert!(matches!(

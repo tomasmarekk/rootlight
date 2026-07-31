@@ -149,7 +149,7 @@ pub(crate) fn read_header(
         .require(GenerationResource::SourceReferences, stats.source_refs())
         .map_err(CatalogError::control)?;
     context
-        .require(GenerationResource::TextBytes, stats.text_bytes())
+        .require(GenerationResource::EncodedTextBytes, stats.text_bytes())
         .map_err(CatalogError::control)?;
     validate_text_bytes(connection, stats, context)?;
     Ok((metadata, stats))
@@ -278,7 +278,7 @@ fn accumulate_text_rows(
             .checked_add(row_bytes)
             .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
         context
-            .require(GenerationResource::TextBytes, *observed_bytes)
+            .require(GenerationResource::EncodedTextBytes, *observed_bytes)
             .map_err(CatalogError::control)?;
     }
     if table_rows != expected_rows {
@@ -1314,7 +1314,7 @@ fn read_opaque_records<T: OpaqueRecord>(
             .checked_add(usize_to_u64(payload.len())?)
             .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
         context
-            .require(GenerationResource::TextBytes, payload_bytes)
+            .require(GenerationResource::EncodedTextBytes, payload_bytes)
             .map_err(CatalogError::control)?;
         let record = decode(payload.as_bytes(), context)?;
         if record.id() != id

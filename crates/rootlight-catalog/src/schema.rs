@@ -929,7 +929,7 @@ fn validate_oracle_size(
         .and_then(|value| {
             context
                 .budget()
-                .limit(GenerationResource::TextBytes)
+                .limit(GenerationResource::EncodedTextBytes)
                 .checked_mul(ORACLE_TEXT_REPLICATION_FACTOR)
                 .and_then(|text| value.checked_add(text))
         })

@@ -537,7 +537,7 @@ fn cancellation_stays_typed_across_index_and_query_boundaries() {
 }
 
 #[test]
-fn adapter_failure_preserves_the_prior_active_generation() {
+fn invalid_utf8_publishes_a_bounded_successor_without_losing_the_prior_generation() {
     let fixture = fixture(BEFORE);
     let source_path = fixture.path().join("src/lib.rs");
     let cancellation = deadline();
@@ -549,18 +549,21 @@ fn adapter_failure_preserves_the_prior_active_generation() {
     invalid_utf8.push(0xff);
     fs::write(source_path, invalid_utf8).expect("invalid UTF-8 source writes");
 
-    assert_eq!(
-        service.index_rust_fixture(fixture.path(), &cancellation),
-        Err(FirstSliceError::Adapter)
-    );
+    let second = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("invalid UTF-8 publishes bounded file coverage");
+    assert_eq!(second.parent, Some(first.generation));
+    assert!(second.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "invalid-utf8" && diagnostic.message == "source is not valid utf-8"
+    }));
     assert_eq!(
         service.active_generation_for(first.repository),
-        Some(first.generation)
+        Some(second.generation)
     );
     assert_eq!(
         service
-            .resolve_generation(first.repository, None)
-            .expect("prior active generation remains resolved")
+            .resolve_generation(first.repository, Some(first.generation))
+            .expect("prior generation remains retained")
             .receipt,
         first
     );

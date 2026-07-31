@@ -11,6 +11,7 @@ use std::{
 use cap_std::{ambient_authority, fs::Dir};
 use rootlight_cancel::Cancellation;
 use rootlight_catalog::OracleReader;
+use rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES;
 use rootlight_ids::{ContentHash, GenerationId, RepositoryId};
 use rootlight_search::{BuildBudget, LexicalIndex};
 use rootlight_storage::{GenerationBudget, GenerationContext, IdentityVerifiedGeneration};
@@ -21,9 +22,9 @@ use rootlight_vfs::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    FirstSliceError, FirstSliceIndexReceipt, FirstSliceOperationContext, MAX_SOURCE_BYTES,
-    RustSourceInput, check_cancellation, map_catalog_error, map_query_error, map_search_error,
-    map_vfs_error, project_lexical_documents,
+    FirstSliceError, FirstSliceIndexReceipt, FirstSliceOperationContext, RustSourceInput,
+    check_cancellation, map_catalog_error, map_query_error, map_search_error, map_vfs_error,
+    project_lexical_documents,
 };
 
 const DURABLE_DIRECTORY: &str = "first-slice";
@@ -94,7 +95,33 @@ struct DurableActivationManifest {
     global_activation_sequence: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     published_generation_count: Option<u64>,
-    operation: Option<FirstSliceOperationContext>,
+    operation: Option<DurableOperationContextV2>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableOperationContextV2 {
+    operation: rootlight_ids::OperationId,
+    started_unix_ms: u64,
+}
+
+impl From<FirstSliceOperationContext> for DurableOperationContextV2 {
+    fn from(context: FirstSliceOperationContext) -> Self {
+        Self {
+            operation: context.operation,
+            started_unix_ms: context.started_unix_ms,
+        }
+    }
+}
+
+impl From<DurableOperationContextV2> for FirstSliceOperationContext {
+    fn from(context: DurableOperationContextV2) -> Self {
+        Self {
+            operation: context.operation,
+            started_unix_ms: context.started_unix_ms,
+            provider: super::FirstSliceIndexProvider::Unknown,
+        }
+    }
 }
 
 struct ActivationMarker {
@@ -380,6 +407,7 @@ impl DurableCatalog {
                         && retained_marker_names.contains(&marker.name))
                     .then_some(marker.manifest.operation)
                     .flatten()
+                    .map(FirstSliceOperationContext::from)
                 })
                 .collect();
         }
@@ -907,8 +935,7 @@ fn restore_generation(
         .map_err(|_| FirstSliceError::Retention)?;
     for file in &persisted.document().files {
         check_cancellation(cancellation)?;
-        if file.byte_length > u64::try_from(MAX_SOURCE_BYTES).unwrap_or(u64::MAX)
-            || file.byte_length > MAX_SNAPSHOT_BYTES
+        if file.byte_length > DEFAULT_MAX_SOURCE_FILE_BYTES || file.byte_length > MAX_SNAPSHOT_BYTES
         {
             return Err(FirstSliceError::CatalogCorrupt);
         }
@@ -980,7 +1007,9 @@ fn publish_activation_marker(
         generation,
         global_activation_sequence: Some(global_activation_sequence),
         published_generation_count: Some(published_generation_count),
-        operation,
+        // Keep the version-2 manifest byte contract rollback-readable. Provider
+        // diagnostics remain process-local until a new manifest version exists.
+        operation: operation.map(DurableOperationContextV2::from),
     };
     let bytes = serde_json::to_vec(&manifest).map_err(|_| FirstSliceError::Catalog)?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ACTIVATION_MANIFEST_BYTES {
@@ -1103,6 +1132,49 @@ mod tests {
         let name = activation_name(42, generation);
         assert_eq!(parse_activation_name(&name), Some((42, generation)));
         assert!(parse_activation_name("activation-42-invalid").is_none());
+    }
+
+    #[test]
+    fn activation_manifest_v2_keeps_the_legacy_operation_shape() {
+        let repository = derive_repository(b"durable-operation-shape").id();
+        let generation = derive_generation(GenerationIdentity {
+            repository,
+            parent: None,
+            manifest_hash: content_hash(b"manifest"),
+            config_hash: content_hash(b"config"),
+            provider_set_hash: content_hash(b"provider"),
+            format_version: 1,
+        })
+        .id();
+        let operation = FirstSliceOperationContext {
+            operation: rootlight_ids::OperationId::from_bytes([7; 16]),
+            started_unix_ms: 42,
+            provider: super::super::FirstSliceIndexProvider::ProjectAnalyzer,
+        };
+        let manifest = DurableActivationManifest {
+            version: ACTIVATION_MANIFEST_VERSION,
+            generation,
+            global_activation_sequence: Some(1),
+            published_generation_count: Some(1),
+            operation: Some(operation.into()),
+        };
+
+        let encoded = serde_json::to_value(&manifest).expect("activation manifest serializes");
+        assert!(
+            encoded["operation"].get("provider").is_none(),
+            "version-2 manifests must remain readable by the previous binary"
+        );
+        let decoded: DurableActivationManifest =
+            serde_json::from_value(encoded).expect("activation manifest round trips");
+        let restored = FirstSliceOperationContext::from(
+            decoded.operation.expect("operation context is retained"),
+        );
+        assert_eq!(restored.operation, operation.operation);
+        assert_eq!(restored.started_unix_ms, operation.started_unix_ms);
+        assert_eq!(
+            restored.provider,
+            super::super::FirstSliceIndexProvider::Unknown
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]

@@ -51,7 +51,6 @@ use crate::{
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const FIRST_SLICE_PROVIDER: &str = "rootlight-first-slice-treesitter";
 const PROJECT_SEMANTICS_PROVIDER: &str = "rootlight-project-semantics";
-const FIRST_SLICE_LANGUAGE: &str = "rust";
 const BRIDGE_TRACE_PREFIX: &str = "bridge-";
 
 type AsyncClientFuture<T> = Pin<Box<dyn Future<Output = Result<T, ClientError>> + Send + 'static>>;
@@ -955,7 +954,8 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 )
                 .await
                 .map_err(map_client_error)?;
-            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            let languages = symbol_languages(&result)?;
+            let metadata = read_metadata(&result.context, languages)?;
             Ok(SymbolExplainPortResponse::new(result, metadata))
         })
     }
@@ -1514,9 +1514,9 @@ const fn query_freshness(freshness: QueryFreshness) -> Freshness {
 }
 
 fn locate_languages(result: &CodeLocate) -> Result<Vec<LanguageCoverage>, ClientPortError> {
-    let mut languages = BTreeMap::from([(FIRST_SLICE_LANGUAGE.to_owned(), result.context.tier)]);
+    let mut languages = BTreeMap::new();
     for hit in &result.hits {
-        if hit.language != FIRST_SLICE_LANGUAGE {
+        if SafeLabel::parse(&hit.language).is_err() {
             return Err(ClientPortError::InvalidResponse);
         }
         languages
@@ -1528,21 +1528,35 @@ fn locate_languages(result: &CodeLocate) -> Result<Vec<LanguageCoverage>, Client
 }
 
 fn source_languages(result: &SourceRead) -> Result<Vec<LanguageCoverage>, ClientPortError> {
-    if result
-        .chunks
-        .iter()
-        .any(|chunk| chunk.language != FIRST_SLICE_LANGUAGE)
-    {
-        return Err(ClientPortError::InvalidResponse);
+    let mut languages = BTreeMap::new();
+    for chunk in &result.chunks {
+        if SafeLabel::parse(&chunk.language).is_err() {
+            return Err(ClientPortError::InvalidResponse);
+        }
+        languages
+            .entry(chunk.language.clone())
+            .and_modify(|current| *current = weaker_tier(*current, chunk.tier))
+            .or_insert(chunk.tier);
     }
-    Ok(service_languages(&result.context))
+    Ok(language_coverage(languages, result.context.coverage_status))
 }
 
-fn service_languages(context: &rootlight_client::QueryContext) -> Vec<LanguageCoverage> {
-    language_coverage(
-        BTreeMap::from([(FIRST_SLICE_LANGUAGE.to_owned(), context.tier)]),
-        context.coverage_status,
-    )
+fn symbol_languages(result: &SymbolExplain) -> Result<Vec<LanguageCoverage>, ClientPortError> {
+    let mut languages = BTreeMap::new();
+    for symbol in &result.symbols {
+        if SafeLabel::parse(&symbol.language).is_err() {
+            return Err(ClientPortError::InvalidResponse);
+        }
+        languages
+            .entry(symbol.language.clone())
+            .and_modify(|current| *current = weaker_tier(*current, symbol.tier))
+            .or_insert(symbol.tier);
+    }
+    Ok(language_coverage(languages, result.context.coverage_status))
+}
+
+fn service_languages(_context: &rootlight_client::QueryContext) -> Vec<LanguageCoverage> {
+    Vec::new()
 }
 
 fn language_coverage(

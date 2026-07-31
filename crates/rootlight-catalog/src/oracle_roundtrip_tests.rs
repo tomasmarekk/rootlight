@@ -41,7 +41,7 @@ use rootlight_ir::{
 use rootlight_storage::{
     CoverageReadRequest, GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext,
     GenerationManifestRecipe, GenerationMetadata, GenerationReadLimit, GenerationReader,
-    GenerationSnapshot, IdentityVerificationError, IdentityVerifiedGeneration,
+    GenerationResource, GenerationSnapshot, IdentityVerificationError, IdentityVerifiedGeneration,
     OccurrenceReadRequest, ReadPageCompleteness, RelationReadDirection, RelationReadRequest,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot};
@@ -630,16 +630,23 @@ fn oracle_is_exactly_named_and_cannot_be_overwritten() {
 fn preflight_budget_and_cancellation_leave_no_payload_rows() {
     let budget_directory = TempDir::new().expect("budget staging directory is created");
     let cancellation = Cancellation::new();
-    let budget = GenerationBudget::new(1, 1, 1).expect("tiny nonzero budget is valid");
+    let budget =
+        GenerationBudget::new(1_000, 1_000, 1).expect("encoded-text-constrained budget is valid");
     let context = GenerationContext::new(&cancellation, budget);
     let error = OracleWriter::create_in(budget_directory.path())
         .expect("oracle schema initializes")
         .seal_unverified_for_test(snapshot(fixture_documents().0), &context)
         .expect_err("generation exceeds the tiny budget");
-    assert!(matches!(
-        error.kind(),
-        CatalogErrorKind::BudgetExceeded { .. }
-    ));
+    let CatalogErrorKind::BudgetExceeded {
+        resource,
+        observed,
+        limit,
+    } = error.kind()
+    else {
+        panic!("tiny generation must return a typed budget error");
+    };
+    assert_eq!(resource, GenerationResource::EncodedTextBytes);
+    assert!(observed > limit);
     let connection =
         Connection::open(budget_directory.path().join(ORACLE_FILENAME)).expect("oracle opens");
     let rows: i64 = connection

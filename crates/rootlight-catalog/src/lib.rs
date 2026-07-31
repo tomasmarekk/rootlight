@@ -175,7 +175,27 @@ impl OracleWriter {
         generation: IdentityVerifiedGeneration,
         context: &GenerationContext<'_>,
     ) -> Result<OracleReader, CatalogError> {
-        self.seal_snapshot(generation.into_snapshot(), context)
+        self.seal_and_retain(generation, context)
+            .map(|(reader, _generation)| reader)
+    }
+
+    /// Writes one generation and returns its identity-verified readback.
+    ///
+    /// The input capability is released before readback materialization so a
+    /// substantial generation is not retained twice in process memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::seal`].
+    pub fn seal_and_retain(
+        self,
+        generation: IdentityVerifiedGeneration,
+        context: &GenerationContext<'_>,
+    ) -> Result<(OracleReader, IdentityVerifiedGeneration), CatalogError> {
+        let reader = self.seal_snapshot(generation.snapshot(), context)?;
+        drop(generation);
+        let readback = reader.read_verified(context)?;
+        Ok((reader, readback))
     }
 
     #[cfg(test)]
@@ -184,12 +204,16 @@ impl OracleWriter {
         generation: GenerationSnapshot,
         context: &GenerationContext<'_>,
     ) -> Result<OracleReader, CatalogError> {
-        self.seal_snapshot(generation, context)
+        let reader = self.seal_snapshot(&generation, context)?;
+        if reader.read(context)?.ne(&generation) {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+        Ok(reader)
     }
 
     fn seal_snapshot(
         self,
-        generation: GenerationSnapshot,
+        generation: &GenerationSnapshot,
         context: &GenerationContext<'_>,
     ) -> Result<OracleReader, CatalogError> {
         let Self {
@@ -197,10 +221,10 @@ impl OracleWriter {
             path,
         } = self;
         schema::install_generation_cancellation(&connection, context)?;
-        let stats = write::write_generation(&mut connection, &generation, context)?;
+        let stats = write::write_generation(&mut connection, generation, context)?;
         drop(connection);
         let reader = OracleReader::open_path(path, context)?;
-        if reader.stats != stats || reader.read(context)? != generation {
+        if reader.stats != stats {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         }
         Ok(reader)
@@ -476,7 +500,27 @@ impl EphemeralOracleWriter {
         generation: IdentityVerifiedGeneration,
         context: &GenerationContext<'_>,
     ) -> Result<EphemeralOracleReader, CatalogError> {
-        self.seal_snapshot(generation.into_snapshot(), context)
+        self.seal_and_retain(generation, context)
+            .map(|(reader, _generation)| reader)
+    }
+
+    /// Writes one in-memory generation and returns its verified readback.
+    ///
+    /// The input capability is released before readback materialization so a
+    /// substantial generation is not retained twice in process memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::seal`].
+    pub fn seal_and_retain(
+        self,
+        generation: IdentityVerifiedGeneration,
+        context: &GenerationContext<'_>,
+    ) -> Result<(EphemeralOracleReader, IdentityVerifiedGeneration), CatalogError> {
+        let reader = self.seal_snapshot(generation.snapshot(), context)?;
+        drop(generation);
+        let readback = reader.read_verified(context)?;
+        Ok((reader, readback))
     }
 
     #[cfg(test)]
@@ -485,17 +529,21 @@ impl EphemeralOracleWriter {
         generation: GenerationSnapshot,
         context: &GenerationContext<'_>,
     ) -> Result<EphemeralOracleReader, CatalogError> {
-        self.seal_snapshot(generation, context)
+        let reader = self.seal_snapshot(&generation, context)?;
+        if reader.read(context)?.ne(&generation) {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+        Ok(reader)
     }
 
     fn seal_snapshot(
         self,
-        snapshot: GenerationSnapshot,
+        snapshot: &GenerationSnapshot,
         context: &GenerationContext<'_>,
     ) -> Result<EphemeralOracleReader, CatalogError> {
         let Self { mut connection } = self;
         schema::install_generation_cancellation(&connection, context)?;
-        let expected_stats = write::write_generation(&mut connection, &snapshot, context)?;
+        let expected_stats = write::write_generation(&mut connection, snapshot, context)?;
         schema::configure_ephemeral_oracle_reader(&connection, context)?;
         let (metadata, stats) = read::read_header(&connection, context)?;
         let reader = EphemeralOracleReader {
@@ -503,7 +551,7 @@ impl EphemeralOracleWriter {
             metadata,
             stats,
         };
-        if stats != expected_stats || reader.read(context)? != snapshot {
+        if stats != expected_stats {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         }
         Ok(reader)
@@ -733,6 +781,8 @@ pub enum CatalogErrorKind {
     BudgetExceeded {
         /// Exhausted resource family.
         resource: GenerationResource,
+        /// Safe observed count or byte total.
+        observed: u64,
         /// Configured operation limit.
         limit: u64,
     },
@@ -789,9 +839,15 @@ impl CatalogError {
     pub(crate) fn control(error: GenerationControlError) -> Self {
         match error {
             GenerationControlError::Cancelled { .. } => Self::new(CatalogErrorKind::Cancelled),
-            GenerationControlError::BudgetExceeded { resource, limit } => {
-                Self::new(CatalogErrorKind::BudgetExceeded { resource, limit })
-            }
+            GenerationControlError::BudgetExceeded {
+                resource,
+                observed,
+                limit,
+            } => Self::new(CatalogErrorKind::BudgetExceeded {
+                resource,
+                observed,
+                limit,
+            }),
         }
     }
 

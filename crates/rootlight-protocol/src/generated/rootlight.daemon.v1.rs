@@ -954,6 +954,12 @@ pub struct FirstSliceSymbolExplanation {
     #[prost(uint32, tag = "13")]
     #[allow(missing_docs)]
     pub confidence: u32,
+    #[prost(string, tag = "14")]
+    #[allow(missing_docs)]
+    pub language: ::prost::alloc::string::String,
+    #[prost(enumeration = "FirstSliceAnalysisTier", tag = "15")]
+    #[allow(missing_docs)]
+    pub tier: i32,
 }
 /// Returns explanations in request order and unresolved stable identities.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1060,6 +1066,9 @@ pub struct FirstSliceSourceChunk {
     #[prost(bytes = "vec", tag = "14")]
     #[allow(missing_docs)]
     pub exact_content: ::prost::alloc::vec::Vec<u8>,
+    #[prost(enumeration = "FirstSliceAnalysisTier", tag = "15")]
+    #[allow(missing_docs)]
+    pub tier: i32,
 }
 /// Returns exact verified source chunks.
 #[derive(Clone, PartialEq, ::prost::Message)]

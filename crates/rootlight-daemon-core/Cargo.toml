@@ -14,6 +14,7 @@ rootlight-ipc = { path = "../rootlight-ipc" }
 rootlight-observability = { path = "../rootlight-observability" }
 rootlight-operations = { path = "../rootlight-operations" }
 rootlight-protocol = { path = "../rootlight-protocol" }
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 unicode-casefold.workspace = true
@@ -24,6 +25,7 @@ rootlight-client = { path = "../rootlight-client" }
 serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+zip.workspace = true
 
 [lints]
 workspace = true

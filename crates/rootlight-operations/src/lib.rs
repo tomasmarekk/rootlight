@@ -42,6 +42,8 @@ pub const MAX_NONTERMINAL_OPERATIONS: u32 = 65_536;
 pub const MAX_OPERATION_ROWS: usize = MAX_OPERATION_HISTORY + 65_536;
 /// Maximum serialized public error retained for one terminal operation.
 pub const MAX_PUBLIC_ERROR_BYTES: usize = 16 * 1024;
+/// Maximum recent terminal operation records exposed to one support snapshot.
+pub const MAX_RECENT_TERMINAL_OPERATIONS: usize = 32;
 /// Maximum accepted size of the main SQLite catalog before opening it.
 pub const MAX_CATALOG_BYTES: u64 = 256 * 1024 * 1024;
 /// Maximum accepted size of the SQLite write-ahead log before opening a catalog.
@@ -471,6 +473,29 @@ pub struct OperationRecord {
     pub error: Option<PublicError>,
     /// Reports that a persisted failure envelope exists after restart.
     pub has_persisted_error: bool,
+}
+
+/// Source-free SQLite and storage facts exposed to diagnostic evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationJournalSupportSnapshot {
+    /// Current operation-journal schema version.
+    pub schema_version: u32,
+    /// Bundled SQLite runtime version.
+    pub sqlite_version: String,
+    /// Whether the journal is persistent or isolated in memory.
+    pub persistent: bool,
+    /// Current SQLite page size in bytes.
+    pub page_size_bytes: u64,
+    /// Current number of allocated catalog pages.
+    pub page_count: u64,
+    /// Allocated catalog bytes derived from page size and page count.
+    pub allocated_bytes: u64,
+    /// Maximum accepted main catalog bytes.
+    pub maximum_catalog_bytes: u64,
+    /// Maximum accepted write-ahead-log bytes.
+    pub maximum_wal_bytes: u64,
+    /// Maximum accepted shared-memory sidecar bytes.
+    pub maximum_shm_bytes: u64,
 }
 
 /// Result of retry-safe durable submission.
@@ -1309,7 +1334,9 @@ impl OperationJournal {
             .execute(
                 "UPDATE operations
                  SET state = 'succeeded', stage = 'cleanup',
-                     completed = 1, total = 1, revision = ?1
+                     completed = CASE WHEN total = 0 THEN 1 ELSE total END,
+                     total = CASE WHEN total = 0 THEN 1 ELSE total END,
+                     revision = ?1
                  WHERE operation = ?2 AND revision = ?3
                    AND kind = 'repository_index'
                    AND state = 'running' AND stage = 'executing'
@@ -1496,7 +1523,9 @@ impl OperationJournal {
         let updated = transaction
             .execute(
                 "UPDATE operations
-                 SET state = 'succeeded', completed = 1, total = 1,
+                 SET state = 'succeeded',
+                     completed = CASE WHEN total = 0 THEN 1 ELSE total END,
+                     total = CASE WHEN total = 0 THEN 1 ELSE total END,
                      revision = ?1
                  WHERE operation = ?2 AND revision = ?3
                    AND kind = 'repository_index'
@@ -1518,17 +1547,17 @@ impl OperationJournal {
         self.status(operation)
     }
 
-    /// Reconciles a durable external publication after process restart.
+    /// Reconciles a durable external publication after finalization ambiguity.
     ///
     /// The caller may invoke this only for an operation identity recovered
-    /// from a validated immutable publication marker. That marker is the
-    /// external commit proof for the operation interrupted between prepare and
-    /// journal finalization.
+    /// from a validated immutable publication marker. That marker is external
+    /// commit proof whether the journal is still in authorized cleanup or was
+    /// interrupted there by restart.
     ///
     /// # Errors
     ///
     /// Returns a typed lifecycle or storage failure when the operation is not
-    /// the interrupted cleanup phase of repository publication.
+    /// an authorized cleanup phase of repository publication.
     pub fn reconcile_committed_repository_publication(
         &self,
         operation: OperationId,
@@ -1542,8 +1571,10 @@ impl OperationJournal {
         if current.state == OperationState::Succeeded {
             return Ok(current);
         }
-        if current.state != OperationState::Interrupted
-            || current.stage != OperationStage::Cleanup
+        if !matches!(
+            current.state,
+            OperationState::Running | OperationState::Interrupted
+        ) || current.stage != OperationStage::Cleanup
             || current.cancellation_requested
             || current.error.is_some()
         {
@@ -1553,11 +1584,13 @@ impl OperationJournal {
         let updated = transaction
             .execute(
                 "UPDATE operations
-                 SET state = 'succeeded', completed = 1, total = 1,
+                 SET state = 'succeeded',
+                     completed = CASE WHEN total = 0 THEN 1 ELSE total END,
+                     total = CASE WHEN total = 0 THEN 1 ELSE total END,
                      recovery_class = 'not_applicable', revision = ?1
                  WHERE operation = ?2 AND revision = ?3
                    AND kind = 'repository_index'
-                   AND state = 'interrupted' AND stage = 'cleanup'
+                   AND state IN ('running', 'interrupted') AND stage = 'cleanup'
                    AND cancellation_requested = 0 AND error_json IS NULL",
                 params![
                     u64_to_i64(revision)?,
@@ -1814,6 +1847,63 @@ impl OperationJournal {
             record.error = Some(error);
         }
         Ok(record)
+    }
+
+    /// Loads the newest bounded terminal records in newest-to-oldest order.
+    ///
+    /// The caller-provided limit is capped by [`MAX_RECENT_TERMINAL_OPERATIONS`]
+    /// so diagnostic collection cannot allocate in proportion to catalog history.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed corruption or SQLite storage failure.
+    pub fn recent_terminal(
+        &self,
+        max_records: usize,
+    ) -> Result<Vec<OperationRecord>, OperationError> {
+        let connection = self.lock_connection()?;
+        let ids = select_recent_terminal_operation_ids(&connection, max_records)?;
+        drop(connection);
+        ids.into_iter()
+            .map(|operation| self.status(operation))
+            .collect()
+    }
+
+    /// Returns bounded source-free SQLite and catalog allocation facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed corruption or SQLite storage failure.
+    pub fn support_snapshot(&self) -> Result<OperationJournalSupportSnapshot, OperationError> {
+        let connection = self.lock_connection()?;
+        let storage = catalog_storage(&connection)?;
+        let sqlite_version = connection
+            .query_row("SELECT sqlite_version()", [], |row| row.get::<_, String>(0))
+            .map_err(map_sqlite_error)?;
+        let page_size_bytes = nonnegative_i64_to_u64(
+            connection
+                .query_row("PRAGMA page_size", [], |row| row.get(0))
+                .map_err(map_sqlite_error)?,
+        )?;
+        let page_count = nonnegative_i64_to_u64(
+            connection
+                .query_row("PRAGMA page_count", [], |row| row.get(0))
+                .map_err(map_sqlite_error)?,
+        )?;
+        let allocated_bytes = page_size_bytes
+            .checked_mul(page_count)
+            .ok_or(OperationError::CorruptState)?;
+        Ok(OperationJournalSupportSnapshot {
+            schema_version: OPERATION_SCHEMA_VERSION,
+            sqlite_version,
+            persistent: storage == CatalogStorage::Persistent,
+            page_size_bytes,
+            page_count,
+            allocated_bytes,
+            maximum_catalog_bytes: MAX_CATALOG_BYTES,
+            maximum_wal_bytes: MAX_CATALOG_WAL_BYTES,
+            maximum_shm_bytes: MAX_CATALOG_SHM_BYTES,
+        })
     }
 
     /// Returns bounded nonterminal operation counts.
@@ -3377,6 +3467,32 @@ fn select_operation_ids(
         .collect()
 }
 
+fn select_recent_terminal_operation_ids(
+    connection: &Connection,
+    max_records: usize,
+) -> Result<Vec<OperationId>, OperationError> {
+    let maximum = i64::try_from(max_records.min(MAX_RECENT_TERMINAL_OPERATIONS))
+        .map_err(|_| OperationError::CorruptState)?;
+    connection
+        .prepare(
+            "SELECT operation FROM operations
+             WHERE state IN ('succeeded', 'failed', 'cancelled', 'interrupted')
+             ORDER BY sequence DESC LIMIT ?1",
+        )
+        .map_err(map_sqlite_error)?
+        .query_map([maximum], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(map_sqlite_error)?
+        .map(|value| {
+            value
+                .map_err(map_sqlite_error)
+                .and_then(|bytes| {
+                    <[u8; 16]>::try_from(bytes).map_err(|_| OperationError::CorruptState)
+                })
+                .map(OperationId::from_bytes)
+        })
+        .collect()
+}
+
 fn select_prunable_operation_ids(
     connection: &Connection,
     retained: usize,
@@ -4640,6 +4756,9 @@ mod tests {
             journal
                 .start_execution(operation)
                 .expect("operation starts");
+            journal
+                .update_progress(operation, Progress::new(5, 6).expect("progress is valid"))
+                .expect("publication progress advances");
             let authorized = journal
                 .authorize_repository_publication(operation)
                 .expect("publication is authorized");
@@ -4647,7 +4766,7 @@ mod tests {
             assert_eq!(authorized.stage, OperationStage::Cleanup);
             assert_eq!(
                 authorized.progress,
-                Progress::new(0, 0).expect("empty progress is valid")
+                Progress::new(5, 6).expect("progress is valid")
             );
             assert_eq!(
                 journal
@@ -4683,13 +4802,95 @@ mod tests {
         assert_eq!(reconciled.recovery_class, RecoveryClass::NotApplicable);
         assert_eq!(
             reconciled.progress,
-            Progress::new(1, 1).expect("fixed progress is valid")
+            Progress::new(6, 6).expect("completed progress is valid")
         );
         assert_eq!(
             journal
                 .reconcile_committed_repository_publication(operation)
                 .expect("reconciliation replay is idempotent"),
             reconciled
+        );
+    }
+
+    #[test]
+    fn live_authorized_publication_accepts_external_commit_proof() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = operation(78);
+        journal
+            .submit(
+                OperationSubmission::new(
+                    operation,
+                    OperationKind::RepositoryIndex,
+                    PlanHash::from_bytes([78; 32]),
+                    ClientInstanceId::new([78; 16]).expect("client identity is valid"),
+                    true,
+                    None,
+                    None,
+                )
+                .expect("submission is valid"),
+            )
+            .expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        journal
+            .update_progress(operation, Progress::new(5, 6).expect("progress is valid"))
+            .expect("publication progress advances");
+        let authorized = journal
+            .authorize_repository_publication(operation)
+            .expect("publication is authorized");
+        assert_eq!(authorized.state, OperationState::Running);
+        assert_eq!(authorized.stage, OperationStage::Cleanup);
+
+        let reconciled = journal
+            .reconcile_committed_repository_publication(operation)
+            .expect("validated external marker resolves a live finalization ambiguity");
+
+        assert_eq!(reconciled.state, OperationState::Succeeded);
+        assert_eq!(reconciled.stage, OperationStage::Cleanup);
+        assert_eq!(
+            reconciled.progress,
+            Progress::new(6, 6).expect("completed progress is valid")
+        );
+    }
+
+    #[test]
+    fn authorized_publication_completion_preserves_progress_total() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = operation(76);
+        journal
+            .submit(
+                OperationSubmission::new(
+                    operation,
+                    OperationKind::RepositoryIndex,
+                    PlanHash::from_bytes([76; 32]),
+                    ClientInstanceId::new([76; 16]).expect("client identity is valid"),
+                    true,
+                    None,
+                    None,
+                )
+                .expect("submission is valid"),
+            )
+            .expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        journal
+            .update_progress(operation, Progress::new(5, 6).expect("progress is valid"))
+            .expect("publication progress advances");
+        journal
+            .authorize_repository_publication(operation)
+            .expect("publication is authorized");
+
+        let completed = journal
+            .finish_authorized_repository_publication(operation)
+            .expect("authorized publication completes");
+
+        assert_eq!(completed.state, OperationState::Succeeded);
+        assert_eq!(completed.stage, OperationStage::Cleanup);
+        assert_eq!(
+            completed.progress,
+            Progress::new(6, 6).expect("completed progress is valid")
         );
     }
 
@@ -4807,6 +5008,9 @@ mod tests {
         journal
             .start_execution(authorized)
             .expect("operation starts");
+        journal
+            .update_progress(authorized, Progress::new(5, 6).expect("progress is valid"))
+            .expect("publication progress advances");
         let publication = journal
             .complete_repository_publication(authorized)
             .expect("publication wins before deadline");
@@ -4814,7 +5018,7 @@ mod tests {
         assert_eq!(publication.state, OperationState::Succeeded);
         assert_eq!(
             publication.progress,
-            Progress::new(1, 1).expect("fixed progress is valid")
+            Progress::new(6, 6).expect("completed progress is valid")
         );
         assert_eq!(
             journal
@@ -7059,6 +7263,79 @@ mod tests {
         let actual = reopened.status(operation(22)).expect("status loads");
         assert_eq!(actual.error, Some(expected));
         assert!(actual.has_persisted_error);
+    }
+
+    #[test]
+    fn recent_terminal_records_are_bounded_newest_first_and_restart_safe() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let expected_error = PublicError::builder(ErrorCode::Internal, "operation failed")
+            .operation(operation(22))
+            .build()
+            .expect("public error builds");
+        {
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            for seed in 20..=22 {
+                journal
+                    .enqueue(operation(seed))
+                    .expect("operation enqueues");
+                journal
+                    .start_execution(operation(seed))
+                    .expect("operation starts");
+                if seed == 22 {
+                    journal
+                        .transition(
+                            operation(seed),
+                            OperationState::Failed,
+                            Some(&expected_error),
+                        )
+                        .expect("operation fails");
+                } else {
+                    journal
+                        .transition(operation(seed), OperationState::Succeeded, None)
+                        .expect("operation succeeds");
+                }
+            }
+        }
+
+        let reopened = OperationJournal::open(&path).expect("journal reopens");
+        let records = reopened
+            .recent_terminal(2)
+            .expect("recent terminal records load");
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.operation)
+                .collect::<Vec<_>>(),
+            vec![operation(22), operation(21)]
+        );
+        assert_eq!(records[0].error, Some(expected_error));
+        assert!(records[0].has_persisted_error);
+        assert!(
+            reopened
+                .recent_terminal(0)
+                .expect("zero-sized snapshot loads")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn support_snapshot_reports_bounded_catalog_allocation() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let snapshot = journal.support_snapshot().expect("support snapshot loads");
+
+        assert_eq!(snapshot.schema_version, OPERATION_SCHEMA_VERSION);
+        assert!(!snapshot.sqlite_version.is_empty());
+        assert!(!snapshot.persistent);
+        assert!(snapshot.page_size_bytes > 0);
+        assert!(snapshot.page_count > 0);
+        assert_eq!(
+            snapshot.allocated_bytes,
+            snapshot.page_size_bytes * snapshot.page_count
+        );
+        assert_eq!(snapshot.maximum_catalog_bytes, MAX_CATALOG_BYTES);
+        assert_eq!(snapshot.maximum_wal_bytes, MAX_CATALOG_WAL_BYTES);
+        assert_eq!(snapshot.maximum_shm_bytes, MAX_CATALOG_SHM_BYTES);
     }
 
     #[cfg(unix)]

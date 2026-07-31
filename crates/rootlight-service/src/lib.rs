@@ -27,7 +27,8 @@ use durable::{
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, AnalysisRequest, BatchThresholds, EncodingId,
     GeneratedOriginMapping, GenerationBoundSnapshot, LanguageId, MemoryAdmissionPolicy,
-    ParseProvider, StreamLimits, TransformationId,
+    ParseProvider, ReportError, RequestError, ResourceKind, SinkError, StreamLimits,
+    TransformationId,
 };
 use rootlight_adapter_treesitter::{
     ADAPTER_VERSION as TREE_SITTER_ADAPTER_VERSION, GrammarDescriptor, GrammarRegistry,
@@ -38,7 +39,9 @@ pub use rootlight_adapters::{
     RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError, RuntimeTraceLimits, RuntimeTraceOverlay,
     RuntimeTraceProvenance, RuntimeTraceRelation, RuntimeTraceRelationKind, RuntimeTraceResource,
 };
-use rootlight_adapters::{RuntimeTraceImportRequest, import_runtime_trace};
+use rootlight_adapters::{
+    RuntimeTraceImportRequest, SemanticProjectLanguage, import_runtime_trace,
+};
 pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::{CatalogError, CatalogErrorKind, EphemeralOracleWriter, OracleWriter};
 use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource};
@@ -61,8 +64,9 @@ use rootlight_incremental::{
 pub use rootlight_incremental::{ChangeClass, FactDomain, FallbackReason, FileChangeKind};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageStatus, DiagnosticRecord, DiagnosticSeverity,
-    ExtensionSupport, FactEvidence, FactRef, FileIdentityClaim, IrLimits, NormalizedIrDocument,
-    OccurrenceRole, ProducerIdentity, ProducerKind, SourceMappingKind, SourceRef, SourceSpan,
+    ExtensionSupport, FactEvidence, FactRef, FileIdentityClaim, IrDocumentValidationError,
+    IrLimits, LEXICAL_EXTENSION_NAMESPACE, NormalizedIrDocument, OccurrenceRole, ProducerIdentity,
+    ProducerKind, SourceMappingKind, SourceRef, SourceSpan, derive_coverage_record_id,
     derive_diagnostic_record_id,
 };
 pub use rootlight_query::{
@@ -83,14 +87,15 @@ pub use rootlight_query::{
 };
 use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
 use rootlight_resolve::{
-    RESOLVER_PROVIDER_VERSION, ResolutionEngine, ResolutionError, ResolverFactContext,
+    DEFAULT_CANDIDATE_LIMIT, RESOLVER_PROVIDER_VERSION, ResolutionEngine, ResolutionError,
+    ResolutionLimits, ResolverFactContext,
 };
 use rootlight_search::{BuildBudget, LexicalIndex, SearchBudget, SearchError};
 use rootlight_source::{SourceBudget, SourceError, SourceService};
 pub use rootlight_source::{SourceEncoding, SourceReadOptions};
 use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationControlError,
-    GenerationManifestRecipe, GenerationMetadata, IdentityVerificationError,
+    GenerationManifestRecipe, GenerationMetadata, GenerationResource, IdentityVerificationError,
     IdentityVerifiedGeneration, SharedGenerationError,
     export_shared_generation as encode_shared_generation,
     import_shared_generation as decode_shared_generation, shared_generation_source_set_hash,
@@ -101,15 +106,30 @@ pub use rootlight_storage::{
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot, VfsError};
 use serde::{Deserialize, Serialize};
 
-const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_RETAINED_SOURCE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RETAINED_OPTIONAL_EXTENSIONS: usize = 10_000;
+const MAX_RETAINED_OPTIONAL_EXTENSION_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TOTAL_MATERIALIZED_RESOLUTION_CANDIDATES: usize = 1_000_000;
 const DURABLE_STAGING_FIXED_OVERHEAD_BYTES: u64 = 64 * 1024 * 1024;
 const DURABLE_DISK_SAFETY_MARGIN_BYTES: u64 = 64 * 1024 * 1024;
+// SQLite stores normalized fields across tables and indexes, so the streaming
+// JSON size is multiplied before any durable file is created.
+const DURABLE_ORACLE_SERIALIZED_EXPANSION_FACTOR: u64 = 8;
+// Finalization owns the normalized document while canonical verification and
+// one verified catalog readback materialize bounded working state.
+const GENERATION_MEMORY_SERIALIZED_EXPANSION_FACTOR: u64 = 3;
+const MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_FIRST_SLICE_REPOSITORIES: usize = 128;
 const HARD_MAX_FIRST_SLICE_GENERATIONS: usize = 8_193;
-const MAX_SYNTAX_NODES: usize = 16_384;
+const MAX_SYNTAX_NODES: usize = 1_048_576;
 const MAX_SYNTAX_DEPTH: usize = 128;
+const MAX_STREAM_RECORDS_PER_FILE: usize = 1_048_576;
+const MAX_STREAM_OUTPUT_BYTES_PER_FILE: usize = 512 * 1024 * 1024;
+const MAX_STREAM_DIAGNOSTICS_PER_FILE: usize = 16_384;
+const MAX_STREAM_DIAGNOSTIC_BYTES_PER_FILE: usize = 16 * 1024 * 1024;
+const MAX_STREAM_STRING_BYTES_PER_FILE: usize = 128 * 1024 * 1024;
+const MAX_REPORTED_MEMORY_BYTES_PER_FILE: usize = 512 * 1024 * 1024;
 const MAX_REPOSITORY_PATH_IDENTITY_BYTES: usize = 64 * 1024;
 const MAX_RANDOM_ID_ATTEMPTS: usize = 8;
 const GENERATED_HEADER_MAX_BYTES: usize = 8 * 1024;
@@ -135,6 +155,15 @@ const COMPILER_CONTEXT_INPUT_SEED: &[u8] = b"rootlight.first-slice.compiler-cont
 const SEARCH_REVISION_SEED: &[u8] = b"rootlight.first-slice.search-schema/1";
 const DERIVED_PLAN_REVISION_SEED: &[u8] =
     b"rootlight.first-slice.incremental-plan/schema-1.0/graph-1";
+// The isolated project host accepts only this semantic set. Tree-sitter has
+// additional fallback grammars that must not be advertised for the host.
+const PROJECT_ADAPTER_SUPPORT_LANGUAGES: [SemanticProjectLanguage; 5] = [
+    SemanticProjectLanguage::Rust,
+    SemanticProjectLanguage::TypeScript,
+    SemanticProjectLanguage::JavaScript,
+    SemanticProjectLanguage::Python,
+    SemanticProjectLanguage::Go,
+];
 
 /// Maximum number of distinct source-free diagnostics retained in an index receipt.
 pub const MAX_FIRST_SLICE_INDEX_DIAGNOSTICS: usize = 100;
@@ -164,6 +193,15 @@ pub struct FirstSliceIndexReceipt {
     pub parent: Option<GenerationId>,
     /// Regular inputs admitted by deterministic discovery.
     pub discovered_inputs: u64,
+    /// Files and directories visited by bounded discovery.
+    #[serde(default)]
+    pub visited_entries: u64,
+    /// Inputs omitted by stable discovery policy or resource classification.
+    #[serde(default)]
+    pub excluded_inputs: u64,
+    /// Oversized regular inputs omitted by the configured per-file bound.
+    #[serde(default)]
+    pub oversized_inputs: u64,
     /// Files committed into normalized IR.
     pub indexed_files: u64,
     /// Semantic entities committed into normalized IR.
@@ -180,6 +218,105 @@ pub struct FirstSliceIndexReceipt {
     pub diagnostics: Vec<FirstSliceIndexDiagnostic>,
     /// End-to-end indexing time rounded up to microseconds.
     pub elapsed_micros: u64,
+}
+
+/// Source-free adapter facts for production support evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSliceSupportAdapter {
+    /// Stable provider label.
+    pub name: String,
+    /// Closed language labels handled by the provider.
+    pub languages: Vec<String>,
+    /// Whether the provider executes outside the daemon process.
+    pub isolated: bool,
+}
+
+/// Source-free repository facts for production support evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSliceSupportRepository {
+    /// Opaque repository identity.
+    pub repository: RepositoryId,
+    /// Closed indexed language labels.
+    pub languages: Vec<String>,
+    /// Closed completed analysis-tier labels.
+    pub tiers: Vec<String>,
+    /// Files retained by the active generation.
+    pub files: u64,
+    /// Symbols retained by the active generation.
+    pub symbols: u64,
+    /// Relationships retained by the active generation.
+    pub relationships: u64,
+    /// Immutable generations currently retained for this repository.
+    pub generation_count: u32,
+}
+
+/// Source-free immutable generation facts for production support evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSliceSupportGeneration {
+    /// Repository owning the generation.
+    pub repository: RepositoryId,
+    /// Immutable generation identity.
+    pub generation: GenerationId,
+    /// SQLite bytes allocated by the normalized generation oracle.
+    pub disk_bytes: u64,
+    /// Whether this generation is currently active.
+    pub active: bool,
+}
+
+/// Bounded source-free snapshot consumed by the daemon support bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSliceSupportInventory {
+    /// Available parser and project-analysis providers.
+    pub adapters: Vec<FirstSliceSupportAdapter>,
+    /// Active repository summaries.
+    pub repositories: Vec<FirstSliceSupportRepository>,
+    /// Retained immutable generation summaries.
+    pub generations: Vec<FirstSliceSupportGeneration>,
+    /// Stable normalized generation format.
+    pub generation_format: String,
+    /// Total allocated bytes reported by retained generation receipts.
+    pub generation_disk_bytes: u64,
+}
+
+/// Coarse source-free stage reported while preparing an index generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FirstSliceIndexStage {
+    /// Deterministic repository discovery and incremental correlation completed.
+    Discovery,
+    /// Stable source snapshots were captured.
+    Snapshot,
+    /// Bounded parser and adapter analysis completed.
+    Analysis,
+    /// Per-file normalized documents were merged.
+    Merge,
+    /// Verified durable or ephemeral generation state was constructed.
+    Persistence,
+    /// The generation-pinned lexical index was built.
+    Search,
+}
+
+/// Monotonic coarse progress for one generation preparation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstSliceIndexProgress {
+    /// Completed coarse stage.
+    pub stage: FirstSliceIndexStage,
+    /// Completed coarse units.
+    pub completed: u64,
+    /// Fixed total coarse units for this preparation.
+    pub total: u64,
+}
+
+impl FirstSliceIndexProgress {
+    const TOTAL: u64 = 6;
+
+    const fn completed(stage: FirstSliceIndexStage, completed: u64) -> Self {
+        Self {
+            stage,
+            completed,
+            total: Self::TOTAL,
+        }
+    }
 }
 
 /// Receipts for one completed structural-first semantic refinement.
@@ -264,6 +401,19 @@ pub struct FirstSliceCrossRepositoryLink {
     pub source_refs: Vec<SourceRef>,
 }
 
+/// Provider family that produced one durable generation activation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirstSliceIndexProvider {
+    /// A legacy activation did not persist its provider family.
+    #[default]
+    Unknown,
+    /// Built-in structural parsing and lowering.
+    TreeSitter,
+    /// Installed project-level semantic analyzer.
+    ProjectAnalyzer,
+}
+
 /// Durable operation identity bound to one generation activation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -272,6 +422,9 @@ pub struct FirstSliceOperationContext {
     pub operation: OperationId,
     /// Source-redacted wall-clock start time captured by the daemon.
     pub started_unix_ms: u64,
+    /// Source-free provider family retained for terminal diagnostics.
+    #[serde(default)]
+    pub provider: FirstSliceIndexProvider,
 }
 
 /// Restored durable operation-to-generation publication mapping.
@@ -281,6 +434,8 @@ pub struct FirstSliceDurableOperation {
     pub operation: OperationId,
     /// Source-redacted wall-clock start time captured by the daemon.
     pub started_unix_ms: u64,
+    /// Source-free provider family that produced the generation.
+    pub provider: FirstSliceIndexProvider,
     /// Immutable generation receipt published by the operation.
     pub receipt: FirstSliceIndexReceipt,
 }
@@ -1904,7 +2059,6 @@ pub struct FirstSliceService {
     extensions: ExtensionSupport,
     analyzers: BTreeMap<String, TreeSitterAnalyzer>,
     project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
-    resolver: ResolutionEngine,
     // The canonical-root digest remains an internal lookup key. Durable mode
     // persists the random repository UUID instead of deriving public identity
     // from a local path.
@@ -2129,7 +2283,7 @@ impl FirstSliceService {
 
     fn new_with_storage(
         maximum_generations: usize,
-        maximum_source_bytes: usize,
+        maximum_retained_source_bytes: usize,
         durable: Option<DurableCatalog>,
         project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
     ) -> Result<Self, FirstSliceError> {
@@ -2143,9 +2297,15 @@ impl FirstSliceService {
             contents: "version = \"1.0\"",
         }])
         .map_err(|_| FirstSliceError::Configuration)?;
-        let analysis_limits = analysis_limits()?;
+        // Discovery, the capability snapshot, and parser admission must share
+        // one effective source-file ceiling. Divergent limits make a file pass
+        // discovery only to fail as an unrelated repository error later.
+        let maximum_source_bytes = usize::try_from(config.analysis().max_source_file_bytes)
+            .map_err(|_| FirstSliceError::Limits)?;
+        let analysis_limits = analysis_limits(maximum_source_bytes)?;
         let parser = Arc::new(
-            TreeSitterProvider::new(parser_config()?).map_err(|_| FirstSliceError::Adapter)?,
+            TreeSitterProvider::new(parser_config(maximum_source_bytes)?)
+                .map_err(|_| FirstSliceError::Adapter)?,
         );
         let registry = GrammarRegistry::audited().map_err(|_| FirstSliceError::Adapter)?;
         let producer =
@@ -2192,7 +2352,7 @@ impl FirstSliceService {
         let generations = GenerationSet::new(total_generation_capacity)
             .map_err(|_| FirstSliceError::Retention)?;
         let source_snapshots =
-            SourceSnapshotRetention::new(total_generation_capacity, maximum_source_bytes)?;
+            SourceSnapshotRetention::new(total_generation_capacity, maximum_retained_source_bytes)?;
         let structural_artifacts = StructuralArtifactRetention::new(
             total_generation_capacity,
             MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES,
@@ -2206,7 +2366,6 @@ impl FirstSliceService {
             extensions: ExtensionSupport::default(),
             analyzers,
             project_analyzer,
-            resolver: ResolutionEngine::default(),
             repositories: BTreeMap::new(),
             pending_repository_registrations: BTreeMap::new(),
             repository_display_names: BTreeMap::new(),
@@ -2379,6 +2538,7 @@ impl FirstSliceService {
                 let publication = FirstSliceDurableOperation {
                     operation: operation.operation,
                     started_unix_ms: operation.started_unix_ms,
+                    provider: operation.provider,
                     receipt: receipt.clone(),
                 };
                 if self
@@ -2548,6 +2708,25 @@ impl FirstSliceService {
         mode: FirstSliceIndexMode,
         cancellation: &Cancellation,
     ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
+        self.prepare_repository_with_mode_and_progress(path, mode, cancellation, |_| {})
+    }
+
+    /// Builds one hidden generation and reports monotonic coarse progress.
+    ///
+    /// Progress callbacks contain only a closed stage and bounded counters.
+    /// They must remain lightweight because they run synchronously between
+    /// preparation stages.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::prepare_repository_with_mode`].
+    pub fn prepare_repository_with_mode_and_progress(
+        &self,
+        path: &Path,
+        mode: FirstSliceIndexMode,
+        cancellation: &Cancellation,
+        mut observe_progress: impl FnMut(FirstSliceIndexProgress),
+    ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
         let started = Instant::now();
         require_deadline(cancellation)?;
         cancellation
@@ -2641,6 +2820,10 @@ impl FirstSliceService {
             cancellation,
         )
         .map_err(|error| map_discovery_error(error, cancellation))?;
+        observe_progress(FirstSliceIndexProgress::completed(
+            FirstSliceIndexStage::Discovery,
+            1,
+        ));
         let source_preflight = preflight_source_inputs(
             &manifest.inputs,
             &self.analyzers,
@@ -2648,7 +2831,7 @@ impl FirstSliceService {
             self.source_snapshots.maximum_bytes,
             cancellation,
         )?;
-        let estimated_disk_bytes = durable_staging_reservation(source_preflight.source_bytes)?;
+        let mut estimated_disk_bytes = durable_staging_reservation(source_preflight.source_bytes)?;
         self.ensure_durable_staging_capacity(estimated_disk_bytes)?;
         let source_count = source_preflight.file_count;
         let mut file_claims = Vec::new();
@@ -2699,6 +2882,10 @@ impl FirstSliceService {
             });
         }
         attach_generated_origin_mappings(&mut sources, &source_languages, cancellation)?;
+        observe_progress(FirstSliceIndexProgress::completed(
+            FirstSliceIndexStage::Snapshot,
+            2,
+        ));
         let manifest_hash =
             GenerationManifestRecipe::new(repository, self.config.hash(), file_claims)
                 .map_err(|_| FirstSliceError::Identity)?
@@ -2796,41 +2983,74 @@ impl FirstSliceService {
                     .and_then(|artifacts| artifacts.get(snapshot.file()))
                     .filter(|entry| entry.id == artifact_id)
                     .ok_or(FirstSliceError::Incremental)?;
-                let output = analyzer
-                    .analyze_from_artifact(
-                        &request,
-                        &entry.artifact,
-                        self.extensions.clone(),
-                        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                        cancellation,
-                    )
-                    .map_err(|error| map_adapter_error(error, cancellation))?;
-                reused_parser_artifacts = reused_parser_artifacts
-                    .checked_add(1)
-                    .ok_or(FirstSliceError::Limits)?;
-                (output, Arc::clone(&entry.artifact))
+                match analyzer.analyze_from_artifact(
+                    &request,
+                    &entry.artifact,
+                    self.extensions.clone(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    cancellation,
+                ) {
+                    Ok(output) => {
+                        reused_parser_artifacts = reused_parser_artifacts
+                            .checked_add(1)
+                            .ok_or(FirstSliceError::Limits)?;
+                        (output, Some(Arc::clone(&entry.artifact)))
+                    }
+                    Err(error) if is_invalid_utf8_adapter_failure(&error) => (
+                        analyzer
+                            .analyze_unsupported_encoding(
+                                &request,
+                                self.extensions.clone(),
+                                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                                cancellation,
+                            )
+                            .map_err(|error| map_adapter_error(error, cancellation))?,
+                        None,
+                    ),
+                    Err(error) => return Err(map_adapter_error(error, cancellation)),
+                }
             } else {
-                let (output, artifact) = analyzer
-                    .analyze_and_capture(
-                        &request,
-                        self.extensions.clone(),
-                        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                        cancellation,
-                    )
-                    .map_err(|error| map_adapter_error(error, cancellation))?;
-                parsed_files = parsed_files.checked_add(1).ok_or(FirstSliceError::Limits)?;
-                (output, Arc::new(artifact))
+                match analyzer.analyze_and_capture(
+                    &request,
+                    self.extensions.clone(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    cancellation,
+                ) {
+                    Ok((output, artifact)) => {
+                        parsed_files =
+                            parsed_files.checked_add(1).ok_or(FirstSliceError::Limits)?;
+                        (output, Some(Arc::new(artifact)))
+                    }
+                    Err(error) if is_invalid_utf8_adapter_failure(&error) => (
+                        analyzer
+                            .analyze_unsupported_encoding(
+                                &request,
+                                self.extensions.clone(),
+                                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                                cancellation,
+                            )
+                            .map_err(|error| map_adapter_error(error, cancellation))?,
+                        None,
+                    ),
+                    Err(error) => return Err(map_adapter_error(error, cancellation)),
+                }
             };
             let language_documents = structural_documents.entry(language.clone()).or_default();
             language_documents
                 .try_reserve(1)
                 .map_err(|_| FirstSliceError::Limits)?;
             language_documents.push(output.document().clone());
-            structural_entries.push(StructuralArtifactEntry {
-                id: artifact_id,
-                artifact,
-            });
+            if let Some(artifact) = artifact {
+                structural_entries.push(StructuralArtifactEntry {
+                    id: artifact_id,
+                    artifact,
+                });
+            }
         }
+        observe_progress(FirstSliceIndexProgress::completed(
+            FirstSliceIndexStage::Analysis,
+            3,
+        ));
         self.append_best_available_documents(
             &mut document,
             structural_documents,
@@ -2839,6 +3059,23 @@ impl FirstSliceService {
             mode,
             cancellation,
         )?;
+        let oversized_inputs = manifest
+            .coverage
+            .excluded
+            .get("oversized")
+            .copied()
+            .unwrap_or(0);
+        if oversized_inputs > 0 {
+            append_oversized_input_diagnostic(
+                &mut document,
+                oversized_inputs,
+                self.analysis_limits.ir(),
+            )?;
+        }
+        observe_progress(FirstSliceIndexProgress::completed(
+            FirstSliceIndexStage::Merge,
+            4,
+        ));
         incremental_plan.state.evidence.parsed_files =
             u64::try_from(parsed_files).map_err(|_| FirstSliceError::Limits)?;
         incremental_plan.state.evidence.reused_parser_artifacts =
@@ -2848,15 +3085,19 @@ impl FirstSliceService {
         let structural_artifacts =
             StructuralGenerationArtifacts::new(structural_entries, cancellation)?;
         let incremental = incremental_plan.state;
-        let document = self
-            .resolver
-            .apply(
+        let resolution_limits = resolution_limits_for_occurrences(document.occurrences.len())?;
+        let document = ResolutionEngine::new(resolution_limits)
+            .apply_document(
                 document,
                 ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED)),
                 cancellation,
             )
-            .map_err(|error| map_resolution_error(error, cancellation))?
-            .document;
+            .map_err(|error| map_resolution_error(error, cancellation))?;
+        let serialized_document_bytes = normalized_document_serialized_bytes(&document)?;
+        ensure_generation_memory_admission(
+            source_preflight.source_bytes,
+            serialized_document_bytes,
+        )?;
         let metadata = GenerationMetadata::new(
             repository,
             generation,
@@ -2875,42 +3116,42 @@ impl FirstSliceService {
             &context,
         )
         .map_err(|error| map_identity_error(error, cancellation))?;
-        let (oracle_allocated_bytes, persisted, verified, durable) =
-            if let Some(durable) = &self.durable {
-                let prepared = durable.begin_generation(repository, generation)?;
-                prepared.write_sources(&sources)?;
-                let oracle = OracleWriter::create_in(prepared.path())
-                    .map_err(|error| map_catalog_error(&error, cancellation))?
-                    .seal(verified, &context)
-                    .map_err(|error| map_catalog_error(&error, cancellation))?;
-                let allocated_bytes = oracle
-                    .allocated_bytes(&context)
-                    .map_err(|error| map_catalog_error(&error, cancellation))?;
-                let persisted = oracle
-                    .read(&context)
-                    .map_err(|error| map_catalog_error(&error, cancellation))?;
-                let verified = oracle
-                    .read_verified(&context)
-                    .map_err(|error| map_catalog_error(&error, cancellation))?;
-                (allocated_bytes, persisted, verified, Some(prepared))
-            } else {
-                let oracle = EphemeralOracleWriter::create()
-                    .map_err(|error| map_catalog_error(&error, cancellation))?
-                    .seal(verified, &context)
-                    .map_err(|error| map_catalog_error(&error, cancellation))?;
-                let allocated_bytes = oracle
-                    .allocated_bytes()
-                    .map_err(|error| map_catalog_error(&error, cancellation))?;
-                let persisted = oracle
-                    .read(&context)
-                    .map_err(|error| map_catalog_error(&error, cancellation))?;
-                let verified = oracle
-                    .read_verified(&context)
-                    .map_err(|error| map_catalog_error(&error, cancellation))?;
-                (allocated_bytes, persisted, verified, None)
-            };
-        let documents = project_lexical_documents(&persisted, BuildBudget::default(), cancellation)
-            .map_err(|error| map_query_error(error, cancellation))?;
+        if self.durable.is_some() {
+            estimated_disk_bytes = durable_output_reservation(
+                source_preflight.source_bytes,
+                serialized_document_bytes,
+            )?
+            .max(estimated_disk_bytes);
+            self.ensure_durable_staging_capacity(estimated_disk_bytes)?;
+        }
+        let (oracle_allocated_bytes, verified, durable) = if let Some(durable) = &self.durable {
+            let prepared = durable.begin_generation(repository, generation)?;
+            prepared.write_sources(&sources)?;
+            let (oracle, verified) = OracleWriter::create_in(prepared.path())
+                .map_err(|error| map_catalog_error(&error, cancellation))?
+                .seal_and_retain(verified, &context)
+                .map_err(|error| map_catalog_error(&error, cancellation))?;
+            let allocated_bytes = oracle
+                .allocated_bytes(&context)
+                .map_err(|error| map_catalog_error(&error, cancellation))?;
+            (allocated_bytes, verified, Some(prepared))
+        } else {
+            let (oracle, verified) = EphemeralOracleWriter::create()
+                .map_err(|error| map_catalog_error(&error, cancellation))?
+                .seal_and_retain(verified, &context)
+                .map_err(|error| map_catalog_error(&error, cancellation))?;
+            let allocated_bytes = oracle
+                .allocated_bytes()
+                .map_err(|error| map_catalog_error(&error, cancellation))?;
+            (allocated_bytes, verified, None)
+        };
+        observe_progress(FirstSliceIndexProgress::completed(
+            FirstSliceIndexStage::Persistence,
+            5,
+        ));
+        let documents =
+            project_lexical_documents(verified.snapshot(), BuildBudget::default(), cancellation)
+                .map_err(|error| map_query_error(error, cancellation))?;
         let lexical_documents =
             u64::try_from(documents.len()).map_err(|_| FirstSliceError::Limits)?;
         let search = LexicalIndex::build_ephemeral(
@@ -2920,21 +3161,34 @@ impl FirstSliceService {
             cancellation,
         )
         .map_err(|error| map_search_error(error, cancellation))?;
+        observe_progress(FirstSliceIndexProgress::completed(
+            FirstSliceIndexStage::Search,
+            6,
+        ));
         let indexed_files =
-            u64::try_from(persisted.document().files.len()).map_err(|_| FirstSliceError::Limits)?;
-        let entities = u64::try_from(persisted.document().entities.len())
+            u64::try_from(verified.document().files.len()).map_err(|_| FirstSliceError::Limits)?;
+        let entities = u64::try_from(verified.document().entities.len())
             .map_err(|_| FirstSliceError::Limits)?;
         let receipt = FirstSliceIndexReceipt {
             repository,
             generation,
             parent,
             discovered_inputs: manifest.coverage.included,
+            visited_entries: manifest.coverage.visited,
+            excluded_inputs: manifest
+                .coverage
+                .excluded
+                .values()
+                .try_fold(0_u64, |total, count| {
+                    total.checked_add(*count).ok_or(FirstSliceError::Limits)
+                })?,
+            oversized_inputs,
             indexed_files,
             entities,
             lexical_documents,
             oracle_allocated_bytes,
             estimated_disk_bytes,
-            diagnostics: index_diagnostic_summaries(persisted.document())?,
+            diagnostics: index_diagnostic_summaries(verified.document())?,
             elapsed_micros: elapsed_micros(started),
         };
         if let Some(durable) = &durable {
@@ -3013,6 +3267,7 @@ impl FirstSliceService {
         mode: FirstSliceIndexMode,
         cancellation: &Cancellation,
     ) -> Result<(), FirstSliceError> {
+        let mut append_state = DocumentAppendState::from_document(target)?;
         for (language, fallback_documents) in structural_documents {
             check_cancellation(cancellation)?;
             let mut inputs = Vec::new();
@@ -3070,6 +3325,7 @@ impl FirstSliceService {
                             target,
                             document,
                             self.analysis_limits.ir(),
+                            &mut append_state,
                         )
                         .is_ok()
                         {
@@ -3096,7 +3352,12 @@ impl FirstSliceService {
                 .map(|provenance| provenance.id)
                 .ok_or(FirstSliceError::Identity)?;
             for document in fallback_documents {
-                append_normalized_document(target, document, self.analysis_limits.ir())?;
+                append_normalized_document(
+                    target,
+                    document,
+                    self.analysis_limits.ir(),
+                    &mut append_state,
+                )?;
             }
             if let Some(error) = fallback_error {
                 append_project_fallback_diagnostic(
@@ -3108,6 +3369,20 @@ impl FirstSliceService {
                     self.analysis_limits.ir(),
                 )?;
             }
+        }
+        if append_state.truncated_extensions > 0 {
+            append_extension_truncation_diagnostic(
+                target,
+                append_state.truncated_extensions,
+                self.analysis_limits.ir(),
+            )?;
+        }
+        if append_state.truncated_skipped_regions > 0 {
+            append_skipped_region_truncation_diagnostic(
+                target,
+                append_state.truncated_skipped_regions,
+                self.analysis_limits.ir(),
+            )?;
         }
         Ok(())
     }
@@ -3390,6 +3665,11 @@ impl FirstSliceService {
             .global_activation_sequence
             .checked_add(1)
             .ok_or(FirstSliceError::Retention)?;
+        if self.durable.is_some()
+            && let Some(operation) = operation
+        {
+            self.validate_durable_operation(operation, &receipt)?;
+        }
         match staged.publication {
             FirstSlicePublication::Retained => {
                 if let Some(durable) = &self.durable {
@@ -3407,7 +3687,7 @@ impl FirstSliceService {
                         operation,
                     )?;
                     if let Some(operation) = operation {
-                        self.record_durable_operation(operation, &receipt)?;
+                        self.record_durable_operation(operation, &receipt);
                     }
                 }
                 self.generations
@@ -3431,14 +3711,6 @@ impl FirstSliceService {
                 if self.durable.is_some() != durable.is_some() {
                     return Err(FirstSliceError::CatalogCorrupt);
                 }
-                if let Some(durable) = &mut durable {
-                    durable.activate(
-                        repository_activation_sequence,
-                        global_activation_sequence,
-                        published_generation_count,
-                        operation,
-                    )?;
-                }
                 self.source_snapshots
                     .commit_staged(receipt.generation)
                     .map_err(|_| FirstSliceError::Retention)?;
@@ -3452,6 +3724,7 @@ impl FirstSliceService {
                         .map_err(|_| FirstSliceError::Retention)?;
                     return Err(FirstSliceError::Retention);
                 }
+                let prior_active = self.generations.active_generation();
                 if self
                     .generations
                     .commit_staged(receipt.generation, true)
@@ -3465,6 +3738,34 @@ impl FirstSliceService {
                         .map_err(|_| FirstSliceError::Retention)?;
                     return Err(FirstSliceError::Retention);
                 }
+                if let Some(durable) = &mut durable
+                    && let Err(error) = durable.activate(
+                        repository_activation_sequence,
+                        global_activation_sequence,
+                        published_generation_count,
+                        operation,
+                    )
+                {
+                    self.generations
+                        .rollback_commit(receipt.generation, prior_active)
+                        .map_err(|_| FirstSliceError::Retention)?;
+                    self.structural_artifacts
+                        .rollback_commit(receipt.generation)
+                        .map_err(|_| FirstSliceError::Retention)?;
+                    self.source_snapshots
+                        .rollback_commit(receipt.generation)
+                        .map_err(|_| FirstSliceError::Retention)?;
+                    let source_release = self.source_snapshots.begin_discard(receipt.generation)?;
+                    let structural_release = self
+                        .structural_artifacts
+                        .begin_discard(receipt.generation)?;
+                    self.generations
+                        .discard_staged(receipt.generation)
+                        .map_err(|_| FirstSliceError::Retention)?;
+                    self.source_snapshots.finish_discard(source_release);
+                    self.structural_artifacts.finish_discard(structural_release);
+                    return Err(error);
+                }
                 self.receipts.insert(receipt.generation, receipt.clone());
                 self.incremental_baselines
                     .insert(receipt.generation, incremental.baseline);
@@ -3477,7 +3778,7 @@ impl FirstSliceService {
                 if self.durable.is_some()
                     && let Some(operation) = operation
                 {
-                    self.record_durable_operation(operation, &receipt)?;
+                    self.record_durable_operation(operation, &receipt);
                 }
                 if register_repository {
                     self.repositories.insert(root_identity, receipt.repository);
@@ -3542,25 +3843,39 @@ impl FirstSliceService {
         Ok(())
     }
 
+    fn validate_durable_operation(
+        &self,
+        operation: FirstSliceOperationContext,
+        receipt: &FirstSliceIndexReceipt,
+    ) -> Result<(), FirstSliceError> {
+        let publication = Self::durable_operation(operation, receipt);
+        match self.durable_operations.get(&operation.operation) {
+            None => Ok(()),
+            Some(existing) if *existing == publication => Ok(()),
+            Some(_) => Err(FirstSliceError::CatalogCorrupt),
+        }
+    }
+
     fn record_durable_operation(
         &mut self,
         operation: FirstSliceOperationContext,
         receipt: &FirstSliceIndexReceipt,
-    ) -> Result<(), FirstSliceError> {
-        let publication = FirstSliceDurableOperation {
+    ) {
+        self.durable_operations.insert(
+            operation.operation,
+            Self::durable_operation(operation, receipt),
+        );
+    }
+
+    fn durable_operation(
+        operation: FirstSliceOperationContext,
+        receipt: &FirstSliceIndexReceipt,
+    ) -> FirstSliceDurableOperation {
+        FirstSliceDurableOperation {
             operation: operation.operation,
             started_unix_ms: operation.started_unix_ms,
+            provider: operation.provider,
             receipt: receipt.clone(),
-        };
-        match self.durable_operations.entry(operation.operation) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(publication);
-                Ok(())
-            }
-            std::collections::btree_map::Entry::Occupied(entry) if *entry.get() == publication => {
-                Ok(())
-            }
-            std::collections::btree_map::Entry::Occupied(_) => Err(FirstSliceError::CatalogCorrupt),
         }
     }
 
@@ -3863,6 +4178,100 @@ impl FirstSliceService {
         &self,
     ) -> impl ExactSizeIterator<Item = FirstSliceDurableOperation> + '_ {
         self.durable_operations.values().cloned()
+    }
+
+    /// Returns bounded source-free indexing facts for production diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::CatalogCorrupt`] when retained repository
+    /// metadata is internally inconsistent, or [`FirstSliceError::Limits`]
+    /// when a retained count cannot be represented by the support contract.
+    pub fn support_inventory_snapshot(
+        &self,
+    ) -> Result<FirstSliceSupportInventory, FirstSliceError> {
+        let languages: Vec<_> = self.analyzers.keys().cloned().collect();
+        let mut adapters = vec![FirstSliceSupportAdapter {
+            name: "tree-sitter".to_owned(),
+            languages,
+            isolated: false,
+        }];
+        if self.project_analyzer.is_some() {
+            adapters.push(FirstSliceSupportAdapter {
+                name: "project-adapter".to_owned(),
+                languages: PROJECT_ADAPTER_SUPPORT_LANGUAGES
+                    .into_iter()
+                    .map(|language| language.as_str().to_owned())
+                    .collect(),
+                isolated: true,
+            });
+        }
+
+        let mut repositories = Vec::new();
+        repositories
+            .try_reserve_exact(self.active_by_repository.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        for (repository, active_generation) in &self.active_by_repository {
+            let snapshot = self
+                .generations
+                .generation(*active_generation)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let coverage = language_coverage(snapshot.document());
+            let languages = coverage
+                .iter()
+                .map(|entry| entry.language.clone())
+                .collect();
+            let tiers = coverage
+                .iter()
+                .map(|entry| analysis_tier_label(entry.tier).to_owned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let generation_count = u32::try_from(self.retained_generation_count(*repository))
+                .map_err(|_| FirstSliceError::Limits)?;
+            repositories.push(FirstSliceSupportRepository {
+                repository: *repository,
+                languages,
+                tiers,
+                files: u64::try_from(snapshot.document().files.len())
+                    .map_err(|_| FirstSliceError::Limits)?,
+                symbols: u64::try_from(snapshot.document().entities.len())
+                    .map_err(|_| FirstSliceError::Limits)?,
+                relationships: u64::try_from(snapshot.document().relations.len())
+                    .map_err(|_| FirstSliceError::Limits)?,
+                generation_count,
+            });
+        }
+
+        let mut generation_disk_bytes = 0_u64;
+        let mut generations = Vec::new();
+        generations
+            .try_reserve_exact(self.receipts.len())
+            .map_err(|_| FirstSliceError::Limits)?;
+        for receipt in self.receipts.values() {
+            generation_disk_bytes = generation_disk_bytes
+                .checked_add(receipt.oracle_allocated_bytes)
+                .ok_or(FirstSliceError::Limits)?;
+            generations.push(FirstSliceSupportGeneration {
+                repository: receipt.repository,
+                generation: receipt.generation,
+                disk_bytes: receipt.oracle_allocated_bytes,
+                active: self.active_by_repository.get(&receipt.repository)
+                    == Some(&receipt.generation),
+            });
+        }
+
+        Ok(FirstSliceSupportInventory {
+            adapters,
+            repositories,
+            generations,
+            generation_format: format!(
+                "{}.{}",
+                GENERATION_CONTRACT_VERSION.major(),
+                GENERATION_CONTRACT_VERSION.minor()
+            ),
+            generation_disk_bytes,
+        })
     }
 
     /// Resolves and verifies one repository-owned immutable generation.
@@ -4980,6 +5389,52 @@ impl FirstSliceService {
             .map_err(|error| map_query_error(error, cancellation))
     }
 
+    /// Returns the normalized language label for one retained source file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::Query`] when the generation or file is not
+    /// retained, or [`FirstSliceError::CatalogCorrupt`] when its normalized
+    /// provenance record is missing.
+    pub fn source_language(
+        &self,
+        generation: GenerationId,
+        file: FileId,
+    ) -> Result<String, FirstSliceError> {
+        self.source_language_coverage(generation, file)
+            .map(|(language, _tier)| language)
+    }
+
+    /// Returns authoritative language and analysis tier for one retained file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::Query`] when the generation or file is not
+    /// retained, or [`FirstSliceError::CatalogCorrupt`] when its normalized
+    /// provenance record is missing.
+    pub fn source_language_coverage(
+        &self,
+        generation: GenerationId,
+        file: FileId,
+    ) -> Result<(String, AnalysisTier), FirstSliceError> {
+        let snapshot = self
+            .generations
+            .generation(generation)
+            .map_err(|_| FirstSliceError::Query)?;
+        let document = snapshot.document();
+        let file = document
+            .files
+            .iter()
+            .find(|candidate| candidate.id == file)
+            .ok_or(FirstSliceError::Query)?;
+        let tier = document
+            .provenance
+            .iter()
+            .find_map(|provenance| (provenance.id == file.provenance).then_some(provenance.tier))
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
+        Ok((file.language.clone(), tier))
+    }
+
     /// Lists every repository known to this daemon process.
     ///
     /// The result is deterministic because the underlying repository map is an
@@ -5154,6 +5609,126 @@ impl std::fmt::Debug for FirstSliceService {
     }
 }
 
+/// Closed resource labels safe to expose in first-slice diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FirstSliceResource {
+    /// Supported source files selected for one generation.
+    SourceFiles,
+    /// Aggregate retained source bytes selected for one generation.
+    SourceBytes,
+    /// Top-level normalized IR records.
+    Records,
+    /// Normalized file records.
+    Files,
+    /// Normalized entity records.
+    Entities,
+    /// Normalized occurrence records.
+    Occurrences,
+    /// Normalized relation records.
+    Relations,
+    /// Normalized provenance records.
+    Provenance,
+    /// Normalized source-mapping records.
+    SourceMappings,
+    /// Normalized coverage records.
+    Coverage,
+    /// Normalized skipped-region records.
+    SkippedRegions,
+    /// Normalized diagnostic records.
+    Diagnostics,
+    /// Normalized extension envelopes.
+    Extensions,
+    /// Aggregate extension payload bytes.
+    ExtensionBytes,
+    /// Aggregate nested fact references and bounded nested values.
+    NestedItems,
+    /// Logical rows visited during generation identity verification.
+    GenerationRows,
+    /// Distinct source references visited during generation verification.
+    SourceReferences,
+    /// Aggregate non-source text visited during generation verification.
+    TextBytes,
+    /// Aggregate UTF-8 bytes in the persisted catalog representation.
+    EncodedTextBytes,
+    /// Conservative aggregate memory required by generation finalization.
+    GenerationMemoryBytes,
+    /// Transactional adapter stream batches.
+    Batches,
+    /// Deterministically accounted adapter output bytes.
+    OutputBytes,
+    /// UTF-8 bytes in adapter diagnostics.
+    DiagnosticBytes,
+    /// UTF-8 bytes in adapter labels and other non-payload strings.
+    StringBytes,
+    /// Files admitted to one project-analysis transaction.
+    ProjectFiles,
+    /// Aggregate source bytes admitted to one project-analysis transaction.
+    ProjectSourceBytes,
+    /// Canonical project build-context bytes.
+    ProjectContextBytes,
+    /// Generated-origin mappings admitted to one project-analysis transaction.
+    GeneratedMappings,
+    /// Deterministically accounted generated-origin mapping bytes.
+    GeneratedMappingBytes,
+    /// Analysis-unit identity bytes.
+    AnalysisUnitBytes,
+    /// Build-target identity bytes.
+    BuildTargetBytes,
+    /// Embedded included source ranges.
+    IncludedRanges,
+    /// Concrete-syntax nodes processed for one source file.
+    SyntaxNodes,
+    /// Concrete-syntax nesting depth.
+    SyntaxDepth,
+    /// Adapter-reported in-process memory bytes.
+    ReportedMemoryBytes,
+}
+
+impl FirstSliceResource {
+    /// Returns the stable source-free diagnostic label for this resource.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceFiles => "source_files",
+            Self::SourceBytes => "source_bytes",
+            Self::Records => "records",
+            Self::Files => "files",
+            Self::Entities => "entities",
+            Self::Occurrences => "occurrences",
+            Self::Relations => "relations",
+            Self::Provenance => "provenance",
+            Self::SourceMappings => "source_mappings",
+            Self::Coverage => "coverage",
+            Self::SkippedRegions => "skipped_regions",
+            Self::Diagnostics => "diagnostics",
+            Self::Extensions => "extensions",
+            Self::ExtensionBytes => "extension_bytes",
+            Self::NestedItems => "nested_items",
+            Self::GenerationRows => "generation_rows",
+            Self::SourceReferences => "source_references",
+            Self::TextBytes => "text_bytes",
+            Self::EncodedTextBytes => "encoded_text_bytes",
+            Self::GenerationMemoryBytes => "generation_memory_bytes",
+            Self::Batches => "batches",
+            Self::OutputBytes => "output_bytes",
+            Self::DiagnosticBytes => "diagnostic_bytes",
+            Self::StringBytes => "string_bytes",
+            Self::ProjectFiles => "project_files",
+            Self::ProjectSourceBytes => "project_source_bytes",
+            Self::ProjectContextBytes => "project_context_bytes",
+            Self::GeneratedMappings => "generated_mappings",
+            Self::GeneratedMappingBytes => "generated_mapping_bytes",
+            Self::AnalysisUnitBytes => "analysis_unit_bytes",
+            Self::BuildTargetBytes => "build_target_bytes",
+            Self::IncludedRanges => "included_ranges",
+            Self::SyntaxNodes => "syntax_nodes",
+            Self::SyntaxDepth => "syntax_depth",
+            Self::ReportedMemoryBytes => "reported_memory_bytes",
+        }
+    }
+}
+
 /// Stable source-redacted first-slice service failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -5239,6 +5814,16 @@ pub enum FirstSliceError {
     /// A configured integer or duration is not representable.
     #[error("first-slice limits are invalid")]
     Limits,
+    /// One explicit bounded resource crossed its configured ceiling.
+    #[error("first-slice resource {resource:?} observed {observed} above limit {limit}")]
+    ResourceLimit {
+        /// Closed source-free resource label.
+        resource: FirstSliceResource,
+        /// Safe observed count or byte total.
+        observed: u64,
+        /// Configured count or byte ceiling.
+        limit: u64,
+    },
     /// Durable staging cannot preserve its required free-space margin.
     #[error(
         "insufficient disk space for first-slice publication: required {required_bytes} bytes, available {available_bytes} bytes"
@@ -6284,13 +6869,22 @@ fn preflight_source_inputs(
         if supported_source_language(input, analyzers).is_none() {
             continue;
         }
-        source_count = checked_combined_length(source_count, 1, maximum_files)?;
+        source_count = checked_resource_length(
+            source_count,
+            1,
+            maximum_files,
+            FirstSliceResource::SourceFiles,
+        )?;
         let input_bytes = usize::try_from(input.bytes).map_err(|_| FirstSliceError::Limits)?;
         source_bytes = source_bytes
             .checked_add(input_bytes)
             .ok_or(FirstSliceError::Limits)?;
         if source_bytes > maximum_source_bytes {
-            return Err(FirstSliceError::Retention);
+            return Err(resource_limit(
+                FirstSliceResource::SourceBytes,
+                source_bytes,
+                maximum_source_bytes,
+            ));
         }
     }
     check_cancellation(cancellation)?;
@@ -6306,6 +6900,72 @@ fn preflight_source_inputs(
 fn durable_staging_reservation(source_bytes: u64) -> Result<u64, FirstSliceError> {
     source_bytes
         .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(DURABLE_STAGING_FIXED_OVERHEAD_BYTES))
+        .and_then(|bytes| bytes.checked_add(DURABLE_DISK_SAFETY_MARGIN_BYTES))
+        .ok_or(FirstSliceError::Limits)
+}
+
+#[derive(Default)]
+struct SerializedSizeCounter {
+    bytes: u64,
+}
+
+impl std::io::Write for SerializedSizeCounter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let length =
+            u64::try_from(buffer.len()).map_err(|_| std::io::Error::other("size overflow"))?;
+        self.bytes = self
+            .bytes
+            .checked_add(length)
+            .ok_or_else(|| std::io::Error::other("size overflow"))?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn normalized_document_serialized_bytes(
+    document: &NormalizedIrDocument,
+) -> Result<u64, FirstSliceError> {
+    let mut serialized = SerializedSizeCounter::default();
+    serde_json::to_writer(&mut serialized, document).map_err(|_| FirstSliceError::Limits)?;
+    Ok(serialized.bytes)
+}
+
+fn ensure_generation_memory_admission(
+    source_bytes: u64,
+    serialized_document_bytes: u64,
+) -> Result<(), FirstSliceError> {
+    let observed = source_bytes
+        .checked_mul(2)
+        .and_then(|bytes| {
+            serialized_document_bytes
+                .checked_mul(GENERATION_MEMORY_SERIALIZED_EXPANSION_FACTOR)
+                .and_then(|document_bytes| bytes.checked_add(document_bytes))
+        })
+        .ok_or(FirstSliceError::Limits)?;
+    if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES {
+        return Err(FirstSliceError::ResourceLimit {
+            resource: FirstSliceResource::GenerationMemoryBytes,
+            observed,
+            limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn durable_output_reservation(
+    source_bytes: u64,
+    serialized_document_bytes: u64,
+) -> Result<u64, FirstSliceError> {
+    source_bytes
+        .checked_add(
+            serialized_document_bytes
+                .checked_mul(DURABLE_ORACLE_SERIALIZED_EXPANSION_FACTOR)
+                .ok_or(FirstSliceError::Limits)?,
+        )
         .and_then(|bytes| bytes.checked_add(DURABLE_STAGING_FIXED_OVERHEAD_BYTES))
         .and_then(|bytes| bytes.checked_add(DURABLE_DISK_SAFETY_MARGIN_BYTES))
         .ok_or(FirstSliceError::Limits)
@@ -6446,10 +7106,160 @@ fn append_project_fallback_diagnostic(
     Ok(())
 }
 
+fn append_extension_truncation_diagnostic(
+    document: &mut NormalizedIrDocument,
+    truncated_extensions: u64,
+    limits: &IrLimits,
+) -> Result<(), FirstSliceError> {
+    let provenance = document
+        .provenance
+        .first()
+        .map(|record| record.id)
+        .ok_or(FirstSliceError::Identity)?;
+    let evidence_file = document
+        .files
+        .first()
+        .map(|record| record.id)
+        .ok_or(FirstSliceError::Identity)?;
+    let total = normalized_record_count(document)?;
+    checked_combined_length(total, 1, limits.max_total_records)?;
+    reserve_records(&mut document.diagnostics, 1, limits.max_diagnostics)?;
+    let mut diagnostic = DiagnosticRecord {
+        id: FactId::from_bytes([0; 20]),
+        repository: document.repository,
+        generation: document.generation,
+        code: "extension-coverage-bounded".to_owned(),
+        message: format!(
+            "{truncated_extensions} optional lexical extensions omitted by aggregate resource limit"
+        ),
+        severity: DiagnosticSeverity::Warning,
+        source: None,
+        coverage_effect: CoverageStatus::Bounded,
+        provenance,
+        evidence: FactEvidence {
+            source: None,
+            derivation: vec![FactRef::File(evidence_file)],
+        },
+    };
+    diagnostic.id =
+        derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
+    document.diagnostics.push(diagnostic);
+    Ok(())
+}
+
+fn append_skipped_region_truncation_diagnostic(
+    document: &mut NormalizedIrDocument,
+    truncated_regions: u64,
+    limits: &IrLimits,
+) -> Result<(), FirstSliceError> {
+    let provenance = document
+        .provenance
+        .first()
+        .map(|record| record.id)
+        .ok_or(FirstSliceError::Identity)?;
+    let evidence_file = document
+        .files
+        .first()
+        .map(|record| record.id)
+        .ok_or(FirstSliceError::Identity)?;
+    let total = normalized_record_count(document)?;
+    checked_combined_length(total, 1, limits.max_total_records)?;
+    reserve_records(&mut document.diagnostics, 1, limits.max_diagnostics)?;
+    let mut diagnostic = DiagnosticRecord {
+        id: FactId::from_bytes([0; 20]),
+        repository: document.repository,
+        generation: document.generation,
+        code: "skipped-region-details-bounded".to_owned(),
+        message: format!(
+            "{truncated_regions} skipped-region detail records omitted by aggregate resource limit"
+        ),
+        severity: DiagnosticSeverity::Warning,
+        source: None,
+        coverage_effect: CoverageStatus::Bounded,
+        provenance,
+        evidence: FactEvidence {
+            source: None,
+            derivation: vec![FactRef::File(evidence_file)],
+        },
+    };
+    diagnostic.id =
+        derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
+    document.diagnostics.push(diagnostic);
+    Ok(())
+}
+
+fn append_oversized_input_diagnostic(
+    document: &mut NormalizedIrDocument,
+    oversized_inputs: u64,
+    limits: &IrLimits,
+) -> Result<(), FirstSliceError> {
+    let provenance = document
+        .provenance
+        .first()
+        .map(|record| record.id)
+        .ok_or(FirstSliceError::Identity)?;
+    let evidence_file = document
+        .files
+        .first()
+        .map(|record| record.id)
+        .ok_or(FirstSliceError::Identity)?;
+    let total = normalized_record_count(document)?;
+    checked_combined_length(total, 1, limits.max_total_records)?;
+    reserve_records(&mut document.diagnostics, 1, limits.max_diagnostics)?;
+    let mut diagnostic = DiagnosticRecord {
+        id: FactId::from_bytes([0; 20]),
+        repository: document.repository,
+        generation: document.generation,
+        code: "oversized-inputs-bounded".to_owned(),
+        message: format!(
+            "oversized repository input count {oversized_inputs} omitted by configured source file limit"
+        ),
+        severity: DiagnosticSeverity::Warning,
+        source: None,
+        coverage_effect: CoverageStatus::Bounded,
+        provenance,
+        evidence: FactEvidence {
+            source: None,
+            derivation: vec![FactRef::File(evidence_file)],
+        },
+    };
+    diagnostic.id =
+        derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
+    document.diagnostics.push(diagnostic);
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct DocumentAppendState {
+    extension_payload_bytes: usize,
+    truncated_extensions: u64,
+    truncated_skipped_regions: u64,
+}
+
+impl DocumentAppendState {
+    fn from_document(document: &NormalizedIrDocument) -> Result<Self, FirstSliceError> {
+        let extension_payload_bytes =
+            document
+                .extensions
+                .iter()
+                .try_fold(0_usize, |total, extension| {
+                    total
+                        .checked_add(extension.payload.len())
+                        .ok_or(FirstSliceError::Limits)
+                })?;
+        Ok(Self {
+            extension_payload_bytes,
+            truncated_extensions: 0,
+            truncated_skipped_regions: 0,
+        })
+    }
+}
+
 fn append_normalized_document(
     target: &mut NormalizedIrDocument,
-    source: NormalizedIrDocument,
+    mut source: NormalizedIrDocument,
     limits: &IrLimits,
+    append_state: &mut DocumentAppendState,
 ) -> Result<(), FirstSliceError> {
     if source.version != target.version
         || source.repository != target.repository
@@ -6457,55 +7267,100 @@ fn append_normalized_document(
     {
         return Err(FirstSliceError::Identity);
     }
-    let target_total = normalized_record_count(target)?;
-    let source_total = normalized_record_count(&source)?;
-    checked_combined_length(target_total, source_total, limits.max_total_records)?;
-
-    reserve_records(&mut target.files, source.files.len(), limits.max_files)?;
-    reserve_records(
+    reserve_resource_records(
+        &mut target.files,
+        source.files.len(),
+        limits.max_files,
+        FirstSliceResource::Files,
+    )?;
+    reserve_resource_records(
         &mut target.entities,
         source.entities.len(),
         limits.max_entities,
+        FirstSliceResource::Entities,
     )?;
-    reserve_records(
+    reserve_resource_records(
         &mut target.occurrences,
         source.occurrences.len(),
         limits.max_occurrences,
+        FirstSliceResource::Occurrences,
     )?;
-    reserve_records(
+    reserve_resource_records(
         &mut target.relations,
         source.relations.len(),
         limits.max_relations,
+        FirstSliceResource::Relations,
     )?;
-    reserve_records(
+    reserve_resource_records(
         &mut target.provenance,
         source.provenance.len(),
         limits.max_provenance_records,
+        FirstSliceResource::Provenance,
     )?;
-    reserve_records(
+    reserve_resource_records(
         &mut target.source_mappings,
         source.source_mappings.len(),
         limits.max_source_mappings,
+        FirstSliceResource::SourceMappings,
     )?;
-    reserve_records(
+    reserve_resource_records(
         &mut target.coverage_records,
         source.coverage_records.len(),
         limits.max_coverage_records,
+        FirstSliceResource::Coverage,
     )?;
-    reserve_records(
+    let truncated_skipped_regions = truncate_skipped_regions(target, &mut source, limits)?;
+    reserve_resource_records(
         &mut target.skipped_regions,
         source.skipped_regions.len(),
         limits.max_skipped_regions,
+        FirstSliceResource::SkippedRegions,
     )?;
-    reserve_records(
+    reserve_resource_records(
         &mut target.diagnostics,
         source.diagnostics.len(),
         limits.max_diagnostics,
+        FirstSliceResource::Diagnostics,
     )?;
-    reserve_records(
-        &mut target.extensions,
-        source.extensions.len(),
-        limits.max_extensions,
+    let target_non_extensions = normalized_record_count(target)?
+        .checked_sub(target.extensions.len())
+        .ok_or(FirstSliceError::Limits)?;
+    let source_non_extensions = normalized_record_count(&source)?
+        .checked_sub(source.extensions.len())
+        .ok_or(FirstSliceError::Limits)?;
+    let maximum_merged_extensions = target
+        .extensions
+        .len()
+        .checked_add(source.extensions.len())
+        .ok_or(FirstSliceError::Limits)?
+        .min(limits.max_extensions);
+    let maximum_total = target_non_extensions
+        .checked_add(source_non_extensions)
+        .and_then(|total| total.checked_add(maximum_merged_extensions))
+        .ok_or(FirstSliceError::Limits)?;
+    if maximum_total > limits.max_total_records {
+        return Err(resource_limit(
+            FirstSliceResource::Records,
+            maximum_total,
+            limits.max_total_records,
+        ));
+    }
+    target
+        .extensions
+        .try_reserve(
+            source.extensions.len().min(
+                limits
+                    .max_extensions
+                    .saturating_sub(target.extensions.len()),
+            ),
+        )
+        .map_err(|_| FirstSliceError::Limits)?;
+    let next_append_state = truncate_optional_extensions(
+        target,
+        &mut source,
+        append_state,
+        truncated_skipped_regions,
+        limits,
     )?;
 
     let NormalizedIrDocument {
@@ -6531,7 +7386,290 @@ fn append_normalized_document(
     target.skipped_regions.append(&mut skipped_regions);
     target.diagnostics.append(&mut diagnostics);
     target.extensions.append(&mut extensions);
+    *append_state = next_append_state;
     Ok(())
+}
+
+fn truncate_skipped_regions(
+    target: &NormalizedIrDocument,
+    source: &mut NormalizedIrDocument,
+    limits: &IrLimits,
+) -> Result<u64, FirstSliceError> {
+    let available = limits
+        .max_skipped_regions
+        .checked_sub(target.skipped_regions.len())
+        .ok_or_else(|| {
+            resource_limit(
+                FirstSliceResource::SkippedRegions,
+                target.skipped_regions.len(),
+                limits.max_skipped_regions,
+            )
+        })?;
+    let retained = source.skipped_regions.len().min(available);
+    let truncated = source
+        .skipped_regions
+        .len()
+        .checked_sub(retained)
+        .ok_or(FirstSliceError::Limits)?;
+    source.skipped_regions.truncate(retained);
+    u64::try_from(truncated).map_err(|_| FirstSliceError::Limits)
+}
+
+fn truncate_optional_extensions(
+    target: &mut NormalizedIrDocument,
+    source: &mut NormalizedIrDocument,
+    append_state: &DocumentAppendState,
+    truncated_skipped_regions: u64,
+    limits: &IrLimits,
+) -> Result<DocumentAppendState, FirstSliceError> {
+    let required_count = source
+        .extensions
+        .iter()
+        .filter(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE)
+        .count();
+    let required_bytes = extension_payload_bytes(
+        source
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE),
+    )?;
+    let retained_required_count = target
+        .extensions
+        .iter()
+        .filter(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE)
+        .count();
+    let retained_required_bytes = extension_payload_bytes(
+        target
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE),
+    )?;
+    let observed_required_count = retained_required_count
+        .checked_add(required_count)
+        .ok_or(FirstSliceError::Limits)?;
+    if observed_required_count > limits.max_extensions {
+        return Err(resource_limit(
+            FirstSliceResource::Extensions,
+            observed_required_count,
+            limits.max_extensions,
+        ));
+    }
+    let observed_required_bytes = retained_required_bytes
+        .checked_add(required_bytes)
+        .ok_or(FirstSliceError::Limits)?;
+    if observed_required_bytes > limits.max_total_extension_bytes {
+        return Err(resource_limit(
+            FirstSliceResource::ExtensionBytes,
+            observed_required_bytes,
+            limits.max_total_extension_bytes,
+        ));
+    }
+
+    let mut dropped_from_target = BTreeMap::<FileId, u64>::new();
+    let mut dropped_target_indices = Vec::new();
+    dropped_target_indices
+        .try_reserve_exact(
+            target
+                .extensions
+                .len()
+                .checked_sub(retained_required_count)
+                .ok_or(FirstSliceError::Limits)?,
+        )
+        .map_err(|_| FirstSliceError::Limits)?;
+    let mut target_extension_count = target.extensions.len();
+    let mut target_extension_bytes = append_state.extension_payload_bytes;
+    let mut target_optional_count = target
+        .extensions
+        .len()
+        .checked_sub(retained_required_count)
+        .ok_or(FirstSliceError::Limits)?;
+    let mut target_optional_bytes = append_state
+        .extension_payload_bytes
+        .checked_sub(retained_required_bytes)
+        .ok_or(FirstSliceError::Limits)?;
+    let mut search_before = target.extensions.len();
+    while target_extension_count
+        .checked_add(required_count)
+        .is_none_or(|observed| observed > limits.max_extensions)
+        || target_extension_bytes
+            .checked_add(required_bytes)
+            .is_none_or(|observed| observed > limits.max_total_extension_bytes)
+        || target_optional_count > MAX_RETAINED_OPTIONAL_EXTENSIONS
+        || target_optional_bytes > MAX_RETAINED_OPTIONAL_EXTENSION_BYTES
+    {
+        let index = target
+            .extensions
+            .get(..search_before)
+            .ok_or(FirstSliceError::Limits)?
+            .iter()
+            .rposition(|extension| extension.namespace == LEXICAL_EXTENSION_NAMESPACE)
+            .ok_or(FirstSliceError::Limits)?;
+        search_before = index;
+        let extension = &target.extensions[index];
+        target_extension_count = target_extension_count
+            .checked_sub(1)
+            .ok_or(FirstSliceError::Limits)?;
+        target_extension_bytes = target_extension_bytes
+            .checked_sub(extension.payload.len())
+            .ok_or(FirstSliceError::Limits)?;
+        target_optional_count = target_optional_count
+            .checked_sub(1)
+            .ok_or(FirstSliceError::Limits)?;
+        target_optional_bytes = target_optional_bytes
+            .checked_sub(extension.payload.len())
+            .ok_or(FirstSliceError::Limits)?;
+        let file = extension_file(extension)?;
+        let dropped = dropped_from_target.entry(file).or_default();
+        *dropped = dropped.checked_add(1).ok_or(FirstSliceError::Limits)?;
+        dropped_target_indices.push(index);
+    }
+    let adjusted_target_coverage = (!dropped_from_target.is_empty())
+        .then(|| adjusted_extension_coverage(&target.coverage_records, &dropped_from_target))
+        .transpose()?;
+
+    let available_count = limits
+        .max_extensions
+        .checked_sub(target_extension_count)
+        .ok_or(FirstSliceError::Limits)?;
+    let available_bytes = limits
+        .max_total_extension_bytes
+        .checked_sub(target_extension_bytes)
+        .ok_or(FirstSliceError::Limits)?;
+    let available_optional_count = available_count
+        .checked_sub(required_count)
+        .ok_or(FirstSliceError::Limits)?
+        .min(
+            MAX_RETAINED_OPTIONAL_EXTENSIONS
+                .checked_sub(target_optional_count)
+                .ok_or(FirstSliceError::Limits)?,
+        );
+    let available_optional_bytes = available_bytes
+        .checked_sub(required_bytes)
+        .ok_or(FirstSliceError::Limits)?
+        .min(
+            MAX_RETAINED_OPTIONAL_EXTENSION_BYTES
+                .checked_sub(target_optional_bytes)
+                .ok_or(FirstSliceError::Limits)?,
+        );
+    let mut retained = Vec::new();
+    retained
+        .try_reserve_exact(source.extensions.len().min(available_count))
+        .map_err(|_| FirstSliceError::Limits)?;
+    let mut retained_optional_count = 0_usize;
+    let mut retained_optional_bytes = 0_usize;
+    let mut retained_bytes = 0_usize;
+    let mut dropped_by_file = BTreeMap::<FileId, u64>::new();
+
+    for extension in source.extensions.drain(..) {
+        let payload_bytes = extension.payload.len();
+        let optional = extension.namespace == LEXICAL_EXTENSION_NAMESPACE;
+        let next_optional_bytes = retained_optional_bytes
+            .checked_add(payload_bytes)
+            .ok_or(FirstSliceError::Limits)?;
+        let keep = !optional
+            || (retained_optional_count < available_optional_count
+                && next_optional_bytes <= available_optional_bytes);
+        if keep {
+            if optional {
+                retained_optional_count = retained_optional_count
+                    .checked_add(1)
+                    .ok_or(FirstSliceError::Limits)?;
+                retained_optional_bytes = next_optional_bytes;
+            }
+            retained_bytes = retained_bytes
+                .checked_add(payload_bytes)
+                .ok_or(FirstSliceError::Limits)?;
+            retained.push(extension);
+            continue;
+        }
+
+        let file = extension_file(&extension)?;
+        let dropped = dropped_by_file.entry(file).or_default();
+        *dropped = dropped.checked_add(1).ok_or(FirstSliceError::Limits)?;
+    }
+    let adjusted_source_coverage = (!dropped_by_file.is_empty())
+        .then(|| adjusted_extension_coverage(&source.coverage_records, &dropped_by_file))
+        .transpose()?;
+    let truncated_extensions = dropped_from_target
+        .values()
+        .chain(dropped_by_file.values())
+        .try_fold(0_u64, |total, dropped| {
+            total.checked_add(*dropped).ok_or(FirstSliceError::Limits)
+        })?;
+    let next_state = DocumentAppendState {
+        extension_payload_bytes: target_extension_bytes
+            .checked_add(retained_bytes)
+            .ok_or(FirstSliceError::Limits)?,
+        truncated_extensions: append_state
+            .truncated_extensions
+            .checked_add(truncated_extensions)
+            .ok_or(FirstSliceError::Limits)?,
+        truncated_skipped_regions: append_state
+            .truncated_skipped_regions
+            .checked_add(truncated_skipped_regions)
+            .ok_or(FirstSliceError::Limits)?,
+    };
+
+    for index in dropped_target_indices {
+        target.extensions.remove(index);
+    }
+    if let Some(coverage_records) = adjusted_target_coverage {
+        target.coverage_records = coverage_records;
+    }
+    source.extensions = retained;
+    if let Some(coverage_records) = adjusted_source_coverage {
+        source.coverage_records = coverage_records;
+    }
+    Ok(next_state)
+}
+
+fn extension_payload_bytes<'a>(
+    mut extensions: impl Iterator<Item = &'a rootlight_ir::ExtensionEnvelope>,
+) -> Result<usize, FirstSliceError> {
+    extensions.try_fold(0_usize, |total, extension| {
+        total
+            .checked_add(extension.payload.len())
+            .ok_or(FirstSliceError::Limits)
+    })
+}
+
+fn extension_file(extension: &rootlight_ir::ExtensionEnvelope) -> Result<FileId, FirstSliceError> {
+    extension
+        .evidence
+        .source
+        .as_ref()
+        .map(|source| source.span().file())
+        .ok_or(FirstSliceError::Identity)
+}
+
+fn adjusted_extension_coverage(
+    existing: &[rootlight_ir::CoverageRecord],
+    dropped_by_file: &BTreeMap<FileId, u64>,
+) -> Result<Vec<rootlight_ir::CoverageRecord>, FirstSliceError> {
+    let mut coverage_records = existing.to_vec();
+    for (file, dropped) in dropped_by_file {
+        let mut matching_records = coverage_records.iter_mut().filter(|coverage| {
+            coverage.domain == rootlight_ir::FactDomain::Extensions
+                && coverage.scope == rootlight_ir::CoverageScope::File(*file)
+        });
+        let coverage = matching_records.next().ok_or(FirstSliceError::Identity)?;
+        if matching_records.next().is_some() {
+            return Err(FirstSliceError::Identity);
+        }
+        coverage.indexed = coverage
+            .indexed
+            .checked_sub(*dropped)
+            .ok_or(FirstSliceError::Identity)?;
+        coverage.skipped = coverage
+            .skipped
+            .checked_add(*dropped)
+            .ok_or(FirstSliceError::Limits)?;
+        if coverage.status != CoverageStatus::Unknown {
+            coverage.status = CoverageStatus::Bounded;
+        }
+        coverage.id = derive_coverage_record_id(coverage).map_err(|_| FirstSliceError::Identity)?;
+    }
+    Ok(coverage_records)
 }
 
 fn normalized_record_count(document: &NormalizedIrDocument) -> Result<usize, FirstSliceError> {
@@ -6628,6 +7766,41 @@ fn reserve_records<T>(
         .map_err(|_| FirstSliceError::Limits)
 }
 
+fn reserve_resource_records<T>(
+    target: &mut Vec<T>,
+    additional: usize,
+    maximum: usize,
+    resource: FirstSliceResource,
+) -> Result<(), FirstSliceError> {
+    checked_resource_length(target.len(), additional, maximum, resource)?;
+    target
+        .try_reserve(additional)
+        .map_err(|_| FirstSliceError::Limits)
+}
+
+fn checked_resource_length(
+    current: usize,
+    additional: usize,
+    maximum: usize,
+    resource: FirstSliceResource,
+) -> Result<usize, FirstSliceError> {
+    let observed = current
+        .checked_add(additional)
+        .ok_or(FirstSliceError::Limits)?;
+    if observed > maximum {
+        return Err(resource_limit(resource, observed, maximum));
+    }
+    Ok(observed)
+}
+
+fn resource_limit(resource: FirstSliceResource, observed: usize, limit: usize) -> FirstSliceError {
+    FirstSliceError::ResourceLimit {
+        resource,
+        observed: u64::try_from(observed).unwrap_or(u64::MAX),
+        limit: u64::try_from(limit).unwrap_or(u64::MAX),
+    }
+}
+
 fn checked_combined_length(
     current: usize,
     additional: usize,
@@ -6692,8 +7865,25 @@ fn map_vfs_error(error: VfsError, cancellation: &Cancellation) -> FirstSliceErro
     }
     match error {
         VfsError::Cancelled(reason) => FirstSliceError::Cancelled(reason),
+        // Discovery and analysis share one source-file ceiling. Reaching this
+        // variant on the second snapshot therefore means the file grew after
+        // the manifest observation and should be retried as snapshot drift.
+        VfsError::FileTooLarge { .. } => FirstSliceError::DiscoveryDrift,
+        VfsError::InvalidByteLimit => FirstSliceError::Limits,
+        VfsError::MemoryUnavailable => FirstSliceError::Retention,
         _ => FirstSliceError::Repository,
     }
+}
+
+fn is_invalid_utf8_adapter_failure(error: &AdapterError) -> bool {
+    matches!(
+        error,
+        AdapterError::ProviderFailed { code }
+            if matches!(
+                code.as_str(),
+                "invalid-utf8" | "treesitter-lowering-invalid-utf8"
+            )
+    )
 }
 
 fn map_adapter_error(error: AdapterError, cancellation: &Cancellation) -> FirstSliceError {
@@ -6702,7 +7892,61 @@ fn map_adapter_error(error: AdapterError, cancellation: &Cancellation) -> FirstS
     }
     match error {
         AdapterError::Cancelled { reason } => FirstSliceError::Cancelled(reason),
+        AdapterError::RejectedRequest(RequestError::SourceTooLarge { observed, limit }) => {
+            resource_limit(FirstSliceResource::SourceBytes, observed, limit)
+        }
+        AdapterError::RejectedRequest(RequestError::TooManyIncludedRanges { observed, limit }) => {
+            resource_limit(FirstSliceResource::IncludedRanges, observed, limit)
+        }
+        AdapterError::RejectedRequest(RequestError::ProviderLimit {
+            resource,
+            observed,
+            limit,
+        })
+        | AdapterError::Sink(SinkError::BatchLimit {
+            resource,
+            observed,
+            limit,
+        })
+        | AdapterError::Sink(SinkError::StreamLimit {
+            resource,
+            observed,
+            limit,
+        })
+        | AdapterError::InvalidReport(ReportError::ResourceLimit {
+            resource,
+            observed,
+            limit,
+        }) => adapter_resource(resource).map_or(FirstSliceError::Adapter, |resource| {
+            resource_limit(resource, observed, limit)
+        }),
         _ => FirstSliceError::Adapter,
+    }
+}
+
+const fn adapter_resource(resource: ResourceKind) -> Option<FirstSliceResource> {
+    match resource {
+        ResourceKind::Batches => Some(FirstSliceResource::Batches),
+        ResourceKind::Records => Some(FirstSliceResource::Records),
+        ResourceKind::OutputBytes => Some(FirstSliceResource::OutputBytes),
+        ResourceKind::Diagnostics => Some(FirstSliceResource::Diagnostics),
+        ResourceKind::DiagnosticBytes => Some(FirstSliceResource::DiagnosticBytes),
+        ResourceKind::StringBytes => Some(FirstSliceResource::StringBytes),
+        ResourceKind::NestedItems => Some(FirstSliceResource::NestedItems),
+        ResourceKind::ExtensionBytes => Some(FirstSliceResource::ExtensionBytes),
+        ResourceKind::SourceBytes => Some(FirstSliceResource::SourceBytes),
+        ResourceKind::ProjectFiles => Some(FirstSliceResource::ProjectFiles),
+        ResourceKind::ProjectSourceBytes => Some(FirstSliceResource::ProjectSourceBytes),
+        ResourceKind::ProjectContextBytes => Some(FirstSliceResource::ProjectContextBytes),
+        ResourceKind::GeneratedMappings => Some(FirstSliceResource::GeneratedMappings),
+        ResourceKind::GeneratedMappingBytes => Some(FirstSliceResource::GeneratedMappingBytes),
+        ResourceKind::AnalysisUnitBytes => Some(FirstSliceResource::AnalysisUnitBytes),
+        ResourceKind::BuildTargetBytes => Some(FirstSliceResource::BuildTargetBytes),
+        ResourceKind::IncludedRanges => Some(FirstSliceResource::IncludedRanges),
+        ResourceKind::SyntaxNodes => Some(FirstSliceResource::SyntaxNodes),
+        ResourceKind::SyntaxDepth => Some(FirstSliceResource::SyntaxDepth),
+        ResourceKind::ReportedMemoryBytes => Some(FirstSliceResource::ReportedMemoryBytes),
+        _ => None,
     }
 }
 
@@ -6712,7 +7956,54 @@ fn map_resolution_error(error: ResolutionError, cancellation: &Cancellation) -> 
     }
     match error {
         ResolutionError::Cancelled(cancelled) => FirstSliceError::Cancelled(cancelled.reason()),
+        ResolutionError::InvalidDocument(IrDocumentValidationError::CollectionLimit {
+            collection,
+            observed,
+            limit,
+        }) => ir_collection_resource(collection).map_or(FirstSliceError::Resolution, |resource| {
+            resource_limit(resource, observed, limit)
+        }),
+        ResolutionError::InvalidDocument(IrDocumentValidationError::TotalRecordLimit {
+            observed,
+            limit,
+        }) => resource_limit(FirstSliceResource::Records, observed, limit),
+        ResolutionError::InvalidDocument(IrDocumentValidationError::TotalExtensionBytesLimit {
+            observed,
+            limit,
+        }) => resource_limit(FirstSliceResource::ExtensionBytes, observed, limit),
+        ResolutionError::InvalidDocument(IrDocumentValidationError::TotalNestedItemLimit {
+            observed,
+            limit,
+        }) => resource_limit(FirstSliceResource::NestedItems, observed, limit),
         _ => FirstSliceError::Resolution,
+    }
+}
+
+fn resolution_limits_for_occurrences(
+    occurrence_count: usize,
+) -> Result<ResolutionLimits, FirstSliceError> {
+    // Preserve the documented per-site default for ordinary repositories while
+    // constraining aggregate candidate materialization for substantial inputs.
+    let aggregate_limit = MAX_TOTAL_MATERIALIZED_RESOLUTION_CANDIDATES
+        .checked_div(occurrence_count.max(1))
+        .unwrap_or(1);
+    ResolutionLimits::new(aggregate_limit.clamp(1, DEFAULT_CANDIDATE_LIMIT))
+        .map_err(|_| FirstSliceError::Limits)
+}
+
+const fn ir_collection_resource(collection: &str) -> Option<FirstSliceResource> {
+    match collection.as_bytes() {
+        b"files" => Some(FirstSliceResource::Files),
+        b"entities" => Some(FirstSliceResource::Entities),
+        b"occurrences" => Some(FirstSliceResource::Occurrences),
+        b"relations" => Some(FirstSliceResource::Relations),
+        b"provenance" => Some(FirstSliceResource::Provenance),
+        b"source_mappings" => Some(FirstSliceResource::SourceMappings),
+        b"coverage_records" => Some(FirstSliceResource::Coverage),
+        b"skipped_regions" => Some(FirstSliceResource::SkippedRegions),
+        b"diagnostics" => Some(FirstSliceResource::Diagnostics),
+        b"extensions" => Some(FirstSliceResource::Extensions),
+        _ => None,
     }
 }
 
@@ -6727,6 +8018,17 @@ fn map_identity_error(
         IdentityVerificationError::Control(GenerationControlError::Cancelled { reason }) => {
             FirstSliceError::Cancelled(reason)
         }
+        IdentityVerificationError::Control(GenerationControlError::BudgetExceeded {
+            resource,
+            observed,
+            limit,
+        }) => generation_resource(resource).map_or(FirstSliceError::Identity, |resource| {
+            FirstSliceError::ResourceLimit {
+                resource,
+                observed,
+                limit,
+            }
+        }),
         _ => FirstSliceError::Identity,
     }
 }
@@ -6745,12 +8047,33 @@ fn map_catalog_error_kind(kind: CatalogErrorKind, cancellation: &Cancellation) -
                 .reason()
                 .unwrap_or(CancellationReason::ParentCancelled),
         ),
+        CatalogErrorKind::BudgetExceeded {
+            resource,
+            observed,
+            limit,
+        } => generation_resource(resource).map_or(FirstSliceError::Catalog, |resource| {
+            FirstSliceError::ResourceLimit {
+                resource,
+                observed,
+                limit,
+            }
+        }),
         CatalogErrorKind::Corrupt
         | CatalogErrorKind::MigrationChecksumMismatch
         | CatalogErrorKind::InvalidGeneration
         | CatalogErrorKind::IdentityProofRequired => FirstSliceError::CatalogCorrupt,
         CatalogErrorKind::IncompatibleSchema => FirstSliceError::CatalogMigrationRequired,
         _ => FirstSliceError::Catalog,
+    }
+}
+
+const fn generation_resource(resource: GenerationResource) -> Option<FirstSliceResource> {
+    match resource {
+        GenerationResource::Rows => Some(FirstSliceResource::GenerationRows),
+        GenerationResource::SourceReferences => Some(FirstSliceResource::SourceReferences),
+        GenerationResource::TextBytes => Some(FirstSliceResource::TextBytes),
+        GenerationResource::EncodedTextBytes => Some(FirstSliceResource::EncodedTextBytes),
+        _ => None,
     }
 }
 
@@ -6823,25 +8146,28 @@ fn map_query_error(error: QueryError, cancellation: &Cancellation) -> FirstSlice
     }
 }
 
-fn analysis_limits() -> Result<AnalysisLimits, FirstSliceError> {
+fn analysis_limits(maximum_source_bytes: usize) -> Result<AnalysisLimits, FirstSliceError> {
     let batch = BatchThresholds::new(128, 1024 * 1024, 32, 128 * 1024)
         .map_err(|_| FirstSliceError::Limits)?;
+    // The public source ceiling admits multi-megabyte generated declarations.
+    // Keep their normalized output bounded, but do not apply tiny fixture-sized
+    // stream quotas that reject otherwise valid production repository files.
     let stream = StreamLimits::new(
-        128,
-        16_384,
-        16 * 1024 * 1024,
-        128,
-        128 * 1024,
-        4 * 1024 * 1024,
+        8_192,
+        MAX_STREAM_RECORDS_PER_FILE,
+        MAX_STREAM_OUTPUT_BYTES_PER_FILE,
+        MAX_STREAM_DIAGNOSTICS_PER_FILE,
+        MAX_STREAM_DIAGNOSTIC_BYTES_PER_FILE,
+        MAX_STREAM_STRING_BYTES_PER_FILE,
         batch,
     )
     .map_err(|_| FirstSliceError::Limits)?;
     AnalysisLimits::new(
-        MAX_SOURCE_BYTES,
+        maximum_source_bytes,
         MAX_SYNTAX_NODES,
         MAX_SYNTAX_DEPTH,
         32,
-        16 * 1024 * 1024,
+        MAX_REPORTED_MEMORY_BYTES_PER_FILE,
         stream.clone(),
         stream,
         IrLimits::default(),
@@ -6849,10 +8175,10 @@ fn analysis_limits() -> Result<AnalysisLimits, FirstSliceError> {
     .map_err(|_| FirstSliceError::Limits)
 }
 
-fn parser_config() -> Result<RuntimeConfig, FirstSliceError> {
+fn parser_config(maximum_source_bytes: usize) -> Result<RuntimeConfig, FirstSliceError> {
     let settings = ParserSettings::new(4096).map_err(|_| FirstSliceError::Limits)?;
     RuntimeConfig::new(
-        MAX_SOURCE_BYTES,
+        maximum_source_bytes,
         MAX_SYNTAX_NODES,
         MAX_SYNTAX_DEPTH,
         32,
@@ -7054,6 +8380,28 @@ mod tests {
         include_str!("../../../tests/fixtures/vertical-slice/first-slice/v1-to-v2.patch");
     const IGNORED_SENTINEL: &str = "ROOTLIGHT_IGNORED_SENTINEL";
     const EQUIVALENCE_COMPONENT_BYTES: usize = 4 * 1024 * 1024;
+
+    #[test]
+    fn substantial_indexes_bound_aggregate_resolution_candidates() {
+        assert_eq!(
+            resolution_limits_for_occurrences(1)
+                .expect("small indexes use valid resolver limits")
+                .candidate_limit(),
+            DEFAULT_CANDIDATE_LIMIT
+        );
+        assert_eq!(
+            resolution_limits_for_occurrences(125_000)
+                .expect("substantial indexes use valid resolver limits")
+                .candidate_limit(),
+            8
+        );
+        assert_eq!(
+            resolution_limits_for_occurrences(usize::MAX)
+                .expect("maximum indexes use valid resolver limits")
+                .candidate_limit(),
+            1
+        );
+    }
 
     struct FailingProjectAnalyzer {
         identity: ContentHash,
@@ -8075,6 +9423,64 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
+    fn durable_output_admission_rejects_expansion_before_staging() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        let source = b"pub fn expanded_output() -> u32 { 42 }\n";
+        fs::write(fixture.path().join("src/lib.rs"), source).expect("fixture source writes");
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        let source_bytes = u64::try_from(source.len()).expect("fixture length is representable");
+        let source_only_reservation =
+            durable_staging_reservation(source_bytes).expect("source reservation is valid");
+        service.set_available_disk_bytes_override(source_only_reservation);
+
+        let error = match service.prepare_rust_fixture(fixture.path(), &cancellation) {
+            Ok(_) => panic!("normalized output expansion exceeds the source-only reservation"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            FirstSliceError::InsufficientDiskSpace {
+                required_bytes,
+                available_bytes,
+            } if required_bytes > available_bytes
+                && available_bytes == source_only_reservation
+        ));
+        assert!(service.receipts.is_empty());
+    }
+
+    #[test]
+    fn generation_memory_admission_rejects_oversized_finalization() {
+        let serialized_bytes = MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+            .checked_div(GENERATION_MEMORY_SERIALIZED_EXPANSION_FACTOR)
+            .and_then(|bytes| bytes.checked_add(1))
+            .expect("test observation is representable");
+
+        assert!(matches!(
+            ensure_generation_memory_admission(0, serialized_bytes),
+            Err(FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::GenerationMemoryBytes,
+                observed,
+                limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+            }) if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
     fn durable_service_removes_unactivated_crash_artifacts_before_restore() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -8408,6 +9814,15 @@ mod tests {
     fn query_and_source_budget_failures_remain_distinct() {
         let cancellation = Cancellation::new();
         assert_eq!(
+            map_vfs_error(
+                VfsError::FileTooLarge {
+                    maximum: rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES,
+                },
+                &cancellation,
+            ),
+            FirstSliceError::DiscoveryDrift
+        );
+        assert_eq!(
             map_query_error(
                 QueryError::PlanRejected {
                     resource: rootlight_query::QueryResource::Results,
@@ -8484,6 +9899,399 @@ mod tests {
                     .as_ref()
                     .is_some_and(|source| source.span().file() == malformed)
         }));
+    }
+
+    #[test]
+    fn configured_source_file_limit_is_shared_by_discovery_and_analysis() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        let minimum_regression_bytes = 1024 * 1024 + 1;
+        let mut source = vec![b' '; minimum_regression_bytes];
+        source.extend_from_slice(b"\npub fn beyond_one_mebibyte() -> u32 { 42 }\n");
+        fs::write(fixture.path().join("src/lib.rs"), source).expect("large source writes");
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+        let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+
+        assert_eq!(
+            service.analysis_limits.max_source_bytes(),
+            usize::try_from(rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES)
+                .expect("default source-file bound fits usize")
+        );
+        let mut progress = Vec::new();
+        let preparation = service
+            .prepare_repository_with_mode_and_progress(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &cancellation,
+                |observed| progress.push(observed),
+            )
+            .expect("a source between one MiB and the configured bound prepares");
+        assert_eq!(
+            progress
+                .iter()
+                .map(|observed| (observed.completed, observed.total))
+                .collect::<Vec<_>>(),
+            vec![(1, 6), (2, 6), (3, 6), (4, 6), (5, 6), (6, 6)]
+        );
+        let receipt = service
+            .publish_prepared(preparation, &cancellation)
+            .expect("a source between one MiB and the configured bound publishes");
+        assert_eq!(receipt.indexed_files, 1);
+    }
+
+    #[test]
+    fn support_inventory_is_source_free_and_tracks_active_generation() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn inventory_probe() -> u32 { 42 }\n",
+        )
+        .expect("fixture source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("fixture publishes");
+
+        let inventory = service
+            .support_inventory_snapshot()
+            .expect("support inventory builds");
+        assert_eq!(inventory.repositories.len(), 1);
+        assert_eq!(inventory.generations.len(), 1);
+        assert_eq!(inventory.generation_format, "1.2");
+        assert_eq!(
+            inventory.generation_disk_bytes,
+            receipt.oracle_allocated_bytes
+        );
+        let repository = &inventory.repositories[0];
+        assert_eq!(repository.repository, receipt.repository);
+        assert_eq!(repository.languages, ["rust"]);
+        assert_eq!(repository.tiers, ["tier_b"]);
+        assert_eq!(repository.files, 1);
+        assert!(repository.symbols > 0);
+        assert_eq!(repository.generation_count, 1);
+        let generation = &inventory.generations[0];
+        assert_eq!(generation.repository, receipt.repository);
+        assert_eq!(generation.generation, receipt.generation);
+        assert!(generation.active);
+        assert!(
+            inventory
+                .adapters
+                .iter()
+                .any(|adapter| adapter.name == "tree-sitter"
+                    && adapter.languages.iter().any(|language| language == "rust")
+                    && !adapter.isolated)
+        );
+    }
+
+    #[test]
+    fn project_support_inventory_excludes_unsupported_parser_grammars() {
+        let analyzer = Arc::new(FailingProjectAnalyzer {
+            identity: content_hash(b"support-project-adapter"),
+            error: FirstSliceProjectAnalysisError::Analysis,
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let service =
+            FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("service initializes with a project adapter");
+
+        let inventory = service
+            .support_inventory_snapshot()
+            .expect("support inventory builds");
+        let project = inventory
+            .adapters
+            .iter()
+            .find(|adapter| adapter.name == "project-adapter")
+            .expect("project adapter is advertised");
+        assert_eq!(
+            project.languages,
+            ["rust", "typescript", "javascript", "python", "go"]
+        );
+        assert!(!project.languages.iter().any(|language| language == "java"));
+        assert!(
+            inventory
+                .adapters
+                .iter()
+                .find(|adapter| adapter.name == "tree-sitter")
+                .is_some_and(|adapter| adapter.languages.iter().any(|language| language == "java"))
+        );
+    }
+
+    #[test]
+    fn oversized_source_is_reported_while_safe_inputs_publish() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn retained() -> u32 { 42 }\n",
+        )
+        .expect("safe source writes");
+        let oversized = fs::File::create(fixture.path().join("src/oversized.rs"))
+            .expect("oversized fixture creates");
+        oversized
+            .set_len(rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES + 1)
+            .expect("oversized fixture length sets");
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+        let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("safe source publishes despite an oversized peer");
+        assert_eq!(receipt.indexed_files, 1);
+        assert_eq!(receipt.oversized_inputs, 1);
+        assert!(receipt.excluded_inputs >= receipt.oversized_inputs);
+        assert!(receipt.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "oversized-inputs-bounded"
+                && diagnostic.message
+                    == "oversized repository input count 1 omitted by configured source file limit"
+        }));
+    }
+
+    #[test]
+    fn invalid_utf8_source_publishes_bounded_file_coverage() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn retained() -> u32 { 42 }\n",
+        )
+        .expect("valid source writes");
+        fs::write(
+            fixture.path().join("src/invalid.rs"),
+            b"pub fn unavailable() {}\n\xff",
+        )
+        .expect("invalid UTF-8 source writes");
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+        let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("invalid UTF-8 bounds one file without rejecting the repository");
+        assert_eq!(receipt.indexed_files, 2);
+        assert!(receipt.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid-utf8" && diagnostic.message == "source is not valid utf-8"
+        }));
+
+        let generation = service
+            .generations
+            .generation(receipt.generation)
+            .expect("published generation is retained");
+        let invalid_file = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "src/invalid.rs")
+            .expect("invalid source retains its file identity");
+        assert!(generation.document().skipped_regions.iter().any(|region| {
+            region.source.span().file() == invalid_file.id
+                && region.reason == rootlight_ir::SkippedRegionReason::UnsupportedEncoding
+                && region.detail == "invalid-utf8"
+        }));
+        assert!(
+            generation
+                .document()
+                .coverage_records
+                .iter()
+                .any(|coverage| {
+                    coverage.scope == rootlight_ir::CoverageScope::File(invalid_file.id)
+                        && coverage.domain == rootlight_ir::FactDomain::Entities
+                        && coverage.status == CoverageStatus::Bounded
+                        && coverage.skipped == 1
+                })
+        );
+        service
+            .code_locate(
+                receipt.generation,
+                "retained".to_owned(),
+                LocateMode::Exact,
+                8,
+                0,
+                &cancellation,
+            )
+            .expect("valid peer remains queryable");
+    }
+
+    #[test]
+    fn aggregate_lexical_extension_limit_publishes_bounded_coverage() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        for file_index in 0..16 {
+            let mut source = String::new();
+            for comment_index in 0..800 {
+                source.push_str(&format!(
+                    "// lexical evidence {file_index:02} {comment_index:04}\n"
+                ));
+            }
+            source.push_str(&format!(
+                "pub fn indexed_{file_index:02}() -> usize {{ {file_index} }}\n"
+            ));
+            fs::write(
+                fixture.path().join(format!("src/file_{file_index:02}.rs")),
+                source,
+            )
+            .expect("extension-heavy source writes");
+        }
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(120))
+                .expect("test deadline is representable"),
+        );
+        let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+
+        let first = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("optional extension overflow preserves a generation");
+        let repeated = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("unchanged bounded generation remains reusable");
+        assert_eq!(repeated.generation, first.generation);
+        let document = service
+            .generations
+            .generation(first.generation)
+            .expect("bounded generation remains retained")
+            .document();
+        assert_eq!(
+            document
+                .extensions
+                .iter()
+                .filter(|extension| extension.namespace == LEXICAL_EXTENSION_NAMESPACE)
+                .count(),
+            MAX_RETAINED_OPTIONAL_EXTENSIONS
+        );
+        assert!(
+            document.extensions.len() <= service.analysis_limits.ir().max_extensions,
+            "required identity extensions remain inside the hard IR capacity"
+        );
+        assert!(document.coverage_records.iter().any(|coverage| {
+            coverage.domain == rootlight_ir::FactDomain::Extensions
+                && coverage.status == CoverageStatus::Bounded
+                && coverage.skipped > 0
+        }));
+        assert!(first.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "extension-coverage-bounded"
+                && diagnostic
+                    .message
+                    .ends_with("optional lexical extensions omitted by aggregate resource limit")
+        }));
+    }
+
+    #[test]
+    fn rejected_project_append_preserves_structural_target_and_state() {
+        let repository = derive_repository(b"transactional-project-append").id();
+        let generation = GenerationId::from_bytes([31; 20]);
+        let provenance = FactId::from_bytes([32; 20]);
+        let extension = |id: u8, namespace: &str| rootlight_ir::ExtensionEnvelope {
+            id: FactId::from_bytes([id; 20]),
+            repository,
+            generation,
+            namespace: namespace.to_owned(),
+            version: "1.0".to_owned(),
+            criticality: rootlight_ir::ExtensionCriticality::Noncritical,
+            payload: "{}".to_owned(),
+            provenance,
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        };
+        let mut target = NormalizedIrDocument::empty(repository, generation);
+        target
+            .extensions
+            .push(extension(33, LEXICAL_EXTENSION_NAMESPACE));
+        let expected_target = target.clone();
+        let mut state =
+            DocumentAppendState::from_document(&target).expect("append state initializes");
+        let expected_extension_bytes = state.extension_payload_bytes;
+        let mut source = NormalizedIrDocument::empty(repository, generation);
+        source.extensions.push(extension(34, "test.required"));
+        let mut limits = IrLimits::default();
+        limits.max_extensions = 1;
+
+        assert!(matches!(
+            append_normalized_document(&mut target, source, &limits, &mut state),
+            Err(FirstSliceError::Identity)
+        ));
+        assert_eq!(target, expected_target);
+        assert_eq!(state.extension_payload_bytes, expected_extension_bytes);
+        assert_eq!(state.truncated_extensions, 0);
+        assert_eq!(state.truncated_skipped_regions, 0);
+    }
+
+    #[test]
+    fn aggregate_skipped_region_limit_retains_bounded_detail() {
+        let repository = derive_repository(b"bounded-skipped-region-details").id();
+        let generation = GenerationId::from_bytes([11; 20]);
+        let file = FileId::from_bytes([12; 20]);
+        let provenance = FactId::from_bytes([13; 20]);
+        let source_hash = content_hash(b"abcd");
+        let region = |start: u64| {
+            let source = SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, start, start + 1).expect("source span is valid"),
+                source_hash,
+                None,
+            );
+            let mut region = rootlight_ir::SkippedRegion {
+                id: FactId::from_bytes([0; 20]),
+                repository,
+                generation,
+                source: source.clone(),
+                domain: rootlight_ir::FactDomain::Entities,
+                reason: rootlight_ir::SkippedRegionReason::UnsupportedConstruct,
+                detail: "unsupported test construct".to_owned(),
+                provenance,
+                evidence: FactEvidence {
+                    source: Some(source),
+                    derivation: Vec::new(),
+                },
+            };
+            region.id =
+                rootlight_ir::derive_skipped_region_id(&region).expect("region identity derives");
+            region
+        };
+        let mut target = NormalizedIrDocument::empty(repository, generation);
+        let mut limits = IrLimits::default();
+        limits.max_skipped_regions = 2;
+        let mut state =
+            DocumentAppendState::from_document(&target).expect("append state initializes");
+
+        let mut first = NormalizedIrDocument::empty(repository, generation);
+        first.skipped_regions = vec![region(0), region(1), region(2)];
+        let expected = first.skipped_regions[..2]
+            .iter()
+            .map(|record| record.id)
+            .collect::<Vec<_>>();
+        append_normalized_document(&mut target, first, &limits, &mut state)
+            .expect("first document retains bounded detail");
+
+        let mut second = NormalizedIrDocument::empty(repository, generation);
+        second.skipped_regions = vec![region(1), region(2), region(3)];
+        append_normalized_document(&mut target, second, &limits, &mut state)
+            .expect("later detail can be omitted without failing the generation");
+
+        assert_eq!(
+            target
+                .skipped_regions
+                .iter()
+                .map(|record| record.id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(state.truncated_skipped_regions, 4);
     }
 
     #[test]
@@ -8761,6 +10569,14 @@ mod tests {
             checked_combined_length(usize::MAX, 1, usize::MAX),
             Err(FirstSliceError::Limits)
         );
+        assert_eq!(
+            checked_resource_length(10_000, 1, 10_000, FirstSliceResource::Extensions),
+            Err(FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::Extensions,
+                observed: 10_001,
+                limit: 10_000,
+            })
+        );
     }
 
     #[test]
@@ -8975,7 +10791,10 @@ mod tests {
 
         assert!(matches!(
             service.prepare_rust_fixture(fixture.path(), &deadline()),
-            Err(FirstSliceError::Retention)
+            Err(FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::SourceBytes,
+                ..
+            })
         ));
         assert!(service.generations.is_empty());
         assert!(service.repositories.is_empty());
@@ -9600,7 +11419,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_generation_count_survives_reclamation_and_idempotent_publication() {
+    fn catalog_history_and_support_retention_counts_diverge_after_reclamation() {
         let fixture = TempDir::new().expect("fixture root exists");
         fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
         let source = fixture.path().join("src/lib.rs");
@@ -9639,6 +11458,14 @@ mod tests {
         assert_eq!(page.items().len(), 1);
         assert_eq!(page.items()[0].active_generation(), Some(second.generation));
         assert_eq!(page.items()[0].generation_count(), 2);
+
+        let inventory = service
+            .support_inventory_snapshot()
+            .expect("support inventory builds after reclamation");
+        assert_eq!(inventory.repositories.len(), 1);
+        assert_eq!(inventory.repositories[0].generation_count, 1);
+        assert_eq!(inventory.generations.len(), 1);
+        assert_eq!(inventory.generations[0].generation, second.generation);
     }
 
     fn logical_component(

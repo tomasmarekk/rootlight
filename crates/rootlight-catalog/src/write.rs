@@ -10,10 +10,11 @@ use std::{
 
 use rootlight_ids::{ContentHash, FactId, FileId, RepositoryId, SymbolId};
 use rootlight_ir::{
-    ExtensionCriticality, FactEvidence, IrLimits, NormalizedIrDocument, OccurrenceTarget, SourceRef,
+    ExtensionCriticality, FactEvidence, NormalizedIrDocument, OccurrenceTarget, SourceRef,
 };
 use rootlight_storage::{
     GenerationContext, GenerationResource, GenerationSnapshot, GenerationStats,
+    HARD_MAX_GENERATION_ENCODED_TEXT_BYTES,
 };
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 
@@ -304,7 +305,7 @@ pub(crate) fn measure(
         .require(GenerationResource::Rows, stored_rows)
         .map_err(CatalogError::control)?;
     context
-        .require(GenerationResource::TextBytes, text_bytes)
+        .require(GenerationResource::EncodedTextBytes, text_bytes)
         .map_err(CatalogError::control)?;
 
     let stats = GenerationStats::new(
@@ -415,7 +416,7 @@ fn add_text(
         .checked_add(usize_to_u64(value.len())?)
         .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
     context
-        .require(GenerationResource::TextBytes, *bytes)
+        .require(GenerationResource::EncodedTextBytes, *bytes)
         .map_err(CatalogError::control)
 }
 
@@ -435,7 +436,7 @@ fn add_serialized_text(
     value: &impl serde::Serialize,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
-    let mut writer = CheckedJsonWriter::for_text(io::sink(), *bytes, context)?;
+    let mut writer = CheckedJsonWriter::for_encoded_text(io::sink(), *bytes, context)?;
     serialize_json(&mut writer, value)?;
     *bytes = writer.total_bytes();
     Ok(())
@@ -1125,9 +1126,17 @@ pub(crate) fn canonical_document_hash(
     context: &GenerationContext<'_>,
     overflow_kind: CatalogErrorKind,
 ) -> Result<ContentHash, CatalogError> {
-    let maximum = usize_to_u64(IrLimits::default().max_document_bytes)?;
-    let mut writer =
-        CheckedJsonWriter::new(Blake3Writer::default(), 0, maximum, overflow_kind, context)?;
+    // This document has already passed record, nested-item, source, and text
+    // budgets. The smaller wire-decode ceiling protects untrusted allocation;
+    // applying it again here would reject valid documents merely because fixed
+    // binary identifiers expand in their canonical JSON representation.
+    let mut writer = CheckedJsonWriter::new(
+        Blake3Writer::default(),
+        0,
+        HARD_MAX_GENERATION_ENCODED_TEXT_BYTES,
+        overflow_kind,
+        context,
+    )?;
     serialize_json(&mut writer, document)?;
     context.check().map_err(CatalogError::control)?;
     let digest = writer.into_inner().0.finalize();
@@ -1141,7 +1150,7 @@ fn serialize_json_text<T>(
 where
     T: serde::Serialize + ?Sized,
 {
-    let mut writer = CheckedJsonWriter::for_text(Vec::new(), 0, context)?;
+    let mut writer = CheckedJsonWriter::for_encoded_text(Vec::new(), 0, context)?;
     serialize_json(&mut writer, value)?;
     context.check().map_err(CatalogError::control)?;
     String::from_utf8(writer.into_inner())
@@ -1183,7 +1192,10 @@ impl<'a, W: Write> CheckedJsonWriter<'a, W> {
     ) -> Result<Self, CatalogError> {
         context.check().map_err(CatalogError::control)?;
         if initial_bytes > maximum_bytes {
-            return Err(CatalogError::new(overflow_kind));
+            return Err(CatalogError::new(overflow_with_observed(
+                overflow_kind,
+                initial_bytes,
+            )));
         }
         Ok(Self {
             inner,
@@ -1195,18 +1207,19 @@ impl<'a, W: Write> CheckedJsonWriter<'a, W> {
         })
     }
 
-    fn for_text(
+    fn for_encoded_text(
         inner: W,
         initial_bytes: u64,
         context: &GenerationContext<'a>,
     ) -> Result<Self, CatalogError> {
-        let maximum = context.budget().limit(GenerationResource::TextBytes);
+        let maximum = context.budget().limit(GenerationResource::EncodedTextBytes);
         Self::new(
             inner,
             initial_bytes,
             maximum,
             CatalogErrorKind::BudgetExceeded {
-                resource: GenerationResource::TextBytes,
+                resource: GenerationResource::EncodedTextBytes,
+                observed: 0,
                 limit: maximum,
             },
             context,
@@ -1229,6 +1242,23 @@ impl<'a, W: Write> CheckedJsonWriter<'a, W> {
         self.failure = Some(kind);
         io::Error::other("controlled JSON write stopped")
     }
+
+    fn stop_overflow(&mut self, observed: u64) -> io::Error {
+        self.stop(overflow_with_observed(self.overflow_kind, observed))
+    }
+}
+
+const fn overflow_with_observed(kind: CatalogErrorKind, observed: u64) -> CatalogErrorKind {
+    match kind {
+        CatalogErrorKind::BudgetExceeded {
+            resource, limit, ..
+        } => CatalogErrorKind::BudgetExceeded {
+            resource,
+            observed,
+            limit,
+        },
+        kind => kind,
+    }
 }
 
 impl<W: Write> Write for CheckedJsonWriter<'_, W> {
@@ -1237,14 +1267,13 @@ impl<W: Write> Write for CheckedJsonWriter<'_, W> {
             if let Err(error) = self.context.check() {
                 return Err(self.stop(CatalogError::control(error).kind()));
             }
-            let increment =
-                u64::try_from(chunk.len()).map_err(|_| self.stop(self.overflow_kind))?;
+            let increment = u64::try_from(chunk.len()).map_err(|_| self.stop_overflow(u64::MAX))?;
             let next = self
                 .total_bytes
                 .checked_add(increment)
-                .ok_or_else(|| self.stop(self.overflow_kind))?;
+                .ok_or_else(|| self.stop_overflow(u64::MAX))?;
             if next > self.maximum_bytes {
-                return Err(self.stop(self.overflow_kind));
+                return Err(self.stop_overflow(next));
             }
             self.inner.write_all(chunk)?;
             self.total_bytes = next;

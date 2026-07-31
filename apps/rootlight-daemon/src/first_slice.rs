@@ -28,11 +28,12 @@ use rootlight_adapter_host::{
     project_adapter_identity_with_cancellation,
 };
 use rootlight_daemon_core::{
-    ControlRequest, ControlResponse, FirstSliceEffectiveBudget, FirstSliceIpcContext,
+    ControlRequest, ControlResponse, DaemonState, FirstSliceEffectiveBudget, FirstSliceIpcContext,
     FirstSliceIpcFuture, FirstSliceIpcHandler, FirstSliceIpcRequest, FirstSliceIpcResponse,
-    JournalActorHandle, ServiceError, operation_record_to_wire,
+    HealthStatus, IndexSupportInventory, JournalActorHandle, RepositoryIndexProvider, ServiceError,
+    operation_record_to_wire,
 };
-use rootlight_error::{ErrorCode, NextAction, PublicError};
+use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
 use rootlight_ids::{
     ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId, content_hash,
 };
@@ -40,10 +41,14 @@ use rootlight_ir::{
     AnalysisTier, CoverageRecord, CoverageStatus, LineRange, OccurrenceRole, RelationEndpoint,
     RelationPredicate, SourceRef, SourceSpan,
 };
+use rootlight_observability::{
+    SupportAdapterInventory, SupportChecksumStatus, SupportGenerationInventory,
+    SupportRepositoryInventory,
+};
 use rootlight_operations::{
     Cancellation, CancellationAuthority, CancellationReason, ClientInstanceId,
     InternalCancellationAuthority, OperationError, OperationKind, OperationRecord, OperationStage,
-    OperationState, OperationSubmission, PlanHash,
+    OperationState, OperationSubmission, PlanHash, Progress,
 };
 use rootlight_protocol::{
     adapter_contract::ADAPTER_NONCE_BYTES,
@@ -57,9 +62,10 @@ use rootlight_service::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
     AdvancedAstNode, FirstSliceBudget, FirstSliceDurableOperation, FirstSliceError,
     FirstSliceGenerationContext, FirstSliceIndexAdmission, FirstSliceIndexMode,
-    FirstSliceIndexReceipt, FirstSliceObservedFreshness, FirstSliceOperationContext,
-    FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisRequest,
-    FirstSliceProjectAnalyzer, FirstSliceService, HistoryChangeKind, PlanChangeObjective,
+    FirstSliceIndexProgress, FirstSliceIndexProvider, FirstSliceIndexReceipt,
+    FirstSliceObservedFreshness, FirstSliceOperationContext, FirstSliceProjectAnalysis,
+    FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer,
+    FirstSliceService, FirstSliceSupportInventory, HistoryChangeKind, PlanChangeObjective,
     SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
@@ -77,9 +83,13 @@ const DEFAULT_OPERATION_METADATA: usize = 256;
 const RETRY_AFTER_MS: u32 = 100;
 const MAX_OPERATION_STATUS_WAIT_MS: u32 = 30_000;
 const OPERATION_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const OPERATION_STATUS_RESPONSE_GRACE: Duration = Duration::from_millis(250);
 const LIFECYCLE_FINALIZATION_GRACE: Duration = Duration::from_secs(2);
-const STARTUP_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
-const DETACHED_INDEX_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+// Restoring a verified substantial generation streams every catalog row and
+// recomputes its identity proof. Keep this independently bounded from the
+// 30-second client request envelope used after the endpoint becomes ready.
+const STARTUP_RESTORE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const DETACHED_INDEX_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const DEFAULT_RELATIONSHIP_RESULTS: u32 = 100;
 const DEFAULT_FLOW_DEPTH: u32 = 3;
 const DEFAULT_FLOW_PATHS: u32 = 10;
@@ -371,6 +381,7 @@ struct FirstSliceServiceLanes {
     index_serialization: IndexSerialization,
     semantic_refinements: SemanticRefinements,
     refinement: SyncSender<SemanticRefinementCommand>,
+    support_state: Option<Arc<DaemonState>>,
 }
 
 struct PublicationBoundaryHook {
@@ -396,6 +407,7 @@ enum PublicationBoundary {
     AfterActivation,
     BeforeCompletion,
     AfterSuccess,
+    AfterCommit,
 }
 
 impl PublicationBoundaryHook {
@@ -444,6 +456,7 @@ impl FirstSliceDaemon {
     pub(crate) async fn start_durable(
         journal: JournalActorHandle,
         state_root: &Path,
+        support_state: Arc<DaemonState>,
     ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
         let cancellation = Cancellation::with_deadline(
             Instant::now()
@@ -466,6 +479,10 @@ impl FirstSliceDaemon {
             ),
         }
         .map_err(FirstSliceHostError::Service)?;
+        let inventory = index_support_inventory(&service).map_err(FirstSliceHostError::Service)?;
+        support_state
+            .replace_index_support_inventory(inventory)
+            .map_err(FirstSliceHostError::Journal)?;
         let durable_publications = service.durable_operation_publications().collect::<Vec<_>>();
         let reconciled_publications = tokio::time::timeout(STARTUP_RESTORE_TIMEOUT, async {
             let mut reconciled = Vec::new();
@@ -491,7 +508,13 @@ impl FirstSliceDaemon {
         .await
         .map_err(|_| FirstSliceHostError::StartupTimedOut)?
         .map_err(FirstSliceHostError::Journal)?;
-        Self::start_workers(journal, service, None, reconciled_publications)
+        Self::start_workers(
+            journal,
+            service,
+            None,
+            reconciled_publications,
+            Some(support_state),
+        )
     }
 
     #[cfg(test)]
@@ -503,13 +526,30 @@ impl FirstSliceDaemon {
     }
 
     #[cfg(test)]
+    fn start_durable_with_publication_hook(
+        journal: JournalActorHandle,
+        state_root: &Path,
+        hook: PublicationBoundaryHook,
+    ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(STARTUP_RESTORE_TIMEOUT)
+                .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?,
+        );
+        let service =
+            FirstSliceService::new_durable(DEFAULT_GENERATION_RETENTION, state_root, &cancellation)
+                .map_err(FirstSliceHostError::Service)?;
+        Self::start_workers(journal, service, Some(hook), Vec::new(), None)
+    }
+
+    #[cfg(test)]
     fn start_inner(
         journal: JournalActorHandle,
         publication_hook: Option<PublicationBoundaryHook>,
     ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
         let service = FirstSliceService::new(DEFAULT_GENERATION_RETENTION)
             .map_err(FirstSliceHostError::Service)?;
-        Self::start_workers(journal, service, publication_hook, Vec::new())
+        Self::start_workers(journal, service, publication_hook, Vec::new(), None)
     }
 
     fn start_workers(
@@ -517,6 +557,7 @@ impl FirstSliceDaemon {
         service: FirstSliceService,
         publication_hook: Option<PublicationBoundaryHook>,
         durable_publications: Vec<(FirstSliceDurableOperation, OperationRecord)>,
+        support_state: Option<Arc<DaemonState>>,
     ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
         let work_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -532,6 +573,13 @@ impl FirstSliceDaemon {
             .map_err(FirstSliceHostError::AsyncRuntime)?;
         let mut operation_metadata = OperationMetadataSet::new(DEFAULT_OPERATION_METADATA);
         for (publication, record) in durable_publications {
+            if let Some(state) = support_state.as_deref() {
+                state.record_repository_index_context(
+                    publication.operation,
+                    publication.receipt.repository,
+                    repository_index_support_provider(publication.provider),
+                );
+            }
             operation_metadata
                 .restore_committed(publication, &record)
                 .map_err(FirstSliceHostError::Service)?;
@@ -549,6 +597,7 @@ impl FirstSliceDaemon {
             index_serialization,
             semantic_refinements: Arc::clone(&semantic_refinements),
             refinement: refinement.clone(),
+            support_state,
         };
         let work_journal = journal.clone();
         let work_metadata = Arc::clone(&metadata);
@@ -672,10 +721,14 @@ impl FirstSliceDaemon {
         // control worker needed by cancellation and health traffic.
         request.wait_ms = None;
         request.after_revision = None;
+        let response_deadline = context
+            .deadline
+            .checked_sub(OPERATION_STATUS_RESPONSE_GRACE)
+            .unwrap_or(context.deadline);
         let wait_deadline = Instant::now()
             .checked_add(Duration::from_millis(u64::from(wait_ms)))
             .ok_or_else(internal_error)?
-            .min(context.deadline);
+            .min(response_deadline);
         let mut observed_revision = None;
         loop {
             context
@@ -1034,6 +1087,7 @@ impl OperationMetadataSet {
         Ok(())
     }
 
+    #[cfg(test)]
     fn fail_closed(&mut self, operation: OperationId) {
         if let Some(metadata) = self.records.get_mut(&operation) {
             metadata.publication = PublicationState::FailedClosed;
@@ -1656,6 +1710,13 @@ fn repository_index_with_intent(
         }
     };
     lock_metadata(metadata)?.admit(operation, admission);
+    if let Some(state) = lanes.support_state.as_deref() {
+        state.record_repository_index_context(
+            operation,
+            admission.repository,
+            repository_index_support_provider(first_slice_index_provider(mode)),
+        );
+    }
     if detached && let Some(reply) = reply.take() {
         let response = admitted_index_response(admission, &submitted.operation, mode);
         let _ = reply.send(Ok(FirstSliceIpcResponse::RepositoryIndex(response)));
@@ -1715,12 +1776,38 @@ fn repository_index_with_intent(
             )?;
             return Err(error);
         }
+        let mut progress_failure = None;
         let preparation = {
             let service = read_service(service)?;
             match intent {
-                RepositoryIndexIntent::Requested => {
-                    service.prepare_repository_with_mode(&root, mode, &cancellation)
-                }
+                RepositoryIndexIntent::Requested => service
+                    .prepare_repository_with_mode_and_progress(
+                        &root,
+                        mode,
+                        &cancellation,
+                        |observed| {
+                            if progress_failure.is_some() {
+                                return;
+                            }
+                            let progress = match operation_progress(observed) {
+                                Ok(progress) => progress,
+                                Err(error) => {
+                                    progress_failure = Some(error);
+                                    return;
+                                }
+                            };
+                            if let Err(error) = journal_lifecycle_call(
+                                runtime,
+                                journal.update_progress_until(
+                                    operation,
+                                    progress,
+                                    lifecycle_deadline,
+                                ),
+                            ) {
+                                progress_failure = Some(error);
+                            }
+                        },
+                    ),
                 RepositoryIndexIntent::SemanticRefinement {
                     structural_generation,
                 } => {
@@ -1728,6 +1815,18 @@ fn repository_index_with_intent(
                 }
             }
         };
+        if let Some(error) = progress_failure {
+            finish_failed_index(
+                runtime,
+                lifecycle_deadline,
+                journal,
+                metadata,
+                operation,
+                &cancellation,
+                &error,
+            )?;
+            return Err(error);
+        }
         match preparation {
             Ok(prepared) => {
                 if propagate_peer_cancellation(
@@ -1827,7 +1926,6 @@ fn repository_index_with_intent(
                         &cancellation,
                         &error,
                     );
-                    lock_metadata(metadata)?.fail_closed(operation);
                     discard?;
                     terminal?;
                     return Err(error);
@@ -1868,17 +1966,18 @@ fn repository_index_with_intent(
                 let publication_record = match completion {
                     Ok(record) => record,
                     Err(error) => {
-                        if write_service(service)?.discard_staged(staged).is_err() {
-                            lock_metadata(metadata)?.fail_closed(operation);
-                            return Err(internal_error());
-                        }
-                        if error.code() != ErrorCode::Cancelled {
-                            lock_metadata(metadata)?.fail_closed(operation);
-                        } else {
-                            let mut metadata = lock_metadata(metadata)?;
-                            metadata.discard(operation)?;
-                            metadata.mark_terminal(operation);
-                        }
+                        write_service(service)?
+                            .discard_staged(staged)
+                            .map_err(service_error)?;
+                        finish_failed_index(
+                            runtime,
+                            lifecycle_deadline,
+                            journal,
+                            metadata,
+                            operation,
+                            &cancellation,
+                            &error,
+                        )?;
                         return Err(error);
                     }
                 };
@@ -1903,7 +2002,15 @@ fn repository_index_with_intent(
                     write_service(service)?
                         .discard_staged(staged)
                         .map_err(service_error)?;
-                    lock_metadata(metadata)?.fail_closed(operation);
+                    finish_failed_index(
+                        runtime,
+                        lifecycle_deadline,
+                        journal,
+                        metadata,
+                        operation,
+                        &cancellation,
+                        &error,
+                    )?;
                     return Err(error);
                 }
                 let commit = if publication_hook.is_some_and(PublicationBoundaryHook::fail_commit) {
@@ -1917,26 +2024,56 @@ fn repository_index_with_intent(
                         FirstSliceOperationContext {
                             operation,
                             started_unix_ms,
+                            provider: first_slice_index_provider(mode),
                         },
                     )
                 };
                 let receipt = match commit {
-                    Ok(receipt) if receipt == staged_receipt => receipt,
-                    Ok(_) | Err(_) => {
-                        lock_metadata(metadata)?.fail_closed(operation);
-                        return Err(internal_error());
+                    Ok(receipt) => {
+                        if receipt != staged_receipt {
+                            lock_metadata(metadata)?.stage(operation, receipt.clone());
+                        }
+                        receipt
+                    }
+                    Err(_error) => {
+                        let public = failed_closed_publication(operation);
+                        finish_failed_index(
+                            runtime,
+                            lifecycle_deadline,
+                            journal,
+                            metadata,
+                            operation,
+                            &cancellation,
+                            &public,
+                        )?;
+                        return Err(public);
                     }
                 };
+                refresh_index_support_inventory(service, lanes.support_state.as_deref());
                 let operation_record = if durable_publication {
-                    match journal_lifecycle_call(
-                        runtime,
-                        journal.finish_authorized_publication(operation),
-                    ) {
+                    let finalization = match publication_hook {
+                        Some(hook) => hook.pause(PublicationBoundary::AfterCommit).and_then(|()| {
+                            journal_lifecycle_call(
+                                runtime,
+                                journal.finish_authorized_publication(operation),
+                            )
+                        }),
+                        None => journal_lifecycle_call(
+                            runtime,
+                            journal.finish_authorized_publication(operation),
+                        ),
+                    };
+                    match finalization {
                         Ok(record) if record.state == OperationState::Succeeded => record,
-                        Ok(_) | Err(_) => {
-                            lock_metadata(metadata)?.fail_closed(operation);
-                            return Err(internal_error());
-                        }
+                        Ok(_) | Err(_) => journal_lifecycle_call(
+                            runtime,
+                            journal.reconcile_committed_publication(operation),
+                        )
+                        .and_then(|record| {
+                            (record.state == OperationState::Succeeded)
+                                .then_some(record)
+                                .ok_or_else(internal_error)
+                        })?,
                     }
                 } else {
                     publication_record
@@ -1947,7 +2084,14 @@ fn repository_index_with_intent(
                 Ok(index_response(receipt, &operation_record, mode))
             }
             Err(error) => {
-                let public = service_error(error);
+                let public = repository_index_error(
+                    error,
+                    RepositoryIndexErrorContext {
+                        operation,
+                        repository: admission.repository,
+                        provider: repository_index_provider(mode),
+                    },
+                );
                 finish_failed_index(
                     runtime,
                     lifecycle_deadline,
@@ -2171,6 +2315,14 @@ fn finish_failed_index(
     cancellation: &Cancellation,
     error: &PublicError,
 ) -> Result<(), PublicError> {
+    // Work may observe cancellation after its deadline. Give the terminal
+    // journal write a fresh bounded window so an expired work budget cannot
+    // strand a durable operation in the running state.
+    let deadline = deadline.max(
+        Instant::now()
+            .checked_add(LIFECYCLE_FINALIZATION_GRACE)
+            .ok_or_else(internal_error)?,
+    );
     let record = if let Some(reason) = cancellation.reason() {
         journal_lifecycle_call(
             runtime,
@@ -2568,6 +2720,9 @@ fn symbol_explain(
         }
         let provider = response.data.provenance.producer.name().to_owned();
         let evidence = enum_label(response.data.provenance.producer_kind)?;
+        let (language, tier) = service
+            .source_language_coverage(generation.generation, definition.span().file())
+            .map_err(service_error)?;
         symbols.push(daemon::FirstSliceSymbolExplanation {
             symbol: Some(symbol_to_wire(symbol)),
             kind: enum_label(entity.kind)?,
@@ -2586,6 +2741,8 @@ fn symbol_explain(
             } else {
                 0
             },
+            language,
+            tier: analysis_tier_to_wire(tier) as i32,
         });
     }
     Ok(daemon::SymbolExplainResponse {
@@ -3831,6 +3988,12 @@ fn source_read(
         .try_reserve_exact(data.chunks.len())
         .map_err(|_| resource_exhausted())?;
     for chunk in data.chunks {
+        let (language, tier) = service
+            .source_language_coverage(generation.generation, chunk.reference.span().file())
+            .map_err(service_error)?;
+        if language != chunk.language {
+            return Err(internal_error());
+        }
         let included_start_line = include_line_numbers.then_some(chunk.start_line).flatten();
         let included_end_line = include_line_numbers.then_some(chunk.end_line).flatten();
         let (encoding, legacy_content) = match chunk.encoding {
@@ -3851,12 +4014,13 @@ fn source_read(
             end_line: included_end_line.unwrap_or(0),
             content: legacy_content,
             content_hash: Some(content_hash_to_wire(chunk.content_hash)),
-            language: chunk.language,
+            language,
             generated: chunk.generated,
             encoding,
             included_start_line,
             included_end_line,
             exact_content: chunk.bytes,
+            tier: analysis_tier_to_wire(tier) as i32,
         });
     }
     Ok(daemon::SourceReadResponse {
@@ -4437,6 +4601,10 @@ fn aggregate_coverage(
         status = weaker_coverage(status, record.status);
         skipped = skipped.saturating_add(record.skipped);
     }
+    if receipt.oversized_inputs > 0 {
+        status = weaker_coverage(status, CoverageStatus::Bounded);
+        skipped = skipped.saturating_add(receipt.oversized_inputs);
+    }
     (tier, status, skipped)
 }
 
@@ -4715,6 +4883,105 @@ fn journal_lifecycle_call<T>(
     runtime.block_on(request).map_err(service_boundary_error)
 }
 
+fn operation_progress(observed: FirstSliceIndexProgress) -> Result<Progress, PublicError> {
+    let completed = u32::try_from(observed.completed).map_err(|_| internal_error())?;
+    let total = u32::try_from(observed.total).map_err(|_| internal_error())?;
+    Progress::new(completed, total).map_err(|_| internal_error())
+}
+
+fn index_support_inventory(
+    service: &FirstSliceService,
+) -> Result<IndexSupportInventory, FirstSliceError> {
+    let snapshot = service.support_inventory_snapshot()?;
+    Ok(map_index_support_inventory(snapshot))
+}
+
+fn map_index_support_inventory(snapshot: FirstSliceSupportInventory) -> IndexSupportInventory {
+    let generation_format = snapshot.generation_format.clone();
+    IndexSupportInventory {
+        adapters: snapshot
+            .adapters
+            .into_iter()
+            .map(|adapter| SupportAdapterInventory {
+                name: adapter.name,
+                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+                languages: adapter.languages,
+                available: true,
+                isolated: adapter.isolated,
+                binary_sha256: None,
+                artifact_sha256: None,
+            })
+            .collect(),
+        repositories: snapshot
+            .repositories
+            .into_iter()
+            .map(|repository| SupportRepositoryInventory {
+                repository_id: support_hex(repository.repository.as_bytes()),
+                root_fingerprint_sha256: None,
+                languages: repository.languages,
+                tiers: repository.tiers,
+                state: "ready".to_owned(),
+                file_count: repository.files,
+                symbol_count: repository.symbols,
+                relationship_count: repository.relationships,
+                generation_count: repository.generation_count,
+            })
+            .collect(),
+        generations: snapshot
+            .generations
+            .into_iter()
+            .map(|generation| SupportGenerationInventory {
+                repository_id: support_hex(generation.repository.as_bytes()),
+                generation_id: support_hex(generation.generation.as_bytes()),
+                format_version: generation_format.clone(),
+                checksum_status: SupportChecksumStatus::Verified,
+                disk_bytes: generation.disk_bytes,
+                state: if generation.active {
+                    "active".to_owned()
+                } else {
+                    "superseded".to_owned()
+                },
+            })
+            .collect(),
+        generation_format_version: Some(snapshot.generation_format),
+        generation_disk_bytes: snapshot.generation_disk_bytes,
+        unreclaimed_temporary_bytes: 0,
+        disk_margin_bytes: None,
+    }
+}
+
+fn refresh_index_support_inventory(
+    service: &RwLock<FirstSliceService>,
+    state: Option<&DaemonState>,
+) {
+    let Some(state) = state else {
+        return;
+    };
+    let inventory = match service.read() {
+        Ok(service) => index_support_inventory(&service),
+        Err(_) => {
+            state.set_catalog_status(HealthStatus::Degraded);
+            return;
+        }
+    };
+    if inventory.is_err()
+        || inventory
+            .is_ok_and(|inventory| state.replace_index_support_inventory(inventory).is_err())
+    {
+        state.set_catalog_status(HealthStatus::Degraded);
+    }
+}
+
+fn support_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
 fn lifecycle_deadline(client_deadline: Instant) -> Result<Instant, PublicError> {
     client_deadline
         .checked_add(LIFECYCLE_FINALIZATION_GRACE)
@@ -4768,61 +5035,295 @@ fn map_queue_error(error: TrySendError<WorkerCommand>) -> PublicError {
 }
 
 fn service_error(error: FirstSliceError) -> PublicError {
-    let (code, message, retryable) = match error {
-        FirstSliceError::Cancelled(_) => (ErrorCode::Cancelled, "operation was cancelled", false),
-        FirstSliceError::RepositoryNotFound => {
-            (ErrorCode::NotFound, "repository was not found", false)
-        }
+    build_service_error(error, None)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RepositoryIndexErrorContext {
+    operation: OperationId,
+    repository: RepositoryId,
+    provider: &'static str,
+}
+
+fn repository_index_error(
+    error: FirstSliceError,
+    context: RepositoryIndexErrorContext,
+) -> PublicError {
+    build_service_error(error, Some(context))
+}
+
+fn build_service_error(
+    error: FirstSliceError,
+    context: Option<RepositoryIndexErrorContext>,
+) -> PublicError {
+    let (code, message, retryable, failure_family, failure_stage) = match error {
+        FirstSliceError::Configuration => (
+            ErrorCode::Internal,
+            "first-slice configuration failed",
+            false,
+            "configuration",
+            "configuration",
+        ),
+        FirstSliceError::RandomUnavailable => (
+            ErrorCode::Internal,
+            "repository identity allocation failed",
+            true,
+            "identity_allocation",
+            "admission",
+        ),
+        FirstSliceError::DeadlineRequired => (
+            ErrorCode::InvalidArgument,
+            "repository indexing requires a deadline",
+            false,
+            "deadline",
+            "admission",
+        ),
+        FirstSliceError::Cancelled(_) => (
+            ErrorCode::Cancelled,
+            "operation was cancelled",
+            false,
+            "cancellation",
+            "executing",
+        ),
+        FirstSliceError::RepositoryNotFound => (
+            ErrorCode::NotFound,
+            "repository was not found",
+            false,
+            "repository_lookup",
+            "admission",
+        ),
         FirstSliceError::GenerationNotFound => (
             ErrorCode::StaleGeneration,
             "generation is not retained",
             false,
+            "generation_lookup",
+            "query",
         ),
         FirstSliceError::GenerationMismatch => (
             ErrorCode::Conflict,
             "generation does not belong to repository",
             false,
+            "generation_identity",
+            "query",
         ),
         FirstSliceError::FixtureShape => (
             ErrorCode::UnsupportedCapability,
             "repository shape is unsupported",
             false,
+            "repository_shape",
+            "discovery",
         ),
-        FirstSliceError::Retention | FirstSliceError::Limits => (
+        FirstSliceError::Repository => (
+            ErrorCode::NotFound,
+            "repository root is unavailable",
+            false,
+            "repository_access",
+            "discovery",
+        ),
+        FirstSliceError::Discovery => (
+            ErrorCode::Internal,
+            "repository discovery failed",
+            false,
+            "discovery",
+            "discovery",
+        ),
+        FirstSliceError::Incremental => (
+            ErrorCode::Internal,
+            "incremental planning failed",
+            false,
+            "incremental_planning",
+            "planning",
+        ),
+        FirstSliceError::DiscoveryDrift => (
+            ErrorCode::Conflict,
+            "repository changed during indexing",
+            true,
+            "discovery_drift",
+            "snapshot",
+        ),
+        FirstSliceError::Retention => (
+            ErrorCode::ResourceExhausted,
+            "first-slice retention limit was reached",
+            true,
+            "retention_limit",
+            "executing",
+        ),
+        FirstSliceError::ResourceLimit { .. } => (
             ErrorCode::ResourceExhausted,
             "first-slice resource limit was reached",
+            false,
+            "resource_limit",
+            "executing",
+        ),
+        FirstSliceError::Limits => (
+            ErrorCode::ResourceExhausted,
+            "first-slice safety limit was reached",
             true,
+            "safety_limit",
+            "executing",
         ),
         FirstSliceError::InsufficientDiskSpace { .. } => (
             ErrorCode::ResourceExhausted,
             "insufficient disk space for repository indexing",
             true,
+            "disk_space",
+            "admission",
         ),
-        FirstSliceError::SymbolNotFound => (ErrorCode::NotFound, "symbol was not found", false),
+        FirstSliceError::SymbolNotFound => (
+            ErrorCode::NotFound,
+            "symbol was not found",
+            false,
+            "symbol_lookup",
+            "query",
+        ),
         FirstSliceError::BudgetExceeded => (
             ErrorCode::BudgetExceeded,
             "first-slice execution budget is exhausted",
             false,
+            "execution_budget",
+            "query",
         ),
-        FirstSliceError::Query => (ErrorCode::NotFound, "query target was not found", false),
+        FirstSliceError::Query => (
+            ErrorCode::NotFound,
+            "query target was not found",
+            false,
+            "query",
+            "query",
+        ),
         FirstSliceError::Adapter => (
             ErrorCode::AdapterFailed,
             "repository analysis failed",
             false,
+            "adapter",
+            "analysis",
+        ),
+        FirstSliceError::Resolution => (
+            ErrorCode::Internal,
+            "semantic resolution failed",
+            false,
+            "resolution",
+            "resolution",
+        ),
+        FirstSliceError::Identity => (
+            ErrorCode::Internal,
+            "generation identity verification failed",
+            false,
+            "identity_verification",
+            "verification",
+        ),
+        FirstSliceError::Catalog => (
+            ErrorCode::Internal,
+            "generation persistence failed",
+            false,
+            "catalog",
+            "publication",
+        ),
+        FirstSliceError::Search => (
+            ErrorCode::Internal,
+            "search index construction failed",
+            false,
+            "search",
+            "indexing",
+        ),
+        FirstSliceError::Source => (
+            ErrorCode::Internal,
+            "source retention failed",
+            false,
+            "source",
+            "publication",
+        ),
+        FirstSliceError::Sharing => (
+            ErrorCode::Internal,
+            "generation transfer failed",
+            false,
+            "generation_transfer",
+            "transfer",
+        ),
+        FirstSliceError::RuntimeTrace(_) => (
+            ErrorCode::InvalidArgument,
+            "runtime trace import failed",
+            false,
+            "runtime_trace",
+            "query",
         ),
         FirstSliceError::CatalogCorrupt => (
             ErrorCode::IndexCorrupt,
             "repository generation is corrupt",
             false,
+            "catalog_integrity",
+            "verification",
         ),
         FirstSliceError::CatalogMigrationRequired => (
             ErrorCode::MigrationRequired,
             "repository generation requires migration",
             false,
+            "catalog_schema",
+            "verification",
         ),
-        _ => (ErrorCode::Internal, "first-slice operation failed", false),
+        _ => (
+            ErrorCode::Internal,
+            "first-slice operation failed",
+            false,
+            "unknown",
+            "executing",
+        ),
     };
-    let mut builder = PublicError::builder(code, message);
+    let mut builder = PublicError::builder(code, message)
+        .detail(
+            static_detail_key("failure_family"),
+            PublicValue::Label(static_safe_label(failure_family)),
+        )
+        .detail(
+            static_detail_key("failure_stage"),
+            PublicValue::Label(static_safe_label(failure_stage)),
+        );
+    if let Some(context) = context {
+        builder = builder
+            .operation(context.operation)
+            .repository(context.repository)
+            .detail(
+                static_detail_key("provider"),
+                PublicValue::Label(static_safe_label(context.provider)),
+            )
+            .next_action(NextAction::InspectOperation);
+    }
+    if let FirstSliceError::ResourceLimit {
+        resource,
+        observed,
+        limit,
+    } = error
+    {
+        builder = builder
+            .detail(
+                static_detail_key("resource"),
+                PublicValue::Label(static_safe_label(resource.as_str())),
+            )
+            .detail(
+                static_detail_key("observed"),
+                PublicValue::Unsigned(observed),
+            )
+            .detail(static_detail_key("limit"), PublicValue::Unsigned(limit))
+            .next_action(NextAction::CollectSupportBundle);
+    }
+    if let FirstSliceError::InsufficientDiskSpace {
+        required_bytes,
+        available_bytes,
+    } = error
+    {
+        builder = builder
+            .detail(
+                static_detail_key("resource"),
+                PublicValue::Label(static_safe_label("disk_bytes")),
+            )
+            .detail(
+                static_detail_key("required_bytes"),
+                PublicValue::Unsigned(required_bytes),
+            )
+            .detail(
+                static_detail_key("available_bytes"),
+                PublicValue::Unsigned(available_bytes),
+            );
+    }
     if matches!(
         error,
         FirstSliceError::CatalogCorrupt | FirstSliceError::CatalogMigrationRequired
@@ -4832,9 +5333,56 @@ fn service_error(error: FirstSliceError) -> PublicError {
     if retryable {
         builder = builder.retryable().next_action(NextAction::Retry);
     }
+    if matches!(
+        error,
+        FirstSliceError::Discovery
+            | FirstSliceError::Incremental
+            | FirstSliceError::Adapter
+            | FirstSliceError::Resolution
+            | FirstSliceError::Identity
+            | FirstSliceError::Catalog
+            | FirstSliceError::Search
+            | FirstSliceError::Source
+    ) {
+        builder = builder.next_action(NextAction::CollectSupportBundle);
+    }
     builder
         .build()
         .unwrap_or_else(|_| unreachable!("closed first-slice errors are statically bounded"))
+}
+
+fn repository_index_provider(mode: FirstSliceIndexMode) -> &'static str {
+    match mode {
+        FirstSliceIndexMode::Structural => "rootlight-first-slice-treesitter",
+        FirstSliceIndexMode::Deep => "rootlight-project-analyzer",
+    }
+}
+
+const fn first_slice_index_provider(mode: FirstSliceIndexMode) -> FirstSliceIndexProvider {
+    match mode {
+        FirstSliceIndexMode::Structural => FirstSliceIndexProvider::TreeSitter,
+        FirstSliceIndexMode::Deep => FirstSliceIndexProvider::ProjectAnalyzer,
+    }
+}
+
+const fn repository_index_support_provider(
+    provider: FirstSliceIndexProvider,
+) -> RepositoryIndexProvider {
+    match provider {
+        FirstSliceIndexProvider::Unknown => RepositoryIndexProvider::Legacy,
+        FirstSliceIndexProvider::TreeSitter => RepositoryIndexProvider::TreeSitter,
+        FirstSliceIndexProvider::ProjectAnalyzer => RepositoryIndexProvider::ProjectAnalyzer,
+    }
+}
+
+fn static_detail_key(value: &'static str) -> DetailKey {
+    DetailKey::parse(value)
+        .unwrap_or_else(|_| unreachable!("static error detail keys are valid safe labels"))
+}
+
+fn static_safe_label(value: &'static str) -> SafeLabel {
+    SafeLabel::parse(value)
+        .unwrap_or_else(|_| unreachable!("static error detail values are valid safe labels"))
 }
 
 fn repository_status_error(
@@ -5098,11 +5646,112 @@ mod tests {
     }
 
     #[test]
+    fn support_inventory_mapping_omits_repository_root_fingerprints() {
+        let repository = RepositoryId::from_bytes([41; 16]);
+        let mapped = map_index_support_inventory(FirstSliceSupportInventory {
+            adapters: Vec::new(),
+            repositories: vec![rootlight_service::FirstSliceSupportRepository {
+                repository,
+                languages: vec!["rust".to_owned()],
+                tiers: vec!["tier_b".to_owned()],
+                files: 3,
+                symbols: 5,
+                relationships: 7,
+                generation_count: 1,
+            }],
+            generations: Vec::new(),
+            generation_format: "1.2".to_owned(),
+            generation_disk_bytes: 0,
+        });
+
+        assert_eq!(mapped.repositories.len(), 1);
+        assert_eq!(
+            mapped.repositories[0].repository_id,
+            support_hex(repository.as_bytes())
+        );
+        assert_eq!(mapped.repositories[0].root_fingerprint_sha256, None);
+        assert_eq!(mapped.repositories[0].generation_count, 1);
+    }
+
+    #[test]
     fn first_slice_budget_exhaustion_keeps_its_public_error_code() {
         let error = service_error(FirstSliceError::BudgetExceeded);
 
         assert_eq!(error.code(), ErrorCode::BudgetExceeded);
         assert!(!error.retryable());
+    }
+
+    #[test]
+    fn repository_index_failures_retain_safe_operation_context() {
+        let operation = OperationId::from_bytes([19; 16]);
+        let repository = RepositoryId::from_bytes([23; 16]);
+        let error = repository_index_error(
+            FirstSliceError::Discovery,
+            RepositoryIndexErrorContext {
+                operation,
+                repository,
+                provider: repository_index_provider(FirstSliceIndexMode::Structural),
+            },
+        );
+
+        assert_eq!(error.code(), ErrorCode::Internal);
+        assert_eq!(error.operation(), Some(operation));
+        assert_eq!(error.repository(), Some(repository));
+        assert_eq!(
+            error.details().get(&static_detail_key("failure_family")),
+            Some(&PublicValue::Label(static_safe_label("discovery")))
+        );
+        assert_eq!(
+            error.details().get(&static_detail_key("failure_stage")),
+            Some(&PublicValue::Label(static_safe_label("discovery")))
+        );
+        assert_eq!(
+            error.details().get(&static_detail_key("provider")),
+            Some(&PublicValue::Label(static_safe_label(
+                "rootlight-first-slice-treesitter"
+            )))
+        );
+        assert_eq!(
+            error.next_actions(),
+            &[
+                NextAction::InspectOperation,
+                NextAction::CollectSupportBundle
+            ]
+        );
+
+        let bounded = repository_index_error(
+            FirstSliceError::ResourceLimit {
+                resource: rootlight_service::FirstSliceResource::Extensions,
+                observed: 10_001,
+                limit: 10_000,
+            },
+            RepositoryIndexErrorContext {
+                operation,
+                repository,
+                provider: repository_index_provider(FirstSliceIndexMode::Structural),
+            },
+        );
+        assert_eq!(bounded.code(), ErrorCode::ResourceExhausted);
+        assert!(!bounded.retryable());
+        assert_eq!(
+            bounded.details().get(&static_detail_key("resource")),
+            Some(&PublicValue::Label(static_safe_label("extensions")))
+        );
+        assert_eq!(
+            bounded.details().get(&static_detail_key("observed")),
+            Some(&PublicValue::Unsigned(10_001))
+        );
+        assert_eq!(
+            bounded.details().get(&static_detail_key("limit")),
+            Some(&PublicValue::Unsigned(10_000))
+        );
+        assert_eq!(
+            bounded.next_actions(),
+            &[
+                NextAction::InspectOperation,
+                NextAction::CollectSupportBundle
+            ]
+        );
     }
 
     #[test]
@@ -5180,6 +5829,7 @@ mod tests {
             index_serialization,
             semantic_refinements,
             refinement,
+            support_state: None,
         };
 
         let response = repository_index(&lanes, resources, request, &context, &mut reply)
@@ -5282,6 +5932,9 @@ mod tests {
             generation: GenerationId::from_bytes([2; 20]),
             parent: None,
             discovered_inputs: 2,
+            visited_entries: 2,
+            excluded_inputs: 0,
+            oversized_inputs: 0,
             indexed_files: 1,
             entities: 1,
             lexical_documents: 1,
@@ -5374,6 +6027,7 @@ mod tests {
                     FirstSliceOperationContext {
                         operation,
                         started_unix_ms: 79,
+                        provider: FirstSliceIndexProvider::TreeSitter,
                     },
                 )
                 .expect("durable marker commits before simulated crash")
@@ -5411,6 +6065,7 @@ mod tests {
             .block_on(FirstSliceDaemon::start_durable(
                 actor.handle(),
                 paths.state_dir(),
+                Arc::new(DaemonState::starting()),
             ))
             .expect("daemon reconciles the durable marker");
         let reconciled = journal.status(operation).expect("reconciled status loads");
@@ -5511,6 +6166,7 @@ mod tests {
                     FirstSliceOperationContext {
                         operation,
                         started_unix_ms: 80,
+                        provider: FirstSliceIndexProvider::TreeSitter,
                     },
                 )
                 .expect("durable marker commits without retained journal history")
@@ -5534,6 +6190,7 @@ mod tests {
             .block_on(FirstSliceDaemon::start_durable(
                 actor.handle(),
                 paths.state_dir(),
+                Arc::new(DaemonState::starting()),
             ))
             .expect("daemon skips pruned operation history");
 
@@ -6287,6 +6944,7 @@ mod tests {
             index_serialization,
             semantic_refinements,
             refinement,
+            support_state: None,
         };
         let error = repository_index(
             &lanes,
@@ -7232,9 +7890,18 @@ mod tests {
         actor.join().expect("journal actor joins");
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
-    fn commit_boundary_failure_reports_failed_and_publishes_nothing() {
-        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+    fn durable_commit_boundary_failure_is_terminal_and_publishes_nothing() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let journal = Arc::new(
+            OperationJournal::open(&paths.operation_journal_path()).expect("journal opens"),
+        );
         let actor =
             JournalActor::start(Arc::clone(&journal), 16, 16).expect("journal actor starts");
         let (reached_sender, reached_receiver) = mpsc::sync_channel(1);
@@ -7246,8 +7913,12 @@ mod tests {
             reached: reached_sender,
             release: release_receiver,
         };
-        let (daemon, workers) = FirstSliceDaemon::start_with_publication_hook(actor.handle(), hook)
-            .expect("host starts");
+        let (daemon, workers) = FirstSliceDaemon::start_durable_with_publication_hook(
+            actor.handle(),
+            paths.state_dir(),
+            hook,
+        )
+        .expect("durable host starts");
         let fixture = TempDir::new().expect("fixture exists");
         fs::create_dir(fixture.path().join("src")).expect("source directory exists");
         fs::write(
@@ -7339,6 +8010,116 @@ mod tests {
             .block_on(workers.stop(tokio::time::Instant::now() + Duration::from_secs(5)))
             .expect("workers stop");
         actor.join().expect("journal actor joins");
+        drop(journal);
+        let reopened =
+            OperationJournal::open(&paths.operation_journal_path()).expect("journal reopens");
+        let persisted = reopened
+            .status(operation)
+            .expect("terminal failure survives restart");
+        assert_eq!(persisted.state, OperationState::Failed);
+        assert_eq!(persisted.stage, OperationStage::Cleanup);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn durable_external_commit_reconciles_live_finalization_failure() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let journal = Arc::new(
+            OperationJournal::open(&paths.operation_journal_path()).expect("journal opens"),
+        );
+        let actor =
+            JournalActor::start(Arc::clone(&journal), 16, 16).expect("journal actor starts");
+        let (reached_sender, reached_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        drop(release_sender);
+        let hook = PublicationBoundaryHook {
+            boundary: PublicationBoundary::AfterCommit,
+            fail_commit: AtomicBool::new(false),
+            armed: AtomicBool::new(true),
+            reached: reached_sender,
+            release: release_receiver,
+        };
+        let (daemon, workers) = FirstSliceDaemon::start_durable_with_publication_hook(
+            actor.handle(),
+            paths.state_dir(),
+            hook,
+        )
+        .expect("durable host starts");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn reconciled_answer() -> u32 { 42 }\n",
+        )
+        .expect("source writes");
+        let operation = OperationId::from_bytes([49; 16]);
+
+        let accepted = execute(
+            &daemon,
+            FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root: fixture.path().to_string_lossy().into_owned(),
+                operation: Some(operation_to_wire(operation)),
+                detached: true,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
+            }),
+        );
+        assert!(matches!(
+            accepted,
+            FirstSliceIpcResponse::RepositoryIndex(_)
+        ));
+        reached_receiver
+            .recv_timeout(Duration::from_secs(30))
+            .expect("external durable commit precedes injected finalization failure");
+        wait_for_terminal_operation(&journal, operation);
+        let terminal = journal.status(operation).expect("terminal status loads");
+        assert_eq!(terminal.state, OperationState::Succeeded);
+        assert_eq!(terminal.stage, OperationStage::Cleanup);
+
+        let status = execute_retrying_busy(
+            &daemon,
+            || {
+                FirstSliceIpcRequest::RepositoryOperationStatus(
+                    daemon::RepositoryOperationStatusRequest {
+                        schema_version: Some(schema_version()),
+                        operation: Some(operation_to_wire(operation)),
+                        action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                        wait_ms: None,
+                        after_revision: None,
+                    },
+                )
+            },
+            "reconciled publication becomes visible",
+        );
+        let FirstSliceIpcResponse::RepositoryOperationStatus(status) = status else {
+            panic!("repository operation status response expected");
+        };
+        assert!(status.published_generation.is_some());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        drop(daemon);
+        runtime
+            .block_on(workers.stop(tokio::time::Instant::now() + Duration::from_secs(5)))
+            .expect("workers stop");
+        actor.join().expect("journal actor joins");
+        drop(journal);
+        let reopened =
+            OperationJournal::open(&paths.operation_journal_path()).expect("journal reopens");
+        assert_eq!(
+            reopened
+                .status(operation)
+                .expect("reconciled success survives restart")
+                .state,
+            OperationState::Succeeded
+        );
     }
 
     #[test]
@@ -7670,7 +8451,9 @@ mod tests {
 
         finish_failed_index(
             &runtime,
-            Instant::now() + Duration::from_secs(1),
+            Instant::now()
+                .checked_sub(Duration::from_millis(1))
+                .expect("elapsed lifecycle deadline derives"),
             &actor.handle(),
             &metadata,
             operation,

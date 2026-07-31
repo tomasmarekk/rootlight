@@ -11,7 +11,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     },
@@ -32,14 +32,20 @@ use rootlight_observability::{
     CancellationAuditOutcome, ControlMethod, DaemonLifecycle as ObservabilityDaemonLifecycle,
     DiagnosticsQuickSnapshot, ErrorCode as ObservabilityErrorCode, HealthSnapshot, OperatingSystem,
     OperationsSummary, ProtocolVersion as ObservabilityProtocolVersion, SpanKind,
-    SupportBundleInput, SupportBundleSchema, Telemetry, TelemetryOutcome, TelemetryOutput,
+    SupportAdapterInventory, SupportBundleInput, SupportBundleSchema,
+    SupportConfigurationInventory, SupportDependencyInventory, SupportDetailValue,
+    SupportGenerationInventory, SupportInventory, SupportNextAction, SupportOperationKind,
+    SupportOperationProgress, SupportOperationStage, SupportOperationState,
+    SupportRepositoryInventory, SupportRuntimeInventory, SupportStorageInventory,
+    SupportTerminalError, SupportTerminalOperation, Telemetry, TelemetryOutcome, TelemetryOutput,
     build_support_bundle_for_schema,
 };
 use rootlight_operations::{
     Cancellation, CancellationAuthority, CancellationDisposition, CancellationOutcome,
     CancellationReason, ClientInstanceId, DeadlineRetry, InternalCancellationAuthority,
-    OperationError, OperationJournal, OperationKind, OperationRecord, OperationStage,
-    OperationState, OperationSubmission, PlanHash, Progress, RecoveryClass, SubmissionOutcome,
+    MAX_RECENT_TERMINAL_OPERATIONS, OperationError, OperationJournal, OperationKind,
+    OperationRecord, OperationStage, OperationState, OperationSubmission, PlanHash, Progress,
+    RecoveryClass, SubmissionOutcome,
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
@@ -51,6 +57,7 @@ use rootlight_protocol::{
     MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES, MINIMUM_PROTOCOL_MINOR, PROTOCOL_VERSION,
     generated::{common::v1 as common, daemon::v1 as daemon},
 };
+use sha2::{Digest as _, Sha256};
 use unicode_casefold::UnicodeCaseFold as _;
 use unicode_normalization::UnicodeNormalization as _;
 
@@ -77,6 +84,7 @@ const CAPABILITIES: &[&str] = &[
     "support.bundle.v1",
     "support.bundle.v2",
     "support.bundle.v3",
+    "support.bundle.v4",
 ];
 /// Default simultaneous negotiated connection limit.
 pub const DEFAULT_CONNECTION_LIMIT: u32 = 128;
@@ -839,6 +847,55 @@ impl Default for DaemonLimits {
     }
 }
 
+/// Source-free indexing inventory supplied by the repository service.
+///
+/// Callers should order records deterministically before publishing a snapshot.
+/// The daemon caps every collection again before retaining it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexSupportInventory {
+    /// Installed adapter and provider identities.
+    pub adapters: Vec<SupportAdapterInventory>,
+    /// Known repository summaries.
+    pub repositories: Vec<SupportRepositoryInventory>,
+    /// Known generation manifest headers.
+    pub generations: Vec<SupportGenerationInventory>,
+    /// Current generation format version.
+    pub generation_format_version: Option<String>,
+    /// Total immutable generation bytes.
+    pub generation_disk_bytes: u64,
+    /// Unreclaimed temporary generation bytes.
+    pub unreclaimed_temporary_bytes: u64,
+    /// Remaining disk margin when the repository service can measure it.
+    pub disk_margin_bytes: Option<u64>,
+}
+
+/// Source-free provider family retained for repository-index diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositoryIndexProvider {
+    /// Built-in structural parser and lowering pipeline.
+    TreeSitter,
+    /// Installed project-level semantic analyzer.
+    ProjectAnalyzer,
+    /// An activation written before provider persistence was introduced.
+    Legacy,
+}
+
+impl RepositoryIndexProvider {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::TreeSitter => "rootlight-first-slice-treesitter",
+            Self::ProjectAnalyzer => "rootlight-project-analyzer",
+            Self::Legacy => "rootlight-indexing",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepositoryIndexSupportContext {
+    repository: RepositoryId,
+    provider: String,
+}
+
 /// Lock-free source-free counters shared by transport and orchestration.
 #[derive(Debug)]
 pub struct DaemonState {
@@ -855,6 +912,8 @@ pub struct DaemonState {
     catalog_status: AtomicU8,
     endpoint_status: AtomicU8,
     resource_pressure: AtomicU8,
+    index_support_inventory: Mutex<IndexSupportInventory>,
+    repository_index_contexts: Mutex<BTreeMap<OperationId, RepositoryIndexSupportContext>>,
 }
 
 impl DaemonState {
@@ -882,6 +941,8 @@ impl DaemonState {
             catalog_status: AtomicU8::new(HealthStatus::Unavailable.as_u8()),
             endpoint_status: AtomicU8::new(HealthStatus::Unavailable.as_u8()),
             resource_pressure: AtomicU8::new(ResourcePressure::Unknown.as_u8()),
+            index_support_inventory: Mutex::new(IndexSupportInventory::default()),
+            repository_index_contexts: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -940,6 +1001,74 @@ impl DaemonState {
     pub fn set_resource_pressure(&self, pressure: ResourcePressure) {
         self.resource_pressure
             .store(pressure.as_u8(), Ordering::Release);
+    }
+
+    /// Replaces the bounded source-free inventory reported by the indexing service.
+    ///
+    /// Records beyond the support schema's reviewed limits are deterministically
+    /// omitted from the end of each caller-ordered collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::SupportInventoryStatePoisoned`] after an earlier panic.
+    pub fn replace_index_support_inventory(
+        &self,
+        mut inventory: IndexSupportInventory,
+    ) -> Result<(), ServiceError> {
+        inventory
+            .adapters
+            .truncate(rootlight_observability::MAX_SUPPORT_ADAPTERS);
+        inventory
+            .repositories
+            .truncate(rootlight_observability::MAX_SUPPORT_REPOSITORIES);
+        inventory
+            .generations
+            .truncate(rootlight_observability::MAX_SUPPORT_GENERATIONS);
+        *self
+            .index_support_inventory
+            .lock()
+            .map_err(|_| ServiceError::SupportInventoryStatePoisoned)? = inventory;
+        Ok(())
+    }
+
+    fn index_support_inventory(&self) -> Result<IndexSupportInventory, ServiceError> {
+        self.index_support_inventory
+            .lock()
+            .map_err(|_| ServiceError::SupportInventoryStatePoisoned)
+            .map(|inventory| inventory.clone())
+    }
+
+    /// Retains source-free repository and provider context for a durable index operation.
+    pub fn record_repository_index_context(
+        &self,
+        operation: OperationId,
+        repository: RepositoryId,
+        provider: RepositoryIndexProvider,
+    ) {
+        let mut contexts = self
+            .repository_index_contexts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !contexts.contains_key(&operation)
+            && contexts.len() >= rootlight_operations::MAX_OPERATION_ROWS
+            && let Some(displaced) = contexts.keys().next().copied()
+        {
+            contexts.remove(&displaced);
+        }
+        contexts.insert(
+            operation,
+            RepositoryIndexSupportContext {
+                repository,
+                provider: provider.label().to_owned(),
+            },
+        );
+    }
+
+    fn repository_index_contexts(&self) -> BTreeMap<OperationId, RepositoryIndexSupportContext> {
+        self.repository_index_contexts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Sets bounded operation counters after one serialized scheduler update.
@@ -1066,6 +1195,12 @@ enum JournalCommand {
         reply: tokio::sync::oneshot::Sender<
             Result<(OperationRecord, rootlight_operations::Cancellation), OperationError>,
         >,
+    },
+    UpdateProgress {
+        operation: OperationId,
+        progress: Progress,
+        claim: MutationClaim,
+        reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
     CompletePublication {
         operation: OperationId,
@@ -1428,6 +1563,31 @@ impl JournalActorHandle {
                 operation,
                 deadline,
                 claim: Some(claim.clone()),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
+    }
+
+    /// Persists monotonic operation progress before an absolute lifecycle deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, actor, lifecycle, or journal failure.
+    pub async fn update_progress_until(
+        &self,
+        operation: OperationId,
+        progress: Progress,
+        deadline: Instant,
+    ) -> Result<OperationRecord, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::UpdateProgress {
+                operation,
+                progress,
+                claim: claim.clone(),
                 reply,
             },
         )?;
@@ -2180,6 +2340,16 @@ fn execute_journal_command(
             });
             let _ = reply.send(result);
         }
+        JournalCommand::UpdateProgress {
+            operation,
+            progress,
+            claim,
+            reply,
+        } => {
+            let _ = reply.send(execute_claimed(Some(&claim), || {
+                journal.update_progress(operation, progress)
+            }));
+        }
         JournalCommand::CompletePublication {
             operation,
             admission,
@@ -2292,11 +2462,12 @@ fn execute_journal_command(
                             _ => Err(OperationError::InvalidStage),
                         }
                     } else {
+                        let total = record.progress.total.max(record.progress.completed).max(1);
                         journal
                             .update_progress(
                                 operation,
-                                Progress::new(1, 1).unwrap_or_else(|_| {
-                                    unreachable!("fixed synthetic progress is valid")
+                                Progress::new(total, total).unwrap_or_else(|_| {
+                                    unreachable!("equal completed and total progress is valid")
                                 }),
                             )
                             .and_then(|_| {
@@ -4843,6 +5014,251 @@ impl CancellationHandoffTestHook {
     }
 }
 
+fn support_inventory(
+    health: &Health,
+    limits: DaemonLimits,
+    journal: rootlight_operations::OperationJournalSupportSnapshot,
+    index: IndexSupportInventory,
+) -> Result<SupportInventory, ServiceError> {
+    let logical_processors = std::thread::available_parallelism()
+        .map(|count| u32::try_from(count.get()).unwrap_or(u32::MAX))
+        .unwrap_or(1);
+    Ok(SupportInventory {
+        runtime: SupportRuntimeInventory {
+            product_version: env!("CARGO_PKG_VERSION").to_owned(),
+            binary_name: "rootlight-daemon".to_owned(),
+            binary_sha256: running_binary_sha256(),
+            feature_profile: vec!["local-only".to_owned(), "standard".to_owned()],
+            protocol_major: PROTOCOL_MAJOR,
+            protocol_minor: PROTOCOL_MINOR,
+            logical_processors,
+            physical_memory_bytes: None,
+        },
+        dependencies: vec![SupportDependencyInventory {
+            name: "sqlite".to_owned(),
+            version: journal.sqlite_version.clone(),
+            sha256: None,
+        }],
+        adapters: index.adapters,
+        repositories: index.repositories,
+        generations: index.generations,
+        configuration: SupportConfigurationInventory {
+            schema_version: 1,
+            connection_limit: limits.connection_limit(),
+            client_connection_limit: limits.client_connection_limit(),
+            control_queue_limit: u32::try_from(limits.control_queue_limit())
+                .map_err(|_| ServiceError::InvalidLimits)?,
+            operation_queue_limit: limits.operation_queue_limit(),
+            client_operation_limit: limits.client_operation_limit(),
+            operation_workers: u32::try_from(limits.operation_workers())
+                .map_err(|_| ServiceError::InvalidLimits)?,
+            request_timeout_ms: duration_ms_u64(limits.request_timeout())?,
+            maintenance_interval_ms: duration_ms_u64(limits.maintenance_interval())?,
+            shutdown_grace_ms: duration_ms_u64(limits.shutdown_grace())?,
+        },
+        storage: SupportStorageInventory {
+            catalog_schema_version: health.catalog_schema_version,
+            generation_format_version: index.generation_format_version,
+            sqlite_version: journal.sqlite_version,
+            persistent: journal.persistent,
+            defensive: true,
+            foreign_keys: true,
+            trusted_schema: false,
+            catalog_allocated_bytes: journal.allocated_bytes,
+            maximum_catalog_bytes: journal.maximum_catalog_bytes,
+            maximum_wal_bytes: journal.maximum_wal_bytes,
+            maximum_shm_bytes: journal.maximum_shm_bytes,
+            generation_disk_bytes: index.generation_disk_bytes,
+            unreclaimed_temporary_bytes: index.unreclaimed_temporary_bytes,
+            disk_margin_bytes: index.disk_margin_bytes,
+        },
+    })
+}
+
+fn support_terminal_operations(
+    records: &[OperationRecord],
+    contexts: &BTreeMap<OperationId, RepositoryIndexSupportContext>,
+) -> Result<Vec<SupportTerminalOperation>, ServiceError> {
+    records
+        .iter()
+        .map(|record| support_terminal_operation(record, contexts.get(&record.operation)))
+        .collect()
+}
+
+fn support_terminal_operation(
+    record: &OperationRecord,
+    context: Option<&RepositoryIndexSupportContext>,
+) -> Result<SupportTerminalOperation, ServiceError> {
+    let error = record
+        .error
+        .as_ref()
+        .map(|error| support_terminal_error(record.operation, error))
+        .transpose()?;
+    let repository_id = context
+        .map(|context| context.repository)
+        .or_else(|| record.error.as_ref().and_then(PublicError::repository))
+        .map(|repository| support_id(repository.as_bytes()));
+    let provider = context.map(|context| context.provider.clone()).or_else(|| {
+        record.error.as_ref().and_then(|error| {
+            error
+                .details()
+                .iter()
+                .find(|(key, _)| key.as_str() == "provider")
+                .and_then(|(_, value)| match value {
+                    PublicValue::Label(label) => Some(label.as_str().to_owned()),
+                    _ => None,
+                })
+        })
+    });
+    Ok(SupportTerminalOperation {
+        operation_id: support_id(record.operation.as_bytes()),
+        repository_id,
+        kind: match record.kind {
+            OperationKind::ControlProbe => SupportOperationKind::ControlProbe,
+            OperationKind::RepositoryIndex => SupportOperationKind::RepositoryIndex,
+        },
+        state: match record.state {
+            OperationState::Succeeded => SupportOperationState::Succeeded,
+            OperationState::Failed => SupportOperationState::Failed,
+            OperationState::Cancelled => SupportOperationState::Cancelled,
+            OperationState::Interrupted => SupportOperationState::Interrupted,
+            OperationState::Queued | OperationState::Running | OperationState::Cancelling => {
+                return Err(ServiceError::UnexpectedResponse);
+            }
+        },
+        stage: match record.stage {
+            OperationStage::Accepted => SupportOperationStage::Accepted,
+            OperationStage::Executing => SupportOperationStage::Executing,
+            OperationStage::Cleanup => SupportOperationStage::Cleanup,
+        },
+        revision: record.revision,
+        progress: SupportOperationProgress {
+            completed: record.progress.completed,
+            total: record.progress.total,
+        },
+        provider,
+        error,
+    })
+}
+
+fn support_terminal_error(
+    operation: OperationId,
+    error: &PublicError,
+) -> Result<SupportTerminalError, ServiceError> {
+    let details = error
+        .details()
+        .iter()
+        .map(|(key, value)| {
+            support_detail_value(value).map(|value| (key.as_str().to_owned(), value))
+        })
+        .collect::<Result<_, _>>()?;
+    let mut next_actions = error
+        .next_actions()
+        .iter()
+        .map(support_next_action)
+        .collect::<Result<Vec<_>, _>>()?;
+    if next_actions.is_empty() {
+        next_actions.push(SupportNextAction::InspectOperation);
+    }
+    Ok(SupportTerminalError {
+        code: observability_error_code(error.code()),
+        retryable: error.retryable(),
+        retry_after_ms: error.retry_after_ms(),
+        repository_id: error
+            .repository()
+            .map(|repository| support_id(repository.as_bytes())),
+        operation_id: Some(support_id(operation.as_bytes())),
+        generation_id: error
+            .generation()
+            .map(|generation| support_id(generation.as_bytes())),
+        details,
+        next_actions,
+    })
+}
+
+fn support_detail_value(value: &PublicValue) -> Result<SupportDetailValue, ServiceError> {
+    match value {
+        PublicValue::Boolean(value) => Ok(SupportDetailValue::Boolean(*value)),
+        PublicValue::Integer(value) => Ok(SupportDetailValue::Integer(*value)),
+        PublicValue::Unsigned(value) => Ok(SupportDetailValue::Unsigned(*value)),
+        PublicValue::Repository(value) => {
+            Ok(SupportDetailValue::Repository(support_id(value.as_bytes())))
+        }
+        PublicValue::Generation(value) => {
+            Ok(SupportDetailValue::Generation(support_id(value.as_bytes())))
+        }
+        PublicValue::Operation(value) => {
+            Ok(SupportDetailValue::Operation(support_id(value.as_bytes())))
+        }
+        PublicValue::Label(value) => Ok(SupportDetailValue::Label(value.as_str().to_owned())),
+        _ => Err(ServiceError::UnsupportedPublicErrorVariant),
+    }
+}
+
+fn support_next_action(action: &NextAction) -> Result<SupportNextAction, ServiceError> {
+    match action {
+        NextAction::CorrectField { field } => Ok(SupportNextAction::CorrectField {
+            field: field.as_str().to_owned(),
+        }),
+        NextAction::Retry => Ok(SupportNextAction::Retry),
+        NextAction::SelectSupportedVersion => Ok(SupportNextAction::SelectSupportedVersion),
+        NextAction::InspectOperation => Ok(SupportNextAction::InspectOperation),
+        NextAction::RebuildRepository => Ok(SupportNextAction::RebuildRepository),
+        NextAction::CollectSupportBundle => Ok(SupportNextAction::CollectSupportBundle),
+        NextAction::RestartEnumeration => Ok(SupportNextAction::RestartEnumeration),
+        _ => Err(ServiceError::UnsupportedPublicErrorVariant),
+    }
+}
+
+fn support_id(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}")
+            .unwrap_or_else(|_| unreachable!("formatting into String cannot fail"));
+    }
+    encoded
+}
+
+fn duration_ms_u64(duration: Duration) -> Result<u64, ServiceError> {
+    u64::try_from(duration.as_millis()).map_err(|_| ServiceError::InvalidLimits)
+}
+
+fn running_binary_sha256() -> Option<String> {
+    static DIGEST: OnceLock<Option<String>> = OnceLock::new();
+    DIGEST.get_or_init(compute_running_binary_sha256).clone()
+}
+
+fn compute_running_binary_sha256() -> Option<String> {
+    use std::io::Read as _;
+
+    let path = std::env::current_exe().ok()?;
+    let mut binary = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = binary.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest: [u8; 32] = hasher.finalize().into();
+    Some(hex_bytes(&digest))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}")
+            .unwrap_or_else(|_| unreachable!("formatting into String cannot fail"));
+    }
+    encoded
+}
+
 impl ControlService {
     /// Creates a ready service for one daemon instance.
     #[must_use]
@@ -4984,6 +5400,7 @@ impl ControlService {
                         "diagnostics.quick" | "support.bundle.v1" => selected_minor >= 3,
                         "support.bundle.v2" => selected_minor >= 4,
                         "support.bundle.v3" => selected_minor >= 5,
+                        "support.bundle.v4" => selected_minor >= 8,
                         "code.locate.v1"
                         | "repository.index.v1"
                         | "source.read.v1"
@@ -5166,21 +5583,50 @@ impl ControlService {
             SupportBundleSchema::V2 => {
                 rootlight_observability::PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION
             }
-            SupportBundleSchema::V3 => {
+            SupportBundleSchema::V3 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V3,
+            SupportBundleSchema::V4 => {
                 rootlight_observability::CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
             }
         };
+        let (terminal_operations, inventory) = if schema == SupportBundleSchema::V4 {
+            let terminal_records =
+                match self.journal.recent_terminal(MAX_RECENT_TERMINAL_OPERATIONS) {
+                    Ok(records) => records,
+                    Err(error) => {
+                        return ControlResponse::Error(operation_error_to_public(&error, None));
+                    }
+                };
+            let contexts = self.state.repository_index_contexts();
+            let terminal_operations =
+                match support_terminal_operations(&terminal_records, &contexts) {
+                    Ok(operations) => operations,
+                    Err(_) => return ControlResponse::Error(internal_error()),
+                };
+            let inventory = match self.support_bundle_inventory_snapshot(&health) {
+                Ok(inventory) => inventory,
+                Err(_) => return ControlResponse::Error(internal_error()),
+            };
+            (terminal_operations, Some(inventory))
+        } else {
+            (Vec::new(), None)
+        };
+        if Instant::now() >= deadline {
+            return ControlResponse::Error(request_timed_out());
+        }
         let input = SupportBundleInput {
             protocol_version: match schema {
                 SupportBundleSchema::V1 => ObservabilityProtocolVersion::V1_3,
                 SupportBundleSchema::V2 => ObservabilityProtocolVersion::V1_4,
                 SupportBundleSchema::V3 => ObservabilityProtocolVersion::V1_5,
+                SupportBundleSchema::V4 => ObservabilityProtocolVersion::V1_8,
             },
             operating_system: observability_operating_system(),
             architecture: observability_architecture(),
             health: health_snapshot(&health),
             diagnostics: diagnostics_snapshot(&diagnostics),
             operations: self.state.operation_counts(),
+            terminal_operations,
+            inventory,
             telemetry: (schema != SupportBundleSchema::V1).then(|| self.state.telemetry.snapshot()),
         };
         match build_support_bundle_for_schema(&input, schema) {
@@ -5196,6 +5642,18 @@ impl ControlService {
             Ok(_) => ControlResponse::Error(request_timed_out()),
             Err(_) => ControlResponse::Error(internal_error()),
         }
+    }
+
+    fn support_bundle_inventory_snapshot(
+        &self,
+        health: &Health,
+    ) -> Result<SupportInventory, ServiceError> {
+        let journal = self
+            .journal
+            .support_snapshot()
+            .map_err(ServiceError::Operations)?;
+        let index = self.state.index_support_inventory()?;
+        support_inventory(health, self.limits, journal, index)
     }
 
     /// Executes the quick check through a separate read-only catalog connection.
@@ -8737,7 +9195,9 @@ fn request_from_wire(
                 )));
             }
             Ok(DecodedRequest::Control(ControlRequest::SupportBundle(
-                if selected_protocol_minor >= 5 {
+                if selected_protocol_minor >= 8 {
+                    SupportBundleSchema::V4
+                } else if selected_protocol_minor >= 5 {
                     SupportBundleSchema::V3
                 } else if selected_protocol_minor >= 4 {
                     SupportBundleSchema::V2
@@ -9255,6 +9715,7 @@ impl ServiceError {
             | Self::ChannelClosed
             | Self::ClientConnectionLimit { .. }
             | Self::AdmissionStatePoisoned
+            | Self::SupportInventoryStatePoisoned
             | Self::RequestTimedOut
             | Self::TaskFailed(_)
             | Self::ThreadSpawn(_)
@@ -9564,6 +10025,9 @@ pub enum ServiceError {
     /// A synchronous client-admission ledger was poisoned.
     #[error("daemon operation admission state is unavailable")]
     AdmissionStatePoisoned,
+    /// The source-free indexing inventory lock was poisoned.
+    #[error("daemon support inventory state is unavailable")]
+    SupportInventoryStatePoisoned,
     /// A daemon request exceeded its response deadline.
     #[error("daemon request timed out")]
     RequestTimedOut,
@@ -10505,8 +10969,14 @@ mod tests {
                     .expect("supported minor negotiates"),
                 common::ContractVersion { major: 1, minor }
             );
-            let expected = if minor >= 5 {
+            let expected = if minor >= 8 {
                 CAPABILITIES.to_vec()
+            } else if minor >= 5 {
+                CAPABILITIES
+                    .iter()
+                    .copied()
+                    .filter(|capability| *capability != "support.bundle.v4")
+                    .collect()
             } else if minor >= 4 {
                 vec![
                     "diagnostics.quick",
@@ -10579,6 +11049,156 @@ mod tests {
         assert_eq!(wire.archive_bytes, bundle.archive_bytes);
         assert_eq!(wire.sha256, bundle.sha256);
         assert!(!wire.contains_source);
+    }
+
+    #[test]
+    fn production_support_bundle_contains_terminal_error_and_index_inventory() {
+        let service = service();
+        service.state().set_catalog_status(HealthStatus::Healthy);
+        let operation = OperationId::from_bytes([41; 16]);
+        let succeeded_operation = OperationId::from_bytes([44; 16]);
+        let repository = RepositoryId::from_bytes([42; 16]);
+        let limit = DetailKey::parse("limit").expect("detail key is valid");
+        let provider = DetailKey::parse("provider").expect("detail key is valid");
+        let error = PublicError::builder(ErrorCode::ResourceExhausted, "resource limit exceeded")
+            .repository(repository)
+            .operation(operation)
+            .detail(limit, PublicValue::Unsigned(10))
+            .detail(
+                provider,
+                PublicValue::Label(SafeLabel::parse("tree-sitter").expect("label is valid")),
+            )
+            .next_action(NextAction::InspectOperation)
+            .build()
+            .expect("public error builds");
+        service
+            .journal
+            .enqueue(operation)
+            .expect("operation enqueues");
+        service
+            .journal
+            .start_execution(operation)
+            .expect("operation starts");
+        service
+            .journal
+            .transition(operation, OperationState::Failed, Some(&error))
+            .expect("operation fails");
+        service
+            .journal
+            .enqueue(succeeded_operation)
+            .expect("successful operation enqueues");
+        service
+            .journal
+            .start_execution(succeeded_operation)
+            .expect("successful operation starts");
+        service
+            .journal
+            .transition(succeeded_operation, OperationState::Succeeded, None)
+            .expect("successful operation completes");
+        service.state().record_repository_index_context(
+            succeeded_operation,
+            repository,
+            RepositoryIndexProvider::ProjectAnalyzer,
+        );
+        service
+            .state()
+            .replace_index_support_inventory(IndexSupportInventory {
+                adapters: vec![SupportAdapterInventory {
+                    name: "tree-sitter".to_owned(),
+                    version: Some("builtin".to_owned()),
+                    languages: vec!["rust".to_owned()],
+                    available: true,
+                    isolated: false,
+                    binary_sha256: None,
+                    artifact_sha256: None,
+                }],
+                repositories: vec![SupportRepositoryInventory {
+                    repository_id: support_id(repository.as_bytes()),
+                    root_fingerprint_sha256: None,
+                    languages: vec!["rust".to_owned()],
+                    tiers: vec!["structural".to_owned()],
+                    state: "ready".to_owned(),
+                    file_count: 12,
+                    symbol_count: 40,
+                    relationship_count: 75,
+                    generation_count: 1,
+                }],
+                generations: vec![SupportGenerationInventory {
+                    repository_id: support_id(repository.as_bytes()),
+                    generation_id: support_id(&[43; 20]),
+                    format_version: "1.2".to_owned(),
+                    checksum_status: rootlight_observability::SupportChecksumStatus::Verified,
+                    disk_bytes: 4096,
+                    state: "active".to_owned(),
+                }],
+                generation_format_version: Some("1.2".to_owned()),
+                generation_disk_bytes: 4096,
+                unreclaimed_temporary_bytes: 0,
+                disk_margin_bytes: Some(1024 * 1024),
+            })
+            .expect("index support inventory publishes");
+
+        let bundle = service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V4));
+        let ControlResponse::SupportBundle(bundle) = bundle else {
+            panic!("production support bundle response expected");
+        };
+        assert_eq!(
+            bundle.schema_version,
+            rootlight_observability::CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+        );
+        assert!(!bundle.contains_source);
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(bundle.archive)).expect("support ZIP opens");
+        let mut operation_bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut archive
+                .by_name("operations-summary.json")
+                .expect("operations entry opens"),
+            &mut operation_bytes,
+        )
+        .expect("operations entry reads");
+        let operations: rootlight_observability::SupportOperationsV4 =
+            serde_json::from_slice(&operation_bytes).expect("operations entry decodes");
+        assert_eq!(operations.recent_terminal.len(), 2);
+        let failed = operations
+            .recent_terminal
+            .iter()
+            .find(|terminal| terminal.operation_id == support_id(operation.as_bytes()))
+            .expect("failed terminal operation is retained");
+        assert_eq!(
+            failed.error.as_ref().map(|error| error.code),
+            Some(ObservabilityErrorCode::ResourceExhausted)
+        );
+        let succeeded = operations
+            .recent_terminal
+            .iter()
+            .find(|terminal| terminal.operation_id == support_id(succeeded_operation.as_bytes()))
+            .expect("successful terminal operation is retained");
+        assert_eq!(
+            succeeded.repository_id.as_deref(),
+            Some(support_id(repository.as_bytes()).as_str())
+        );
+        assert_eq!(
+            succeeded.provider.as_deref(),
+            Some("rootlight-project-analyzer")
+        );
+        assert_eq!(failed.provider.as_deref(), Some("tree-sitter"));
+
+        let mut inventory_bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut archive
+                .by_name("inventory.json")
+                .expect("inventory entry opens"),
+            &mut inventory_bytes,
+        )
+        .expect("inventory entry reads");
+        let inventory: SupportInventory =
+            serde_json::from_slice(&inventory_bytes).expect("inventory entry decodes");
+        assert_eq!(inventory.adapters.len(), 1);
+        assert_eq!(inventory.repositories.len(), 1);
+        assert_eq!(inventory.generations.len(), 1);
+        assert_eq!(inventory.storage.generation_disk_bytes, 4096);
+        assert_eq!(inventory.runtime.protocol_minor, 8);
     }
 
     #[test]
@@ -11157,6 +11777,76 @@ mod tests {
         assert!(first.inserted);
         assert!(!second.inserted);
         assert_eq!(first.operation, second.operation);
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test]
+    async fn journal_actor_progress_and_finalization_are_durable_and_deadline_bounded() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = OperationId::from_bytes([31; 16]);
+        journal.enqueue(operation).expect("operation enqueues");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let handle = actor.handle();
+        let progress = Progress::new(3, 10).expect("progress is valid");
+
+        let updated = handle
+            .update_progress_until(
+                operation,
+                progress,
+                Instant::now()
+                    .checked_add(Duration::from_secs(1))
+                    .expect("test deadline is representable"),
+            )
+            .await
+            .expect("progress persists");
+        assert_eq!(updated.progress, progress);
+        assert_eq!(
+            journal
+                .status(operation)
+                .expect("durable progress reloads")
+                .progress,
+            progress
+        );
+
+        let expired = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("test instant can move backward");
+        assert!(matches!(
+            handle
+                .update_progress_until(
+                    operation,
+                    Progress::new(4, 10).expect("later progress is valid"),
+                    expired,
+                )
+                .await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+        assert_eq!(
+            journal
+                .status(operation)
+                .expect("expired mutation leaves state readable")
+                .progress,
+            progress
+        );
+        let completed = handle
+            .finish_operation(operation, None)
+            .await
+            .expect("operation completion persists");
+        assert_eq!(completed.state, OperationState::Succeeded);
+        assert_eq!(
+            completed.progress,
+            Progress::new(10, 10).expect("completed progress is valid")
+        );
+        assert_eq!(
+            journal
+                .status(operation)
+                .expect("completed progress reloads")
+                .progress,
+            completed.progress
+        );
         actor.join().expect("actor joins");
     }
 
@@ -15615,6 +16305,8 @@ mod tests {
                 provider: "tree-sitter".to_owned(),
                 evidence: "parser".to_owned(),
                 confidence: 1_000,
+                language: "rust".to_owned(),
+                tier: daemon::FirstSliceAnalysisTier::FirstSliceTierB as i32,
             }],
             unresolved_symbols: vec![symbols[1].clone()],
             truncated: false,
@@ -15663,6 +16355,7 @@ mod tests {
                 included_start_line: Some(1),
                 included_end_line: Some(1),
                 exact_content: content.as_bytes().to_vec(),
+                tier: daemon::FirstSliceAnalysisTier::FirstSliceTierB as i32,
             };
         let source_response = daemon::SourceReadResponse {
             schema_version: schema,

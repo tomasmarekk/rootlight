@@ -131,6 +131,38 @@ where
         Ok(())
     }
 
+    /// Moves one just-committed generation back to hidden staging.
+    ///
+    /// This is the in-process compensation path when an external durable
+    /// activation marker fails after retention commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError::GenerationNotFound`] when the committed
+    /// generation is absent, or [`QueryError::InvalidGenerationSet`] when the
+    /// supplied prior active generation is not retained.
+    pub fn rollback_commit(
+        &mut self,
+        generation: GenerationId,
+        prior_active: Option<GenerationId>,
+    ) -> Result<(), QueryError> {
+        if prior_active.is_some_and(|active| !self.generations.contains_key(&active)) {
+            return Err(QueryError::InvalidGenerationSet);
+        }
+        if self.staged.contains_key(&generation) {
+            return Err(QueryError::DuplicateGeneration);
+        }
+        let retained = self
+            .generations
+            .remove(&generation)
+            .ok_or(QueryError::GenerationNotFound)?;
+        self.staged.insert(generation, retained);
+        if self.active == Some(generation) {
+            self.active = prior_active;
+        }
+        Ok(())
+    }
+
     /// Discards one staged, still-hidden generation.
     ///
     /// # Errors

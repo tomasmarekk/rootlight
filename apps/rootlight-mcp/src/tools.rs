@@ -3098,8 +3098,8 @@ mod tests {
                     "72c20ac780c573e7ae282c449f2caa04fa0b9f618e6755dbda1fb6d32c7b847b".to_owned(),
                 ),
                 (
-                    678_363,
-                    "b36690667639f75e121d86c278e39173420417cd726a1e95011e683d3f959c78".to_owned(),
+                    678_411,
+                    "6088e3d4a8d166d2da1672e7b700b867aa9dbeb868d20257b3e248ae1f7f6b4b".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"

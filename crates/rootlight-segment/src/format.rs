@@ -308,7 +308,7 @@ fn require_stats(
 ) -> Result<(), SegmentError> {
     context.require(GenerationResource::Rows, stats.stored_rows())?;
     context.require(GenerationResource::SourceReferences, stats.source_refs())?;
-    context.require(GenerationResource::TextBytes, stats.text_bytes())?;
+    context.require(GenerationResource::EncodedTextBytes, stats.text_bytes())?;
     Ok(())
 }
 

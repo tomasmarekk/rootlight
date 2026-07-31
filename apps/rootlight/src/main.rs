@@ -1740,6 +1740,8 @@ fn support_bundle_from_domain(bundle: DomainSupportBundle) -> ClientSupportBundl
         archive_bytes: bundle.archive_bytes,
         contains_source: bundle.contains_source,
         telemetry: None,
+        inventory: None,
+        terminal_operations: Vec::new(),
     }
 }
 

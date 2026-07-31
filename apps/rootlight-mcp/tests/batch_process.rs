@@ -919,15 +919,13 @@ fn ensure_daemon_binary() -> PathBuf {
         .parent()
         .expect("MCP binary has a profile directory");
     let daemon = profile_dir.join(format!("rootlight-daemon{}", std::env::consts::EXE_SUFFIX));
-    if daemon.is_file() {
-        return daemon;
-    }
-
     let target_dir = profile_dir
         .parent()
         .expect("profile directory belongs to a Cargo target directory");
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    // The process contract evolves with the generated daemon schema. Let Cargo
+    // refresh a stale sibling binary instead of trusting that its path exists.
     let output = Command::new(cargo)
         .current_dir(&workspace)
         .args([

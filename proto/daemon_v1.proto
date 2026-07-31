@@ -582,6 +582,8 @@ message FirstSliceSymbolExplanation {
   string provider = 11;
   string evidence = 12;
   uint32 confidence = 13;
+  string language = 14;
+  FirstSliceAnalysisTier tier = 15;
 }
 
 // Returns explanations in request order and unresolved stable identities.
@@ -631,6 +633,7 @@ message FirstSliceSourceChunk {
   optional uint64 included_end_line = 13;
   // Exact bytes for both UTF-8 and binary source reads.
   bytes exact_content = 14;
+  FirstSliceAnalysisTier tier = 15;
 }
 
 // Returns exact verified source chunks.

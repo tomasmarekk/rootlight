@@ -23,16 +23,16 @@ use rootlight_ids::{
 };
 use rootlight_ir::{
     AnalysisTier, Confidence, ContainerRef, CoverageRecord, CoverageScope, CoverageStatus,
-    DiagnosticRecord, EntityFlag, EntityKind, EntityRecord, EntityVisibility, EvidenceKind,
-    ExtensionEnvelope, ExtensionSupport, FactDomain, FactEvidence, FactRef, FileIdentityClaim,
-    FileRecord, IrLimits, LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION,
-    LexicalEvidenceFormat, LexicalEvidenceKind, LexicalEvidenceV1, MAX_LEXICAL_SIGNATURE_BYTES,
-    OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind,
-    ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SkippedRegion,
-    SkippedRegionReason, SourceRef, SourceSpan, SymbolIdentityClaim, derive_coverage_record_id,
-    derive_diagnostic_record_id, derive_occurrence_record_id, derive_provenance_record_id,
-    derive_relation_record_id, derive_skipped_region_id, entity_kind_identity_label,
-    new_file_identity_claim_envelope, new_lexical_evidence_envelope,
+    DiagnosticRecord, DiagnosticSeverity, EntityFlag, EntityKind, EntityRecord, EntityVisibility,
+    EvidenceKind, ExtensionEnvelope, ExtensionSupport, FactDomain, FactEvidence, FactRef,
+    FileIdentityClaim, FileRecord, IrLimits, LEXICAL_EXTENSION_NAMESPACE,
+    LEXICAL_EXTENSION_VERSION, LexicalEvidenceFormat, LexicalEvidenceKind, LexicalEvidenceV1,
+    MAX_LEXICAL_SIGNATURE_BYTES, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
+    ProducerIdentity, ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
+    RelationRecord, SkippedRegion, SkippedRegionReason, SourceRef, SourceSpan, SymbolIdentityClaim,
+    derive_coverage_record_id, derive_diagnostic_record_id, derive_occurrence_record_id,
+    derive_provenance_record_id, derive_relation_record_id, derive_skipped_region_id,
+    entity_kind_identity_label, new_file_identity_claim_envelope, new_lexical_evidence_envelope,
     new_symbol_identity_claim_envelope,
 };
 
@@ -277,6 +277,40 @@ impl TreeSitterAnalyzer {
         execute_analysis(&prepared, request, extensions, memory_policy, cancellation)
     }
 
+    /// Emits bounded file identity and coverage facts for invalid UTF-8 input.
+    ///
+    /// The ordinary parser contract continues to reject malformed UTF-8. A
+    /// repository orchestrator may use this explicit fallback to preserve the
+    /// rest of a generation while declaring the affected file incomplete.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] when the request does not belong to this
+    /// analyzer, the source is valid UTF-8, cancellation wins, or the normal
+    /// bounded sink and report contracts reject the fallback output.
+    pub fn analyze_unsupported_encoding(
+        &self,
+        request: &AnalysisRequest<'_>,
+        extensions: ExtensionSupport,
+        memory_policy: MemoryAdmissionPolicy,
+        cancellation: &Cancellation,
+    ) -> Result<AnalysisOutput, AdapterError> {
+        cancellation.check()?;
+        self.validate_request_identity(request)?;
+        if std::str::from_utf8(request.source().bytes()).is_ok() {
+            return Err(provider_failure(
+                "treesitter-unsupported-encoding-fallback-requires-invalid-utf8",
+            ));
+        }
+        execute_analysis(
+            &UnsupportedEncodingAnalyzer { analyzer: self },
+            request,
+            extensions,
+            memory_policy,
+            cancellation,
+        )
+    }
+
     fn validate_request_identity(&self, request: &AnalysisRequest<'_>) -> Result<(), AdapterError> {
         if self.descriptor.language() != request.language() {
             return Err(RequestError::UnsupportedLanguage.into());
@@ -404,6 +438,148 @@ impl LanguageAnalyzer for PreparsedTreeSitterAnalyzer<'_> {
     ) -> Result<AnalysisReport, AdapterError> {
         self.analyzer
             .lower_parse_output(request, self.parse_output, sink, cancellation)
+    }
+}
+
+struct UnsupportedEncodingAnalyzer<'a> {
+    analyzer: &'a TreeSitterAnalyzer,
+}
+
+impl LanguageAnalyzer for UnsupportedEncodingAnalyzer<'_> {
+    fn descriptor(&self) -> &ProducerDescriptor {
+        &self.analyzer.descriptor
+    }
+
+    fn analyze(
+        &self,
+        request: &AnalysisRequest<'_>,
+        sink: &mut dyn IrBatchSink,
+        cancellation: &Cancellation,
+    ) -> Result<AnalysisReport, AdapterError> {
+        let source = request.source().source_ref();
+        let provenance = parser_provenance(self.analyzer, request, source)?;
+        let provenance_id = provenance.id;
+        let file = parser_file(request, source, provenance_id)?;
+        let file_claim = FileIdentityClaim {
+            file: file.id,
+            repository: file.repository,
+            path: file.path.clone(),
+            path_identity: request.source().path().identity_bytes().to_vec(),
+            content_hash: file.content_hash,
+            byte_length: file.byte_length,
+        };
+        let file_claim = new_file_identity_claim_envelope(
+            &file_claim,
+            source.generation(),
+            provenance_id,
+            source.clone(),
+        )
+        .map_err(|_| provider_failure("treesitter-file-identity-claim"))?;
+        let mut extension_bytes = 0;
+        ensure_extension_budget(&file_claim, 0, &mut extension_bytes, request.limits().ir())?;
+
+        let skipped_domains = [
+            FactDomain::Entities,
+            FactDomain::Occurrences,
+            FactDomain::Relations,
+        ];
+        let mut skipped_regions = Vec::new();
+        skipped_regions
+            .try_reserve_exact(skipped_domains.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        for domain in skipped_domains {
+            skipped_regions.push(skipped_region(
+                source,
+                source.span(),
+                domain,
+                SkippedRegionReason::UnsupportedEncoding,
+                "invalid-utf8",
+                provenance_id,
+            )?);
+        }
+
+        let domain_coverage = [
+            DomainCoverage::new(FactDomain::Files, CoverageStatus::Complete, 1, 1, 0),
+            DomainCoverage::new(FactDomain::Entities, CoverageStatus::Bounded, 1, 0, 1),
+            DomainCoverage::new(FactDomain::Occurrences, CoverageStatus::Bounded, 1, 0, 1),
+            DomainCoverage::new(FactDomain::Relations, CoverageStatus::Bounded, 1, 0, 1),
+            DomainCoverage::new(FactDomain::Provenance, CoverageStatus::Complete, 1, 1, 0),
+            DomainCoverage::new(
+                FactDomain::SourceMappings,
+                CoverageStatus::Complete,
+                0,
+                0,
+                0,
+            ),
+            DomainCoverage::new(FactDomain::Diagnostics, CoverageStatus::Complete, 1, 1, 0),
+            DomainCoverage::new(FactDomain::Extensions, CoverageStatus::Complete, 1, 1, 0),
+        ]
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AdapterError::from)?;
+        let coverage_records = coverage_records(
+            source,
+            provenance_id,
+            self.analyzer.descriptor.tier(),
+            &domain_coverage,
+        )?;
+        let mut diagnostic = DiagnosticRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository: source.repository(),
+            generation: source.generation(),
+            code: "invalid-utf8".to_owned(),
+            message: "source is not valid utf-8".to_owned(),
+            severity: DiagnosticSeverity::Error,
+            source: Some(source.clone()),
+            coverage_effect: CoverageStatus::Bounded,
+            provenance: provenance_id,
+            evidence: direct_evidence(source.clone()),
+        };
+        diagnostic.id = derive_diagnostic_record_id(&diagnostic)
+            .map_err(|_| provider_failure("treesitter-diagnostic-identity"))?;
+
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(
+                3_usize
+                    .checked_add(skipped_regions.len())
+                    .and_then(|count| count.checked_add(coverage_records.len()))
+                    .ok_or(SinkError::AccountingOverflow)?,
+            )
+            .map_err(|_| SinkError::AllocationFailed)?;
+        records.push(IrRecord::File(file));
+        records.push(IrRecord::Provenance(provenance));
+        records.extend(coverage_records.into_iter().map(IrRecord::Coverage));
+        records.extend(skipped_regions.into_iter().map(IrRecord::SkippedRegion));
+        records.push(IrRecord::Diagnostic(diagnostic));
+        records.push(IrRecord::Extension(file_claim));
+        emit_records(records, request, sink, cancellation)?;
+        cancellation.check()?;
+
+        let usage = sink.staged_usage();
+        let coverage = CoverageReport::new(
+            self.analyzer.descriptor.tier(),
+            CoverageStatus::Bounded,
+            request.source().bytes().len(),
+            0,
+            skipped_domains.len(),
+            domain_coverage,
+        )
+        .map_err(AdapterError::from)?;
+        let resources = ResourceUsage::new(
+            request.source().bytes().len(),
+            usage.records(),
+            0,
+            0,
+            None,
+            usage,
+        );
+        rootlight_adapter_sdk::WorkReport::new(
+            coverage,
+            resources,
+            StreamEnd::new(sink.next_sequence(), usage),
+        )
+        .map_err(AdapterError::from)
     }
 }
 
@@ -583,7 +759,9 @@ fn preflight_lowering_limits(
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(
                 &mut string_bytes,
-                "lexical-evidence-unavailable".len(),
+                "lexical-evidence-unavailable"
+                    .len()
+                    .max("lexical-evidence-resource-limit".len()),
                 limits,
             )?;
         }
@@ -592,7 +770,9 @@ fn preflight_lowering_limits(
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(
                 &mut string_bytes,
-                "signature-capture-unavailable".len(),
+                "signature-capture-unavailable"
+                    .len()
+                    .max("lexical-evidence-resource-limit".len()),
                 limits,
             )?;
         }
@@ -650,7 +830,15 @@ fn preflight_lowering_limits(
             account_string(&mut string_bytes, "outside-included-ranges".len(), limits)?;
         }
     }
-    for _ in 0..extension_candidates {
+    let required_extension_candidates = checked_add(1, entity_candidates)?;
+    require_resource_limit(
+        ResourceKind::Records,
+        required_extension_candidates,
+        limits.max_extensions,
+    )?;
+    let admitted_optional_extensions =
+        extension_candidates.min(limits.max_extensions - required_extension_candidates);
+    for _ in 0..admitted_optional_extensions {
         account_string(&mut string_bytes, LEXICAL_EXTENSION_NAMESPACE.len(), limits)?;
         account_string(&mut string_bytes, LEXICAL_EXTENSION_VERSION.len(), limits)?;
     }
@@ -680,11 +868,8 @@ fn preflight_lowering_limits(
         diagnostic_count,
         limits.max_diagnostics,
     )?;
-    require_resource_limit(
-        ResourceKind::Records,
-        extension_candidates,
-        limits.max_extensions,
-    )?;
+    let extension_records =
+        checked_add(required_extension_candidates, admitted_optional_extensions)?;
     let total_records = [
         2,
         entity_candidates,
@@ -693,7 +878,7 @@ fn preflight_lowering_limits(
         8,
         skipped_candidates,
         diagnostic_count,
-        extension_candidates,
+        extension_records,
     ]
     .into_iter()
     .try_fold(0_usize, checked_add)?;
@@ -754,7 +939,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let provenance_id = provenance.id;
         let file = self.file(provenance_id)?;
 
-        let entity_plan = self.entity_drafts(cancellation, &mut total_string_bytes)?;
+        let mut entity_plan = self.entity_drafts(cancellation, &mut total_string_bytes)?;
         let drafts = &entity_plan.drafts;
         let mut materialized = HashMap::new();
         for (index, draft) in drafts.iter().enumerate() {
@@ -770,16 +955,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
             )?;
             materialized.insert(draft.local_id, entity);
         }
+        entity_plan
+            .unsupported_scope_entities
+            .extend(exclude_ambiguous_entities(&mut materialized));
 
         let mut entities = BTreeMap::<SymbolId, EntityRecord>::new();
         let mut symbol_claims = BTreeMap::<SymbolId, SymbolIdentityClaim>::new();
         let mut identity_guards = BTreeMap::<SymbolId, [u8; 32]>::new();
         for entity in materialized.values() {
-            ensure_symbol_identity_collision_free(
+            if record_symbol_identity_guard(
                 &mut identity_guards,
                 entity.record.id,
                 entity.identity_guard,
-            )?;
+            ) {
+                return Err(provider_failure("treesitter-lowering-symbol-collision"));
+            }
             match entities.get(&entity.record.id) {
                 Some(existing) => {
                     if !equivalent_entity_projection(existing, &entity.record) {
@@ -829,6 +1019,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         .map_err(|_| provider_failure("treesitter-file-identity-claim"))?;
         ensure_extension_budget(
             &file_claim_envelope,
+            extensions.len(),
             &mut extension_bytes,
             self.request.limits().ir(),
         )?;
@@ -849,7 +1040,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 source,
             )
             .map_err(|_| provider_failure("treesitter-symbol-identity-claim"))?;
-            ensure_extension_budget(&envelope, &mut extension_bytes, self.request.limits().ir())?;
+            ensure_extension_budget(
+                &envelope,
+                extensions.len(),
+                &mut extension_bytes,
+                self.request.limits().ir(),
+            )?;
             extensions.insert(envelope.id, envelope);
         }
 
@@ -901,14 +1097,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         LexicalEvidenceFormat::SourceText,
                         signature,
                     ) {
-                        if !extensions.contains_key(&envelope.id) {
-                            ensure_extension_budget(
-                                &envelope,
-                                &mut extension_bytes,
-                                self.request.limits().ir(),
+                        if !insert_optional_extension(
+                            envelope,
+                            &mut extensions,
+                            &mut extension_bytes,
+                            self.request.limits().ir(),
+                        )? {
+                            let region = skipped_region(
+                                self.full_source,
+                                signature_span,
+                                FactDomain::Extensions,
+                                SkippedRegionReason::ResourceLimit,
+                                "lexical-evidence-resource-limit",
+                                provenance_id,
                             )?;
+                            skipped.insert(region.id, region);
                         }
-                        extensions.insert(envelope.id, envelope);
                     } else {
                         let region = skipped_region(
                             self.full_source,
@@ -979,14 +1183,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         LexicalEvidenceFormat::PlainText,
                         comment,
                     ) {
-                        if !extensions.contains_key(&envelope.id) {
-                            ensure_extension_budget(
-                                &envelope,
-                                &mut extension_bytes,
-                                self.request.limits().ir(),
+                        if !insert_optional_extension(
+                            envelope,
+                            &mut extensions,
+                            &mut extension_bytes,
+                            self.request.limits().ir(),
+                        )? {
+                            let region = skipped_region(
+                                self.full_source,
+                                fact.span(),
+                                FactDomain::Extensions,
+                                SkippedRegionReason::ResourceLimit,
+                                "lexical-evidence-resource-limit",
+                                provenance_id,
                             )?;
+                            skipped.insert(region.id, region);
                         }
-                        extensions.insert(envelope.id, envelope);
                     } else {
                         let region = skipped_region(
                             self.full_source,
@@ -1131,47 +1343,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
     }
 
     fn provenance(&self) -> Result<ProvenanceRecord, AdapterError> {
-        let producer = self.analyzer.descriptor.identity();
-        let mut record = ProvenanceRecord {
-            id: FactId::from_bytes([0; 20]),
-            repository: self.full_source.repository(),
-            generation: self.full_source.generation(),
-            producer_kind: ProducerKind::Parser,
-            producer: producer.clone(),
-            binary_digest: self.analyzer.binary_digest,
-            frontend_version: Some(self.analyzer.frontend_version.clone()),
-            language: self.request.language().as_str().to_owned(),
-            tier: self.analyzer.descriptor.tier(),
-            build_context: self.request.build_context(),
-            input_sources: vec![self.full_source.clone()],
-            evidence_sources: vec![self.full_source.clone()],
-            derivation_parents: Vec::new(),
-            rule: None,
-        };
-        record.id = derive_provenance_record_id(&record)
-            .map_err(|_| provider_failure("treesitter-provenance-identity"))?;
-        Ok(record)
+        parser_provenance(self.analyzer, self.request, self.full_source)
     }
 
     fn file(&self, provenance: FactId) -> Result<FileRecord, AdapterError> {
-        let generated = self
-            .request
-            .generated_status()
-            .ok_or(RequestError::GeneratedStatusRequired)?;
-        Ok(FileRecord {
-            id: self.full_source.span().file(),
-            repository: self.full_source.repository(),
-            generation: self.full_source.generation(),
-            path: self.request.source().path().as_str().to_owned(),
-            path_locator: Some(self.request.source().path().to_locator()),
-            content_hash: self.full_source.content_hash(),
-            byte_length: self.full_source.span().end_byte(),
-            language: self.request.language().as_str().to_owned(),
-            encoding: self.request.encoding().as_str().to_owned(),
-            generated,
-            provenance,
-            evidence: direct_evidence(self.full_source.clone()),
-        })
+        parser_file(self.request, self.full_source, provenance)
     }
 
     fn entity_drafts(
@@ -1767,19 +1943,57 @@ fn entity_identity_guard(
     Ok(*hasher.finalize().as_bytes())
 }
 
-fn ensure_symbol_identity_collision_free(
+fn exclude_ambiguous_entities(
+    materialized: &mut HashMap<u64, MaterializedEntity>,
+) -> BTreeSet<u64> {
+    let mut guards = BTreeMap::<SymbolId, [u8; 32]>::new();
+    let mut excluded_symbols = BTreeSet::new();
+    for entity in materialized.values() {
+        if record_symbol_identity_guard(&mut guards, entity.record.id, entity.identity_guard) {
+            excluded_symbols.insert(entity.record.id);
+        }
+    }
+
+    // Anonymous scopes deliberately omit source positions from durable symbol
+    // identity. If two such scopes produce the same semantic identity, omit
+    // both ambiguous subtrees and report bounded coverage instead of binding
+    // either declaration to the other's stable ID.
+    loop {
+        let previous_count = excluded_symbols.len();
+        for entity in materialized.values() {
+            if matches!(
+                entity.record.container,
+                Some(ContainerRef::Entity(parent)) if excluded_symbols.contains(&parent)
+            ) {
+                excluded_symbols.insert(entity.record.id);
+            }
+        }
+        if excluded_symbols.len() == previous_count {
+            break;
+        }
+    }
+
+    let mut excluded_local_ids = BTreeSet::new();
+    materialized.retain(|local_id, entity| {
+        let retained = !excluded_symbols.contains(&entity.record.id);
+        if !retained {
+            excluded_local_ids.insert(*local_id);
+        }
+        retained
+    });
+    excluded_local_ids
+}
+
+fn record_symbol_identity_guard(
     guards: &mut BTreeMap<SymbolId, [u8; 32]>,
     symbol: SymbolId,
     guard: [u8; 32],
-) -> Result<(), AdapterError> {
+) -> bool {
     match guards.get(&symbol) {
-        Some(existing) if existing != &guard => {
-            Err(provider_failure("treesitter-lowering-symbol-collision"))
-        }
-        Some(_) => Ok(()),
+        Some(existing) => existing != &guard,
         None => {
             guards.insert(symbol, guard);
-            Ok(())
+            false
         }
     }
 }
@@ -1954,6 +2168,56 @@ fn containment_relation(
     record.id = derive_relation_record_id(&record)
         .map_err(|_| provider_failure("treesitter-relation-identity"))?;
     Ok(record)
+}
+
+fn parser_provenance(
+    analyzer: &TreeSitterAnalyzer,
+    request: &AnalysisRequest<'_>,
+    source: &SourceRef,
+) -> Result<ProvenanceRecord, AdapterError> {
+    let mut record = ProvenanceRecord {
+        id: FactId::from_bytes([0; 20]),
+        repository: source.repository(),
+        generation: source.generation(),
+        producer_kind: ProducerKind::Parser,
+        producer: analyzer.descriptor.identity().clone(),
+        binary_digest: analyzer.binary_digest,
+        frontend_version: Some(analyzer.frontend_version.clone()),
+        language: request.language().as_str().to_owned(),
+        tier: analyzer.descriptor.tier(),
+        build_context: request.build_context(),
+        input_sources: vec![source.clone()],
+        evidence_sources: vec![source.clone()],
+        derivation_parents: Vec::new(),
+        rule: None,
+    };
+    record.id = derive_provenance_record_id(&record)
+        .map_err(|_| provider_failure("treesitter-provenance-identity"))?;
+    Ok(record)
+}
+
+fn parser_file(
+    request: &AnalysisRequest<'_>,
+    source: &SourceRef,
+    provenance: FactId,
+) -> Result<FileRecord, AdapterError> {
+    let generated = request
+        .generated_status()
+        .ok_or(RequestError::GeneratedStatusRequired)?;
+    Ok(FileRecord {
+        id: source.span().file(),
+        repository: source.repository(),
+        generation: source.generation(),
+        path: request.source().path().as_str().to_owned(),
+        path_locator: Some(request.source().path().to_locator()),
+        content_hash: source.content_hash(),
+        byte_length: source.span().end_byte(),
+        language: request.language().as_str().to_owned(),
+        encoding: request.encoding().as_str().to_owned(),
+        generated,
+        provenance,
+        evidence: direct_evidence(source.clone()),
+    })
 }
 
 fn diagnostic_record(
@@ -2775,20 +3039,53 @@ fn account_string(total: &mut usize, length: usize, limits: &IrLimits) -> Result
 
 fn ensure_extension_budget(
     envelope: &ExtensionEnvelope,
+    current_count: usize,
     total: &mut usize,
     limits: &IrLimits,
 ) -> Result<(), AdapterError> {
+    let observed_count = checked_add(current_count, 1)?;
+    require_resource_limit(ResourceKind::Records, observed_count, limits.max_extensions)?;
     require_resource_limit(
         ResourceKind::ExtensionBytes,
         envelope.payload.len(),
         limits.max_extension_payload_bytes,
     )?;
-    *total = checked_add(*total, envelope.payload.len())?;
+    let observed_bytes = checked_add(*total, envelope.payload.len())?;
     require_resource_limit(
         ResourceKind::ExtensionBytes,
-        *total,
+        observed_bytes,
         limits.max_total_extension_bytes,
-    )
+    )?;
+    *total = observed_bytes;
+    Ok(())
+}
+
+fn insert_optional_extension(
+    envelope: ExtensionEnvelope,
+    extensions: &mut BTreeMap<FactId, ExtensionEnvelope>,
+    total: &mut usize,
+    limits: &IrLimits,
+) -> Result<bool, AdapterError> {
+    if let std::collections::btree_map::Entry::Occupied(mut existing) =
+        extensions.entry(envelope.id)
+    {
+        existing.insert(envelope);
+        return Ok(true);
+    }
+    let fits = envelope.payload.len() <= limits.max_extension_payload_bytes
+        && extensions
+            .len()
+            .checked_add(1)
+            .is_some_and(|count| count <= limits.max_extensions)
+        && total
+            .checked_add(envelope.payload.len())
+            .is_some_and(|bytes| bytes <= limits.max_total_extension_bytes);
+    if !fits {
+        return Ok(false);
+    }
+    ensure_extension_budget(&envelope, extensions.len(), total, limits)?;
+    extensions.insert(envelope.id, envelope);
+    Ok(true)
 }
 
 fn lexical_extension(
@@ -3083,17 +3380,9 @@ mod tests {
     fn symbol_identity_guard_rejects_distinct_inputs_for_one_id() {
         let symbol = SymbolId::from_bytes([7; 20]);
         let mut guards = BTreeMap::new();
-        ensure_symbol_identity_collision_free(&mut guards, symbol, [1; 32])
-            .expect("first identity input is admitted");
-        ensure_symbol_identity_collision_free(&mut guards, symbol, [1; 32])
-            .expect("equivalent identity input deduplicates");
-        let error = ensure_symbol_identity_collision_free(&mut guards, symbol, [2; 32])
-            .expect_err("distinct identity inputs cannot share a symbol ID");
-        assert!(matches!(
-            error,
-            AdapterError::ProviderFailed { code }
-                if code.as_str() == "treesitter-lowering-symbol-collision"
-        ));
+        assert!(!record_symbol_identity_guard(&mut guards, symbol, [1; 32]));
+        assert!(!record_symbol_identity_guard(&mut guards, symbol, [1; 32]));
+        assert!(record_symbol_identity_guard(&mut guards, symbol, [2; 32]));
     }
 
     proptest! {

@@ -16,7 +16,8 @@ pub use generation::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationBudgetError, GenerationContext,
     GenerationContractVersion, GenerationControlError, GenerationManifestRecipe,
     GenerationMetadata, GenerationResource, GenerationSnapshot, GenerationSnapshotError,
-    GenerationStats, GenerationValidationError, GenerationWriter, HARD_MAX_GENERATION_ROWS,
+    GenerationStats, GenerationValidationError, GenerationWriter,
+    HARD_MAX_GENERATION_ENCODED_TEXT_BYTES, HARD_MAX_GENERATION_ROWS,
     HARD_MAX_GENERATION_SOURCE_REFS, HARD_MAX_GENERATION_TEXT_BYTES, IdentityVerificationError,
     IdentityVerifiedGeneration, PROPOSED_IDENTITY_CLAIM_VERSION,
 };

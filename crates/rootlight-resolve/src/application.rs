@@ -4,21 +4,22 @@
 //! fails closed when an existing derived-fact chain would require a wider
 //! identity cascade than this resolver stage owns.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{FactId, SymbolId, content_hash};
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, Confidence, EvidenceKind, FactEvidence, FactRef, IrLimits,
-    NormalizedIrDocument, OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerIdentity,
-    ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SourceRef,
-    canonicalize_ir_document, derive_occurrence_record_id, derive_provenance_record_id,
-    derive_relation_record_id,
+    AnalysisTier, BuildContextIdentity, Confidence, EvidenceKind, ExtensionSupport, FactEvidence,
+    FactRef, IrLimits, NormalizedIrDocument, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
+    ProducerIdentity, ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
+    RelationRecord, SourceRef, canonicalize_ir_document, derive_occurrence_record_id,
+    derive_provenance_record_id, derive_relation_record_id, validate_ir_document,
 };
 
 use crate::{
     AppliedResolution, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionDecision,
     ResolutionEngine, ResolutionError, ResolutionOutcome, ResolutionRule, ResolverFactContext,
+    engine::{CandidateIndex, resolvable_role},
 };
 
 impl ResolutionEngine {
@@ -39,6 +40,12 @@ impl ResolutionEngine {
         cancellation: &Cancellation,
     ) -> Result<AppliedResolution, ResolutionError> {
         let batch = self.resolve(&document, cancellation)?;
+        let lookup = CandidateIndex::build(
+            &document.files,
+            &document.entities,
+            &document.provenance,
+            cancellation,
+        )?;
         let occurrence_indexes = document
             .occurrences
             .iter()
@@ -47,6 +54,12 @@ impl ResolutionEngine {
             .collect::<BTreeMap<_, _>>();
         let mut occurrence_remap = BTreeMap::new();
         let mut pending_relations = Vec::new();
+        let mut new_provenance = Vec::new();
+        let mut known_provenance = document
+            .provenance
+            .iter()
+            .map(|record| record.id)
+            .collect::<BTreeSet<_>>();
         let producer = resolver_producer(self.limits.candidate_limit(), &self.policy)?;
 
         for decision in &batch.decisions {
@@ -58,31 +71,33 @@ impl ResolutionEngine {
                 .get(&decision.occurrence)
                 .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
             let provenance = build_provenance(
-                &document,
+                document.repository,
+                document.generation,
+                &lookup,
                 &document.occurrences[index],
                 decision,
                 &producer,
                 context,
             )?;
             let provenance_id = provenance.id;
-            if !document
-                .provenance
-                .iter()
-                .any(|existing| existing.id == provenance_id)
-            {
-                document.provenance.push(provenance);
+            if known_provenance.insert(provenance_id) {
+                new_provenance.push(provenance);
             }
 
             let occurrence = &mut document.occurrences[index];
             let old_id = occurrence.id;
             apply_target(occurrence, decision);
             occurrence.provenance = provenance_id;
-            merge_candidate_derivations(&mut occurrence.evidence, decision);
+            // Candidate identities already live in the target and resolver
+            // provenance. Repeating them in occurrence evidence multiplies
+            // storage without adding an independent derivation edge.
             occurrence.id =
                 derive_occurrence_record_id(occurrence).map_err(ResolutionError::FactIdentity)?;
             occurrence_remap.insert(old_id, occurrence.id);
             pending_relations.extend(relation_specs(occurrence, decision));
         }
+        drop(lookup);
+        document.provenance.append(&mut new_provenance);
 
         ensure_nonrelation_remap_is_safe(&document, &occurrence_remap)?;
         let relation_remap =
@@ -97,6 +112,90 @@ impl ResolutionEngine {
                 .map_err(ResolutionError::InvalidDocument)?;
 
         Ok(AppliedResolution { document, batch })
+    }
+
+    /// Applies semantic resolution without retaining a repository-sized
+    /// explanation batch.
+    ///
+    /// This path preserves the same targets, provenance, relations, and
+    /// canonical identities as [`Self::apply`], but streams one decision at a
+    /// time so substantial repositories do not duplicate every candidate and
+    /// rejection explanation in memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResolutionError`] under the same validation, resolution,
+    /// provenance, remapping, cancellation, and canonicalization conditions as
+    /// [`Self::apply`].
+    pub fn apply_document(
+        &self,
+        mut document: NormalizedIrDocument,
+        context: ResolverFactContext,
+        cancellation: &Cancellation,
+    ) -> Result<NormalizedIrDocument, ResolutionError> {
+        cancellation.check()?;
+        validate_ir_document(
+            &document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .map_err(ResolutionError::InvalidDocument)?;
+
+        let lookup = CandidateIndex::build(
+            &document.files,
+            &document.entities,
+            &document.provenance,
+            cancellation,
+        )?;
+        let repository = document.repository;
+        let generation = document.generation;
+        let producer = resolver_producer(self.limits.candidate_limit(), &self.policy)?;
+        let mut known_provenance = document
+            .provenance
+            .iter()
+            .map(|record| record.id)
+            .collect::<BTreeSet<_>>();
+        let mut new_provenance = Vec::new();
+        let mut occurrence_remap = BTreeMap::new();
+
+        for occurrence in &mut document.occurrences {
+            cancellation.check()?;
+            if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+                || !resolvable_role(occurrence.role)
+            {
+                continue;
+            }
+            let decision = self.resolve_occurrence(occurrence, &lookup, cancellation)?;
+            if matches!(decision.outcome, ResolutionOutcome::Unresolved { .. }) {
+                continue;
+            }
+            let provenance = build_provenance(
+                repository, generation, &lookup, occurrence, &decision, &producer, context,
+            )?;
+            let provenance_id = provenance.id;
+            if known_provenance.insert(provenance_id) {
+                new_provenance.push(provenance);
+            }
+
+            let old_id = occurrence.id;
+            apply_target(occurrence, &decision);
+            occurrence.provenance = provenance_id;
+            occurrence.id =
+                derive_occurrence_record_id(occurrence).map_err(ResolutionError::FactIdentity)?;
+            occurrence_remap.insert(old_id, occurrence.id);
+            for relation in relation_specs(occurrence, &decision) {
+                document.relations.push(relation.into_record()?);
+            }
+        }
+        drop(lookup);
+        document.provenance.append(&mut new_provenance);
+
+        ensure_nonrelation_remap_is_safe(&document, &occurrence_remap)?;
+        let relation_remap =
+            remap_existing_relations(&mut document.relations, &occurrence_remap, cancellation)?;
+        ensure_relation_remap_is_safe(&document, &relation_remap)?;
+        canonicalize_ir_document(document, &IrLimits::default(), &Default::default())
+            .map_err(ResolutionError::InvalidDocument)
     }
 }
 
@@ -159,16 +258,18 @@ fn resolver_producer(
 }
 
 fn build_provenance(
-    document: &NormalizedIrDocument,
+    repository: rootlight_ids::RepositoryId,
+    generation: rootlight_ids::GenerationId,
+    lookup: &CandidateIndex<'_>,
     occurrence: &OccurrenceRecord,
     decision: &ResolutionDecision,
     producer: &ProducerIdentity,
     context: ResolverFactContext,
 ) -> Result<ProvenanceRecord, ResolutionError> {
-    let parent = document
+    let parent = lookup
         .provenance
-        .iter()
-        .find(|record| record.id == occurrence.provenance)
+        .get(&occurrence.provenance)
+        .copied()
         .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
     let mut sources = vec![occurrence.source.clone()];
     let mut derivation_parents = Vec::new();
@@ -176,10 +277,10 @@ fn build_provenance(
     let mut tier = parent.tier;
 
     for candidate in &decision.explanation.candidates {
-        let entity = document
+        let entity = lookup
             .entities
-            .iter()
-            .find(|entity| entity.id == candidate.symbol)
+            .get(&candidate.symbol)
+            .copied()
             .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
         derivation_parents.push(FactRef::Entity(entity.id));
         tier = lower_tier(tier, entity.tier);
@@ -188,10 +289,10 @@ fn build_provenance(
         {
             sources.push(source.clone());
         }
-        let entity_provenance = document
+        let entity_provenance = lookup
             .provenance
-            .iter()
-            .find(|record| record.id == entity.provenance)
+            .get(&entity.provenance)
+            .copied()
             .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
         context_digests.push(entity_provenance.build_context.digest());
     }
@@ -206,10 +307,9 @@ fn build_provenance(
     for digest in context_digests {
         context_bytes.extend_from_slice(digest.as_bytes());
     }
-    let language = document
+    let language = lookup
         .files
-        .iter()
-        .find(|file| file.id == occurrence.file)
+        .get(&occurrence.file)
         .map(|file| file.language.clone())
         .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
     let rule = match decision.explanation.rule {
@@ -218,8 +318,8 @@ fn build_provenance(
     };
     let mut record = ProvenanceRecord {
         id: FactId::from_bytes([0; 20]),
-        repository: document.repository,
-        generation: document.generation,
+        repository,
+        generation,
         producer_kind: ProducerKind::Rule,
         producer: producer.clone(),
         binary_digest: context.binary_digest(),
@@ -248,8 +348,11 @@ fn apply_target(occurrence: &mut OccurrenceRecord, decision: &ResolutionDecision
             completeness,
             confidence,
         } => {
+            let mut symbols = symbols.clone();
+            symbols.sort_unstable();
+            symbols.dedup();
             occurrence.target = OccurrenceTarget::Candidates {
-                symbols: symbols.clone(),
+                symbols,
                 total_count: *total_count,
                 completeness: *completeness,
             };
@@ -257,18 +360,6 @@ fn apply_target(occurrence: &mut OccurrenceRecord, decision: &ResolutionDecision
         }
         ResolutionOutcome::Unresolved { .. } => {}
     }
-}
-
-fn merge_candidate_derivations(evidence: &mut FactEvidence, decision: &ResolutionDecision) {
-    evidence.derivation.extend(
-        decision
-            .explanation
-            .candidates
-            .iter()
-            .map(|candidate| FactRef::Entity(candidate.symbol)),
-    );
-    evidence.derivation.sort_unstable();
-    evidence.derivation.dedup();
 }
 
 fn relation_specs(
@@ -500,5 +591,86 @@ fn tier_rank(tier: AnalysisTier) -> u8 {
         AnalysisTier::TierC => 2,
         AnalysisTier::TierD => 1,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rootlight_ids::{FactId, FileId, GenerationId, RepositoryId, SymbolId, content_hash};
+    use rootlight_ir::{
+        Confidence, CoverageStatus, FactEvidence, OccurrenceRecord, OccurrenceRole,
+        OccurrenceTarget, SourceRef, SourceSpan,
+    };
+
+    use crate::{CompletenessAssumption, ResolutionExplanation};
+
+    use super::{
+        RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionDecision, ResolutionOutcome,
+        ResolutionRule, apply_target,
+    };
+
+    #[test]
+    fn candidate_targets_are_canonical_before_identity_derivation() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let spelling = content_hash(b"candidate");
+        let mut occurrence = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, 0, 1).expect("source span is valid"),
+                content_hash(b"x"),
+                None,
+            ),
+            role: OccurrenceRole::Reference,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved {
+                text_hash: spelling,
+            },
+            syntactic_text_hash: spelling,
+            syntax_kind: "identifier".to_owned(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).expect("confidence is valid"),
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        };
+        let lower = SymbolId::from_bytes([6; 20]);
+        let higher = SymbolId::from_bytes([7; 20]);
+        let decision = ResolutionDecision {
+            occurrence: occurrence.id,
+            outcome: ResolutionOutcome::Candidates {
+                symbols: vec![higher, lower],
+                total_count: 2,
+                completeness: CoverageStatus::Complete,
+                confidence: Confidence::new(800).expect("confidence is valid"),
+            },
+            explanation: ResolutionExplanation {
+                rule: ResolutionRule::LexicalScope,
+                provider_name: RESOLVER_PROVIDER_NAME,
+                provider_version: RESOLVER_PROVIDER_VERSION,
+                candidates: Vec::new(),
+                rejected_candidates: Vec::new(),
+                rejected_total: 0,
+                completeness_assumptions: vec![CompletenessAssumption::ValidatedNormalizedDocument],
+            },
+        };
+
+        apply_target(&mut occurrence, &decision);
+
+        assert_eq!(
+            occurrence.target,
+            OccurrenceTarget::Candidates {
+                symbols: vec![lower, higher],
+                total_count: 2,
+                completeness: CoverageStatus::Complete,
+            }
+        );
     }
 }

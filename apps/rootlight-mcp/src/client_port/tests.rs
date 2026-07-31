@@ -13,21 +13,22 @@ use rootlight_client::{
     ArchitectureOverview, ChangeImpact, ChangeImpactRiskSummary, ClientError, CodeDead,
     CodeDeadEntryPointSummary, CodeLocate, ContinuationAvailability, CoverageStatus,
     CycleProjection, FlowTrace, FlowTraceFrontier, FlowTraceProjection, GenerationSelector,
-    HistoryArchitectureDelta, HistoryCompare, HistoryMatchedStates, LocateMode, OperationKind,
-    OperationStage, OperationState, PlanChange, PlanChangeContextPack, PlanChangeImpactSummary,
-    QueryContext, QueryUsage, RecoveryClass, RepositoryCatalogEntry, RepositoryCatalogFreshness,
-    RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryCatalogSnapshotId,
-    RepositoryCatalogState, RepositoryCoverageEntry, RepositoryIndex, RepositoryIndexDiagnostic,
-    RepositoryIndexMode, RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
-    RepositoryStatusRequest, RequestOptions, RequestTimeout, ResultCompleteness,
-    ResultCompletenessState, SourceChunk, SourceRead, SourceReference, SymbolExplain,
-    SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
+    HistoryArchitectureDelta, HistoryCompare, HistoryMatchedStates, LocateHit, LocateMode,
+    OperationKind, OperationStage, OperationState, PlanChange, PlanChangeContextPack,
+    PlanChangeImpactSummary, QueryContext, QueryUsage, RecoveryClass, RepositoryCatalogEntry,
+    RepositoryCatalogFreshness, RepositoryCatalogPage, RepositoryCatalogPageRequest,
+    RepositoryCatalogSnapshotId, RepositoryCatalogState, RepositoryCoverageEntry, RepositoryIndex,
+    RepositoryIndexDiagnostic, RepositoryIndexMode, RepositoryOperationAction,
+    RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
+    RequestTimeout, ResultCompleteness, ResultCompletenessState, SourceChunk, SourceRead,
+    SourceReference, SymbolExplain, SymbolExplanation, SymbolRelationships, TestsSelect,
+    TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
     ErrorCode, ExposureProfile, PublicError, ToolResponse, VerticalTool,
     vertical::{
-        CodeLocateOutput, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
+        AnalysisTier, CodeLocateOutput, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
         SymbolExplainOutput,
     },
 };
@@ -37,7 +38,8 @@ use tokio::sync::watch;
 
 use super::{
     AsyncClientFuture, AsyncFirstSliceClient, FIRST_SLICE_PROVIDER, NativeFirstSliceClientPort,
-    UnavailableFirstSliceClientPort, map_client_error,
+    UnavailableFirstSliceClientPort, locate_languages, map_client_error, source_languages,
+    symbol_languages,
 };
 use crate::{
     FirstSliceClientPort, FirstSliceToolExecutor, RequestCancellation, ToolExecutionFailure,
@@ -389,6 +391,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     encoding: projection.encoding,
                     content_hash: content_hash(),
                     language: "rust".to_owned(),
+                    tier: ClientAnalysisTier::TierB,
                     generated: false,
                 })
                 .collect();
@@ -925,8 +928,7 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
         rootlight_mcp_contract::vertical::Freshness::Stale
     );
     assert!(locate.data.query_interpretation.tokens.is_empty());
-    assert_eq!(locate.coverage.languages.len(), 1);
-    assert_eq!(locate.coverage.languages[0].language, "rust");
+    assert!(locate.coverage.languages.is_empty());
     assert!(locate.usage.trace_id.starts_with("bridge-"));
 
     let explain: SymbolExplainOutput = execute(
@@ -947,8 +949,7 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
         explain.generation.structural_freshness,
         rootlight_mcp_contract::vertical::Freshness::Superseded
     );
-    assert_eq!(explain.coverage.languages.len(), 1);
-    assert_eq!(explain.coverage.languages[0].language, "rust");
+    assert!(explain.coverage.languages.is_empty());
 
     let source: SourceReadOutput = execute(
         &executor,
@@ -1122,6 +1123,128 @@ async fn unavailable_port_returns_transport_for_every_tool() {
             .expect_err("unavailable port rejects every call");
         assert_eq!(error.failure(), Some(ToolExecutionFailure::Transport));
     }
+}
+
+#[test]
+fn read_metadata_preserves_safe_non_rust_languages() {
+    let context = query_context(repository(), GenerationSelector::Active, true);
+    let locate = CodeLocate {
+        context: context.clone(),
+        hits: vec![LocateHit {
+            symbol: symbol(),
+            file: file(),
+            identifier: "DenoWorkspace".to_owned(),
+            qualified_name: "tools/release/deno_workspace.ts::DenoWorkspace".to_owned(),
+            path: "tools/release/deno_workspace.ts".to_owned(),
+            kind: "class".to_owned(),
+            language: "typescript".to_owned(),
+            tier: ClientAnalysisTier::TierB,
+            generated: false,
+            score: 1_000,
+            source: None,
+        }],
+        matched_candidates: 1,
+        truncated: false,
+        next_page_offset: None,
+        execution_completeness: complete_execution(),
+    };
+    let locate_coverage = locate_languages(&locate).expect("TypeScript locate metadata validates");
+    assert_eq!(locate_coverage.len(), 1);
+    assert_eq!(locate_coverage[0].language, "typescript");
+    assert_eq!(locate_coverage[0].tier, AnalysisTier::B);
+
+    let source = SourceReference::new(
+        repository(),
+        generation(),
+        file(),
+        0..16,
+        content_hash(),
+        Some(1..=1),
+    )
+    .expect("source reference validates");
+    let read = SourceRead {
+        context,
+        chunks: vec![SourceChunk {
+            source,
+            path: "Lib/venv/__init__.py".to_owned(),
+            start_byte: 0,
+            end_byte: 16,
+            start_line: Some(1),
+            end_line: Some(1),
+            content: b"class EnvBuilder".to_vec(),
+            encoding: rootlight_client::SourceEncoding::Utf8,
+            content_hash: content_hash(),
+            language: "python".to_owned(),
+            tier: ClientAnalysisTier::TierB,
+            generated: false,
+        }],
+        total_source_bytes: 16,
+        truncated: false,
+        execution_completeness: complete_execution(),
+    };
+    let source_coverage = source_languages(&read).expect("Python source metadata validates");
+    assert_eq!(source_coverage.len(), 1);
+    assert_eq!(source_coverage[0].language, "python");
+    assert_eq!(source_coverage[0].tier, AnalysisTier::B);
+
+    let explained = SymbolExplain {
+        context: read.context.clone(),
+        symbols: vec![SymbolExplanation {
+            symbol: symbol(),
+            kind: "class".to_owned(),
+            display_name: "EnvBuilder".to_owned(),
+            signature: None,
+            definition: read.chunks[0].source.clone(),
+            outbound_exact: 0,
+            outbound_candidates: 0,
+            inbound_exact: 0,
+            inbound_candidates: 0,
+            references_exact: 1,
+            provider: FIRST_SLICE_PROVIDER.to_owned(),
+            evidence: "parser".to_owned(),
+            language: "python".to_owned(),
+            tier: ClientAnalysisTier::TierB,
+            confidence: 1_000,
+        }],
+        unresolved_symbols: Vec::new(),
+        truncated: false,
+        execution_completeness: complete_execution(),
+    };
+    let symbol_coverage = symbol_languages(&explained).expect("Python symbol metadata validates");
+    assert_eq!(symbol_coverage.len(), 1);
+    assert_eq!(symbol_coverage[0].language, "python");
+    assert_eq!(symbol_coverage[0].tier, AnalysisTier::B);
+}
+
+#[test]
+fn empty_results_do_not_invent_language_coverage() {
+    let context = query_context(repository(), GenerationSelector::Active, true);
+    let locate = CodeLocate {
+        context: context.clone(),
+        hits: Vec::new(),
+        matched_candidates: 0,
+        truncated: false,
+        next_page_offset: None,
+        execution_completeness: complete_execution(),
+    };
+    assert!(
+        locate_languages(&locate)
+            .expect("empty locate metadata validates")
+            .is_empty()
+    );
+
+    let explained = SymbolExplain {
+        context,
+        symbols: Vec::new(),
+        unresolved_symbols: vec![symbol()],
+        truncated: false,
+        execution_completeness: complete_execution(),
+    };
+    assert!(
+        symbol_languages(&explained)
+            .expect("unresolved symbol metadata validates")
+            .is_empty()
+    );
 }
 
 #[test]

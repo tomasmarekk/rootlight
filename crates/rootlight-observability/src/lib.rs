@@ -2,7 +2,7 @@
 //!
 //! This crate accepts only allow-listed aggregate data. It owns the privacy and
 //! size boundary for support bundles so transport and CLI layers cannot add
-//! repository content, identifiers, paths, or arbitrary diagnostic text.
+//! repository content, paths, or arbitrary diagnostic text.
 
 #![forbid(unsafe_code)]
 
@@ -23,8 +23,10 @@ use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 pub const SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 1;
 /// Frozen support-bundle schema used by protocol 1.4 clients.
 pub const PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 2;
-/// Current support-bundle schema including every protocol 1.5 control method.
-pub const CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 3;
+/// Frozen support-bundle schema including every protocol 1.5 control method.
+pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V3: u32 = 3;
+/// Current support-bundle schema with production inventory and terminal operations.
+pub const CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 4;
 /// Schema version for normalized telemetry snapshots.
 pub const TELEMETRY_SCHEMA_VERSION: u32 = 1;
 /// Maximum encoded support archive returned through daemon IPC.
@@ -37,6 +39,18 @@ pub const MAX_TELEMETRY_ENTRY_BYTES: usize = MAX_SUPPORT_ENTRY_BYTES;
 pub const RECENT_LOG_CAPACITY: usize = 64;
 /// Maximum recent completed spans retained in memory.
 pub const RECENT_TRACE_CAPACITY: usize = 64;
+/// Maximum recent terminal operations included in one support archive.
+pub const MAX_SUPPORT_TERMINAL_OPERATIONS: usize = 32;
+/// Maximum dependency records included in one support archive.
+pub const MAX_SUPPORT_DEPENDENCIES: usize = 32;
+/// Maximum adapter records included in one support archive.
+pub const MAX_SUPPORT_ADAPTERS: usize = 32;
+/// Maximum repository records included in one support archive.
+pub const MAX_SUPPORT_REPOSITORIES: usize = 128;
+/// Maximum generation records included in one support archive.
+pub const MAX_SUPPORT_GENERATIONS: usize = 256;
+/// Maximum language or tier labels retained in one inventory record.
+pub const MAX_SUPPORT_RECORD_LABELS: usize = 32;
 /// Maximum encoded bytes for one structured JSON log line, including its newline.
 pub const MAX_STRUCTURED_LOG_LINE_BYTES: usize = 512;
 /// Fixed upper bounds for local request-duration histogram buckets.
@@ -49,6 +63,7 @@ pub const SLOW_CONTROL_REQUEST_US: u64 = 50_000;
 const SUPPORT_ENTRY_COUNT_V1: usize = 5;
 const SUPPORT_ENTRY_COUNT_V2: usize = 6;
 const SUPPORT_ENTRY_COUNT_V3: usize = 6;
+const SUPPORT_ENTRY_COUNT_V4: usize = 7;
 const CONTROL_METHOD_COUNT_V2: usize = 8;
 const CONTROL_METHOD_COUNT: usize = 25;
 const TELEMETRY_OUTCOME_COUNT: usize = 6;
@@ -71,6 +86,16 @@ pub const SUPPORT_ENTRY_NAMES_V2: [&str; SUPPORT_ENTRY_COUNT_V2] = [
 ];
 /// Ordered allow-list for current support archives with normalized telemetry.
 pub const SUPPORT_ENTRY_NAMES_V3: [&str; SUPPORT_ENTRY_COUNT_V3] = SUPPORT_ENTRY_NAMES_V2;
+/// Ordered allow-list for current production support archives.
+pub const SUPPORT_ENTRY_NAMES_V4: [&str; SUPPORT_ENTRY_COUNT_V4] = [
+    "diagnostics/quick.json",
+    "health.json",
+    "inventory.json",
+    "manifest.json",
+    "operations-summary.json",
+    "redaction-report.json",
+    "telemetry.json",
+];
 /// Data classes that the frozen support schema must explicitly omit.
 pub const OMITTED_DATA_CLASSES: [&str; 12] = [
     "absolute_roots",
@@ -103,6 +128,21 @@ pub const OMITTED_DATA_CLASSES_V2: [&str; 12] = [
 ];
 /// Data classes omitted by current support archives.
 pub const OMITTED_DATA_CLASSES_V3: [&str; 12] = OMITTED_DATA_CLASSES_V2;
+/// Data classes omitted by production support archives with opaque identifiers.
+pub const OMITTED_DATA_CLASSES_V4: [&str; 12] = [
+    "absolute_roots",
+    "adapter_output",
+    "compiler_output",
+    "credentials",
+    "environment",
+    "free_form_text",
+    "git_remote_credentials",
+    "paths",
+    "prompts",
+    "raw_sqlite_errors",
+    "source",
+    "symbol_names",
+];
 
 /// Closed daemon protocol version emitted by this support schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +156,9 @@ pub enum ProtocolVersion {
     /// Rootlight daemon protocol 1.5.
     #[serde(rename = "1.5")]
     V1_5,
+    /// Rootlight daemon protocol 1.8.
+    #[serde(rename = "1.8")]
+    V1_8,
 }
 
 /// Closed target operating-system family emitted by support evidence.
@@ -331,6 +374,348 @@ pub struct OperationsSummary {
     pub running: u32,
     /// Operations completing cancellation cleanup.
     pub cancelling: u32,
+}
+
+/// Closed terminal operation kind retained in production support evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportOperationKind {
+    /// Internal control-path lifecycle probe.
+    ControlProbe,
+    /// Repository indexing and generation publication.
+    RepositoryIndex,
+}
+
+/// Closed terminal operation state retained in production support evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportOperationState {
+    /// Work completed successfully.
+    Succeeded,
+    /// Work ended with a stable public error.
+    Failed,
+    /// Cooperative cancellation completed.
+    Cancelled,
+    /// Restart or shutdown interrupted unfinished work.
+    Interrupted,
+}
+
+/// Closed operation stage retained in production support evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportOperationStage {
+    /// Work was durably admitted.
+    Accepted,
+    /// Work was executing.
+    Executing,
+    /// Temporary resources or publication state were being finalized.
+    Cleanup,
+}
+
+/// Monotonic operation progress retained in production support evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportOperationProgress {
+    /// Completed bounded work units.
+    pub completed: u32,
+    /// Total bounded work units, or zero when unknown.
+    pub total: u32,
+}
+
+/// Bounded primitive detail value retained from a checked public error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    deny_unknown_fields,
+    tag = "type",
+    content = "value",
+    rename_all = "snake_case"
+)]
+pub enum SupportDetailValue {
+    /// Boolean diagnostic property.
+    Boolean(bool),
+    /// Signed integer diagnostic property.
+    Integer(i64),
+    /// Unsigned integer diagnostic property.
+    Unsigned(u64),
+    /// Opaque lowercase hexadecimal repository identity.
+    Repository(String),
+    /// Opaque lowercase hexadecimal generation identity.
+    Generation(String),
+    /// Opaque lowercase hexadecimal operation identity.
+    Operation(String),
+    /// Source-free bounded diagnostic label.
+    Label(String),
+}
+
+/// Stable remediation hint retained from a checked public error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "action", rename_all = "snake_case")]
+pub enum SupportNextAction {
+    /// Correct one named input field.
+    CorrectField {
+        /// Stable field name.
+        field: String,
+    },
+    /// Retry the identical request.
+    Retry,
+    /// Select a compatible contract version.
+    SelectSupportedVersion,
+    /// Inspect the associated operation.
+    InspectOperation,
+    /// Rebuild the affected repository generation.
+    RebuildRepository,
+    /// Collect another protected support archive.
+    CollectSupportBundle,
+    /// Restart enumeration after an invalid continuation.
+    RestartEnumeration,
+}
+
+/// Stable source-free terminal error retained in production support evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportTerminalError {
+    /// Stable public error family.
+    pub code: ErrorCode,
+    /// Whether an unchanged request may succeed when retried.
+    pub retryable: bool,
+    /// Optional bounded retry delay.
+    pub retry_after_ms: Option<u64>,
+    /// Opaque associated repository identity.
+    pub repository_id: Option<String>,
+    /// Opaque associated operation identity.
+    pub operation_id: Option<String>,
+    /// Opaque associated generation identity.
+    pub generation_id: Option<String>,
+    /// Checked source-free diagnostic details.
+    pub details: std::collections::BTreeMap<String, SupportDetailValue>,
+    /// Stable bounded remediation hints.
+    pub next_actions: Vec<SupportNextAction>,
+}
+
+/// One bounded durable terminal operation retained in production support evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportTerminalOperation {
+    /// Opaque lowercase hexadecimal operation identity.
+    pub operation_id: String,
+    /// Opaque lowercase hexadecimal repository identity, when associated.
+    pub repository_id: Option<String>,
+    /// Submitted operation kind.
+    pub kind: SupportOperationKind,
+    /// Terminal lifecycle state.
+    pub state: SupportOperationState,
+    /// Final monotonic operation stage.
+    pub stage: SupportOperationStage,
+    /// Final durable lifecycle revision.
+    pub revision: u64,
+    /// Final monotonic progress snapshot.
+    pub progress: SupportOperationProgress,
+    /// Source-free adapter or provider label, when known.
+    pub provider: Option<String>,
+    /// Stable terminal failure, present only for failed work.
+    pub error: Option<SupportTerminalError>,
+}
+
+/// Current operation counts plus bounded recent terminal evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportOperationsV4 {
+    /// Current nonterminal operation counts.
+    pub current: OperationsSummary,
+    /// Recent durable terminal operations in newest-to-oldest order.
+    pub recent_terminal: Vec<SupportTerminalOperation>,
+}
+
+/// Product and sanitized host facts included in production support evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportRuntimeInventory {
+    /// Rootlight product version.
+    pub product_version: String,
+    /// Stable binary role.
+    pub binary_name: String,
+    /// SHA-256 of the running binary when the executable was readable.
+    pub binary_sha256: Option<String>,
+    /// Closed compile/runtime feature profile labels.
+    pub feature_profile: Vec<String>,
+    /// Negotiated protocol major.
+    pub protocol_major: u32,
+    /// Negotiated protocol minor.
+    pub protocol_minor: u32,
+    /// Sanitized logical processor count.
+    pub logical_processors: u32,
+    /// Sanitized physical memory bytes when available without private host data.
+    pub physical_memory_bytes: Option<u64>,
+}
+
+/// One source-free dependency identity included in production support evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportDependencyInventory {
+    /// Stable dependency name.
+    pub name: String,
+    /// Stable dependency version.
+    pub version: String,
+    /// Binary or package digest when available.
+    pub sha256: Option<String>,
+}
+
+/// One source-free adapter identity included in production support evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportAdapterInventory {
+    /// Stable adapter or provider name.
+    pub name: String,
+    /// Adapter implementation version when separately versioned.
+    pub version: Option<String>,
+    /// Closed language labels handled by the adapter.
+    pub languages: Vec<String>,
+    /// Whether the adapter is available in this process.
+    pub available: bool,
+    /// Whether analysis executes through an isolated host.
+    pub isolated: bool,
+    /// Adapter binary digest when a separate executable exists.
+    pub binary_sha256: Option<String>,
+    /// Grammar or model artifact digest when available.
+    pub artifact_sha256: Option<String>,
+}
+
+/// One source-free repository summary included in production support evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportRepositoryInventory {
+    /// Opaque lowercase hexadecimal repository identity.
+    pub repository_id: String,
+    /// Deserialization-only reserved root fingerprint.
+    ///
+    /// Serialization omits this field and v4 validation requires `None` because
+    /// an unsalted canonical-path digest remains linkable through path guessing.
+    #[serde(default, skip_serializing)]
+    pub root_fingerprint_sha256: Option<String>,
+    /// Closed detected language labels.
+    pub languages: Vec<String>,
+    /// Closed completed analysis tier labels.
+    pub tiers: Vec<String>,
+    /// Source-free repository lifecycle state.
+    pub state: String,
+    /// Bounded indexed file count.
+    pub file_count: u64,
+    /// Bounded indexed symbol count.
+    pub symbol_count: u64,
+    /// Bounded indexed relationship count.
+    pub relationship_count: u64,
+    /// Number of retained immutable generations.
+    pub generation_count: u32,
+}
+
+/// Closed checksum state for one immutable generation summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportChecksumStatus {
+    /// Checksums were verified successfully.
+    Verified,
+    /// Verification found a mismatch.
+    Failed,
+    /// No verification result is currently available.
+    Unknown,
+}
+
+/// One source-free generation manifest header included in production support evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportGenerationInventory {
+    /// Opaque lowercase hexadecimal repository identity.
+    pub repository_id: String,
+    /// Opaque lowercase hexadecimal generation identity.
+    pub generation_id: String,
+    /// Stable generation format label.
+    pub format_version: String,
+    /// Manifest checksum validation status.
+    pub checksum_status: SupportChecksumStatus,
+    /// Total immutable generation bytes.
+    pub disk_bytes: u64,
+    /// Source-free generation lifecycle state.
+    pub state: String,
+}
+
+/// Effective non-secret daemon limits included in production support evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportConfigurationInventory {
+    /// Configuration schema version.
+    pub schema_version: u32,
+    /// Global connection limit.
+    pub connection_limit: u32,
+    /// Per-client connection limit.
+    pub client_connection_limit: u32,
+    /// Bounded control queue capacity.
+    pub control_queue_limit: u32,
+    /// Global operation admission limit.
+    pub operation_queue_limit: u32,
+    /// Per-client operation admission limit.
+    pub client_operation_limit: u32,
+    /// Concurrent operation worker count.
+    pub operation_workers: u32,
+    /// Default request timeout in milliseconds.
+    pub request_timeout_ms: u64,
+    /// Maintenance interval in milliseconds.
+    pub maintenance_interval_ms: u64,
+    /// Shutdown grace period in milliseconds.
+    pub shutdown_grace_ms: u64,
+}
+
+/// Source-free catalog and disk bounds included in production support evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportStorageInventory {
+    /// Current catalog schema version.
+    pub catalog_schema_version: u32,
+    /// Current generation format version when the indexing service reported it.
+    pub generation_format_version: Option<String>,
+    /// Bundled SQLite runtime version.
+    pub sqlite_version: String,
+    /// Whether the catalog uses persistent storage.
+    pub persistent: bool,
+    /// Whether SQLite defensive mode is enabled.
+    pub defensive: bool,
+    /// Whether foreign-key enforcement is enabled.
+    pub foreign_keys: bool,
+    /// Whether SQLite trusted-schema behavior is enabled.
+    pub trusted_schema: bool,
+    /// Current allocated catalog bytes.
+    pub catalog_allocated_bytes: u64,
+    /// Maximum accepted catalog bytes.
+    pub maximum_catalog_bytes: u64,
+    /// Maximum accepted write-ahead-log bytes.
+    pub maximum_wal_bytes: u64,
+    /// Maximum accepted shared-memory sidecar bytes.
+    pub maximum_shm_bytes: u64,
+    /// Total immutable generation bytes reported by the indexing service.
+    pub generation_disk_bytes: u64,
+    /// Unreclaimed temporary bytes reported by the indexing service.
+    pub unreclaimed_temporary_bytes: u64,
+    /// Remaining disk margin when available.
+    pub disk_margin_bytes: Option<u64>,
+}
+
+/// Complete allow-listed production inventory accepted by the privacy boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportInventory {
+    /// Product, binary, protocol, feature, and sanitized hardware facts.
+    pub runtime: SupportRuntimeInventory,
+    /// Bounded dependency inventory.
+    pub dependencies: Vec<SupportDependencyInventory>,
+    /// Bounded adapter inventory.
+    pub adapters: Vec<SupportAdapterInventory>,
+    /// Bounded repository inventory.
+    pub repositories: Vec<SupportRepositoryInventory>,
+    /// Bounded generation manifest headers.
+    pub generations: Vec<SupportGenerationInventory>,
+    /// Effective non-secret configuration.
+    pub configuration: SupportConfigurationInventory,
+    /// Catalog, SQLite, and disk facts.
+    pub storage: SupportStorageInventory,
 }
 
 /// Closed output behavior for the in-process telemetry recorder.
@@ -758,6 +1143,8 @@ pub enum SupportBundleSchema {
     V2,
     /// Six-entry schema covering every protocol 1.5 control method.
     V3,
+    /// Production schema with inventory and bounded terminal operations.
+    V4,
 }
 
 /// Inputs accepted by the support-bundle privacy boundary.
@@ -775,7 +1162,11 @@ pub struct SupportBundleInput {
     pub diagnostics: DiagnosticsQuickSnapshot,
     /// Aggregate durable operation counts.
     pub operations: OperationsSummary,
-    /// Pre-assembly normalized telemetry for schema v2.
+    /// Recent durable terminal operations required by schema v4.
+    pub terminal_operations: Vec<SupportTerminalOperation>,
+    /// Production runtime, dependency, adapter, repository, and storage inventory.
+    pub inventory: Option<SupportInventory>,
+    /// Pre-assembly normalized telemetry for schema v2 and later.
     pub telemetry: Option<TelemetrySnapshot>,
 }
 
@@ -1338,6 +1729,7 @@ pub fn build_support_bundle_for_schema(
         SupportBundleSchema::V1 => ProtocolVersion::V1_3,
         SupportBundleSchema::V2 => ProtocolVersion::V1_4,
         SupportBundleSchema::V3 => ProtocolVersion::V1_5,
+        SupportBundleSchema::V4 => ProtocolVersion::V1_8,
     };
     if input.protocol_version != expected_protocol {
         return Err(SupportBundleError::ProtocolVersionMismatch);
@@ -1346,6 +1738,7 @@ pub fn build_support_bundle_for_schema(
         SupportBundleSchema::V1 => build_support_bundle_v1(input),
         SupportBundleSchema::V2 => build_support_bundle_v2(input),
         SupportBundleSchema::V3 => build_support_bundle_v3(input),
+        SupportBundleSchema::V4 => build_support_bundle_v4(input),
     }
 }
 
@@ -1405,13 +1798,10 @@ fn build_support_bundle_v3(
     let diagnostics = json_entry("diagnostics/quick.json", &input.diagnostics)?;
     let health = json_entry("health.json", &input.health)?;
     let operations = json_entry("operations-summary.json", &input.operations)?;
-    let redaction = redaction_entry(
-        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
-        &OMITTED_DATA_CLASSES_V3,
-    )?;
+    let redaction = redaction_entry(SUPPORT_BUNDLE_SCHEMA_VERSION_V3, &OMITTED_DATA_CLASSES_V3)?;
     let telemetry = json_entry_with_limit("telemetry.json", telemetry, MAX_TELEMETRY_ENTRY_BYTES)?;
     let manifest = support_manifest_entry(
-        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V3,
         input,
         [&diagnostics, &health, &operations, &redaction, &telemetry],
     )?;
@@ -1423,6 +1813,236 @@ fn build_support_bundle_v3(
         redaction,
         telemetry,
     ])
+}
+
+fn build_support_bundle_v4(
+    input: &SupportBundleInput,
+) -> Result<SupportBundle, SupportBundleError> {
+    let telemetry = input
+        .telemetry
+        .as_ref()
+        .ok_or(SupportBundleError::MissingTelemetry)?;
+    let inventory = input
+        .inventory
+        .as_ref()
+        .ok_or(SupportBundleError::MissingInventory)?;
+    validate_v4_input(input, inventory)?;
+    let diagnostics = json_entry("diagnostics/quick.json", &input.diagnostics)?;
+    let health = json_entry("health.json", &input.health)?;
+    let inventory = json_entry("inventory.json", inventory)?;
+    let operations = json_entry(
+        "operations-summary.json",
+        &SupportOperationsV4 {
+            current: input.operations,
+            recent_terminal: input.terminal_operations.clone(),
+        },
+    )?;
+    let redaction = redaction_entry(
+        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        &OMITTED_DATA_CLASSES_V4,
+    )?;
+    let telemetry = json_entry_with_limit("telemetry.json", telemetry, MAX_TELEMETRY_ENTRY_BYTES)?;
+    let manifest = support_manifest_entry(
+        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        input,
+        [
+            &diagnostics,
+            &health,
+            &inventory,
+            &operations,
+            &redaction,
+            &telemetry,
+        ],
+    )?;
+    finish_support_bundle(&[
+        diagnostics,
+        health,
+        inventory,
+        manifest,
+        operations,
+        redaction,
+        telemetry,
+    ])
+}
+
+fn validate_v4_input(
+    input: &SupportBundleInput,
+    inventory: &SupportInventory,
+) -> Result<(), SupportBundleError> {
+    if input.terminal_operations.len() > MAX_SUPPORT_TERMINAL_OPERATIONS
+        || inventory.dependencies.len() > MAX_SUPPORT_DEPENDENCIES
+        || inventory.adapters.len() > MAX_SUPPORT_ADAPTERS
+        || inventory.repositories.len() > MAX_SUPPORT_REPOSITORIES
+        || inventory.generations.len() > MAX_SUPPORT_GENERATIONS
+        || inventory.runtime.protocol_major != 1
+        || inventory.runtime.protocol_minor != 8
+        || inventory.runtime.logical_processors == 0
+        || inventory.configuration.schema_version == 0
+        || inventory.storage.catalog_schema_version == 0
+        || inventory.storage.catalog_schema_version != input.health.catalog_schema_version
+        || !is_support_label(&inventory.runtime.product_version)
+        || !is_support_label(&inventory.runtime.binary_name)
+        || !optional_digest_is_valid(inventory.runtime.binary_sha256.as_deref())
+        || inventory.runtime.feature_profile.is_empty()
+        || !labels_are_valid(&inventory.runtime.feature_profile)
+        || !is_support_label(&inventory.storage.sqlite_version)
+        || !optional_label_is_valid(inventory.storage.generation_format_version.as_deref())
+    {
+        return Err(SupportBundleError::InvalidInventory);
+    }
+    for dependency in &inventory.dependencies {
+        if !is_support_label(&dependency.name)
+            || !is_support_label(&dependency.version)
+            || !optional_digest_is_valid(dependency.sha256.as_deref())
+        {
+            return Err(SupportBundleError::InvalidInventory);
+        }
+    }
+    for adapter in &inventory.adapters {
+        if !is_support_label(&adapter.name)
+            || !optional_label_is_valid(adapter.version.as_deref())
+            || adapter.languages.len() > MAX_SUPPORT_RECORD_LABELS
+            || !labels_are_valid(&adapter.languages)
+            || !optional_digest_is_valid(adapter.binary_sha256.as_deref())
+            || !optional_digest_is_valid(adapter.artifact_sha256.as_deref())
+        {
+            return Err(SupportBundleError::InvalidInventory);
+        }
+    }
+    let mut repository_ids = std::collections::BTreeSet::new();
+    for repository in &inventory.repositories {
+        if !is_opaque_id(&repository.repository_id)
+            || !repository_ids.insert(repository.repository_id.as_str())
+            || repository.root_fingerprint_sha256.is_some()
+            || repository.languages.len() > MAX_SUPPORT_RECORD_LABELS
+            || repository.tiers.len() > MAX_SUPPORT_RECORD_LABELS
+            || !labels_are_valid(&repository.languages)
+            || !labels_are_valid(&repository.tiers)
+            || !is_support_label(&repository.state)
+        {
+            return Err(SupportBundleError::InvalidInventory);
+        }
+    }
+    let mut generation_ids = std::collections::BTreeSet::new();
+    for generation in &inventory.generations {
+        if !is_opaque_id(&generation.repository_id)
+            || !is_opaque_id(&generation.generation_id)
+            || !generation_ids.insert(generation.generation_id.as_str())
+            || !is_support_label(&generation.format_version)
+            || !is_support_label(&generation.state)
+        {
+            return Err(SupportBundleError::InvalidInventory);
+        }
+    }
+    for operation in &input.terminal_operations {
+        validate_terminal_operation(operation)?;
+    }
+    Ok(())
+}
+
+fn validate_terminal_operation(
+    operation: &SupportTerminalOperation,
+) -> Result<(), SupportBundleError> {
+    if !is_opaque_id(&operation.operation_id)
+        || operation
+            .repository_id
+            .as_deref()
+            .is_some_and(|value| !is_opaque_id(value))
+        || !optional_label_is_valid(operation.provider.as_deref())
+        || operation.progress.total != 0 && operation.progress.completed > operation.progress.total
+        || (operation.state == SupportOperationState::Failed) != operation.error.is_some()
+    {
+        return Err(SupportBundleError::InvalidInventory);
+    }
+    let Some(error) = operation.error.as_ref() else {
+        return Ok(());
+    };
+    if error.retry_after_ms.is_some_and(|delay| delay > 86_400_000)
+        || error.retry_after_ms.is_some() && !error.retryable
+        || error
+            .repository_id
+            .as_deref()
+            .is_some_and(|value| !is_opaque_id(value))
+        || error
+            .operation_id
+            .as_deref()
+            .is_some_and(|value| value != operation.operation_id)
+        || error
+            .generation_id
+            .as_deref()
+            .is_some_and(|value| !is_opaque_id(value))
+        || error.details.len() > 32
+        || error.next_actions.len() > 8
+    {
+        return Err(SupportBundleError::InvalidInventory);
+    }
+    for (key, value) in &error.details {
+        if !is_detail_key(key) || !support_detail_is_valid(value) {
+            return Err(SupportBundleError::InvalidInventory);
+        }
+    }
+    for action in &error.next_actions {
+        if let SupportNextAction::CorrectField { field } = action
+            && !is_detail_key(field)
+        {
+            return Err(SupportBundleError::InvalidInventory);
+        }
+    }
+    Ok(())
+}
+
+fn support_detail_is_valid(value: &SupportDetailValue) -> bool {
+    match value {
+        SupportDetailValue::Boolean(_)
+        | SupportDetailValue::Integer(_)
+        | SupportDetailValue::Unsigned(_) => true,
+        SupportDetailValue::Repository(value)
+        | SupportDetailValue::Generation(value)
+        | SupportDetailValue::Operation(value) => is_opaque_id(value),
+        SupportDetailValue::Label(value) => is_support_label(value),
+    }
+}
+
+fn labels_are_valid(labels: &[String]) -> bool {
+    labels.iter().all(|value| is_support_label(value))
+}
+
+fn optional_label_is_valid(value: Option<&str>) -> bool {
+    value.is_none_or(is_support_label)
+}
+
+fn optional_digest_is_valid(value: Option<&str>) -> bool {
+    value.is_none_or(is_sha256)
+}
+
+fn is_detail_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn is_support_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+}
+
+fn is_opaque_id(value: &str) -> bool {
+    matches!(value.len(), 32 | 40)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn project_telemetry_v2(telemetry: &TelemetrySnapshot) -> TelemetrySnapshot {
@@ -1584,9 +2204,15 @@ pub enum SupportBundleError {
     /// The complete encoded archive exceeded its transport-safe limit.
     #[error("support bundle archive exceeds its size limit")]
     ArchiveTooLarge,
-    /// Schema v2 was selected without a normalized telemetry snapshot.
+    /// A telemetry-bearing schema was selected without a normalized snapshot.
     #[error("support bundle telemetry is required for this schema")]
     MissingTelemetry,
+    /// Schema v4 was selected without production inventory.
+    #[error("support bundle inventory is required for this schema")]
+    MissingInventory,
+    /// Schema-v4 inventory violated a reviewed size or privacy bound.
+    #[error("support bundle inventory violates its bounded schema")]
+    InvalidInventory,
     /// The selected support schema and daemon protocol version did not match.
     #[error("support bundle protocol version does not match its schema")]
     ProtocolVersionMismatch,
@@ -1643,8 +2269,122 @@ mod tests {
                 running: 1,
                 cancelling: 0,
             },
+            terminal_operations: Vec::new(),
+            inventory: None,
             telemetry: None,
         }
+    }
+
+    fn production_input() -> SupportBundleInput {
+        let mut input = input();
+        input.protocol_version = ProtocolVersion::V1_8;
+        input.telemetry = Some(Telemetry::default().snapshot());
+        input.terminal_operations = vec![SupportTerminalOperation {
+            operation_id: "11".repeat(16),
+            repository_id: Some("22".repeat(16)),
+            kind: SupportOperationKind::RepositoryIndex,
+            state: SupportOperationState::Failed,
+            stage: SupportOperationStage::Executing,
+            revision: 3,
+            progress: SupportOperationProgress {
+                completed: 5,
+                total: 10,
+            },
+            provider: Some("tree-sitter".to_owned()),
+            error: Some(SupportTerminalError {
+                code: ErrorCode::ResourceExhausted,
+                retryable: false,
+                retry_after_ms: None,
+                repository_id: Some("22".repeat(16)),
+                operation_id: Some("11".repeat(16)),
+                generation_id: None,
+                details: std::collections::BTreeMap::from([
+                    ("limit".to_owned(), SupportDetailValue::Unsigned(1_000_000)),
+                    (
+                        "provider".to_owned(),
+                        SupportDetailValue::Label("tree-sitter".to_owned()),
+                    ),
+                ]),
+                next_actions: vec![
+                    SupportNextAction::InspectOperation,
+                    SupportNextAction::CollectSupportBundle,
+                ],
+            }),
+        }];
+        input.inventory = Some(SupportInventory {
+            runtime: SupportRuntimeInventory {
+                product_version: "0.1.0".to_owned(),
+                binary_name: "rootlight-daemon".to_owned(),
+                binary_sha256: Some("aa".repeat(32)),
+                feature_profile: vec!["standard".to_owned()],
+                protocol_major: 1,
+                protocol_minor: 8,
+                logical_processors: 8,
+                physical_memory_bytes: None,
+            },
+            dependencies: vec![SupportDependencyInventory {
+                name: "sqlite".to_owned(),
+                version: "3.51.3".to_owned(),
+                sha256: None,
+            }],
+            adapters: vec![SupportAdapterInventory {
+                name: "tree-sitter".to_owned(),
+                version: Some("builtin".to_owned()),
+                languages: vec!["rust".to_owned()],
+                available: true,
+                isolated: false,
+                binary_sha256: None,
+                artifact_sha256: Some("bb".repeat(32)),
+            }],
+            repositories: vec![SupportRepositoryInventory {
+                repository_id: "22".repeat(16),
+                root_fingerprint_sha256: None,
+                languages: vec!["rust".to_owned()],
+                tiers: vec!["structural".to_owned()],
+                state: "ready".to_owned(),
+                file_count: 12,
+                symbol_count: 40,
+                relationship_count: 75,
+                generation_count: 1,
+            }],
+            generations: vec![SupportGenerationInventory {
+                repository_id: "22".repeat(16),
+                generation_id: "33".repeat(16),
+                format_version: "1.2".to_owned(),
+                checksum_status: SupportChecksumStatus::Verified,
+                disk_bytes: 4096,
+                state: "active".to_owned(),
+            }],
+            configuration: SupportConfigurationInventory {
+                schema_version: 1,
+                connection_limit: 128,
+                client_connection_limit: 8,
+                control_queue_limit: 64,
+                operation_queue_limit: 256,
+                client_operation_limit: 32,
+                operation_workers: 4,
+                request_timeout_ms: 5_000,
+                maintenance_interval_ms: 1_000,
+                shutdown_grace_ms: 5_000,
+            },
+            storage: SupportStorageInventory {
+                catalog_schema_version: 2,
+                generation_format_version: Some("1.2".to_owned()),
+                sqlite_version: "3.51.3".to_owned(),
+                persistent: true,
+                defensive: true,
+                foreign_keys: true,
+                trusted_schema: false,
+                catalog_allocated_bytes: 8192,
+                maximum_catalog_bytes: 1024 * 1024,
+                maximum_wal_bytes: 256 * 1024,
+                maximum_shm_bytes: 64 * 1024,
+                generation_disk_bytes: 4096,
+                unreclaimed_temporary_bytes: 0,
+                disk_margin_bytes: Some(1024 * 1024),
+            },
+        });
+        input
     }
 
     #[test]
@@ -2008,6 +2748,115 @@ mod tests {
                     method: ControlMethod::CodeLocate,
                 }
         }));
+    }
+
+    #[test]
+    fn schema_v4_support_archive_is_deterministic_complete_and_source_free() {
+        let input = production_input();
+        let first = build_support_bundle_for_schema(&input, SupportBundleSchema::V4)
+            .expect("schema v4 support bundle builds");
+        let second = build_support_bundle_for_schema(&input, SupportBundleSchema::V4)
+            .expect("schema v4 support bundle rebuilds");
+        assert_eq!(first, second);
+
+        let mut archive =
+            zip::ZipArchive::new(Cursor::new(first.archive())).expect("support ZIP opens");
+        let names = (0..archive.len())
+            .map(|index| {
+                archive
+                    .by_index(index)
+                    .expect("entry opens")
+                    .name()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, SUPPORT_ENTRY_NAMES_V4);
+
+        let mut operations = Vec::new();
+        archive
+            .by_name("operations-summary.json")
+            .expect("operations entry opens")
+            .read_to_end(&mut operations)
+            .expect("operations entry reads");
+        let operations: SupportOperationsV4 =
+            serde_json::from_slice(&operations).expect("operations entry decodes");
+        assert_eq!(operations.recent_terminal, input.terminal_operations);
+        assert_eq!(
+            operations.recent_terminal[0]
+                .error
+                .as_ref()
+                .map(|error| error.code),
+            Some(ErrorCode::ResourceExhausted)
+        );
+
+        let archive_text = String::from_utf8_lossy(first.archive());
+        for forbidden in [
+            "PRIVATE_SOURCE_BODY",
+            "C:\\Users\\private\\repo",
+            "/home/private/repo",
+            "sk-secret-token",
+        ] {
+            assert!(!archive_text.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn schema_v4_rejects_path_shaped_inventory_and_unbounded_operations() {
+        let mut path_shaped = production_input();
+        path_shaped
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .repositories[0]
+            .state = "C:\\private\\repo".to_owned();
+        assert!(matches!(
+            build_support_bundle_for_schema(&path_shaped, SupportBundleSchema::V4),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+
+        let mut unbounded = production_input();
+        let record = unbounded.terminal_operations[0].clone();
+        unbounded
+            .terminal_operations
+            .resize(MAX_SUPPORT_TERMINAL_OPERATIONS + 1, record);
+        assert!(matches!(
+            build_support_bundle_for_schema(&unbounded, SupportBundleSchema::V4),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+    }
+
+    #[test]
+    fn schema_v4_omits_linkable_repository_root_fingerprints() {
+        let input = production_input();
+        let bundle = build_support_bundle_for_schema(&input, SupportBundleSchema::V4)
+            .expect("privacy-safe schema v4 support bundle builds");
+        let mut archive =
+            zip::ZipArchive::new(Cursor::new(bundle.archive())).expect("support ZIP opens");
+        let mut inventory = Vec::new();
+        archive
+            .by_name("inventory.json")
+            .expect("inventory entry opens")
+            .read_to_end(&mut inventory)
+            .expect("inventory entry reads");
+        let inventory: serde_json::Value =
+            serde_json::from_slice(&inventory).expect("inventory entry decodes");
+        assert!(
+            inventory["repositories"][0]
+                .get("root_fingerprint_sha256")
+                .is_none()
+        );
+
+        let mut linkable = production_input();
+        linkable
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .repositories[0]
+            .root_fingerprint_sha256 = Some("cc".repeat(32));
+        assert!(matches!(
+            build_support_bundle_for_schema(&linkable, SupportBundleSchema::V4),
+            Err(SupportBundleError::InvalidInventory)
+        ));
     }
 
     #[test]

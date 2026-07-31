@@ -39,15 +39,18 @@ const LEGACY_GENERATION_CONTRACT_VERSION: GenerationContractVersion =
     GenerationContractVersion::new(1, 1);
 
 /// Hard ceiling for physical rows written or materialized by one operation.
-pub const HARD_MAX_GENERATION_ROWS: u64 = 1_000_000;
+pub const HARD_MAX_GENERATION_ROWS: u64 = 50_000_000;
 /// Hard ceiling for distinct source references in one generation operation.
-pub const HARD_MAX_GENERATION_SOURCE_REFS: u64 = 500_000;
+pub const HARD_MAX_GENERATION_SOURCE_REFS: u64 = 20_000_000;
 /// Hard ceiling for owned dynamic text crossing one generation operation.
-pub const HARD_MAX_GENERATION_TEXT_BYTES: u64 = 128 * 1024 * 1024;
+pub const HARD_MAX_GENERATION_TEXT_BYTES: u64 = 256 * 1024 * 1024;
+/// Hard ceiling for encoded UTF-8 persisted by one generation backend.
+pub const HARD_MAX_GENERATION_ENCODED_TEXT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
-const DEFAULT_MAX_GENERATION_ROWS: u64 = 250_000;
-const DEFAULT_MAX_GENERATION_SOURCE_REFS: u64 = 100_000;
-const DEFAULT_MAX_GENERATION_TEXT_BYTES: u64 = 32 * 1024 * 1024;
+const DEFAULT_MAX_GENERATION_ROWS: u64 = HARD_MAX_GENERATION_ROWS;
+const DEFAULT_MAX_GENERATION_SOURCE_REFS: u64 = HARD_MAX_GENERATION_SOURCE_REFS;
+const DEFAULT_MAX_GENERATION_TEXT_BYTES: u64 = HARD_MAX_GENERATION_TEXT_BYTES;
+const ENCODED_TEXT_EXPANSION_FACTOR: u64 = 64;
 const IDENTITY_RECIPE_CHECKPOINT_BYTES: usize = 4 * 1024;
 
 /// Major/minor compatibility version for logical generation storage.
@@ -340,6 +343,11 @@ fn require_document_budget(
         context.check()?;
         observe_evidence(&file.evidence, &mut sources, &mut rows, context)?;
         observe_text(&file.path, &mut text_bytes, context)?;
+        if let Some(locator) = &file.path_locator {
+            for component in locator.components() {
+                observe_text(component, &mut text_bytes, context)?;
+            }
+        }
         observe_text(&file.language, &mut text_bytes, context)?;
         observe_text(&file.encoding, &mut text_bytes, context)?;
         context.check()?;
@@ -554,6 +562,7 @@ fn budget_exceeded(
 ) -> GenerationControlError {
     GenerationControlError::BudgetExceeded {
         resource,
+        observed: u64::MAX,
         limit: context.budget().limit(resource),
     }
 }
@@ -797,6 +806,12 @@ impl IdentityVerifiedGeneration {
     #[must_use]
     pub const fn document(&self) -> &NormalizedIrDocument {
         self.snapshot.document()
+    }
+
+    /// Returns the canonical snapshot behind this verified capability.
+    #[must_use]
+    pub const fn snapshot(&self) -> &GenerationSnapshot {
+        &self.snapshot
     }
 
     /// Consumes the verified wrapper into its canonical generation.
@@ -1253,7 +1268,7 @@ impl GenerationStats {
         self.stored_rows
     }
 
-    /// Returns dynamic UTF-8 bytes owned by the persisted logical records.
+    /// Returns encoded UTF-8 bytes owned by the persisted record representation.
     #[must_use]
     pub const fn text_bytes(self) -> u64 {
         self.text_bytes
@@ -1270,6 +1285,8 @@ pub enum GenerationResource {
     SourceReferences,
     /// Dynamic UTF-8 bytes owned by records.
     TextBytes,
+    /// Encoded UTF-8 bytes owned by a persisted backend representation.
+    EncodedTextBytes,
 }
 
 impl GenerationResource {
@@ -1278,6 +1295,7 @@ impl GenerationResource {
             Self::Rows => HARD_MAX_GENERATION_ROWS,
             Self::SourceReferences => HARD_MAX_GENERATION_SOURCE_REFS,
             Self::TextBytes => HARD_MAX_GENERATION_TEXT_BYTES,
+            Self::EncodedTextBytes => HARD_MAX_GENERATION_ENCODED_TEXT_BYTES,
         }
     }
 }
@@ -1329,6 +1347,16 @@ impl GenerationBudget {
             GenerationResource::Rows => self.max_rows,
             GenerationResource::SourceReferences => self.max_source_refs,
             GenerationResource::TextBytes => self.max_text_bytes,
+            GenerationResource::EncodedTextBytes => {
+                let expanded = self
+                    .max_text_bytes
+                    .saturating_mul(ENCODED_TEXT_EXPANSION_FACTOR);
+                if expanded < HARD_MAX_GENERATION_ENCODED_TEXT_BYTES {
+                    expanded
+                } else {
+                    HARD_MAX_GENERATION_ENCODED_TEXT_BYTES
+                }
+            }
         }
     }
 }
@@ -1388,7 +1416,11 @@ impl<'a> GenerationContext<'a> {
         self.check()?;
         let limit = self.budget.limit(resource);
         if observed > limit {
-            Err(GenerationControlError::BudgetExceeded { resource, limit })
+            Err(GenerationControlError::BudgetExceeded {
+                resource,
+                observed,
+                limit,
+            })
         } else {
             Ok(())
         }
@@ -1455,6 +1487,8 @@ pub enum GenerationControlError {
     BudgetExceeded {
         /// Exhausted resource family.
         resource: GenerationResource,
+        /// Observed resource use, or [`u64::MAX`] after arithmetic overflow.
+        observed: u64,
         /// Configured operation limit.
         limit: u64,
     },
@@ -1667,6 +1701,28 @@ mod tests {
 
     #[test]
     fn budget_rejects_zero_and_above_hard_limits() {
+        let default = GenerationBudget::default();
+        assert_eq!(
+            default.limit(GenerationResource::Rows),
+            HARD_MAX_GENERATION_ROWS
+        );
+        assert_eq!(
+            default.limit(GenerationResource::SourceReferences),
+            HARD_MAX_GENERATION_SOURCE_REFS
+        );
+        assert_eq!(
+            default.limit(GenerationResource::TextBytes),
+            HARD_MAX_GENERATION_TEXT_BYTES
+        );
+        assert_eq!(
+            default.limit(GenerationResource::EncodedTextBytes),
+            HARD_MAX_GENERATION_ENCODED_TEXT_BYTES
+        );
+        let reduced = GenerationBudget::new(1, 1, 1).expect("reduced budget is valid");
+        assert_eq!(
+            reduced.limit(GenerationResource::EncodedTextBytes),
+            ENCODED_TEXT_EXPANSION_FACTOR
+        );
         assert_eq!(
             GenerationBudget::new(0, 1, 1),
             Err(GenerationBudgetError::Zero(GenerationResource::Rows))
@@ -1716,6 +1772,7 @@ mod tests {
             Err(IdentityVerificationError::Control(
                 GenerationControlError::BudgetExceeded {
                     resource: GenerationResource::Rows,
+                    observed: 3,
                     limit: 2,
                 }
             ))
@@ -1744,6 +1801,7 @@ mod tests {
             Err(IdentityVerificationError::Control(
                 GenerationControlError::BudgetExceeded {
                     resource: GenerationResource::Rows,
+                    observed: 3,
                     limit: 2,
                 }
             ))
@@ -1808,6 +1866,7 @@ mod tests {
             result,
             Err(GenerationControlError::BudgetExceeded {
                 resource: GenerationResource::SourceReferences,
+                observed: 2,
                 limit: 1,
             })
         );

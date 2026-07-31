@@ -1017,6 +1017,52 @@ fn staged_generation_is_hidden_until_commit_and_can_be_discarded() {
 }
 
 #[test]
+fn rolled_back_commit_restores_the_prior_active_generation() {
+    let prior = verified_empty_generation(23);
+    let prior_id = prior.metadata().generation();
+    let replacement = verified_empty_generation(24);
+    let replacement_id = replacement.metadata().generation();
+    let mut generations = GenerationSet::new(2).expect("retention bound is valid");
+    generations
+        .publish(
+            prior,
+            FakeSearch {
+                generation: prior_id,
+                hits: Vec::new(),
+            },
+            true,
+        )
+        .expect("prior generation publishes");
+    generations
+        .stage(
+            replacement,
+            FakeSearch {
+                generation: replacement_id,
+                hits: Vec::new(),
+            },
+        )
+        .expect("replacement generation stages");
+    generations
+        .commit_staged(replacement_id, true)
+        .expect("replacement generation commits");
+
+    generations
+        .rollback_commit(replacement_id, Some(prior_id))
+        .expect("replacement commit rolls back");
+
+    assert_eq!(generations.active_generation(), Some(prior_id));
+    assert_eq!(generations.len(), 1);
+    assert!(generations.query(prior_id).is_ok());
+    assert!(matches!(
+        generations.query(replacement_id),
+        Err(QueryError::GenerationNotFound)
+    ));
+    generations
+        .discard_staged(replacement_id)
+        .expect("rolled-back replacement remains staged");
+}
+
+#[test]
 fn generation_set_rejects_invalid_mismatched_duplicate_and_excess_state() {
     assert!(matches!(
         GenerationSet::<FakeSearch>::new(0),

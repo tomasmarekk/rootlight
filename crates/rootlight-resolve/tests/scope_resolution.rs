@@ -15,11 +15,11 @@ use rootlight_ir::{
     RelationPredicate, RelationRecord, SourceRef, SourceSpan, validate_ir_document,
 };
 use rootlight_resolve::{
-    CompletenessAssumption, DynamicCallCalibration, ExpectedResolution, ForeignLinkEngine,
-    ForeignLinkInput, ForeignLinkLimits, ForeignLinkNamespace, ForeignLinkOutcome,
-    RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionError, ResolutionExpectation,
-    ResolutionPenalty, ResolutionPolicy, ResolutionSignal, ResolverFactContext, UnresolvedReason,
-    evaluate_resolution_quality,
+    CompletenessAssumption, DEFAULT_CANDIDATE_LIMIT, DynamicCallCalibration, ExpectedResolution,
+    ForeignLinkEngine, ForeignLinkInput, ForeignLinkLimits, ForeignLinkNamespace,
+    ForeignLinkOutcome, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionError,
+    ResolutionExpectation, ResolutionPenalty, ResolutionPolicy, ResolutionSignal,
+    ResolverFactContext, UnresolvedReason, evaluate_resolution_quality,
 };
 use rootlight_resolve::{ResolutionEngine, ResolutionLimits, ResolutionOutcome};
 
@@ -139,6 +139,11 @@ fn resolves_a_unique_scoped_cross_file_call() {
 
 #[test]
 fn validates_candidate_bounds() {
+    assert_eq!(
+        ResolutionLimits::default().candidate_limit(),
+        DEFAULT_CANDIDATE_LIMIT
+    );
+    assert_eq!(DEFAULT_CANDIDATE_LIMIT, 256);
     assert!(ResolutionLimits::new(0).is_err());
     assert!(ResolutionLimits::new(4_096).is_ok());
     assert!(ResolutionLimits::new(4_097).is_err());
@@ -473,6 +478,7 @@ fn applies_exact_bindings_with_derived_provenance_and_identity() {
     });
     fixture.validate();
 
+    let streaming_input = fixture.document.clone();
     let applied = ResolutionEngine::default()
         .apply(
             fixture.document,
@@ -480,6 +486,17 @@ fn applies_exact_bindings_with_derived_provenance_and_identity() {
             &Cancellation::new(),
         )
         .expect("valid exact binding applies");
+    let streamed = ResolutionEngine::default()
+        .apply_document(
+            streaming_input,
+            ResolverFactContext::new(fixture.content_hash),
+            &Cancellation::new(),
+        )
+        .expect("streamed exact binding applies");
+    assert_eq!(
+        streamed, applied.document,
+        "streamed application preserves canonical resolved IR"
+    );
     validate_ir_document(
         &applied.document,
         &IrLimits::default(),

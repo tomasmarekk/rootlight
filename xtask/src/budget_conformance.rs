@@ -86,7 +86,7 @@ const SOURCE_PROOFS: [SourceProofDeclaration; 4] = [
         file: "apps/rootlight-daemon/src/first_slice.rs",
         symbols: &[
             "peer_cancellation_leaves_work_lane_reusable_before_publication",
-            "commit_boundary_failure_reports_failed_and_publishes_nothing",
+            "durable_commit_boundary_failure_is_terminal_and_publishes_nothing",
         ],
     },
 ];

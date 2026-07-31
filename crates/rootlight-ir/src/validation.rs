@@ -112,19 +112,19 @@ impl Default for IrLimits {
             max_entities: 1_000_000,
             max_occurrences: 5_000_000,
             max_relations: 5_000_000,
-            max_provenance_records: 100_000,
+            max_provenance_records: 2_000_000,
             max_source_mappings: 1_000_000,
             max_coverage_records: 500_000,
             max_skipped_regions: 100_000,
             max_diagnostics: 10_000,
-            max_extensions: 10_000,
+            max_extensions: 1_100_000,
             max_total_records: 10_000_000,
             max_nested_items_per_record: DEFAULT_MAX_NESTED_ITEMS_PER_RECORD,
-            max_total_nested_items: 10_000_000,
+            max_total_nested_items: 20_000_000,
             max_string_bytes: DEFAULT_MAX_STRING_BYTES,
             max_total_string_bytes: 256 * 1024 * 1024,
             max_extension_payload_bytes: DEFAULT_MAX_EXTENSION_PAYLOAD_BYTES,
-            max_total_extension_bytes: 16 * 1024 * 1024,
+            max_total_extension_bytes: 256 * 1024 * 1024,
             max_diagnostic_message_bytes: 4_096,
             max_total_diagnostic_bytes: 4 * 1024 * 1024,
         }
@@ -1934,6 +1934,16 @@ mod tests {
             canonicalize_ir_document(coverage, &IrLimits::default(), &ExtensionSupport::default()),
             Err(IrDocumentValidationError::InvalidCoverageCounts(_))
         ));
+    }
+
+    #[test]
+    fn default_provenance_capacity_matches_large_entity_corpora() {
+        let limits = IrLimits::default();
+
+        assert_eq!(limits.max_provenance_records, 2_000_000);
+        assert!(limits.max_provenance_records >= limits.max_entities);
+        assert!(limits.max_provenance_records < limits.max_total_records);
+        assert_eq!(limits.max_total_nested_items, 20_000_000);
     }
 
     #[test]

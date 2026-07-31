@@ -90,8 +90,12 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
         state.telemetry(),
     )?;
     let actor_handle = actor.handle();
-    let (first_slice, first_slice_workers) =
-        FirstSliceDaemon::start_durable(actor_handle.clone(), paths.state_dir()).await?;
+    let (first_slice, first_slice_workers) = FirstSliceDaemon::start_durable(
+        actor_handle.clone(),
+        paths.state_dir(),
+        Arc::clone(&state),
+    )
+    .await?;
     let first_slice: Arc<dyn FirstSliceIpcHandler> = Arc::new(first_slice);
     let mut orchestrator =
         DaemonOrchestrator::new(actor_handle.clone(), Arc::clone(&state), limits)?;

@@ -24,8 +24,8 @@ use rootlight_ids::{GenerationId, RepositoryId, SymbolId, content_hash, derive_r
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageScope, CoverageStatus, EntityFlag, EntityKind,
     ExtensionSupport, FactDomain, FactEvidence, IrDocument, IrLimits, OccurrenceRole,
-    OccurrenceTarget, ProducerIdentity, ProducerKind, RelationPredicate, SourceRef, SourceSpan,
-    decode_ir_document, validate_ir_document,
+    OccurrenceTarget, ProducerIdentity, ProducerKind, RelationPredicate, SkippedRegionReason,
+    SourceRef, SourceSpan, decode_ir_document, validate_ir_document,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
@@ -478,6 +478,35 @@ fn real_analyzer_reports_invalid_utf8_without_source_material() {
     let rendered = format!("{error:?}\n{error}");
     assert!(!rendered.contains(SECRET));
     assert!(!rendered.contains(case.path));
+
+    let fallback = analyzer
+        .analyze_unsupported_encoding(
+            &request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("repository fallback preserves bounded coverage");
+    validate_ir_document(
+        fallback.document(),
+        limits.ir(),
+        &ExtensionSupport::default(),
+    )
+    .expect("fallback IR validates");
+    assert_eq!(fallback.document().files.len(), 1);
+    assert_eq!(fallback.document().diagnostics.len(), 1);
+    assert_eq!(fallback.document().diagnostics[0].code, "invalid-utf8");
+    assert_eq!(fallback.document().skipped_regions.len(), 3);
+    assert!(fallback.document().skipped_regions.iter().all(|region| {
+        region.reason == SkippedRegionReason::UnsupportedEncoding && region.detail == "invalid-utf8"
+    }));
+    assert!(fallback.document().coverage_records.iter().any(|coverage| {
+        coverage.domain == FactDomain::Entities
+            && coverage.status == CoverageStatus::Bounded
+            && coverage.skipped == 1
+    }));
+    let fallback_json = serde_json::to_string(fallback.document()).expect("fallback IR encodes");
+    assert!(!fallback_json.contains(SECRET));
 }
 
 #[test]
@@ -636,7 +665,7 @@ fn real_analyzer_keeps_unique_symbol_identity_after_anonymous_scope_insertion() 
 }
 
 #[test]
-fn real_analyzer_rejects_ambiguous_anonymous_scope_identity_without_source_material() {
+fn real_analyzer_bounds_ambiguous_anonymous_scope_identity_without_source_material() {
     const SECRET: &str = "scope-secret-marker";
     let provider = Arc::new(provider());
     let limits = limits();
@@ -666,22 +695,26 @@ fn real_analyzer_rejects_ambiguous_anonymous_scope_identity_without_source_mater
         let fixture = Fixture::new(case, source.as_bytes());
         let analyzer = analyzer(&provider, case);
         let analysis_request = request(&fixture.snapshot, &fixture.source, case, &limits);
-        let error = execute_analysis(
+        let output = execute_analysis(
             &analyzer,
             &analysis_request,
             extensions.clone(),
             MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(),
         )
-        .expect_err("ambiguous anonymous scope identity must fail conservatively");
-        assert!(matches!(
-            &error,
-            AdapterError::ProviderFailed { code }
-                if code.as_str() == "treesitter-lowering-symbol-collision"
-        ));
-        let rendered = format!("{error:?}\n{error}");
-        assert!(!rendered.contains(SECRET));
-        assert!(!rendered.contains(case.path));
+        .expect("ambiguous anonymous scope identity must degrade to bounded coverage");
+        assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+        assert!(output.document().skipped_regions.iter().any(|region| {
+            region.domain == FactDomain::Entities
+                && region.detail == "stable-scope-identity-unavailable"
+        }));
+        assert!(
+            output
+                .document()
+                .entities
+                .iter()
+                .all(|entity| entity.canonical_name != "same")
+        );
     }
 }
 

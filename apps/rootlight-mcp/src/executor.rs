@@ -6778,6 +6778,7 @@ fn map_symbol_explain(
                 .is_some_and(|signature| signature.len() > 4_096)
             || !safe_label(&explanation.provider, 128)
             || !safe_label(&explanation.evidence, 128)
+            || !safe_label(&explanation.language, 64)
             || explanation.definition.repository() != request.repository
             || explanation.definition.generation() != resolved_generation
         {

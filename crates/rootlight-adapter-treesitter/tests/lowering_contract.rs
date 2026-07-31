@@ -252,29 +252,35 @@ fn missing_java_field_definition_is_reserved_in_preflight_quotas() {
         facts.clone(),
     )
     .expect_err("missing definition is admitted against skipped quota");
-    assert!(matches!(
-        error,
-        AdapterError::Sink(SinkError::StreamLimit {
-            resource: rootlight_adapter_sdk::ResourceKind::Records,
-            observed: 1,
-            limit: 0,
-        })
-    ));
+    assert!(
+        matches!(
+            error,
+            AdapterError::Sink(SinkError::StreamLimit {
+                resource: rootlight_adapter_sdk::ResourceKind::Records,
+                observed: 1,
+                limit: 0,
+            })
+        ),
+        "{error:?}"
+    );
 
     let mut total_limit = IrLimits::default();
     // Without the reserved name-unavailable record this conservative upper
-    // bound would be 13 and would incorrectly pass the preflight.
-    total_limit.max_total_records = 13;
+    // bound would be 15 and would incorrectly pass the preflight.
+    total_limit.max_total_records = 15;
     let error = analyze_custom(&snapshot, &source, language, &limits(total_limit), facts)
         .expect_err("missing definition is included in total-record preflight");
-    assert!(matches!(
-        error,
-        AdapterError::Sink(SinkError::StreamLimit {
-            resource: rootlight_adapter_sdk::ResourceKind::Records,
-            observed: 14,
-            limit: 13,
-        })
-    ));
+    assert!(
+        matches!(
+            error,
+            AdapterError::Sink(SinkError::StreamLimit {
+                resource: rootlight_adapter_sdk::ResourceKind::Records,
+                observed: 16,
+                limit: 15,
+            })
+        ),
+        "{error:?}"
+    );
 }
 
 #[test]

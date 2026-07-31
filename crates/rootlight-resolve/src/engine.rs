@@ -72,7 +72,12 @@ impl ResolutionEngine {
         validate_ir_document(document, &IrLimits::default(), &ExtensionSupport::default())
             .map_err(ResolutionError::InvalidDocument)?;
 
-        let index = CandidateIndex::build(document, cancellation)?;
+        let index = CandidateIndex::build(
+            &document.files,
+            &document.entities,
+            &document.provenance,
+            cancellation,
+        )?;
         let mut decisions = Vec::with_capacity(document.occurrences.len());
         for occurrence in &document.occurrences {
             cancellation.check()?;
@@ -92,7 +97,7 @@ impl ResolutionEngine {
         })
     }
 
-    fn resolve_occurrence(
+    pub(crate) fn resolve_occurrence(
         &self,
         occurrence: &OccurrenceRecord,
         index: &CandidateIndex<'_>,
@@ -257,11 +262,11 @@ impl Default for ResolutionEngine {
     }
 }
 
-struct CandidateIndex<'a> {
+pub(crate) struct CandidateIndex<'a> {
     by_name_hash: BTreeMap<ContentHash, Vec<IndexedCandidate<'a>>>,
-    entities: BTreeMap<SymbolId, &'a EntityRecord>,
-    files: BTreeMap<FileId, &'a FileRecord>,
-    provenance: BTreeMap<FactId, &'a ProvenanceRecord>,
+    pub(crate) entities: BTreeMap<SymbolId, &'a EntityRecord>,
+    pub(crate) files: BTreeMap<FileId, &'a FileRecord>,
+    pub(crate) provenance: BTreeMap<FactId, &'a ProvenanceRecord>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -278,19 +283,21 @@ struct IndexedCandidate<'a> {
 }
 
 impl<'a> CandidateIndex<'a> {
-    fn build(
-        document: &'a NormalizedIrDocument,
+    pub(crate) fn build(
+        file_records: &'a [FileRecord],
+        entity_records: &'a [EntityRecord],
+        provenance_records: &'a [ProvenanceRecord],
         cancellation: &Cancellation,
     ) -> Result<Self, ResolutionError> {
         let mut by_name_hash = BTreeMap::<ContentHash, Vec<IndexedCandidate<'_>>>::new();
         let mut entities = BTreeMap::new();
         let mut files = BTreeMap::new();
         let mut provenance = BTreeMap::new();
-        for file in &document.files {
+        for file in file_records {
             cancellation.check()?;
             files.insert(file.id, file);
         }
-        for entity in &document.entities {
+        for entity in entity_records {
             cancellation.check()?;
             entities.insert(entity.id, entity);
             index_name(
@@ -312,7 +319,7 @@ impl<'a> CandidateIndex<'a> {
                 NameMatch::Qualified,
             );
         }
-        for record in &document.provenance {
+        for record in provenance_records {
             cancellation.check()?;
             provenance.insert(record.id, record);
         }
@@ -468,7 +475,7 @@ fn unresolved_reason(role: OccurrenceRole, kind_rejection_total: u64) -> Unresol
     }
 }
 
-fn resolvable_role(role: OccurrenceRole) -> bool {
+pub(crate) fn resolvable_role(role: OccurrenceRole) -> bool {
     !matches!(
         role,
         OccurrenceRole::Definition

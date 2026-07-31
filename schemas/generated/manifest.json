@@ -10,11 +10,11 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "bb9fef083e1c438659b6c4490195e22c9ade8da301c540804f92b7b26d28019f"
+      "blake3": "e0eabb1a34010fa13d1181f7dd2fc464fdca51d00dd9b8136ebbde7f3c346064"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
-      "blake3": "5449531d15ddfd7b08427fc8f32ff323fed2292320282eda2e98058cf81ff1ba"
+      "blake3": "f1df8d381a0af1c1ff5669270684cbf37f8fb09c43a271e865209a002c27438c"
     },
     {
       "path": "crates/rootlight-config/src/lib.rs",
@@ -42,7 +42,7 @@
     },
     {
       "path": "crates/rootlight-ir/src/validation.rs",
-      "blake3": "152fd1babf02f2dbf5ab97935926267d263c926a915a9a3d89533d58a0fbfcd6"
+      "blake3": "0787cdd3b0bf4ec9b3278be386ec34a0a1265b3aeb5251d6d97b7dec568ac459"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/change.rs",
@@ -70,7 +70,7 @@
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
-      "blake3": "c6a20f174540e4768c55552e0121c9794ec7cad6cdf3556177c5771c56c447b0"
+      "blake3": "5b593a60ad4b88b42297032b44cd6775587aa1a5c108abf675fe6c0f859b8ce5"
     },
     {
       "path": "proto/adapter_v1.proto",
@@ -82,7 +82,7 @@
     },
     {
       "path": "proto/daemon_v1.proto",
-      "blake3": "661a72e418894c86139abb08bab8e6a073fdf54c8d1ba349f85879d10ac950da"
+      "blake3": "69e6be54d4cae2d1b44e9724f153b451c050b2926f4edc98be48706fa141caf6"
     },
     {
       "path": "tests/fixtures/compatibility/contract-0.1.json",
@@ -212,7 +212,7 @@
     },
     {
       "path": "crates/rootlight-protocol/src/generated/rootlight.daemon.v1.rs",
-      "blake3": "996056c56a5598891e032576a9cb9a61aea8c0ce94f84edfb1f42b2ec032a848"
+      "blake3": "3565560739b2881fbc6d214ad5653c4a525e9dd38f028c4f4c2eaf53374b788d"
     },
     {
       "path": "schemas/generated/json/config-1.0.schema.json",
@@ -404,7 +404,7 @@
     },
     {
       "path": "schemas/generated/protobuf/rootlight.desc",
-      "blake3": "b4e4f6dcd9822061a77fe511251016ed39068003118fab135effe7e4a72f95fc"
+      "blake3": "af302feebe8089c4cd3571f7539ed6906dcb1b4647bcf55362274b9ee0b41779"
     }
   ]
 }

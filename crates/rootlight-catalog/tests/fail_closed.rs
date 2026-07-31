@@ -74,7 +74,7 @@ fn supported_unix_control_catalog_rejects_a_final_symlink() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_control_catalog_rejects_an_extended_acl() {
-    let directory = TempDir::new().expect("temporary catalog parent exists");
+    let directory = TempDir::new().expect("catalog parent exists");
     let catalog_path = directory.path().join(CATALOG_FILENAME);
     drop(Catalog::open_in(directory.path()).expect("catalog initializes"));
 

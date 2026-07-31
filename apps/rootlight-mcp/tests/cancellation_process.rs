@@ -52,7 +52,9 @@ fn cancellation_reaches_active_daemon_analyses_without_emitting_responses() {
         // The test cancels query execution, so project analysis would add
         // unrelated setup latency under loaded CI runners.
         "mode": "structural",
-        "detached": false
+        // Publication is polled below; detached setup keeps its duration out
+        // of the MCP response bound exercised by this cancellation test.
+        "detached": true
     });
     let index = process_support::retry_transient_busy("index", |attempt_id| {
         mcp.call(attempt_id, "repo.index", arguments.clone())
