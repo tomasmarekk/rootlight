@@ -39,7 +39,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     explain::{finalize_plan, plan_change_plan},
-    policy::{BudgetCharge, BudgetLedger, CancellationSignal, ExecutionPolicyError},
+    policy::{BudgetCharge, BudgetLedger, BudgetLimits, CancellationSignal, ExecutionPolicyError},
     port::{
         AgentCallContext, AgentIdentityRequest, AgentPortError, AgentResolutionContext,
         AgentResolvedIdentity, AgentToolPort, AgentToolRequest,
@@ -48,6 +48,7 @@ use crate::{
 
 const PLAN_PROVIDER_COUNT: usize = 7;
 const PLAN_EVIDENCE_RECORD_LIMIT: usize = 64;
+const PLAN_EVIDENCE_BUDGET_DIVISOR: u64 = 4;
 
 /// Admitted `plan.change` request independent of a concrete daemon client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,15 +396,23 @@ impl PlanChangeService {
         let publication_floor = minimum_plan_publication_charge(&identity)?;
         ledger.charge(publication_floor).map_err(map_policy_error)?;
 
+        // Optional evidence must not consume the capacity required to publish
+        // a useful structural plan. A child ledger also turns provider-local
+        // exhaustion into explicit coverage instead of failing the whole call.
+        let evidence_limits = plan_evidence_budget_limits(ledger.remaining());
+        let mut evidence_allocation = ledger
+            .allocate_child(evidence_limits, None)
+            .map_err(map_policy_error)?;
         let evidence = collect_plan_evidence(
             Arc::clone(&port),
             &request,
             &identity,
             cancellation.clone(),
             deadline,
-            &mut ledger,
+            evidence_allocation.ledger_mut(),
         )
         .await?;
+        evidence_allocation.commit().map_err(map_policy_error)?;
         let mut budget = remaining_response_budget(&ledger, request.budget())?;
         budget.max_results = request
             .max_steps()
@@ -707,7 +716,15 @@ where
     let data: T = serde_json::from_value(envelope.data)
         .map_err(|_| PlanChangeServiceError::InvalidResponse)?;
     let observed = observed_items(&data);
-    charge_usage(ledger, &envelope.usage, observed)?;
+    if let Err(error) = charge_usage(ledger, &envelope.usage, observed) {
+        return match error {
+            PlanChangeServiceError::BudgetExceeded => Ok(omitted_provider(
+                provider,
+                PlanEvidenceOmissionReason::SharedBudgetExhausted,
+            )),
+            error => Err(error),
+        };
+    }
     let (coverage, projection_truncated) = provider_coverage(
         provider,
         kind,
@@ -732,8 +749,16 @@ fn provider_error_coverage(
     ledger: &mut BudgetLedger,
 ) -> Result<CollectedPlanProvider, PlanChangeServiceError> {
     let (error, usage) = error.into_parts();
-    if let Some(usage) = usage {
-        charge_usage(ledger, &usage, 0)?;
+    if let Some(usage) = usage
+        && let Err(error) = charge_usage(ledger, &usage, 0)
+    {
+        return match error {
+            PlanChangeServiceError::BudgetExceeded => Ok(omitted_provider(
+                provider,
+                PlanEvidenceOmissionReason::SharedBudgetExhausted,
+            )),
+            error => Err(error),
+        };
     }
     match error {
         AgentPortError::Public(error)
@@ -1077,6 +1102,24 @@ fn remaining_response_budget(
         max_paths: Some(u16::try_from(remaining.paths).unwrap_or(u16::MAX)),
         timeout_ms: Some(u32::try_from(remaining.time_ms).unwrap_or(u32::MAX)),
         evidence_level: requested.and_then(|budget| budget.evidence_level),
+    })
+}
+
+fn plan_evidence_budget_limits(remaining: BudgetCharge) -> BudgetLimits {
+    BudgetLimits::from_maximums(BudgetCharge {
+        rows: remaining.rows / PLAN_EVIDENCE_BUDGET_DIVISOR,
+        results: remaining.results / PLAN_EVIDENCE_BUDGET_DIVISOR,
+        tokens: remaining.tokens / PLAN_EVIDENCE_BUDGET_DIVISOR,
+        actual_tokens: remaining.actual_tokens / PLAN_EVIDENCE_BUDGET_DIVISOR,
+        source_bytes: remaining.source_bytes / PLAN_EVIDENCE_BUDGET_DIVISOR,
+        traversal_facts: remaining.traversal_facts / PLAN_EVIDENCE_BUDGET_DIVISOR,
+        // Depth is a high-water mark rather than an additive counter, so the
+        // child can inherit it without reducing the planner's later capacity.
+        depth: remaining.depth,
+        paths: remaining.paths / PLAN_EVIDENCE_BUDGET_DIVISOR,
+        json_bytes: remaining.json_bytes / PLAN_EVIDENCE_BUDGET_DIVISOR,
+        memory_bytes: remaining.memory_bytes / PLAN_EVIDENCE_BUDGET_DIVISOR,
+        time_ms: remaining.time_ms / PLAN_EVIDENCE_BUDGET_DIVISOR,
     })
 }
 

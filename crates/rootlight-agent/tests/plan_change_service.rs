@@ -631,8 +631,8 @@ async fn plan_call_receives_cancellation_deadline_and_result_budget() {
 
 #[tokio::test]
 async fn accepted_budget_is_preserved_and_max_steps_only_reduces_results() {
-    for (requested_results, max_steps, effective_results) in
-        [(20, 4, 4), (8, 4, 4), (1_000, 100, 100)]
+    for (requested_results, max_steps, effective_results, remaining_facts) in
+        [(20, 4, 4, 983), (8, 4, 4, 985), (1_000, 100, 100, 983)]
     {
         let requested_budget = ResponseBudget {
             max_results: Some(requested_results),
@@ -672,7 +672,7 @@ async fn accepted_budget_is_preserved_and_max_steps_only_reduces_results() {
                 .is_some_and(|tokens| tokens < 4_000)
         );
         assert_eq!(calls[0].budget.max_source_bytes, Some(654));
-        assert_eq!(calls[0].budget.max_traversal_facts, Some(983));
+        assert_eq!(calls[0].budget.max_traversal_facts, Some(remaining_facts));
         assert_eq!(calls[0].budget.max_depth, Some(3));
         assert_eq!(calls[0].budget.max_paths, Some(5));
         assert_eq!(calls[0].budget.timeout_ms, Some(900));
@@ -683,6 +683,53 @@ async fn accepted_budget_is_preserved_and_max_steps_only_reduces_results() {
         assert!(u16::from(max_steps) >= effective_results);
         assert!(requested_results >= effective_results);
     }
+}
+
+#[tokio::test]
+async fn single_step_budget_preserves_planning_when_optional_evidence_cannot_run() {
+    let mut request = input(generation(2));
+    request.max_steps = Some(1);
+    request.budget = Some(ResponseBudget {
+        max_results: Some(1),
+        max_tokens: Some(4_000),
+        max_source_bytes: Some(1_024),
+        max_traversal_facts: Some(1_024),
+        max_depth: Some(4),
+        max_paths: Some(4),
+        timeout_ms: Some(900),
+        evidence_level: Some(ProvenanceLevel::Compact),
+    });
+    let port = Arc::new(FakePort::new(
+        Some(Ok(identity(generation(2)))),
+        Some(Ok(plan_output(generation(2)))),
+    ));
+
+    let output = PlanChangeService
+        .execute(
+            Arc::clone(&port),
+            request,
+            TestCancellation(false),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .expect("the core plan retains its reserved result capacity");
+
+    assert!(
+        port.provider_calls
+            .lock()
+            .expect("provider call lock is available")
+            .is_empty()
+    );
+    let calls = port.plan_calls.lock().expect("plan call lock is available");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].budget.max_results, Some(1));
+    assert_eq!(output.data.plan.len(), 1);
+    assert!(output.data.provider_coverage[..4].iter().all(|coverage| {
+        coverage.state == PlanProviderState::Omitted
+            && coverage.omission.as_ref().is_some_and(|omission| {
+                omission.reason == PlanEvidenceOmissionReason::SharedBudgetExhausted
+            })
+    }));
 }
 
 #[tokio::test]
