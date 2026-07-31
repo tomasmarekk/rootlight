@@ -372,6 +372,82 @@ fn sink_fact_pressure_is_explicit_and_bounded() {
 }
 
 #[test]
+fn fact_pressure_retains_late_entity_evidence_across_a_file() {
+    let mut rust = b"fn noisy() {\n".to_vec();
+    rust.extend_from_slice(b"    noise();\n".repeat(128).as_slice());
+    rust.extend_from_slice(b"}\nenum LateRustSymbol { Value }\n");
+
+    let mut python = b"def noisy():\n".to_vec();
+    python.extend_from_slice(b"    noise()\n".repeat(128).as_slice());
+    python.extend_from_slice(b"\nclass LatePythonSymbol:\n    pass\n");
+
+    let mut c = b"int noisy(void) {\n".to_vec();
+    c.extend_from_slice(b"    noise();\n".repeat(128).as_slice());
+    c.extend_from_slice(b"    return 0;\n}\nint LateCSymbol(void) { return 0; }\n");
+
+    let provider = provider();
+    let limits = prioritized_fact_limits();
+    for (name, language, source, label, symbol) in [
+        (
+            "late.rs",
+            "rust",
+            rust.as_slice(),
+            "rust.type_identifier.definition",
+            "LateRustSymbol",
+        ),
+        (
+            "late.py",
+            "python",
+            python.as_slice(),
+            "python.identifier.definition",
+            "LatePythonSymbol",
+        ),
+        (
+            "late.c",
+            "c",
+            c.as_slice(),
+            "c.identifier.definition",
+            "LateCSymbol",
+        ),
+    ] {
+        let fixture = Fixture::new(name, source);
+        let request = request(
+            &fixture.snapshot,
+            &fixture.source,
+            &limits,
+            language,
+            Vec::new(),
+        );
+        let output = execute_parse(
+            &provider,
+            &request,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("fact-limited extraction commits prioritized entity evidence");
+
+        assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+        assert!(
+            output
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code().as_str() == "syntax-extraction-limit")
+        );
+        let definitions = fact_texts(&output, source, label);
+        let retained = output
+            .facts()
+            .iter()
+            .map(|fact| (fact.syntax_kind().as_str(), source_text(source, fact)))
+            .collect::<Vec<_>>();
+        assert!(
+            definitions.contains(&symbol),
+            "{language} omitted the late entity definition; retained {retained:?}"
+        );
+        assert!(output.facts().len() <= 12);
+    }
+}
+
+#[test]
 fn java_package_and_named_module_have_bounded_name_evidence() {
     let limits = limits(4096, 128);
     let cases: [(&str, &[u8], &str, &str); 2] = [
@@ -899,6 +975,27 @@ fn fact_limited_limits() -> AnalysisLimits {
         .expect("syntax stream limits are valid");
     let ir_batch = BatchThresholds::new(8, 4096, 2, 1024).expect("IR batch limits are valid");
     let ir = StreamLimits::new(8, 32, 32 * 1024, 8, 8192, 8192, ir_batch)
+        .expect("IR stream limits are valid");
+    AnalysisLimits::new(
+        MAX_SOURCE_BYTES,
+        4096,
+        128,
+        32,
+        8 * 1024 * 1024,
+        syntax,
+        ir,
+        IrLimits::default(),
+    )
+    .expect("analysis limits are valid")
+}
+
+fn prioritized_fact_limits() -> AnalysisLimits {
+    let syntax_batch =
+        BatchThresholds::new(4, 16 * 1024, 2, 1024).expect("syntax batch limits are valid");
+    let syntax = StreamLimits::new(3, 12, 128 * 1024, 4, 4096, 8192, syntax_batch)
+        .expect("syntax stream limits are valid");
+    let ir_batch = BatchThresholds::new(16, 16 * 1024, 2, 1024).expect("IR batch limits are valid");
+    let ir = StreamLimits::new(8, 128, 256 * 1024, 8, 8192, 8192, ir_batch)
         .expect("IR stream limits are valid");
     AnalysisLimits::new(
         MAX_SOURCE_BYTES,

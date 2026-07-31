@@ -375,14 +375,29 @@ impl TreeSitterProvider {
             max_facts,
             cancellation,
         )?;
+        let extraction_limited = extraction.limit.is_some();
+        if extraction_limited {
+            emit_extraction_limit_diagnostic(request, sink, cancellation)?;
+        }
+        let normalization_fact_limit = if extraction_limited {
+            let budget = sink.remaining_budget();
+            budget
+                .remaining()
+                .batches()
+                .checked_mul(budget.batch().max_records())
+                .ok_or_else(|| provider_failure("query-fact-accounting"))?
+                .min(budget.remaining().records())
+        } else {
+            extraction.fact_limit
+        };
         let normalized = normalize_query_candidates(
             extraction.candidates,
             request,
-            extraction.fact_limit,
+            normalization_fact_limit,
             cancellation,
         )?;
-        let query_limited = extraction.limit.is_some() || normalized.limited;
-        if query_limited {
+        let query_limited = extraction_limited || normalized.limited;
+        if normalized.limited && !extraction_limited {
             emit_extraction_limit_diagnostic(request, sink, cancellation)?;
         }
         let initial_plan =
@@ -1270,6 +1285,13 @@ fn normalize_query_candidates(
     max_facts: usize,
     cancellation: &Cancellation,
 ) -> Result<NormalizedFacts, AdapterError> {
+    let mut limited = candidates.len() > max_facts;
+    if limited {
+        sort_cancellable_by(&mut candidates, cancellation, |left, right| {
+            left.retention_rank().cmp(&right.retention_rank())
+        })?;
+        candidates.truncate(max_facts);
+    }
     sort_cancellable_by(&mut candidates, cancellation, |left, right| {
         (left.start, left.end, left.role, left.syntax).cmp(&(
             right.start,
@@ -1306,7 +1328,6 @@ fn normalize_query_candidates(
         cancellation,
         "query-fact-allocation",
     )?;
-    let mut limited = false;
     'candidate: for (index, candidate) in candidates.into_iter().enumerate() {
         if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
             cancellation.check()?;

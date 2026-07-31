@@ -3,7 +3,7 @@
 //! Native queries and capture indices stay private; runtime extraction sees
 //! only the closed, parser-independent role mapping defined here.
 
-use std::ops::ControlFlow;
+use std::{cmp::Ordering, collections::BinaryHeap, ops::ControlFlow};
 
 use rootlight_adapter_sdk::{AdapterError, DiagnosticCode, SyntaxFactKind};
 use rootlight_cancel::Cancellation;
@@ -124,6 +124,22 @@ impl StructuralRole {
             _ => None,
         }
     }
+
+    const fn retention_rank(self) -> u8 {
+        match self {
+            Self::Root => 0,
+            Self::Module => 1,
+            Self::Declaration | Self::Definition => 2,
+            Self::Signature | Self::Scope | Self::ScopeTrait | Self::ScopeType => 3,
+            Self::TestAttribute => 4,
+            Self::Import => 5,
+            Self::Documentation => 6,
+            Self::Call | Self::ScopedCall => 7,
+            Self::Reference => 8,
+            Self::Comment => 9,
+            Self::StringLiteral => 10,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +156,39 @@ pub(crate) struct QueryCandidate {
     pub(crate) end: usize,
     pub(crate) role: StructuralRole,
     pub(crate) syntax: &'static str,
+}
+
+impl QueryCandidate {
+    pub(crate) fn retention_rank(self) -> (u8, usize, usize, StructuralRole, &'static str) {
+        (
+            self.role.retention_rank(),
+            self.start,
+            self.end,
+            self.role,
+            self.syntax,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RetainedCandidate(QueryCandidate);
+
+impl RetainedCandidate {
+    fn rank(self) -> (u8, usize, usize, StructuralRole, &'static str) {
+        self.0.retention_rank()
+    }
+}
+
+impl Ord for RetainedCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.rank().cmp(&other.rank())
+    }
+}
+
+impl PartialOrd for RetainedCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 pub(crate) struct QueryExtraction {
@@ -231,12 +280,13 @@ impl QueryPack {
         let options = QueryCursorOptions::new().progress_callback(&mut progress);
         let mut matches =
             cursor.matches_with_options(&self.query, tree.root_node(), source, options);
-        let mut candidates = Vec::with_capacity(max_facts.min(4096));
+        let mut candidates = BinaryHeap::with_capacity(max_facts.min(4096));
         let mut match_count = 0usize;
         let mut capture_count = 0usize;
         let mut limit = None;
+        let mut fact_limit_reached = false;
 
-        while let Some(query_match) = matches.next() {
+        'query: while let Some(query_match) = matches.next() {
             if match_count >= max_matches {
                 limit = Some(QueryLimit::Match);
                 break;
@@ -247,15 +297,11 @@ impl QueryPack {
             for capture in query_match.captures {
                 if capture_count >= max_captures {
                     limit = Some(QueryLimit::Capture);
-                    break;
+                    break 'query;
                 }
                 capture_count = capture_count
                     .checked_add(1)
                     .ok_or_else(|| query_failure("query-capture-accounting"))?;
-                if candidates.len() >= max_facts {
-                    limit = Some(QueryLimit::Fact);
-                    break;
-                }
                 let role = self
                     .role_for_capture(capture.index)
                     .ok_or_else(|| query_failure("query-capture-role"))?;
@@ -282,15 +328,26 @@ impl QueryPack {
                     _ => canonical_syntax(family, capture.node.kind())
                         .ok_or_else(|| query_failure("query-node-kind"))?,
                 };
-                candidates.push(QueryCandidate {
+                let candidate = RetainedCandidate(QueryCandidate {
                     start: capture.node.start_byte(),
                     end: capture.node.end_byte(),
                     role,
                     syntax,
                 });
-            }
-            if limit.is_some() {
-                break;
+                if candidates.len() < max_facts {
+                    candidates.push(candidate);
+                    continue;
+                }
+
+                fact_limit_reached = true;
+                // Continue the bounded query after capacity is reached so late
+                // declarations can replace lower-value calls and references.
+                let mut worst = candidates
+                    .peek_mut()
+                    .expect("a nonzero full fact heap has a worst candidate");
+                if candidate < *worst {
+                    *worst = candidate;
+                }
             }
         }
         drop(matches);
@@ -300,9 +357,14 @@ impl QueryPack {
         cancellation.check()?;
         if cursor.did_exceed_match_limit() {
             limit = Some(QueryLimit::CursorMatch);
+        } else if limit.is_none() && fact_limit_reached {
+            limit = Some(QueryLimit::Fact);
         }
         Ok(QueryExtraction {
-            candidates,
+            candidates: candidates
+                .into_iter()
+                .map(|candidate| candidate.0)
+                .collect(),
             limit,
             fact_limit: max_facts,
         })
