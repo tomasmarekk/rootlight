@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     FirstSliceError, FirstSliceIndexReceipt, FirstSliceOperationContext, RustSourceInput,
-    check_cancellation, map_catalog_error, map_query_error, map_search_error, map_vfs_error,
-    project_lexical_documents,
+    check_cancellation, map_catalog_error, map_identity_error, map_query_error, map_search_error,
+    map_vfs_error, project_lexical_documents,
 };
 
 const DURABLE_DIRECTORY: &str = "first-slice";
@@ -960,9 +960,11 @@ fn restore_generation(
             origins: Vec::new(),
         });
     }
-    let verified = oracle
-        .read_verified(&context)
-        .map_err(|error| map_catalog_error(&error, cancellation))?;
+    // Reuse the canonical snapshot already read for search and source restoration.
+    // Reading it through the oracle again temporarily doubles large-generation
+    // memory and turns crash recovery into an avoidable second storage scan.
+    let verified = IdentityVerifiedGeneration::verify_snapshot(persisted, &context)
+        .map_err(|error| map_identity_error(error, cancellation))?;
     Ok(RestoredGeneration {
         root_identity: manifest.root_identity,
         display_name: manifest.display_name,
