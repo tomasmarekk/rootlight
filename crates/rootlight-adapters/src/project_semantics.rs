@@ -19,9 +19,9 @@ use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, Confidence, ContainerRef, CoverageRecord, CoverageScope,
-    CoverageStatus, DiagnosticRecord, EntityFlag, EntityKind, EntityRecord, EntityVisibility,
-    EvidenceKind, FactDomain, FactEvidence, FactRef, FileIdentityClaim, FileRecord,
-    LexicalEvidenceFormat, LexicalEvidenceKind, LexicalEvidenceV1, OccurrenceRecord,
+    CoverageStatus, DiagnosticRecord, DiagnosticSeverity, EntityFlag, EntityKind, EntityRecord,
+    EntityVisibility, EvidenceKind, FactDomain, FactEvidence, FactRef, FileIdentityClaim,
+    FileRecord, LexicalEvidenceFormat, LexicalEvidenceKind, LexicalEvidenceV1, OccurrenceRecord,
     OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord,
     RelationEndpoint, RelationPredicate, RelationRecord, SkippedRegion, SkippedRegionReason,
     SourceMappingKind, SourceMappingRecord, SourceRef, SourceSpan, SymbolIdentityClaim,
@@ -40,6 +40,9 @@ const STATIC_CALL_CONFIDENCE: u16 = 850;
 const TYPESCRIPT_CALL_CONFIDENCE: u16 = 800;
 const DYNAMIC_CALL_CONFIDENCE: u16 = 650;
 const FALLBACK_REFERENCE_CONFIDENCE: u16 = 550;
+// One syntax fact can expand into several related IR records. Bound the input
+// set before that expansion so the isolated transaction can always be framed.
+const MAX_PROJECT_SYNTAX_FACTS: usize = 256;
 
 const ALL_DOMAINS: [FactDomain; 8] = [
     FactDomain::Files,
@@ -291,6 +294,25 @@ impl SemanticProjectAnalyzer {
             {
                 return Err(provider_failure("project-language-input"));
             }
+            if std::str::from_utf8(input.source().bytes()).is_err() {
+                // Encoding fixtures are legitimate repository inputs. Retain
+                // their identity at Tier B while declaring their facts bounded.
+                parsed.push(ParsedInput {
+                    input,
+                    facts: Vec::new(),
+                    diagnostics: vec![AdapterDiagnostic::new(
+                        DiagnosticCode::new("invalid-utf8")
+                            .map_err(|_| provider_failure("project-diagnostic-code"))?,
+                        DiagnosticSeverity::Warning,
+                        Some(input.source().source_ref().clone()),
+                        CoverageStatus::Bounded,
+                    )],
+                    parse_status: CoverageStatus::Bounded,
+                    syntax_nodes: 0,
+                    max_syntax_depth: 0,
+                });
+                continue;
+            }
             let parse_request = ParseRequest::new(
                 input.source().clone(),
                 input.language().clone(),
@@ -313,8 +335,149 @@ impl SemanticProjectAnalyzer {
                 max_syntax_depth: output.report().resources().max_syntax_depth(),
             });
         }
+        bound_project_syntax_facts(&mut parsed)?;
         ProjectFactsBuilder::new(self, request, parsed, cancellation).build()
     }
+}
+
+fn bound_project_syntax_facts(parsed: &mut [ParsedInput<'_, '_>]) -> Result<(), AdapterError> {
+    let total_facts = parsed.iter().try_fold(0_usize, |total, input| {
+        total
+            .checked_add(input.facts.len())
+            .ok_or_else(|| provider_failure("project-fact-accounting"))
+    })?;
+    if total_facts <= MAX_PROJECT_SYNTAX_FACTS {
+        return Ok(());
+    }
+
+    let code = DiagnosticCode::new("project-syntax-fact-limit")
+        .map_err(|_| provider_failure("project-diagnostic-code"))?;
+    let mut remaining_facts = MAX_PROJECT_SYNTAX_FACTS;
+    let mut remaining_inputs = parsed.len();
+    for input in parsed {
+        let allowance = remaining_facts
+            .checked_add(remaining_inputs.saturating_sub(1))
+            .and_then(|value| value.checked_div(remaining_inputs))
+            .ok_or_else(|| provider_failure("project-fact-accounting"))?;
+        if input.facts.len() > allowance {
+            retain_project_syntax_facts(&mut input.facts, allowance);
+            input.diagnostics.push(AdapterDiagnostic::new(
+                code.clone(),
+                DiagnosticSeverity::Warning,
+                Some(input.input.source().source_ref().clone()),
+                CoverageStatus::Bounded,
+            ));
+            input.parse_status = merge_status(input.parse_status, CoverageStatus::Bounded);
+        }
+        remaining_facts = remaining_facts
+            .checked_sub(input.facts.len())
+            .ok_or_else(|| provider_failure("project-fact-accounting"))?;
+        remaining_inputs = remaining_inputs
+            .checked_sub(1)
+            .ok_or_else(|| provider_failure("project-fact-accounting"))?;
+    }
+    Ok(())
+}
+
+fn retain_project_syntax_facts(facts: &mut Vec<SyntaxFact>, allowance: usize) {
+    let facts_by_id = facts
+        .iter()
+        .map(|fact| (fact.local_id(), fact))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected = BTreeSet::new();
+    let mut remaining = allowance;
+
+    // Definitions carry the most useful stable identity for exact lookup.
+    // Prefer shallow declarations and retain their complete ancestry so the
+    // reduced fact graph stays valid rather than producing dangling parents.
+    let mut declarations = facts
+        .iter()
+        .filter(|fact| fact.kind() == SyntaxFactKind::Declaration)
+        .collect::<Vec<_>>();
+    declarations.sort_by_key(|fact| {
+        (
+            fact.depth(),
+            fact.span().start_byte(),
+            span_len(fact.span()),
+        )
+    });
+    for declaration in declarations {
+        let Some(definition) = facts
+            .iter()
+            .filter(|fact| {
+                fact.kind() == SyntaxFactKind::Occurrence
+                    && !is_call_fact(fact)
+                    && contains_span(declaration.span(), fact.span())
+            })
+            .min_by_key(|fact| {
+                (
+                    !is_definition_fact(fact),
+                    fact.span().start_byte(),
+                    span_len(fact.span()),
+                )
+            })
+        else {
+            continue;
+        };
+        select_syntax_fact_group(
+            [declaration, definition],
+            &facts_by_id,
+            &mut selected,
+            &mut remaining,
+        );
+    }
+
+    for kind in [
+        SyntaxFactKind::Import,
+        SyntaxFactKind::Occurrence,
+        SyntaxFactKind::Scope,
+        SyntaxFactKind::Root,
+        SyntaxFactKind::Module,
+        SyntaxFactKind::Signature,
+        SyntaxFactKind::ErrorRecovery,
+        SyntaxFactKind::EmbeddedRegion,
+        SyntaxFactKind::Comment,
+        SyntaxFactKind::StringLiteral,
+    ] {
+        for fact in facts.iter().filter(|fact| fact.kind() == kind) {
+            if remaining == 0 {
+                break;
+            }
+            select_syntax_fact_group([fact], &facts_by_id, &mut selected, &mut remaining);
+        }
+    }
+    facts.retain(|fact| selected.contains(&fact.local_id()));
+}
+
+fn select_syntax_fact_group<'fact>(
+    facts: impl IntoIterator<Item = &'fact SyntaxFact>,
+    facts_by_id: &BTreeMap<u64, &'fact SyntaxFact>,
+    selected: &mut BTreeSet<u64>,
+    remaining: &mut usize,
+) {
+    let mut required = BTreeSet::new();
+    for fact in facts {
+        let mut current = Some(fact);
+        let mut traversed = 0_usize;
+        while let Some(candidate) = current {
+            if traversed >= facts_by_id.len() || !required.insert(candidate.local_id()) {
+                break;
+            }
+            traversed += 1;
+            current = candidate
+                .parent()
+                .and_then(|parent| facts_by_id.get(&parent).copied());
+        }
+    }
+    let additional = required
+        .iter()
+        .filter(|local_id| !selected.contains(local_id))
+        .count();
+    if additional > *remaining {
+        return;
+    }
+    selected.extend(required);
+    *remaining -= additional;
 }
 
 impl ProjectLanguageAnalyzer for SemanticProjectAnalyzer {
@@ -840,6 +1003,11 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
     }
 
     fn materialize_entities(&mut self) -> Result<(), AdapterError> {
+        let mut materialized_symbols = self
+            .entities
+            .iter()
+            .map(|entity| entity.symbol)
+            .collect::<BTreeSet<_>>();
         let structural_containers = self
             .entities
             .iter()
@@ -877,6 +1045,11 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .unwrap_or(ContainerRef::File(draft.file));
             let claim = self.symbol_claim(draft.kind, container, &draft.name, &draft.header);
             let symbol = claim.symbol;
+            // Repeated declarations with the same stable signature share one
+            // entity; their distinct definition occurrences retain each site.
+            if !materialized_symbols.insert(symbol) {
+                continue;
+            }
             let state = self
                 .states
                 .get(&draft.file)
@@ -1796,12 +1969,19 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             .source()
             .cloned()
             .or_else(|| Some(input.source().source_ref().clone()));
+        let message = match diagnostic.code().as_str() {
+            "invalid-utf8" => "source is not valid utf-8",
+            "project-syntax-fact-limit" => {
+                "project syntax facts exceeded the bounded semantic limit"
+            }
+            _ => "parser recovered from malformed or incomplete syntax",
+        };
         let mut record = DiagnosticRecord {
             id: FactId::from_bytes([0; 20]),
             repository: input.source().source_ref().repository(),
             generation: input.source().source_ref().generation(),
             code: diagnostic.code().as_str().to_owned(),
-            message: "parser recovered from malformed or incomplete syntax".to_owned(),
+            message: message.to_owned(),
             severity: diagnostic.severity(),
             source: source.clone(),
             coverage_effect: diagnostic.coverage_effect(),

@@ -372,6 +372,62 @@ fn malformed_source_commits_partial_diagnostics() {
 }
 
 #[test]
+fn oversized_project_fact_sets_commit_bounded_tier_b_output() {
+    let repeated_calls = format!(
+        "{}def ping():\n    pass\ndef ping():\n    pass\n",
+        "ping()\n".repeat(6_000)
+    );
+    let fixture = ProjectFixture::new(
+        ["dep.py", "main.py"],
+        [repeated_calls.as_str(), "ping()\n"],
+        SemanticProjectLanguage::Python,
+    );
+    let limits = limits();
+    let request = fixture.request(&limits, AnalysisTier::TierB);
+    let analyzer = analyzer(SemanticProjectLanguage::Python, fixture.build_context);
+
+    let output = execute_project_analysis(
+        &analyzer,
+        &request,
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect("oversized project facts commit bounded output");
+
+    assert_eq!(
+        output.report().work().coverage().tier(),
+        AnalysisTier::TierB
+    );
+    assert_eq!(
+        output.report().work().coverage().status(),
+        CoverageStatus::Bounded
+    );
+    assert!(output.document().diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "project-syntax-fact-limit"
+            && diagnostic.coverage_effect == CoverageStatus::Bounded
+    }));
+    assert_eq!(
+        output
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.display_name == "ping")
+            .count(),
+        1,
+        "late declarations remain available to exact symbol lookup"
+    );
+    assert!(
+        output
+            .document()
+            .occurrences
+            .len()
+            .checked_add(output.document().entities.len())
+            .is_some_and(|facts| facts < 6_000)
+    );
+}
+
+#[test]
 fn build_context_cancellation_and_output_quota_fail_closed() {
     let fixture = ProjectFixture::new(
         ["src/dep.rs", "src/main.rs"],
@@ -492,12 +548,13 @@ impl ParseProvider for FixtureParser {
             ));
         }
         facts.sort_by_key(|fact| (fact.span(), fact.local_id()));
-        let sequence = sink.next_sequence();
-        sink.push(rootlight_adapter_sdk::SyntaxFactBatch::new(
-            sequence,
-            facts.clone(),
-            diagnostics,
-        ))?;
+        for chunk in facts.chunks(256) {
+            sink.push(rootlight_adapter_sdk::SyntaxFactBatch::new(
+                sink.next_sequence(),
+                chunk.to_vec(),
+                std::mem::take(&mut diagnostics),
+            ))?;
+        }
         let usage = sink.staged_usage();
         let coverage = CoverageReport::new(
             AnalysisTier::TierD,

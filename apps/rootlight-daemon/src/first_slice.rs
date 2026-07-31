@@ -116,6 +116,10 @@ const PROJECT_ADAPTER_CPU_TIME_MS: u64 = 15_000;
 const PROJECT_ADAPTER_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 const PROJECT_ADAPTER_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const PROJECT_ADAPTER_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
+// Source expands into normalized facts, so partitions need output and CPU
+// headroom even when the encoded request remains below the hard input limit.
+const PROJECT_ADAPTER_PARTITION_SOURCE_BYTES: u64 = 256 * 1024;
+const PROJECT_ADAPTER_PARTITION_FILES: usize = 8;
 const PROJECT_ADAPTER_HANDLES: u32 = 64;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
@@ -331,7 +335,7 @@ impl ProjectPartitionBuffer {
             request_payload_bytes: base_request_payload_bytes,
             source_bytes: context_bytes,
             context_bytes,
-            max_files,
+            max_files: max_files.min(PROJECT_ADAPTER_PARTITION_FILES),
         })
     }
 
@@ -351,8 +355,11 @@ impl ProjectPartitionBuffer {
             .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
         let input_limit = usize::try_from(PROJECT_ADAPTER_INPUT_BYTES)
             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        let partition_source_limit = usize::try_from(PROJECT_ADAPTER_PARTITION_SOURCE_BYTES)
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
         let fits = self.inputs.len() < self.max_files
             && source_bytes <= input_limit
+            && (self.inputs.is_empty() || source_bytes <= partition_source_limit)
             && project_analysis_frame_bytes(request_payload_bytes)
                 .is_some_and(|bytes| bytes <= MAX_ADAPTER_FRAME_BYTES);
         if !fits {
@@ -6188,8 +6195,8 @@ mod tests {
             requested_tier: adapter::RequestedAnalysisTier::TierB as i32,
         };
         let base_payload = project_analysis_request_payload_bytes(&base_request);
-        let first = input(7, "Lib/first.py", 9 * 1024 * 1024);
-        let second = input(8, "Lib/second.py", 9 * 1024 * 1024);
+        let first = input(7, "Lib/first.py", 3 * 1024 * 1024);
+        let second = input(8, "Lib/second.py", 3 * 1024 * 1024);
         let mut buffer = ProjectPartitionBuffer::new(base_payload, 7, 4_096)
             .expect("partition buffer initializes");
 
@@ -6222,7 +6229,14 @@ mod tests {
                 .source
                 .len()
                 .checked_add(second_batch[0].source.len())
-                .is_some_and(|bytes| bytes > 16 * 1024 * 1024)
+                .is_some_and(|bytes| {
+                    bytes
+                        > usize::try_from(PROJECT_ADAPTER_PARTITION_SOURCE_BYTES)
+                            .expect("partition source limit fits usize")
+                        && bytes
+                            < usize::try_from(PROJECT_ADAPTER_INPUT_BYTES)
+                                .expect("adapter input limit fits usize")
+                })
         );
     }
 

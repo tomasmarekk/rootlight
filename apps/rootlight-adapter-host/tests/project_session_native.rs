@@ -137,6 +137,101 @@ fn actual_isolated_binary_returns_multifile_tier_b() {
 }
 
 #[test]
+fn actual_isolated_binary_bounds_invalid_utf8_without_abandoning_the_project() {
+    let executable = adapter_executable();
+    let limits = resource_limits(8 * 1024 * 1024);
+    let session = negotiated_session(&executable, limits);
+    let request = project_request(
+        &session,
+        "python",
+        &[
+            (
+                "src/encoded.py",
+                b"# coding: iso-8859-1\nvalue = '\xff'\n".as_slice(),
+                false,
+                Vec::new(),
+            ),
+            (
+                "src/main.py",
+                b"def run():\n    return 1\n".as_slice(),
+                false,
+                Vec::new(),
+            ),
+        ],
+    );
+
+    let output = execute_isolated_project_adapter(
+        &executable,
+        &session,
+        &request,
+        &ExtensionSupport::default(),
+        &deadline(),
+    )
+    .expect("invalid UTF-8 bounds only the affected file");
+
+    assert_eq!(output.document().files.len(), 2);
+    assert!(
+        output
+            .document()
+            .provenance
+            .iter()
+            .all(|provenance| provenance.tier == AnalysisTier::TierB)
+    );
+    assert!(output.document().diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "invalid-utf8" && diagnostic.coverage_effect == CoverageStatus::Bounded
+    }));
+    assert!(output.document().skipped_regions.iter().any(|region| {
+        output
+            .document()
+            .files
+            .iter()
+            .any(|file| file.path == "src/encoded.py" && region.source.span().file() == file.id)
+    }));
+}
+
+#[test]
+fn actual_isolated_binary_bounds_large_semantic_fact_sets() {
+    let executable = adapter_executable();
+    let limits = resource_limits(16 * 1024 * 1024);
+    let session = negotiated_session(&executable, limits);
+    let repeated_calls = "ping()\n".repeat(6_000);
+    let request = project_request(
+        &session,
+        "python",
+        &[
+            (
+                "src/dep.py",
+                b"def ping():\n    pass\n".as_slice(),
+                false,
+                Vec::new(),
+            ),
+            ("src/main.py", repeated_calls.as_bytes(), false, Vec::new()),
+        ],
+    );
+
+    let output = execute_isolated_project_adapter(
+        &executable,
+        &session,
+        &request,
+        &ExtensionSupport::default(),
+        &deadline(),
+    )
+    .expect("large semantic fact sets commit bounded output");
+
+    assert!(
+        output
+            .document()
+            .provenance
+            .iter()
+            .all(|provenance| { provenance.tier == AnalysisTier::TierB })
+    );
+    assert!(output.document().diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "project-syntax-fact-limit"
+            && diagnostic.coverage_effect == CoverageStatus::Bounded
+    }));
+}
+
+#[test]
 fn actual_isolated_binary_keeps_function_identity_across_body_changes() {
     let executable = adapter_executable();
     let limits = resource_limits(8 * 1024 * 1024);
