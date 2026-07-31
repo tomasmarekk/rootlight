@@ -250,6 +250,36 @@ impl FirstSliceIndexCommit {
     }
 }
 
+/// Opaque durable recovery work that can run after the service starts accepting reads.
+pub struct FirstSliceDeferredRestore {
+    durable: Arc<DurableCatalog>,
+}
+
+/// Fully verified durable state awaiting one atomic in-memory installation.
+pub struct FirstSliceRestoredState {
+    generations: Vec<RestoredGeneration>,
+}
+
+impl FirstSliceDeferredRestore {
+    /// Loads and verifies every retained activation-marked generation.
+    ///
+    /// The work is intentionally separate from service construction so daemon
+    /// readiness and lifecycle control do not depend on catalog size.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed durable catalog, integrity, cancellation, or retention
+    /// failure.
+    pub fn restore(
+        self,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceRestoredState, FirstSliceError> {
+        self.durable
+            .restore(cancellation)
+            .map(|generations| FirstSliceRestoredState { generations })
+    }
+}
+
 /// Source-free adapter facts for production support evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstSliceSupportAdapter {
@@ -2141,7 +2171,7 @@ pub struct FirstSliceService {
     // Catalog pagination mutates only bounded cursor state. Its independent
     // lock keeps catalog reads concurrent with long immutable analysis reads.
     catalog_snapshots: Mutex<CatalogSnapshotStore>,
-    durable: Option<DurableCatalog>,
+    durable: Option<Arc<DurableCatalog>>,
     maximum_generations_per_repository: usize,
     activation_sequences: BTreeMap<RepositoryId, u64>,
     global_activation_sequence: u64,
@@ -2182,12 +2212,14 @@ impl FirstSliceService {
         state_root: &Path,
         cancellation: &Cancellation,
     ) -> Result<Self, FirstSliceError> {
-        Self::new_durable_with_optional_project_analyzer(
+        let (mut service, deferred) = Self::open_durable_deferred_with_optional_project_analyzer(
             maximum_generations,
             state_root,
             None,
-            cancellation,
-        )
+        )?;
+        let restored = deferred.restore(cancellation)?;
+        service.install_deferred_restore(restored, cancellation)?;
+        Ok(service)
     }
 
     /// Opens the durable service with one authenticated project analyzer.
@@ -2206,30 +2238,85 @@ impl FirstSliceService {
         project_analyzer: Arc<dyn FirstSliceProjectAnalyzer>,
         cancellation: &Cancellation,
     ) -> Result<Self, FirstSliceError> {
-        Self::new_durable_with_optional_project_analyzer(
+        let (mut service, deferred) = Self::open_durable_deferred_with_optional_project_analyzer(
             maximum_generations,
             state_root,
             Some(project_analyzer),
-            cancellation,
+        )?;
+        let restored = deferred.restore(cancellation)?;
+        service.install_deferred_restore(restored, cancellation)?;
+        Ok(service)
+    }
+
+    /// Opens durable publication state without scanning retained generations.
+    ///
+    /// The returned recovery token can be evaluated on a background worker and
+    /// then installed through [`Self::install_deferred_restore`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable boundary or bounded in-memory service
+    /// cannot initialize.
+    pub fn open_durable_deferred(
+        maximum_generations: usize,
+        state_root: &Path,
+    ) -> Result<(Self, FirstSliceDeferredRestore), FirstSliceError> {
+        Self::open_durable_deferred_with_optional_project_analyzer(
+            maximum_generations,
+            state_root,
+            None,
         )
     }
 
-    fn new_durable_with_optional_project_analyzer(
+    /// Opens deferred durable state with one authenticated project analyzer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::open_durable_deferred`].
+    pub fn open_durable_deferred_with_project_analyzer(
+        maximum_generations: usize,
+        state_root: &Path,
+        project_analyzer: Arc<dyn FirstSliceProjectAnalyzer>,
+    ) -> Result<(Self, FirstSliceDeferredRestore), FirstSliceError> {
+        Self::open_durable_deferred_with_optional_project_analyzer(
+            maximum_generations,
+            state_root,
+            Some(project_analyzer),
+        )
+    }
+
+    fn open_durable_deferred_with_optional_project_analyzer(
         maximum_generations: usize,
         state_root: &Path,
         project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
-        cancellation: &Cancellation,
-    ) -> Result<Self, FirstSliceError> {
-        let durable = DurableCatalog::open(state_root, maximum_generations)?;
-        let restored = durable.restore(cancellation)?;
-        let mut service = Self::new_with_storage(
+    ) -> Result<(Self, FirstSliceDeferredRestore), FirstSliceError> {
+        let durable = Arc::new(DurableCatalog::open(state_root, maximum_generations)?);
+        let service = Self::new_with_storage(
             maximum_generations,
             MAX_RETAINED_SOURCE_BYTES,
-            Some(durable),
+            Some(Arc::clone(&durable)),
             project_analyzer,
         )?;
-        service.install_restored(restored, cancellation)?;
-        Ok(service)
+        Ok((service, FirstSliceDeferredRestore { durable }))
+    }
+
+    /// Installs fully verified durable state into an otherwise empty service.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed cancellation, integrity, or bounded-retention failure.
+    pub fn install_deferred_restore(
+        &mut self,
+        restored: FirstSliceRestoredState,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceError> {
+        if !self.repositories.is_empty()
+            || !self.receipts.is_empty()
+            || !self.generations.is_empty()
+        {
+            return Err(FirstSliceError::Retention);
+        }
+        self.install_restored(restored.generations, cancellation)
     }
 
     /// Resolves an already registered repository from its canonical root.
@@ -2350,7 +2437,7 @@ impl FirstSliceService {
     fn new_with_storage(
         maximum_generations: usize,
         maximum_retained_source_bytes: usize,
-        durable: Option<DurableCatalog>,
+        durable: Option<Arc<DurableCatalog>>,
         project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
     ) -> Result<Self, FirstSliceError> {
         let total_generation_capacity = maximum_generations
@@ -9931,8 +10018,16 @@ mod tests {
                 .expect("durable generation publishes")
         };
 
-        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
-            .expect("durable generation restores");
+        let (mut restored, deferred) =
+            FirstSliceService::open_durable_deferred(2, paths.state_dir())
+                .expect("durable boundary opens without scanning generations");
+        assert!(restored.list_repositories().is_empty());
+        let restored_state = deferred
+            .restore(&cancellation)
+            .expect("durable generation verifies");
+        restored
+            .install_deferred_restore(restored_state, &cancellation)
+            .expect("verified durable generation installs");
         assert_eq!(
             restored.active_generation_for(receipt.repository),
             Some(receipt.generation)

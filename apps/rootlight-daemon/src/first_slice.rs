@@ -65,8 +65,8 @@ use rootlight_query::{
 };
 use rootlight_service::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
-    AdvancedAstNode, FirstSliceBudget, FirstSliceDurableOperation, FirstSliceError,
-    FirstSliceGenerationContext, FirstSliceIndexAdmission, FirstSliceIndexMode,
+    AdvancedAstNode, FirstSliceBudget, FirstSliceDeferredRestore, FirstSliceDurableOperation,
+    FirstSliceError, FirstSliceGenerationContext, FirstSliceIndexAdmission, FirstSliceIndexMode,
     FirstSliceIndexProgress, FirstSliceIndexProvider, FirstSliceIndexReceipt,
     FirstSliceObservedFreshness, FirstSliceOperationContext, FirstSliceProjectAnalysis,
     FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer,
@@ -555,6 +555,7 @@ struct FirstSliceServiceLanes {
     index_serialization: IndexSerialization,
     semantic_refinements: SemanticRefinements,
     refinement: SyncSender<SemanticRefinementCommand>,
+    recovery_ready: Arc<AtomicBool>,
     support_state: Option<Arc<DaemonState>>,
 }
 
@@ -640,55 +641,30 @@ impl FirstSliceDaemon {
         );
         let project_analyzer = InstalledProjectAnalyzer::discover(&cancellation)
             .map_err(FirstSliceHostError::Service)?;
-        let service = match project_analyzer {
-            Some(project_analyzer) => FirstSliceService::new_durable_with_project_analyzer(
-                DEFAULT_GENERATION_RETENTION,
-                state_root,
-                project_analyzer,
-                &cancellation,
-            ),
-            None => FirstSliceService::new_durable(
-                DEFAULT_GENERATION_RETENTION,
-                state_root,
-                &cancellation,
-            ),
+        let (service, deferred_restore) = match project_analyzer {
+            Some(project_analyzer) => {
+                FirstSliceService::open_durable_deferred_with_project_analyzer(
+                    DEFAULT_GENERATION_RETENTION,
+                    state_root,
+                    project_analyzer,
+                )
+            }
+            None => {
+                FirstSliceService::open_durable_deferred(DEFAULT_GENERATION_RETENTION, state_root)
+            }
         }
         .map_err(FirstSliceHostError::Service)?;
         let inventory = index_support_inventory(&service).map_err(FirstSliceHostError::Service)?;
         support_state
             .replace_index_support_inventory(inventory)
             .map_err(FirstSliceHostError::Journal)?;
-        let durable_publications = service.durable_operation_publications().collect::<Vec<_>>();
-        let reconciled_publications = tokio::time::timeout(STARTUP_RESTORE_TIMEOUT, async {
-            let mut reconciled = Vec::new();
-            reconciled
-                .try_reserve_exact(durable_publications.len())
-                .map_err(|_| ServiceError::InvalidLimits)?;
-            for publication in durable_publications {
-                match journal
-                    .reconcile_committed_publication(publication.operation)
-                    .await
-                {
-                    Ok(record) => reconciled.push((publication, record)),
-                    // Durable generation history may legitimately outlive the
-                    // bounded operation journal. The generation remains
-                    // queryable, but no operation status is reconstructed
-                    // without a journal record that proves its identity.
-                    Err(ServiceError::Operations(OperationError::NotFound)) => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            Ok::<_, ServiceError>(reconciled)
-        })
-        .await
-        .map_err(|_| FirstSliceHostError::StartupTimedOut)?
-        .map_err(FirstSliceHostError::Journal)?;
         Self::start_workers(
             journal,
             service,
             None,
-            reconciled_publications,
+            Vec::new(),
             Some(support_state),
+            Some(deferred_restore),
         )
     }
 
@@ -714,7 +690,7 @@ impl FirstSliceDaemon {
         let service =
             FirstSliceService::new_durable(DEFAULT_GENERATION_RETENTION, state_root, &cancellation)
                 .map_err(FirstSliceHostError::Service)?;
-        Self::start_workers(journal, service, Some(hook), Vec::new(), None)
+        Self::start_workers(journal, service, Some(hook), Vec::new(), None, None)
     }
 
     #[cfg(test)]
@@ -724,7 +700,7 @@ impl FirstSliceDaemon {
     ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
         let service = FirstSliceService::new(DEFAULT_GENERATION_RETENTION)
             .map_err(FirstSliceHostError::Service)?;
-        Self::start_workers(journal, service, publication_hook, Vec::new(), None)
+        Self::start_workers(journal, service, publication_hook, Vec::new(), None, None)
     }
 
     fn start_workers(
@@ -733,6 +709,7 @@ impl FirstSliceDaemon {
         publication_hook: Option<PublicationBoundaryHook>,
         durable_publications: Vec<(FirstSliceDurableOperation, OperationRecord)>,
         support_state: Option<Arc<DaemonState>>,
+        deferred_restore: Option<FirstSliceDeferredRestore>,
     ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
         let work_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -747,6 +724,10 @@ impl FirstSliceDaemon {
             .build()
             .map_err(FirstSliceHostError::AsyncRuntime)?;
         let refinement_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(FirstSliceHostError::AsyncRuntime)?;
+        let recovery_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
             .map_err(FirstSliceHostError::AsyncRuntime)?;
@@ -768,6 +749,7 @@ impl FirstSliceDaemon {
         let service = Arc::new(RwLock::new(service));
         let index_serialization = Arc::new(Mutex::new(()));
         let semantic_refinements = Arc::new(Mutex::new(BTreeMap::new()));
+        let recovery_ready = Arc::new(AtomicBool::new(deferred_restore.is_none()));
         let (work, work_receiver) = mpsc::sync_channel(DEFAULT_WORK_QUEUE);
         let (read, read_receiver) = mpsc::sync_channel(DEFAULT_READ_QUEUE);
         let (control, control_receiver) = mpsc::sync_channel(DEFAULT_CONTROL_QUEUE);
@@ -777,6 +759,7 @@ impl FirstSliceDaemon {
             index_serialization,
             semantic_refinements: Arc::clone(&semantic_refinements),
             refinement: refinement.clone(),
+            recovery_ready: Arc::clone(&recovery_ready),
             support_state,
         };
         let work_journal = journal.clone();
@@ -824,11 +807,12 @@ impl FirstSliceDaemon {
         let refinement_journal = journal.clone();
         let refinement_metadata = Arc::clone(&metadata);
         let refinement_stopping = Arc::clone(&stopping);
+        let refinement_lanes = lanes.clone();
         let refinement_thread = thread::Builder::new()
             .name("rootlight-semantic-refinement".to_owned())
             .spawn(move || {
                 semantic_refinement_worker(
-                    lanes,
+                    refinement_lanes,
                     refinement_journal,
                     refinement_metadata,
                     refinement_stopping,
@@ -842,12 +826,13 @@ impl FirstSliceDaemon {
             })?;
         let control_journal = journal.clone();
         let control_stopping = Arc::clone(&stopping);
+        let control_metadata = Arc::clone(&metadata);
         let control_thread = thread::Builder::new()
             .name("rootlight-first-slice-control".to_owned())
             .spawn(move || {
                 lifecycle_worker(
                     control_journal,
-                    metadata,
+                    control_metadata,
                     control_stopping,
                     control_runtime,
                     control_receiver,
@@ -857,6 +842,45 @@ impl FirstSliceDaemon {
                 stopping.store(true, Ordering::Release);
                 FirstSliceHostError::Thread(error)
             })?;
+        let (recovery_cancellation, recovery_thread) = match deferred_restore {
+            Some(deferred_restore) => {
+                let deadline = Instant::now()
+                    .checked_add(STARTUP_RESTORE_TIMEOUT)
+                    .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
+                let cancellation = Cancellation::with_deadline(deadline);
+                let worker_cancellation = cancellation.clone();
+                let recovery_lanes = lanes.clone();
+                let recovery_state = recovery_lanes.support_state.clone();
+                let recovery_journal = journal.clone();
+                let recovery_metadata = Arc::clone(&metadata);
+                let recovery_stopping = Arc::clone(&stopping);
+                let thread = thread::Builder::new()
+                    .name("rootlight-durable-recovery".to_owned())
+                    .spawn(move || {
+                        let result = durable_recovery_worker(
+                            deferred_restore,
+                            recovery_lanes,
+                            recovery_journal,
+                            recovery_metadata,
+                            recovery_stopping,
+                            recovery_runtime,
+                            worker_cancellation,
+                        );
+                        if result.is_err()
+                            && let Some(state) = recovery_state.as_deref()
+                        {
+                            state.set_catalog_status(HealthStatus::Degraded);
+                        }
+                        result
+                    })
+                    .map_err(|error| {
+                        stopping.store(true, Ordering::Release);
+                        FirstSliceHostError::Thread(error)
+                    })?;
+                (Some(cancellation), Some(thread))
+            }
+            None => (None, None),
+        };
         let daemon = Self {
             work: work.clone(),
             read: read.clone(),
@@ -872,10 +896,12 @@ impl FirstSliceDaemon {
                 semantic_refinements,
                 stopping,
                 journal,
+                recovery_cancellation,
                 work_thread: Some(work_thread),
                 read_thread: Some(read_thread),
                 control_thread: Some(control_thread),
                 refinement_thread: Some(refinement_thread),
+                recovery_thread,
             },
         ))
     }
@@ -1013,10 +1039,12 @@ pub(crate) struct FirstSliceWorkers {
     semantic_refinements: SemanticRefinements,
     stopping: Arc<AtomicBool>,
     journal: JournalActorHandle,
+    recovery_cancellation: Option<Cancellation>,
     work_thread: Option<JoinHandle<()>>,
     read_thread: Option<JoinHandle<()>>,
     control_thread: Option<JoinHandle<()>>,
     refinement_thread: Option<JoinHandle<()>>,
+    recovery_thread: Option<JoinHandle<Result<(), FirstSliceHostError>>>,
 }
 
 impl FirstSliceWorkers {
@@ -1031,6 +1059,9 @@ impl FirstSliceWorkers {
         deadline: tokio::time::Instant,
     ) -> Result<(), FirstSliceHostError> {
         self.stopping.store(true, Ordering::Release);
+        if let Some(cancellation) = self.recovery_cancellation.take() {
+            let _ = cancellation.cancel(CancellationReason::Shutdown);
+        }
         // Cancel the local registry before scanning the journal. A refinement
         // may have left the queue but not activated its journal record yet.
         cancel_all_semantic_refinements(&self.semantic_refinements, CancellationReason::Shutdown)?;
@@ -1049,11 +1080,12 @@ impl FirstSliceWorkers {
         let read = self.read_thread.take();
         let control = self.control_thread.take();
         let refinement = self.refinement_thread.take();
+        let recovery = self.recovery_thread.take();
         let (joined, completion) = tokio::sync::oneshot::channel();
         thread::Builder::new()
             .name("rootlight-first-slice-join".to_owned())
             .spawn(move || {
-                let result = [control, read, work, refinement]
+                let mut result = [control, read, work, refinement]
                     .into_iter()
                     .flatten()
                     .try_for_each(|thread| {
@@ -1061,6 +1093,14 @@ impl FirstSliceWorkers {
                             .join()
                             .map_err(|_| FirstSliceHostError::ThreadPanicked)
                     });
+                if result.is_ok()
+                    && let Some(recovery) = recovery
+                {
+                    result = recovery
+                        .join()
+                        .map_err(|_| FirstSliceHostError::ThreadPanicked)
+                        .and_then(std::convert::identity);
+                }
                 let _ = joined.send(result);
             })
             .map_err(FirstSliceHostError::Thread)?;
@@ -1075,6 +1115,9 @@ impl FirstSliceWorkers {
 impl Drop for FirstSliceWorkers {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
+        if let Some(cancellation) = self.recovery_cancellation.take() {
+            let _ = cancellation.cancel(CancellationReason::Shutdown);
+        }
         if let Ok(refinements) = self.semantic_refinements.try_lock() {
             for pending in refinements.values() {
                 let _ = pending.cancellation.cancel(CancellationReason::Shutdown);
@@ -1108,9 +1151,6 @@ pub(crate) enum FirstSliceHostError {
     /// Cooperative worker shutdown exceeded the daemon grace period.
     #[error("first-slice worker shutdown timed out")]
     ShutdownTimedOut,
-    /// Durable publication reconciliation exceeded the startup deadline.
-    #[error("first-slice durable publication reconciliation timed out")]
-    StartupTimedOut,
 }
 
 #[derive(Debug, Clone)]
@@ -1425,6 +1465,72 @@ fn refresh_process_rss(system: &mut System, pid: Pid, peak_rss_bytes: &AtomicU64
     }
 }
 
+fn durable_recovery_worker(
+    deferred_restore: FirstSliceDeferredRestore,
+    lanes: FirstSliceServiceLanes,
+    journal: JournalActorHandle,
+    metadata: Arc<Mutex<OperationMetadataSet>>,
+    stopping: Arc<AtomicBool>,
+    runtime: tokio::runtime::Runtime,
+    cancellation: Cancellation,
+) -> Result<(), FirstSliceHostError> {
+    let restored = match deferred_restore.restore(&cancellation) {
+        Ok(restored) => restored,
+        Err(FirstSliceError::Cancelled(CancellationReason::Shutdown))
+            if stopping.load(Ordering::Acquire) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(FirstSliceHostError::Service(error)),
+    };
+    if stopping.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    lanes
+        .service
+        .write()
+        .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+        .install_deferred_restore(restored, &cancellation)
+        .map_err(FirstSliceHostError::Service)?;
+    let publications = lanes
+        .service
+        .read()
+        .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+        .durable_operation_publications()
+        .collect::<Vec<_>>();
+    for publication in publications {
+        if stopping.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        match runtime.block_on(journal.reconcile_committed_publication(publication.operation)) {
+            Ok(record) => metadata
+                .lock()
+                .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+                .restore_committed(publication, &record)
+                .map_err(FirstSliceHostError::Service)?,
+            // Durable generation history may legitimately outlive the bounded
+            // operation journal, so no status is reconstructed without its
+            // original journal identity.
+            Err(ServiceError::Operations(OperationError::NotFound)) => {}
+            Err(error) => return Err(FirstSliceHostError::Journal(error)),
+        }
+    }
+    if let Some(state) = lanes.support_state.as_deref() {
+        let inventory = lanes
+            .service
+            .read()
+            .map_err(|_| FirstSliceHostError::ThreadPanicked)
+            .and_then(|service| {
+                index_support_inventory(&service).map_err(FirstSliceHostError::Service)
+            })?;
+        state
+            .replace_index_support_inventory(inventory)
+            .map_err(FirstSliceHostError::Journal)?;
+    }
+    lanes.recovery_ready.store(true, Ordering::Release);
+    Ok(())
+}
+
 fn service_worker(
     lanes: FirstSliceServiceLanes,
     journal: JournalActorHandle,
@@ -1572,6 +1678,15 @@ fn execute_service_request(
         .cancellation
         .check()
         .map_err(|_| cancelled_error())?;
+    if !lanes.recovery_ready.load(Ordering::Acquire)
+        && !matches!(
+            &request,
+            FirstSliceIpcRequest::RepositoryList(_)
+                | FirstSliceIpcRequest::RepositoryCatalogPage(_)
+        )
+    {
+        return Err(recovery_in_progress());
+    }
     let request = match request {
         FirstSliceIpcRequest::RepositoryIndex(request) => {
             let _index = try_lock_index_serialization(&lanes.index_serialization)?;
@@ -5880,6 +5995,17 @@ fn operation_in_progress() -> PublicError {
         .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
 }
 
+fn recovery_in_progress() -> PublicError {
+    PublicError::builder(
+        ErrorCode::Busy,
+        "durable repository recovery is still running",
+    )
+    .retryable()
+    .next_action(NextAction::Retry)
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
+}
+
 fn failed_closed_publication(operation: OperationId) -> PublicError {
     PublicError::builder(
         ErrorCode::IndexCorrupt,
@@ -6347,6 +6473,7 @@ mod tests {
             index_serialization,
             semantic_refinements,
             refinement,
+            recovery_ready: Arc::new(AtomicBool::new(true)),
             support_state: None,
         };
 
@@ -6618,14 +6745,10 @@ mod tests {
                 Arc::new(DaemonState::starting()),
             ))
             .expect("daemon reconciles the durable marker");
-        let reconciled = journal.status(operation).expect("reconciled status loads");
-        assert_eq!(reconciled.state, OperationState::Succeeded);
-        assert_eq!(reconciled.stage, OperationStage::Cleanup);
-        assert_eq!(reconciled.recovery_class, RecoveryClass::NotApplicable);
-
-        let status = execute_retrying_busy(
-            &daemon,
-            || {
+        let status_deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            let status = execute_with_timeout(
+                &daemon,
                 FirstSliceIpcRequest::RepositoryOperationStatus(
                     daemon::RepositoryOperationStatusRequest {
                         schema_version: Some(schema_version()),
@@ -6634,13 +6757,38 @@ mod tests {
                         wait_ms: None,
                         after_revision: None,
                     },
-                )
-            },
-            "operation status becomes visible after terminalization",
-        );
-        let FirstSliceIpcResponse::RepositoryOperationStatus(status) = status else {
-            panic!("repository operation status response expected");
+                ),
+            );
+            let status = match status {
+                Ok(status) => status,
+                Err(error)
+                    if error.code() == ErrorCode::UnsupportedCapability
+                        && Instant::now() < status_deadline =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("durable operation status failed: {error:?}"),
+            };
+            let FirstSliceIpcResponse::RepositoryOperationStatus(status) = status else {
+                panic!("repository operation status response expected");
+            };
+            if status.operation.as_ref().is_some_and(|operation| {
+                operation.state == daemon::OperationState::Succeeded as i32
+            }) {
+                break status;
+            }
+            assert!(
+                Instant::now() < status_deadline,
+                "durable operation reconciliation timed out"
+            );
+            thread::sleep(Duration::from_millis(10));
         };
+        let reconciled = journal.status(operation).expect("reconciled status loads");
+        assert_eq!(reconciled.state, OperationState::Succeeded);
+        assert_eq!(reconciled.stage, OperationStage::Cleanup);
+        assert_eq!(reconciled.recovery_class, RecoveryClass::NotApplicable);
+
         assert!(status.published_generation.is_some());
         assert_eq!(
             status
@@ -6651,22 +6799,25 @@ mod tests {
             daemon::OperationState::Succeeded as i32
         );
 
-        let located = execute(
+        let located = execute_retrying_busy(
             &daemon,
-            FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
-                schema_version: Some(schema_version()),
-                repository: Some(repository_to_wire(receipt.repository)),
-                generation: Some(daemon::GenerationSelector {
-                    selector: Some(daemon::generation_selector::Selector::Generation(
-                        generation_to_wire(receipt.generation),
-                    )),
-                }),
-                query: "crash_safe_answer".to_owned(),
-                mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
-                maximum_results: 8,
-                page_offset: 0,
-                languages: Vec::new(),
-            }),
+            || {
+                FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+                    schema_version: Some(schema_version()),
+                    repository: Some(repository_to_wire(receipt.repository)),
+                    generation: Some(daemon::GenerationSelector {
+                        selector: Some(daemon::generation_selector::Selector::Generation(
+                            generation_to_wire(receipt.generation),
+                        )),
+                    }),
+                    query: "crash_safe_answer".to_owned(),
+                    mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+                    maximum_results: 8,
+                    page_offset: 0,
+                    languages: Vec::new(),
+                })
+            },
+            "restored generation becomes queryable",
         );
         let FirstSliceIpcResponse::CodeLocate(located) = located else {
             panic!("code locate response expected");
@@ -6745,22 +6896,25 @@ mod tests {
             ))
             .expect("daemon skips pruned operation history");
 
-        let located = execute(
+        let located = execute_retrying_busy(
             &daemon,
-            FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
-                schema_version: Some(schema_version()),
-                repository: Some(repository_to_wire(receipt.repository)),
-                generation: Some(daemon::GenerationSelector {
-                    selector: Some(daemon::generation_selector::Selector::Generation(
-                        generation_to_wire(receipt.generation),
-                    )),
-                }),
-                query: "retained_answer".to_owned(),
-                mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
-                maximum_results: 8,
-                page_offset: 0,
-                languages: Vec::new(),
-            }),
+            || {
+                FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+                    schema_version: Some(schema_version()),
+                    repository: Some(repository_to_wire(receipt.repository)),
+                    generation: Some(daemon::GenerationSelector {
+                        selector: Some(daemon::generation_selector::Selector::Generation(
+                            generation_to_wire(receipt.generation),
+                        )),
+                    }),
+                    query: "retained_answer".to_owned(),
+                    mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+                    maximum_results: 8,
+                    page_offset: 0,
+                    languages: Vec::new(),
+                })
+            },
+            "retained generation becomes queryable",
         );
         let FirstSliceIpcResponse::CodeLocate(located) = located else {
             panic!("code locate response expected");
@@ -7560,6 +7714,7 @@ mod tests {
             index_serialization,
             semantic_refinements,
             refinement,
+            recovery_ready: Arc::new(AtomicBool::new(true)),
             support_state: None,
         };
         let error = repository_index(
@@ -7878,6 +8033,88 @@ mod tests {
             .expect("terminal metadata is evicted");
         assert!(!metadata.records.contains_key(&first));
         assert!(metadata.records.contains_key(&second));
+    }
+
+    #[test]
+    fn deferred_recovery_keeps_catalog_reads_and_lifecycle_failures_bounded() {
+        let service = Arc::new(RwLock::new(
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION)
+                .expect("empty service initializes"),
+        ));
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let handle = actor.handle();
+        let metadata = Mutex::new(OperationMetadataSet::new(4));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let (_refinement, refinement_receiver) = mpsc::sync_channel(1);
+        let lanes = FirstSliceServiceLanes {
+            service,
+            index_serialization: Arc::new(Mutex::new(())),
+            semantic_refinements: Arc::new(Mutex::new(BTreeMap::new())),
+            refinement: _refinement,
+            recovery_ready: Arc::new(AtomicBool::new(false)),
+            support_state: None,
+        };
+        let resources = ServiceRequestResources {
+            journal: &handle,
+            metadata: &metadata,
+            runtime: &runtime,
+            catalog_epoch: Instant::now(),
+            publication_hook: None,
+        };
+        let context = || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::from_bytes([93; 16]),
+                selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+                cancellation: Cancellation::with_deadline(deadline),
+                deadline,
+                effective_budget: None,
+                index_admission: None,
+            }
+        };
+        let mut reply = None;
+
+        let listed = execute_service_request(
+            &lanes,
+            resources,
+            FirstSliceIpcRequest::RepositoryList(daemon::RepositoryListRequest {
+                max_results: Some(20),
+                query: None,
+            }),
+            context(),
+            &mut reply,
+        )
+        .expect("catalog remains readable while recovery runs");
+        assert!(matches!(
+            listed,
+            FirstSliceIpcResponse::RepositoryList(ref response)
+                if response.repositories.is_empty()
+        ));
+
+        let error = execute_service_request(
+            &lanes,
+            resources,
+            FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root: ".".to_owned(),
+                operation: Some(operation_to_wire(OperationId::from_bytes([93; 16]))),
+                detached: false,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
+            }),
+            context(),
+            &mut reply,
+        )
+        .expect_err("mutations wait for durable recovery");
+        assert_eq!(error.code(), ErrorCode::Busy);
+        assert!(error.retryable());
+        assert_eq!(error.next_actions(), &[NextAction::Retry]);
+
+        drop(refinement_receiver);
+        actor.join().expect("journal actor joins");
     }
 
     #[test]
