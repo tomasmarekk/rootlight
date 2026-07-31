@@ -64,9 +64,10 @@ use rootlight_incremental::{
 pub use rootlight_incremental::{ChangeClass, FactDomain, FallbackReason, FileChangeKind};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageStatus, DiagnosticRecord, DiagnosticSeverity,
-    ExtensionSupport, FactEvidence, FactRef, FileIdentityClaim, IrDocumentValidationError,
-    IrLimits, LEXICAL_EXTENSION_NAMESPACE, NormalizedIrDocument, OccurrenceRole, ProducerIdentity,
-    ProducerKind, SourceMappingKind, SourceRef, SourceSpan, derive_coverage_record_id,
+    EntityKind, ExtensionSupport, FactEvidence, FactRef, FileIdentityClaim,
+    IrDocumentValidationError, IrLimits, LEXICAL_EXTENSION_NAMESPACE, NormalizedIrDocument,
+    OccurrenceRole, ProducerIdentity, ProducerKind, SYMBOL_IDENTITY_CLAIM_NAMESPACE,
+    SourceMappingKind, SourceRef, SourceSpan, derive_coverage_record_id,
     derive_diagnostic_record_id,
 };
 pub use rootlight_query::{
@@ -7424,12 +7425,38 @@ fn merge_project_documents(
 ) -> Result<NormalizedIrDocument, FirstSliceError> {
     let mut documents = documents.into_iter();
     let mut merged = documents.next().ok_or(FirstSliceError::Identity)?;
+    let mut external_symbols = merged
+        .entities
+        .iter()
+        .filter_map(|entity| (entity.kind == EntityKind::ExternalSymbol).then_some(entity.id))
+        .collect::<BTreeSet<_>>();
     for mut document in documents {
         if document.version != merged.version
             || document.repository != merged.repository
             || document.generation != merged.generation
         {
             return Err(FirstSliceError::Identity);
+        }
+        let mut duplicate_external_symbols = BTreeSet::new();
+        document.entities.retain(|entity| {
+            entity.kind != EntityKind::ExternalSymbol
+                || if external_symbols.insert(entity.id) {
+                    true
+                } else {
+                    duplicate_external_symbols.insert(entity.id);
+                    false
+                }
+        });
+        if !duplicate_external_symbols.is_empty() {
+            document.extensions.retain(|extension| {
+                if extension.namespace != SYMBOL_IDENTITY_CLAIM_NAMESPACE {
+                    return true;
+                }
+                let [FactRef::Entity(symbol)] = extension.evidence.derivation.as_slice() else {
+                    return true;
+                };
+                !duplicate_external_symbols.contains(symbol)
+            });
         }
         merged
             .files
@@ -8901,9 +8928,10 @@ mod tests {
     use rootlight_ids::GenerationId;
     use rootlight_incremental::{EquivalenceSnapshot, LogicalComponent, LogicalDomain};
     use rootlight_ir::{
-        CoverageScope, CoverageStatus, FileRecord, OccurrenceRole, OccurrenceTarget, ProducerKind,
-        ProvenanceRecord, RelationPredicate, SourceMappingRecord, derive_provenance_record_id,
-        new_file_identity_claim_envelope,
+        ContainerRef, CoverageScope, CoverageStatus, EntityRecord, EntityVisibility, FileRecord,
+        OccurrenceRole, OccurrenceTarget, ProducerKind, ProvenanceRecord, RelationPredicate,
+        SourceMappingRecord, SymbolIdentityClaim, derive_provenance_record_id,
+        new_file_identity_claim_envelope, new_symbol_identity_claim_envelope,
     };
     use rootlight_runtime::RuntimePaths;
     use rootlight_vfs::platform::PrivateDirectory;
@@ -8942,6 +8970,109 @@ mod tests {
                 .candidate_limit(),
             1
         );
+    }
+
+    #[test]
+    fn project_partition_merge_unifies_external_symbol_claims() {
+        fn document(
+            repository: RepositoryId,
+            generation: GenerationId,
+            file: FileId,
+        ) -> NormalizedIrDocument {
+            let source = SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, 0, 1).expect("external symbol source span is valid"),
+                content_hash(file.as_bytes()),
+                None,
+            );
+            let build_context =
+                BuildContextIdentity::new(content_hash(b"partition-merge-build-context"));
+            let producer = ProducerIdentity::new(
+                "rootlight-test-project",
+                "1.0",
+                content_hash(b"partition-merge-producer"),
+            )
+            .expect("project producer is valid");
+            let mut provenance = ProvenanceRecord {
+                id: FactId::from_bytes([0; 20]),
+                repository,
+                generation,
+                producer_kind: ProducerKind::Derivation,
+                producer,
+                binary_digest: content_hash(b"partition-merge-binary"),
+                frontend_version: Some("test-project-1".to_owned()),
+                language: "rust".to_owned(),
+                tier: AnalysisTier::TierB,
+                build_context,
+                input_sources: vec![source.clone()],
+                evidence_sources: vec![source.clone()],
+                derivation_parents: Vec::new(),
+                rule: None,
+            };
+            provenance.id = derive_provenance_record_id(&provenance)
+                .expect("project provenance identity derives");
+            let mut container_identity = vec![0];
+            container_identity.extend_from_slice(repository.as_bytes());
+            let mut claim = SymbolIdentityClaim {
+                symbol: SymbolId::from_bytes([0; 20]),
+                repository,
+                language: "rust".to_owned(),
+                kind: EntityKind::ExternalSymbol,
+                container: Some(ContainerRef::Repository(repository)),
+                container_identity,
+                declared_identity: "external_api".to_owned(),
+                signature_discriminator: content_hash(b"external_api").as_bytes().to_vec(),
+                build_context_discriminator: build_context.digest().as_bytes().to_vec(),
+            };
+            claim.symbol = claim.derived_symbol();
+            let entity = EntityRecord {
+                id: claim.symbol,
+                repository,
+                generation,
+                kind: EntityKind::ExternalSymbol,
+                language: "rust".to_owned(),
+                tier: AnalysisTier::TierB,
+                canonical_name: "external_api".to_owned(),
+                display_name: "external_api".to_owned(),
+                qualified_name: "external_api".to_owned(),
+                container: Some(ContainerRef::Repository(repository)),
+                visibility: EntityVisibility::Unknown,
+                flags: Vec::new(),
+                provenance: provenance.id,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            };
+            let identity_claim =
+                new_symbol_identity_claim_envelope(&claim, generation, provenance.id, source)
+                    .expect("external symbol identity claim encodes");
+            let mut document = NormalizedIrDocument::empty(repository, generation);
+            document.provenance.push(provenance);
+            document.entities.push(entity);
+            document.extensions.push(identity_claim);
+            document
+        }
+
+        let repository = derive_repository(b"partition-merge-repository").id();
+        let generation = GenerationId::from_bytes([21; 20]);
+        let merged = merge_project_documents(vec![
+            document(repository, generation, FileId::from_bytes([1; 20])),
+            document(repository, generation, FileId::from_bytes([2; 20])),
+        ])
+        .expect("partitioned project documents merge");
+
+        assert_eq!(merged.entities.len(), 1);
+        assert_eq!(
+            merged
+                .extensions
+                .iter()
+                .filter(|extension| extension.namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE)
+                .count(),
+            1
+        );
+        assert_eq!(merged.provenance.len(), 2);
     }
 
     struct FailingProjectAnalyzer {

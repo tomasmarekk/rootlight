@@ -115,6 +115,58 @@ fn every_language_emits_complete_tier_b_project_semantics() {
 }
 
 #[test]
+fn function_identity_is_stable_when_only_its_body_changes() {
+    let first = ProjectFixture::new(
+        ["src/lib.rs", "src/other.rs"],
+        ["pub fn run() -> u32 {\n    42\n}\n", "pub fn other() {}\n"],
+        SemanticProjectLanguage::Rust,
+    );
+    let second = ProjectFixture::new(
+        ["src/lib.rs", "src/other.rs"],
+        ["pub fn run() -> u32 {\n    43\n}\n", "pub fn other() {}\n"],
+        SemanticProjectLanguage::Rust,
+    );
+    let limits = limits();
+    let first_request = first.request(&limits, AnalysisTier::TierB);
+    let second_request = second.request(&limits, AnalysisTier::TierB);
+    let first_analyzer = analyzer(SemanticProjectLanguage::Rust, first.build_context);
+    let second_analyzer = analyzer(SemanticProjectLanguage::Rust, second.build_context);
+
+    let first_output = execute_project_analysis(
+        &first_analyzer,
+        &first_request,
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect("first project analysis commits");
+    let second_output = execute_project_analysis(
+        &second_analyzer,
+        &second_request,
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect("second project analysis commits");
+    let first_symbol = first_output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "run")
+        .expect("first run symbol is present")
+        .id;
+    let second_symbol = second_output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "run")
+        .expect("second run symbol is present")
+        .id;
+
+    assert_eq!(first_symbol, second_symbol);
+}
+
+#[test]
 fn complete_generated_origin_map_is_materialized_with_complete_coverage() {
     let fixture = ProjectFixture::new(
         ["src/generator.rs", "src/api.generated.rs"],

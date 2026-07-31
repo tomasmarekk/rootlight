@@ -117,7 +117,6 @@ const PROJECT_ADAPTER_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 const PROJECT_ADAPTER_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const PROJECT_ADAPTER_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 const PROJECT_ADAPTER_HANDLES: u32 = 64;
-const PROJECT_PARTITION_IDENTITY_SEED: &[u8] = b"rootlight.project-partition/1";
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
 
@@ -232,7 +231,6 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
             .try_reserve(maximum_partitions.min(16))
             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
         let mut isolation_permits_deep_adapter = true;
-        let mut partition_ordinal = 0_u64;
         for input in ordered_inputs {
             let wire_input = project_input_to_wire(&request, input)?;
             if let Some(rejected) = partition.try_push(wire_input)? {
@@ -240,18 +238,10 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
                 if batch.is_empty() {
                     return Err(FirstSliceProjectAnalysisError::Analysis);
                 }
-                let (document, isolated) = self.execute_partition(
-                    &request,
-                    &session,
-                    partition_ordinal,
-                    batch,
-                    cancellation,
-                )?;
+                let (document, isolated) =
+                    self.execute_partition(&request, &session, batch, cancellation)?;
                 documents.push(document);
                 isolation_permits_deep_adapter &= isolated;
-                partition_ordinal = partition_ordinal
-                    .checked_add(1)
-                    .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
                 if partition.try_push(rejected)?.is_some() {
                     return Err(FirstSliceProjectAnalysisError::Analysis);
                 }
@@ -262,7 +252,7 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
             return Err(FirstSliceProjectAnalysisError::Analysis);
         }
         let (document, isolated) =
-            self.execute_partition(&request, &session, partition_ordinal, batch, cancellation)?;
+            self.execute_partition(&request, &session, batch, cancellation)?;
         documents.push(document);
         isolation_permits_deep_adapter &= isolated;
         Ok(FirstSliceProjectAnalysis::new_partitioned(
@@ -277,7 +267,6 @@ impl InstalledProjectAnalyzer {
         &self,
         request: &FirstSliceProjectAnalysisRequest<'_>,
         session: &NegotiatedSession,
-        partition_ordinal: u64,
         inputs: Vec<adapter::ProjectInput>,
         cancellation: &Cancellation,
     ) -> Result<(NormalizedIrDocument, bool), FirstSliceProjectAnalysisError> {
@@ -286,13 +275,11 @@ impl InstalledProjectAnalyzer {
         if request_id.iter().all(|byte| *byte == 0) {
             return Err(FirstSliceProjectAnalysisError::Identity);
         }
-        let build_context =
-            project_partition_build_context(request.build_context(), partition_ordinal, &inputs)?;
         let project_request = build_project_analysis_request(
             request,
             session.session_id(),
             &request_id,
-            build_context,
+            request.build_context(),
             inputs,
         );
         let payload_bytes = project_analysis_request_payload_bytes(&project_request);
@@ -459,39 +446,6 @@ fn build_project_analysis_request(
         context_manifest,
         requested_tier: adapter::RequestedAnalysisTier::TierB as i32,
     }
-}
-
-fn project_partition_build_context(
-    build_context: ContentHash,
-    partition_ordinal: u64,
-    inputs: &[adapter::ProjectInput],
-) -> Result<ContentHash, FirstSliceProjectAnalysisError> {
-    let identity_bytes = PROJECT_PARTITION_IDENTITY_SEED
-        .len()
-        .checked_add(build_context.as_bytes().len())
-        .and_then(|bytes| bytes.checked_add(partition_ordinal.to_be_bytes().len()))
-        .and_then(|bytes| bytes.checked_add(inputs.len().checked_mul(52)?))
-        .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
-    let mut identity = Vec::new();
-    identity
-        .try_reserve_exact(identity_bytes)
-        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
-    identity.extend_from_slice(PROJECT_PARTITION_IDENTITY_SEED);
-    identity.extend_from_slice(build_context.as_bytes());
-    identity.extend_from_slice(&partition_ordinal.to_be_bytes());
-    for input in inputs {
-        let file = input
-            .file
-            .as_ref()
-            .ok_or(FirstSliceProjectAnalysisError::Protocol)?;
-        let source_digest = input
-            .source_digest
-            .as_ref()
-            .ok_or(FirstSliceProjectAnalysisError::Protocol)?;
-        identity.extend_from_slice(&file.value);
-        identity.extend_from_slice(&source_digest.value);
-    }
-    Ok(content_hash(&identity))
 }
 
 fn adapter_identity_digest(
@@ -6236,7 +6190,6 @@ mod tests {
         let base_payload = project_analysis_request_payload_bytes(&base_request);
         let first = input(7, "Lib/first.py", 9 * 1024 * 1024);
         let second = input(8, "Lib/second.py", 9 * 1024 * 1024);
-        let original_context = ContentHash::from_bytes([9; 32]);
         let mut buffer = ProjectPartitionBuffer::new(base_payload, 7, 4_096)
             .expect("partition buffer initializes");
 
@@ -6270,18 +6223,6 @@ mod tests {
                 .len()
                 .checked_add(second_batch[0].source.len())
                 .is_some_and(|bytes| bytes > 16 * 1024 * 1024)
-        );
-        assert_eq!(
-            project_partition_build_context(original_context, 0, &first_batch)
-                .expect("partition identity derives"),
-            project_partition_build_context(original_context, 0, &first_batch)
-                .expect("partition identity is stable")
-        );
-        assert_ne!(
-            project_partition_build_context(original_context, 0, &first_batch)
-                .expect("first partition identity derives"),
-            project_partition_build_context(original_context, 1, &second_batch)
-                .expect("second partition identity derives")
         );
     }
 
