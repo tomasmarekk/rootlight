@@ -55,6 +55,8 @@ const MCP_PROFILE_CEILING_ENV: &str = "ROOTLIGHT_MCP_PROFILE_CEILING";
 #[cfg(windows)]
 const MCP_PROFILE_ENV: &str = "ROOTLIGHT_MCP_PROFILE";
 #[cfg(windows)]
+const ROOTLIGHT_LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
+#[cfg(windows)]
 const MCP_INTERNAL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(windows)]
 const MCP_INTERNAL_POLL_INTERVAL: Duration = Duration::from_millis(2);
@@ -94,6 +96,16 @@ pub fn run() -> Result<ExitCode, LauncherError> {
     }
     let binary = invocation_binary_name(executable.as_os_str())?;
     let install_root = install_root(&executable)?;
+
+    #[cfg(windows)]
+    if binary == "rootlight-mcp" && arguments.is_empty() {
+        // The frozen initialize frame identifies this stable bridge. Deferring
+        // mutable install-state reads removes their Windows tail latency, while
+        // every successful exit and operating handoff still resolves the
+        // payload through the complete update and rollback policy below.
+        return run_lazy_mcp_payload(&install_root, binary, ROOTLIGHT_LAUNCHER_VERSION);
+    }
+
     let resolved = resolve_payload(&install_root, binary)?;
     let target = &resolved.executable;
 
@@ -111,9 +123,6 @@ pub fn run() -> Result<ExitCode, LauncherError> {
     }
     #[cfg(windows)]
     {
-        if binary == "rootlight-mcp" && arguments.is_empty() {
-            return run_lazy_mcp_payload(target, &resolved.version);
-        }
         let mut command = Command::new(target);
         command
             .args(&arguments)
@@ -162,32 +171,35 @@ pub fn run() -> Result<ExitCode, LauncherError> {
 }
 
 #[cfg(windows)]
-fn run_lazy_mcp_payload(target: &Path, server_version: &str) -> Result<ExitCode, LauncherError> {
+fn run_lazy_mcp_payload(
+    install_root: &Path,
+    binary: &str,
+    server_version: &str,
+) -> Result<ExitCode, LauncherError> {
     let mut input = BufReader::new(io::stdin());
     let first_input = read_mcp_input_prefix(&mut input)?;
     if first_input.is_empty() {
+        resolve_mcp_payload_for_handoff(install_root, binary)?;
         return Ok(ExitCode::SUCCESS);
     }
 
     let Some(frame) = first_input.strip_suffix(b"\n") else {
-        return proxy_mcp_payload(target, input, first_input, Vec::new(), None);
+        let resolved = resolve_mcp_payload_for_handoff(install_root, binary)?;
+        return proxy_mcp_payload(&resolved.executable, input, first_input, Vec::new(), None);
     };
     let ceiling = std::env::var_os(MCP_PROFILE_CEILING_ENV);
     let requested = std::env::var_os(MCP_PROFILE_ENV);
     if !exposure_profile_policy_is_valid(ceiling.as_deref(), requested.as_deref()) {
-        return proxy_mcp_payload(target, input, first_input, Vec::new(), None);
+        let resolved = resolve_mcp_payload_for_handoff(install_root, binary)?;
+        return proxy_mcp_payload(&resolved.executable, input, first_input, Vec::new(), None);
     }
     let Some(bootstrap) = bootstrap_initialize(frame, server_version)
         .map_err(|_error| LauncherError::McpBootstrap)?
     else {
-        return proxy_mcp_payload(target, input, first_input, Vec::new(), None);
+        let resolved = resolve_mcp_payload_for_handoff(install_root, binary)?;
+        return proxy_mcp_payload(&resolved.executable, input, first_input, Vec::new(), None);
     };
     let response = bootstrap.response();
-    let expected = response
-        .strip_suffix(b"\n")
-        .filter(|frame| !frame.is_empty() && !frame.contains(&b'\n'))
-        .ok_or(LauncherError::McpProxyInvariant)?
-        .to_vec();
 
     {
         let mut output = io::stdout().lock();
@@ -198,15 +210,33 @@ fn run_lazy_mcp_payload(target: &Path, server_version: &str) -> Result<ExitCode,
     }
 
     // A session that closes after `initialize` has no operating work, so the
-    // versioned payload never needs to enter the image loader or security scan.
+    // versioned payload never needs to enter the image loader. Full routing
+    // validation still gates successful completion outside the response SLO.
     let pending_input = read_mcp_input_prefix(&mut input)?;
+    let resolved = resolve_mcp_payload_for_handoff(install_root, binary)?;
     if pending_input.is_empty() {
         return Ok(ExitCode::SUCCESS);
     }
     // The full payload must reproduce the frozen initialize ABI exactly before
     // buffered operating input is released, preventing silent launcher/payload
-    // protocol drift across side-by-side updates.
-    proxy_mcp_payload(target, input, first_input, pending_input, Some(expected))
+    // protocol drift across side-by-side updates. The stable launcher reports
+    // its own version; the hidden payload handshake is checked against the
+    // independently resolved payload version.
+    let expected = bootstrap_initialize(frame, &resolved.version)
+        .map_err(|_error| LauncherError::McpBootstrap)?
+        .ok_or(LauncherError::McpProxyInvariant)?
+        .response()
+        .strip_suffix(b"\n")
+        .filter(|frame| !frame.is_empty() && !frame.contains(&b'\n'))
+        .ok_or(LauncherError::McpProxyInvariant)?
+        .to_vec();
+    proxy_mcp_payload(
+        &resolved.executable,
+        input,
+        first_input,
+        pending_input,
+        Some(expected),
+    )
 }
 
 #[cfg(windows)]
@@ -941,6 +971,14 @@ struct ResolvedPayload {
     executable: PathBuf,
     #[cfg(any(test, windows))]
     version: String,
+}
+
+#[cfg(windows)]
+fn resolve_mcp_payload_for_handoff(
+    root: &Path,
+    binary: &str,
+) -> Result<ResolvedPayload, LauncherError> {
+    resolve_payload(root, binary)
 }
 
 fn resolve_payload(root: &Path, binary: &str) -> Result<ResolvedPayload, LauncherError> {
@@ -1687,6 +1725,39 @@ mod tests {
 
         assert!(target.executable.starts_with(root.join("versions/1.0.0")));
         assert_eq!(target.version, "1.0.0");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stable_bootstrap_and_payload_handshake_keep_independent_versions() {
+        const INITIALIZE: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#;
+        let launcher = bootstrap_initialize(INITIALIZE, "1.0.0")
+            .expect("launcher version is valid")
+            .expect("initialize request is recognized");
+        let payload = bootstrap_initialize(INITIALIZE, "2.0.0")
+            .expect("payload version is valid")
+            .expect("initialize request is recognized");
+        let launcher: serde_json::Value =
+            serde_json::from_slice(launcher.response()).expect("launcher response is valid JSON");
+        let payload: serde_json::Value =
+            serde_json::from_slice(payload.response()).expect("payload response is valid JSON");
+
+        assert_eq!(
+            launcher.pointer("/result/serverInfo/version"),
+            Some(&serde_json::Value::String("1.0.0".to_owned()))
+        );
+        assert_eq!(
+            payload.pointer("/result/serverInfo/version"),
+            Some(&serde_json::Value::String("2.0.0".to_owned()))
+        );
+        assert_eq!(
+            launcher.pointer("/result/protocolVersion"),
+            payload.pointer("/result/protocolVersion")
+        );
+        assert_eq!(
+            launcher.pointer("/result/capabilities"),
+            payload.pointer("/result/capabilities")
+        );
     }
 
     #[test]
