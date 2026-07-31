@@ -1069,7 +1069,11 @@ impl OperationMetadataSet {
     }
 
     fn cache_snapshot(&mut self, operation: OperationId, snapshot: OperationStatusSnapshot) {
-        if let Some(metadata) = self.records.get_mut(&operation) {
+        // Only terminal journal state is immutable. Caching a running snapshot
+        // makes repository status remain "indexing" after later publication.
+        if snapshot.state.is_terminal()
+            && let Some(metadata) = self.records.get_mut(&operation)
+        {
             metadata.terminal_snapshot = Some(snapshot);
         }
     }
@@ -6826,6 +6830,70 @@ mod tests {
         );
         drop(handle);
         actor.join().expect("empty journal actor joins");
+    }
+
+    #[test]
+    fn repository_status_refreshes_a_previously_running_operation() {
+        let (service, _root) = indexed_catalog(&["alpha"]);
+        let repository = service.list_repositories()[0].repository;
+        let operation = OperationId::from_bytes([75; 16]);
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        journal
+            .submit(repository_submission(operation, 7))
+            .expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let mut metadata = OperationMetadataSet::new(4);
+        metadata
+            .reserve(operation, 10, Some(repository))
+            .expect("metadata reserves");
+        let metadata = Mutex::new(metadata);
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("journal actor starts");
+        let handle = actor.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::from_bytes([7; 16]),
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation: Cancellation::with_deadline(deadline),
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+        let mut request = status_request(repository, None);
+        request.include_operations = true;
+
+        let running = repository_status(
+            &service,
+            &handle,
+            &metadata,
+            &runtime,
+            request.clone(),
+            &context,
+        )
+        .expect("running operation reports status");
+        assert_eq!(running.state, "indexing");
+
+        journal
+            .complete_repository_publication(operation)
+            .expect("operation completes");
+        let completed =
+            repository_status(&service, &handle, &metadata, &runtime, request, &context)
+                .expect("completed operation refreshes status");
+
+        assert_eq!(completed.state, "ready");
+        assert_eq!(completed.operations.len(), 1);
+        assert_eq!(
+            daemon::OperationState::try_from(completed.operations[0].state)
+                .expect("operation state maps"),
+            daemon::OperationState::Succeeded
+        );
+        drop(handle);
+        actor.join().expect("journal actor joins");
     }
 
     #[test]
