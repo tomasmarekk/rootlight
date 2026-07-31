@@ -809,11 +809,13 @@ fn language_coverage(document: &NormalizedIrDocument) -> Vec<LanguageCoverageSum
     by_language.into_values().collect()
 }
 
-fn coverage_from_document(document: &NormalizedIrDocument) -> Vec<RepositoryCoverageEntryDto> {
-    language_coverage(document)
-        .into_iter()
+fn coverage_from_summaries(
+    summaries: &[LanguageCoverageSummary],
+) -> Vec<RepositoryCoverageEntryDto> {
+    summaries
+        .iter()
         .map(|coverage| RepositoryCoverageEntryDto {
-            language: coverage.language,
+            language: coverage.language.clone(),
             tier: analysis_tier_label(coverage.tier).to_owned(),
             status: coverage_status_label(coverage.status).to_owned(),
             discovered_files: coverage.files,
@@ -946,6 +948,7 @@ enum FirstSlicePublication {
         root_identity: ContentHash,
         display_name: String,
         register_repository: bool,
+        language_coverage: Vec<LanguageCoverageSummary>,
         incremental: PreparedIncrementalState,
         durable: Option<DurablePublishedGeneration>,
     },
@@ -2068,6 +2071,9 @@ pub struct FirstSliceService {
     published_generation_counts: BTreeMap<RepositoryId, u64>,
     active_by_repository: BTreeMap<RepositoryId, GenerationId>,
     generations: GenerationSet<LexicalIndex>,
+    // Language coverage is immutable generation metadata. Precomputing it at
+    // publication keeps catalog reads independent of normalized IR size.
+    language_coverage_by_generation: BTreeMap<GenerationId, Vec<LanguageCoverageSummary>>,
     source_snapshots: SourceSnapshotRetention,
     structural_artifacts: StructuralArtifactRetention,
     receipts: BTreeMap<GenerationId, FirstSliceIndexReceipt>,
@@ -2372,6 +2378,7 @@ impl FirstSliceService {
             published_generation_counts: BTreeMap::new(),
             active_by_repository: BTreeMap::new(),
             generations,
+            language_coverage_by_generation: BTreeMap::new(),
             source_snapshots,
             structural_artifacts,
             receipts: BTreeMap::new(),
@@ -2455,6 +2462,7 @@ impl FirstSliceService {
         for restored in restored {
             check_cancellation(cancellation)?;
             let receipt = restored.receipt;
+            let language_coverage = language_coverage(restored.verified.document());
             if self.receipts.contains_key(&receipt.generation)
                 || self
                     .repositories
@@ -2483,6 +2491,13 @@ impl FirstSliceService {
             self.repository_display_names
                 .insert(receipt.repository, restored.display_name);
             self.receipts.insert(receipt.generation, receipt.clone());
+            if self
+                .language_coverage_by_generation
+                .insert(receipt.generation, language_coverage)
+                .is_some()
+            {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
             if let Some(generation_count) = restored.published_generation_count {
                 self.published_generation_counts
                     .entry(receipt.repository)
@@ -3494,6 +3509,9 @@ impl FirstSliceService {
             || self.generations.active_generation() == Some(generation)
             || !self.generations.contains(generation)
             || !self.source_snapshots.contains_committed(generation)
+            || !self
+                .language_coverage_by_generation
+                .contains_key(&generation)
         {
             return Err(FirstSliceError::Retention);
         }
@@ -3505,6 +3523,7 @@ impl FirstSliceService {
             .remove(generation)
             .map_err(|_| FirstSliceError::Retention)?;
         self.receipts.remove(&generation);
+        self.language_coverage_by_generation.remove(&generation);
         self.incremental_baselines.remove(&generation);
         self.incremental_inputs.remove(&generation);
         self.incremental_evidence.remove(&generation);
@@ -3549,6 +3568,7 @@ impl FirstSliceService {
                     durable,
                 } = prepared;
                 self.make_room_for_generation(receipt.repository)?;
+                let language_coverage = language_coverage(verified.document());
                 let source_admission =
                     self.source_snapshots
                         .admit(receipt.generation, sources, cancellation)?;
@@ -3603,6 +3623,7 @@ impl FirstSliceService {
                         root_identity,
                         display_name,
                         register_repository,
+                        language_coverage,
                         incremental,
                         durable,
                     },
@@ -3698,6 +3719,7 @@ impl FirstSliceService {
                 root_identity,
                 display_name,
                 register_repository,
+                language_coverage,
                 incremental,
                 mut durable,
             } => {
@@ -3767,6 +3789,10 @@ impl FirstSliceService {
                     return Err(error);
                 }
                 self.receipts.insert(receipt.generation, receipt.clone());
+                let previous_coverage = self
+                    .language_coverage_by_generation
+                    .insert(receipt.generation, language_coverage);
+                debug_assert!(previous_coverage.is_none());
                 self.incremental_baselines
                     .insert(receipt.generation, incremental.baseline);
                 self.incremental_inputs
@@ -4216,7 +4242,10 @@ impl FirstSliceService {
                 .generations
                 .generation(*active_generation)
                 .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-            let coverage = language_coverage(snapshot.document());
+            let coverage = self
+                .language_coverage_by_generation
+                .get(active_generation)
+                .ok_or(FirstSliceError::CatalogCorrupt)?;
             let languages = coverage
                 .iter()
                 .map(|entry| entry.language.clone())
@@ -5448,13 +5477,15 @@ impl FirstSliceService {
             // A missing immutable snapshot indicates internal state drift; the
             // infallible compatibility API omits that invalid entry.
             .filter_map(|(repository, active_generation)| {
-                let snapshot = self.generations.generation(*active_generation).ok()?;
+                self.generations.generation(*active_generation).ok()?;
                 let freshness = self
                     .generation_freshness(*repository, *active_generation)
                     .ok()?;
-                let languages = language_coverage(snapshot.document())
-                    .into_iter()
-                    .map(|coverage| coverage.language)
+                let languages = self
+                    .language_coverage_by_generation
+                    .get(active_generation)?
+                    .iter()
+                    .map(|coverage| coverage.language.clone())
                     .collect();
                 Some(RepositoryListEntryDto {
                     repository: *repository,
@@ -5515,17 +5546,20 @@ impl FirstSliceService {
                 .get(repository)
                 .copied()
                 .ok_or(catalog::CatalogError::CatalogInvariant)?;
-            let snapshot = self
-                .generations
+            self.generations
                 .generation(*active_generation)
                 .map_err(|_| catalog::CatalogError::CatalogInvariant)?;
             let freshness = self
                 .generation_freshness(*repository, *active_generation)
                 .map_err(|_| catalog::CatalogError::CatalogInvariant)?;
             let mut coverage = Vec::new();
-            for summary in language_coverage(snapshot.document()) {
+            let summaries = self
+                .language_coverage_by_generation
+                .get(active_generation)
+                .ok_or(catalog::CatalogError::CatalogInvariant)?;
+            for summary in summaries {
                 coverage.push(CatalogLanguageCoverage::new(
-                    summary.language,
+                    summary.language.clone(),
                     summary.tier,
                     summary.status,
                     summary.files,
@@ -5565,10 +5599,13 @@ impl FirstSliceService {
         generation: Option<GenerationId>,
     ) -> Result<RepositoryStatusDto, FirstSliceError> {
         let context = self.resolve_generation(repository, generation)?;
-        let snapshot = self
-            .generations
+        self.generations
             .generation(context.generation)
             .map_err(|_| FirstSliceError::GenerationNotFound)?;
+        let coverage = self
+            .language_coverage_by_generation
+            .get(&context.generation)
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
         let display_name = self
             .repository_display_names
             .get(&repository)
@@ -5594,7 +5631,7 @@ impl FirstSliceService {
             } else {
                 "retained".to_owned()
             },
-            coverage: coverage_from_document(snapshot.document()),
+            coverage: coverage_from_summaries(coverage),
         })
     }
 }
@@ -9262,6 +9299,40 @@ mod tests {
     }
 
     #[test]
+    fn repository_reads_use_precomputed_language_coverage() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[("src/lib.rs", "pub fn rust_value() -> u32 { 1 }\n")],
+        );
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("repository publishes");
+
+        assert_eq!(
+            service.list_repositories()[0].languages,
+            vec!["rust".to_owned()]
+        );
+        assert!(
+            service
+                .language_coverage_by_generation
+                .remove(&receipt.generation)
+                .is_some()
+        );
+        assert!(service.list_repositories().is_empty());
+        assert!(matches!(
+            service.repository_status(receipt.repository, None),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
+        assert!(matches!(
+            service.support_inventory_snapshot(),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
+    }
+
+    #[test]
     fn every_audited_grammar_has_a_fail_closed_source_suffix() {
         let registry = GrammarRegistry::audited().expect("audited grammar registry initializes");
         let mapped = [
@@ -9632,6 +9703,16 @@ mod tests {
             service.resolve_generation(first.repository, Some(first.generation)),
             Err(FirstSliceError::GenerationNotFound)
         ));
+        assert!(
+            !service
+                .language_coverage_by_generation
+                .contains_key(&first.generation)
+        );
+        assert!(
+            service
+                .language_coverage_by_generation
+                .contains_key(&second.generation)
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
