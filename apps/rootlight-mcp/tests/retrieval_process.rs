@@ -76,9 +76,54 @@ pub fn matrix_target_mu(value: usize) -> usize {
 fn retrieval_contract_matrix_crosses_real_process_boundaries() {
     let mut fixture = RetrievalFixture::spawn();
     supported_profiles_preserve_standalone_and_batch_semantics(&mut fixture);
+    supported_language_filters_apply_across_process_boundaries(&mut fixture);
     unsupported_retrieval_options_fail_with_stable_preflight_errors(&mut fixture);
     retrieval_limits_cursors_and_unresolved_ids_are_truthful(&mut fixture);
     fixture.finish();
+}
+
+fn supported_language_filters_apply_across_process_boundaries(fixture: &mut RetrievalFixture) {
+    let matching_arguments = json!({
+        "query": "matrix_target_alpha",
+        "search_modes": ["exact"],
+        "languages": ["rust"]
+    });
+    let standalone = fixture.standalone(
+        "locate-language-rust",
+        "code.locate",
+        matching_arguments.clone(),
+    );
+    let batch = fixture.batch(
+        "batch-locate-language-rust",
+        "code.locate",
+        matching_arguments,
+        "compact",
+    );
+    assert_standalone_batch_parity(&standalone, &batch, "code.locate");
+    let matching = &standalone["result"]["structuredContent"];
+    assert_common_read_contract(matching, &fixture.repository_id);
+    assert_eq!(
+        matching["data"]["matches"]
+            .as_array()
+            .expect("matching language returns a result")
+            .len(),
+        1
+    );
+
+    let excluded = fixture.standalone(
+        "locate-language-python",
+        "code.locate",
+        json!({
+            "query": "matrix_target_alpha",
+            "search_modes": ["exact"],
+            "languages": ["python"]
+        }),
+    );
+    assert_success(&excluded, "code.locate");
+    let excluded = &excluded["result"]["structuredContent"];
+    assert_common_read_contract(excluded, &fixture.repository_id);
+    assert_eq!(excluded["data"]["matches"], json!([]));
+    assert_eq!(excluded["truncated"], false);
 }
 
 fn supported_profiles_preserve_standalone_and_batch_semantics(fixture: &mut RetrievalFixture) {
@@ -263,11 +308,6 @@ fn unsupported_retrieval_options_fail_with_stable_preflight_errors(fixture: &mut
             "locate-scope",
             "code.locate",
             json!({"repository": repository(), "query": "matrix", "scope": {"symbols": [symbol.clone()]}}),
-        ),
-        (
-            "locate-languages",
-            "code.locate",
-            json!({"repository": repository(), "query": "matrix", "languages": ["rust"]}),
         ),
         (
             "locate-related",
