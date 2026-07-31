@@ -94,6 +94,15 @@ impl TreeSitterStructuralArtifact {
     pub const fn accounted_bytes(&self) -> usize {
         self.accounted_bytes
     }
+
+    /// Returns whether this artifact was captured under the supplied limits.
+    ///
+    /// Parse artifacts must be rebuilt when a repository-wide budget
+    /// partition changes, even if their source content is unchanged.
+    #[must_use]
+    pub fn is_compatible_with_limits(&self, limits: &AnalysisLimits) -> bool {
+        self.limits == *limits
+    }
 }
 
 impl fmt::Debug for TreeSitterStructuralArtifact {

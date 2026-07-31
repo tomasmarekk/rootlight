@@ -110,6 +110,9 @@ const MAX_RETAINED_SOURCE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RETAINED_OPTIONAL_EXTENSIONS: usize = 10_000;
 const MAX_RETAINED_OPTIONAL_EXTENSION_BYTES: usize = 16 * 1024 * 1024;
+// Divide the generation-wide syntax-fact allowance across every admitted
+// source so large repositories degrade per file instead of exhausting memory.
+const MAX_FIRST_SLICE_STRUCTURAL_FACTS: usize = 1_048_576;
 const MAX_TOTAL_MATERIALIZED_RESOLUTION_CANDIDATES: usize = 1_000_000;
 const DURABLE_STAGING_FIXED_OVERHEAD_BYTES: u64 = 64 * 1024 * 1024;
 const DURABLE_DISK_SAFETY_MARGIN_BYTES: u64 = 64 * 1024 * 1024;
@@ -2851,6 +2854,8 @@ impl FirstSliceService {
         let mut estimated_disk_bytes = durable_staging_reservation(source_preflight.source_bytes)?;
         self.ensure_durable_staging_capacity(estimated_disk_bytes)?;
         let source_count = source_preflight.file_count;
+        let repository_analysis_limits =
+            partitioned_analysis_limits(&self.analysis_limits, source_count)?;
         let mut file_claims = Vec::new();
         file_claims
             .try_reserve_exact(source_count)
@@ -2936,8 +2941,15 @@ impl FirstSliceService {
             check_cancellation(cancellation)?;
             return Ok(FirstSliceIndexPreparation::Retained(receipt));
         }
-        let parent_structural_artifacts =
-            active.and_then(|generation| self.structural_artifacts.generation(generation));
+        let parent_structural_artifacts = active
+            .and_then(|generation| self.structural_artifacts.generation(generation))
+            .filter(|artifacts| {
+                artifacts.iter().all(|(_, entry)| {
+                    entry
+                        .artifact
+                        .is_compatible_with_limits(&repository_analysis_limits)
+                })
+            });
         let parent_incremental_inputs =
             active.and_then(|generation| self.incremental_inputs.get(&generation));
         let source_files = sources
@@ -2987,7 +2999,7 @@ impl FirstSliceService {
                 Vec::new(),
                 analysis_tier_for_language(language),
                 BuildContextIdentity::new(content_hash(BUILD_CONTEXT_SEED)),
-                &self.analysis_limits,
+                &repository_analysis_limits,
             )
             .map_err(|_| FirstSliceError::Adapter)?
             .with_generated_status(input.generated);
@@ -8188,6 +8200,57 @@ fn map_query_error(error: QueryError, cancellation: &Cancellation) -> FirstSlice
     }
 }
 
+fn partitioned_analysis_limits(
+    limits: &AnalysisLimits,
+    source_files: usize,
+) -> Result<AnalysisLimits, FirstSliceError> {
+    if source_files == 0 {
+        return Ok(limits.clone());
+    }
+    let syntax = limits.syntax_stream();
+    let maximum_records = MAX_FIRST_SLICE_STRUCTURAL_FACTS
+        .checked_div(source_files)
+        .ok_or(FirstSliceError::Limits)?
+        .max(1)
+        .min(syntax.max_records());
+    if maximum_records == syntax.max_records() {
+        return Ok(limits.clone());
+    }
+    let current_batch = syntax.batch();
+    let batch = BatchThresholds::new(
+        current_batch.max_records().min(maximum_records),
+        current_batch.max_output_bytes(),
+        current_batch.max_diagnostics(),
+        current_batch.max_diagnostic_bytes(),
+    )
+    .map_err(|_| FirstSliceError::Limits)?;
+    let syntax = StreamLimits::new(
+        syntax.max_batches(),
+        maximum_records,
+        syntax.max_output_bytes(),
+        syntax.max_diagnostics(),
+        syntax.max_diagnostic_bytes(),
+        syntax.max_string_bytes(),
+        batch,
+    )
+    .map_err(|_| FirstSliceError::Limits)?;
+    let partitioned = AnalysisLimits::new(
+        limits.max_source_bytes(),
+        limits.max_syntax_nodes(),
+        limits.max_syntax_depth(),
+        limits.max_embedded_ranges(),
+        limits.max_reported_memory_bytes(),
+        syntax,
+        limits.ir_stream().clone(),
+        limits.ir().clone(),
+    )
+    .map_err(|_| FirstSliceError::Limits)?;
+    Ok(match limits.project() {
+        Some(project) => partitioned.with_project_limits(project),
+        None => partitioned,
+    })
+}
+
 fn analysis_limits(maximum_source_bytes: usize) -> Result<AnalysisLimits, FirstSliceError> {
     let batch = BatchThresholds::new(128, 1024 * 1024, 32, 128 * 1024)
         .map_err(|_| FirstSliceError::Limits)?;
@@ -9553,6 +9616,37 @@ mod tests {
                 limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
             }) if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
         ));
+    }
+
+    #[test]
+    fn repository_analysis_partitions_structural_facts_across_sources() {
+        let limits = analysis_limits(16 * 1024 * 1024).expect("analysis limits are valid");
+        let unpartitioned =
+            partitioned_analysis_limits(&limits, 1).expect("one source retains its full budget");
+        assert_eq!(
+            unpartitioned.syntax_stream().max_records(),
+            limits.syntax_stream().max_records()
+        );
+
+        let source_files = 2_835;
+        let partitioned = partitioned_analysis_limits(&limits, source_files)
+            .expect("substantial repositories receive a fair per-file partition");
+        assert_eq!(
+            partitioned.syntax_stream().max_records(),
+            MAX_FIRST_SLICE_STRUCTURAL_FACTS / source_files
+        );
+        assert_eq!(
+            partitioned.syntax_stream().batch().max_records(),
+            limits.syntax_stream().batch().max_records()
+        );
+
+        let source_files = MAX_FIRST_SLICE_STRUCTURAL_FACTS
+            .checked_add(1)
+            .expect("test source count is representable");
+        let minimum = partitioned_analysis_limits(&limits, source_files)
+            .expect("extreme source counts retain a nonzero bounded partition");
+        assert_eq!(minimum.syntax_stream().max_records(), 1);
+        assert_eq!(minimum.syntax_stream().batch().max_records(), 1);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
