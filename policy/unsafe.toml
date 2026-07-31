@@ -35,8 +35,8 @@ source = "crates/rootlight-sandbox/src/platform/os.rs"
 status = "enabled"
 owner = "@tomasmarekk"
 reason = "Win32 AppContainer profiles and tokens, protected ACLs, cryptographic workspace naming, explicit process attributes, hard Job limits, exact process ownership, and fail-closed cleanup require native APIs unavailable through stable safe Rust"
-expected_source_tokens = 53
-expected_geiger_count = 265
+expected_source_tokens = 54
+expected_geiger_count = 274
 geiger_host_os = "windows"
 
 [[boundaries]]
