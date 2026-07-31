@@ -12,7 +12,7 @@ mod durable;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -2080,7 +2080,9 @@ pub struct FirstSliceService {
     incremental_baselines: BTreeMap<GenerationId, IncrementalDiscoveryBaseline>,
     incremental_inputs: BTreeMap<GenerationId, InputSnapshot>,
     incremental_evidence: BTreeMap<GenerationId, FirstSliceIncrementalEvidence>,
-    catalog_snapshots: CatalogSnapshotStore,
+    // Catalog pagination mutates only bounded cursor state. Its independent
+    // lock keeps catalog reads concurrent with long immutable analysis reads.
+    catalog_snapshots: Mutex<CatalogSnapshotStore>,
     durable: Option<DurableCatalog>,
     maximum_generations_per_repository: usize,
     activation_sequences: BTreeMap<RepositoryId, u64>,
@@ -2385,10 +2387,10 @@ impl FirstSliceService {
             incremental_baselines: BTreeMap::new(),
             incremental_inputs: BTreeMap::new(),
             incremental_evidence: BTreeMap::new(),
-            catalog_snapshots: CatalogSnapshotStore::new(
+            catalog_snapshots: Mutex::new(CatalogSnapshotStore::new(
                 catalog::CatalogSnapshotLimits::default(),
                 catalog_instance_nonce,
-            ),
+            )),
             durable,
             maximum_generations_per_repository: maximum_generations,
             activation_sequences: BTreeMap::new(),
@@ -5511,7 +5513,7 @@ impl FirstSliceService {
     /// unsupported filters, unavailable snapshots, or inconsistent internal
     /// repository metadata.
     pub fn repository_catalog_page(
-        &mut self,
+        &self,
         request: CatalogPageRequest,
         now: CatalogInstant,
     ) -> Result<CatalogPage, catalog::CatalogError> {
@@ -5520,7 +5522,10 @@ impl FirstSliceService {
         } else {
             Vec::new()
         };
-        self.catalog_snapshots.page(request, records, now)
+        self.catalog_snapshots
+            .lock()
+            .map_err(|_| catalog::CatalogError::CatalogInvariant)?
+            .page(request, records, now)
     }
 
     fn catalog_records(&self) -> Result<Vec<CatalogRepositoryRecord>, catalog::CatalogError> {
@@ -9784,7 +9789,7 @@ mod tests {
             2
         );
 
-        let mut restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
             .expect("durable state restores");
         assert_eq!(
             restored.active_generation_for(first.repository),

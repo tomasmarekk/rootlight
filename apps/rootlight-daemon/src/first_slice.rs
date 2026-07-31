@@ -1286,11 +1286,6 @@ fn execute_service_request(
             return repository_index(lanes, resources, request, &context, reply)
                 .map(FirstSliceIpcResponse::RepositoryIndex);
         }
-        FirstSliceIpcRequest::RepositoryCatalogPage(request) => {
-            let mut service = write_service(&lanes.service)?;
-            return repository_catalog_page(&mut service, request, resources.catalog_epoch)
-                .map(FirstSliceIpcResponse::RepositoryCatalogPage);
-        }
         request => request,
     };
     let service = read_service(&lanes.service)?;
@@ -1308,7 +1303,10 @@ fn execute_service_request(
         FirstSliceIpcRequest::RepositoryList(request) => {
             repository_list(&service, request).map(FirstSliceIpcResponse::RepositoryList)
         }
-        FirstSliceIpcRequest::RepositoryCatalogPage(_) => Err(internal_error()),
+        FirstSliceIpcRequest::RepositoryCatalogPage(request) => {
+            repository_catalog_page(&service, request, resources.catalog_epoch)
+                .map(FirstSliceIpcResponse::RepositoryCatalogPage)
+        }
         FirstSliceIpcRequest::RepositoryStatus(request) => repository_status(
             &service,
             resources.journal,
@@ -4113,7 +4111,7 @@ fn repository_list(
 }
 
 fn repository_catalog_page(
-    service: &mut FirstSliceService,
+    service: &FirstSliceService,
     request: daemon::RepositoryCatalogPageRequest,
     catalog_epoch: Instant,
 ) -> Result<daemon::RepositoryCatalogPageResponse, PublicError> {
@@ -5858,9 +5856,9 @@ mod tests {
         };
         assert_eq!(repository.semantic_freshness, "pending_refinement");
         let catalog = {
-            let mut service = write_service(&service).expect("service write lock is available");
+            let service = read_service(&service).expect("service read lock is available");
             repository_catalog_page(
-                &mut service,
+                &service,
                 catalog_request(20, false, Vec::new(), None, None),
                 Instant::now(),
             )
@@ -7049,7 +7047,7 @@ mod tests {
         let (mut service, root) = indexed_catalog(&["alpha", "beta"]);
         let epoch = Instant::now();
         let first = repository_catalog_page(
-            &mut service,
+            &service,
             catalog_request(1, false, Vec::new(), None, None),
             epoch,
         )
@@ -7087,7 +7085,7 @@ mod tests {
             .expect("new repository indexes");
 
         let continuation = repository_catalog_page(
-            &mut service,
+            &service,
             catalog_request(
                 1,
                 false,
@@ -7105,7 +7103,7 @@ mod tests {
         assert!(continuation.next_after.is_none());
 
         let refreshed = repository_catalog_page(
-            &mut service,
+            &service,
             catalog_request(20, false, Vec::new(), None, None),
             epoch,
         )
@@ -7117,11 +7115,11 @@ mod tests {
 
     #[test]
     fn repository_catalog_preserves_absent_and_empty_state_filters() {
-        let (mut service, _root) = indexed_catalog(&["alpha"]);
+        let (service, _root) = indexed_catalog(&["alpha"]);
         let epoch = Instant::now();
 
         let all = repository_catalog_page(
-            &mut service,
+            &service,
             catalog_request(20, false, Vec::new(), None, None),
             epoch,
         )
@@ -7129,7 +7127,7 @@ mod tests {
         assert_eq!(all.total_count, Some(1));
 
         let none = repository_catalog_page(
-            &mut service,
+            &service,
             catalog_request(20, true, Vec::new(), None, None),
             epoch,
         )
@@ -7137,7 +7135,7 @@ mod tests {
         assert_eq!(none.total_count, Some(0));
 
         let ready = repository_catalog_page(
-            &mut service,
+            &service,
             catalog_request(20, true, vec!["ready"], None, None),
             epoch,
         )
@@ -7145,7 +7143,7 @@ mod tests {
         assert_eq!(ready.total_count, Some(1));
 
         let inconsistent = repository_catalog_page(
-            &mut service,
+            &service,
             catalog_request(20, false, vec!["ready"], None, None),
             epoch,
         )
@@ -7153,7 +7151,7 @@ mod tests {
         assert_eq!(inconsistent.code(), ErrorCode::InvalidArgument);
 
         let unknown = repository_catalog_page(
-            &mut service,
+            &service,
             catalog_request(20, true, vec!["unknown"], None, None),
             epoch,
         )
@@ -7163,11 +7161,11 @@ mod tests {
 
     #[test]
     fn repository_catalog_cursor_errors_request_restart_without_leaking_sources() {
-        let mut service =
+        let service =
             FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
         let mut request = catalog_request(20, false, Vec::new(), None, None);
         request.sort_version = u32::from(CATALOG_SORT_VERSION) + 1;
-        let unsupported = repository_catalog_page(&mut service, request, Instant::now())
+        let unsupported = repository_catalog_page(&service, request, Instant::now())
             .expect_err("unsupported sort version fails");
         assert_eq!(unsupported.code(), ErrorCode::InvalidCursor);
         assert_eq!(
@@ -7182,7 +7180,7 @@ mod tests {
         assert!(!unsupported.message().contains('/'));
 
         let malformed_snapshot = repository_catalog_page(
-            &mut service,
+            &service,
             catalog_request(
                 20,
                 false,
@@ -7196,7 +7194,7 @@ mod tests {
         assert_eq!(malformed_snapshot.code(), ErrorCode::InvalidCursor);
 
         let oversized_page = repository_catalog_page(
-            &mut service,
+            &service,
             catalog_request(u32::from(u16::MAX) + 1, false, Vec::new(), None, None),
             Instant::now(),
         )
