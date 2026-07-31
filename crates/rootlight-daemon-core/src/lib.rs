@@ -11,7 +11,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, Once, OnceLock,
         atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     },
@@ -5225,9 +5225,51 @@ fn duration_ms_u64(duration: Duration) -> Result<u64, ServiceError> {
     u64::try_from(duration.as_millis()).map_err(|_| ServiceError::InvalidLimits)
 }
 
+struct BackgroundDigestCache {
+    started: Once,
+    value: OnceLock<Option<String>>,
+}
+
+impl BackgroundDigestCache {
+    const fn new() -> Self {
+        Self {
+            started: Once::new(),
+            value: OnceLock::new(),
+        }
+    }
+
+    fn prepare<F>(&'static self, compute: F)
+    where
+        F: FnOnce() -> Option<String> + Send + 'static,
+    {
+        self.started.call_once(|| {
+            let spawn = thread::Builder::new()
+                .name("rootlight-binary-digest".to_owned())
+                .spawn(move || {
+                    let _ = self.value.set(compute());
+                });
+            if spawn.is_err() {
+                let _ = self.value.set(None);
+            }
+        });
+    }
+
+    fn ready(&self) -> Option<String> {
+        self.value.get().cloned().flatten()
+    }
+}
+
+static RUNNING_BINARY_SHA256: BackgroundDigestCache = BackgroundDigestCache::new();
+
+fn prepare_running_binary_sha256() {
+    // Debug executables can be hundreds of megabytes, so hashing must not consume
+    // the bounded support-bundle request that first asks for this optional value.
+    RUNNING_BINARY_SHA256.prepare(compute_running_binary_sha256);
+}
+
 fn running_binary_sha256() -> Option<String> {
-    static DIGEST: OnceLock<Option<String>> = OnceLock::new();
-    DIGEST.get_or_init(compute_running_binary_sha256).clone()
+    prepare_running_binary_sha256();
+    RUNNING_BINARY_SHA256.ready()
 }
 
 fn compute_running_binary_sha256() -> Option<String> {
@@ -5278,6 +5320,7 @@ impl ControlService {
         state: Arc<DaemonState>,
         limits: DaemonLimits,
     ) -> Self {
+        prepare_running_binary_sha256();
         Self {
             journal,
             catalog_path: None,
@@ -11049,6 +11092,45 @@ mod tests {
         assert_eq!(wire.archive_bytes, bundle.archive_bytes);
         assert_eq!(wire.sha256, bundle.sha256);
         assert!(!wire.contains_source);
+    }
+
+    #[test]
+    fn background_digest_cache_does_not_block_while_digest_computes() {
+        static CACHE: BackgroundDigestCache = BackgroundDigestCache::new();
+
+        let (compute_started, started) = mpsc::sync_channel(0);
+        let (release, released) = mpsc::sync_channel(0);
+        CACHE.prepare(move || {
+            compute_started
+                .send(())
+                .expect("test observes digest computation");
+            released.recv().expect("test releases digest computation");
+            Some("aa".repeat(32))
+        });
+        started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("digest computation starts");
+
+        let (read, result) = mpsc::sync_channel(0);
+        let reader = thread::spawn(move || {
+            read.send(CACHE.ready())
+                .expect("test observes the non-blocking cache read");
+        });
+        assert_eq!(
+            result.recv_timeout(Duration::from_secs(1)),
+            Ok(None),
+            "an in-progress digest must remain optional"
+        );
+        reader.join().expect("cache reader exits cleanly");
+
+        release.send(()).expect("digest computation is released");
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(1))
+            .expect("test deadline derives");
+        while CACHE.ready().is_none() && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(CACHE.ready(), Some("aa".repeat(32)));
     }
 
     #[test]
