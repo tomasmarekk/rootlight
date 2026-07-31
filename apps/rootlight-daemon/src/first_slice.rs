@@ -84,6 +84,7 @@ const FIRST_SLICE_SCHEMA_MAJOR: u32 = 1;
 const FIRST_SLICE_SCHEMA_MINOR: u32 = 0;
 const DEFAULT_GENERATION_RETENTION: usize = 8;
 const DEFAULT_WORK_QUEUE: usize = 16;
+const DEFAULT_READ_QUEUE: usize = 32;
 const DEFAULT_CONTROL_QUEUE: usize = 32;
 const DEFAULT_OPERATION_METADATA: usize = 256;
 const RETRY_AFTER_MS: u32 = 100;
@@ -603,6 +604,7 @@ impl PublicationBoundaryHook {
 #[derive(Clone)]
 pub(crate) struct FirstSliceDaemon {
     work: SyncSender<WorkerCommand>,
+    read: SyncSender<WorkerCommand>,
     control: SyncSender<WorkerCommand>,
 }
 
@@ -736,6 +738,10 @@ impl FirstSliceDaemon {
             .enable_time()
             .build()
             .map_err(FirstSliceHostError::AsyncRuntime)?;
+        let read_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(FirstSliceHostError::AsyncRuntime)?;
         let control_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -763,6 +769,7 @@ impl FirstSliceDaemon {
         let index_serialization = Arc::new(Mutex::new(()));
         let semantic_refinements = Arc::new(Mutex::new(BTreeMap::new()));
         let (work, work_receiver) = mpsc::sync_channel(DEFAULT_WORK_QUEUE);
+        let (read, read_receiver) = mpsc::sync_channel(DEFAULT_READ_QUEUE);
         let (control, control_receiver) = mpsc::sync_channel(DEFAULT_CONTROL_QUEUE);
         let (refinement, refinement_receiver) = mpsc::sync_channel(DEFAULT_OPERATION_METADATA);
         let lanes = FirstSliceServiceLanes {
@@ -787,6 +794,27 @@ impl FirstSliceDaemon {
                     work_runtime,
                     work_receiver,
                     publication_hook,
+                );
+            })
+            .map_err(|error| {
+                stopping.store(true, Ordering::Release);
+                FirstSliceHostError::Thread(error)
+            })?;
+        let read_journal = journal.clone();
+        let read_metadata = Arc::clone(&metadata);
+        let read_stopping = Arc::clone(&stopping);
+        let read_lanes = lanes.clone();
+        let read_thread = thread::Builder::new()
+            .name("rootlight-first-slice-read".to_owned())
+            .spawn(move || {
+                service_worker(
+                    read_lanes,
+                    read_journal,
+                    read_metadata,
+                    read_stopping,
+                    read_runtime,
+                    read_receiver,
+                    None,
                 );
             })
             .map_err(|error| {
@@ -831,18 +859,21 @@ impl FirstSliceDaemon {
             })?;
         let daemon = Self {
             work: work.clone(),
+            read: read.clone(),
             control: control.clone(),
         };
         Ok((
             daemon,
             FirstSliceWorkers {
                 work: Some(work),
+                read: Some(read),
                 control: Some(control),
                 refinement: Some(refinement),
                 semantic_refinements,
                 stopping,
                 journal,
                 work_thread: Some(work_thread),
+                read_thread: Some(read_thread),
                 control_thread: Some(control_thread),
                 refinement_thread: Some(refinement_thread),
             },
@@ -850,10 +881,10 @@ impl FirstSliceDaemon {
     }
 
     fn sender(&self, request: &FirstSliceIpcRequest) -> &SyncSender<WorkerCommand> {
-        if matches!(request, FirstSliceIpcRequest::RepositoryOperationStatus(_)) {
-            &self.control
-        } else {
-            &self.work
+        match request {
+            FirstSliceIpcRequest::RepositoryIndex(_) => &self.work,
+            FirstSliceIpcRequest::RepositoryOperationStatus(_) => &self.control,
+            _ => &self.read,
         }
     }
 
@@ -976,12 +1007,14 @@ fn operation_status_observation(
 /// Join owner for the process-lifetime first-slice workers.
 pub(crate) struct FirstSliceWorkers {
     work: Option<SyncSender<WorkerCommand>>,
+    read: Option<SyncSender<WorkerCommand>>,
     control: Option<SyncSender<WorkerCommand>>,
     refinement: Option<SyncSender<SemanticRefinementCommand>>,
     semantic_refinements: SemanticRefinements,
     stopping: Arc<AtomicBool>,
     journal: JournalActorHandle,
     work_thread: Option<JoinHandle<()>>,
+    read_thread: Option<JoinHandle<()>>,
     control_thread: Option<JoinHandle<()>>,
     refinement_thread: Option<JoinHandle<()>>,
 }
@@ -1009,16 +1042,18 @@ impl FirstSliceWorkers {
             .map_err(|_| FirstSliceHostError::ShutdownTimedOut)?
             .map_err(FirstSliceHostError::Journal)?;
         self.work.take();
+        self.read.take();
         self.control.take();
         self.refinement.take();
         let work = self.work_thread.take();
+        let read = self.read_thread.take();
         let control = self.control_thread.take();
         let refinement = self.refinement_thread.take();
         let (joined, completion) = tokio::sync::oneshot::channel();
         thread::Builder::new()
             .name("rootlight-first-slice-join".to_owned())
             .spawn(move || {
-                let result = [control, work, refinement]
+                let result = [control, read, work, refinement]
                     .into_iter()
                     .flatten()
                     .try_for_each(|thread| {
@@ -1046,6 +1081,7 @@ impl Drop for FirstSliceWorkers {
             }
         }
         self.work.take();
+        self.read.take();
         self.control.take();
         self.refinement.take();
     }
@@ -7845,6 +7881,81 @@ mod tests {
     }
 
     #[test]
+    fn repository_reads_remain_available_during_paused_index() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor =
+            JournalActor::start(Arc::clone(&journal), 16, 16).expect("journal actor starts");
+        let (reached_sender, reached_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let hook = PublicationBoundaryHook {
+            boundary: PublicationBoundary::BeforeCompletion,
+            fail_commit: AtomicBool::new(false),
+            armed: AtomicBool::new(true),
+            reached: reached_sender,
+            release: release_receiver,
+        };
+        let (daemon, workers) = FirstSliceDaemon::start_with_publication_hook(actor.handle(), hook)
+            .expect("host starts");
+        let fixture = TempDir::new().expect("fixture exists");
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn independently_readable() -> u32 { 42 }\n",
+        )
+        .expect("source writes");
+        let operation = OperationId::from_bytes([92; 16]);
+
+        let accepted = execute(
+            &daemon,
+            FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root: fixture.path().to_string_lossy().into_owned(),
+                operation: Some(operation_to_wire(operation)),
+                detached: true,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
+            }),
+        );
+        assert!(matches!(
+            accepted,
+            FirstSliceIpcResponse::RepositoryIndex(_)
+        ));
+        reached_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("index reaches the paused publication boundary");
+
+        let started = Instant::now();
+        let listed = execute_with_timeout(
+            &daemon,
+            FirstSliceIpcRequest::RepositoryList(daemon::RepositoryListRequest {
+                max_results: Some(20),
+                query: None,
+            }),
+        );
+        let elapsed = started.elapsed();
+        release_sender.send(()).expect("index resumes");
+        wait_for_terminal_operation(&journal, operation);
+        let listed = listed.expect("repository read remains available");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "repository read was delayed for {elapsed:?}"
+        );
+        let FirstSliceIpcResponse::RepositoryList(listed) = listed else {
+            panic!("repository list response expected");
+        };
+        assert!(listed.repositories.is_empty());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        drop(daemon);
+        runtime
+            .block_on(workers.stop(tokio::time::Instant::now() + Duration::from_secs(5)))
+            .expect("workers stop");
+        actor.join().expect("journal actor joins");
+    }
+
+    #[test]
     fn operation_status_long_poll_does_not_block_cancellation() {
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
         let actor =
@@ -8308,6 +8419,22 @@ mod tests {
             }),
         );
         assert!(matches!(second, FirstSliceIpcResponse::RepositoryIndex(_)));
+        wait_for_terminal_operation(&journal, OperationId::from_bytes([2; 16]));
+        let _ = execute_retrying_busy(
+            &daemon,
+            || {
+                FirstSliceIpcRequest::RepositoryOperationStatus(
+                    daemon::RepositoryOperationStatusRequest {
+                        schema_version: Some(schema_version()),
+                        operation: Some(operation_to_wire(OperationId::from_bytes([2; 16]))),
+                        action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                        wait_ms: None,
+                        after_revision: None,
+                    },
+                )
+            },
+            "second generation publication becomes visible",
+        );
         let locate = execute(
             &daemon,
             FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
