@@ -84,6 +84,7 @@ serde = { version = "1.0.228", default-features = false, features = ["derive", "
 serde_json = { version = "1.0.150", default-features = false, features = ["std"] }
 sha2 = { version = "0.11.0", default-features = false }
 syn = { version = "=2.0.119", default-features = false, features = ["full", "parsing", "visit"] }
+sysinfo = { version = "=0.37.2", default-features = false, features = ["system"] }
 tantivy = { version = "=0.26.1", default-features = false, features = ["mmap"] }
 tantivy-fst = { version = "=0.5.0", default-features = false }
 tempfile = "3.23.0"

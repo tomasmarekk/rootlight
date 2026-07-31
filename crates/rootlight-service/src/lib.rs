@@ -223,6 +223,33 @@ pub struct FirstSliceIndexReceipt {
     pub elapsed_micros: u64,
 }
 
+/// One committed generation plus confirmed durable bytes written by its operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSliceIndexCommit {
+    receipt: FirstSliceIndexReceipt,
+    written_bytes: u64,
+}
+
+impl FirstSliceIndexCommit {
+    /// Returns the published generation receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> &FirstSliceIndexReceipt {
+        &self.receipt
+    }
+
+    /// Returns cumulative bytes confirmed by durable writer boundaries.
+    #[must_use]
+    pub const fn written_bytes(&self) -> u64 {
+        self.written_bytes
+    }
+
+    /// Separates the published receipt from its operation-local write metric.
+    #[must_use]
+    pub fn into_parts(self) -> (FirstSliceIndexReceipt, u64) {
+        (self.receipt, self.written_bytes)
+    }
+}
+
 /// Source-free adapter facts for production support evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstSliceSupportAdapter {
@@ -922,6 +949,7 @@ pub struct PreparedFirstSliceIndex {
     display_name: String,
     register_repository: bool,
     durable: Option<DurablePreparedGeneration>,
+    written_bytes: u64,
 }
 
 /// Retention-admitted generation awaiting durable lifecycle success.
@@ -932,6 +960,7 @@ pub struct PreparedFirstSliceIndex {
 pub struct FirstSliceStagedIndex {
     receipt: FirstSliceIndexReceipt,
     publication: FirstSlicePublication,
+    written_bytes: u64,
 }
 
 impl FirstSliceStagedIndex {
@@ -939,6 +968,12 @@ impl FirstSliceStagedIndex {
     #[must_use]
     pub fn receipt(&self) -> FirstSliceIndexReceipt {
         self.receipt.clone()
+    }
+
+    /// Returns bytes already confirmed by durable preparation writers.
+    #[must_use]
+    pub const fn written_bytes(&self) -> u64 {
+        self.written_bytes
     }
 }
 
@@ -3189,27 +3224,31 @@ impl FirstSliceService {
             .max(estimated_disk_bytes);
             self.ensure_durable_staging_capacity(estimated_disk_bytes)?;
         }
-        let (oracle_allocated_bytes, verified, durable) = if let Some(durable) = &self.durable {
-            let prepared = durable.begin_generation(repository, generation)?;
-            prepared.write_sources(&sources)?;
-            let (oracle, verified) = OracleWriter::create_in(prepared.path())
-                .map_err(|error| map_catalog_error(&error, cancellation))?
-                .seal_and_retain(verified, &context)
-                .map_err(|error| map_catalog_error(&error, cancellation))?;
-            let allocated_bytes = oracle
-                .allocated_bytes(&context)
-                .map_err(|error| map_catalog_error(&error, cancellation))?;
-            (allocated_bytes, verified, Some(prepared))
-        } else {
-            let (oracle, verified) = EphemeralOracleWriter::create()
-                .map_err(|error| map_catalog_error(&error, cancellation))?
-                .seal_and_retain(verified, &context)
-                .map_err(|error| map_catalog_error(&error, cancellation))?;
-            let allocated_bytes = oracle
-                .allocated_bytes()
-                .map_err(|error| map_catalog_error(&error, cancellation))?;
-            (allocated_bytes, verified, None)
-        };
+        let (oracle_allocated_bytes, verified, durable, mut written_bytes) =
+            if let Some(durable) = &self.durable {
+                let prepared = durable.begin_generation(repository, generation)?;
+                let source_written_bytes = prepared.write_sources(&sources)?;
+                let (oracle, verified) = OracleWriter::create_in(prepared.path())
+                    .map_err(|error| map_catalog_error(&error, cancellation))?
+                    .seal_and_retain(verified, &context)
+                    .map_err(|error| map_catalog_error(&error, cancellation))?;
+                let allocated_bytes = oracle
+                    .allocated_bytes(&context)
+                    .map_err(|error| map_catalog_error(&error, cancellation))?;
+                let written_bytes = source_written_bytes
+                    .checked_add(allocated_bytes)
+                    .ok_or(FirstSliceError::Limits)?;
+                (allocated_bytes, verified, Some(prepared), written_bytes)
+            } else {
+                let (oracle, verified) = EphemeralOracleWriter::create()
+                    .map_err(|error| map_catalog_error(&error, cancellation))?
+                    .seal_and_retain(verified, &context)
+                    .map_err(|error| map_catalog_error(&error, cancellation))?;
+                let allocated_bytes = oracle
+                    .allocated_bytes()
+                    .map_err(|error| map_catalog_error(&error, cancellation))?;
+                (allocated_bytes, verified, None, 0)
+            };
         observe_progress(FirstSliceIndexProgress::completed(
             FirstSliceIndexStage::Persistence,
             5,
@@ -3257,7 +3296,11 @@ impl FirstSliceService {
             elapsed_micros: elapsed_micros(started),
         };
         if let Some(durable) = &durable {
-            durable.finish(root_identity, &display_name, receipt.clone())?;
+            let manifest_written_bytes =
+                durable.finish(root_identity, &display_name, receipt.clone())?;
+            written_bytes = written_bytes
+                .checked_add(manifest_written_bytes)
+                .ok_or(FirstSliceError::Limits)?;
         }
         check_cancellation(cancellation)?;
         Ok(FirstSliceIndexPreparation::Pending(
@@ -3272,6 +3315,7 @@ impl FirstSliceService {
                 display_name,
                 register_repository: existing_repository.is_none(),
                 durable,
+                written_bytes,
             },
         ))
     }
@@ -3622,6 +3666,7 @@ impl FirstSliceService {
             FirstSliceIndexPreparation::Retained(receipt) => Ok(FirstSliceStagedIndex {
                 receipt,
                 publication: FirstSlicePublication::Retained,
+                written_bytes: 0,
             }),
             FirstSliceIndexPreparation::Pending(prepared) => {
                 let PreparedFirstSliceIndex {
@@ -3635,6 +3680,7 @@ impl FirstSliceService {
                     display_name,
                     register_repository,
                     durable,
+                    written_bytes,
                 } = prepared;
                 self.make_room_for_generation(receipt.repository)?;
                 let language_coverage = language_coverage(verified.document());
@@ -3696,6 +3742,7 @@ impl FirstSliceService {
                         incremental,
                         durable,
                     },
+                    written_bytes,
                 })
             }
         }
@@ -3718,6 +3765,7 @@ impl FirstSliceService {
         staged: FirstSliceStagedIndex,
     ) -> Result<FirstSliceIndexReceipt, FirstSliceError> {
         self.commit_staged_with_operation(staged, None)
+            .map(|committed| committed.receipt)
     }
 
     /// Commits a staged generation and durably binds its journal operation.
@@ -3735,15 +3783,31 @@ impl FirstSliceService {
         operation: FirstSliceOperationContext,
     ) -> Result<FirstSliceIndexReceipt, FirstSliceError> {
         self.commit_staged_with_operation(staged, Some(operation))
+            .map(|committed| committed.receipt)
+    }
+
+    /// Commits a staged operation and reports confirmed durable write volume.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same typed durable activation, integrity, or retention
+    /// failures as [`Self::commit_staged_for_operation`].
+    pub fn commit_staged_for_operation_with_metrics(
+        &mut self,
+        staged: FirstSliceStagedIndex,
+        operation: FirstSliceOperationContext,
+    ) -> Result<FirstSliceIndexCommit, FirstSliceError> {
+        self.commit_staged_with_operation(staged, Some(operation))
     }
 
     fn commit_staged_with_operation(
         &mut self,
         staged: FirstSliceStagedIndex,
         operation: Option<FirstSliceOperationContext>,
-    ) -> Result<FirstSliceIndexReceipt, FirstSliceError> {
+    ) -> Result<FirstSliceIndexCommit, FirstSliceError> {
         self.retry_pending_durable_compactions()?;
         let receipt = staged.receipt;
+        let mut written_bytes = staged.written_bytes;
         let repository_activation_sequence = self
             .activation_sequences
             .get(&receipt.repository)
@@ -3768,7 +3832,7 @@ impl FirstSliceService {
                         .get(&receipt.repository)
                         .copied()
                         .ok_or(FirstSliceError::CatalogCorrupt)?;
-                    durable.activate_existing(
+                    let activation_written_bytes = durable.activate_existing(
                         receipt.repository,
                         receipt.generation,
                         repository_activation_sequence,
@@ -3776,6 +3840,9 @@ impl FirstSliceService {
                         published_generation_count,
                         operation,
                     )?;
+                    written_bytes = written_bytes
+                        .checked_add(activation_written_bytes)
+                        .ok_or(FirstSliceError::Limits)?;
                     if let Some(operation) = operation {
                         self.record_durable_operation(operation, &receipt);
                     }
@@ -3829,33 +3896,41 @@ impl FirstSliceService {
                         .map_err(|_| FirstSliceError::Retention)?;
                     return Err(FirstSliceError::Retention);
                 }
-                if let Some(durable) = &mut durable
-                    && let Err(error) = durable.activate(
+                if let Some(durable) = &mut durable {
+                    match durable.activate(
                         repository_activation_sequence,
                         global_activation_sequence,
                         published_generation_count,
                         operation,
-                    )
-                {
-                    self.generations
-                        .rollback_commit(receipt.generation, prior_active)
-                        .map_err(|_| FirstSliceError::Retention)?;
-                    self.structural_artifacts
-                        .rollback_commit(receipt.generation)
-                        .map_err(|_| FirstSliceError::Retention)?;
-                    self.source_snapshots
-                        .rollback_commit(receipt.generation)
-                        .map_err(|_| FirstSliceError::Retention)?;
-                    let source_release = self.source_snapshots.begin_discard(receipt.generation)?;
-                    let structural_release = self
-                        .structural_artifacts
-                        .begin_discard(receipt.generation)?;
-                    self.generations
-                        .discard_staged(receipt.generation)
-                        .map_err(|_| FirstSliceError::Retention)?;
-                    self.source_snapshots.finish_discard(source_release);
-                    self.structural_artifacts.finish_discard(structural_release);
-                    return Err(error);
+                    ) {
+                        Ok(activation_written_bytes) => {
+                            written_bytes = written_bytes
+                                .checked_add(activation_written_bytes)
+                                .ok_or(FirstSliceError::Limits)?;
+                        }
+                        Err(error) => {
+                            self.generations
+                                .rollback_commit(receipt.generation, prior_active)
+                                .map_err(|_| FirstSliceError::Retention)?;
+                            self.structural_artifacts
+                                .rollback_commit(receipt.generation)
+                                .map_err(|_| FirstSliceError::Retention)?;
+                            self.source_snapshots
+                                .rollback_commit(receipt.generation)
+                                .map_err(|_| FirstSliceError::Retention)?;
+                            let source_release =
+                                self.source_snapshots.begin_discard(receipt.generation)?;
+                            let structural_release = self
+                                .structural_artifacts
+                                .begin_discard(receipt.generation)?;
+                            self.generations
+                                .discard_staged(receipt.generation)
+                                .map_err(|_| FirstSliceError::Retention)?;
+                            self.source_snapshots.finish_discard(source_release);
+                            self.structural_artifacts.finish_discard(structural_release);
+                            return Err(error);
+                        }
+                    }
                 }
                 self.receipts.insert(receipt.generation, receipt.clone());
                 let previous_coverage = self
@@ -3913,7 +3988,10 @@ impl FirstSliceService {
                 self.pending_durable_compactions.insert(receipt.repository);
             }
         }
-        Ok(receipt)
+        Ok(FirstSliceIndexCommit {
+            receipt,
+            written_bytes,
+        })
     }
 
     fn retry_pending_durable_compactions(&mut self) -> Result<(), FirstSliceError> {
@@ -3984,6 +4062,7 @@ impl FirstSliceService {
         let FirstSliceStagedIndex {
             receipt,
             publication,
+            ..
         } = staged;
         if let FirstSlicePublication::Pending {
             root_identity,

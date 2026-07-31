@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
@@ -78,6 +78,7 @@ use rootlight_service::{
         CatalogSortKey,
     },
 };
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
 const FIRST_SLICE_SCHEMA_MAJOR: u32 = 1;
 const FIRST_SLICE_SCHEMA_MINOR: u32 = 0;
@@ -1083,6 +1084,8 @@ struct OperationMetadata {
     parent_generation: Option<GenerationId>,
     estimated_disk_bytes: u64,
     receipt: Option<FirstSliceIndexReceipt>,
+    peak_rss_bytes: Arc<AtomicU64>,
+    written_bytes: u64,
     publication: PublicationState,
     terminal: bool,
     terminal_snapshot: Option<OperationStatusSnapshot>,
@@ -1151,6 +1154,8 @@ impl OperationMetadataSet {
                 parent_generation: publication.receipt.parent,
                 estimated_disk_bytes: publication.receipt.estimated_disk_bytes,
                 receipt: Some(publication.receipt),
+                peak_rss_bytes: Arc::new(AtomicU64::new(record.peak_rss_bytes)),
+                written_bytes: record.written_bytes,
                 publication: PublicationState::Committed,
                 terminal: true,
                 terminal_snapshot: Some(OperationStatusSnapshot::from_record(record)),
@@ -1192,6 +1197,8 @@ impl OperationMetadataSet {
                 parent_generation: None,
                 estimated_disk_bytes: 0,
                 receipt: None,
+                peak_rss_bytes: Arc::new(AtomicU64::new(0)),
+                written_bytes: 0,
                 publication: PublicationState::None,
                 terminal: false,
                 terminal_snapshot: None,
@@ -1207,6 +1214,27 @@ impl OperationMetadataSet {
             metadata.receipt = Some(receipt);
             metadata.publication = PublicationState::Staged;
         }
+    }
+
+    fn resource_meter(&self, operation: OperationId) -> Result<Arc<AtomicU64>, PublicError> {
+        self.records
+            .get(&operation)
+            .map(|metadata| Arc::clone(&metadata.peak_rss_bytes))
+            .ok_or_else(internal_error)
+    }
+
+    fn observe_written_bytes(&mut self, operation: OperationId, written_bytes: u64) {
+        if let Some(metadata) = self.records.get_mut(&operation) {
+            metadata.written_bytes = metadata.written_bytes.max(written_bytes);
+        }
+    }
+
+    fn resources(&self, operation: OperationId) -> Result<(u64, u64), PublicError> {
+        let metadata = self.records.get(&operation).ok_or_else(internal_error)?;
+        Ok((
+            metadata.peak_rss_bytes.load(Ordering::Relaxed),
+            metadata.written_bytes,
+        ))
     }
 
     fn admit(&mut self, operation: OperationId, admission: FirstSliceIndexAdmission) {
@@ -1306,6 +1334,58 @@ impl OperationMetadataSet {
         });
         operations.truncate(100);
         operations
+    }
+}
+
+struct ProcessRssSampler {
+    stopping: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl ProcessRssSampler {
+    fn start(peak_rss_bytes: Arc<AtomicU64>) -> Self {
+        sample_current_process_rss(&peak_rss_bytes);
+        let stopping = Arc::new(AtomicBool::new(false));
+        let worker_stopping = Arc::clone(&stopping);
+        let worker = thread::Builder::new()
+            .name("rootlight-rss-sampler".to_owned())
+            .spawn(move || {
+                let pid = Pid::from_u32(std::process::id());
+                let mut system = System::new();
+                while !worker_stopping.load(Ordering::Acquire) {
+                    refresh_process_rss(&mut system, pid, &peak_rss_bytes);
+                    thread::park_timeout(Duration::from_millis(25));
+                }
+                refresh_process_rss(&mut system, pid, &peak_rss_bytes);
+            })
+            .ok();
+        Self { stopping, worker }
+    }
+}
+
+impl Drop for ProcessRssSampler {
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
+            let _ = worker.join();
+        }
+    }
+}
+
+fn sample_current_process_rss(peak_rss_bytes: &AtomicU64) {
+    let mut system = System::new();
+    refresh_process_rss(
+        &mut system,
+        Pid::from_u32(std::process::id()),
+        peak_rss_bytes,
+    );
+}
+
+fn refresh_process_rss(system: &mut System, pid: Pid, peak_rss_bytes: &AtomicU64) {
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    if let Some(process) = system.process(pid) {
+        peak_rss_bytes.fetch_max(process.memory(), Ordering::Relaxed);
     }
 }
 
@@ -1867,6 +1947,8 @@ fn repository_index_with_intent(
     if let Some(admission) = context.index_admission.as_ref() {
         admission.mark_inserted();
     }
+    let peak_rss_bytes = lock_metadata(metadata)?.resource_meter(operation)?;
+    let _rss_sampler = ProcessRssSampler::start(peak_rss_bytes);
     let admission = match write_service(service)?.admit_rust_fixture(&root, &context.cancellation) {
         Ok(admission) => admission,
         Err(error) => {
@@ -2083,8 +2165,35 @@ fn repository_index_with_intent(
                         return Err(public);
                     }
                 };
+                let staged_written_bytes = staged.written_bytes();
                 let staged_receipt = staged.receipt();
-                lock_metadata(metadata)?.stage(operation, staged_receipt.clone());
+                {
+                    let mut metadata = lock_metadata(metadata)?;
+                    metadata.stage(operation, staged_receipt.clone());
+                    metadata.observe_written_bytes(operation, staged_written_bytes);
+                }
+                if let Err(error) = persist_operation_resources(
+                    runtime,
+                    lifecycle_deadline,
+                    journal,
+                    metadata,
+                    operation,
+                    staged_written_bytes,
+                ) {
+                    write_service(service)?
+                        .discard_staged(staged)
+                        .map_err(service_error)?;
+                    finish_failed_index(
+                        runtime,
+                        lifecycle_deadline,
+                        journal,
+                        metadata,
+                        operation,
+                        &cancellation,
+                        &error,
+                    )?;
+                    return Err(error);
+                }
                 if let Some(hook) = publication_hook
                     && let Err(error) = hook.pause(PublicationBoundary::BeforeCompletion)
                 {
@@ -2193,7 +2302,7 @@ fn repository_index_with_intent(
                         Err(error) => Err(error),
                     }
                 } else {
-                    write_service(service)?.commit_staged_for_operation(
+                    write_service(service)?.commit_staged_for_operation_with_metrics(
                         staged,
                         FirstSliceOperationContext {
                             operation,
@@ -2202,12 +2311,13 @@ fn repository_index_with_intent(
                         },
                     )
                 };
-                let receipt = match commit {
-                    Ok(receipt) => {
+                let (receipt, written_bytes) = match commit {
+                    Ok(commit) => {
+                        let (receipt, written_bytes) = commit.into_parts();
                         if receipt != staged_receipt {
                             lock_metadata(metadata)?.stage(operation, receipt.clone());
                         }
-                        receipt
+                        (receipt, written_bytes)
                     }
                     Err(_error) => {
                         let public = failed_closed_publication(operation);
@@ -2224,6 +2334,17 @@ fn repository_index_with_intent(
                     }
                 };
                 refresh_index_support_inventory(service, lanes.support_state.as_deref());
+                {
+                    lock_metadata(metadata)?.observe_written_bytes(operation, written_bytes);
+                }
+                let resource_update = persist_operation_resources(
+                    runtime,
+                    lifecycle_deadline,
+                    journal,
+                    metadata,
+                    operation,
+                    written_bytes,
+                );
                 let operation_record = if durable_publication {
                     let finalization = match publication_hook {
                         Some(hook) => hook.pause(PublicationBoundary::AfterCommit).and_then(|()| {
@@ -2251,6 +2372,18 @@ fn repository_index_with_intent(
                     }
                 } else {
                     publication_record
+                };
+                let operation_record = match resource_update {
+                    Ok(_) => operation_record,
+                    Err(_) => persist_operation_resources(
+                        runtime,
+                        lifecycle_deadline,
+                        journal,
+                        metadata,
+                        operation,
+                        written_bytes,
+                    )
+                    .unwrap_or(operation_record),
                 };
                 let mut metadata = lock_metadata(metadata)?;
                 metadata.observe_terminal(&operation_record);
@@ -2497,6 +2630,8 @@ fn finish_failed_index(
             .checked_add(LIFECYCLE_FINALIZATION_GRACE)
             .ok_or_else(internal_error)?,
     );
+    let resource_update =
+        persist_operation_resources(runtime, deadline, journal, metadata, operation, 0);
     let record = if let Some(reason) = cancellation.reason() {
         journal_lifecycle_call(
             runtime,
@@ -2508,10 +2643,36 @@ fn finish_failed_index(
             journal.fail_operation_until(operation, error.clone(), deadline),
         )?
     };
+    let record = match resource_update {
+        Ok(_) => record,
+        Err(_) => persist_operation_resources(runtime, deadline, journal, metadata, operation, 0)
+            .unwrap_or(record),
+    };
     let mut metadata = lock_metadata(metadata)?;
     metadata.observe_terminal(&record);
     metadata.mark_terminal(operation);
     Ok(())
+}
+
+fn persist_operation_resources(
+    runtime: &tokio::runtime::Runtime,
+    deadline: Instant,
+    journal: &JournalActorHandle,
+    metadata: &Mutex<OperationMetadataSet>,
+    operation: OperationId,
+    written_bytes: u64,
+) -> Result<OperationRecord, PublicError> {
+    let peak_rss_bytes = {
+        let mut metadata = lock_metadata(metadata)?;
+        metadata.observe_written_bytes(operation, written_bytes);
+        metadata.resource_meter(operation)?
+    };
+    sample_current_process_rss(&peak_rss_bytes);
+    let (peak_rss_bytes, written_bytes) = lock_metadata(metadata)?.resources(operation)?;
+    journal_lifecycle_call(
+        runtime,
+        journal.update_resources_until(operation, peak_rss_bytes, written_bytes, deadline),
+    )
 }
 
 fn bind_journal_cancellation_deadline(
@@ -2708,8 +2869,10 @@ fn repository_operation_status(
             operation: Some(operation_record_to_wire(&visible)),
             published_generation: None,
             started_unix_ms: metadata.started_unix_ms,
-            peak_rss_bytes: 0,
-            written_bytes: 0,
+            peak_rss_bytes: visible
+                .peak_rss_bytes
+                .max(metadata.peak_rss_bytes.load(Ordering::Relaxed)),
+            written_bytes: visible.written_bytes.max(metadata.written_bytes),
             files_examined: metadata
                 .receipt
                 .as_ref()
@@ -2740,8 +2903,10 @@ fn repository_operation_status(
         operation: Some(operation_record_to_wire(&record)),
         published_generation: published_generation.map(generation_to_wire),
         started_unix_ms: metadata.started_unix_ms,
-        peak_rss_bytes: 0,
-        written_bytes: 0,
+        peak_rss_bytes: record
+            .peak_rss_bytes
+            .max(metadata.peak_rss_bytes.load(Ordering::Relaxed)),
+        written_bytes: record.written_bytes.max(metadata.written_bytes),
         files_examined: metadata
             .receipt
             .as_ref()
@@ -8396,6 +8561,8 @@ mod tests {
         let error = failed.error.expect("failed publication has a public error");
         assert_eq!(error.code, common::ErrorCode::IndexCorrupt as i32);
         assert!(status.published_generation.is_none());
+        assert!(status.peak_rss_bytes > 0);
+        assert!(status.written_bytes > 0);
 
         let follow_up = execute_retrying_busy(
             &daemon,
@@ -8435,6 +8602,8 @@ mod tests {
             .expect("terminal failure survives restart");
         assert_eq!(persisted.state, OperationState::Failed);
         assert_eq!(persisted.stage, OperationStage::Cleanup);
+        assert!(persisted.peak_rss_bytes > 0);
+        assert!(persisted.written_bytes > 0);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -8497,6 +8666,8 @@ mod tests {
         let terminal = journal.status(operation).expect("terminal status loads");
         assert_eq!(terminal.state, OperationState::Succeeded);
         assert_eq!(terminal.stage, OperationStage::Cleanup);
+        assert!(terminal.peak_rss_bytes > 0);
+        assert!(terminal.written_bytes > 0);
 
         let status = execute_retrying_busy(
             &daemon,
@@ -8517,6 +8688,8 @@ mod tests {
             panic!("repository operation status response expected");
         };
         assert!(status.published_generation.is_some());
+        assert_eq!(status.peak_rss_bytes, terminal.peak_rss_bytes);
+        assert_eq!(status.written_bytes, terminal.written_bytes);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -8530,13 +8703,12 @@ mod tests {
         drop(journal);
         let reopened =
             OperationJournal::open(&paths.operation_journal_path()).expect("journal reopens");
-        assert_eq!(
-            reopened
-                .status(operation)
-                .expect("reconciled success survives restart")
-                .state,
-            OperationState::Succeeded
-        );
+        let persisted = reopened
+            .status(operation)
+            .expect("reconciled success survives restart");
+        assert_eq!(persisted.state, OperationState::Succeeded);
+        assert_eq!(persisted.peak_rss_bytes, terminal.peak_rss_bytes);
+        assert_eq!(persisted.written_bytes, terminal.written_bytes);
     }
 
     #[test]

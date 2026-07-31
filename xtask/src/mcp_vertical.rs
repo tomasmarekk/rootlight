@@ -1777,6 +1777,16 @@ fn index_repository_with_mode(
     }
     let peak_rss_bytes = required_u64(&resources["peak_rss_bytes"], "operation peak RSS")?;
     let written_bytes = required_u64(&resources["written_bytes"], "operation written bytes")?;
+    if peak_rss_bytes == 0 {
+        return Err(VerticalError::Invariant(
+            "published operation.status reported no peak RSS",
+        ));
+    }
+    if written_bytes == 0 {
+        return Err(VerticalError::Invariant(
+            "published operation.status reported no durable written bytes",
+        ));
+    }
     let status_evidence = OperationStatusEvidence {
         label: label.to_owned(),
         state: "published",
@@ -1790,8 +1800,8 @@ fn index_repository_with_mode(
         files_examined,
         written_bytes,
         peak_rss_bytes,
-        peak_rss_available: peak_rss_bytes != 0,
-        durable_written_bytes_reported: written_bytes != 0,
+        peak_rss_available: true,
+        durable_written_bytes_reported: true,
     };
     Ok(IndexReceipt {
         repository,

@@ -265,7 +265,7 @@ impl DurableCatalog {
         global_activation_sequence: u64,
         published_generation_count: u64,
         operation: Option<FirstSliceOperationContext>,
-    ) -> Result<(), FirstSliceError> {
+    ) -> Result<u64, FirstSliceError> {
         let repository_name = repository.to_string();
         let repository =
             PrivateDirectory::open(self.repositories.capability(), OsStr::new(&repository_name))
@@ -557,11 +557,15 @@ impl DurablePreparedGeneration {
         &self.staging_path
     }
 
-    pub(super) fn write_sources(&self, sources: &[RustSourceInput]) -> Result<(), FirstSliceError> {
+    pub(super) fn write_sources(
+        &self,
+        sources: &[RustSourceInput],
+    ) -> Result<u64, FirstSliceError> {
         let staging = self.staging();
         let sources_directory = staging
             .create_directory(OsStr::new(SOURCES_DIRECTORY))
             .map_err(|_| FirstSliceError::Catalog)?;
+        let mut written_bytes = 0_u64;
         for source in sources {
             let mut file = sources_directory
                 .create_file(OsStr::new(&source.snapshot.file().to_string()))
@@ -569,10 +573,17 @@ impl DurablePreparedGeneration {
             file.write_all(source.snapshot.content())
                 .map_err(|_| FirstSliceError::Catalog)?;
             file.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+            written_bytes = written_bytes
+                .checked_add(
+                    u64::try_from(source.snapshot.content().len())
+                        .map_err(|_| FirstSliceError::Limits)?,
+                )
+                .ok_or(FirstSliceError::Limits)?;
         }
         sources_directory
             .sync_all()
-            .map_err(|_| FirstSliceError::Catalog)
+            .map_err(|_| FirstSliceError::Catalog)?;
+        Ok(written_bytes)
     }
 
     pub(super) fn finish(
@@ -580,7 +591,7 @@ impl DurablePreparedGeneration {
         root_identity: ContentHash,
         display_name: &str,
         receipt: FirstSliceIndexReceipt,
-    ) -> Result<(), FirstSliceError> {
+    ) -> Result<u64, FirstSliceError> {
         if receipt.generation != self.generation || display_name.is_empty() {
             return Err(FirstSliceError::CatalogCorrupt);
         }
@@ -602,7 +613,8 @@ impl DurablePreparedGeneration {
             .map_err(|_| FirstSliceError::Catalog)?;
         file.sync_all().map_err(|_| FirstSliceError::Catalog)?;
         drop(file);
-        staging.sync_all().map_err(|_| FirstSliceError::Catalog)
+        staging.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+        u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)
     }
 
     pub(super) fn publish(mut self) -> Result<DurablePublishedGeneration, FirstSliceError> {
@@ -647,7 +659,7 @@ impl DurablePublishedGeneration {
         global_activation_sequence: u64,
         published_generation_count: u64,
         operation: Option<FirstSliceOperationContext>,
-    ) -> Result<(), FirstSliceError> {
+    ) -> Result<u64, FirstSliceError> {
         publish_activation_marker(
             &self.repository,
             self.generation,
@@ -993,7 +1005,7 @@ fn publish_activation_marker(
     global_activation_sequence: u64,
     published_generation_count: u64,
     operation: Option<FirstSliceOperationContext>,
-) -> Result<(), FirstSliceError> {
+) -> Result<u64, FirstSliceError> {
     if repository_activation_sequence == 0
         || global_activation_sequence == 0
         || published_generation_count == 0
@@ -1028,7 +1040,10 @@ fn publish_activation_marker(
     staging.sync_all().map_err(|_| FirstSliceError::Catalog)?;
     let marker_name = activation_name(repository_activation_sequence, generation);
     match staging.publish_noreplace(repository.capability(), OsStr::new(&marker_name)) {
-        Ok(marker) => marker.sync_all().map_err(|_| FirstSliceError::Catalog),
+        Ok(marker) => {
+            marker.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+            u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)
+        }
         Err(PublishError::NotCommitted { .. }) => Err(FirstSliceError::Catalog),
         Err(PublishError::CommittedButDurabilityUnknown { directory, .. }) => {
             directory.remove().map_err(|_| FirstSliceError::Catalog)?;

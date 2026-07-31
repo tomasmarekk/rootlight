@@ -340,7 +340,7 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     wait_until_absent(&daemon_paths)?;
 
     println!(
-        "daemon lifecycle check passed: startup, 100 deterministic concurrent clients, per-client operation quota isolation, saturated-worker control responsiveness, health, retry-safe submission, cancellation dispositions, source-free cancellation audit evidence, stable deadlines, explicit lease-renewal rejection and attached lease expiry, schema-v3 support telemetry, bounded structured JSONL, privacy sentinels, crash recovery, daemon/standalone submit parity, writer exclusion, stalled-peer shutdown, graceful cleanup, and durable standalone status"
+        "daemon lifecycle check passed: startup, 100 deterministic concurrent clients, per-client operation quota isolation, saturated-worker control responsiveness, health, retry-safe submission, cancellation dispositions, source-free cancellation audit evidence, stable deadlines, explicit lease-renewal rejection and attached lease expiry, schema-v4 support telemetry, bounded structured JSONL, privacy sentinels, crash recovery, daemon/standalone submit parity, writer exclusion, stalled-peer shutdown, graceful cleanup, and durable standalone status"
     );
     control_latency.report();
     Ok(())
@@ -2196,7 +2196,7 @@ pub(crate) enum LifecycleError {
     MissingCancellationAuditEvidence,
     #[error("supervised daemon cancellation audit exposed a raw operation identifier")]
     RawCancellationIdentifierInAudit,
-    #[error("schema-v3 support telemetry evidence was invalid")]
+    #[error("schema-v4 support telemetry evidence was invalid")]
     InvalidSupportTelemetry,
     #[error("privacy sentinel appeared in {0}")]
     PrivacySentinelFound(&'static str),
