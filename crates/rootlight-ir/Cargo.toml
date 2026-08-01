@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+blake3.workspace = true
 rootlight-ids = { path = "../rootlight-ids" }
 schemars = { workspace = true, optional = true }
 serde.workspace = true

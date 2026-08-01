@@ -13,8 +13,12 @@ use rootlight_cancel::Cancellation;
 use rootlight_catalog::OracleReader;
 use rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES;
 use rootlight_ids::{ContentHash, GenerationId, RepositoryId};
+use rootlight_ir::{ExtensionSupport, FileRecord, IrLimits};
 use rootlight_search::{BuildBudget, LexicalIndex};
-use rootlight_storage::{GenerationBudget, GenerationContext, IdentityVerifiedGeneration};
+use rootlight_storage::{
+    GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationContractVersion,
+    GenerationMetadata, GenerationSnapshot, IdentityVerificationError, IdentityVerifiedGeneration,
+};
 use rootlight_vfs::{
     MAX_SNAPSHOT_BYTES, RelativePath, SourceSnapshot,
     platform::{PrivateDirectory, PublishError, PublishedPrivateDirectory},
@@ -32,11 +36,17 @@ const REPOSITORIES_DIRECTORY: &str = "repositories";
 const QUARANTINE_DIRECTORY: &str = "quarantine";
 const SOURCES_DIRECTORY: &str = "sources";
 const MANIFEST_FILENAME: &str = "manifest.json";
+const RECOVERY_SNAPSHOT_FILENAME: &str = "recovery.json";
+const RECOVERY_MANIFEST_FILENAME: &str = "recovery-manifest.json";
 const ACTIVATION_MANIFEST_FILENAME: &str = "activation.json";
 const GENERATION_MANIFEST_VERSION: u16 = 1;
+const RECOVERY_SNAPSHOT_VERSION: u16 = 1;
+const LEGACY_ACTIVATION_MANIFEST_VERSION: u16 = 1;
 const ACTIVATION_MANIFEST_VERSION: u16 = 2;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_ACTIVATION_MANIFEST_BYTES: u64 = 4 * 1024;
+const MAX_RECOVERY_MANIFEST_BYTES: u64 = 4 * 1024;
+const MAX_RECOVERY_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_DURABLE_ENTRIES: usize = 65_536;
 const MAX_RESTORED_OPERATIONS: usize = 256;
 const MAX_QUARANTINED_GENERATIONS: usize = 256;
@@ -77,6 +87,12 @@ pub(super) struct RestoredGeneration {
     pub(super) operations: Vec<FirstSliceOperationContext>,
 }
 
+struct RestorePolicy<'a> {
+    maximum_generations: usize,
+    excluded: &'a BTreeSet<GenerationId>,
+    compact: bool,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct DurableGenerationManifest {
@@ -84,6 +100,19 @@ struct DurableGenerationManifest {
     root_identity: ContentHash,
     display_name: String,
     receipt: FirstSliceIndexReceipt,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableRecoverySnapshot {
+    version: u16,
+    bytes: u64,
+    digest: ContentHash,
+    contract_major: u16,
+    contract_minor: u16,
+    manifest_hash: ContentHash,
+    configuration_hash: ContentHash,
+    provider_set_hash: ContentHash,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -138,6 +167,40 @@ struct GenerationRestoreRequest<'a> {
     published_generation_count: Option<u64>,
     repository_directory: &'a PrivateDirectory<'a>,
     repository_path: &'a Path,
+}
+
+struct RecoverySnapshotWriter<W> {
+    inner: W,
+    hasher: blake3::Hasher,
+    bytes: u64,
+}
+
+impl<W> RecoverySnapshotWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: blake3::Hasher::new(),
+            bytes: 0,
+        }
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for RecoverySnapshotWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buffer)?;
+        let written_bytes =
+            u64::try_from(written).map_err(|_| std::io::Error::other("size overflow"))?;
+        self.bytes = self
+            .bytes
+            .checked_add(written_bytes)
+            .ok_or_else(|| std::io::Error::other("size overflow"))?;
+        self.hasher.update(&buffer[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 impl DurableCatalog {
@@ -203,10 +266,71 @@ impl DurableCatalog {
         Ok(())
     }
 
+    pub(super) fn read_source(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationId,
+        file: &FileRecord,
+        cancellation: &Cancellation,
+    ) -> Result<SourceSnapshot, FirstSliceError> {
+        if file.repository != repository || file.generation != generation {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let repository = PrivateDirectory::open(
+            self.repositories.capability(),
+            OsStr::new(&repository.to_string()),
+        )
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let generation =
+            PrivateDirectory::open(repository.capability(), OsStr::new(&generation.to_string()))
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        read_persisted_source(&generation, file.repository, file, cancellation)
+    }
+
     pub(super) fn restore(
         &self,
         cancellation: &Cancellation,
     ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
+        self.restore_with_policy(
+            self.maximum_generations_per_repository,
+            &BTreeSet::new(),
+            true,
+            cancellation,
+        )
+    }
+
+    pub(super) fn restore_active(
+        &self,
+        cancellation: &Cancellation,
+    ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
+        self.restore_with_policy(1, &BTreeSet::new(), false, cancellation)
+    }
+
+    pub(super) fn restore_excluding(
+        &self,
+        excluded: &BTreeSet<GenerationId>,
+        cancellation: &Cancellation,
+    ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
+        self.restore_with_policy(
+            self.maximum_generations_per_repository,
+            excluded,
+            true,
+            cancellation,
+        )
+    }
+
+    fn restore_with_policy(
+        &self,
+        maximum_generations_per_repository: usize,
+        excluded: &BTreeSet<GenerationId>,
+        compact: bool,
+        cancellation: &Cancellation,
+    ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
+        let policy = RestorePolicy {
+            maximum_generations: maximum_generations_per_repository,
+            excluded,
+            compact,
+        };
         check_cancellation(cancellation)?;
         let repository_names = private_entry_names(&self.repositories)?;
         if repository_names.len() > super::MAX_FIRST_SLICE_REPOSITORIES {
@@ -228,6 +352,7 @@ impl DurableCatalog {
                 repository_id,
                 &repository,
                 &repository_path,
+                &policy,
                 cancellation,
             )?;
             restored
@@ -289,6 +414,7 @@ impl DurableCatalog {
         repository_id: RepositoryId,
         repository: &PrivateDirectory<'_>,
         repository_path: &Path,
+        policy: &RestorePolicy<'_>,
         cancellation: &Cancellation,
     ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
         let names = private_entry_names(repository)?;
@@ -345,6 +471,15 @@ impl DurableCatalog {
             .map(|(generation, sequence)| (*sequence, *generation))
             .collect();
         recency.sort_unstable_by(|left, right| right.cmp(left));
+        let excluded_retained = policy
+            .excluded
+            .iter()
+            .filter(|generation| generation_names.contains(generation))
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let maximum_restored = policy
+            .maximum_generations
+            .saturating_sub(excluded_retained.len());
 
         let mut restored = Vec::new();
         restored
@@ -352,8 +487,11 @@ impl DurableCatalog {
             .map_err(|_| FirstSliceError::Retention)?;
         let mut corrupted = Vec::new();
         for (activation_sequence, generation) in recency {
-            if restored.len() == self.maximum_generations_per_repository {
+            if restored.len() == maximum_restored {
                 break;
+            }
+            if policy.excluded.contains(&generation) {
+                continue;
             }
             check_cancellation(cancellation)?;
             let latest_marker = markers
@@ -393,10 +531,11 @@ impl DurableCatalog {
             latest_by_generation.remove(&generation);
             markers.retain(|_, marker| marker.manifest.generation != generation);
         }
-        let retained: BTreeSet<_> = restored
+        let mut retained: BTreeSet<_> = restored
             .iter()
             .map(|generation| generation.receipt.generation)
             .collect();
+        retained.extend(excluded_retained);
         let retained_marker_names = retained_activation_marker_names(&markers, &retained);
         for restored_generation in &mut restored {
             let generation = restored_generation.receipt.generation;
@@ -411,13 +550,15 @@ impl DurableCatalog {
                 })
                 .collect();
         }
-        compact_repository_entries(
-            repository,
-            &markers,
-            &generation_names,
-            &retained,
-            &retained_marker_names,
-        )?;
+        if policy.compact {
+            compact_repository_entries(
+                repository,
+                &markers,
+                &generation_names,
+                &retained,
+                &retained_marker_names,
+            )?;
+        }
         if let Some(published_generation_count) = published_generation_count
             && let Some(latest_valid) = restored
                 .iter_mut()
@@ -586,6 +727,62 @@ impl DurablePreparedGeneration {
         Ok(written_bytes)
     }
 
+    pub(super) fn write_recovery_snapshot(
+        &self,
+        snapshot: &GenerationSnapshot,
+        expected_bytes: u64,
+    ) -> Result<u64, FirstSliceError> {
+        if snapshot.metadata().generation() != self.generation {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let staging = self.staging();
+        let file = staging
+            .create_file(OsStr::new(RECOVERY_SNAPSHOT_FILENAME))
+            .map_err(|_| FirstSliceError::Catalog)?;
+        let mut writer = RecoverySnapshotWriter::new(file);
+        serde_json::to_writer(&mut writer, snapshot.document())
+            .map_err(|_| FirstSliceError::Catalog)?;
+        writer.flush().map_err(|_| FirstSliceError::Catalog)?;
+        if writer.bytes != expected_bytes || writer.bytes > MAX_RECOVERY_SNAPSHOT_BYTES {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        writer
+            .inner
+            .sync_all()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        let metadata = snapshot.metadata();
+        let contract = metadata.contract_version();
+        let recovery = DurableRecoverySnapshot {
+            version: RECOVERY_SNAPSHOT_VERSION,
+            bytes: writer.bytes,
+            digest: ContentHash::from_bytes(*writer.hasher.finalize().as_bytes()),
+            contract_major: contract.major(),
+            contract_minor: contract.minor(),
+            manifest_hash: metadata.manifest_hash(),
+            configuration_hash: metadata.configuration_hash(),
+            provider_set_hash: metadata.provider_set_hash(),
+        };
+        let descriptor = serde_json::to_vec(&recovery).map_err(|_| FirstSliceError::Catalog)?;
+        let descriptor_bytes =
+            u64::try_from(descriptor.len()).map_err(|_| FirstSliceError::Limits)?;
+        if descriptor_bytes > MAX_RECOVERY_MANIFEST_BYTES {
+            return Err(FirstSliceError::Limits);
+        }
+        let mut descriptor_file = staging
+            .create_file(OsStr::new(RECOVERY_MANIFEST_FILENAME))
+            .map_err(|_| FirstSliceError::Catalog)?;
+        descriptor_file
+            .write_all(&descriptor)
+            .map_err(|_| FirstSliceError::Catalog)?;
+        descriptor_file
+            .sync_all()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        writer
+            .bytes
+            .checked_add(descriptor_bytes)
+            .ok_or(FirstSliceError::Limits)
+    }
+
     pub(super) fn finish(
         &self,
         root_identity: ContentHash,
@@ -746,7 +943,7 @@ fn read_activation_marker(
     let manifest: DurableActivationManifest =
         serde_json::from_slice(&bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
     let version_is_valid = match manifest.version {
-        GENERATION_MANIFEST_VERSION => {
+        LEGACY_ACTIVATION_MANIFEST_VERSION => {
             manifest.global_activation_sequence.is_none()
                 && manifest.published_generation_count.is_none()
         }
@@ -908,75 +1105,61 @@ fn restore_generation(
 
     let context = GenerationContext::new(cancellation, GenerationBudget::default());
     let generation_path = repository_path.join(&generation_name);
-    let oracle = OracleReader::open_in(&generation_path, &context)
-        .map_err(|error| map_catalog_error(&error, cancellation))?;
-    let allocated_bytes = oracle
-        .allocated_bytes(&context)
-        .map_err(|error| map_catalog_error(&error, cancellation))?;
-    let persisted = oracle
-        .read(&context)
-        .map_err(|error| map_catalog_error(&error, cancellation))?;
-    let metadata = persisted.metadata();
-    if metadata.repository() != repository
-        || metadata.generation() != generation
-        || metadata.parent() != manifest.receipt.parent
-        || allocated_bytes != manifest.receipt.oracle_allocated_bytes
-    {
-        return Err(FirstSliceError::CatalogCorrupt);
-    }
-    let documents = project_lexical_documents(&persisted, BuildBudget::default(), cancellation)
-        .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
-    if u64::try_from(persisted.document().files.len()).ok() != Some(manifest.receipt.indexed_files)
-        || u64::try_from(persisted.document().entities.len()).ok()
-            != Some(manifest.receipt.entities)
+    let recovered = restore_recovery_generation(
+        &generation_directory,
+        repository,
+        generation,
+        manifest.receipt.parent,
+        &context,
+        cancellation,
+    );
+    let (verified, allocated_bytes, defer_sources) = match recovered {
+        Ok(Some(verified)) => (verified, manifest.receipt.oracle_allocated_bytes, true),
+        Ok(None) | Err(FirstSliceError::CatalogCorrupt) => {
+            let (verified, allocated_bytes) = restore_oracle_generation(
+                &generation_path,
+                repository,
+                generation,
+                manifest.receipt.parent,
+                manifest.receipt.oracle_allocated_bytes,
+                &context,
+                cancellation,
+            )?;
+            (verified, allocated_bytes, false)
+        }
+        Err(error) => return Err(error),
+    };
+    let documents =
+        project_lexical_documents(verified.snapshot(), BuildBudget::default(), cancellation)
+            .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
+    if u64::try_from(verified.document().files.len()).ok() != Some(manifest.receipt.indexed_files)
+        || u64::try_from(verified.document().entities.len()).ok() != Some(manifest.receipt.entities)
         || u64::try_from(documents.len()).ok() != Some(manifest.receipt.lexical_documents)
+        || allocated_bytes != manifest.receipt.oracle_allocated_bytes
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
     let search =
         LexicalIndex::build_ephemeral(generation, documents, BuildBudget::default(), cancellation)
             .map_err(|error| generation_data_error(map_search_error(error, cancellation)))?;
-    let sources_directory = PrivateDirectory::open(
-        generation_directory.capability(),
-        OsStr::new(SOURCES_DIRECTORY),
-    )
-    .map_err(|_| FirstSliceError::CatalogCorrupt)?;
     let mut sources = Vec::new();
-    sources
-        .try_reserve_exact(persisted.document().files.len())
-        .map_err(|_| FirstSliceError::Retention)?;
-    for file in &persisted.document().files {
-        check_cancellation(cancellation)?;
-        if file.byte_length > DEFAULT_MAX_SOURCE_FILE_BYTES || file.byte_length > MAX_SNAPSHOT_BYTES
-        {
-            return Err(FirstSliceError::CatalogCorrupt);
+    if !defer_sources {
+        sources
+            .try_reserve_exact(verified.document().files.len())
+            .map_err(|_| FirstSliceError::Retention)?;
+        for file in &verified.document().files {
+            sources.push(RustSourceInput {
+                snapshot: read_persisted_source(
+                    &generation_directory,
+                    repository,
+                    file,
+                    cancellation,
+                )?,
+                generated: file.generated,
+                origins: Vec::new(),
+            });
         }
-        let locator = file
-            .path_locator
-            .as_ref()
-            .ok_or(FirstSliceError::CatalogCorrupt)?;
-        let path = RelativePath::from_locator(locator)
-            .map_err(|error| generation_data_error(map_vfs_error(error, cancellation)))?;
-        let bytes = sources_directory
-            .read_file_bounded(OsStr::new(&file.id.to_string()), file.byte_length)
-            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        if u64::try_from(bytes.len()).ok() != Some(file.byte_length) {
-            return Err(FirstSliceError::CatalogCorrupt);
-        }
-        let snapshot =
-            SourceSnapshot::from_persisted(repository, path, file.id, file.content_hash, bytes)
-                .map_err(|error| generation_data_error(map_vfs_error(error, cancellation)))?;
-        sources.push(RustSourceInput {
-            snapshot,
-            generated: file.generated,
-            origins: Vec::new(),
-        });
     }
-    // Reuse the canonical snapshot already read for search and source restoration.
-    // Reading it through the oracle again temporarily doubles large-generation
-    // memory and turns crash recovery into an avoidable second storage scan.
-    let verified = IdentityVerifiedGeneration::verify_snapshot(persisted, &context)
-        .map_err(|error| map_identity_error(error, cancellation))?;
     Ok(RestoredGeneration {
         root_identity: manifest.root_identity,
         display_name: manifest.display_name,
@@ -989,6 +1172,139 @@ fn restore_generation(
         sources,
         operations: Vec::new(),
     })
+}
+
+fn restore_recovery_generation(
+    generation_directory: &PrivateDirectory<'_>,
+    repository: RepositoryId,
+    generation: GenerationId,
+    parent: Option<GenerationId>,
+    context: &GenerationContext<'_>,
+    cancellation: &Cancellation,
+) -> Result<Option<IdentityVerifiedGeneration>, FirstSliceError> {
+    let names = private_entry_names(generation_directory)?;
+    if !names
+        .iter()
+        .any(|name| name == OsStr::new(RECOVERY_MANIFEST_FILENAME))
+    {
+        return Ok(None);
+    }
+    check_cancellation(cancellation)?;
+    let descriptor = generation_directory
+        .read_file_bounded(
+            OsStr::new(RECOVERY_MANIFEST_FILENAME),
+            MAX_RECOVERY_MANIFEST_BYTES,
+        )
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    let recovery: DurableRecoverySnapshot =
+        serde_json::from_slice(&descriptor).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    if recovery.version != RECOVERY_SNAPSHOT_VERSION
+        || recovery.bytes == 0
+        || recovery.bytes > MAX_RECOVERY_SNAPSHOT_BYTES
+        || GenerationContractVersion::new(recovery.contract_major, recovery.contract_minor)
+            != GENERATION_CONTRACT_VERSION
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let encoded = generation_directory
+        .read_file_bounded(OsStr::new(RECOVERY_SNAPSHOT_FILENAME), recovery.bytes)
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    if u64::try_from(encoded.len()).ok() != Some(recovery.bytes) {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let metadata = GenerationMetadata::new_for_contract(
+        GenerationContractVersion::new(recovery.contract_major, recovery.contract_minor),
+        repository,
+        generation,
+        parent,
+        recovery.manifest_hash,
+        recovery.configuration_hash,
+        recovery.provider_set_hash,
+    )
+    .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    let mut recovery_limits = IrLimits::default();
+    // Published in-memory documents may legitimately serialize beyond the
+    // default import envelope. The sidecar supplies the exact checksummed
+    // length, still capped by the recovery hard bound.
+    recovery_limits.max_document_bytes =
+        usize::try_from(recovery.bytes).map_err(|_| FirstSliceError::Limits)?;
+    IdentityVerifiedGeneration::restore_published_json(
+        metadata,
+        &encoded,
+        recovery.digest,
+        &recovery_limits,
+        &ExtensionSupport::default(),
+        context,
+    )
+    .map(Some)
+    .map_err(|error| match error {
+        error @ IdentityVerificationError::Control(_) => map_identity_error(error, cancellation),
+        _ => FirstSliceError::CatalogCorrupt,
+    })
+}
+
+fn restore_oracle_generation(
+    generation_path: &Path,
+    repository: RepositoryId,
+    generation: GenerationId,
+    parent: Option<GenerationId>,
+    expected_allocated_bytes: u64,
+    context: &GenerationContext<'_>,
+    cancellation: &Cancellation,
+) -> Result<(IdentityVerifiedGeneration, u64), FirstSliceError> {
+    let oracle = OracleReader::open_in(generation_path, context)
+        .map_err(|error| map_catalog_error(&error, cancellation))?;
+    let allocated_bytes = oracle
+        .allocated_bytes(context)
+        .map_err(|error| map_catalog_error(&error, cancellation))?;
+    let persisted = oracle
+        .read(context)
+        .map_err(|error| map_catalog_error(&error, cancellation))?;
+    let metadata = persisted.metadata();
+    if metadata.repository() != repository
+        || metadata.generation() != generation
+        || metadata.parent() != parent
+        || allocated_bytes != expected_allocated_bytes
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let verified = IdentityVerifiedGeneration::verify_snapshot(persisted, context)
+        .map_err(|error| map_identity_error(error, cancellation))?;
+    Ok((verified, allocated_bytes))
+}
+
+fn read_persisted_source(
+    generation_directory: &PrivateDirectory<'_>,
+    repository: RepositoryId,
+    file: &FileRecord,
+    cancellation: &Cancellation,
+) -> Result<SourceSnapshot, FirstSliceError> {
+    check_cancellation(cancellation)?;
+    if file.repository != repository
+        || file.byte_length > DEFAULT_MAX_SOURCE_FILE_BYTES
+        || file.byte_length > MAX_SNAPSHOT_BYTES
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let locator = file
+        .path_locator
+        .as_ref()
+        .ok_or(FirstSliceError::CatalogCorrupt)?;
+    let path = RelativePath::from_locator(locator)
+        .map_err(|error| generation_data_error(map_vfs_error(error, cancellation)))?;
+    let sources = PrivateDirectory::open(
+        generation_directory.capability(),
+        OsStr::new(SOURCES_DIRECTORY),
+    )
+    .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    let bytes = sources
+        .read_file_bounded(OsStr::new(&file.id.to_string()), file.byte_length)
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    if u64::try_from(bytes.len()).ok() != Some(file.byte_length) {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    SourceSnapshot::from_persisted(repository, path, file.id, file.content_hash, bytes)
+        .map_err(|error| generation_data_error(map_vfs_error(error, cancellation)))
 }
 
 fn generation_data_error(error: FirstSliceError) -> FirstSliceError {

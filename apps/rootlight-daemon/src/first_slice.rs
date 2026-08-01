@@ -90,11 +90,13 @@ const DEFAULT_OPERATION_METADATA: usize = 256;
 const RETRY_AFTER_MS: u32 = 100;
 const MAX_OPERATION_STATUS_WAIT_MS: u32 = 30_000;
 const OPERATION_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const OPERATION_STATUS_RESPONSE_GRACE: Duration = Duration::from_millis(250);
+// The public client timeout is also 30 seconds. Leave enough time after a
+// maximum long poll for serialization, IPC scheduling, and client decoding.
+const OPERATION_STATUS_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 const LIFECYCLE_FINALIZATION_GRACE: Duration = Duration::from_secs(2);
-// Restoring a verified substantial generation streams every catalog row and
-// recomputes its identity proof. Keep this independently bounded from the
-// 30-second client request envelope used after the endpoint becomes ready.
+// Startup verifies and installs every active recovery snapshot before the
+// endpoint becomes ready. Keep this independently bounded from the 30-second
+// client request envelope used after readiness is published.
 const STARTUP_RESTORE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const DETACHED_INDEX_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const DEFAULT_RELATIONSHIP_RESULTS: u32 = 100;
@@ -520,6 +522,11 @@ struct FirstSliceServiceLanes {
     support_state: Option<Arc<DaemonState>>,
 }
 
+struct DeferredRecoveryWork {
+    restore: FirstSliceDeferredRestore,
+    installed_generations: BTreeSet<GenerationId>,
+}
+
 struct PublicationBoundaryHook {
     boundary: PublicationBoundary,
     fail_commit: AtomicBool,
@@ -602,7 +609,7 @@ impl FirstSliceDaemon {
         );
         let project_analyzer = InstalledProjectAnalyzer::discover(&cancellation)
             .map_err(FirstSliceHostError::Service)?;
-        let (service, deferred_restore) = match project_analyzer {
+        let (mut service, deferred_restore) = match project_analyzer {
             Some(project_analyzer) => {
                 FirstSliceService::open_durable_deferred_with_project_analyzer(
                     DEFAULT_GENERATION_RETENTION,
@@ -615,6 +622,19 @@ impl FirstSliceDaemon {
             }
         }
         .map_err(FirstSliceHostError::Service)?;
+        // Public readiness promises that every newest last-good generation is
+        // already queryable. Older rollback history remains deferred so it
+        // cannot extend the startup availability boundary.
+        let restored = deferred_restore
+            .restore_active(&cancellation)
+            .map_err(FirstSliceHostError::Service)?;
+        let installed_generations = restored.generation_ids();
+        service
+            .install_deferred_restore(restored, &cancellation)
+            .map_err(FirstSliceHostError::Service)?;
+        let durable_publications =
+            Self::reconcile_startup_publications(&journal, &service, &installed_generations)
+                .await?;
         let inventory = index_support_inventory(&service).map_err(FirstSliceHostError::Service)?;
         support_state
             .replace_index_support_inventory(inventory)
@@ -623,9 +643,12 @@ impl FirstSliceDaemon {
             journal,
             service,
             None,
-            Vec::new(),
+            durable_publications,
             Some(support_state),
-            Some(deferred_restore),
+            Some(DeferredRecoveryWork {
+                restore: deferred_restore,
+                installed_generations,
+            }),
         )
     }
 
@@ -664,13 +687,38 @@ impl FirstSliceDaemon {
         Self::start_workers(journal, service, publication_hook, Vec::new(), None, None)
     }
 
+    async fn reconcile_startup_publications(
+        journal: &JournalActorHandle,
+        service: &FirstSliceService,
+        generations: &BTreeSet<GenerationId>,
+    ) -> Result<Vec<(FirstSliceDurableOperation, OperationRecord)>, FirstSliceHostError> {
+        let publications = service
+            .durable_operation_publications()
+            .filter(|publication| generations.contains(&publication.receipt.generation))
+            .collect::<Vec<_>>();
+        let mut restored = Vec::with_capacity(publications.len());
+        for publication in publications {
+            match journal
+                .reconcile_committed_publication(publication.operation)
+                .await
+            {
+                Ok(record) => restored.push((publication, record)),
+                // A retained generation can outlive the bounded operation
+                // journal without recreating source-free status metadata.
+                Err(ServiceError::Operations(OperationError::NotFound)) => {}
+                Err(error) => return Err(FirstSliceHostError::Journal(error)),
+            }
+        }
+        Ok(restored)
+    }
+
     fn start_workers(
         journal: JournalActorHandle,
         service: FirstSliceService,
         publication_hook: Option<PublicationBoundaryHook>,
         durable_publications: Vec<(FirstSliceDurableOperation, OperationRecord)>,
         support_state: Option<Arc<DaemonState>>,
-        deferred_restore: Option<FirstSliceDeferredRestore>,
+        deferred_restore: Option<DeferredRecoveryWork>,
     ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
         let work_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -710,7 +758,7 @@ impl FirstSliceDaemon {
         let service = Arc::new(RwLock::new(service));
         let index_serialization = Arc::new(Mutex::new(()));
         let semantic_refinements = Arc::new(Mutex::new(BTreeMap::new()));
-        let recovery_ready = Arc::new(AtomicBool::new(deferred_restore.is_none()));
+        let recovery_ready = Arc::new(AtomicBool::new(true));
         let (work, work_receiver) = mpsc::sync_channel(DEFAULT_WORK_QUEUE);
         let (read, read_receiver) = mpsc::sync_channel(DEFAULT_READ_QUEUE);
         let (control, control_receiver) = mpsc::sync_channel(DEFAULT_CONTROL_QUEUE);
@@ -925,7 +973,7 @@ impl FirstSliceDaemon {
             context
                 .cancellation
                 .check()
-                .map_err(|_| cancelled_error())?;
+                .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
             let response = self
                 .dispatch_once(
                     FirstSliceIpcRequest::RepositoryOperationStatus(request.clone()),
@@ -1427,7 +1475,7 @@ fn refresh_process_rss(system: &mut System, pid: Pid, peak_rss_bytes: &AtomicU64
 }
 
 fn durable_recovery_worker(
-    deferred_restore: FirstSliceDeferredRestore,
+    deferred: DeferredRecoveryWork,
     lanes: FirstSliceServiceLanes,
     journal: JournalActorHandle,
     metadata: Arc<Mutex<OperationMetadataSet>>,
@@ -1435,7 +1483,10 @@ fn durable_recovery_worker(
     runtime: tokio::runtime::Runtime,
     cancellation: Cancellation,
 ) -> Result<(), FirstSliceHostError> {
-    let restored = match deferred_restore.restore(&cancellation) {
+    let remaining = match deferred
+        .restore
+        .restore_excluding(&deferred.installed_generations, &cancellation)
+    {
         Ok(restored) => restored,
         Err(FirstSliceError::Cancelled(CancellationReason::Shutdown))
             if stopping.load(Ordering::Acquire) =>
@@ -1447,17 +1498,41 @@ fn durable_recovery_worker(
     if stopping.load(Ordering::Acquire) {
         return Ok(());
     }
+    let remaining_generations = remaining.generation_ids();
+    if remaining_generations.is_empty() {
+        return Ok(());
+    }
     lanes
         .service
         .write()
         .map_err(|_| FirstSliceHostError::ThreadPanicked)?
-        .install_deferred_restore(restored, &cancellation)
+        .install_additional_deferred_restore(remaining, &cancellation)
         .map_err(FirstSliceHostError::Service)?;
+    reconcile_restored_publications(
+        &lanes,
+        &journal,
+        metadata.as_ref(),
+        &stopping,
+        &runtime,
+        &remaining_generations,
+    )?;
+    refresh_recovery_support_inventory(&lanes)
+}
+
+fn reconcile_restored_publications(
+    lanes: &FirstSliceServiceLanes,
+    journal: &JournalActorHandle,
+    metadata: &Mutex<OperationMetadataSet>,
+    stopping: &AtomicBool,
+    runtime: &tokio::runtime::Runtime,
+    generations: &BTreeSet<GenerationId>,
+) -> Result<(), FirstSliceHostError> {
     let publications = lanes
         .service
         .read()
         .map_err(|_| FirstSliceHostError::ThreadPanicked)?
         .durable_operation_publications()
+        .filter(|publication| generations.contains(&publication.receipt.generation))
         .collect::<Vec<_>>();
     for publication in publications {
         if stopping.load(Ordering::Acquire) {
@@ -1476,6 +1551,12 @@ fn durable_recovery_worker(
             Err(error) => return Err(FirstSliceHostError::Journal(error)),
         }
     }
+    Ok(())
+}
+
+fn refresh_recovery_support_inventory(
+    lanes: &FirstSliceServiceLanes,
+) -> Result<(), FirstSliceHostError> {
     if let Some(state) = lanes.support_state.as_deref() {
         let inventory = lanes
             .service
@@ -1488,7 +1569,6 @@ fn durable_recovery_worker(
             .replace_index_support_inventory(inventory)
             .map_err(FirstSliceHostError::Journal)?;
     }
-    lanes.recovery_ready.store(true, Ordering::Release);
     Ok(())
 }
 
@@ -1638,7 +1718,7 @@ fn execute_service_request(
     context
         .cancellation
         .check()
-        .map_err(|_| cancelled_error())?;
+        .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
     if !lanes.recovery_ready.load(Ordering::Acquire)
         && !matches!(
             &request,
@@ -2795,8 +2875,8 @@ fn bind_journal_cancellation_deadline(
         return Err(internal_error());
     }
     cancellation.extend_deadline(deadline).map_err(|_| {
-        if cancellation.reason().is_some() {
-            cancelled_error()
+        if let Some(reason) = cancellation.reason() {
+            cancellation_error(reason)
         } else {
             internal_error()
         }
@@ -2935,7 +3015,7 @@ fn repository_operation_status(
     context
         .cancellation
         .check()
-        .map_err(|_| cancelled_error())?;
+        .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
     let operation = parse_operation(request.operation.as_ref())?;
     let action = daemon::RepositoryOperationAction::try_from(request.action)
         .map_err(|_| invalid_argument())?;
@@ -3630,7 +3710,7 @@ fn await_process_cancellation(context: &FirstSliceIpcContext) -> Result<(), Publ
                 write_process_hook_signal(&mut stream, b'C', HOOK_TIMEOUT)?;
                 return Err(cancelled_error());
             }
-            Some(_) => return Err(cancelled_error()),
+            Some(reason) => return Err(cancellation_error(reason)),
             None if Instant::now() >= deadline => return Err(internal_error()),
             // This feature is test-only. Yielding keeps the production
             // cancellation type unchanged while the transport task records
@@ -5339,7 +5419,7 @@ fn journal_call<T>(
     runtime.block_on(async {
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), request)
             .await
-            .map_err(|_| cancelled_error())?
+            .map_err(|_| cancellation_error(CancellationReason::DeadlineExceeded))?
             .map_err(service_boundary_error)
     })
 }
@@ -5549,7 +5629,30 @@ fn build_service_error(
             "deadline",
             "admission",
         ),
-        FirstSliceError::Cancelled(_) => (
+        FirstSliceError::Cancelled(CancellationReason::DeadlineExceeded) => (
+            ErrorCode::Busy,
+            "operation deadline elapsed",
+            true,
+            "deadline",
+            "executing",
+        ),
+        FirstSliceError::Cancelled(CancellationReason::Shutdown) => (
+            ErrorCode::Busy,
+            "operation was interrupted by shutdown",
+            true,
+            "shutdown",
+            "executing",
+        ),
+        FirstSliceError::Cancelled(CancellationReason::ResourceLimit) => (
+            ErrorCode::ResourceExhausted,
+            "operation resource limit was reached",
+            false,
+            "resource_limit",
+            "executing",
+        ),
+        FirstSliceError::Cancelled(
+            CancellationReason::ClientRequest | CancellationReason::ParentCancelled,
+        ) => (
             ErrorCode::Cancelled,
             "operation was cancelled",
             false,
@@ -6066,6 +6169,31 @@ fn cancelled_error() -> PublicError {
         .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
 }
 
+fn cancellation_error(reason: CancellationReason) -> PublicError {
+    match reason {
+        CancellationReason::DeadlineExceeded => {
+            PublicError::builder(ErrorCode::Busy, "first-slice request deadline elapsed")
+                .retryable()
+                .next_action(NextAction::Retry)
+                .build()
+                .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
+        }
+        CancellationReason::Shutdown => PublicError::builder(
+            ErrorCode::Busy,
+            "first-slice request was interrupted by shutdown",
+        )
+        .retryable()
+        .next_action(NextAction::Retry)
+        .build()
+        .unwrap_or_else(|_| unreachable!("closed public error is statically bounded")),
+        CancellationReason::ResourceLimit => resource_exhausted(),
+        CancellationReason::ClientRequest | CancellationReason::ParentCancelled => {
+            cancelled_error()
+        }
+        _ => internal_error(),
+    }
+}
+
 fn lifecycle_timed_out() -> PublicError {
     PublicError::builder(ErrorCode::Busy, "operation lifecycle timed out")
         .retryable()
@@ -6161,6 +6289,37 @@ mod tests {
 
         assert_eq!(error.code(), ErrorCode::BudgetExceeded);
         assert!(!error.retryable());
+    }
+
+    #[test]
+    fn service_cancellation_preserves_non_client_causes() {
+        let deadline = service_error(FirstSliceError::Cancelled(
+            CancellationReason::DeadlineExceeded,
+        ));
+        assert_eq!(deadline.code(), ErrorCode::Busy);
+        assert!(deadline.retryable());
+        assert_eq!(deadline.next_actions(), &[NextAction::Retry]);
+
+        let shutdown = service_error(FirstSliceError::Cancelled(CancellationReason::Shutdown));
+        assert_eq!(shutdown.code(), ErrorCode::Busy);
+        assert!(shutdown.retryable());
+
+        let resource = service_error(FirstSliceError::Cancelled(
+            CancellationReason::ResourceLimit,
+        ));
+        assert_eq!(resource.code(), ErrorCode::ResourceExhausted);
+        assert!(!resource.retryable());
+
+        let client = service_error(FirstSliceError::Cancelled(
+            CancellationReason::ClientRequest,
+        ));
+        assert_eq!(client.code(), ErrorCode::Cancelled);
+        assert!(!client.retryable());
+
+        let queued_deadline = cancellation_error(CancellationReason::DeadlineExceeded);
+        assert_eq!(queued_deadline.code(), ErrorCode::Busy);
+        assert!(queued_deadline.retryable());
+        assert_eq!(queued_deadline.next_actions(), &[NextAction::Retry]);
     }
 
     #[test]
@@ -6754,25 +6913,22 @@ mod tests {
             daemon::OperationState::Succeeded as i32
         );
 
-        let located = execute_retrying_busy(
+        let located = execute(
             &daemon,
-            || {
-                FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
-                    schema_version: Some(schema_version()),
-                    repository: Some(repository_to_wire(receipt.repository)),
-                    generation: Some(daemon::GenerationSelector {
-                        selector: Some(daemon::generation_selector::Selector::Generation(
-                            generation_to_wire(receipt.generation),
-                        )),
-                    }),
-                    query: "crash_safe_answer".to_owned(),
-                    mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
-                    maximum_results: 8,
-                    page_offset: 0,
-                    languages: Vec::new(),
-                })
-            },
-            "restored generation becomes queryable",
+            FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+                schema_version: Some(schema_version()),
+                repository: Some(repository_to_wire(receipt.repository)),
+                generation: Some(daemon::GenerationSelector {
+                    selector: Some(daemon::generation_selector::Selector::Generation(
+                        generation_to_wire(receipt.generation),
+                    )),
+                }),
+                query: "crash_safe_answer".to_owned(),
+                mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+                maximum_results: 8,
+                page_offset: 0,
+                languages: Vec::new(),
+            }),
         );
         let FirstSliceIpcResponse::CodeLocate(located) = located else {
             panic!("code locate response expected");
@@ -6851,25 +7007,22 @@ mod tests {
             ))
             .expect("daemon skips pruned operation history");
 
-        let located = execute_retrying_busy(
+        let located = execute(
             &daemon,
-            || {
-                FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
-                    schema_version: Some(schema_version()),
-                    repository: Some(repository_to_wire(receipt.repository)),
-                    generation: Some(daemon::GenerationSelector {
-                        selector: Some(daemon::generation_selector::Selector::Generation(
-                            generation_to_wire(receipt.generation),
-                        )),
-                    }),
-                    query: "retained_answer".to_owned(),
-                    mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
-                    maximum_results: 8,
-                    page_offset: 0,
-                    languages: Vec::new(),
-                })
-            },
-            "retained generation becomes queryable",
+            FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+                schema_version: Some(schema_version()),
+                repository: Some(repository_to_wire(receipt.repository)),
+                generation: Some(daemon::GenerationSelector {
+                    selector: Some(daemon::generation_selector::Selector::Generation(
+                        generation_to_wire(receipt.generation),
+                    )),
+                }),
+                query: "retained_answer".to_owned(),
+                mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+                maximum_results: 8,
+                page_offset: 0,
+                languages: Vec::new(),
+            }),
         );
         let FirstSliceIpcResponse::CodeLocate(located) = located else {
             panic!("code locate response expected");

@@ -106,6 +106,29 @@ class PackagePreparationTests(unittest.TestCase):
                     workspace_root(), candidates, VERSION, REVISION, root / "output"
                 )
 
+    def test_legacy_manifest_schema_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidates = root / "candidates"
+            candidates.mkdir()
+            for index, target in enumerate(npm_packages.TARGETS):
+                write_candidate(
+                    candidates,
+                    target,
+                    VERSION,
+                    REVISION,
+                    manifest_schema=(
+                        "rootlight.package-manifest/1"
+                        if index == 0
+                        else npm_packages.PACKAGE_MANIFEST_SCHEMA
+                    ),
+                )
+
+            with self.assertRaises(npm_packages.PackagePreparationError):
+                npm_packages.prepare_release(
+                    workspace_root(), candidates, VERSION, REVISION, root / "output"
+                )
+
     def test_bootstrap_is_bounded_and_has_no_runtime_entrypoint(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "bootstrap"
@@ -127,10 +150,11 @@ def write_candidate(
     source_revision: str,
     *,
     public_executables: tuple[str, ...] = npm_packages.PUBLIC_EXECUTABLES,
+    manifest_schema: str = npm_packages.PACKAGE_MANIFEST_SCHEMA,
 ) -> None:
     archive = directory / f"rootlight-{version}-{target.triple}.zip"
     manifest = {
-        "schema": "rootlight.package-manifest/1",
+        "schema": manifest_schema,
         "source_revision": source_revision,
         "target": target.triple,
         "version": version,

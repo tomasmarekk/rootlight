@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 PACKAGE_SCOPE = "@tomasmarekk"
 ROOT_PACKAGE = f"{PACKAGE_SCOPE}/rootlight"
 PACKAGE_LICENSE = "AGPL-3.0-only"
+PACKAGE_MANIFEST_SCHEMA = "rootlight.package-manifest/2"
 BOOTSTRAP_VERSION = "0.0.0-security-bootstrap.0"
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
@@ -253,7 +254,7 @@ def extract_candidate(
         manifest_info = infos[names.index("package-manifest.json")]
         manifest = json.loads(read_bounded(bundle, manifest_info, 1024 * 1024))
         expected_manifest = {
-            "schema": "rootlight.package-manifest/1",
+            "schema": PACKAGE_MANIFEST_SCHEMA,
             "source_revision": source_revision,
             "target": target.triple,
             "version": version,

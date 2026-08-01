@@ -25,8 +25,9 @@ use rootlight_ir::{
     OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord,
     RelationEndpoint, RelationPredicate, RelationRecord, SkippedRegion, SkippedRegionReason,
     SourceMappingKind, SourceMappingRecord, SourceRef, SourceSpan, SymbolIdentityClaim,
-    derive_coverage_record_id, derive_diagnostic_record_id, derive_occurrence_record_id,
-    derive_provenance_record_id, derive_relation_record_id, derive_skipped_region_id,
+    canonical_rust_impl_scope, canonical_symbol_signature, derive_coverage_record_id,
+    derive_diagnostic_record_id, derive_occurrence_record_id, derive_provenance_record_id,
+    derive_relation_record_id, derive_rust_impl_scope_identity, derive_skipped_region_id,
     derive_source_mapping_record_id, new_file_identity_claim_envelope,
     new_lexical_evidence_envelope, new_symbol_identity_claim_envelope,
 };
@@ -568,14 +569,34 @@ struct SemanticEntity {
 
 #[derive(Debug, Clone)]
 struct DeclarationDraft {
+    local_id: u64,
     file: FileId,
     span: SourceSpan,
     name: String,
     header: String,
+    signature: String,
     kind: EntityKind,
     visibility: EntityVisibility,
-    container: Option<SymbolId>,
+    parent_declaration: Option<u64>,
+    scope_identity: Option<[u8; 32]>,
     source: SourceRef,
+}
+
+#[derive(Default)]
+struct RustImplCaptures<'fact> {
+    self_type: Option<&'fact SyntaxFact>,
+    trait_type: Option<&'fact SyntaxFact>,
+    invalid: bool,
+}
+
+impl<'fact> RustImplCaptures<'fact> {
+    fn insert_self_type(&mut self, fact: &'fact SyntaxFact) {
+        self.invalid |= self.self_type.replace(fact).is_some();
+    }
+
+    fn insert_trait_type(&mut self, fact: &'fact SyntaxFact) {
+        self.invalid |= self.trait_type.replace(fact).is_some();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -741,13 +762,14 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .map_err(|_| provider_failure("project-file-identity-claim"))?,
             ));
 
-            let module_name = module_name(&path);
+            let module_name = path.clone();
             let module_span = source.span();
             let module_claim = self.symbol_claim(
                 EntityKind::Module,
                 ContainerRef::File(source.span().file()),
                 &module_name,
-                &path,
+                "",
+                None,
             );
             let module_symbol = module_claim.symbol;
             self.records.push(IrRecord::Entity(EntityRecord {
@@ -817,14 +839,116 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .iter()
                 .map(|fact| (fact.local_id(), fact))
                 .collect::<BTreeMap<_, _>>();
-            let declaration_facts = facts
+            let mut ordered_facts = facts.iter().collect::<Vec<_>>();
+            ordered_facts.sort_by_key(|fact| {
+                (
+                    fact.depth(),
+                    fact.span().start_byte(),
+                    fact.span().end_byte(),
+                    fact.local_id(),
+                )
+            });
+            let mut nearest_declaration = BTreeMap::<u64, Option<u64>>::new();
+            let mut signature_captures = BTreeMap::<u64, Vec<&SyntaxFact>>::new();
+            let mut rust_impl_captures = BTreeMap::<u64, RustImplCaptures<'_>>::new();
+            for fact in ordered_facts {
+                let parent_declaration = fact
+                    .parent()
+                    .and_then(|parent| nearest_declaration.get(&parent).copied().flatten());
+                if fact.kind() == SyntaxFactKind::Declaration {
+                    nearest_declaration.insert(fact.local_id(), Some(fact.local_id()));
+                } else {
+                    nearest_declaration.insert(fact.local_id(), parent_declaration);
+                    if is_symbol_signature_fact(fact)
+                        && let Some(declaration) = parent_declaration
+                    {
+                        signature_captures
+                            .entry(declaration)
+                            .or_default()
+                            .push(fact);
+                    }
+                }
+                if let Some(parent) = fact.parent() {
+                    match fact.syntax_kind().as_str() {
+                        "rust.impl_trait.scope_trait" => rust_impl_captures
+                            .entry(parent)
+                            .or_default()
+                            .insert_trait_type(fact),
+                        "rust.impl_type.scope_type" => rust_impl_captures
+                            .entry(parent)
+                            .or_default()
+                            .insert_self_type(fact),
+                        _ => {}
+                    }
+                }
+            }
+            let mut declaration_facts = facts
                 .iter()
                 .filter(|fact| fact.kind() == SyntaxFactKind::Declaration)
                 .collect::<Vec<_>>();
-            let scope_facts = facts
+            declaration_facts.sort_by_key(|fact| {
+                (
+                    fact.depth(),
+                    fact.span().start_byte(),
+                    fact.span().end_byte(),
+                    fact.local_id(),
+                )
+            });
+            let mut scope_facts = facts
                 .iter()
                 .filter(|fact| fact.kind() == SyntaxFactKind::Scope)
                 .collect::<Vec<_>>();
+            scope_facts.sort_by_key(|fact| {
+                (
+                    fact.depth(),
+                    fact.span().start_byte(),
+                    fact.span().end_byte(),
+                    fact.local_id(),
+                )
+            });
+            let mut rust_impl_identities = BTreeMap::new();
+            if self.analyzer.language == SemanticProjectLanguage::Rust {
+                for scope in &scope_facts {
+                    if scope.syntax_kind().as_str() != "rust.impl.scope" {
+                        continue;
+                    }
+                    let Some(captures) = rust_impl_captures
+                        .get(&scope.local_id())
+                        .filter(|captures| !captures.invalid)
+                    else {
+                        continue;
+                    };
+                    let Some(self_type) = captures
+                        .self_type
+                        .and_then(|fact| source_text(bytes, fact.span()))
+                    else {
+                        continue;
+                    };
+                    let trait_type = match captures.trait_type {
+                        Some(fact) => {
+                            let Some(text) = source_text(bytes, fact.span()) else {
+                                continue;
+                            };
+                            Some(text)
+                        }
+                        None => None,
+                    };
+                    let Some(header) = canonical_rust_impl_scope(
+                        self_type,
+                        trait_type,
+                        self.request.limits().ir().max_string_bytes,
+                    )
+                    .map_err(|_| provider_failure("project-rust-impl-identity"))?
+                    else {
+                        continue;
+                    };
+                    let parent = enclosing_rust_impl_scope_before_declaration(scope, &facts_by_id)
+                        .and_then(|parent| rust_impl_identities.get(&parent.local_id()).copied());
+                    let identity = derive_rust_impl_scope_identity(parent, header.header())
+                        .map_err(|_| provider_failure("project-rust-impl-identity"))?;
+                    rust_impl_identities.insert(scope.local_id(), identity);
+                }
+            }
             let mut scope_symbols = BTreeMap::new();
 
             for (scope_index, scope) in scope_facts.iter().enumerate() {
@@ -841,6 +965,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     ContainerRef::Entity(module),
                     &name,
                     &name,
+                    None,
                 );
                 let symbol = claim.symbol;
                 let provenance = self.provenance_for(input)?;
@@ -883,6 +1008,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             }
 
             let mut selected_definition_spans = BTreeSet::new();
+            let mut declaration_kinds = BTreeMap::<u64, EntityKind>::new();
             for (declaration_index, declaration) in declaration_facts.iter().enumerate() {
                 check_periodically(declaration_index, self.cancellation)?;
                 let definition = facts
@@ -916,13 +1042,42 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     continue;
                 }
                 selected_definition_spans.insert(definition.span());
-                let container = enclosing_scope(declaration, &facts_by_id, &scope_symbols)
-                    .or_else(|| self.module_by_file.get(&definition.span().file()).copied());
-                let is_nested = container.is_some_and(|candidate| {
-                    self.entities.iter().any(|entity| {
-                        entity.symbol == candidate && entity.kind != EntityKind::Module
+                let parent_declaration = declaration
+                    .parent()
+                    .and_then(|parent| nearest_declaration.get(&parent).copied().flatten());
+                let rust_impl_scope = (self.analyzer.language == SemanticProjectLanguage::Rust)
+                    .then(|| {
+                        enclosing_syntax_fact(
+                            declaration,
+                            &facts_by_id,
+                            SyntaxFactKind::Scope,
+                            "rust.impl.scope",
+                        )
                     })
-                });
+                    .flatten();
+                let scope_identity = if let Some(scope) = rust_impl_scope {
+                    let Some(identity) = rust_impl_identities.get(&scope.local_id()).copied()
+                    else {
+                        continue;
+                    };
+                    Some(identity)
+                } else {
+                    None
+                };
+                let is_type_member = parent_declaration
+                    .and_then(|parent| declaration_kinds.get(&parent))
+                    .is_some_and(|kind| {
+                        matches!(
+                            kind,
+                            EntityKind::Class
+                                | EntityKind::Struct
+                                | EntityKind::Enum
+                                | EntityKind::Trait
+                                | EntityKind::Interface
+                                | EntityKind::Protocol
+                        )
+                    })
+                    || scope_identity.is_some();
                 let visibility = declaration_visibility(
                     self.analyzer.language,
                     bytes,
@@ -930,17 +1085,37 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     &header,
                     name,
                 );
+                let kind = self
+                    .analyzer
+                    .language
+                    .entity_kind(declaration_text, is_type_member);
+                declaration_kinds.insert(declaration.local_id(), kind);
+                let signature = if supports_symbol_signature(kind) {
+                    signature_captures
+                        .get(&declaration.local_id())
+                        .and_then(|captures| select_unique_syntax_fact(captures))
+                        .and_then(|signature| source_text(bytes, signature.span()))
+                        .and_then(|signature| {
+                            canonical_symbol_signature(
+                                signature,
+                                self.request.limits().ir().max_string_bytes,
+                            )
+                        })
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 self.declarations.push(DeclarationDraft {
+                    local_id: declaration.local_id(),
                     file: definition.span().file(),
                     span: declaration.span(),
                     name: name.to_owned(),
                     header,
-                    kind: self
-                        .analyzer
-                        .language
-                        .entity_kind(declaration_text, is_nested),
+                    signature,
+                    kind,
                     visibility,
-                    container,
+                    parent_declaration,
+                    scope_identity,
                     source: source_for_span(input, declaration.span()),
                 });
             }
@@ -1008,6 +1183,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             .iter()
             .map(|entity| entity.symbol)
             .collect::<BTreeSet<_>>();
+        let mut symbols_by_declaration = BTreeMap::<(FileId, u64), SymbolId>::new();
+        let mut qualified_by_declaration = BTreeMap::<(FileId, u64), String>::new();
         let structural_containers = self
             .entities
             .iter()
@@ -1040,21 +1217,46 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             check_periodically(index, self.cancellation)?;
             let draft = self.declarations[index].clone();
             let container = draft
-                .container
+                .parent_declaration
+                .and_then(|parent| symbols_by_declaration.get(&(draft.file, parent)).copied())
                 .map(ContainerRef::Entity)
+                .or_else(|| {
+                    uses_explicit_file_module(self.analyzer.language)
+                        .then(|| {
+                            self.module_by_file
+                                .get(&draft.file)
+                                .copied()
+                                .map(ContainerRef::Entity)
+                        })
+                        .flatten()
+                })
                 .unwrap_or(ContainerRef::File(draft.file));
-            let claim = self.symbol_claim(draft.kind, container, &draft.name, &draft.header);
+            let claim = self.symbol_claim(
+                draft.kind,
+                container,
+                &draft.name,
+                &draft.signature,
+                draft.scope_identity,
+            );
             let symbol = claim.symbol;
+            let state = self
+                .states
+                .get(&draft.file)
+                .ok_or_else(|| provider_failure("project-file-state"))?;
+            let qualified_name = draft
+                .parent_declaration
+                .and_then(|parent| qualified_by_declaration.get(&(draft.file, parent)))
+                .map_or_else(
+                    || format!("{}::{}", state.path, draft.name),
+                    |parent| format!("{parent}::{}", draft.name),
+                );
+            symbols_by_declaration.insert((draft.file, draft.local_id), symbol);
+            qualified_by_declaration.insert((draft.file, draft.local_id), qualified_name.clone());
             // Repeated declarations with the same stable signature share one
             // entity; their distinct definition occurrences retain each site.
             if !materialized_symbols.insert(symbol) {
                 continue;
             }
-            let state = self
-                .states
-                .get(&draft.file)
-                .ok_or_else(|| provider_failure("project-file-state"))?;
-            let qualified_name = format!("{}::{}", state.path, draft.name);
             let provenance = state.provenance;
             self.records.push(IrRecord::Entity(EntityRecord {
                 id: symbol,
@@ -1553,6 +1755,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         container: ContainerRef,
         name: &str,
         signature: &str,
+        scope_identity: Option<[u8; 32]>,
     ) -> SymbolIdentityClaim {
         let mut container_identity = Vec::new();
         match container {
@@ -1569,6 +1772,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 container_identity.extend_from_slice(entity.as_bytes());
             }
         }
+        if let Some(scope_identity) = scope_identity {
+            container_identity.push(3);
+            container_identity.extend_from_slice(&scope_identity);
+        }
         let mut claim = SymbolIdentityClaim {
             symbol: SymbolId::from_bytes([0; 20]),
             repository: self.request.inputs()[0].source().source_ref().repository(),
@@ -1577,7 +1784,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             container: Some(container),
             container_identity,
             declared_identity: name.to_owned(),
-            signature_discriminator: content_hash(signature.as_bytes()).as_bytes().to_vec(),
+            signature_discriminator: signature.as_bytes().to_vec(),
             build_context_discriminator: self.request.build_context().digest().as_bytes().to_vec(),
         };
         claim.symbol = claim.derived_symbol();
@@ -1921,7 +2128,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             return Ok(existing.clone());
         }
         let container = ContainerRef::Repository(source.repository());
-        let claim = self.symbol_claim(EntityKind::ExternalSymbol, container, name, name);
+        let claim = self.symbol_claim(EntityKind::ExternalSymbol, container, name, name, None);
         let symbol = claim.symbol;
         let provenance = self.provenance_for_file(file)?;
         let entity = SemanticEntity {
@@ -2187,6 +2394,53 @@ fn enclosing_scope(
     None
 }
 
+fn enclosing_syntax_fact<'fact>(
+    fact: &SyntaxFact,
+    facts_by_id: &BTreeMap<u64, &'fact SyntaxFact>,
+    kind: SyntaxFactKind,
+    syntax_kind: &str,
+) -> Option<&'fact SyntaxFact> {
+    let mut parent = fact.parent();
+    let mut remaining = facts_by_id.len();
+    while let Some(parent_id) = parent {
+        if remaining == 0 {
+            return None;
+        }
+        remaining -= 1;
+        let candidate = facts_by_id.get(&parent_id).copied()?;
+        if candidate.kind() == kind && candidate.syntax_kind().as_str() == syntax_kind {
+            return Some(candidate);
+        }
+        parent = candidate.parent();
+    }
+    None
+}
+
+fn enclosing_rust_impl_scope_before_declaration<'fact>(
+    fact: &SyntaxFact,
+    facts_by_id: &BTreeMap<u64, &'fact SyntaxFact>,
+) -> Option<&'fact SyntaxFact> {
+    let mut parent = fact.parent();
+    let mut remaining = facts_by_id.len();
+    while let Some(parent_id) = parent {
+        if remaining == 0 {
+            return None;
+        }
+        remaining -= 1;
+        let candidate = facts_by_id.get(&parent_id).copied()?;
+        if candidate.kind() == SyntaxFactKind::Declaration {
+            return None;
+        }
+        if candidate.kind() == SyntaxFactKind::Scope
+            && candidate.syntax_kind().as_str() == "rust.impl.scope"
+        {
+            return Some(candidate);
+        }
+        parent = candidate.parent();
+    }
+    None
+}
+
 fn is_call_fact(fact: &SyntaxFact) -> bool {
     let label = fact.syntax_kind().as_str();
     label.ends_with(".call") || label.ends_with(".scoped_call")
@@ -2277,11 +2531,43 @@ fn declaration_header(language: SemanticProjectLanguage, declaration: &str) -> S
     }
 }
 
-fn module_name(path: &str) -> String {
-    let file = path.rsplit('/').next().unwrap_or(path);
-    file.rsplit_once('.')
-        .map_or(file, |(stem, _)| stem)
-        .to_owned()
+fn select_unique_syntax_fact<'a>(facts: &[&'a SyntaxFact]) -> Option<&'a SyntaxFact> {
+    let selected = facts.first().copied()?;
+    facts
+        .iter()
+        .copied()
+        .all(|candidate| {
+            candidate.span() == selected.span()
+                && candidate.syntax_kind().as_str() == selected.syntax_kind().as_str()
+        })
+        .then_some(selected)
+}
+
+fn is_symbol_signature_fact(fact: &SyntaxFact) -> bool {
+    fact.kind() == SyntaxFactKind::Signature && fact.syntax_kind().as_str().ends_with(".signature")
+}
+
+const fn supports_symbol_signature(kind: EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::Function
+            | EntityKind::Method
+            | EntityKind::Constructor
+            | EntityKind::Class
+            | EntityKind::Struct
+            | EntityKind::Enum
+            | EntityKind::Trait
+            | EntityKind::Interface
+    )
+}
+
+const fn uses_explicit_file_module(language: SemanticProjectLanguage) -> bool {
+    matches!(
+        language,
+        SemanticProjectLanguage::TypeScript
+            | SemanticProjectLanguage::JavaScript
+            | SemanticProjectLanguage::Python
+    )
 }
 
 fn parse_import(

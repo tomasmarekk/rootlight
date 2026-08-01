@@ -260,10 +260,14 @@ fn proxy_mcp_payload(
     pending_input: Vec<u8>,
     expected_initialize: Option<Vec<u8>>,
 ) -> Result<ExitCode, LauncherError> {
+    use std::os::windows::process::CommandExt as _;
+    use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
     let mut child = Command::new(target)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
+        .creation_flags(CREATE_NO_WINDOW.0)
         .spawn()
         .map_err(LauncherError::Spawn)?;
     let Some(mut child_input) = child.stdin.take() else {

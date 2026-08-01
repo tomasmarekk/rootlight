@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ContainerRef, CoverageRecord, DiagnosticRecord, EntityKind, ExtensionCriticality,
-    ExtensionEnvelope, FactEvidence, FactRef, OccurrenceRecord, ProvenanceRecord, RelationRecord,
-    SkippedRegion, SourceMappingRecord, SourceRef,
+    ExtensionEnvelope, FactEvidence, FactRef, MAX_LEXICAL_SIGNATURE_BYTES, OccurrenceRecord,
+    ProvenanceRecord, RelationRecord, SkippedRegion, SourceMappingRecord, SourceRef,
 };
 
 /// Namespace carrying one unverified structured file-identity claim.
@@ -26,6 +26,8 @@ const OCCURRENCE_FACT_DOMAIN: &str = "rootlight.occurrence/v2";
 const RELATION_FACT_DOMAIN: &str = "rootlight.relation/v2";
 const SOURCE_MAPPING_FACT_DOMAIN: &str = "rootlight.source-mapping/v2";
 const COVERAGE_FACT_DOMAIN: &str = "rootlight.coverage/v2";
+const RUST_IMPL_HEADER_CONTEXT: &str = "rootlight/treesitter-scope-header/v1";
+const RUST_SCOPE_IDENTITY_CONTEXT: &str = "rootlight/scope-container/v1";
 const SKIPPED_REGION_FACT_DOMAIN: &str = "rootlight.skipped-region/v2";
 const DIAGNOSTIC_FACT_DOMAIN: &str = "rootlight.diagnostic/v2";
 
@@ -98,6 +100,422 @@ impl SymbolIdentityClaim {
         })
         .id()
     }
+}
+
+/// Canonicalizes source signature text for provider-independent symbol identity.
+///
+/// Whitespace is presentation-only and therefore excluded from the durable
+/// discriminator. Oversized or empty signatures deliberately collapse to no
+/// discriminator instead of letting providers choose incompatible fallbacks.
+#[must_use]
+pub fn canonical_symbol_signature(text: &str, maximum_string_bytes: usize) -> Option<String> {
+    if text.is_empty()
+        || text.len() > MAX_LEXICAL_SIGNATURE_BYTES
+        || text.len() > maximum_string_bytes
+    {
+        return None;
+    }
+    let mut canonical = String::with_capacity(text.len());
+    canonical.extend(text.chars().filter(|character| !character.is_whitespace()));
+    (!canonical.is_empty()).then_some(canonical)
+}
+
+/// Canonical identity of one Rust `impl` header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustImplScopeIdentity {
+    header: [u8; 32],
+    display: String,
+}
+
+impl RustImplScopeIdentity {
+    /// Returns the stable header digest.
+    #[must_use]
+    pub const fn header(&self) -> [u8; 32] {
+        self.header
+    }
+
+    /// Returns the normalized display prefix.
+    #[must_use]
+    pub fn display(&self) -> &str {
+        &self.display
+    }
+}
+
+/// Bounded Rust `impl` identity canonicalization failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RustScopeIdentityError {
+    /// A length or allocation exceeded the declared identity budget.
+    #[error("Rust scope identity exceeded its resource budget")]
+    ResourceLimit,
+    /// Checked length accounting overflowed.
+    #[error("Rust scope identity accounting overflowed")]
+    AccountingOverflow,
+}
+
+/// Canonicalizes a Rust `impl` self type and optional trait into one header identity.
+///
+/// Both structural and project providers use this recipe so comments and
+/// presentation whitespace cannot change a method's durable container.
+///
+/// # Errors
+///
+/// Returns [`RustScopeIdentityError`] when bounded allocation or checked
+/// accounting cannot represent the input.
+pub fn canonical_rust_impl_scope(
+    self_type: &str,
+    trait_type: Option<&str>,
+    maximum_string_bytes: usize,
+) -> Result<Option<RustImplScopeIdentity>, RustScopeIdentityError> {
+    let Some(self_type) = canonical_rust_scope_component(self_type, maximum_string_bytes)? else {
+        return Ok(None);
+    };
+    let has_trait_type = trait_type.is_some();
+    let trait_type = trait_type
+        .map(|value| canonical_rust_scope_component(value, maximum_string_bytes))
+        .transpose()?
+        .flatten();
+    if has_trait_type && trait_type.is_none() {
+        return Ok(None);
+    }
+    let mut hasher = blake3::Hasher::new_derive_key(RUST_IMPL_HEADER_CONTEXT);
+    hash_rust_scope_component(&mut hasher, b"self", &self_type)?;
+    let display = match trait_type {
+        Some(trait_type) => {
+            hash_rust_scope_component(&mut hasher, b"trait", &trait_type)?;
+            let length = self_type
+                .display
+                .len()
+                .checked_add(trait_type.display.len())
+                .and_then(|length| length.checked_add("< as >".len()))
+                .ok_or(RustScopeIdentityError::AccountingOverflow)?;
+            if length > maximum_string_bytes {
+                return Ok(None);
+            }
+            format!("<{} as {}>", self_type.display, trait_type.display)
+        }
+        None => {
+            hash_rust_scope_marker(&mut hasher, b"inherent")?;
+            self_type.display
+        }
+    };
+    Ok(Some(RustImplScopeIdentity {
+        header: *hasher.finalize().as_bytes(),
+        display,
+    }))
+}
+
+/// Derives the container discriminator for a canonical Rust `impl` scope.
+///
+/// # Errors
+///
+/// Returns [`RustScopeIdentityError`] when the fixed syntax label length cannot
+/// be represented.
+pub fn derive_rust_impl_scope_identity(
+    parent: Option<[u8; 32]>,
+    header: [u8; 32],
+) -> Result<[u8; 32], RustScopeIdentityError> {
+    let mut hasher = blake3::Hasher::new_derive_key(RUST_SCOPE_IDENTITY_CONTEXT);
+    match parent {
+        Some(parent) => {
+            hasher.update(&[1]);
+            hasher.update(&parent);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    let syntax_kind = b"rust.impl.scope";
+    let syntax_length =
+        u64::try_from(syntax_kind.len()).map_err(|_| RustScopeIdentityError::AccountingOverflow)?;
+    hasher.update(&syntax_length.to_be_bytes());
+    hasher.update(syntax_kind);
+    hasher.update(&header);
+    Ok(*hasher.finalize().as_bytes())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RustScopeComponent {
+    tokens: Vec<String>,
+    display: String,
+}
+
+fn canonical_rust_scope_component(
+    text: &str,
+    maximum_string_bytes: usize,
+) -> Result<Option<RustScopeComponent>, RustScopeIdentityError> {
+    if text.is_empty()
+        || text.len() > MAX_LEXICAL_SIGNATURE_BYTES
+        || text.len() > maximum_string_bytes
+    {
+        return Ok(None);
+    }
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    tokens
+        .try_reserve_exact(text.len().min(32))
+        .map_err(|_| RustScopeIdentityError::ResourceLimit)?;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"//") {
+            index = bytes[index..]
+                .iter()
+                .position(|byte| matches!(byte, b'\r' | b'\n'))
+                .map_or(bytes.len(), |offset| index + offset);
+            continue;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            let mut depth = 1usize;
+            index += 2;
+            while index < bytes.len() && depth > 0 {
+                if bytes[index..].starts_with(b"/*") {
+                    depth = depth
+                        .checked_add(1)
+                        .ok_or(RustScopeIdentityError::AccountingOverflow)?;
+                    index += 2;
+                } else if bytes[index..].starts_with(b"*/") {
+                    depth -= 1;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            if depth != 0 {
+                return Ok(None);
+            }
+            continue;
+        }
+        if let Some(end) = rust_raw_string_end(bytes, index) {
+            push_rust_scope_token(&mut tokens, text, index, end)?;
+            index = end;
+            continue;
+        }
+        let normal_string_start = match bytes.get(index..index.saturating_add(2)) {
+            Some([b'b' | b'c', b'"']) => Some(index + 1),
+            _ if bytes[index] == b'"' => Some(index),
+            _ => None,
+        };
+        if let Some(quote) = normal_string_start {
+            let Some(end) = rust_quoted_end(bytes, quote, b'"') else {
+                return Ok(None);
+            };
+            push_rust_scope_token(&mut tokens, text, index, end)?;
+            index = end;
+            continue;
+        }
+        let char_start = if bytes.get(index..index.saturating_add(2)) == Some(b"b'") {
+            Some(index + 1)
+        } else if bytes[index] == b'\'' {
+            Some(index)
+        } else {
+            None
+        };
+        if let Some(quote) = char_start
+            && let Some(end) = rust_char_literal_end(text, quote)
+        {
+            push_rust_scope_token(&mut tokens, text, index, end)?;
+            index = end;
+            continue;
+        }
+        let character = text
+            .get(index..)
+            .and_then(|remaining| remaining.chars().next())
+            .ok_or(RustScopeIdentityError::AccountingOverflow)?;
+        if character.is_whitespace() {
+            index = index
+                .checked_add(character.len_utf8())
+                .ok_or(RustScopeIdentityError::AccountingOverflow)?;
+            continue;
+        }
+        if is_rust_scope_word_character(character)
+            || character == '\''
+                && text
+                    .get(index + 1..)
+                    .and_then(|remaining| remaining.chars().next())
+                    .is_some_and(is_rust_scope_word_character)
+        {
+            let start = index;
+            if character == '\'' {
+                index += 1;
+            }
+            while index < bytes.len() {
+                let next = text
+                    .get(index..)
+                    .and_then(|remaining| remaining.chars().next())
+                    .ok_or(RustScopeIdentityError::AccountingOverflow)?;
+                if !(is_rust_scope_word_character(next)
+                    || next == '#' && index == start + 1 && bytes.get(start) == Some(&b'r'))
+                {
+                    break;
+                }
+                index = index
+                    .checked_add(next.len_utf8())
+                    .ok_or(RustScopeIdentityError::AccountingOverflow)?;
+            }
+            push_rust_scope_token(&mut tokens, text, start, index)?;
+            continue;
+        }
+        let end = index
+            .checked_add(character.len_utf8())
+            .ok_or(RustScopeIdentityError::AccountingOverflow)?;
+        push_rust_scope_token(&mut tokens, text, index, end)?;
+        index = end;
+    }
+    if tokens.is_empty() {
+        return Ok(None);
+    }
+    let mut display = String::new();
+    display
+        .try_reserve_exact(text.len())
+        .map_err(|_| RustScopeIdentityError::ResourceLimit)?;
+    let mut previous_word = false;
+    for token in &tokens {
+        let word = rust_scope_token_is_word(token);
+        if previous_word && word {
+            display.push(' ');
+        }
+        display.push_str(token);
+        previous_word = word;
+    }
+    if display.len() > maximum_string_bytes {
+        return Ok(None);
+    }
+    Ok(Some(RustScopeComponent { tokens, display }))
+}
+
+fn hash_rust_scope_component(
+    hasher: &mut blake3::Hasher,
+    label: &[u8],
+    component: &RustScopeComponent,
+) -> Result<(), RustScopeIdentityError> {
+    hash_rust_scope_marker(hasher, label)?;
+    let token_count = u64::try_from(component.tokens.len())
+        .map_err(|_| RustScopeIdentityError::AccountingOverflow)?;
+    hasher.update(&token_count.to_be_bytes());
+    for token in &component.tokens {
+        hash_rust_scope_marker(hasher, token.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn hash_rust_scope_marker(
+    hasher: &mut blake3::Hasher,
+    value: &[u8],
+) -> Result<(), RustScopeIdentityError> {
+    let length =
+        u64::try_from(value.len()).map_err(|_| RustScopeIdentityError::AccountingOverflow)?;
+    hasher.update(&length.to_be_bytes());
+    hasher.update(value);
+    Ok(())
+}
+
+fn push_rust_scope_token(
+    tokens: &mut Vec<String>,
+    text: &str,
+    start: usize,
+    end: usize,
+) -> Result<(), RustScopeIdentityError> {
+    let token = text
+        .get(start..end)
+        .ok_or(RustScopeIdentityError::AccountingOverflow)?;
+    tokens
+        .try_reserve(1)
+        .map_err(|_| RustScopeIdentityError::ResourceLimit)?;
+    tokens.push(token.to_owned());
+    Ok(())
+}
+
+fn is_rust_scope_word_character(character: char) -> bool {
+    character == '_'
+        || character.is_alphanumeric()
+        || !character.is_ascii() && !character.is_whitespace()
+}
+
+fn rust_scope_token_is_word(token: &str) -> bool {
+    token
+        .chars()
+        .next()
+        .is_some_and(|character| is_rust_scope_word_character(character) || character == '\'')
+}
+
+fn rust_raw_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut cursor = start;
+    if matches!(bytes.get(cursor), Some(b'b' | b'c')) {
+        cursor = cursor.checked_add(1)?;
+    }
+    if bytes.get(cursor) != Some(&b'r') {
+        return None;
+    }
+    cursor = cursor.checked_add(1)?;
+    let hashes_start = cursor;
+    while bytes.get(cursor) == Some(&b'#') {
+        cursor = cursor.checked_add(1)?;
+    }
+    if bytes.get(cursor) != Some(&b'"') {
+        return None;
+    }
+    let hash_count = cursor.checked_sub(hashes_start)?;
+    cursor = cursor.checked_add(1)?;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'"' {
+            let hashes_end = cursor.checked_add(1)?.checked_add(hash_count)?;
+            if hashes_end <= bytes.len()
+                && bytes[cursor + 1..hashes_end]
+                    .iter()
+                    .all(|byte| *byte == b'#')
+            {
+                return Some(hashes_end);
+            }
+        }
+        cursor = cursor.checked_add(1)?;
+    }
+    None
+}
+
+fn rust_quoted_end(bytes: &[u8], quote: usize, delimiter: u8) -> Option<usize> {
+    if bytes.get(quote) != Some(&delimiter) {
+        return None;
+    }
+    let mut cursor = quote.checked_add(1)?;
+    let mut escaped = false;
+    while let Some(byte) = bytes.get(cursor).copied() {
+        cursor = cursor.checked_add(1)?;
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == delimiter {
+            return Some(cursor);
+        }
+    }
+    None
+}
+
+fn rust_char_literal_end(text: &str, quote: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.get(quote) != Some(&b'\'') {
+        return None;
+    }
+    let content = quote.checked_add(1)?;
+    let end = if bytes.get(content) == Some(&b'\\') {
+        let escaped = content.checked_add(1)?;
+        match bytes.get(escaped).copied()? {
+            b'x' => escaped.checked_add(3)?,
+            b'u' if bytes.get(escaped.checked_add(1)?) == Some(&b'{') => {
+                let close = bytes
+                    .get(escaped.checked_add(2)?..)?
+                    .iter()
+                    .position(|byte| *byte == b'}')?;
+                escaped.checked_add(3)?.checked_add(close)?
+            }
+            _ => escaped.checked_add(1)?,
+        }
+    } else {
+        let character = text.get(content..)?.chars().next()?;
+        content.checked_add(character.len_utf8())?
+    };
+    (bytes.get(end) == Some(&b'\''))
+        .then(|| end.checked_add(1))
+        .flatten()
 }
 
 /// Identity-claim envelope construction or decoding failure.
@@ -799,6 +1217,42 @@ mod tests {
 
         assert!(matches!(result, Err(FactRecipeFailure::Interrupted)));
         assert_eq!(checkpoints, 2);
+    }
+
+    #[test]
+    fn canonical_symbol_signatures_ignore_only_presentation_whitespace() {
+        assert_eq!(
+            canonical_symbol_signature("( x : i32 )", 128),
+            Some("(x:i32)".to_owned())
+        );
+        assert_ne!(
+            canonical_symbol_signature("(x:i32)", 128),
+            canonical_symbol_signature("(x:u64)", 128)
+        );
+        assert_eq!(canonical_symbol_signature(" ", 128), None);
+        assert_eq!(canonical_symbol_signature("(x)", 2), None);
+    }
+
+    #[test]
+    fn rust_impl_scope_identity_ignores_presentation_and_preserves_trait_context() {
+        let compact = canonical_rust_impl_scope("Demo<T>", None, 128)
+            .expect("compact scope is bounded")
+            .expect("compact scope is valid");
+        let spaced = canonical_rust_impl_scope("Demo < T >", None, 128)
+            .expect("spaced scope is bounded")
+            .expect("spaced scope is valid");
+        assert_eq!(compact.header(), spaced.header());
+        assert_eq!(
+            derive_rust_impl_scope_identity(None, compact.header())
+                .expect("compact scope identity derives"),
+            derive_rust_impl_scope_identity(None, spaced.header())
+                .expect("spaced scope identity derives")
+        );
+
+        let trait_impl = canonical_rust_impl_scope("Demo<T>", Some("Display"), 128)
+            .expect("trait scope is bounded")
+            .expect("trait scope is valid");
+        assert_ne!(compact.header(), trait_impl.header());
     }
 
     #[test]

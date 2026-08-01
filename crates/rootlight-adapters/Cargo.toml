@@ -19,6 +19,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+rootlight-adapter-treesitter = { path = "../rootlight-adapter-treesitter" }
 rootlight-vfs = { path = "../rootlight-vfs" }
 tempfile.workspace = true
 

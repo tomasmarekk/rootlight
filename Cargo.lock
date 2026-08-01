@@ -1893,6 +1893,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sysinfo",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -1966,6 +1967,7 @@ version = "0.1.0"
 dependencies = [
  "protobuf",
  "rootlight-adapter-sdk",
+ "rootlight-adapter-treesitter",
  "rootlight-cancel",
  "rootlight-ids",
  "rootlight-ir",
@@ -2230,6 +2232,7 @@ dependencies = [
 name = "rootlight-ir"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "rootlight-ids",
  "schemars",
  "serde",

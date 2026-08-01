@@ -11,14 +11,14 @@ use std::{
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{
-    ContentHash, GenerationId, GenerationIdentity, RepositoryId, derive_generation,
+    ContentHash, GenerationId, GenerationIdentity, RepositoryId, content_hash, derive_generation,
 };
 use rootlight_ir::{
     ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim,
-    IdentityClaimError, IrDocumentValidationError, IrLimits, IrVersion,
+    IdentityClaimError, IrDocument, IrDocumentValidationError, IrLimits, IrVersion,
     LEXICAL_EXTENSION_NAMESPACE, NORMALIZED_IR_VERSION, NormalizedIrDocument, OccurrenceTarget,
     SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef, canonicalize_ir_document,
-    decode_file_identity_claim_envelope_with_checkpoint,
+    decode_file_identity_claim_envelope_with_checkpoint, decode_ir_document,
     decode_symbol_identity_claim_envelope_with_checkpoint,
     derive_coverage_record_id_with_checkpoint, derive_diagnostic_record_id_with_checkpoint,
     derive_occurrence_record_id_with_checkpoint, derive_provenance_record_id_with_checkpoint,
@@ -794,6 +794,59 @@ impl IdentityVerifiedGeneration {
             .check()
             .map_err(IdentityVerificationError::Control)?;
         Ok(Self { snapshot })
+    }
+
+    /// Restores a crash-safe published snapshot from its exact bounded JSON image.
+    ///
+    /// This path is reserved for an immutable artifact whose digest was written
+    /// into the generation manifest before the activation marker became
+    /// durable. It rechecks that digest, the normalized IR contract, canonical
+    /// quotas, metadata ownership, and operation budgets. Full identity-recipe
+    /// recomputation remains suitable for background scrubs, but is not needed
+    /// to make the already verified last-good image available after restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IdentityVerificationError::InvalidGeneration`] when the digest,
+    /// document contract, or metadata binding differs, and
+    /// [`IdentityVerificationError::Control`] when the recovery budget or
+    /// cancellation policy stops the operation.
+    pub fn restore_published_json(
+        metadata: GenerationMetadata,
+        encoded: &[u8],
+        expected_digest: ContentHash,
+        limits: &IrLimits,
+        extensions: &ExtensionSupport,
+        context: &GenerationContext<'_>,
+    ) -> Result<Self, IdentityVerificationError> {
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        if content_hash(encoded) != expected_digest {
+            return Err(IdentityVerificationError::InvalidGeneration);
+        }
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        let IrDocument::NormalizedV1_1(document) = decode_ir_document(encoded, limits, extensions)
+            .map_err(|_| IdentityVerificationError::InvalidGeneration)?
+        else {
+            return Err(IdentityVerificationError::InvalidGeneration);
+        };
+        if document.repository != metadata.repository()
+            || document.generation != metadata.generation()
+            || metadata.contract_version() != GENERATION_CONTRACT_VERSION
+        {
+            return Err(IdentityVerificationError::InvalidGeneration);
+        }
+        require_document_budget(metadata.contract_version(), &document, context)
+            .map_err(IdentityVerificationError::Control)?;
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        Ok(Self {
+            snapshot: GenerationSnapshot { metadata, document },
+        })
     }
 
     /// Returns the verified generation metadata.

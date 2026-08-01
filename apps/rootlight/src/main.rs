@@ -54,6 +54,7 @@ use rootlight_service::{
     SourceReadQueryResult, SymbolExplainResult,
 };
 use serde::{Deserialize, Serialize};
+use sysinfo::{ProcessesToUpdate, System};
 
 const CLI_CONTRACT_VERSION: &str = "1.0";
 // Local IPC authenticates the OS account. Short-lived operation commands then
@@ -429,6 +430,7 @@ fn execute_update(arguments: &[std::ffi::OsString]) -> Result<CommandResult, Cli
         [uninstall, root_flag, install_root]
             if uninstall == "uninstall" && root_flag == "--root" =>
         {
+            ensure_installed_daemon_absent(Path::new(install_root))?;
             Ok(CommandResult::UpdateUninstalled(uninstall_package(
                 Path::new(install_root),
             )?))
@@ -633,6 +635,60 @@ fn installed_root_for_executable(executable: &Path) -> Result<PathBuf, CliError>
         .parent()
         .map(Path::to_path_buf)
         .ok_or(CliError::InvalidInstalledLayout)
+}
+
+fn ensure_installed_daemon_absent(install_root: &Path) -> Result<(), CliError> {
+    let requested_root = fs::canonicalize(install_root).map_err(CliError::UpdateInputRead)?;
+    if install_owned_daemon_is_running(&requested_root) {
+        return Err(CliError::DaemonActiveDuringUninstall);
+    }
+    let executable_is_requested_install = installed_root_from_current_executable()
+        .ok()
+        .and_then(|root| fs::canonicalize(root).ok())
+        .is_some_and(|root| root == requested_root);
+    if !executable_is_requested_install {
+        return Ok(());
+    }
+    let paths = runtime_paths()?;
+    classify_uninstall_daemon_probe(
+        Client::connect_or_start(&paths, CLI_CLIENT_INSTANCE_ID, ConnectPolicy::ExistingOnly)
+            .map(drop),
+    )
+}
+
+fn install_owned_daemon_is_running(install_root: &Path) -> bool {
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    system.processes().values().any(|process| {
+        process
+            .exe()
+            .is_some_and(|executable| install_owns_daemon_executable(install_root, executable))
+    })
+}
+
+fn install_owns_daemon_executable(install_root: &Path, executable: &Path) -> bool {
+    executable
+        .file_name()
+        .is_some_and(|name| name == daemon_executable_name())
+        && fs::canonicalize(executable).is_ok_and(|executable| executable.starts_with(install_root))
+}
+
+#[cfg(windows)]
+fn daemon_executable_name() -> &'static str {
+    "rootlight-daemon.exe"
+}
+
+#[cfg(not(windows))]
+fn daemon_executable_name() -> &'static str {
+    "rootlight-daemon"
+}
+
+fn classify_uninstall_daemon_probe(probe: Result<(), ClientError>) -> Result<(), CliError> {
+    match probe {
+        Ok(()) => Err(CliError::DaemonActiveDuringUninstall),
+        Err(ClientError::DaemonUnavailable) => Ok(()),
+        Err(error) => Err(CliError::Client(error)),
+    }
 }
 
 fn execute_update_health_probe() -> Result<CommandResult, CliError> {
@@ -2326,6 +2382,8 @@ enum CliError {
     CurrentExecutable(#[source] std::io::Error),
     #[error("current executable is outside an installed version")]
     InvalidInstalledLayout,
+    #[error("stop the active Rootlight daemon before uninstalling")]
+    DaemonActiveDuringUninstall,
     #[error("candidate health probe filesystem setup failed")]
     HealthProbeIo(#[source] std::io::Error),
     #[error("candidate health probe did not reach ready state")]
@@ -2437,6 +2495,7 @@ impl CliError {
             | Self::Client(ClientError::DaemonExecutableMissing)
             | Self::Client(ClientError::DaemonLaunchFailed)
             | Self::Client(ClientError::DaemonStartTimedOut)
+            | Self::DaemonActiveDuringUninstall
             | Self::Operations(
                 rootlight_operations::OperationError::WriterBusy
                 | rootlight_operations::OperationError::Busy,
@@ -2468,6 +2527,15 @@ impl CliError {
         }
         if matches!(self, Self::FirstSlice(FirstSliceError::Cancelled(_))) {
             return PublicError::builder(ErrorCode::Cancelled, "operation was cancelled").build();
+        }
+        if matches!(self, Self::DaemonActiveDuringUninstall) {
+            return PublicError::builder(
+                ErrorCode::Busy,
+                "stop the installed daemon before retrying uninstall",
+            )
+            .retryable()
+            .next_action(NextAction::Retry)
+            .build();
         }
         if matches!(
             self,
@@ -2896,6 +2964,51 @@ mod tests {
         paths
             .endpoint([7; 16])
             .expect("health runtime endpoint is representable");
+    }
+
+    #[test]
+    fn live_daemon_makes_installed_uninstall_explicitly_retryable() {
+        let error = classify_uninstall_daemon_probe(Ok(()))
+            .expect_err("a connected daemon prevents uninstall");
+        assert!(matches!(error, CliError::DaemonActiveDuringUninstall));
+        assert_eq!(error.exit_family(), ExitFamily::Unavailable);
+        let public = error.public_error().expect("public error builds");
+        assert_eq!(public.code(), ErrorCode::Busy);
+        assert_eq!(
+            public.message(),
+            "stop the installed daemon before retrying uninstall"
+        );
+        assert!(public.retryable());
+        assert_eq!(public.next_actions(), &[NextAction::Retry]);
+
+        classify_uninstall_daemon_probe(Err(ClientError::DaemonUnavailable))
+            .expect("an absent daemon permits uninstall");
+    }
+
+    #[test]
+    fn uninstall_process_probe_accepts_only_install_owned_daemon_executables() {
+        let installation = tempfile::tempdir().expect("installation root exists");
+        let version_bin = installation.path().join("versions/1.0.0/bin");
+        fs::create_dir_all(&version_bin).expect("version bin exists");
+        let owned_daemon = version_bin.join(daemon_executable_name());
+        fs::write(&owned_daemon, b"fixture").expect("owned daemon fixture writes");
+        let outside = tempfile::tempdir().expect("outside root exists");
+        let outside_daemon = outside.path().join(daemon_executable_name());
+        fs::write(&outside_daemon, b"fixture").expect("outside daemon fixture writes");
+        let unrelated = version_bin.join("rootlight-helper");
+        fs::write(&unrelated, b"fixture").expect("unrelated fixture writes");
+        let canonical_root =
+            fs::canonicalize(installation.path()).expect("installation root canonicalizes");
+
+        assert!(install_owns_daemon_executable(
+            &canonical_root,
+            &owned_daemon
+        ));
+        assert!(!install_owns_daemon_executable(
+            &canonical_root,
+            &outside_daemon
+        ));
+        assert!(!install_owns_daemon_executable(&canonical_root, &unrelated));
     }
 
     #[test]

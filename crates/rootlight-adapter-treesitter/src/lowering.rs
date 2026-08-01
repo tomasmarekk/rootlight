@@ -27,12 +27,13 @@ use rootlight_ir::{
     EvidenceKind, ExtensionEnvelope, ExtensionSupport, FactDomain, FactEvidence, FactRef,
     FileIdentityClaim, FileRecord, IrLimits, LEXICAL_EXTENSION_NAMESPACE,
     LEXICAL_EXTENSION_VERSION, LexicalEvidenceFormat, LexicalEvidenceKind, LexicalEvidenceV1,
-    MAX_LEXICAL_SIGNATURE_BYTES, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
-    ProducerIdentity, ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
-    RelationRecord, SkippedRegion, SkippedRegionReason, SourceRef, SourceSpan, SymbolIdentityClaim,
-    derive_coverage_record_id, derive_diagnostic_record_id, derive_occurrence_record_id,
-    derive_provenance_record_id, derive_relation_record_id, derive_skipped_region_id,
-    entity_kind_identity_label, new_file_identity_claim_envelope, new_lexical_evidence_envelope,
+    OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind,
+    ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SkippedRegion,
+    SkippedRegionReason, SourceRef, SourceSpan, SymbolIdentityClaim, canonical_rust_impl_scope,
+    canonical_symbol_signature, derive_coverage_record_id, derive_diagnostic_record_id,
+    derive_occurrence_record_id, derive_provenance_record_id, derive_relation_record_id,
+    derive_rust_impl_scope_identity, derive_skipped_region_id, entity_kind_identity_label,
+    new_file_identity_claim_envelope, new_lexical_evidence_envelope,
     new_symbol_identity_claim_envelope,
 };
 
@@ -43,8 +44,6 @@ const CONTAINMENT_CONFIDENCE: u16 = 1_000;
 const CANCELLATION_CHECK_INTERVAL: usize = 64;
 const MAX_FRONTEND_VERSION_BYTES: usize = 128;
 
-const SCOPE_IDENTITY_CONTEXT: &str = "rootlight/scope-container/v1";
-const SCOPE_HEADER_CONTEXT: &str = "rootlight/treesitter-scope-header/v1";
 const SCOPE_COLLISION_GUARD_CONTEXT: &str = "rootlight/treesitter-scope-collision-guard/v1";
 const ENTITY_IDENTITY_GUARD_CONTEXT: &str = "rootlight/treesitter-entity-identity-guard/v1";
 const STABLE_SCOPE_IDENTITY_UNAVAILABLE: &str = "stable-scope-identity-unavailable";
@@ -1503,6 +1502,23 @@ impl<'context, 'source> Lowering<'context, 'source> {
             {
                 kind = EntityKind::Method;
             }
+            if kind == EntityKind::Function
+                && parent_entity
+                    .and_then(|parent| drafts.get(&parent))
+                    .is_some_and(|parent| {
+                        matches!(
+                            parent.kind,
+                            EntityKind::Class
+                                | EntityKind::Struct
+                                | EntityKind::Enum
+                                | EntityKind::Trait
+                                | EntityKind::Interface
+                                | EntityKind::Protocol
+                        )
+                    })
+            {
+                kind = EntityKind::Method;
+            }
             let capture = captures.get(&fact.local_id()).cloned().unwrap_or_default();
             let definition = select_unique_capture(&capture.definitions);
             let (name, definition_local_id, definition_span) = if let Some(definition) = definition
@@ -1528,7 +1544,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 && let Some(signature) = signature_capture
             {
                 let text = self.text_for_span(signature.span())?;
-                match canonical_signature(text, self.request.limits().ir().max_string_bytes)? {
+                match canonical_symbol_signature(text, self.request.limits().ir().max_string_bytes)
+                {
                     Some(canonical) => (canonical, Some(text.to_owned()), Some(signature.span())),
                     None => (String::new(), None, None),
                 }
@@ -1641,52 +1658,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let Some(self_type) = captures.self_type else {
             return Ok(None);
         };
-        let Some(self_type) = canonical_rust_scope_component(
-            self.text_for_span(self_type.span())?,
-            self.request.limits().ir().max_string_bytes,
-        )?
-        else {
-            return Ok(None);
-        };
+        let self_type = self.text_for_span(self_type.span())?;
         let trait_type = captures
             .trait_type
-            .map(|fact| {
-                canonical_rust_scope_component(
-                    self.text_for_span(fact.span())?,
-                    self.request.limits().ir().max_string_bytes,
-                )
-            })
-            .transpose()?
-            .flatten();
-        if captures.trait_type.is_some() && trait_type.is_none() {
-            return Ok(None);
-        }
-        let mut hasher = blake3::Hasher::new_derive_key(SCOPE_HEADER_CONTEXT);
-        hash_scope_component(&mut hasher, b"self", &self_type)?;
-        let qualified_prefix = match trait_type {
-            Some(trait_type) => {
-                hash_scope_component(&mut hasher, b"trait", &trait_type)?;
-                let length = self_type
-                    .display
-                    .len()
-                    .checked_add(trait_type.display.len())
-                    .and_then(|length| length.checked_add("< as >".len()))
-                    .ok_or(SinkError::AccountingOverflow)?;
-                require_resource_limit(
-                    ResourceKind::StringBytes,
-                    length,
-                    self.request.limits().ir().max_string_bytes,
-                )?;
-                format!("<{} as {}>", self_type.display, trait_type.display)
-            }
-            None => {
-                hash_scope_marker(&mut hasher, b"inherent")?;
-                self_type.display
-            }
-        };
-        Ok(Some(StableScopeHeader {
-            digest: *hasher.finalize().as_bytes(),
-            qualified_prefix,
+            .map(|fact| self.text_for_span(fact.span()))
+            .transpose()?;
+        let identity = canonical_rust_impl_scope(
+            self_type,
+            trait_type,
+            self.request.limits().ir().max_string_bytes,
+        )
+        .map_err(|_| provider_failure("treesitter-lowering-scope"))?;
+        Ok(identity.map(|identity| StableScopeHeader {
+            digest: identity.header(),
+            qualified_prefix: identity.display().to_owned(),
             kind: StableScopeKind::RustImpl,
         }))
     }
@@ -1773,11 +1758,6 @@ struct StableScopeHeader {
     digest: [u8; 32],
     qualified_prefix: String,
     kind: StableScopeKind,
-}
-
-struct RustScopeComponent {
-    tokens: Vec<String>,
-    display: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2028,22 +2008,9 @@ fn scope_identity(
     syntax_kind: &str,
     header: [u8; 32],
 ) -> Result<[u8; 32], AdapterError> {
-    let mut hasher = blake3::Hasher::new_derive_key(SCOPE_IDENTITY_CONTEXT);
-    match parent {
-        Some(parent) => {
-            hasher.update(&[1]);
-            hasher.update(&parent);
-        }
-        None => {
-            hasher.update(&[0]);
-        }
-    }
-    let syntax_length = u64::try_from(syntax_kind.len())
-        .map_err(|_| provider_failure("treesitter-lowering-scope"))?;
-    hasher.update(&syntax_length.to_be_bytes());
-    hasher.update(syntax_kind.as_bytes());
-    hasher.update(&header);
-    Ok(*hasher.finalize().as_bytes())
+    debug_assert_eq!(syntax_kind, "rust.impl.scope");
+    derive_rust_impl_scope_identity(parent, header)
+        .map_err(|_| provider_failure("treesitter-lowering-scope"))
 }
 
 fn scope_collision_guard(
@@ -2662,300 +2629,6 @@ const fn supports_signature(kind: EntityKind) -> bool {
     )
 }
 
-fn hash_scope_component(
-    hasher: &mut blake3::Hasher,
-    label: &[u8],
-    component: &RustScopeComponent,
-) -> Result<(), AdapterError> {
-    hash_scope_marker(hasher, label)?;
-    let token_count = u64::try_from(component.tokens.len())
-        .map_err(|_| provider_failure("treesitter-lowering-scope"))?;
-    hasher.update(&token_count.to_be_bytes());
-    for token in &component.tokens {
-        hash_scope_marker(hasher, token.as_bytes())?;
-    }
-    Ok(())
-}
-
-fn hash_scope_marker(hasher: &mut blake3::Hasher, value: &[u8]) -> Result<(), AdapterError> {
-    let length =
-        u64::try_from(value.len()).map_err(|_| provider_failure("treesitter-lowering-scope"))?;
-    hasher.update(&length.to_be_bytes());
-    hasher.update(value);
-    Ok(())
-}
-
-fn canonical_rust_scope_component(
-    text: &str,
-    maximum_string_bytes: usize,
-) -> Result<Option<RustScopeComponent>, AdapterError> {
-    if text.is_empty()
-        || text.len() > MAX_LEXICAL_SIGNATURE_BYTES
-        || text.len() > maximum_string_bytes
-    {
-        return Ok(None);
-    }
-    let bytes = text.as_bytes();
-    let mut tokens = Vec::new();
-    tokens
-        .try_reserve_exact(text.len().min(32))
-        .map_err(|_| provider_failure("treesitter-lowering-scope"))?;
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if bytes[index..].starts_with(b"//") {
-            index = bytes[index..]
-                .iter()
-                .position(|byte| matches!(byte, b'\r' | b'\n'))
-                .map_or(bytes.len(), |offset| index + offset);
-            continue;
-        }
-        if bytes[index..].starts_with(b"/*") {
-            let mut depth = 1usize;
-            index += 2;
-            while index < bytes.len() && depth > 0 {
-                if bytes[index..].starts_with(b"/*") {
-                    depth = depth
-                        .checked_add(1)
-                        .ok_or_else(|| provider_failure("treesitter-lowering-scope"))?;
-                    index += 2;
-                } else if bytes[index..].starts_with(b"*/") {
-                    depth -= 1;
-                    index += 2;
-                } else {
-                    index += 1;
-                }
-            }
-            if depth != 0 {
-                return Ok(None);
-            }
-            continue;
-        }
-        if let Some(end) = rust_raw_string_end(bytes, index) {
-            push_rust_scope_token(&mut tokens, text, index, end)?;
-            index = end;
-            continue;
-        }
-        let normal_string_start = match bytes.get(index..index.saturating_add(2)) {
-            Some([b'b' | b'c', b'"']) => Some(index + 1),
-            _ if bytes[index] == b'"' => Some(index),
-            _ => None,
-        };
-        if let Some(quote) = normal_string_start {
-            let Some(end) = rust_quoted_end(bytes, quote, b'"') else {
-                return Ok(None);
-            };
-            push_rust_scope_token(&mut tokens, text, index, end)?;
-            index = end;
-            continue;
-        }
-        let char_start = if bytes.get(index..index.saturating_add(2)) == Some(b"b'") {
-            Some(index + 1)
-        } else if bytes[index] == b'\'' {
-            Some(index)
-        } else {
-            None
-        };
-        if let Some(quote) = char_start
-            && let Some(end) = rust_char_literal_end(text, quote)
-        {
-            push_rust_scope_token(&mut tokens, text, index, end)?;
-            index = end;
-            continue;
-        }
-        let character = text
-            .get(index..)
-            .and_then(|remaining| remaining.chars().next())
-            .ok_or_else(|| provider_failure("treesitter-lowering-scope"))?;
-        if character.is_whitespace() {
-            index = index
-                .checked_add(character.len_utf8())
-                .ok_or(SinkError::AccountingOverflow)?;
-            continue;
-        }
-        if is_rust_scope_word_character(character)
-            || character == '\''
-                && text
-                    .get(index + 1..)
-                    .and_then(|remaining| remaining.chars().next())
-                    .is_some_and(is_rust_scope_word_character)
-        {
-            let start = index;
-            if character == '\'' {
-                index += 1;
-            }
-            while index < bytes.len() {
-                let next = text
-                    .get(index..)
-                    .and_then(|remaining| remaining.chars().next())
-                    .ok_or_else(|| provider_failure("treesitter-lowering-scope"))?;
-                if !(is_rust_scope_word_character(next)
-                    || next == '#' && index == start + 1 && bytes.get(start) == Some(&b'r'))
-                {
-                    break;
-                }
-                index = index
-                    .checked_add(next.len_utf8())
-                    .ok_or(SinkError::AccountingOverflow)?;
-            }
-            push_rust_scope_token(&mut tokens, text, start, index)?;
-            continue;
-        }
-        let end = index
-            .checked_add(character.len_utf8())
-            .ok_or(SinkError::AccountingOverflow)?;
-        push_rust_scope_token(&mut tokens, text, index, end)?;
-        index = end;
-    }
-    if tokens.is_empty() {
-        return Ok(None);
-    }
-    let mut display = String::new();
-    display
-        .try_reserve_exact(text.len())
-        .map_err(|_| provider_failure("treesitter-lowering-scope"))?;
-    let mut previous_word = false;
-    for token in &tokens {
-        let word = rust_scope_token_is_word(token);
-        if previous_word && word {
-            display.push(' ');
-        }
-        display.push_str(token);
-        previous_word = word;
-    }
-    if display.len() > maximum_string_bytes {
-        return Ok(None);
-    }
-    Ok(Some(RustScopeComponent { tokens, display }))
-}
-
-fn push_rust_scope_token(
-    tokens: &mut Vec<String>,
-    text: &str,
-    start: usize,
-    end: usize,
-) -> Result<(), AdapterError> {
-    let token = text
-        .get(start..end)
-        .ok_or_else(|| provider_failure("treesitter-lowering-scope"))?;
-    tokens
-        .try_reserve(1)
-        .map_err(|_| provider_failure("treesitter-lowering-scope"))?;
-    tokens.push(token.to_owned());
-    Ok(())
-}
-
-fn is_rust_scope_word_character(character: char) -> bool {
-    character == '_'
-        || character.is_alphanumeric()
-        || !character.is_ascii() && !character.is_whitespace()
-}
-
-fn rust_scope_token_is_word(token: &str) -> bool {
-    token
-        .chars()
-        .next()
-        .is_some_and(|character| is_rust_scope_word_character(character) || character == '\'')
-}
-
-fn rust_raw_string_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut cursor = start;
-    if matches!(bytes.get(cursor), Some(b'b' | b'c')) {
-        cursor = cursor.checked_add(1)?;
-    }
-    if bytes.get(cursor) != Some(&b'r') {
-        return None;
-    }
-    cursor = cursor.checked_add(1)?;
-    let hashes_start = cursor;
-    while bytes.get(cursor) == Some(&b'#') {
-        cursor = cursor.checked_add(1)?;
-    }
-    if bytes.get(cursor) != Some(&b'"') {
-        return None;
-    }
-    let hash_count = cursor.checked_sub(hashes_start)?;
-    cursor = cursor.checked_add(1)?;
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'"' {
-            let hashes_end = cursor.checked_add(1)?.checked_add(hash_count)?;
-            if hashes_end <= bytes.len()
-                && bytes[cursor + 1..hashes_end]
-                    .iter()
-                    .all(|byte| *byte == b'#')
-            {
-                return Some(hashes_end);
-            }
-        }
-        cursor = cursor.checked_add(1)?;
-    }
-    None
-}
-
-fn rust_quoted_end(bytes: &[u8], quote: usize, delimiter: u8) -> Option<usize> {
-    if bytes.get(quote) != Some(&delimiter) {
-        return None;
-    }
-    let mut cursor = quote.checked_add(1)?;
-    let mut escaped = false;
-    while let Some(byte) = bytes.get(cursor).copied() {
-        cursor = cursor.checked_add(1)?;
-        if escaped {
-            escaped = false;
-        } else if byte == b'\\' {
-            escaped = true;
-        } else if byte == delimiter {
-            return Some(cursor);
-        }
-    }
-    None
-}
-
-fn rust_char_literal_end(text: &str, quote: usize) -> Option<usize> {
-    let bytes = text.as_bytes();
-    if bytes.get(quote) != Some(&b'\'') {
-        return None;
-    }
-    let content = quote.checked_add(1)?;
-    let end = if bytes.get(content) == Some(&b'\\') {
-        let escaped = content.checked_add(1)?;
-        match bytes.get(escaped).copied()? {
-            b'x' => escaped.checked_add(3)?,
-            b'u' if bytes.get(escaped.checked_add(1)?) == Some(&b'{') => {
-                let close = bytes
-                    .get(escaped.checked_add(2)?..)?
-                    .iter()
-                    .position(|byte| *byte == b'}')?;
-                escaped.checked_add(3)?.checked_add(close)?
-            }
-            _ => escaped.checked_add(1)?,
-        }
-    } else {
-        let character = text.get(content..)?.chars().next()?;
-        content.checked_add(character.len_utf8())?
-    };
-    (bytes.get(end) == Some(&b'\''))
-        .then(|| end.checked_add(1))
-        .flatten()
-}
-
-fn canonical_signature(
-    text: &str,
-    maximum_string_bytes: usize,
-) -> Result<Option<String>, AdapterError> {
-    if text.is_empty() {
-        return Ok(None);
-    }
-    if text.len() > MAX_LEXICAL_SIGNATURE_BYTES || text.len() > maximum_string_bytes {
-        return Ok(None);
-    }
-    let mut canonical = String::with_capacity(text.len());
-    canonical.extend(text.chars().filter(|character| !character.is_whitespace()));
-    if canonical.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(canonical))
-}
-
 fn comment_text(text: &str) -> Option<&str> {
     let text = text
         .trim()
@@ -3343,15 +3016,12 @@ mod tests {
 
     #[test]
     fn signature_discriminator_ignores_formatting_but_keeps_overloads_distinct() {
-        let compact = canonical_signature("(x:i32)", 128)
-            .expect("compact signature is checked")
-            .expect("compact signature is usable");
-        let spaced = canonical_signature("( x : i32 )", 128)
-            .expect("spaced signature is checked")
-            .expect("spaced signature is usable");
-        let overload = canonical_signature("(x:u64)", 128)
-            .expect("overload signature is checked")
-            .expect("overload signature is usable");
+        let compact =
+            canonical_symbol_signature("(x:i32)", 128).expect("compact signature is usable");
+        let spaced =
+            canonical_symbol_signature("( x : i32 )", 128).expect("spaced signature is usable");
+        let overload =
+            canonical_symbol_signature("(x:u64)", 128).expect("overload signature is usable");
 
         assert_eq!(compact, spaced);
         assert_ne!(compact, overload);

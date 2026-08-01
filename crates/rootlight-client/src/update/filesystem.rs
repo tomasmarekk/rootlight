@@ -47,7 +47,8 @@ const UPDATE_POLICY_SCHEMA: &str = "rootlight.update-policy/1";
 const UPDATE_TRANSACTION_SCHEMA: &str = "rootlight.update-transaction/1";
 const INSTALL_MANIFEST_SCHEMA_V1: &str = "rootlight.install-ownership/1";
 const INSTALL_MANIFEST_SCHEMA_V2: &str = "rootlight.install-ownership/2";
-const PACKAGE_MANIFEST_SCHEMA: &str = "rootlight.package-manifest/1";
+const PACKAGE_MANIFEST_SCHEMA_V1: &str = "rootlight.package-manifest/1";
+const PACKAGE_MANIFEST_SCHEMA_V2: &str = "rootlight.package-manifest/2";
 const PACKAGE_MANIFEST_NAME: &str = "package-manifest.json";
 #[cfg(windows)]
 const DEFERRED_UNINSTALL_SCHEMA: &str = "rootlight.deferred-uninstall/1";
@@ -1583,6 +1584,8 @@ struct PackageManifest {
     ownership_manifest: String,
     active_version_file: String,
     launcher_binary: String,
+    #[serde(default)]
+    mcp_launcher_binary: Option<String>,
     versions_directory: String,
     launcher_directory: String,
     update_lock_file: String,
@@ -1610,7 +1613,16 @@ impl PackageManifest {
             "launcher/{}",
             platform_executable_name("rootlight-launcher")
         );
-        if self.schema != PACKAGE_MANIFEST_SCHEMA
+        let mcp_launcher = format!(
+            "launcher/{}",
+            platform_executable_name("rootlight-mcp-launcher")
+        );
+        let launcher_schema_is_valid = match self.schema.as_str() {
+            PACKAGE_MANIFEST_SCHEMA_V1 => self.mcp_launcher_binary.is_none(),
+            PACKAGE_MANIFEST_SCHEMA_V2 => self.mcp_launcher_binary.as_ref() == Some(&mcp_launcher),
+            _ => false,
+        };
+        if !launcher_schema_is_valid
             || self.target != target
             || self.version != expected_version
             || !(lower_hex(&self.source_revision, 40) || lower_hex(&self.source_revision, 64))
@@ -1621,6 +1633,10 @@ impl PackageManifest {
             || self.ownership_manifest != "state/install-manifest.json"
             || self.active_version_file != "state/active-version"
             || self.launcher_binary != launcher
+            || self
+                .mcp_launcher_binary
+                .as_ref()
+                .is_some_and(|path| path != &mcp_launcher || path == &self.launcher_binary)
             || self.versions_directory != VERSIONS_DIRECTORY
             || self.launcher_directory != LAUNCHER_DIRECTORY
             || self.update_lock_file != "state/update.lock"
@@ -1633,6 +1649,7 @@ impl PackageManifest {
         }
         let mut previous = None;
         let mut binaries = BTreeSet::new();
+        let mut launchers = BTreeSet::new();
         for entry in &self.entries {
             entry.validate()?;
             if previous.is_some_and(|value| value >= entry.path.as_str()) {
@@ -1642,17 +1659,20 @@ impl PackageManifest {
             if entry.kind == "binary" {
                 binaries.insert(entry.path.clone());
             }
+            if matches!(entry.kind.as_str(), "launcher" | "mcp_launcher") {
+                launchers.insert((entry.path.clone(), entry.kind.clone()));
+            }
         }
         let expected = EXPECTED_BINARIES
             .iter()
             .map(|binary| format!("bin/{}", platform_executable_name(binary)))
             .collect::<BTreeSet<_>>();
-        if binaries != expected
-            || !self
-                .entries
-                .iter()
-                .any(|entry| entry.path == self.launcher_binary && entry.kind == "launcher")
-        {
+        let mut expected_launchers =
+            BTreeSet::from([(self.launcher_binary.clone(), "launcher".to_owned())]);
+        if let Some(path) = &self.mcp_launcher_binary {
+            expected_launchers.insert((path.clone(), "mcp_launcher".to_owned()));
+        }
+        if binaries != expected || launchers != expected_launchers {
             return Err(FilesystemUpdateError::InvalidArchive);
         }
         Ok(())
@@ -1662,7 +1682,13 @@ impl PackageManifest {
         let mut paths = self
             .entries
             .iter()
-            .filter(|entry| entry.path != self.launcher_binary)
+            .filter(|entry| {
+                entry.path != self.launcher_binary
+                    && self
+                        .mcp_launcher_binary
+                        .as_ref()
+                        .is_none_or(|path| entry.path != *path)
+            })
             .map(|entry| format!("versions/{version}/{}", entry.path))
             .collect::<Vec<_>>();
         paths.push(format!("versions/{version}/{PACKAGE_MANIFEST_NAME}"));
@@ -1688,6 +1714,7 @@ impl PackageManifestEntry {
                 self.kind.as_str(),
                 "binary"
                     | "launcher"
+                    | "mcp_launcher"
                     | "autostart_template"
                     | "license"
                     | "notice"
@@ -1697,7 +1724,8 @@ impl PackageManifestEntry {
             || self.bytes > MAX_ENTRY_BYTES
             || !lower_hex(&self.sha256, 64)
             || !matches!(self.unix_mode, 0o644 | 0o755)
-            || matches!(self.kind.as_str(), "binary" | "launcher") != (self.unix_mode == 0o755)
+            || matches!(self.kind.as_str(), "binary" | "launcher" | "mcp_launcher")
+                != (self.unix_mode == 0o755)
         {
             return Err(FilesystemUpdateError::InvalidArchive);
         }
@@ -1750,30 +1778,24 @@ fn install_launchers(
     current_bin: &PrivateDirectory<'_>,
     install_root: &Path,
 ) -> Result<(), FilesystemUpdateError> {
-    let declared = manifest
-        .entries
-        .iter()
-        .find(|entry| entry.path == manifest.launcher_binary && entry.kind == "launcher")
-        .ok_or(FilesystemUpdateError::InvalidArchive)?;
     let mut archive = ZipArchive::new(file).map_err(FilesystemUpdateError::Zip)?;
     #[cfg(windows)]
     {
         let primary_name = platform_executable_name(EXPECTED_BINARIES[0]);
-        let index = find_archive_entry(&mut archive, &manifest.launcher_binary)?
-            .ok_or(FilesystemUpdateError::InvalidArchive)?;
-        let mut entry = archive
-            .by_index(index)
-            .map_err(FilesystemUpdateError::Zip)?;
-        write_zip_file(
+        write_launcher(
+            &mut archive,
+            manifest,
             current_bin,
             &primary_name,
-            &mut entry,
-            declared.bytes,
-            Some(&declared.sha256),
-            0o755,
+            &manifest.launcher_binary,
+            "launcher",
         )?;
         let primary = install_root.join(LAUNCHER_DIRECTORY).join(primary_name);
-        for binary in EXPECTED_BINARIES.iter().skip(1) {
+        for binary in EXPECTED_BINARIES
+            .iter()
+            .skip(1)
+            .filter(|binary| manifest.mcp_launcher_binary.is_none() || **binary != "rootlight-mcp")
+        {
             fs::hard_link(
                 &primary,
                 install_root
@@ -1782,28 +1804,71 @@ fn install_launchers(
             )
             .map_err(FilesystemUpdateError::Io)?;
         }
+        if let Some(mcp_launcher) = &manifest.mcp_launcher_binary {
+            write_launcher(
+                &mut archive,
+                manifest,
+                current_bin,
+                &platform_executable_name("rootlight-mcp"),
+                mcp_launcher,
+                "mcp_launcher",
+            )?;
+        }
         Ok(())
     }
     #[cfg(not(windows))]
     {
         let _ = install_root;
         for binary in EXPECTED_BINARIES {
-            let index = find_archive_entry(&mut archive, &manifest.launcher_binary)?
-                .ok_or(FilesystemUpdateError::InvalidArchive)?;
-            let mut entry = archive
-                .by_index(index)
-                .map_err(FilesystemUpdateError::Zip)?;
-            write_zip_file(
+            let (launcher, kind) = if binary == "rootlight-mcp" {
+                manifest
+                    .mcp_launcher_binary
+                    .as_ref()
+                    .map_or((&manifest.launcher_binary, "launcher"), |path| {
+                        (path, "mcp_launcher")
+                    })
+            } else {
+                (&manifest.launcher_binary, "launcher")
+            };
+            write_launcher(
+                &mut archive,
+                manifest,
                 current_bin,
                 &platform_executable_name(binary),
-                &mut entry,
-                declared.bytes,
-                Some(&declared.sha256),
-                0o755,
+                launcher,
+                kind,
             )?;
         }
         Ok(())
     }
+}
+
+fn write_launcher(
+    archive: &mut ZipArchive<File>,
+    manifest: &PackageManifest,
+    current_bin: &PrivateDirectory<'_>,
+    installed_name: &str,
+    archive_path: &str,
+    kind: &str,
+) -> Result<(), FilesystemUpdateError> {
+    let declared = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.path == archive_path && entry.kind == kind)
+        .ok_or(FilesystemUpdateError::InvalidArchive)?;
+    let index =
+        find_archive_entry(archive, archive_path)?.ok_or(FilesystemUpdateError::InvalidArchive)?;
+    let mut entry = archive
+        .by_index(index)
+        .map_err(FilesystemUpdateError::Zip)?;
+    write_zip_file(
+        current_bin,
+        installed_name,
+        &mut entry,
+        declared.bytes,
+        Some(&declared.sha256),
+        0o755,
+    )
 }
 
 fn copy_bootstrap_artifact(
@@ -1901,7 +1966,12 @@ fn extract_package(
             .by_index(index)
             .map_err(FilesystemUpdateError::Zip)?;
         let name = entry.name().to_owned();
-        if name == manifest.launcher_binary {
+        if name == manifest.launcher_binary
+            || manifest
+                .mcp_launcher_binary
+                .as_ref()
+                .is_some_and(|path| name == *path)
+        {
             let declared = expected
                 .get(name.as_str())
                 .ok_or(FilesystemUpdateError::InvalidArchive)?;
@@ -2749,6 +2819,14 @@ mod tests {
     }
 
     fn package_bytes_with_revision(version: &str, source_revision: &str) -> Vec<u8> {
+        package_bytes_with_options(version, source_revision, true)
+    }
+
+    fn package_bytes_with_options(
+        version: &str,
+        source_revision: &str,
+        include_mcp_launcher: bool,
+    ) -> Vec<u8> {
         let suffix = if cfg!(windows) { ".exe" } else { "" };
         let mut entries = EXPECTED_BINARIES
             .iter()
@@ -2767,6 +2845,14 @@ mod tests {
             0o755,
             b"launcher".to_vec(),
         ));
+        if include_mcp_launcher {
+            entries.push((
+                format!("launcher/rootlight-mcp-launcher{suffix}"),
+                "mcp_launcher",
+                0o755,
+                b"mcp-launcher".to_vec(),
+            ));
+        }
         entries.sort_by(|left, right| left.0.cmp(&right.0));
         let manifest_entries = entries
             .iter()
@@ -2780,8 +2866,12 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let manifest = serde_json::json!({
-            "schema": PACKAGE_MANIFEST_SCHEMA,
+        let mut manifest = serde_json::json!({
+            "schema": if include_mcp_launcher {
+                PACKAGE_MANIFEST_SCHEMA_V2
+            } else {
+                PACKAGE_MANIFEST_SCHEMA_V1
+            },
             "target": current_target().expect("test platform is supported"),
             "version": version,
             "source_revision": source_revision,
@@ -2811,6 +2901,15 @@ mod tests {
             "retained_versions": 2,
             "entries": manifest_entries
         });
+        if include_mcp_launcher {
+            manifest
+                .as_object_mut()
+                .expect("package manifest is an object")
+                .insert(
+                    "mcp_launcher_binary".to_owned(),
+                    serde_json::json!(format!("launcher/rootlight-mcp-launcher{suffix}")),
+                );
+        }
         let output = Cursor::new(Vec::new());
         let mut writer = ZipWriter::new(output);
         for (path, _kind, mode, bytes) in entries {
@@ -3229,7 +3328,12 @@ mod tests {
         assert_eq!(status.active_version, "1.0.0");
         assert!(!status.recovery_required);
         let semantic_host = platform_executable_name("rootlight-semantic-host");
+        let mcp = platform_executable_name("rootlight-mcp");
         assert!(root.join("current/bin").join(&semantic_host).is_file());
+        assert_eq!(
+            fs::read(root.join("current/bin").join(&mcp)).expect("MCP launcher reads"),
+            b"mcp-launcher"
+        );
         assert!(
             root.join("versions/1.0.0/bin")
                 .join(&semantic_host)
@@ -3246,6 +3350,11 @@ mod tests {
                     .expect("secondary launcher link reads"),
                 b"linked-launcher"
             );
+            assert_eq!(
+                fs::read(root.join("current/bin").join(&mcp))
+                    .expect("dedicated MCP launcher remains independent"),
+                b"mcp-launcher"
+            );
         }
         let removed = uninstall_package(&root).expect("package uninstalls");
         assert!(removed.user_data_preserved);
@@ -3260,6 +3369,34 @@ mod tests {
         assert!(!root.join("current").exists());
         assert!(!root.join("versions").exists());
         assert!(!root.join("state").exists());
+    }
+
+    #[test]
+    fn bootstrap_accepts_legacy_package_without_dedicated_mcp_launcher() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let root = temporary.path().join("install");
+        let archive = temporary.path().join("package.zip");
+        let bytes = package_bytes_with_options("1.0.0", &"a".repeat(40), false);
+        fs::write(&archive, &bytes).expect("package writes");
+        let digest = hex_sha256(Sha256::digest(&bytes).into());
+        let key_pair = test_key_pair();
+
+        install_package_with_policy(
+            &root,
+            &archive,
+            &digest,
+            &policy(UpdatePublicKey(*key_pair.pk)),
+        )
+        .expect("legacy package installs");
+
+        assert_eq!(
+            fs::read(
+                root.join("current/bin")
+                    .join(platform_executable_name("rootlight-mcp"))
+            )
+            .expect("legacy MCP launcher reads"),
+            b"launcher"
+        );
     }
 
     #[test]

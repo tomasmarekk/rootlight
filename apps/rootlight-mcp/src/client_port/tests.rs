@@ -1276,7 +1276,13 @@ fn client_errors_map_to_source_free_port_classes() {
     );
     assert_eq!(
         map_client_error(ClientError::RequestTimedOut),
-        crate::ClientPortError::Transport
+        crate::ClientPortError::Public(Box::new(
+            PublicError::builder(ErrorCode::Busy, "daemon request timed out")
+                .retryable()
+                .next_action(rootlight_mcp_contract::NextAction::Retry)
+                .build()
+                .expect("timeout error validates")
+        ))
     );
     assert_eq!(
         map_client_error(ClientError::DaemonLaunchCleanupTimedOut),

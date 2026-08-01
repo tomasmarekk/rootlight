@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "fa1f9742250f8aad9f5d81ef6a0a9ea50eaedb4fe461dbfa45c030a73313f9be"
+      "blake3": "7a0e8258101da9860332b380aa4d54499de93e036132ff7ec56ea42d164b200e"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
@@ -34,7 +34,7 @@
     },
     {
       "path": "crates/rootlight-ir/src/lib.rs",
-      "blake3": "e6d7cb58508c55556e4512a93dd65b7dafc6402a006208601cd3d6c0a7316a55"
+      "blake3": "7bbb0c633d0da4a4b4d0e9f9f8bd9bb698b5874fd40587de4c6fb66af1d6c2bb"
     },
     {
       "path": "crates/rootlight-ir/src/normalized.rs",
@@ -70,7 +70,7 @@
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
-      "blake3": "5b593a60ad4b88b42297032b44cd6775587aa1a5c108abf675fe6c0f859b8ce5"
+      "blake3": "94df2f4cbe16cc7b2597bb4cd9a0f596ef914e39bcea922609c9b7dd16e0cac3"
     },
     {
       "path": "proto/adapter_v1.proto",

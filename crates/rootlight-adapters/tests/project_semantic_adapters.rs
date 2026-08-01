@@ -11,22 +11,26 @@ use std::{
 };
 
 use rootlight_adapter_sdk::{
-    AdapterDiagnostic, AdapterError, AnalysisLimits, AnalysisUnitId, BatchThresholds,
-    BuildTargetId, CoverageReport, DiagnosticCode, EncodingId, GeneratedOriginMapping,
-    GenerationBoundSnapshot, LanguageId, MemoryAdmissionPolicy, MemoryEnforcement,
-    ParseCapabilities, ParseProvider, ParseReport, ParseRequest, ProjectAnalysisLimits,
-    ProjectAnalysisRequest, ProjectSourceInput, ResourceUsage, StreamEnd, StreamLimits, SyntaxFact,
-    SyntaxFactKind, SyntaxFactSink, SyntaxKindLabel, TransformationId, WorkReport,
-    execute_project_analysis,
+    AdapterDiagnostic, AdapterError, AnalysisLimits, AnalysisRequest, AnalysisUnitId,
+    BatchThresholds, BuildTargetId, CoverageReport, DiagnosticCode, EncodingId,
+    GeneratedOriginMapping, GenerationBoundSnapshot, LanguageId, MemoryAdmissionPolicy,
+    MemoryEnforcement, ParseCapabilities, ParseProvider, ParseReport, ParseRequest,
+    ProjectAnalysisLimits, ProjectAnalysisRequest, ProjectSourceInput, ResourceUsage, StreamEnd,
+    StreamLimits, SyntaxFact, SyntaxFactKind, SyntaxFactSink, SyntaxKindLabel, TransformationId,
+    WorkReport, execute_analysis, execute_project_analysis,
+};
+use rootlight_adapter_treesitter::{
+    ParserSettings, RuntimeConfig, TreeSitterAnalyzer, TreeSitterProvider,
 };
 use rootlight_adapters::{SemanticProjectAnalyzer, SemanticProjectLanguage};
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, RepositoryId, content_hash};
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, CoverageStatus, DiagnosticSeverity, ExtensionSupport,
-    FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain, FactRef, IrLimits, OccurrenceRole, OccurrenceTarget,
-    ProducerIdentity, ProducerKind, RelationPredicate, SYMBOL_IDENTITY_CLAIM_NAMESPACE,
-    SourceMappingKind, SourceRef, SourceSpan,
+    AnalysisTier, BuildContextIdentity, CoverageStatus, DiagnosticSeverity, EntityKind,
+    ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain, FactRef, IrLimits, OccurrenceRole,
+    OccurrenceTarget, ProducerIdentity, ProducerKind, RelationPredicate,
+    SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceMappingKind, SourceRef, SourceSpan,
+    decode_symbol_identity_claim_envelope,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
@@ -164,6 +168,166 @@ fn function_identity_is_stable_when_only_its_body_changes() {
         .id;
 
     assert_eq!(first_symbol, second_symbol);
+}
+
+#[test]
+fn python_symbol_identity_matches_structural_and_project_analysis() {
+    let fixture = ProjectFixture::new(
+        ["Lib/asyncio/helpers.py", "Lib/asyncio/base_events.py"],
+        [
+            "def helper():\n    return None\n",
+            "class BaseEventLoop:\n    def run_until_complete(self, future):\n        return future\n\ndef _run_once(loop):\n    def nested():\n        return loop\n    return nested()\n",
+        ],
+        SemanticProjectLanguage::Python,
+    );
+    assert_real_parser_symbol_identity(
+        &fixture,
+        "python",
+        &[
+            (EntityKind::Module, "Lib/asyncio/base_events.py"),
+            (EntityKind::Class, "BaseEventLoop"),
+            (EntityKind::Method, "run_until_complete"),
+            (EntityKind::Function, "_run_once"),
+            (EntityKind::Function, "nested"),
+        ],
+    );
+}
+
+#[test]
+fn rust_impl_method_identity_matches_structural_and_project_analysis() {
+    let fixture = ProjectFixture::new(
+        ["src/lib.rs", "src/other.rs"],
+        [
+            "pub struct Demo;\nimpl Demo {\n    pub fn answer(&self) -> u32 { 42 }\n}\npub fn top_level() {}\n",
+            "pub fn other() {}\n",
+        ],
+        SemanticProjectLanguage::Rust,
+    );
+    assert_real_parser_symbol_identity(
+        &fixture,
+        "rust",
+        &[
+            (EntityKind::Struct, "Demo"),
+            (EntityKind::Method, "answer"),
+            (EntityKind::Function, "top_level"),
+        ],
+    );
+}
+
+#[test]
+fn nested_rust_impl_identity_matches_structural_and_project_analysis() {
+    let fixture = ProjectFixture::new(
+        ["src/lib.rs", "src/other.rs"],
+        [
+            "pub struct Outer;\npub struct Local;\nimpl Outer {\n    pub fn create(&self) {\n        impl Local {\n            pub fn nested(&self) {}\n        }\n    }\n}\n",
+            "pub fn other() {}\n",
+        ],
+        SemanticProjectLanguage::Rust,
+    );
+    assert_real_parser_symbol_identity(
+        &fixture,
+        "rust",
+        &[
+            (EntityKind::Struct, "Outer"),
+            (EntityKind::Struct, "Local"),
+            (EntityKind::Method, "nested"),
+        ],
+    );
+}
+
+fn assert_real_parser_symbol_identity(
+    fixture: &ProjectFixture,
+    language: &str,
+    expected: &[(EntityKind, &str)],
+) {
+    let limits = real_parser_limits();
+    let provider = Arc::new(real_parser());
+    let parser: Arc<dyn ParseProvider> = provider.clone();
+    let producer = producer_identity();
+    let binary_digest = content_hash(b"real-parser-binary");
+    let project_analyzer = SemanticProjectAnalyzer::new(
+        fixture.language,
+        parser,
+        producer.clone(),
+        binary_digest,
+        fixture.build_context,
+    )
+    .expect("project analyzer constructs");
+    let project_output = execute_project_analysis(
+        &project_analyzer,
+        &fixture.request(&limits, AnalysisTier::TierB),
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect("project analysis commits");
+    let structural_analyzer = TreeSitterAnalyzer::new(
+        provider,
+        producer,
+        LanguageId::new(language).expect("language is valid"),
+        language,
+        binary_digest,
+    )
+    .expect("structural analyzer constructs");
+    let mut structural_entities = Vec::new();
+    let mut structural_claims = Vec::new();
+    for (snapshot, source) in fixture.snapshots.iter().zip(&fixture.sources) {
+        let request = AnalysisRequest::new_with_parse_context(
+            GenerationBoundSnapshot::new(snapshot, source).expect("snapshot binds"),
+            LanguageId::new(language).expect("language is valid"),
+            EncodingId::utf8(),
+            Vec::new(),
+            AnalysisTier::TierD,
+            fixture.build_context,
+            &limits,
+        )
+        .expect("analysis request is valid")
+        .with_generated_status(false);
+        let output = execute_analysis(
+            &structural_analyzer,
+            &request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .expect("structural analysis commits");
+        structural_entities.extend(output.document().entities.iter().cloned());
+        structural_claims.extend(
+            output
+                .document()
+                .extensions
+                .iter()
+                .filter_map(|envelope| decode_symbol_identity_claim_envelope(envelope).ok()),
+        );
+    }
+
+    for (kind, name) in expected {
+        let project_id = project_output
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.kind == *kind && entity.display_name == *name)
+            .unwrap_or_else(|| panic!("project analysis emits {kind:?} {name}"))
+            .id;
+        let structural_id = structural_entities
+            .iter()
+            .find(|entity| entity.kind == *kind && entity.display_name == *name)
+            .unwrap_or_else(|| panic!("structural analysis emits {kind:?} {name}"))
+            .id;
+        let project_claim = project_output
+            .document()
+            .extensions
+            .iter()
+            .filter_map(|envelope| decode_symbol_identity_claim_envelope(envelope).ok())
+            .find(|claim| claim.symbol == project_id);
+        let structural_claim = structural_claims
+            .iter()
+            .find(|claim| claim.symbol == structural_id);
+        assert_eq!(
+            project_id, structural_id,
+            "{kind:?} {name}; project={project_claim:?}; structural={structural_claim:?}"
+        );
+    }
 }
 
 #[test]
@@ -929,6 +1093,61 @@ fn analyzer(
         build_context,
     )
     .expect("fixture analyzer constructs")
+}
+
+fn real_parser() -> TreeSitterProvider {
+    let settings = ParserSettings::new(4096).expect("parser settings are valid");
+    let config = RuntimeConfig::new(
+        64 * 1024,
+        64 * 1024,
+        4096,
+        256,
+        256,
+        1,
+        16 * 1024 * 1024,
+        settings,
+    )
+    .expect("runtime configuration is valid");
+    TreeSitterProvider::new(config).expect("audited provider initializes")
+}
+
+fn producer_identity() -> ProducerIdentity {
+    ProducerIdentity::new(
+        "rootlight-project-identity-test",
+        "1.0.0",
+        content_hash(b"project-identity-test-config"),
+    )
+    .expect("producer identity is valid")
+}
+
+fn real_parser_limits() -> AnalysisLimits {
+    let batch =
+        BatchThresholds::new(256, 4 * 1024 * 1024, 128, 128 * 1024).expect("batch is valid");
+    let stream = StreamLimits::new(
+        256,
+        16 * 1024,
+        4 * 1024 * 1024,
+        1024,
+        1024 * 1024,
+        4 * 1024 * 1024,
+        batch,
+    )
+    .expect("stream is valid");
+    AnalysisLimits::new(
+        64 * 1024,
+        64 * 1024,
+        4096,
+        256,
+        16 * 1024 * 1024,
+        stream.clone(),
+        stream,
+        IrLimits::default(),
+    )
+    .expect("analysis limits are valid")
+    .with_project_limits(
+        ProjectAnalysisLimits::new(16, 512 * 1024, 64 * 1024, 128, 128 * 1024, 256, 256)
+            .expect("project limits are valid"),
+    )
 }
 
 fn limits() -> AnalysisLimits {

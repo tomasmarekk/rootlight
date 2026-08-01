@@ -26,7 +26,7 @@ use rootlight_client::{
 use rootlight_ids::{FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::CoverageStatus as IrCoverageStatus;
 use rootlight_mcp_contract::{
-    SafeLabel,
+    ErrorCode, NextAction, PublicError, SafeLabel,
     vertical::{
         AnalysisTier, CacheStatus, Diagnostic, Freshness, IndexMode, IndexPlanScope,
         IndexPlanSummary, LanguageCoverage, RequiredNullable, SourceFreeMessage,
@@ -1615,6 +1615,15 @@ const fn coverage_status(status: CoverageStatus) -> IrCoverageStatus {
 fn map_client_error(error: ClientError) -> ClientPortError {
     match error {
         ClientError::Public(error) => ClientPortError::Public(error),
+        ClientError::RequestTimedOut => ClientPortError::Public(Box::new(
+            PublicError::builder(ErrorCode::Busy, "daemon request timed out")
+                .retryable()
+                .next_action(NextAction::Retry)
+                .build()
+                .unwrap_or_else(|_| {
+                    unreachable!("closed daemon timeout error is statically bounded")
+                }),
+        )),
         ClientError::MismatchedRequestId
         | ClientError::MissingResponse
         | ClientError::UnexpectedResponse
@@ -1648,7 +1657,6 @@ fn map_client_error(error: ClientError) -> ClientPortError {
         | ClientError::MissingProtocol
         | ClientError::ProtocolMismatch
         | ClientError::ProtocolFeatureUnavailable
-        | ClientError::RequestTimedOut
         | ClientError::Runtime(_)
         | ClientError::DaemonUnavailable
         | ClientError::LaunchIo(_)

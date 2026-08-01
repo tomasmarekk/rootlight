@@ -33,7 +33,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 const SPEC_PATH: &str = "packaging/package.toml";
 const SPEC_SCHEMA: &str = "rootlight.package-spec/1";
-const ARCHIVE_SCHEMA: &str = "rootlight.package-manifest/1";
+const ARCHIVE_SCHEMA: &str = "rootlight.package-manifest/2";
 const LIFECYCLE_SCHEMA: &str = "rootlight.package-lifecycle/4";
 const MAX_SPEC_BYTES: u64 = 256 * 1024;
 const MAX_TEMPLATE_BYTES: u64 = 1024 * 1024;
@@ -44,6 +44,7 @@ const MAX_CHECKSUM_BYTES: u64 = 512;
 const MAX_ARCHIVE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const EXPECTED_LAUNCHER: &str = "rootlight-launcher";
+const EXPECTED_MCP_LAUNCHER: &str = "rootlight-mcp-launcher";
 const EXPECTED_BINARIES: [&str; 5] = [
     "rootlight",
     "rootlight-adapter-host",
@@ -361,12 +362,16 @@ fn validate_spec(workspace: &Path, spec: &PackageSpec) -> Result<(), PackageErro
     validate_relative_path(&spec.ownership_manifest)?;
     validate_relative_path(&spec.active_version_file)?;
     validate_resource_id(&spec.launcher_binary)?;
+    validate_resource_id(&spec.mcp_launcher_binary)?;
     validate_relative_path(&spec.versions_directory)?;
     validate_relative_path(&spec.launcher_directory)?;
     validate_relative_path(&spec.update_lock_file)?;
     validate_relative_path(&spec.update_transaction_file)?;
     if spec.launcher_binary != EXPECTED_LAUNCHER {
         return invalid_spec("launcher binary must match the workspace launcher");
+    }
+    if spec.mcp_launcher_binary != EXPECTED_MCP_LAUNCHER {
+        return invalid_spec("MCP launcher binary must match the workspace MCP launcher");
     }
     let state_paths = [
         spec.ownership_manifest.as_str(),
@@ -489,7 +494,7 @@ fn build_archive(
     output_dir: &Path,
 ) -> Result<BuildOutcome, PackageError> {
     prepare_output_dir(output_dir)?;
-    let mut entries = Vec::with_capacity(spec.binaries.len() + DISTRIBUTION_LICENSES.len() + 5);
+    let mut entries = Vec::with_capacity(spec.binaries.len() + DISTRIBUTION_LICENSES.len() + 6);
     for binary in &spec.binaries {
         let filename = format!("{}{}", binary.name, platform.executable_suffix);
         let source = bin_dir.join(&filename);
@@ -508,6 +513,18 @@ fn build_archive(
         "launcher",
         0o755,
         read_regular_bounded(&bin_dir.join(&launcher_filename), spec.maximum_binary_bytes)?,
+    )?);
+    let mcp_launcher_filename =
+        format!("{}{}", spec.mcp_launcher_binary, platform.executable_suffix);
+    let mcp_launcher_path = format!("launcher/{mcp_launcher_filename}");
+    entries.push(ArchiveEntry::new(
+        mcp_launcher_path.clone(),
+        "mcp_launcher",
+        0o755,
+        read_regular_bounded(
+            &bin_dir.join(&mcp_launcher_filename),
+            spec.maximum_binary_bytes,
+        )?,
     )?);
     let template_name = Path::new(&platform.autostart_source)
         .file_name()
@@ -561,6 +578,7 @@ fn build_archive(
         ownership_manifest: &spec.ownership_manifest,
         active_version_file: &spec.active_version_file,
         launcher_binary: &launcher_path,
+        mcp_launcher_binary: &mcp_launcher_path,
         versions_directory: &spec.versions_directory,
         launcher_directory: &spec.launcher_directory,
         update_lock_file: &spec.update_lock_file,
@@ -1427,6 +1445,7 @@ struct PackageSpec {
     ownership_manifest: String,
     active_version_file: String,
     launcher_binary: String,
+    mcp_launcher_binary: String,
     versions_directory: String,
     launcher_directory: String,
     update_lock_file: String,
@@ -1505,6 +1524,7 @@ struct ArchiveManifest<'a> {
     ownership_manifest: &'a str,
     active_version_file: &'a str,
     launcher_binary: &'a str,
+    mcp_launcher_binary: &'a str,
     versions_directory: &'a str,
     launcher_directory: &'a str,
     update_lock_file: &'a str,
@@ -1720,6 +1740,11 @@ mod tests {
             format!("fixture:{}", spec.launcher_binary),
         )
         .expect("launcher fixture");
+        fs::write(
+            binaries.join(&spec.mcp_launcher_binary),
+            format!("fixture:{}", spec.mcp_launcher_binary),
+        )
+        .expect("MCP launcher fixture");
         let version = Version::parse("1.2.3").expect("version");
 
         let first = build_archive(
@@ -1795,6 +1820,8 @@ mod tests {
             .expect("manifest reads");
         assert!(manifest.contains("\"autostart_default\": \"disabled\""));
         assert!(manifest.contains("\"user_data_policy\": \"preserve\""));
+        assert!(manifest.contains("\"mcp_launcher_binary\": \"launcher/rootlight-mcp-launcher\""));
+        assert!(names.contains(&"launcher/rootlight-mcp-launcher".to_owned()));
         assert!(names.contains(&"NOTICE".to_owned()));
         for filename in DISTRIBUTION_LICENSES {
             assert!(names.contains(&format!("licenses/{filename}")));
