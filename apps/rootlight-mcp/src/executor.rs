@@ -210,6 +210,15 @@ pub type PlanChangePortRequest = PlanChangeRequest;
 /// future when that signal fires. The response wrappers carry mandatory MCP
 /// facts that the current `rootlight-client` DTOs do not yet expose.
 pub trait FirstSliceClientPort: Send + Sync + 'static {
+    /// Establishes daemon readiness before tool execution accounting begins.
+    ///
+    /// In-memory and unavailable ports need no preparation. Production uses
+    /// this boundary to keep bounded startup recovery separate from the
+    /// request's own execution budget.
+    fn prepare(&self, _cancellation: RequestCancellation) -> ClientPortFuture<()> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Starts one whole-repository first-slice index operation.
     ///
     /// The MCP input has no request-scoped idempotency key. Implementations
@@ -1932,7 +1941,6 @@ async fn execute_query_batch<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: QueryBatchInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
@@ -1955,6 +1963,7 @@ where
     )?;
 
     let repository = repository_id(plan.repository().clone(), unsupported)?;
+    let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_query_batch(port, repository, &plan, cancellation).await?;
         return serialize_measured_read_success(output, started_at, budget.limits);
@@ -2735,7 +2744,7 @@ where
     let limits = BudgetLimits::server_ceiling();
     let repository = repository_id(input.repository.clone(), unsupported)?;
     let adapter = Arc::new(McpAgentToolPort {
-        port,
+        port: Arc::clone(&port),
         validator,
         unsupported: unsupported.clone(),
         invalid_arguments: invalid_arguments.clone(),
@@ -2769,6 +2778,7 @@ where
             .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))?;
         input.generation = Some(GenerationSelector::Explicit(cursor_generation));
     }
+    prepare_port(&port, &cancellation).await?;
     let output = ContextPackService
         .execute(adapter, input, repository, cancellation)
         .await
@@ -2850,7 +2860,6 @@ async fn execute_repo_list<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: RepoListInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
     if !is_compact_profile(input.response_profile) {
@@ -2925,6 +2934,7 @@ where
         continuation,
     )
     .map_err(|_| invalid_input())?;
+    let started_at = prepare_port(&port, &cancellation).await?;
     let future = port.repository_catalog_page(request, cancellation.clone());
     let page = await_port(future, cancellation).await?;
     let total_count = page
@@ -3512,7 +3522,6 @@ async fn execute_repo_status<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: RepoStatusInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
     let repository = repository_id(input.repository.clone(), unsupported)?;
@@ -3549,6 +3558,7 @@ where
             input.include_operations.unwrap_or(false),
             require_freshness,
         );
+    let started_at = prepare_port(&port, &cancellation).await?;
     let future = port.repository_status(request, cancellation.clone());
     let status = await_port(future, cancellation).await?;
 
@@ -3868,7 +3878,6 @@ async fn execute_code_locate<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: CodeLocateInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
@@ -3891,6 +3900,7 @@ where
         );
         validate_repository_cursor(&parsed, &context, invalid_cursor, cursor_key)?;
     }
+    let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_code_locate(port, request, cancellation).await?;
         return serialize_profiled_read_success(
@@ -4166,12 +4176,12 @@ async fn execute_symbol_explain<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: SymbolExplainInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_symbol_explain(input, unsupported)?;
+    let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_symbol_explain(port, request, cancellation).await?;
         return serialize_profiled_read_success(
@@ -4201,7 +4211,6 @@ async fn execute_symbol_relationships<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: SymbolRelationshipsInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
@@ -4224,6 +4233,7 @@ where
         );
         validate_repository_cursor(&parsed, &context, invalid_cursor, cursor_key)?;
     }
+    let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_symbol_relationships(port, request, cancellation).await?;
         return serialize_profiled_read_success(
@@ -4497,7 +4507,6 @@ async fn execute_flow_trace<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: FlowTraceInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
@@ -4505,6 +4514,7 @@ where
     let trace_relations = input.relations.clone();
     let trace_min_confidence = input.min_confidence;
     let request = normalize_flow_trace(input, unsupported)?;
+    let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_flow_trace(
             port,
@@ -4692,12 +4702,12 @@ async fn execute_architecture_cycles<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: ArchitectureCyclesInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_architecture_cycles(input, unsupported)?;
+    let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_architecture_cycles(port, request, cancellation).await?;
         return serialize_profiled_read_success(
@@ -4896,12 +4906,12 @@ async fn execute_code_dead<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: CodeDeadInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_code_dead(input, unsupported)?;
+    let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_code_dead(port, request, cancellation).await?;
         return serialize_profiled_read_success(
@@ -5072,12 +5082,12 @@ async fn execute_architecture_overview<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: ArchitectureOverviewInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_architecture_overview(input, unsupported)?;
+    let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_architecture_overview(port, request, cancellation).await?;
         return serialize_profiled_read_success(
@@ -5281,12 +5291,12 @@ async fn execute_tests_select<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: TestsSelectInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_tests_select(input, unsupported)?;
+    let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_tests_select(port, request, cancellation).await?;
         return serialize_profiled_read_success(
@@ -5469,12 +5479,12 @@ async fn execute_change_impact<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: ChangeImpactInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_change_impact(input, unsupported)?;
+    let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_change_impact(port, request, cancellation).await?;
         return serialize_profiled_read_success(
@@ -5663,10 +5673,13 @@ async fn execute_plan_change<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: PlanChangeInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let response_profile = input.profile.unwrap_or(ResponseProfile::Compact);
+    normalize_plan_change(input.clone()).map_err(|error| {
+        map_plan_change_service_error(PlanChangeServiceError::Admission(error), unsupported)
+    })?;
+    let started_at = prepare_port(&port, &cancellation).await?;
     let deadline = started_at
         .checked_add(Duration::from_millis(budget.limits.maximums().time_ms))
         .ok_or_else(|| internal(ToolExecutionFailure::Executor))?;
@@ -5904,11 +5917,11 @@ async fn execute_history_compare<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: HistoryCompareInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let request = normalize_history_compare(input, unsupported)?;
+    let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_history_compare(port, request, cancellation).await?;
         return serialize_measured_read_success(output, started_at, budget.limits);
@@ -6072,7 +6085,6 @@ async fn execute_query_advanced<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: QueryAdvancedInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(None)?;
     if input.explain == Some(true) && input.cursor.is_some() {
@@ -6091,6 +6103,7 @@ where
         );
         validate_repository_cursor(&parsed, &context, invalid_cursor, cursor_key)?;
     }
+    let started_at = prepare_port(&port, &cancellation).await?;
     let expected = request.clone();
     let future = port.query_advanced(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -6230,12 +6243,12 @@ async fn execute_source_read<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: SourceReadInput = decode_input(arguments)?;
     let budget =
         AnalyticalBudget::with_source_limit(input.budget.as_ref(), input.max_source_bytes)?;
     let explain_only = input.explain == Some(true);
     let request = normalize_source_read(input, unsupported, invalid_arguments)?;
+    let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_source_read(port, request, cancellation).await?;
         return serialize_measured_read_success(output, started_at, budget.limits);
@@ -6256,6 +6269,18 @@ async fn await_port<T>(
         _ = cancellation.cancelled() => Err(internal(ToolExecutionFailure::Executor)),
         response = future => response.map_err(map_port_error),
     }
+}
+
+async fn prepare_port<P>(
+    port: &Arc<P>,
+    cancellation: &RequestCancellation,
+) -> Result<Instant, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let readiness = port.prepare(cancellation.clone());
+    await_port(readiness, cancellation.clone()).await?;
+    Ok(Instant::now())
 }
 
 fn decode_input<T>(arguments: Map<String, Value>) -> Result<T, ToolExecutionError>

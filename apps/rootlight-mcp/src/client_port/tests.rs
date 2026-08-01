@@ -221,6 +221,10 @@ impl FakeAsyncClient {
 }
 
 impl AsyncFirstSliceClient for FakeAsyncClient {
+    fn prepare(&self) -> AsyncClientFuture<()> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn repository_index(
         &self,
         root: String,
@@ -1102,12 +1106,8 @@ async fn deferred_port_connects_only_for_tool_calls_and_retries_transient_failur
     });
     assert_eq!(attempts.load(Ordering::SeqCst), 0);
 
-    let request =
-        RepositoryCatalogPageRequest::new(1, None, None, None, None).expect("request is valid");
     for expected_attempts in 1..=2 {
-        let result =
-            FirstSliceClientPort::repository_catalog_page(&port, request.clone(), cancellation())
-                .await;
+        let result = FirstSliceClientPort::prepare(&port, cancellation()).await;
         assert!(matches!(result, Err(crate::ClientPortError::Transport)));
         assert_eq!(attempts.load(Ordering::SeqCst), expected_attempts);
     }

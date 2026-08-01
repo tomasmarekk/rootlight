@@ -204,6 +204,8 @@ struct FakePort {
     outcome: FakeOutcome,
     calls: Arc<Mutex<Vec<ObservedCall>>>,
     call_count: Arc<AtomicUsize>,
+    prepare_count: Arc<AtomicUsize>,
+    prepare_delay: Duration,
 }
 
 struct DropMarker(Arc<AtomicBool>);
@@ -407,6 +409,21 @@ fn catalog_page(
 }
 
 impl FirstSliceClientPort for FakePort {
+    fn prepare(&self, _cancellation: RequestCancellation) -> ClientPortFuture<()> {
+        let invocation = self.prepare_count.fetch_add(1, Ordering::Relaxed);
+        let delay = if invocation == 0 {
+            self.prepare_delay
+        } else {
+            Duration::ZERO
+        };
+        Box::pin(async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            Ok(())
+        })
+    }
+
     fn repository_index(
         &self,
         request: RepositoryIndexPortRequest,
@@ -771,37 +788,50 @@ struct Harness {
     executor: FirstSliceToolExecutor<FakePort>,
     calls: Arc<Mutex<Vec<ObservedCall>>>,
     call_count: Arc<AtomicUsize>,
+    prepare_count: Arc<AtomicUsize>,
 }
 
 impl Harness {
     fn new(outcome: FakeOutcome) -> Self {
+        Self::with_prepare_delay(outcome, Duration::ZERO)
+    }
+
+    fn with_prepare_delay(outcome: FakeOutcome, prepare_delay: Duration) -> Self {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let call_count = Arc::new(AtomicUsize::new(0));
+        let prepare_count = Arc::new(AtomicUsize::new(0));
         let port = FakePort {
             outcome,
             calls: Arc::clone(&calls),
             call_count: Arc::clone(&call_count),
+            prepare_count: Arc::clone(&prepare_count),
+            prepare_delay,
         };
         Self {
             executor: FirstSliceToolExecutor::new(port).expect("built-in errors are valid"),
             calls,
             call_count,
+            prepare_count,
         }
     }
 
     fn with_cursor_key(outcome: FakeOutcome, cursor_key: [u8; 32]) -> Self {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let call_count = Arc::new(AtomicUsize::new(0));
+        let prepare_count = Arc::new(AtomicUsize::new(0));
         let port = FakePort {
             outcome,
             calls: Arc::clone(&calls),
             call_count: Arc::clone(&call_count),
+            prepare_count: Arc::clone(&prepare_count),
+            prepare_delay: Duration::ZERO,
         };
         Self {
             executor: FirstSliceToolExecutor::with_cursor_key(port, cursor_key)
                 .expect("built-in errors are valid"),
             calls,
             call_count,
+            prepare_count,
         }
     }
 
@@ -830,6 +860,8 @@ async fn analytic_request_options_reach_the_port_unchanged() {
         outcome: FakeOutcome::CodeLocate(Err(ClientPortError::Executor)),
         calls: Arc::clone(&calls),
         call_count: Arc::new(AtomicUsize::new(0)),
+        prepare_count: Arc::new(AtomicUsize::new(0)),
+        prepare_delay: Duration::ZERO,
     };
     let options = client::RequestOptions::new().with_timeout(
         client::RequestTimeout::new(std::time::Duration::from_secs(7))
@@ -3319,6 +3351,44 @@ async fn query_batch_composes_locate_subtools_under_one_pinned_generation() {
 }
 
 #[tokio::test]
+async fn query_batch_excludes_client_preparation_from_the_aggregate_budget() {
+    let preparation_delay = Duration::from_millis(1_500);
+    let harness = Harness::with_prepare_delay(
+        FakeOutcome::Batch {
+            status: Box::new(Ok(repository_status_response())),
+            locate: Ok(locate_response()),
+        },
+        preparation_delay,
+    );
+    let started_at = Instant::now();
+    let output = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "budget": {"timeout_ms": 1_000},
+            "operations": [{
+                "id": "find",
+                "tool": "code.locate",
+                "arguments": {"query": "publish", "max_results": 5}
+            }]
+        }),
+    )
+    .await
+    .expect("batch executes after delayed client preparation");
+    let elapsed = started_at.elapsed();
+    let output: QueryBatchOutput = decode(output);
+    let ToolResponse::Success(output) = output else {
+        panic!("expected batch success");
+    };
+
+    assert_eq!(output.data.batch_status, BatchStatus::Ok);
+    assert_eq!(harness.prepare_count.load(Ordering::Relaxed), 2);
+    assert!(elapsed >= preparation_delay);
+    assert!(output.usage.wall_time_ms <= 1_000);
+}
+
+#[tokio::test]
 async fn query_batch_public_profiles_preserve_child_semantics() {
     let mut semantics = Vec::new();
 
@@ -5627,6 +5697,11 @@ async fn repo_list_cursor_binds_query_and_state_presence_before_daemon_work() {
         1,
         "context mismatches are authenticated before daemon lookup"
     );
+    assert_eq!(
+        harness.prepare_count.load(Ordering::Relaxed),
+        1,
+        "context mismatches are authenticated before daemon readiness"
+    );
 }
 
 #[tokio::test]
@@ -5786,6 +5861,8 @@ fn executor_fails_closed_when_cursor_key_provider_fails() {
         })),
         calls,
         call_count,
+        prepare_count: Arc::new(AtomicUsize::new(0)),
+        prepare_delay: Duration::ZERO,
     };
     assert!(matches!(
         FirstSliceToolExecutor::with_cursor_key_provider(port, &FailingProvider),
@@ -5803,6 +5880,8 @@ fn executor_rejects_all_zero_cursor_key_material() {
         })),
         calls,
         call_count,
+        prepare_count: Arc::new(AtomicUsize::new(0)),
+        prepare_delay: Duration::ZERO,
     };
     assert!(matches!(
         FirstSliceToolExecutor::with_cursor_key(port, [0; 32]),

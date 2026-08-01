@@ -56,6 +56,8 @@ const BRIDGE_TRACE_PREFIX: &str = "bridge-";
 type AsyncClientFuture<T> = Pin<Box<dyn Future<Output = Result<T, ClientError>> + Send + 'static>>;
 
 trait AsyncFirstSliceClient: Send + Sync + 'static {
+    fn prepare(&self) -> AsyncClientFuture<()>;
+
     fn repository_index(
         &self,
         root: String,
@@ -344,6 +346,14 @@ struct LiveAsyncFirstSliceClient {
 }
 
 impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
+    fn prepare(&self) -> AsyncClientFuture<()> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client.resolve().await?;
+            Ok(())
+        })
+    }
+
     fn repository_index(
         &self,
         root: String,
@@ -825,6 +835,11 @@ impl fmt::Debug for NativeFirstSliceClientPort {
 }
 
 impl FirstSliceClientPort for NativeFirstSliceClientPort {
+    fn prepare(&self, _cancellation: RequestCancellation) -> ClientPortFuture<()> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move { client.prepare().await.map_err(map_client_error) })
+    }
+
     fn repository_index(
         &self,
         request: RepositoryIndexPortRequest,
