@@ -1293,6 +1293,8 @@ enum JournalActorState {
 #[derive(Debug, Clone)]
 pub struct JournalActorHandle {
     state: Arc<Mutex<JournalActorState>>,
+    journal: Arc<OperationJournal>,
+    telemetry: Arc<Telemetry>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1870,6 +1872,30 @@ impl JournalActorHandle {
         await_claimed_mutation(receiver, claim).await
     }
 
+    /// Terminalizes durable work whose synchronous owner is relinquishing it.
+    ///
+    /// This narrow direct path is independent of both actor queues. The caller
+    /// must have stopped all work for the operation before invoking it; journal
+    /// transactions still serialize against any actor mutation that won first.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed journal or lifecycle failure.
+    pub fn compensate_unowned_operation(
+        &self,
+        operation: OperationId,
+        error: PublicError,
+        cancellation_reason: Option<rootlight_operations::CancellationReason>,
+    ) -> Result<OperationRecord, OperationError> {
+        compensate_unowned_operation(
+            &self.journal,
+            &self.telemetry,
+            operation,
+            &error,
+            cancellation_reason,
+        )
+    }
+
     fn finish_operation_receiver(
         &self,
         operation: OperationId,
@@ -2106,6 +2132,8 @@ impl JournalActor {
         }
         let (control_tx, control_rx) = mpsc::sync_channel(control_capacity);
         let (normal_tx, normal_rx) = mpsc::sync_channel(normal_capacity);
+        let handle_journal = Arc::clone(&journal);
+        let handle_telemetry = Arc::clone(&telemetry);
         let thread = thread::Builder::new()
             .name("rootlight-journal".to_owned())
             .spawn(move || journal_actor_loop(journal, control_rx, normal_rx, telemetry))
@@ -2116,6 +2144,8 @@ impl JournalActor {
                     control: control_tx,
                     normal: normal_tx,
                 }))),
+                journal: handle_journal,
+                telemetry: handle_telemetry,
             },
             join: Some(thread),
         })
@@ -2474,6 +2504,9 @@ fn execute_journal_command(
                     ) {
                         return Ok(record);
                     }
+                    // A durable cancellation decision precedes any later
+                    // process-local completion signal.
+                    let cancellation_reason = record.cancellation_reason.or(cancellation_reason);
                     if cancellation_reason
                         == Some(rootlight_operations::CancellationReason::DeadlineExceeded)
                     {
@@ -2562,6 +2595,8 @@ fn execute_journal_command(
                             .and_then(|_| {
                                 journal.transition(operation, OperationState::Cancelled, None)
                             })
+                    } else if record.state == OperationState::Queued {
+                        journal.transition(operation, OperationState::Failed, Some(&error))
                     } else if record.state == OperationState::Running {
                         let staged = if record.stage == OperationStage::Cleanup {
                             Ok(record)
@@ -2853,6 +2888,106 @@ fn internal_cancellation_authority(
         _ => return Err(OperationError::UnsupportedCancellationReason),
     };
     Ok(CancellationAuthority::Internal(authority))
+}
+
+fn compensate_unowned_operation(
+    journal: &OperationJournal,
+    telemetry: &Telemetry,
+    operation: OperationId,
+    error: &PublicError,
+    cancellation_reason: Option<CancellationReason>,
+) -> Result<OperationRecord, OperationError> {
+    const MAX_RECONCILIATION_STEPS: usize = 8;
+
+    for _ in 0..MAX_RECONCILIATION_STEPS {
+        let record = journal.status(operation)?;
+        if record.state.is_terminal() {
+            return Ok(record);
+        }
+        let result = compensate_unowned_operation_once(
+            journal,
+            telemetry,
+            record,
+            error,
+            cancellation_reason,
+        );
+        match result {
+            Ok(record) if record.state.is_terminal() => return Ok(record),
+            Ok(_) => {}
+            Err(
+                OperationError::ConcurrentUpdate
+                | OperationError::CancellationWon
+                | OperationError::CancellationTooLate
+                | OperationError::IllegalTransition { .. }
+                | OperationError::InvalidStage,
+            ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let record = journal.status(operation)?;
+    if record.state.is_terminal() {
+        Ok(record)
+    } else {
+        Err(OperationError::ConcurrentUpdate)
+    }
+}
+
+fn compensate_unowned_operation_once(
+    journal: &OperationJournal,
+    telemetry: &Telemetry,
+    record: OperationRecord,
+    error: &PublicError,
+    cancellation_reason: Option<CancellationReason>,
+) -> Result<OperationRecord, OperationError> {
+    let operation = record.operation;
+    if record.cancellation_reason.is_none()
+        && record.state == OperationState::Running
+        && record.stage == OperationStage::Cleanup
+    {
+        return journal.fail_if_revision(operation, record.revision, error);
+    }
+    // A durable cancellation decision wins over a later process-local signal.
+    let cancellation_reason = record.cancellation_reason.or(cancellation_reason);
+    if let Some(reason) = cancellation_reason {
+        if reason == CancellationReason::DeadlineExceeded {
+            return journal.interrupt_deadline(operation);
+        }
+        let cancelled = cancel_operation_with_audit(
+            journal,
+            telemetry,
+            operation,
+            internal_cancellation_authority(reason)?,
+        )?
+        .operation;
+        if cancelled.state.is_terminal() {
+            return Ok(cancelled);
+        }
+        return match cancelled.state {
+            OperationState::Running | OperationState::Cancelling => {
+                let staged = if cancelled.stage == OperationStage::Cleanup {
+                    Ok(cancelled)
+                } else {
+                    journal.update_stage(operation, OperationStage::Cleanup)
+                };
+                staged.and_then(|_| journal.transition(operation, OperationState::Cancelled, None))
+            }
+            OperationState::Queued
+            | OperationState::Succeeded
+            | OperationState::Failed
+            | OperationState::Cancelled
+            | OperationState::Interrupted => Err(OperationError::CorruptState),
+        };
+    }
+    match record.state {
+        OperationState::Queued | OperationState::Running => {
+            journal.fail_if_revision(operation, record.revision, error)
+        }
+        OperationState::Cancelling
+        | OperationState::Succeeded
+        | OperationState::Failed
+        | OperationState::Cancelled
+        | OperationState::Interrupted => Err(OperationError::CorruptState),
+    }
 }
 
 /// Source-free health state returned through every control boundary.
@@ -6525,7 +6660,9 @@ async fn dispatch_first_slice(
         Ok(Err(error)) => daemon::response_envelope::Response::Error(public_error_to_wire(&error)),
         Err(_) => {
             let _ = cancellation.cancel(CancellationReason::DeadlineExceeded);
-            daemon::response_envelope::Response::Error(public_error_to_wire(&request_timed_out()))
+            daemon::response_envelope::Response::Error(public_error_to_wire(
+                &first_slice_request_timed_out(&correlation_request),
+            ))
         }
     }
 }
@@ -9881,6 +10018,26 @@ fn request_timed_out() -> PublicError {
         .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
 }
 
+fn first_slice_request_timed_out(request: &FirstSliceIpcRequest) -> PublicError {
+    let operation = match request {
+        FirstSliceIpcRequest::RepositoryIndex(request) => request.operation.as_ref(),
+        FirstSliceIpcRequest::RepositoryOperationStatus(request) => request.operation.as_ref(),
+        _ => None,
+    }
+    .and_then(|operation| <[u8; 16]>::try_from(operation.value.as_slice()).ok())
+    .map(OperationId::from_bytes);
+    let Some(operation) = operation else {
+        return request_timed_out();
+    };
+    PublicError::builder(ErrorCode::Busy, "daemon request timed out")
+        .retryable()
+        .operation(operation)
+        .next_action(NextAction::InspectOperation)
+        .next_action(NextAction::Retry)
+        .build()
+        .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
+}
+
 fn first_slice_unavailable() -> PublicError {
     PublicError::builder(
         ErrorCode::UnsupportedCapability,
@@ -10144,6 +10301,21 @@ mod tests {
         )
     }
 
+    fn manual_journal_handle(
+        control: SyncSender<JournalCommand>,
+        normal: SyncSender<JournalCommand>,
+        journal: Arc<OperationJournal>,
+    ) -> JournalActorHandle {
+        JournalActorHandle {
+            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
+                control,
+                normal,
+            }))),
+            journal,
+            telemetry: Arc::new(Telemetry::default()),
+        }
+    }
+
     fn prepared(submission: OperationSubmission) -> PreparedOperationSubmission {
         PreparedOperationSubmission::from_submission(submission)
             .expect("submission timing prepares")
@@ -10183,12 +10355,11 @@ mod tests {
     ) {
         let (control, control_rx) = mpsc::sync_channel(control_capacity);
         let (normal, normal_rx) = mpsc::sync_channel(4);
-        let journal = JournalActorHandle {
-            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
-                control,
-                normal,
-            }))),
-        };
+        let journal = manual_journal_handle(
+            control,
+            normal,
+            Arc::new(OperationJournal::open_in_memory().expect("journal opens")),
+        );
         let state = Arc::new(DaemonState::starting());
         state.set_lifecycle(DaemonLifecycle::Ready);
         let limits = DaemonLimits::new(
@@ -11546,6 +11717,47 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn timed_out_index_preserves_the_operation_identity() {
+        let handler = DisconnectRecordingFirstSlice::default();
+        let deadline = Instant::now() + Duration::from_millis(20);
+        let operation = OperationId::from_bytes([96; 16]);
+        let request = FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+            schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+            root: "fixture".to_owned(),
+            operation: Some(common::OperationId {
+                value: operation.as_bytes().to_vec(),
+            }),
+            detached: true,
+            mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
+        });
+
+        let response = dispatch_first_slice(
+            &handler,
+            request,
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::from_bytes([96; 16]),
+                selected_protocol_minor: PROTOCOL_MINOR,
+                cancellation: Cancellation::with_deadline(deadline),
+                deadline,
+                effective_budget: None,
+                index_admission: Some(FirstSliceAdmission::default()),
+            },
+        )
+        .await;
+
+        let daemon::response_envelope::Response::Error(error) = response else {
+            panic!("timeout returns a public error");
+        };
+        assert_eq!(error.code, common::ErrorCode::Busy as i32);
+        assert!(error.retryable);
+        assert_eq!(
+            error.operation.as_ref().map(|id| id.value.as_slice()),
+            Some(operation.as_bytes().as_slice())
+        );
+        assert_eq!(error.next_actions.len(), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn unsupported_first_slice_budget_is_rejected_before_handler_work() {
         let handler = DisconnectRecordingFirstSlice::default();
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -12035,12 +12247,11 @@ mod tests {
     fn full_normal_lane_preserves_worker_authorization_for_retry() {
         let (control, _control_rx) = mpsc::sync_channel(1);
         let (normal, normal_rx) = mpsc::sync_channel(1);
-        let handle = JournalActorHandle {
-            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
-                control,
-                normal,
-            }))),
-        };
+        let handle = manual_journal_handle(
+            control,
+            normal,
+            Arc::new(OperationJournal::open_in_memory().expect("journal opens")),
+        );
         let (checkpoint_reply, _checkpoint_response) = tokio::sync::oneshot::channel();
         handle
             .try_send(
@@ -12089,15 +12300,253 @@ mod tests {
     }
 
     #[test]
+    fn admission_compensation_bypasses_full_actor_lanes_and_preserves_reasons() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let running = OperationId::from_bytes([96; 16]);
+        let failed = OperationId::from_bytes([97; 16]);
+        let deadline = OperationId::from_bytes([98; 16]);
+        let resource = OperationId::from_bytes([99; 16]);
+        for operation in [running, failed, deadline, resource] {
+            journal
+                .submit(OperationSubmission::control_probe(operation))
+                .expect("operation submits");
+        }
+        journal
+            .start_execution(running)
+            .expect("running operation starts");
+        let (control, control_rx) = mpsc::sync_channel(1);
+        let (normal, normal_rx) = mpsc::sync_channel(1);
+        let handle = manual_journal_handle(control, normal, Arc::clone(&journal));
+        for lane in [JournalLane::Control, JournalLane::Normal] {
+            let (reply, _response) = tokio::sync::oneshot::channel();
+            handle
+                .try_send(lane, JournalCommand::Checkpoint { reply })
+                .expect("actor lane fills");
+        }
+        let rejection = |operation| {
+            PublicError::builder(ErrorCode::Busy, "admission is contended")
+                .retryable()
+                .operation(operation)
+                .next_action(NextAction::InspectOperation)
+                .next_action(NextAction::Retry)
+                .build()
+                .expect("rejection validates")
+        };
+
+        let failed_error = rejection(failed);
+        let terminal = handle
+            .compensate_unowned_operation(failed, failed_error.clone(), None)
+            .expect("queue-independent compensation fails queued work");
+        assert_eq!(terminal.state, OperationState::Failed);
+        assert_eq!(terminal.error.as_ref(), Some(&failed_error));
+
+        let running_error = rejection(running);
+        let terminal = handle
+            .compensate_unowned_operation(running, running_error.clone(), None)
+            .expect("queue-independent compensation fails running work");
+        assert_eq!(terminal.state, OperationState::Failed);
+        assert_eq!(terminal.stage, OperationStage::Cleanup);
+        assert_eq!(terminal.error.as_ref(), Some(&running_error));
+
+        let interrupted = handle
+            .compensate_unowned_operation(
+                deadline,
+                rejection(deadline),
+                Some(CancellationReason::DeadlineExceeded),
+            )
+            .expect("deadline compensation interrupts queued work");
+        assert_eq!(interrupted.state, OperationState::Interrupted);
+        assert_eq!(interrupted.recovery_class, RecoveryClass::DeadlineElapsed);
+
+        let cancelled = handle
+            .compensate_unowned_operation(
+                resource,
+                rejection(resource),
+                Some(CancellationReason::ResourceLimit),
+            )
+            .expect("resource compensation cancels queued work");
+        assert_eq!(cancelled.state, OperationState::Cancelled);
+        assert_eq!(
+            cancelled.cancellation_reason,
+            Some(CancellationReason::ResourceLimit)
+        );
+
+        assert!(matches!(
+            control_rx.try_recv(),
+            Ok(JournalCommand::Checkpoint { .. })
+        ));
+        assert!(matches!(
+            normal_rx.try_recv(),
+            Ok(JournalCommand::Checkpoint { .. })
+        ));
+    }
+
+    #[test]
+    fn admission_compensation_reconciles_concurrent_cancellation() {
+        for seed in 100..132 {
+            let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+            let operation = OperationId::from_bytes([seed; 16]);
+            journal
+                .submit(OperationSubmission::control_probe(operation))
+                .expect("operation submits");
+            journal
+                .start_execution(operation)
+                .expect("operation starts");
+            let (control, _control_rx) = mpsc::sync_channel(1);
+            let (normal, _normal_rx) = mpsc::sync_channel(1);
+            let handle = manual_journal_handle(control, normal, Arc::clone(&journal));
+            let gate = Arc::new(std::sync::Barrier::new(2));
+            let cancellation_gate = Arc::clone(&gate);
+            let cancellation_journal = Arc::clone(&journal);
+            let cancellation = thread::spawn(move || {
+                cancellation_gate.wait();
+                cancellation_journal.request_cancellation(
+                    operation,
+                    CancellationAuthority::Internal(InternalCancellationAuthority::Shutdown),
+                )
+            });
+            let rejection = PublicError::builder(ErrorCode::Busy, "admission is contended")
+                .retryable()
+                .operation(operation)
+                .next_action(NextAction::InspectOperation)
+                .next_action(NextAction::Retry)
+                .build()
+                .expect("rejection validates");
+
+            gate.wait();
+            let terminal = handle
+                .compensate_unowned_operation(operation, rejection, None)
+                .expect("compensation reconciles the cancellation race");
+            let _ = cancellation.join().expect("cancellation worker joins");
+
+            assert!(terminal.state.is_terminal());
+            assert_eq!(
+                journal.status(operation).expect("terminal state loads"),
+                terminal
+            );
+        }
+    }
+
+    #[test]
+    fn deadline_compensation_reconciles_cancellation_won_after_snapshot() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = OperationId::from_bytes([132; 16]);
+        journal
+            .submit(OperationSubmission::control_probe(operation))
+            .expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let stale_running = journal.status(operation).expect("running state loads");
+        let rejection = PublicError::builder(ErrorCode::Busy, "admission is contended")
+            .retryable()
+            .operation(operation)
+            .next_action(NextAction::InspectOperation)
+            .next_action(NextAction::Retry)
+            .build()
+            .expect("rejection validates");
+        journal
+            .request_cancellation(
+                operation,
+                CancellationAuthority::Internal(InternalCancellationAuthority::Shutdown),
+            )
+            .expect("shutdown cancellation wins");
+
+        let intermediate = compensate_unowned_operation_once(
+            &journal,
+            &Telemetry::default(),
+            stale_running,
+            &rejection,
+            Some(CancellationReason::DeadlineExceeded),
+        )
+        .expect("stale deadline compensation observes the cancellation winner");
+        assert_eq!(intermediate.state, OperationState::Cancelling);
+
+        let (control, _control_rx) = mpsc::sync_channel(1);
+        let (normal, _normal_rx) = mpsc::sync_channel(1);
+        let handle = manual_journal_handle(control, normal, Arc::clone(&journal));
+        let terminal = handle
+            .compensate_unowned_operation(
+                operation,
+                rejection,
+                Some(CancellationReason::DeadlineExceeded),
+            )
+            .expect("reconciliation completes the winning cancellation");
+
+        assert_eq!(terminal.state, OperationState::Cancelled);
+        assert_eq!(
+            terminal.cancellation_reason,
+            Some(CancellationReason::Shutdown)
+        );
+        assert_eq!(
+            journal.status(operation).expect("terminal state loads"),
+            terminal
+        );
+    }
+
+    #[test]
+    fn stale_failure_compensation_preserves_durable_shutdown() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = OperationId::from_bytes([133; 16]);
+        journal
+            .submit(OperationSubmission::control_probe(operation))
+            .expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let stale_running = journal.status(operation).expect("running state loads");
+        let rejection = PublicError::builder(ErrorCode::Busy, "admission is contended")
+            .retryable()
+            .operation(operation)
+            .next_action(NextAction::InspectOperation)
+            .next_action(NextAction::Retry)
+            .build()
+            .expect("rejection validates");
+        journal
+            .request_cancellation(
+                operation,
+                CancellationAuthority::Internal(InternalCancellationAuthority::Shutdown),
+            )
+            .expect("shutdown cancellation wins");
+
+        assert!(matches!(
+            compensate_unowned_operation_once(
+                &journal,
+                &Telemetry::default(),
+                stale_running,
+                &rejection,
+                None,
+            ),
+            Err(OperationError::CancellationWon)
+        ));
+
+        let (control, _control_rx) = mpsc::sync_channel(1);
+        let (normal, _normal_rx) = mpsc::sync_channel(1);
+        let handle = manual_journal_handle(control, normal, Arc::clone(&journal));
+        let terminal = handle
+            .compensate_unowned_operation(operation, rejection, None)
+            .expect("reconciliation completes the winning shutdown");
+
+        assert_eq!(terminal.state, OperationState::Cancelled);
+        assert_eq!(
+            terminal.cancellation_reason,
+            Some(CancellationReason::Shutdown)
+        );
+        assert_eq!(
+            journal.status(operation).expect("terminal state loads"),
+            terminal
+        );
+    }
+
+    #[test]
     fn worker_start_handshake_bounds_saturation_and_actor_close() {
         let (control, _control_rx) = mpsc::sync_channel(1);
         let (normal, normal_rx) = mpsc::sync_channel(1);
-        let handle = JournalActorHandle {
-            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
-                control,
-                normal,
-            }))),
-        };
+        let handle = manual_journal_handle(
+            control,
+            normal,
+            Arc::new(OperationJournal::open_in_memory().expect("journal opens")),
+        );
         let (checkpoint_reply, _checkpoint_response) = tokio::sync::oneshot::channel();
         handle
             .try_send(
@@ -12136,12 +12585,11 @@ mod tests {
         journal.enqueue(operation).expect("operation enqueues");
         let (control, _control_rx) = mpsc::sync_channel(1);
         let (normal, normal_rx) = mpsc::sync_channel(1);
-        let handle = JournalActorHandle {
-            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
-                control,
-                normal,
-            }))),
-        };
+        let handle = manual_journal_handle(
+            control,
+            normal,
+            Arc::new(OperationJournal::open_in_memory().expect("journal opens")),
+        );
         let deadline = WorkerDeadline::with_remaining_checks(DEFAULT_REQUEST_TIMEOUT, 2)
             .expect("deadline is valid");
 
@@ -12533,6 +12981,8 @@ mod tests {
         let client_admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
         let closed_handle = JournalActorHandle {
             state: Arc::new(Mutex::new(JournalActorState::Draining)),
+            journal: Arc::new(OperationJournal::open_in_memory().expect("journal opens")),
+            telemetry: Arc::new(Telemetry::default()),
         };
         let mut pool = SyntheticWorkerPool::start(1, 1).expect("worker pool starts");
         let permit = SchedulerPermit::reserve(
@@ -13535,12 +13985,11 @@ mod tests {
         let service = service();
         let (control, control_rx) = mpsc::sync_channel(1);
         let (normal, _normal_rx) = mpsc::sync_channel(1);
-        let journal = JournalActorHandle {
-            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
-                control,
-                normal,
-            }))),
-        };
+        let journal = manual_journal_handle(
+            control,
+            normal,
+            Arc::new(OperationJournal::open_in_memory().expect("journal opens")),
+        );
         let (submissions, _submission_rx) = tokio::sync::mpsc::channel(1);
         let commands = OrchestratorSenders::new(submissions);
         let operation = OperationId::from_bytes([38; 16]);
@@ -14740,6 +15189,29 @@ mod tests {
             .await
             .expect("stale completion loads durable state");
         assert_eq!(observed.state, OperationState::Cancelled);
+
+        let shutdown = OperationId::from_bytes([14; 16]);
+        journal.enqueue(shutdown).expect("operation enqueues");
+        journal.start_execution(shutdown).expect("operation starts");
+        journal
+            .request_cancellation(
+                shutdown,
+                CancellationAuthority::Internal(InternalCancellationAuthority::Shutdown),
+            )
+            .expect("durable shutdown commits");
+        let observed = handle
+            .finish_operation(
+                shutdown,
+                Some(rootlight_operations::CancellationReason::DeadlineExceeded),
+            )
+            .await
+            .expect("durable shutdown precedes the later local deadline");
+        assert_eq!(observed.state, OperationState::Cancelled);
+        assert_eq!(
+            observed.cancellation_reason,
+            Some(rootlight_operations::CancellationReason::Shutdown)
+        );
+        assert_eq!(observed.recovery_class, RecoveryClass::NotApplicable);
 
         actor.join().expect("actor joins");
     }

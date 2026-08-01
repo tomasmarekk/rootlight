@@ -849,7 +849,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     timeout,
                 )
                 .await
-                .map_err(map_client_error)?;
+                .map_err(|error| map_operation_client_error(error, operation))?;
             let (mode, providers) = match result.mode {
                 ClientRepositoryIndexMode::Structural => {
                     (IndexMode::Structural, vec![FIRST_SLICE_PROVIDER.to_owned()])
@@ -899,16 +899,17 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     ) -> ClientPortFuture<RepositoryOperationStatus> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let operation = request.operation();
             client
                 .operation_status(
-                    request.operation(),
+                    operation,
                     request.action(),
                     request.wait_ms(),
                     request.after_revision(),
                     request_timeout()?,
                 )
                 .await
-                .map_err(map_client_error)
+                .map_err(|error| map_operation_client_error(error, operation))
         })
     }
 
@@ -1610,6 +1611,23 @@ const fn coverage_status(status: CoverageStatus) -> IrCoverageStatus {
         CoverageStatus::Sampled => IrCoverageStatus::Sampled,
         CoverageStatus::Unknown => IrCoverageStatus::Unknown,
     }
+}
+
+fn map_operation_client_error(error: ClientError, operation: OperationId) -> ClientPortError {
+    if matches!(error, ClientError::RequestTimedOut) {
+        return ClientPortError::Public(Box::new(
+            PublicError::builder(ErrorCode::Busy, "daemon request timed out")
+                .retryable()
+                .operation(operation)
+                .next_action(NextAction::InspectOperation)
+                .next_action(NextAction::Retry)
+                .build()
+                .unwrap_or_else(|_| {
+                    unreachable!("closed daemon timeout error is statically bounded")
+                }),
+        ));
+    }
+    map_client_error(error)
 }
 
 fn map_client_error(error: ClientError) -> ClientPortError {

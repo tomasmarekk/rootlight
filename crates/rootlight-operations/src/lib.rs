@@ -848,6 +848,73 @@ impl OperationJournal {
         self.status(operation)
     }
 
+    /// Atomically fails active work only while its durable revision is unchanged.
+    ///
+    /// The revision guard and cancellation predicate share the failure mutation,
+    /// so a cancellation that commits first cannot be overwritten. Running work
+    /// enters cleanup in the same durable revision as the terminal failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::CancellationWon`] when cancellation committed
+    /// first, [`OperationError::ConcurrentUpdate`] when the revision changed, or
+    /// a typed lifecycle or storage error.
+    pub fn fail_if_revision(
+        &self,
+        operation: OperationId,
+        expected_revision: u64,
+        error: &PublicError,
+    ) -> Result<OperationRecord, OperationError> {
+        let error_json = serialize_public_error(error)?;
+        let revision = next_revision(expected_revision)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
+        let updated = transaction
+            .execute(
+                "UPDATE operations
+                 SET state = 'failed',
+                     stage = CASE WHEN state = 'running' THEN 'cleanup' ELSE stage END,
+                     revision = ?1,
+                     error_json = ?2
+                 WHERE operation = ?3 AND revision = ?4
+                   AND cancellation_requested = 0
+                   AND state IN ('queued', 'running')",
+                params![
+                    u64_to_i64(revision)?,
+                    error_json,
+                    operation.as_bytes().as_slice(),
+                    u64_to_i64(expected_revision)?,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        if updated != 1 {
+            let observed = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+            if observed.cancellation_requested {
+                return Err(OperationError::CancellationWon);
+            }
+            if observed.revision != expected_revision {
+                return Err(OperationError::ConcurrentUpdate);
+            }
+            if !matches!(
+                observed.state,
+                OperationState::Queued | OperationState::Running
+            ) {
+                return Err(OperationError::IllegalTransition {
+                    from: observed.state,
+                    to: OperationState::Failed,
+                });
+            }
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        let record = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        drop(connection);
+        self.lock_errors()?.insert(operation, error.clone());
+        self.lock_cancellations()?.remove(&operation);
+        self.prune_to(MAX_OPERATION_HISTORY)?;
+        Ok(record)
+    }
+
     /// Atomically marks queued work as running at its executing stage.
     ///
     /// Worker scheduling depends on both fields advancing together. A crash must
@@ -4689,6 +4756,84 @@ mod tests {
             Some(CancellationReason::ClientRequest)
         );
         assert_eq!(compensated.recovery_class, RecoveryClass::NotApplicable);
+    }
+
+    #[test]
+    fn revision_guarded_failure_is_atomic_and_cancellation_safe() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let queued_operation = operation(77);
+        let queued = journal
+            .submit(OperationSubmission::control_probe(queued_operation))
+            .expect("queued operation submits")
+            .operation;
+        let queued_error = PublicError::builder(ErrorCode::Busy, "queued admission failed")
+            .operation(queued_operation)
+            .build()
+            .expect("queued error builds");
+
+        let failed = journal
+            .fail_if_revision(queued_operation, queued.revision, &queued_error)
+            .expect("unchanged queued operation fails");
+        assert_eq!(failed.state, OperationState::Failed);
+        assert_eq!(failed.stage, OperationStage::Accepted);
+        assert_eq!(failed.revision, queued.revision + 1);
+        assert_eq!(failed.error.as_ref(), Some(&queued_error));
+
+        let running_operation = operation(78);
+        journal
+            .submit(OperationSubmission::control_probe(running_operation))
+            .expect("running operation submits");
+        let running = journal
+            .start_execution(running_operation)
+            .expect("running operation starts");
+        let running_error = PublicError::builder(ErrorCode::Busy, "running admission failed")
+            .operation(running_operation)
+            .build()
+            .expect("running error builds");
+
+        let failed = journal
+            .fail_if_revision(running_operation, running.revision, &running_error)
+            .expect("unchanged running operation fails");
+        assert_eq!(failed.state, OperationState::Failed);
+        assert_eq!(failed.stage, OperationStage::Cleanup);
+        assert_eq!(failed.revision, running.revision + 1);
+        assert_eq!(failed.error.as_ref(), Some(&running_error));
+
+        let cancelled_operation = operation(79);
+        journal
+            .submit(OperationSubmission::control_probe(cancelled_operation))
+            .expect("cancelled operation submits");
+        let stale_running = journal
+            .start_execution(cancelled_operation)
+            .expect("cancelled operation starts");
+        journal
+            .request_cancellation(
+                cancelled_operation,
+                CancellationAuthority::Internal(InternalCancellationAuthority::Shutdown),
+            )
+            .expect("shutdown cancellation commits first");
+        let cancelled_error = PublicError::builder(ErrorCode::Busy, "cancelled admission failed")
+            .operation(cancelled_operation)
+            .build()
+            .expect("cancelled error builds");
+
+        assert!(matches!(
+            journal.fail_if_revision(
+                cancelled_operation,
+                stale_running.revision,
+                &cancelled_error,
+            ),
+            Err(OperationError::CancellationWon)
+        ));
+        let cancelling = journal
+            .status(cancelled_operation)
+            .expect("cancelling operation loads");
+        assert_eq!(cancelling.state, OperationState::Cancelling);
+        assert_eq!(
+            cancelling.cancellation_reason,
+            Some(CancellationReason::Shutdown)
+        );
+        assert_eq!(cancelling.error, None);
     }
 
     #[test]

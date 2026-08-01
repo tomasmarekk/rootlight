@@ -38,8 +38,8 @@ use tokio::sync::watch;
 
 use super::{
     AsyncClientFuture, AsyncFirstSliceClient, FIRST_SLICE_PROVIDER, NativeFirstSliceClientPort,
-    UnavailableFirstSliceClientPort, locate_languages, map_client_error, source_languages,
-    symbol_languages,
+    UnavailableFirstSliceClientPort, locate_languages, map_client_error,
+    map_operation_client_error, source_languages, symbol_languages,
 };
 use crate::{
     FirstSliceClientPort, FirstSliceToolExecutor, RequestCancellation, ToolExecutionFailure,
@@ -1282,6 +1282,19 @@ fn client_errors_map_to_source_free_port_classes() {
                 .next_action(rootlight_mcp_contract::NextAction::Retry)
                 .build()
                 .expect("timeout error validates")
+        ))
+    );
+    let timed_out_operation = operation();
+    assert_eq!(
+        map_operation_client_error(ClientError::RequestTimedOut, timed_out_operation),
+        crate::ClientPortError::Public(Box::new(
+            PublicError::builder(ErrorCode::Busy, "daemon request timed out")
+                .retryable()
+                .operation(timed_out_operation)
+                .next_action(rootlight_mcp_contract::NextAction::InspectOperation)
+                .next_action(rootlight_mcp_contract::NextAction::Retry)
+                .build()
+                .expect("correlated timeout error validates")
         ))
     );
     assert_eq!(

@@ -48,7 +48,7 @@ use rootlight_observability::{
 use rootlight_operations::{
     Cancellation, CancellationAuthority, CancellationReason, ClientInstanceId,
     InternalCancellationAuthority, OperationError, OperationKind, OperationRecord, OperationStage,
-    OperationState, OperationSubmission, PlanHash, Progress,
+    OperationState, OperationSubmission, PlanHash, Progress, RecoveryClass,
 };
 use rootlight_protocol::{
     MAX_CODE_LOCATE_LANGUAGE_BYTES, MAX_CODE_LOCATE_LANGUAGES,
@@ -1813,6 +1813,16 @@ fn write_service(
     service.write().map_err(|_| internal_error())
 }
 
+fn try_write_service(
+    service: &RwLock<FirstSliceService>,
+) -> Result<RwLockWriteGuard<'_, FirstSliceService>, PublicError> {
+    match service.try_write() {
+        Ok(guard) => Ok(guard),
+        Err(TryLockError::WouldBlock) => Err(operation_in_progress()),
+        Err(TryLockError::Poisoned(_)) => Err(internal_error()),
+    }
+}
+
 fn lock_index_serialization(serialization: &Mutex<()>) -> Result<MutexGuard<'_, ()>, PublicError> {
     serialization.lock().map_err(|_| internal_error())
 }
@@ -2141,22 +2151,41 @@ fn repository_index_with_intent(
     }
     let peak_rss_bytes = lock_metadata(metadata)?.resource_meter(operation)?;
     let _rss_sampler = ProcessRssSampler::start(peak_rss_bytes);
-    let admission = match write_service(service)?.admit_rust_fixture(&root, &context.cancellation) {
-        Ok(admission) => admission,
+    let mut service_guard = match try_write_service(service) {
+        Ok(service_guard) => service_guard,
         Err(error) => {
-            let public = service_error(error);
-            finish_failed_index(
+            let public = if error.code() == ErrorCode::Busy {
+                index_admission_in_progress(operation)
+            } else {
+                error
+            };
+            return reject_index_admission(
                 runtime,
                 lifecycle_deadline,
                 journal,
                 metadata,
                 operation,
                 &context.cancellation,
-                &public,
-            )?;
-            return Err(public);
+                public,
+            );
         }
     };
+    let admission = match service_guard.admit_rust_fixture(&root, &context.cancellation) {
+        Ok(admission) => admission,
+        Err(error) => {
+            drop(service_guard);
+            return reject_index_admission(
+                runtime,
+                lifecycle_deadline,
+                journal,
+                metadata,
+                operation,
+                &context.cancellation,
+                service_error(error),
+            );
+        }
+    };
+    drop(service_guard);
     lock_metadata(metadata)?.admit(operation, admission);
     if let Some(state) = lanes.support_state.as_deref() {
         state.record_repository_index_context(
@@ -2805,6 +2834,102 @@ fn propagate_peer_cancellation(
     }
 }
 
+fn reject_index_admission(
+    runtime: &tokio::runtime::Runtime,
+    deadline: Instant,
+    journal: &JournalActorHandle,
+    metadata: &Mutex<OperationMetadataSet>,
+    operation: OperationId,
+    cancellation: &Cancellation,
+    error: PublicError,
+) -> Result<daemon::RepositoryIndexResponse, PublicError> {
+    // A rejected admission still owns a durable queued record. Promote only
+    // its lifecycle so normal terminalization cannot strand it as queued.
+    match journal_lifecycle_call(
+        runtime,
+        journal.activate_operation_until(operation, deadline),
+    ) {
+        Ok(_) => reject_activated_index_admission(
+            runtime,
+            deadline,
+            journal,
+            metadata,
+            operation,
+            cancellation,
+            error,
+        ),
+        Err(_) => {
+            // Both actor lanes may be unavailable. This narrow compensator
+            // serializes directly in the journal after activation proved that
+            // no worker owns the durable operation.
+            let record = journal
+                .compensate_unowned_operation(operation, error.clone(), cancellation.reason())
+                .map_err(|error| operation_error(&error, Some(operation)))?;
+            let mut metadata = lock_metadata(metadata)?;
+            metadata.observe_terminal(&record);
+            metadata.mark_terminal(operation);
+            Err(rejected_index_response_error(
+                &record,
+                cancellation.reason(),
+                error,
+            ))
+        }
+    }
+}
+
+fn reject_activated_index_admission(
+    runtime: &tokio::runtime::Runtime,
+    deadline: Instant,
+    journal: &JournalActorHandle,
+    metadata: &Mutex<OperationMetadataSet>,
+    operation: OperationId,
+    cancellation: &Cancellation,
+    error: PublicError,
+) -> Result<daemon::RepositoryIndexResponse, PublicError> {
+    let record = finish_failed_index(
+        runtime,
+        deadline,
+        journal,
+        metadata,
+        operation,
+        cancellation,
+        &error,
+    )?;
+    Err(rejected_index_response_error(
+        &record,
+        cancellation.reason(),
+        error,
+    ))
+}
+
+fn rejected_index_response_error(
+    record: &OperationRecord,
+    local_reason: Option<CancellationReason>,
+    error: PublicError,
+) -> PublicError {
+    let operation = record.operation;
+    let durable_reason = record.cancellation_reason.or_else(|| {
+        (record.state == OperationState::Interrupted
+            && record.recovery_class == RecoveryClass::DeadlineElapsed)
+            .then_some(CancellationReason::DeadlineExceeded)
+    });
+    match record.state {
+        OperationState::Failed => record.error.clone().unwrap_or_else(internal_error),
+        OperationState::Cancelled | OperationState::Interrupted => match durable_reason {
+            Some(reason) if Some(reason) == local_reason => error,
+            Some(reason) => cancellation_error(reason),
+            None if record.state == OperationState::Cancelled => {
+                terminal_operation_error(operation, "repository index was cancelled")
+            }
+            None => terminal_operation_error(operation, "repository index was interrupted"),
+        },
+        OperationState::Queued
+        | OperationState::Running
+        | OperationState::Cancelling
+        | OperationState::Succeeded => internal_error(),
+    }
+}
+
 fn finish_failed_index(
     runtime: &tokio::runtime::Runtime,
     deadline: Instant,
@@ -2813,37 +2938,62 @@ fn finish_failed_index(
     operation: OperationId,
     cancellation: &Cancellation,
     error: &PublicError,
-) -> Result<(), PublicError> {
-    // Work may observe cancellation after its deadline. Give the terminal
-    // journal write a fresh bounded window so an expired work budget cannot
-    // strand a durable operation in the running state.
-    let deadline = deadline.max(
-        Instant::now()
-            .checked_add(LIFECYCLE_FINALIZATION_GRACE)
-            .ok_or_else(internal_error)?,
-    );
-    let resource_update =
-        persist_operation_resources(runtime, deadline, journal, metadata, operation, 0);
-    let record = if let Some(reason) = cancellation.reason() {
-        journal_lifecycle_call(
-            runtime,
-            journal.finish_operation_until(operation, Some(reason), deadline),
-        )?
-    } else {
-        journal_lifecycle_call(
-            runtime,
-            journal.fail_operation_until(operation, error.clone(), deadline),
-        )?
+) -> Result<OperationRecord, PublicError> {
+    // Terminal state precedes best-effort resource accounting. Each required
+    // mutation receives its own bounded window so a claimed predecessor cannot
+    // consume the deadline of the mutation that prevents ownerless work.
+    let terminal_deadline = fresh_lifecycle_deadline(deadline)?;
+    let compensate = |reason| {
+        journal
+            .compensate_unowned_operation(operation, error.clone(), reason)
+            .map_err(|error| operation_error(&error, Some(operation)))
     };
-    let record = match resource_update {
-        Ok(_) => record,
-        Err(_) => persist_operation_resources(runtime, deadline, journal, metadata, operation, 0)
-            .unwrap_or(record),
+    let fail = || {
+        let failure_deadline = fresh_lifecycle_deadline(deadline)?;
+        match runtime.block_on(journal.fail_operation_until(
+            operation,
+            error.clone(),
+            failure_deadline,
+        )) {
+            Ok(record) if record.state.is_terminal() => Ok(record),
+            Ok(_) | Err(_) => compensate(None),
+        }
+    };
+    let record = if let Some(reason) = cancellation.reason() {
+        match runtime.block_on(journal.finish_operation_until(
+            operation,
+            Some(reason),
+            terminal_deadline,
+        )) {
+            Ok(record) if record.state.is_terminal() => record,
+            Ok(_) | Err(ServiceError::Operations(OperationError::CancellationTooLate)) => fail()?,
+            Err(_) => compensate(Some(reason))?,
+        }
+    } else {
+        match runtime.block_on(journal.fail_operation_until(
+            operation,
+            error.clone(),
+            terminal_deadline,
+        )) {
+            Ok(record) if record.state.is_terminal() => record,
+            Ok(_) | Err(_) => compensate(None)?,
+        }
+    };
+    if !record.state.is_terminal() {
+        return Err(internal_error());
+    }
+    let persist_resources = || {
+        let resource_deadline = fresh_lifecycle_deadline(deadline)?;
+        persist_operation_resources(runtime, resource_deadline, journal, metadata, operation, 0)
+    };
+    let record = match persist_resources() {
+        Ok(record) => record,
+        Err(_) => persist_resources().unwrap_or(record),
     };
     let mut metadata = lock_metadata(metadata)?;
     metadata.observe_terminal(&record);
     metadata.mark_terminal(operation);
-    Ok(())
+    Ok(record)
 }
 
 fn persist_operation_resources(
@@ -5539,6 +5689,14 @@ fn lifecycle_deadline(client_deadline: Instant) -> Result<Instant, PublicError> 
         .ok_or_else(internal_error)
 }
 
+fn fresh_lifecycle_deadline(deadline: Instant) -> Result<Instant, PublicError> {
+    fresh_lifecycle_deadline_at(deadline, Instant::now())
+}
+
+fn fresh_lifecycle_deadline_at(deadline: Instant, now: Instant) -> Result<Instant, PublicError> {
+    Ok(deadline.max(lifecycle_deadline(now)?))
+}
+
 fn service_boundary_error(error: ServiceError) -> PublicError {
     match error {
         ServiceError::Operations(error) => operation_error(&error, None),
@@ -6054,6 +6212,16 @@ fn incomplete_coverage() -> PublicError {
 fn operation_in_progress() -> PublicError {
     PublicError::builder(ErrorCode::Busy, "repository index is still running")
         .retryable()
+        .next_action(NextAction::Retry)
+        .build()
+        .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
+}
+
+fn index_admission_in_progress(operation: OperationId) -> PublicError {
+    PublicError::builder(ErrorCode::Busy, "repository index is still running")
+        .retryable()
+        .operation(operation)
+        .next_action(NextAction::InspectOperation)
         .next_action(NextAction::Retry)
         .build()
         .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
@@ -8223,6 +8391,547 @@ mod tests {
 
         drop(refinement_receiver);
         actor.join().expect("journal actor joins");
+    }
+
+    #[test]
+    fn contended_index_admission_is_terminal_and_does_not_queue_a_writer() {
+        let service = Arc::new(RwLock::new(
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION)
+                .expect("empty service initializes"),
+        ));
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 8, 8).expect("actor starts");
+        let handle = actor.handle();
+        let metadata = Mutex::new(OperationMetadataSet::new(8));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let (refinement, refinement_receiver) = mpsc::sync_channel(1);
+        let lanes = FirstSliceServiceLanes {
+            service: Arc::clone(&service),
+            index_serialization: Arc::new(Mutex::new(())),
+            semantic_refinements: Arc::new(Mutex::new(BTreeMap::new())),
+            refinement,
+            recovery_ready: Arc::new(AtomicBool::new(true)),
+            support_state: None,
+        };
+        let resources = ServiceRequestResources {
+            journal: &handle,
+            metadata: &metadata,
+            runtime: &runtime,
+            catalog_epoch: Instant::now(),
+            publication_hook: None,
+        };
+        let fixture = TempDir::new().expect("fixture exists");
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn admitted_after_retry() -> bool { true }\n",
+        )
+        .expect("source writes");
+        let context = |admission| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::from_bytes([94; 16]),
+                selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+                cancellation: Cancellation::with_deadline(deadline),
+                deadline,
+                effective_budget: None,
+                index_admission: Some(admission),
+            }
+        };
+        let request = |operation, detached| {
+            FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root: fixture.path().to_string_lossy().into_owned(),
+                operation: Some(operation_to_wire(operation)),
+                detached,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
+            })
+        };
+        let blocked_operation = OperationId::from_bytes([94; 16]);
+        let blocked_admission = rootlight_daemon_core::FirstSliceAdmission::default();
+        let read_guard = service.read().expect("service read lock is healthy");
+        let mut reply = None;
+
+        let started = Instant::now();
+        let error = execute_service_request(
+            &lanes,
+            resources,
+            request(blocked_operation, true),
+            context(blocked_admission.clone()),
+            &mut reply,
+        )
+        .expect_err("contended admission is rejected");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "contended admission queued behind the read lock"
+        );
+        assert_eq!(error.code(), ErrorCode::Busy);
+        assert!(error.retryable());
+        assert_eq!(error.operation(), Some(blocked_operation));
+        assert_eq!(
+            error.next_actions(),
+            &[NextAction::InspectOperation, NextAction::Retry]
+        );
+        assert!(blocked_admission.was_inserted());
+        assert_eq!(
+            journal
+                .status(blocked_operation)
+                .expect("rejected operation is durable")
+                .state,
+            OperationState::Failed
+        );
+        let metadata = metadata.lock().expect("metadata lock is healthy");
+        let rejected = metadata
+            .records
+            .get(&blocked_operation)
+            .expect("rejected operation metadata remains inspectable");
+        assert!(rejected.terminal);
+        drop(metadata);
+
+        let read_started = Instant::now();
+        let listed = execute_service_request(
+            &lanes,
+            resources,
+            FirstSliceIpcRequest::RepositoryList(daemon::RepositoryListRequest {
+                max_results: Some(20),
+                query: None,
+            }),
+            context(rootlight_daemon_core::FirstSliceAdmission::default()),
+            &mut reply,
+        )
+        .expect("read lane remains responsive after rejected admission");
+        assert!(
+            read_started.elapsed() < Duration::from_millis(500),
+            "rejected admission left a writer queued"
+        );
+        assert!(matches!(
+            listed,
+            FirstSliceIpcResponse::RepositoryList(ref response)
+                if response.repositories.is_empty()
+        ));
+
+        drop(read_guard);
+        let retry_operation = OperationId::from_bytes([95; 16]);
+        let retried = execute_service_request(
+            &lanes,
+            resources,
+            request(retry_operation, false),
+            context(rootlight_daemon_core::FirstSliceAdmission::default()),
+            &mut reply,
+        )
+        .expect("retry succeeds after the read lock is released");
+        assert!(matches!(
+            retried,
+            FirstSliceIpcResponse::RepositoryIndex(ref response)
+                if response.operation.as_ref().map(|id| id.value.as_slice())
+                    == Some(retry_operation.as_bytes().as_slice())
+        ));
+        assert_eq!(
+            journal
+                .status(retry_operation)
+                .expect("retried operation is durable")
+                .state,
+            OperationState::Succeeded
+        );
+
+        drop(refinement_receiver);
+        actor.join().expect("journal actor joins");
+    }
+
+    #[test]
+    fn cancelled_rejection_reconciles_terminal_operation_metadata() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = OperationId::from_bytes([96; 16]);
+        journal
+            .submit(repository_submission(operation, 96))
+            .expect("operation submits");
+        journal
+            .request_cancellation(
+                operation,
+                CancellationAuthority::Internal(InternalCancellationAuthority::ClientDisconnect),
+            )
+            .expect("queued operation cancels");
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let metadata = Mutex::new(OperationMetadataSet::new(1));
+        metadata
+            .lock()
+            .expect("metadata locks")
+            .reserve(operation, 1, None)
+            .expect("metadata reserves");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let cancellation = Cancellation::with_deadline(deadline);
+
+        let error = reject_index_admission(
+            &runtime,
+            deadline,
+            &actor.handle(),
+            &metadata,
+            operation,
+            &cancellation,
+            index_admission_in_progress(operation),
+        )
+        .expect_err("terminal cancellation wins over admission rejection");
+
+        assert_eq!(error.code(), ErrorCode::Cancelled);
+        let metadata = metadata.lock().expect("metadata lock is healthy");
+        let reconciled = metadata
+            .records
+            .get(&operation)
+            .expect("cancelled operation metadata remains inspectable");
+        assert!(reconciled.terminal);
+        assert!(matches!(
+            reconciled.terminal_snapshot.as_ref(),
+            Some(snapshot) if snapshot.state == OperationState::Cancelled
+        ));
+        drop(metadata);
+        actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn expired_activation_preserves_deadline_interruption() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = OperationId::from_bytes([97; 16]);
+        journal
+            .submit(repository_submission(operation, 97))
+            .expect("operation submits");
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let metadata = Mutex::new(OperationMetadataSet::new(1));
+        metadata
+            .lock()
+            .expect("metadata locks")
+            .reserve(operation, 1, None)
+            .expect("metadata reserves");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let elapsed = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("elapsed deadline derives");
+        let cancellation = Cancellation::with_deadline(elapsed);
+
+        let error = reject_index_admission(
+            &runtime,
+            elapsed,
+            &actor.handle(),
+            &metadata,
+            operation,
+            &cancellation,
+            index_admission_in_progress(operation),
+        )
+        .expect_err("expired activation is compensated");
+
+        assert_eq!(error.code(), ErrorCode::Busy);
+        assert!(error.retryable());
+        assert_eq!(
+            error.next_actions(),
+            &[NextAction::InspectOperation, NextAction::Retry]
+        );
+        let terminal = journal.status(operation).expect("terminal state loads");
+        assert_eq!(terminal.state, OperationState::Interrupted);
+        assert_eq!(terminal.recovery_class, RecoveryClass::DeadlineElapsed);
+        let metadata = metadata.lock().expect("metadata lock is healthy");
+        let reconciled = metadata
+            .records
+            .get(&operation)
+            .expect("rejected operation metadata remains inspectable");
+        assert!(reconciled.terminal);
+        assert!(matches!(
+            reconciled.terminal_snapshot.as_ref(),
+            Some(snapshot) if snapshot.state == OperationState::Interrupted
+        ));
+        drop(metadata);
+        actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn compensated_rejection_preserves_non_client_public_errors() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let metadata = Mutex::new(OperationMetadataSet::new(2));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+
+        for (seed, reason) in [
+            (98, CancellationReason::Shutdown),
+            (99, CancellationReason::ResourceLimit),
+        ] {
+            let operation = OperationId::from_bytes([seed; 16]);
+            journal
+                .submit(repository_submission(operation, seed))
+                .expect("operation submits");
+            metadata
+                .lock()
+                .expect("metadata locks")
+                .reserve(operation, u64::from(seed), None)
+                .expect("metadata reserves");
+            let cancellation = Cancellation::new();
+            assert!(cancellation.cancel(reason));
+            let elapsed = Instant::now()
+                .checked_sub(Duration::from_millis(1))
+                .expect("elapsed deadline derives");
+            let expected = service_error(FirstSliceError::Cancelled(reason));
+
+            let error = reject_index_admission(
+                &runtime,
+                elapsed,
+                &actor.handle(),
+                &metadata,
+                operation,
+                &cancellation,
+                expected.clone(),
+            )
+            .expect_err("cancelled admission is compensated");
+
+            assert_eq!(error, expected);
+            let terminal = journal.status(operation).expect("terminal state loads");
+            assert_eq!(terminal.state, OperationState::Cancelled);
+            assert_eq!(terminal.cancellation_reason, Some(reason));
+            assert!(
+                metadata
+                    .lock()
+                    .expect("metadata lock is healthy")
+                    .records
+                    .get(&operation)
+                    .is_some_and(|metadata| metadata.terminal)
+            );
+        }
+
+        actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn activated_rejection_reports_a_winning_durable_shutdown() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = OperationId::from_bytes([100; 16]);
+        journal
+            .submit(repository_submission(operation, 100))
+            .expect("operation submits");
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let handle = actor.handle();
+        let metadata = Mutex::new(OperationMetadataSet::new(1));
+        metadata
+            .lock()
+            .expect("metadata locks")
+            .reserve(operation, 1, None)
+            .expect("metadata reserves");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        runtime
+            .block_on(handle.activate_operation_until(operation, deadline))
+            .expect("admission activation succeeds");
+        journal
+            .request_cancellation(
+                operation,
+                CancellationAuthority::Internal(InternalCancellationAuthority::Shutdown),
+            )
+            .expect("durable shutdown wins before failure finalization");
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_sub(Duration::from_millis(1))
+                .expect("elapsed local deadline derives"),
+        );
+        assert_eq!(
+            cancellation.reason(),
+            Some(CancellationReason::DeadlineExceeded)
+        );
+        let admission_error = index_admission_in_progress(operation);
+
+        let error = reject_activated_index_admission(
+            &runtime,
+            deadline,
+            &handle,
+            &metadata,
+            operation,
+            &cancellation,
+            admission_error,
+        )
+        .expect_err("winning shutdown replaces the admission error");
+
+        assert_eq!(error, cancellation_error(CancellationReason::Shutdown));
+        let terminal = journal.status(operation).expect("terminal state loads");
+        assert_eq!(terminal.state, OperationState::Cancelled);
+        assert_eq!(
+            terminal.cancellation_reason,
+            Some(CancellationReason::Shutdown)
+        );
+        let metadata = metadata.lock().expect("metadata lock is healthy");
+        let reconciled = metadata
+            .records
+            .get(&operation)
+            .expect("terminal metadata remains inspectable");
+        assert!(reconciled.terminal);
+        assert!(matches!(
+            reconciled.terminal_snapshot.as_ref(),
+            Some(snapshot) if snapshot.state == OperationState::Cancelled
+        ));
+        drop(metadata);
+        actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn unavailable_actor_lane_uses_direct_failure_compensation() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = OperationId::from_bytes([103; 16]);
+        journal
+            .submit(repository_submission(operation, 103))
+            .expect("operation submits");
+        let actor = JournalActor::start(Arc::clone(&journal), 1, 1).expect("actor starts");
+        let handle = actor.handle();
+        let metadata = Mutex::new(OperationMetadataSet::new(1));
+        metadata
+            .lock()
+            .expect("metadata locks")
+            .reserve(operation, 1, None)
+            .expect("metadata reserves");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        runtime
+            .block_on(handle.activate_operation_until(operation, deadline))
+            .expect("admission activation succeeds");
+        actor.join().expect("actor closes before terminalization");
+        let failure = index_admission_in_progress(operation);
+
+        let terminal = finish_failed_index(
+            &runtime,
+            deadline,
+            &handle,
+            &metadata,
+            operation,
+            &Cancellation::new(),
+            &failure,
+        )
+        .expect("direct fallback terminalizes unowned work");
+
+        assert_eq!(terminal.state, OperationState::Failed);
+        assert_eq!(terminal.stage, OperationStage::Cleanup);
+        assert_eq!(terminal.error.as_ref(), Some(&failure));
+        assert_eq!(
+            journal.status(operation).expect("terminal state loads"),
+            terminal
+        );
+        let metadata = metadata.lock().expect("metadata lock is healthy");
+        let reconciled = metadata
+            .records
+            .get(&operation)
+            .expect("terminal metadata remains inspectable");
+        assert!(reconciled.terminal);
+        assert!(matches!(
+            reconciled.terminal_snapshot.as_ref(),
+            Some(snapshot) if snapshot.state == OperationState::Failed
+        ));
+    }
+
+    #[test]
+    fn late_local_cancellation_preserves_publication_failure() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 8, 8).expect("actor starts");
+        let handle = actor.handle();
+        let metadata = Mutex::new(OperationMetadataSet::new(2));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let lifecycle_deadline = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("elapsed lifecycle deadline derives");
+        let deadline_cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_sub(Duration::from_millis(1))
+                .expect("elapsed deadline derives"),
+        );
+        let resource_cancellation = Cancellation::new();
+        assert!(resource_cancellation.cancel(CancellationReason::ResourceLimit));
+
+        for (seed, cancellation) in [(101, deadline_cancellation), (102, resource_cancellation)] {
+            let operation = OperationId::from_bytes([seed; 16]);
+            journal
+                .submit(repository_submission(operation, seed))
+                .expect("operation submits");
+            journal
+                .start_execution(operation)
+                .expect("operation starts");
+            let authorized = journal
+                .authorize_repository_publication(operation)
+                .expect("publication authorization closes cancellation admission");
+            assert_eq!(authorized.state, OperationState::Running);
+            assert_eq!(authorized.stage, OperationStage::Cleanup);
+            metadata
+                .lock()
+                .expect("metadata locks")
+                .reserve(operation, u64::from(seed), None)
+                .expect("metadata reserves");
+            let failure =
+                PublicError::builder(ErrorCode::AdapterFailed, "repository publication failed")
+                    .operation(operation)
+                    .build()
+                    .expect("failure validates");
+
+            let terminal = finish_failed_index(
+                &runtime,
+                lifecycle_deadline,
+                &handle,
+                &metadata,
+                operation,
+                &cancellation,
+                &failure,
+            )
+            .expect("late cancellation falls back to failure");
+
+            assert_eq!(terminal.state, OperationState::Failed);
+            assert_eq!(terminal.stage, OperationStage::Cleanup);
+            assert_eq!(terminal.error.as_ref(), Some(&failure));
+            assert_eq!(
+                journal.status(operation).expect("terminal state loads"),
+                terminal
+            );
+            let metadata = metadata.lock().expect("metadata lock is healthy");
+            let reconciled = metadata
+                .records
+                .get(&operation)
+                .expect("terminal metadata remains inspectable");
+            assert!(reconciled.terminal);
+            assert!(matches!(
+                reconciled.terminal_snapshot.as_ref(),
+                Some(snapshot) if snapshot.state == OperationState::Failed
+            ));
+        }
+
+        actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn lifecycle_finalization_deadlines_reanchor_each_mutation() {
+        let origin = Instant::now();
+        let expired = origin
+            .checked_sub(Duration::from_secs(1))
+            .expect("expired deadline derives");
+        let first_start = origin + Duration::from_secs(1);
+        let second_start = origin + Duration::from_secs(3);
+
+        let first =
+            fresh_lifecycle_deadline_at(expired, first_start).expect("first deadline derives");
+        let second =
+            fresh_lifecycle_deadline_at(expired, second_start).expect("second deadline derives");
+
+        assert_eq!(first, first_start + LIFECYCLE_FINALIZATION_GRACE);
+        assert_eq!(second, second_start + LIFECYCLE_FINALIZATION_GRACE);
+        assert!(second > first);
     }
 
     #[test]
