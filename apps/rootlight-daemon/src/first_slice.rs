@@ -3219,15 +3219,14 @@ fn repository_operation_status(
         let mut visible = record;
         visible.state = OperationState::Failed;
         visible.error = Some(failed_closed_publication(operation));
+        let (peak_rss_bytes, written_bytes) = public_operation_resources(&visible, &metadata);
         return Ok(daemon::RepositoryOperationStatusResponse {
             schema_version: Some(schema_version()),
             operation: Some(operation_record_to_wire(&visible)),
             published_generation: None,
             started_unix_ms: metadata.started_unix_ms,
-            peak_rss_bytes: visible
-                .peak_rss_bytes
-                .max(metadata.peak_rss_bytes.load(Ordering::Relaxed)),
-            written_bytes: visible.written_bytes.max(metadata.written_bytes),
+            peak_rss_bytes,
+            written_bytes,
             files_examined: metadata
                 .receipt
                 .as_ref()
@@ -3253,21 +3252,38 @@ fn repository_operation_status(
     } else {
         None
     };
+    let (peak_rss_bytes, written_bytes) = public_operation_resources(&record, &metadata);
     Ok(daemon::RepositoryOperationStatusResponse {
         schema_version: Some(schema_version()),
         operation: Some(operation_record_to_wire(&record)),
         published_generation: published_generation.map(generation_to_wire),
         started_unix_ms: metadata.started_unix_ms,
-        peak_rss_bytes: record
-            .peak_rss_bytes
-            .max(metadata.peak_rss_bytes.load(Ordering::Relaxed)),
-        written_bytes: record.written_bytes.max(metadata.written_bytes),
+        peak_rss_bytes,
+        written_bytes,
         files_examined: metadata
             .receipt
             .as_ref()
             .map_or(0, |receipt| receipt.discovered_inputs),
         retry_after_ms: (!record.state.is_terminal()).then_some(RETRY_AFTER_MS),
     })
+}
+
+fn public_operation_resources(
+    record: &OperationRecord,
+    metadata: &OperationMetadata,
+) -> (u64, u64) {
+    if record.state.is_terminal() {
+        // Terminal journal resources are the durable public snapshot. The live
+        // sampler may observe a later process-wide peak that cannot survive a
+        // restart and therefore must not change an already terminal response.
+        return (record.peak_rss_bytes, record.written_bytes);
+    }
+    (
+        record
+            .peak_rss_bytes
+            .max(metadata.peak_rss_bytes.load(Ordering::Relaxed)),
+        record.written_bytes.max(metadata.written_bytes),
+    )
 }
 
 fn code_locate(
