@@ -306,6 +306,29 @@ impl DurableCatalog {
         self.restore_with_policy(1, &BTreeSet::new(), false, cancellation)
     }
 
+    pub(super) fn has_active_restore_work(&self) -> Result<bool, FirstSliceError> {
+        let repository_names = private_entry_names(&self.repositories)?;
+        if repository_names.len() > super::MAX_FIRST_SLICE_REPOSITORIES {
+            return Err(FirstSliceError::Retention);
+        }
+        for repository_name in repository_names {
+            let repository_text = repository_name
+                .to_str()
+                .ok_or(FirstSliceError::CatalogCorrupt)?;
+            RepositoryId::from_str(repository_text).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let repository =
+                PrivateDirectory::open(self.repositories.capability(), &repository_name)
+                    .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            for entry_name in private_entry_names(&repository)? {
+                let entry_text = entry_name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
+                if parse_activation_name(entry_text).is_some() {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     pub(super) fn restore_excluding(
         &self,
         excluded: &BTreeSet<GenerationId>,

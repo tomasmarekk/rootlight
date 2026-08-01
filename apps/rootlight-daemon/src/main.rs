@@ -7,7 +7,13 @@
 
 mod first_slice;
 
-use std::{env, path::PathBuf, process::ExitCode, sync::Arc};
+use std::{
+    env,
+    io::{self, Write as _},
+    path::PathBuf,
+    process::ExitCode,
+    sync::Arc,
+};
 
 use first_slice::FirstSliceDaemon;
 use rootlight_daemon_core::{
@@ -18,7 +24,10 @@ use rootlight_daemon_core::{
 use rootlight_ipc::{AsyncLocalListener, FrameCodec};
 use rootlight_observability::{Telemetry, TelemetryOutput};
 use rootlight_operations::{CatalogWriterLock, OperationJournal};
-use rootlight_runtime::{DiscoveryRecord, RuntimePaths};
+use rootlight_runtime::{
+    COORDINATED_START_SIGNAL_ENV, COORDINATED_START_SIGNAL_VERSION, CoordinatedStartupSignal,
+    DiscoveryRecord, RuntimePaths,
+};
 
 fn main() -> ExitCode {
     match run() {
@@ -90,10 +99,12 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
         state.telemetry(),
     )?;
     let actor_handle = actor.handle();
+    let startup_signal = coordinated_startup_signal_publisher(mode);
     let (first_slice, first_slice_workers) = FirstSliceDaemon::start_durable(
         actor_handle.clone(),
         paths.state_dir(),
         Arc::clone(&state),
+        startup_signal,
     )
     .await?;
     let first_slice: Arc<dyn FirstSliceIpcHandler> = Arc::new(first_slice);
@@ -255,6 +266,24 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
         return Err(error);
     }
     drain_result
+}
+
+fn coordinated_startup_signal_publisher(
+    mode: DaemonMode,
+) -> Option<fn(CoordinatedStartupSignal) -> io::Result<()>> {
+    let coordinated = matches!(
+        mode,
+        DaemonMode::Coordinated | DaemonMode::CoordinatedSupervised
+    );
+    let requested = env::var_os(COORDINATED_START_SIGNAL_ENV)
+        .is_some_and(|value| value == COORDINATED_START_SIGNAL_VERSION);
+    (coordinated && requested).then_some(publish_coordinated_startup_signal)
+}
+
+fn publish_coordinated_startup_signal(signal: CoordinatedStartupSignal) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(&[signal.to_byte()])?;
+    stdout.flush()
 }
 
 async fn shutdown_signal(mode: DaemonMode) {

@@ -262,6 +262,19 @@ pub struct FirstSliceRestoredState {
 }
 
 impl FirstSliceDeferredRestore {
+    /// Reports whether at least one durable activation requires startup restore.
+    ///
+    /// The check traverses only bounded private catalog metadata. Generation
+    /// payloads remain unopened until [`Self::restore_active`] performs their
+    /// integrity-checked recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed durable catalog or retention failure.
+    pub fn has_active_restore_work(&self) -> Result<bool, FirstSliceError> {
+        self.durable.has_active_restore_work()
+    }
+
     /// Loads and verifies every retained activation-marked generation.
     ///
     /// The work is intentionally separate from service construction so daemon
@@ -10253,6 +10266,14 @@ mod tests {
                 .checked_add(Duration::from_secs(30))
                 .expect("test deadline is representable"),
         );
+        let (_, empty_restore) = FirstSliceService::open_durable_deferred(2, paths.state_dir())
+            .expect("empty durable boundary opens");
+        assert!(
+            !empty_restore
+                .has_active_restore_work()
+                .expect("empty durable metadata is readable")
+        );
+        drop(empty_restore);
 
         let receipt = {
             let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
@@ -10266,6 +10287,11 @@ mod tests {
             FirstSliceService::open_durable_deferred(2, paths.state_dir())
                 .expect("durable boundary opens without scanning generations");
         assert!(restored.list_repositories().is_empty());
+        assert!(
+            deferred
+                .has_active_restore_work()
+                .expect("activation metadata is readable")
+        );
         let restored_state = deferred
             .restore(&cancellation)
             .expect("durable generation verifies");

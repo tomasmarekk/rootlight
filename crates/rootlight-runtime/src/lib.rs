@@ -9,6 +9,7 @@ use std::{
     fs::{self, File, TryLockError},
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use directories::ProjectDirs;
@@ -26,6 +27,49 @@ pub const DISCOVERY_SCHEMA_VERSION: u16 = 2;
 pub const PROTOCOL_MAJOR: u32 = 1;
 /// Current private daemon protocol minor version.
 pub const PROTOCOL_MINOR: u32 = CURRENT_PROTOCOL_MINOR;
+/// Maximum time the daemon may spend restoring required active generations.
+///
+/// Coordinated clients use the same bound after the exact child signals that
+/// pre-readiness recovery began, so they never reap a healthy restore before
+/// the daemon's own recovery contract expires.
+pub const STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// Child-only environment opt-in for the coordinated startup signal pipe.
+pub const COORDINATED_START_SIGNAL_ENV: &str = "ROOTLIGHT_COORDINATED_START_SIGNAL";
+/// Current coordinated startup signal protocol version.
+pub const COORDINATED_START_SIGNAL_VERSION: &str = "1";
+
+/// One exact-child startup state published through the coordinator-owned pipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoordinatedStartupSignal {
+    /// No active durable generation requires pre-readiness restoration.
+    NoRecovery,
+    /// The exact child is about to restore at least one active generation.
+    ActiveGenerationRestore,
+}
+
+impl CoordinatedStartupSignal {
+    const NO_RECOVERY_BYTE: u8 = b'N';
+    const ACTIVE_GENERATION_RESTORE_BYTE: u8 = b'R';
+
+    /// Encodes the fixed-width startup signal.
+    #[must_use]
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Self::NoRecovery => Self::NO_RECOVERY_BYTE,
+            Self::ActiveGenerationRestore => Self::ACTIVE_GENERATION_RESTORE_BYTE,
+        }
+    }
+
+    /// Decodes one fixed-width startup signal.
+    #[must_use]
+    pub const fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            Self::NO_RECOVERY_BYTE => Some(Self::NoRecovery),
+            Self::ACTIVE_GENERATION_RESTORE_BYTE => Some(Self::ActiveGenerationRestore),
+            _ => None,
+        }
+    }
+}
 
 const ENDPOINT_ID_PREFIX: &str = "daemon-";
 const ENDPOINT_ID_HEX_BYTES: usize = 32;
@@ -1193,6 +1237,21 @@ pub enum RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coordinated_startup_signals_round_trip_and_reject_unknown_bytes() {
+        for signal in [
+            CoordinatedStartupSignal::NoRecovery,
+            CoordinatedStartupSignal::ActiveGenerationRestore,
+        ] {
+            assert_eq!(
+                CoordinatedStartupSignal::from_byte(signal.to_byte()),
+                Some(signal)
+            );
+        }
+        assert_eq!(CoordinatedStartupSignal::from_byte(b'?'), None);
+    }
+
     fn private_tempdir() -> tempfile::TempDir {
         // Keep generated socket paths below macOS's fixed AF_UNIX ceiling.
         #[cfg(target_os = "macos")]

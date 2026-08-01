@@ -29,7 +29,10 @@ pub use update::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, Cursor, Read as _, Write as _},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, TryRecvError},
+    },
     time::{Duration, Instant},
 };
 
@@ -60,7 +63,10 @@ use rootlight_protocol::{
     MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES, MINIMUM_PROTOCOL_MINOR,
     generated::{common::v1 as common, daemon::v1 as daemon},
 };
-use rootlight_runtime::{LaunchLock, RuntimePaths};
+use rootlight_runtime::{
+    COORDINATED_START_SIGNAL_ENV, COORDINATED_START_SIGNAL_VERSION, CoordinatedStartupSignal,
+    LaunchLock, RuntimePaths, STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT,
+};
 use rootlight_sandbox::{ChildProcess, KillOnCloseJob, ProcessCommand, ProcessError, StdioMode};
 use sha2::{Digest as _, Sha256};
 use tokio::time::Instant as TokioInstant;
@@ -90,9 +96,9 @@ const MAX_SUPPORT_ENTRY_BYTES: usize = 128 * 1024;
 // Release launchers enforce the installed-product startup SLO. Debug payloads
 // remain bounded but need headroom for unoptimized CI and local test builds.
 #[cfg(not(debug_assertions))]
-const COORDINATED_START_TIMEOUT: Duration = Duration::from_secs(3);
+const COORDINATED_INITIAL_START_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(debug_assertions)]
-const COORDINATED_START_TIMEOUT: Duration = Duration::from_secs(30);
+const COORDINATED_INITIAL_START_TIMEOUT: Duration = Duration::from_secs(30);
 const COORDINATED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const START_CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const START_CHILD_CLEANUP_ATTEMPTS: usize = 3;
@@ -2302,6 +2308,7 @@ pub struct Client {
 struct CoordinatedDaemonProcess {
     child: ChildProcess,
     containment: Option<KillOnCloseJob>,
+    startup_signal: Option<mpsc::Receiver<io::Result<CoordinatedStartupSignal>>>,
     cleanup_on_drop: bool,
 }
 
@@ -2311,6 +2318,7 @@ impl CoordinatedDaemonProcess {
         Self {
             child,
             containment: None,
+            startup_signal: None,
             cleanup_on_drop: true,
         }
     }
@@ -2325,6 +2333,47 @@ impl CoordinatedDaemonProcess {
 
     fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>, ProcessError> {
         self.child.try_wait()
+    }
+
+    fn capture_startup_signal(&mut self) -> Result<(), ClientError> {
+        let mut stdout = self
+            .child
+            .take_stdout()
+            .ok_or(ClientError::DaemonLaunchFailed)?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("rootlight-startup-signal".to_owned())
+            .spawn(move || {
+                let signal = read_coordinated_startup_signal(&mut stdout);
+                let _ = sender.send(signal);
+            })
+            .map_err(ClientError::LaunchIo)?;
+        self.startup_signal = Some(receiver);
+        Ok(())
+    }
+
+    fn poll_startup_signal(&mut self) -> Result<Option<CoordinatedStartupSignal>, ClientError> {
+        let Some(receiver) = self.startup_signal.as_ref() else {
+            return Ok(None);
+        };
+        match receiver.try_recv() {
+            Ok(signal) => {
+                self.startup_signal = None;
+                signal.map(Some).map_err(ClientError::LaunchIo)
+            }
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => {
+                self.startup_signal = None;
+                Err(ClientError::LaunchIo(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "coordinated startup signal pipe disconnected",
+                )))
+            }
+        }
+    }
+
+    fn startup_signal_pending(&self) -> bool {
+        self.startup_signal.is_some()
     }
 
     fn handoff(mut self) -> Result<(), ClientError> {
@@ -5499,7 +5548,7 @@ fn coordinate_start(
     client_instance_id: [u8; 16],
     ownership: StartupOwnership,
 ) -> Result<StartupConnection, ClientError> {
-    let deadline = startup_deadline()?;
+    let coordination_deadline = initial_start_deadline(Instant::now())?;
     loop {
         match paths.acquire_launch_lock() {
             Ok(launch) => {
@@ -5515,8 +5564,12 @@ fn coordinate_start(
                 {
                     return Err(error);
                 }
+                if Instant::now() >= coordination_deadline {
+                    return Err(ClientError::DaemonStartTimedOut);
+                }
                 let startup = CoordinatedStartup::spawn(launch, ownership, paths)?;
-                return wait_for_ready_daemon(paths, client_instance_id, deadline, startup);
+                let deadlines = StartupDeadlines::new(Instant::now())?;
+                return wait_for_ready_daemon(paths, client_instance_id, deadlines, startup);
             }
             Err(rootlight_runtime::RuntimeError::LaunchBusy) => {
                 if let ProbeOutcome::Ready(ready) = probe_ready_client(paths, client_instance_id)? {
@@ -5525,7 +5578,7 @@ fn coordinate_start(
                         owned: None,
                     });
                 }
-                wait_before_deadline(deadline)?;
+                wait_before_deadline(coordination_deadline)?;
             }
             Err(error) => return Err(ClientError::Runtime(error)),
         }
@@ -5535,36 +5588,142 @@ fn coordinate_start(
 fn wait_for_ready_daemon(
     paths: &RuntimePaths,
     client_instance_id: [u8; 16],
-    deadline: Instant,
+    mut deadlines: StartupDeadlines,
     mut startup: CoordinatedStartup,
 ) -> Result<StartupConnection, ClientError> {
     loop {
         if startup.child_exited()? {
             return Err(ClientError::DaemonLaunchFailed);
         }
-        let probe = probe_ready_client(paths, client_instance_id);
-        if let Ok(ProbeOutcome::Ready(ready)) = probe {
-            if startup.matches_running(ready.identity)? {
-                return startup.finish(paths.clone(), ready);
+        let startup_signal = match startup.poll_startup_signal() {
+            Ok(signal) => signal,
+            Err(error) => {
+                startup.terminate()?;
+                return Err(error);
             }
-            startup.terminate()?;
-            return Ok(StartupConnection {
-                client: ready.client,
-                owned: None,
-            });
-        }
-        if let Err(error) = probe
-            && !startup_probe_retryable(&error)
+        };
+        if startup_signal == Some(CoordinatedStartupSignal::ActiveGenerationRestore)
+            && let Err(error) = deadlines.authorize_recovery(Instant::now())
         {
             startup.terminate()?;
             return Err(error);
         }
-        if Instant::now() >= deadline {
-            startup.terminate()?;
-            return Err(ClientError::DaemonStartTimedOut);
+        let probe = probe_ready_client(paths, client_instance_id);
+        let action = match classify_startup_probe(
+            probe,
+            startup.startup_signal_pending(),
+            Instant::now(),
+            deadlines,
+        ) {
+            Ok(action) => action,
+            Err(error) => {
+                startup.terminate()?;
+                return Err(error);
+            }
+        };
+        match action {
+            StartupProbeAction::Ready(ready) => {
+                if startup.matches_running(ready.identity)? {
+                    return startup.finish(paths.clone(), ready);
+                }
+                startup.terminate()?;
+                return Ok(StartupConnection {
+                    client: ready.client,
+                    owned: None,
+                });
+            }
+            StartupProbeAction::Continue => {
+                std::thread::sleep(START_POLL_INTERVAL);
+            }
+            StartupProbeAction::TimedOut => {
+                startup.terminate()?;
+                return Err(ClientError::DaemonStartTimedOut);
+            }
         }
-        std::thread::sleep(START_POLL_INTERVAL);
     }
+}
+
+enum StartupProbeAction {
+    Ready(ReadyDaemon),
+    Continue,
+    TimedOut,
+}
+
+fn classify_startup_probe(
+    probe: Result<ProbeOutcome, ClientError>,
+    startup_signal_pending: bool,
+    now: Instant,
+    deadlines: StartupDeadlines,
+) -> Result<StartupProbeAction, ClientError> {
+    match probe {
+        Ok(ProbeOutcome::Ready(_)) if startup_signal_pending && deadlines.expired(now) => {
+            Ok(StartupProbeAction::TimedOut)
+        }
+        Ok(ProbeOutcome::Ready(_)) if startup_signal_pending => Ok(StartupProbeAction::Continue),
+        Ok(ProbeOutcome::Ready(ready)) => Ok(StartupProbeAction::Ready(ready)),
+        Ok(ProbeOutcome::Unavailable) => {
+            if deadlines.expired(now) {
+                Ok(StartupProbeAction::TimedOut)
+            } else {
+                Ok(StartupProbeAction::Continue)
+            }
+        }
+        Err(error) if startup_probe_retryable(&error) => {
+            if deadlines.expired(now) {
+                Ok(StartupProbeAction::TimedOut)
+            } else {
+                Ok(StartupProbeAction::Continue)
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StartupDeadlines {
+    initial: Instant,
+    recovery: Option<Instant>,
+}
+
+impl StartupDeadlines {
+    fn new(started_at: Instant) -> Result<Self, ClientError> {
+        Ok(Self {
+            initial: initial_start_deadline(started_at)?,
+            recovery: None,
+        })
+    }
+
+    fn authorize_recovery(&mut self, observed_at: Instant) -> Result<(), ClientError> {
+        self.recovery = Some(
+            observed_at
+                .checked_add(STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT)
+                .ok_or(ClientError::InvalidRequestTimeout)?,
+        );
+        Ok(())
+    }
+
+    fn expired(self, now: Instant) -> bool {
+        now >= self.recovery.unwrap_or(self.initial)
+    }
+}
+
+fn initial_start_deadline(started_at: Instant) -> Result<Instant, ClientError> {
+    started_at
+        .checked_add(COORDINATED_INITIAL_START_TIMEOUT)
+        .ok_or(ClientError::InvalidRequestTimeout)
+}
+
+fn read_coordinated_startup_signal(
+    reader: &mut impl io::Read,
+) -> io::Result<CoordinatedStartupSignal> {
+    let mut encoded = [0_u8; 1];
+    reader.read_exact(&mut encoded)?;
+    CoordinatedStartupSignal::from_byte(encoded[0]).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "coordinated startup signal is invalid",
+        )
+    })
 }
 
 #[derive(Debug)]
@@ -5586,6 +5745,19 @@ impl CoordinatedStartup {
             ownership,
             child: Some(child),
         })
+    }
+
+    fn poll_startup_signal(&mut self) -> Result<Option<CoordinatedStartupSignal>, ClientError> {
+        self.child
+            .as_mut()
+            .ok_or(ClientError::DaemonLaunchFailed)?
+            .poll_startup_signal()
+    }
+
+    fn startup_signal_pending(&self) -> bool {
+        self.child
+            .as_ref()
+            .is_some_and(CoordinatedDaemonProcess::startup_signal_pending)
     }
 
     fn matches_running(&mut self, identity: ReadyDaemonIdentity) -> Result<bool, ClientError> {
@@ -5822,12 +5994,6 @@ fn classify_health_probe(
     }
 }
 
-fn startup_deadline() -> Result<Instant, ClientError> {
-    Instant::now()
-        .checked_add(COORDINATED_START_TIMEOUT)
-        .ok_or(ClientError::InvalidRequestTimeout)
-}
-
 fn wait_before_deadline(deadline: Instant) -> Result<(), ClientError> {
     if Instant::now() >= deadline {
         return Err(ClientError::DaemonStartTimedOut);
@@ -5901,33 +6067,46 @@ fn spawn_coordinated_daemon(
         .arg(argument)
         .env("ROOTLIGHT_STATE_DIR", paths.state_dir())
         .env("ROOTLIGHT_RUNTIME_DIR", paths.runtime_dir())
+        .env(
+            COORDINATED_START_SIGNAL_ENV,
+            COORDINATED_START_SIGNAL_VERSION,
+        )
         .stdin(stdin)
-        .stdout(StdioMode::Null)
+        .stdout(StdioMode::Piped)
         .stderr(StdioMode::Null);
-    spawn_coordinated_process(command)
+    spawn_coordinated_process(command, true)
 }
 
 #[cfg(windows)]
 fn spawn_coordinated_process(
     command: ProcessCommand,
+    capture_startup_signal: bool,
 ) -> Result<CoordinatedDaemonProcess, ClientError> {
     let containment = KillOnCloseJob::new().map_err(launch_process_error)?;
     let child = containment.spawn(command).map_err(launch_process_error)?;
-    Ok(CoordinatedDaemonProcess {
+    let mut process = CoordinatedDaemonProcess {
         child,
         containment: Some(containment),
+        startup_signal: None,
         cleanup_on_drop: true,
-    })
+    };
+    if capture_startup_signal {
+        process.capture_startup_signal()?;
+    }
+    Ok(process)
 }
 
 #[cfg(not(windows))]
 fn spawn_coordinated_process(
     command: ProcessCommand,
+    capture_startup_signal: bool,
 ) -> Result<CoordinatedDaemonProcess, ClientError> {
-    command
-        .spawn()
-        .map(CoordinatedDaemonProcess::uncontained)
-        .map_err(launch_process_error)
+    let child = command.spawn().map_err(launch_process_error)?;
+    let mut process = CoordinatedDaemonProcess::uncontained(child);
+    if capture_startup_signal {
+        process.capture_startup_signal()?;
+    }
+    Ok(process)
 }
 
 #[cfg(windows)]
@@ -11489,7 +11668,7 @@ mod tests {
                 .stdin(StdioMode::Null)
                 .stdout(StdioMode::Null)
                 .stderr(StdioMode::Null);
-        let mut child = spawn_coordinated_process(command).expect("cleanup child starts");
+        let mut child = spawn_coordinated_process(command, false).expect("cleanup child starts");
         let marker_deadline = Instant::now()
             .checked_add(Duration::from_secs(5))
             .expect("marker deadline is representable");
@@ -11562,9 +11741,12 @@ mod tests {
             wait_for_ready_daemon(
                 &contender_paths,
                 [91; 16],
-                Instant::now()
-                    .checked_add(Duration::from_millis(250))
-                    .expect("startup deadline is representable"),
+                StartupDeadlines {
+                    initial: Instant::now()
+                        .checked_add(Duration::from_millis(250))
+                        .expect("startup deadline is representable"),
+                    recovery: None,
+                },
                 startup,
             )
         });
@@ -11764,15 +11946,169 @@ mod tests {
     }
 
     #[test]
-    fn coordinated_deadlines_match_the_build_profile_contract() {
-        let expected_start = if cfg!(debug_assertions) {
+    fn coordinated_deadlines_match_clean_start_and_recovery_contracts() {
+        let expected_initial = if cfg!(debug_assertions) {
             Duration::from_secs(30)
         } else {
             Duration::from_secs(3)
         };
-        assert_eq!(COORDINATED_START_TIMEOUT, expected_start);
+        assert_eq!(COORDINATED_INITIAL_START_TIMEOUT, expected_initial);
+        assert_eq!(
+            STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT,
+            Duration::from_secs(60 * 60)
+        );
         assert_eq!(COORDINATED_SHUTDOWN_TIMEOUT, Duration::from_secs(30));
-        assert!(COORDINATED_START_TIMEOUT <= COORDINATED_SHUTDOWN_TIMEOUT);
+    }
+
+    #[test]
+    fn startup_probe_prefers_authenticated_readiness_over_elapsed_deadline() {
+        let now = Instant::now();
+        let deadlines = StartupDeadlines {
+            initial: now,
+            recovery: None,
+        };
+        let ready = ReadyDaemon {
+            client: Client::new(test_endpoint("coordinated-ready"), [7; 16], [8; 16]),
+            identity: ReadyDaemonIdentity {
+                pid: 42,
+                instance_nonce: [8; 16],
+            },
+        };
+
+        assert!(matches!(
+            classify_startup_probe(
+                Ok(ProbeOutcome::Ready(ready)),
+                false,
+                now.checked_add(Duration::from_secs(1))
+                    .expect("probe time is representable"),
+                deadlines,
+            )
+            .expect("ready probe remains valid"),
+            StartupProbeAction::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn exact_child_recovery_signal_extends_only_its_fresh_attempt() {
+        let started_at = Instant::now();
+        let mut deadlines =
+            StartupDeadlines::new(started_at).expect("startup deadline is representable");
+        assert!(matches!(
+            classify_startup_probe(
+                Ok(ProbeOutcome::Unavailable),
+                false,
+                deadlines.initial,
+                deadlines,
+            )
+            .expect("unavailable probe reaches the clean-start bound"),
+            StartupProbeAction::TimedOut
+        ));
+
+        let signal_time = deadlines
+            .initial
+            .checked_add(Duration::from_millis(1))
+            .expect("signal time is representable");
+        deadlines
+            .authorize_recovery(signal_time)
+            .expect("recovery deadline is representable");
+        let after_previous_limit = signal_time
+            .checked_add(Duration::from_secs(121))
+            .expect("probe time is representable");
+
+        assert!(matches!(
+            classify_startup_probe(
+                Ok(ProbeOutcome::Unavailable),
+                false,
+                after_previous_limit,
+                deadlines,
+            )
+            .expect("unavailable probe remains retryable"),
+            StartupProbeAction::Continue
+        ));
+        assert!(matches!(
+            classify_startup_probe(
+                Ok(ProbeOutcome::Unavailable),
+                false,
+                deadlines.recovery.expect("recovery deadline exists"),
+                deadlines,
+            )
+            .expect("unavailable probe reaches its final bound"),
+            StartupProbeAction::TimedOut
+        ));
+    }
+
+    #[test]
+    fn ready_probe_with_pending_signal_stays_bounded() {
+        let now = Instant::now();
+        let deadlines = StartupDeadlines::new(now).expect("startup deadline is representable");
+        let ready = || ReadyDaemon {
+            client: Client::new(test_endpoint("pending-signal"), [9; 16], [10; 16]),
+            identity: ReadyDaemonIdentity {
+                pid: 43,
+                instance_nonce: [10; 16],
+            },
+        };
+
+        assert!(matches!(
+            classify_startup_probe(Ok(ProbeOutcome::Ready(ready())), true, now, deadlines,)
+                .expect("pending signal waits before the deadline"),
+            StartupProbeAction::Continue
+        ));
+        assert!(matches!(
+            classify_startup_probe(
+                Ok(ProbeOutcome::Ready(ready())),
+                true,
+                deadlines.initial,
+                deadlines,
+            )
+            .expect("pending signal reaches the clean-start deadline"),
+            StartupProbeAction::TimedOut
+        ));
+    }
+
+    #[test]
+    fn fresh_startup_attempt_never_inherits_contender_deadline() {
+        let coordination_started = Instant::now();
+        let coordination_deadline =
+            initial_start_deadline(coordination_started).expect("coordination deadline exists");
+        let child_started = coordination_deadline
+            .checked_add(Duration::from_secs(1))
+            .expect("child start time is representable");
+        let child_deadlines =
+            StartupDeadlines::new(child_started).expect("child deadline is representable");
+
+        assert!(child_deadlines.initial > coordination_deadline);
+        assert!(!child_deadlines.expired(child_started));
+    }
+
+    #[test]
+    fn coordinated_startup_signal_rejects_missing_or_unknown_states() {
+        assert_eq!(
+            read_coordinated_startup_signal(&mut Cursor::new([
+                CoordinatedStartupSignal::NoRecovery.to_byte()
+            ]))
+            .expect("no-recovery signal decodes"),
+            CoordinatedStartupSignal::NoRecovery
+        );
+        assert_eq!(
+            read_coordinated_startup_signal(&mut Cursor::new([
+                CoordinatedStartupSignal::ActiveGenerationRestore.to_byte()
+            ]))
+            .expect("recovery signal decodes"),
+            CoordinatedStartupSignal::ActiveGenerationRestore
+        );
+        assert_eq!(
+            read_coordinated_startup_signal(&mut Cursor::new(*b"?"))
+                .expect_err("unknown signal fails closed")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            read_coordinated_startup_signal(&mut Cursor::new([]))
+                .expect_err("missing signal fails closed")
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
     }
 
     #[test]

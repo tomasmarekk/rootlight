@@ -12,6 +12,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
+    io,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError,
@@ -63,6 +64,7 @@ use rootlight_query::{
     ArchitectureOverviewView, CodeDeadEntryPointPolicy, ExecutionCompletenessState, LocateMode,
     QueryResource, QueryUsage, RelationDirection, RelationFamily, TestsSelectKind,
 };
+use rootlight_runtime::{CoordinatedStartupSignal, STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT};
 use rootlight_service::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
     AdvancedAstNode, FirstSliceBudget, FirstSliceDeferredRestore, FirstSliceDurableOperation,
@@ -94,10 +96,6 @@ const OPERATION_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 // maximum long poll for serialization, IPC scheduling, and client decoding.
 const OPERATION_STATUS_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 const LIFECYCLE_FINALIZATION_GRACE: Duration = Duration::from_secs(2);
-// Startup verifies and installs every active recovery snapshot before the
-// endpoint becomes ready. Keep this independently bounded from the 30-second
-// client request envelope used after readiness is published.
-const STARTUP_RESTORE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const DETACHED_INDEX_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const DEFAULT_RELATIONSHIP_RESULTS: u32 = 100;
 const DEFAULT_FLOW_DEPTH: u32 = 3;
@@ -601,10 +599,11 @@ impl FirstSliceDaemon {
         journal: JournalActorHandle,
         state_root: &Path,
         support_state: Arc<DaemonState>,
+        startup_signal: Option<fn(CoordinatedStartupSignal) -> io::Result<()>>,
     ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
         let cancellation = Cancellation::with_deadline(
             Instant::now()
-                .checked_add(STARTUP_RESTORE_TIMEOUT)
+                .checked_add(STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT)
                 .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?,
         );
         let project_analyzer = InstalledProjectAnalyzer::discover(&cancellation)
@@ -622,6 +621,17 @@ impl FirstSliceDaemon {
             }
         }
         .map_err(FirstSliceHostError::Service)?;
+        if let Some(publish) = startup_signal {
+            let signal = if deferred_restore
+                .has_active_restore_work()
+                .map_err(FirstSliceHostError::Service)?
+            {
+                CoordinatedStartupSignal::ActiveGenerationRestore
+            } else {
+                CoordinatedStartupSignal::NoRecovery
+            };
+            publish(signal).map_err(FirstSliceHostError::StartupSignal)?;
+        }
         // Public readiness promises that every newest last-good generation is
         // already queryable. Older rollback history remains deferred so it
         // cannot extend the startup availability boundary.
@@ -668,7 +678,7 @@ impl FirstSliceDaemon {
     ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
         let cancellation = Cancellation::with_deadline(
             Instant::now()
-                .checked_add(STARTUP_RESTORE_TIMEOUT)
+                .checked_add(STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT)
                 .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?,
         );
         let service =
@@ -854,7 +864,7 @@ impl FirstSliceDaemon {
         let (recovery_cancellation, recovery_thread) = match deferred_restore {
             Some(deferred_restore) => {
                 let deadline = Instant::now()
-                    .checked_add(STARTUP_RESTORE_TIMEOUT)
+                    .checked_add(STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT)
                     .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
                 let cancellation = Cancellation::with_deadline(deadline);
                 let worker_cancellation = cancellation.clone();
@@ -1151,6 +1161,9 @@ pub(crate) enum FirstSliceHostError {
     /// A private current-thread runtime could not initialize.
     #[error("first-slice async runtime failed to initialize")]
     AsyncRuntime(#[source] std::io::Error),
+    /// The exact-child startup signal could not reach its coordinator.
+    #[error("first-slice startup signal failed")]
+    StartupSignal(#[source] std::io::Error),
     /// The serialized journal actor rejected shutdown or lifecycle work.
     #[error("first-slice journal request failed")]
     Journal(#[source] ServiceError),
@@ -6384,10 +6397,17 @@ mod tests {
     use rootlight_runtime::RuntimePaths;
     use std::{
         fs,
-        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        sync::atomic::{AtomicU8, AtomicUsize, Ordering as AtomicOrdering},
         time::Duration,
     };
     use tempfile::TempDir;
+
+    static OBSERVED_STARTUP_SIGNAL: AtomicU8 = AtomicU8::new(0);
+
+    fn record_startup_signal(signal: CoordinatedStartupSignal) -> io::Result<()> {
+        OBSERVED_STARTUP_SIGNAL.store(signal.to_byte(), AtomicOrdering::SeqCst);
+        Ok(())
+    }
 
     struct FailingSemanticAnalyzer {
         calls: Arc<AtomicUsize>,
@@ -7020,13 +7040,19 @@ mod tests {
             .enable_time()
             .build()
             .expect("runtime builds");
+        OBSERVED_STARTUP_SIGNAL.store(0, AtomicOrdering::SeqCst);
         let (daemon, workers) = runtime
             .block_on(FirstSliceDaemon::start_durable(
                 actor.handle(),
                 paths.state_dir(),
                 Arc::new(DaemonState::starting()),
+                Some(record_startup_signal),
             ))
             .expect("daemon reconciles the durable marker");
+        assert_eq!(
+            OBSERVED_STARTUP_SIGNAL.load(AtomicOrdering::SeqCst),
+            CoordinatedStartupSignal::ActiveGenerationRestore.to_byte()
+        );
         let status_deadline = Instant::now() + Duration::from_secs(5);
         let status = loop {
             let status = execute_with_timeout(
@@ -7172,6 +7198,7 @@ mod tests {
                 actor.handle(),
                 paths.state_dir(),
                 Arc::new(DaemonState::starting()),
+                None,
             ))
             .expect("daemon skips pruned operation history");
 
