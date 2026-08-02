@@ -8,6 +8,7 @@
 
 mod update;
 
+pub use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 pub use update::{
     ACTIVE_VERSION_FILE, ArtifactMetadata, CandidateHealthCheck, CandidateHealthError,
     DetachedArtifactSignature, DetachedUpdateSignature, FilesystemUpdateError,
@@ -37,7 +38,6 @@ use std::{
 };
 
 use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
-use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ipc::{
     Endpoint, FrameCodec, IpcError, connect, connect_async, read_response, read_response_async,
     read_server_hello, read_server_hello_async, wait_for_peer_close_async, write_client_hello,

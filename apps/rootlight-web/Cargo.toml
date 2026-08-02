@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 axum.workspace = true
 data-encoding.workspace = true
+form_urlencoded.workspace = true
 getrandom.workspace = true
 mime_guess.workspace = true
 rootlight-client = { path = "../../crates/rootlight-client" }

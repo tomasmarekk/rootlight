@@ -7,6 +7,7 @@ import { Activity, Boxes, Command, FolderGit2, LogOut, Search, ShieldCheck } fro
 import { NavLink, Outlet } from "react-router";
 
 import { fetchHealth } from "../api/client";
+import type { Health } from "../api/contracts";
 import { useSession } from "../session/session-context";
 
 const navigation = [
@@ -22,7 +23,7 @@ export function AppShell() {
     queryFn: ({ signal }) => fetchHealth(signal),
     refetchInterval: 5_000,
   });
-  const connection = connectionState(health.data?.daemonReady, health.isError);
+  const connection = connectionState(health.data, health.isError);
 
   return (
     <div className="app-frame">
@@ -99,11 +100,11 @@ export function AppShell() {
   );
 }
 
-function connectionState(ready: boolean | undefined, failed: boolean) {
+function connectionState(health: Health | undefined, failed: boolean) {
   if (failed) {
     return { label: "Reconnecting", tone: "warning" } as const;
   }
-  if (ready === true) {
+  if (health?.webReady === true && health.daemonReady && health.lifecycle === "ready") {
     return { label: "Daemon ready", tone: "success" } as const;
   }
   return { label: "Connecting", tone: "neutral" } as const;

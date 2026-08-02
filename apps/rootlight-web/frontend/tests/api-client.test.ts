@@ -58,6 +58,35 @@ describe("browser API client", () => {
     await expect(fetchHealth()).rejects.toMatchObject({ code: "invalid_response" });
     await expect(fetchHealth()).rejects.toMatchObject({ code: "session_required" });
   });
+
+  it("encodes bounded catalog filters and continuation without merging snapshots", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        schema: "rootlight.web-project-catalog-page/1",
+        projects: [],
+        snapshot: "snapshot-token",
+        nextAfter: null,
+        totalCount: "0",
+        truncated: false,
+        sortVersion: 1,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { fetchProjects } = await import("../src/api/client");
+
+    await fetchProjects({
+      pageSize: 50,
+      query: "root light",
+      states: ["ready", "degraded"],
+      snapshot: "snapshot-token",
+      after: "cursor-token",
+      sortVersion: 1,
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/v1/projects?page_size=50&query=root+light&state=ready&state=degraded&snapshot=snapshot-token&after=cursor-token&sort_version=1",
+    );
+  });
 });
 
 function jsonResponse(value: unknown): Response {

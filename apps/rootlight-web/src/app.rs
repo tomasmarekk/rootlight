@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration, time::Instant};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path, Request, State},
+    extract::{DefaultBodyLimit, Extension, Path, Request, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, COOKIE, SET_COOKIE},
@@ -14,12 +14,15 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use rootlight_client::{DaemonLifecycle, Health, HealthStatus, RequestTimeout, ResourcePressure};
+use rootlight_client::{
+    ClientError, DaemonLifecycle, Health, HealthStatus, RequestTimeout, ResourcePressure,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    api,
     assets::{Asset, AssetInventory},
-    daemon::HealthClient,
+    daemon::DaemonClient,
     security::{self, SecurityPolicy},
     session::{
         AuthenticatedSession, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, SessionRegistry,
@@ -33,14 +36,14 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Clone)]
 pub(crate) struct AppState {
     assets: AssetInventory,
-    daemon: Arc<dyn HealthClient>,
+    daemon: Arc<dyn DaemonClient>,
     sessions: Arc<SessionRegistry>,
 }
 
 impl AppState {
     pub(crate) fn new(
         assets: AssetInventory,
-        daemon: Arc<dyn HealthClient>,
+        daemon: Arc<dyn DaemonClient>,
         sessions: Arc<SessionRegistry>,
     ) -> Self {
         Self {
@@ -49,16 +52,31 @@ impl AppState {
             sessions,
         }
     }
+
+    pub(crate) fn daemon(&self) -> &Arc<dyn DaemonClient> {
+        &self.daemon
+    }
 }
 
 pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
-    Router::new()
-        .route("/api/v1/session/bootstrap", post(bootstrap_session))
+    let protected_api = Router::new()
         .route(
             "/api/v1/session",
             get(session_status).delete(logout_session),
         )
         .route("/api/v1/health", get(health))
+        .route("/api/v1/projects", get(api::projects::list))
+        .route(
+            "/api/v1/projects/{repository_id}",
+            get(api::projects::detail),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_session,
+        ));
+    Router::new()
+        .route("/api/v1/session/bootstrap", post(bootstrap_session))
+        .merge(protected_api)
         .route("/", get(index))
         .route("/{*path}", get(asset_or_route))
         .layer(DefaultBodyLimit::max(MAX_BROWSER_BODY_BYTES))
@@ -68,6 +86,16 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
             security::enforce,
         ))
         .with_state(state)
+}
+
+async fn require_session(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let session = authenticate(&state.sessions, request.headers())?;
+    request.extensions_mut().insert(session);
+    Ok(next.run(request).await)
 }
 
 #[derive(Deserialize)]
@@ -94,7 +122,7 @@ struct ErrorEnvelope {
 }
 
 #[derive(Debug)]
-struct ApiError {
+pub(crate) struct ApiError {
     status: StatusCode,
     code: &'static str,
 }
@@ -114,10 +142,44 @@ impl ApiError {
         }
     }
 
-    const fn daemon_unavailable() -> Self {
+    pub(crate) const fn bad_request() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_request",
+        }
+    }
+
+    pub(crate) const fn daemon_unavailable() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "daemon_unavailable",
+        }
+    }
+
+    pub(crate) const fn daemon_request_failed() -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "daemon_request_failed",
+        }
+    }
+
+    pub(crate) fn from_daemon(error: &ClientError) -> Self {
+        match error {
+            ClientError::Ipc(_)
+            | ClientError::RequestTimedOut
+            | ClientError::DaemonUnavailable
+            | ClientError::Runtime(_)
+            | ClientError::DaemonExecutableMissing
+            | ClientError::DaemonLaunchFailed => Self::daemon_unavailable(),
+            ClientError::InvalidFirstSliceRequest
+            | ClientError::InvalidRepositoryCatalogRequest
+            | ClientError::InvalidSourceReference
+            | ClientError::InvalidRequestTimeout => Self::bad_request(),
+            ClientError::ProtocolFeatureUnavailable => Self {
+                status: StatusCode::NOT_IMPLEMENTED,
+                code: "capability_unavailable",
+            },
+            _ => Self::daemon_request_failed(),
         }
     }
 }
@@ -160,10 +222,8 @@ async fn bootstrap_session(
 }
 
 async fn session_status(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(session): Extension<AuthenticatedSession>,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    let session = authenticate(&state.sessions, &headers)?;
     Ok(Json(SessionResponse {
         csrf_token: session.csrf_token(),
         idle_ttl_seconds: idle_ttl_seconds(),
@@ -172,9 +232,9 @@ async fn session_status(
 
 async fn logout_session(
     State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let session = authenticate(&state.sessions, &headers)?;
     require_csrf(&session, &headers)?;
     state.sessions.logout(&session);
     let mut response = StatusCode::NO_CONTENT.into_response();
@@ -207,11 +267,7 @@ struct HealthResponse {
     resource_pressure: &'static str,
 }
 
-async fn health(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<HealthResponse>, ApiError> {
-    authenticate(&state.sessions, &headers)?;
+async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>, ApiError> {
     let timeout =
         RequestTimeout::new(HEALTH_TIMEOUT).map_err(|_| ApiError::daemon_unavailable())?;
     let health = state
@@ -293,7 +349,7 @@ fn accepts_html(headers: &HeaderMap) -> bool {
         })
 }
 
-fn authenticate(
+pub(crate) fn authenticate(
     sessions: &SessionRegistry,
     headers: &HeaderMap,
 ) -> Result<AuthenticatedSession, ApiError> {
@@ -376,7 +432,12 @@ mod tests {
         http::{Method, Request, header::HOST},
     };
     use data_encoding::HEXLOWER;
-    use rootlight_client::ClientError;
+    use rootlight_client::{
+        ClientError, GenerationId, RepositoryCatalogEntry, RepositoryCatalogFreshness,
+        RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryCatalogSnapshotId,
+        RepositoryCatalogState, RepositoryCoverageEntry, RepositoryId, RepositoryStatus,
+        RepositoryStatusRequest,
+    };
     use serde_json::json;
     use sha2::{Digest as _, Sha256};
     use tempfile::TempDir;
@@ -433,6 +494,21 @@ mod tests {
         let app = router(state, SecurityPolicy::loopback(43_127));
         let bootstrap_body =
             serde_json::to_vec(&json!({ "secret": bootstrap })).expect("bootstrap body serializes");
+
+        let unauthenticated_malformed_query = Request::builder()
+            .uri(format!("/api/v1/projects?snapshot={}", "x".repeat(2_000)))
+            .header(HOST, "127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::empty())
+            .expect("unauthenticated query request builds");
+        assert_eq!(
+            app.clone()
+                .oneshot(unauthenticated_malformed_query)
+                .await
+                .expect("unauthenticated query response returns")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
 
         let hostile = Request::builder()
             .method(Method::POST)
@@ -525,6 +601,63 @@ mod tests {
                 .contains_key("content-security-policy")
         );
 
+        let catalog_request = Request::builder()
+            .uri("/api/v1/projects?page_size=1&state=ready")
+            .header(HOST, "127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .header(COOKIE, &cookie)
+            .body(Body::empty())
+            .expect("catalog request builds");
+        let catalog_response = app
+            .clone()
+            .oneshot(catalog_request)
+            .await
+            .expect("catalog response returns");
+        assert_eq!(catalog_response.status(), StatusCode::OK);
+        let catalog_body = to_bytes(catalog_response.into_body(), MAX_BROWSER_BODY_BYTES)
+            .await
+            .expect("catalog response body reads");
+        let catalog_json: serde_json::Value =
+            serde_json::from_slice(&catalog_body).expect("catalog response parses");
+        assert_eq!(
+            catalog_json["projects"][0]["repositoryId"],
+            test_repository().to_string()
+        );
+        assert_eq!(catalog_json["totalCount"], "1");
+
+        let oversized_catalog_request = Request::builder()
+            .uri(format!("/api/v1/projects?query={}", "x".repeat(4_097)))
+            .header(HOST, "127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .header(COOKIE, &cookie)
+            .body(Body::empty())
+            .expect("oversized catalog request builds");
+        assert_eq!(
+            app.clone()
+                .oneshot(oversized_catalog_request)
+                .await
+                .expect("oversized catalog response returns")
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let detail_request = Request::builder()
+            .uri(format!(
+                "/api/v1/projects/{}?generation=active&coverage_detail=language",
+                test_repository()
+            ))
+            .header(HOST, "127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .header(COOKIE, &cookie)
+            .body(Body::empty())
+            .expect("project detail request builds");
+        let detail_response = app
+            .clone()
+            .oneshot(detail_request)
+            .await
+            .expect("project detail response returns");
+        assert_eq!(detail_response.status(), StatusCode::OK);
+
         let cross_origin_health = Request::builder()
             .uri("/api/v1/health")
             .header(HOST, "127.0.0.1:43127")
@@ -581,13 +714,83 @@ mod tests {
 
     struct FakeDaemon;
 
-    impl HealthClient for FakeDaemon {
+    impl DaemonClient for FakeDaemon {
         fn health<'a>(
             &'a self,
             _timeout: RequestTimeout,
         ) -> Pin<Box<dyn Future<Output = Result<Health, ClientError>> + Send + 'a>> {
             Box::pin(async { Ok(test_health()) })
         }
+
+        fn repository_catalog_page<'a>(
+            &'a self,
+            _request: &'a RepositoryCatalogPageRequest,
+            _timeout: RequestTimeout,
+        ) -> Pin<Box<dyn Future<Output = Result<RepositoryCatalogPage, ClientError>> + Send + 'a>>
+        {
+            Box::pin(async {
+                Ok(RepositoryCatalogPage {
+                    repositories: vec![RepositoryCatalogEntry {
+                        repository_id: test_repository(),
+                        display_name: "Rootlight".to_owned(),
+                        alias: None,
+                        active_generation: Some(test_generation()),
+                        generation_count: 1,
+                        state: RepositoryCatalogState::Ready,
+                        languages: vec!["rust".to_owned()],
+                        structural_freshness: RepositoryCatalogFreshness::Current,
+                        semantic_freshness: RepositoryCatalogFreshness::Current,
+                        coverage: Vec::new(),
+                    }],
+                    snapshot_id: RepositoryCatalogSnapshotId::from_bytes([9; 32]),
+                    next_after: None,
+                    total_count: Some(1),
+                    truncated: false,
+                    sort_version: rootlight_client::REPOSITORY_CATALOG_SORT_VERSION,
+                })
+            })
+        }
+
+        fn repository_status<'a>(
+            &'a self,
+            _request: RepositoryStatusRequest,
+            _timeout: RequestTimeout,
+        ) -> Pin<Box<dyn Future<Output = Result<RepositoryStatus, ClientError>> + Send + 'a>>
+        {
+            Box::pin(async {
+                Ok(RepositoryStatus {
+                    repository_id: test_repository(),
+                    display_name: "Rootlight".to_owned(),
+                    alias: None,
+                    resolved_generation: test_generation(),
+                    active_generation: test_generation(),
+                    parent_generation: None,
+                    active_parent_generation: None,
+                    active_structural_freshness: "current".to_owned(),
+                    active_semantic_freshness: "current".to_owned(),
+                    structural_freshness: "current".to_owned(),
+                    semantic_freshness: "current".to_owned(),
+                    state: "ready".to_owned(),
+                    publication_state: "published".to_owned(),
+                    coverage: vec![RepositoryCoverageEntry {
+                        language: "rust".to_owned(),
+                        tier: "tier_b".to_owned(),
+                        status: "complete".to_owned(),
+                        discovered_files: 1,
+                        indexed_files: 1,
+                    }],
+                    operations: Vec::new(),
+                })
+            })
+        }
+    }
+
+    fn test_repository() -> RepositoryId {
+        RepositoryId::from_bytes([7; 16])
+    }
+
+    fn test_generation() -> GenerationId {
+        GenerationId::from_bytes([8; 20])
     }
 
     fn test_health() -> Health {

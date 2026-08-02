@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod api;
 mod app;
 mod assets;
 mod browser;

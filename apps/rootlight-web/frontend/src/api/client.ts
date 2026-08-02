@@ -1,6 +1,16 @@
 // Enforces bounded same-origin API reads and keeps CSRF credentials in memory.
 
-import { parseHealth, parseSession, type Health, type Session } from "./contracts";
+import {
+  parseHealth,
+  parseProjectCatalogPage,
+  parseProjectDetail,
+  parseSession,
+  type Health,
+  type ProjectCatalogPage,
+  type ProjectDetail,
+  type ProjectLifecycleFilter,
+  type Session,
+} from "./contracts";
 
 const maximumJsonBytes = 1024 * 1024;
 const bootstrapPattern = /^[A-Za-z0-9_-]{43}$/u;
@@ -27,6 +37,62 @@ export function initializeSession(): Promise<Session> {
 
 export async function fetchHealth(signal?: AbortSignal): Promise<Health> {
   return parseHealth(await requestJson("/api/v1/health", { signal }));
+}
+
+export type ProjectCatalogRequest = {
+  pageSize: number;
+  query?: string;
+  states?: ProjectLifecycleFilter[];
+  snapshot?: string;
+  after?: string;
+  sortVersion?: number;
+};
+
+export async function fetchProjects(
+  catalog: ProjectCatalogRequest,
+  signal?: AbortSignal,
+): Promise<ProjectCatalogPage> {
+  const parameters = new URLSearchParams();
+  parameters.set("page_size", String(catalog.pageSize));
+  if (catalog.query !== undefined && catalog.query.length > 0) {
+    parameters.set("query", catalog.query);
+  }
+  for (const state of catalog.states ?? []) {
+    parameters.append("state", state);
+  }
+  if (catalog.snapshot !== undefined) {
+    parameters.set("snapshot", catalog.snapshot);
+  }
+  if (catalog.after !== undefined) {
+    parameters.set("after", catalog.after);
+  }
+  if (catalog.sortVersion !== undefined) {
+    parameters.set("sort_version", String(catalog.sortVersion));
+  }
+  return parseProjectCatalogPage(
+    await requestJson(`/api/v1/projects?${parameters.toString()}`, { signal }),
+  );
+}
+
+export async function fetchProjectDetail(
+  repositoryId: string,
+  generation: string,
+  signal?: AbortSignal,
+): Promise<ProjectDetail> {
+  const parameters = new URLSearchParams({
+    generation,
+    coverage_detail: "language",
+    include_operations: "true",
+    require_freshness: "none",
+  });
+  return parseProjectDetail(
+    await requestJson(
+      `/api/v1/projects/${encodeURIComponent(repositoryId)}?${parameters.toString()}`,
+      { signal },
+    ),
+    repositoryId,
+    generation,
+  );
 }
 
 export async function logout(): Promise<void> {
