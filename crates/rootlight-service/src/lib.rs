@@ -2129,6 +2129,7 @@ impl FirstSliceProjectAnalysisRequest<'_> {
 #[derive(Debug)]
 pub struct FirstSliceProjectAnalysis {
     documents: Vec<NormalizedIrDocument>,
+    external_symbols: BTreeSet<SymbolId>,
     isolation_permits_deep_adapter: bool,
     partitioned: bool,
 }
@@ -2137,8 +2138,10 @@ impl FirstSliceProjectAnalysis {
     /// Creates one project output at the daemon-owned adapter boundary.
     #[must_use]
     pub fn new(document: NormalizedIrDocument, isolation_permits_deep_adapter: bool) -> Self {
+        let external_symbols = project_external_symbols(&document);
         Self {
             documents: vec![document],
+            external_symbols,
             isolation_permits_deep_adapter,
             partitioned: false,
         }
@@ -2151,11 +2154,41 @@ impl FirstSliceProjectAnalysis {
         isolation_permits_deep_adapter: bool,
     ) -> Self {
         let partitioned = documents.len() > 1;
+        let external_symbols = documents
+            .iter()
+            .flat_map(project_external_symbols)
+            .collect();
         Self {
             documents,
+            external_symbols,
             isolation_permits_deep_adapter,
             partitioned,
         }
+    }
+
+    /// Merges one validated adapter partition into the retained project output.
+    ///
+    /// Consuming each partition as it arrives bounds peak memory to the merged
+    /// output plus one adapter response instead of retaining every response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceProjectAnalysisError::Analysis`] when the partition
+    /// names a different document identity or bounded allocation fails.
+    pub fn append_partition(
+        &mut self,
+        document: NormalizedIrDocument,
+        isolation_permits_deep_adapter: bool,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        let merged = self
+            .documents
+            .first_mut()
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        merge_project_document(merged, document, &mut self.external_symbols)
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        self.isolation_permits_deep_adapter &= isolation_permits_deep_adapter;
+        self.partitioned = true;
+        Ok(())
     }
 
     fn into_parts(self) -> (Vec<NormalizedIrDocument>, bool, bool) {
@@ -8027,93 +8060,106 @@ fn merge_project_documents(
 ) -> Result<NormalizedIrDocument, FirstSliceError> {
     let mut documents = documents.into_iter();
     let mut merged = documents.next().ok_or(FirstSliceError::Identity)?;
-    let mut external_symbols = merged
+    let mut external_symbols = project_external_symbols(&merged);
+    for document in documents {
+        merge_project_document(&mut merged, document, &mut external_symbols)?;
+    }
+    Ok(merged)
+}
+
+fn project_external_symbols(document: &NormalizedIrDocument) -> BTreeSet<SymbolId> {
+    document
         .entities
         .iter()
         .filter_map(|entity| (entity.kind == EntityKind::ExternalSymbol).then_some(entity.id))
-        .collect::<BTreeSet<_>>();
-    for mut document in documents {
-        if document.version != merged.version
-            || document.repository != merged.repository
-            || document.generation != merged.generation
-        {
-            return Err(FirstSliceError::Identity);
-        }
-        let mut duplicate_external_symbols = BTreeSet::new();
-        document.entities.retain(|entity| {
-            entity.kind != EntityKind::ExternalSymbol
-                || if external_symbols.insert(entity.id) {
-                    true
-                } else {
-                    duplicate_external_symbols.insert(entity.id);
-                    false
-                }
-        });
-        if !duplicate_external_symbols.is_empty() {
-            document.extensions.retain(|extension| {
-                if extension.namespace != SYMBOL_IDENTITY_CLAIM_NAMESPACE {
-                    return true;
-                }
-                let [FactRef::Entity(symbol)] = extension.evidence.derivation.as_slice() else {
-                    return true;
-                };
-                !duplicate_external_symbols.contains(symbol)
-            });
-        }
-        merged
-            .files
-            .try_reserve_exact(document.files.len())
-            .map_err(|_| FirstSliceError::Limits)?;
-        merged
-            .entities
-            .try_reserve_exact(document.entities.len())
-            .map_err(|_| FirstSliceError::Limits)?;
-        merged
-            .occurrences
-            .try_reserve_exact(document.occurrences.len())
-            .map_err(|_| FirstSliceError::Limits)?;
-        merged
-            .relations
-            .try_reserve_exact(document.relations.len())
-            .map_err(|_| FirstSliceError::Limits)?;
-        merged
-            .provenance
-            .try_reserve_exact(document.provenance.len())
-            .map_err(|_| FirstSliceError::Limits)?;
-        merged
-            .source_mappings
-            .try_reserve_exact(document.source_mappings.len())
-            .map_err(|_| FirstSliceError::Limits)?;
-        merged
-            .coverage_records
-            .try_reserve_exact(document.coverage_records.len())
-            .map_err(|_| FirstSliceError::Limits)?;
-        merged
-            .skipped_regions
-            .try_reserve_exact(document.skipped_regions.len())
-            .map_err(|_| FirstSliceError::Limits)?;
-        merged
-            .diagnostics
-            .try_reserve_exact(document.diagnostics.len())
-            .map_err(|_| FirstSliceError::Limits)?;
-        merged
-            .extensions
-            .try_reserve_exact(document.extensions.len())
-            .map_err(|_| FirstSliceError::Limits)?;
-        merged.files.append(&mut document.files);
-        merged.entities.append(&mut document.entities);
-        merged.occurrences.append(&mut document.occurrences);
-        merged.relations.append(&mut document.relations);
-        merged.provenance.append(&mut document.provenance);
-        merged.source_mappings.append(&mut document.source_mappings);
-        merged
-            .coverage_records
-            .append(&mut document.coverage_records);
-        merged.skipped_regions.append(&mut document.skipped_regions);
-        merged.diagnostics.append(&mut document.diagnostics);
-        merged.extensions.append(&mut document.extensions);
+        .collect()
+}
+
+fn merge_project_document(
+    merged: &mut NormalizedIrDocument,
+    mut document: NormalizedIrDocument,
+    external_symbols: &mut BTreeSet<SymbolId>,
+) -> Result<(), FirstSliceError> {
+    if document.version != merged.version
+        || document.repository != merged.repository
+        || document.generation != merged.generation
+    {
+        return Err(FirstSliceError::Identity);
     }
-    Ok(merged)
+    let mut duplicate_external_symbols = BTreeSet::new();
+    document.entities.retain(|entity| {
+        entity.kind != EntityKind::ExternalSymbol
+            || if external_symbols.insert(entity.id) {
+                true
+            } else {
+                duplicate_external_symbols.insert(entity.id);
+                false
+            }
+    });
+    if !duplicate_external_symbols.is_empty() {
+        document.extensions.retain(|extension| {
+            if extension.namespace != SYMBOL_IDENTITY_CLAIM_NAMESPACE {
+                return true;
+            }
+            let [FactRef::Entity(symbol)] = extension.evidence.derivation.as_slice() else {
+                return true;
+            };
+            !duplicate_external_symbols.contains(symbol)
+        });
+    }
+    merged
+        .files
+        .try_reserve_exact(document.files.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    merged
+        .entities
+        .try_reserve_exact(document.entities.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    merged
+        .occurrences
+        .try_reserve_exact(document.occurrences.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    merged
+        .relations
+        .try_reserve_exact(document.relations.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    merged
+        .provenance
+        .try_reserve_exact(document.provenance.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    merged
+        .source_mappings
+        .try_reserve_exact(document.source_mappings.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    merged
+        .coverage_records
+        .try_reserve_exact(document.coverage_records.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    merged
+        .skipped_regions
+        .try_reserve_exact(document.skipped_regions.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    merged
+        .diagnostics
+        .try_reserve_exact(document.diagnostics.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    merged
+        .extensions
+        .try_reserve_exact(document.extensions.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    merged.files.append(&mut document.files);
+    merged.entities.append(&mut document.entities);
+    merged.occurrences.append(&mut document.occurrences);
+    merged.relations.append(&mut document.relations);
+    merged.provenance.append(&mut document.provenance);
+    merged.source_mappings.append(&mut document.source_mappings);
+    merged
+        .coverage_records
+        .append(&mut document.coverage_records);
+    merged.skipped_regions.append(&mut document.skipped_regions);
+    merged.diagnostics.append(&mut document.diagnostics);
+    merged.extensions.append(&mut document.extensions);
+    Ok(())
 }
 
 fn append_project_partition_diagnostic(
@@ -9675,11 +9721,21 @@ mod tests {
 
         let repository = derive_repository(b"partition-merge-repository").id();
         let generation = GenerationId::from_bytes([21; 20]);
-        let merged = merge_project_documents(vec![
+        let mut analysis = FirstSliceProjectAnalysis::new(
             document(repository, generation, FileId::from_bytes([1; 20])),
-            document(repository, generation, FileId::from_bytes([2; 20])),
-        ])
-        .expect("partitioned project documents merge");
+            true,
+        );
+        analysis
+            .append_partition(
+                document(repository, generation, FileId::from_bytes([2; 20])),
+                false,
+            )
+            .expect("the next project partition merges immediately");
+        let (documents, isolation_permits_deep_adapter, partitioned) = analysis.into_parts();
+        assert!(!isolation_permits_deep_adapter);
+        assert!(partitioned);
+        assert_eq!(documents.len(), 1);
+        let merged = &documents[0];
 
         assert_eq!(merged.entities.len(), 1);
         assert_eq!(

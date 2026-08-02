@@ -254,12 +254,7 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
             request.context_manifest().len(),
             usize::try_from(files).map_err(|_| FirstSliceProjectAnalysisError::Analysis)?,
         )?;
-        let mut documents = Vec::new();
-        let maximum_partitions = ordered_inputs.len();
-        documents
-            .try_reserve(maximum_partitions.min(16))
-            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
-        let mut isolation_permits_deep_adapter = true;
+        let mut analysis: Option<FirstSliceProjectAnalysis> = None;
         let mut completed_files = 0_u64;
         let mut completed_bytes = 0_u64;
         for input in ordered_inputs {
@@ -272,8 +267,10 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
                 let (partition_files, partition_bytes) = project_partition_progress(&batch)?;
                 let (document, isolated) =
                     self.execute_partition(&request, &session, batch, cancellation)?;
-                documents.push(document);
-                isolation_permits_deep_adapter &= isolated;
+                match &mut analysis {
+                    Some(analysis) => analysis.append_partition(document, isolated)?,
+                    None => analysis = Some(FirstSliceProjectAnalysis::new(document, isolated)),
+                }
                 completed_files = completed_files
                     .checked_add(partition_files)
                     .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
@@ -298,8 +295,10 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
         let (partition_files, partition_bytes) = project_partition_progress(&batch)?;
         let (document, isolated) =
             self.execute_partition(&request, &session, batch, cancellation)?;
-        documents.push(document);
-        isolation_permits_deep_adapter &= isolated;
+        match &mut analysis {
+            Some(analysis) => analysis.append_partition(document, isolated)?,
+            None => analysis = Some(FirstSliceProjectAnalysis::new(document, isolated)),
+        }
         completed_files = completed_files
             .checked_add(partition_files)
             .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
@@ -312,10 +311,7 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
             completed_bytes,
             total_bytes,
         });
-        Ok(FirstSliceProjectAnalysis::new_partitioned(
-            documents,
-            isolation_permits_deep_adapter,
-        ))
+        analysis.ok_or(FirstSliceProjectAnalysisError::Analysis)
     }
 }
 
