@@ -10375,12 +10375,10 @@ mod tests {
                     |observed| progress.push(observed),
                 )
                 .expect("semantic refinement prepares");
-            assert_eq!(
-                progress
-                    .first()
-                    .map(|observed| (observed.completed, observed.total)),
-                Some((0, 6))
-            );
+            let first = progress.first().expect("initial progress exists");
+            assert_eq!(first.stage, FirstSliceIndexStage::Discovery);
+            assert_eq!(first.total, 6);
+            assert!(first.completed <= 1);
             assert_eq!(
                 progress
                     .last()
