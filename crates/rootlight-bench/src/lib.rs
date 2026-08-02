@@ -9,6 +9,7 @@
 mod ablation;
 mod bundle;
 mod ci;
+mod cold_index;
 mod decode;
 mod integrity;
 mod language_workspace;
@@ -47,6 +48,16 @@ pub use ci::{
     PARSER_CI_ENVELOPE_SCHEMA_VERSION, PARSER_CI_MAX_ENVELOPE_BYTES, ParserCiEvidenceEnvelope,
     ParserCiEvidenceError, build_parser_ci_evidence, decode_parser_ci_evidence,
     encode_parser_ci_evidence, verify_parser_ci_evidence,
+};
+pub use cold_index::{
+    COLD_INDEX_CORPUS_SCHEMA, COLD_INDEX_EVIDENCE_SCHEMA, COLD_INDEX_REPOSITORY_COUNT,
+    ColdIndexCorpus, ColdIndexEvidence, ColdIndexEvidenceError,
+    ColdIndexInterruptedRecoveryEvidence, ColdIndexLocateEvidence, ColdIndexOperationEvidence,
+    ColdIndexProgressEvidence, ColdIndexRepositorySpec, ColdIndexResourceEvidence,
+    ColdIndexRestartEvidence, ColdIndexTierEvidence, MAX_COLD_INDEX_CORPUS_BYTES,
+    MAX_COLD_INDEX_EVIDENCE_BYTES, cold_index_corpus_sha256, decode_cold_index_corpus,
+    decode_cold_index_evidence, encode_cold_index_evidence, load_cold_index_corpus,
+    verify_cold_index_evidence, verify_cold_index_evidence_set,
 };
 pub use decode::{DecodeError, decode_benchmark_command, decode_dataset_manifest};
 pub use language_workspace::{
