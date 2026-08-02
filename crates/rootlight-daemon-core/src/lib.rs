@@ -32,7 +32,7 @@ use rootlight_observability::{
     CancellationAuditOutcome, ControlMethod, DaemonLifecycle as ObservabilityDaemonLifecycle,
     DiagnosticsQuickSnapshot, ErrorCode as ObservabilityErrorCode, HealthSnapshot, OperatingSystem,
     OperationsSummary, ProtocolVersion as ObservabilityProtocolVersion, SpanKind,
-    SupportAdapterInventory, SupportBundleInput, SupportBundleSchema,
+    SupportAdapterInventory, SupportBundleInput, SupportBundleSchema, SupportChecksumStatus,
     SupportConfigurationInventory, SupportDependencyInventory, SupportDetailValue,
     SupportGenerationInventory, SupportInventory, SupportNextAction, SupportOperationKind,
     SupportOperationProgress, SupportOperationStage, SupportOperationState,
@@ -869,6 +869,49 @@ pub struct IndexSupportInventory {
     pub disk_margin_bytes: Option<u64>,
 }
 
+fn generation_health_status(inventory: &IndexSupportInventory) -> HealthStatus {
+    if inventory.repositories.is_empty() && inventory.generations.is_empty() {
+        return HealthStatus::NotConfigured;
+    }
+    let mut active = false;
+    let mut unknown_checksum = false;
+    for generation in inventory
+        .generations
+        .iter()
+        .filter(|generation| generation.state == "active")
+    {
+        active = true;
+        match generation.checksum_status {
+            SupportChecksumStatus::Verified => {}
+            SupportChecksumStatus::Failed => return HealthStatus::Failed,
+            SupportChecksumStatus::Unknown => unknown_checksum = true,
+        }
+    }
+    if !active {
+        HealthStatus::Unavailable
+    } else if unknown_checksum {
+        HealthStatus::Degraded
+    } else {
+        HealthStatus::Healthy
+    }
+}
+
+fn adapter_health_status(inventory: &IndexSupportInventory) -> HealthStatus {
+    if inventory.adapters.is_empty() {
+        return HealthStatus::NotConfigured;
+    }
+    let available = inventory
+        .adapters
+        .iter()
+        .filter(|adapter| adapter.available)
+        .count();
+    match available {
+        0 => HealthStatus::Unavailable,
+        count if count == inventory.adapters.len() => HealthStatus::Healthy,
+        _ => HealthStatus::Degraded,
+    }
+}
+
 /// Source-free provider family retained for repository-index diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryIndexProvider {
@@ -910,6 +953,9 @@ pub struct DaemonState {
     persisting_operations: AtomicU32,
     journal_healthy: AtomicBool,
     catalog_status: AtomicU8,
+    generation_status: AtomicU8,
+    adapter_status: AtomicU8,
+    watcher_status: AtomicU8,
     endpoint_status: AtomicU8,
     resource_pressure: AtomicU8,
     index_support_inventory: Mutex<IndexSupportInventory>,
@@ -939,6 +985,9 @@ impl DaemonState {
             persisting_operations: AtomicU32::new(0),
             journal_healthy: AtomicBool::new(true),
             catalog_status: AtomicU8::new(HealthStatus::Unavailable.as_u8()),
+            generation_status: AtomicU8::new(HealthStatus::NotConfigured.as_u8()),
+            adapter_status: AtomicU8::new(HealthStatus::NotConfigured.as_u8()),
+            watcher_status: AtomicU8::new(HealthStatus::NotConfigured.as_u8()),
             endpoint_status: AtomicU8::new(HealthStatus::Unavailable.as_u8()),
             resource_pressure: AtomicU8::new(ResourcePressure::Unknown.as_u8()),
             index_support_inventory: Mutex::new(IndexSupportInventory::default()),
@@ -997,6 +1046,22 @@ impl DaemonState {
             .store(status.as_u8(), Ordering::Release);
     }
 
+    /// Records the cached immutable-generation availability projection.
+    pub fn set_generation_status(&self, status: HealthStatus) {
+        self.generation_status
+            .store(status.as_u8(), Ordering::Release);
+    }
+
+    /// Records the cached parser and semantic-provider availability projection.
+    pub fn set_adapter_status(&self, status: HealthStatus) {
+        self.adapter_status.store(status.as_u8(), Ordering::Release);
+    }
+
+    /// Records the cached incremental-watcher commitment projection.
+    pub fn set_watcher_status(&self, status: HealthStatus) {
+        self.watcher_status.store(status.as_u8(), Ordering::Release);
+    }
+
     /// Records the latest bounded host-pressure classification.
     pub fn set_resource_pressure(&self, pressure: ResourcePressure) {
         self.resource_pressure
@@ -1024,10 +1089,14 @@ impl DaemonState {
         inventory
             .generations
             .truncate(rootlight_observability::MAX_SUPPORT_GENERATIONS);
+        let generation_status = generation_health_status(&inventory);
+        let adapter_status = adapter_health_status(&inventory);
         *self
             .index_support_inventory
             .lock()
             .map_err(|_| ServiceError::SupportInventoryStatePoisoned)? = inventory;
+        self.set_generation_status(generation_status);
+        self.set_adapter_status(adapter_status);
         Ok(())
     }
 
@@ -3160,11 +3229,11 @@ pub struct Health {
     pub catalog_status: HealthStatus,
     /// Current operation catalog schema version.
     pub catalog_schema_version: u32,
-    /// Generation storage status; not configured by the daemon control plane.
+    /// Cached availability of verified immutable generations.
     pub generation_status: HealthStatus,
-    /// Adapter status; not configured before parser providers exist.
+    /// Cached parser and semantic-provider availability.
     pub adapter_status: HealthStatus,
-    /// Watcher status; not configured before incremental discovery exists.
+    /// Cached incremental-watcher commitment status.
     pub watcher_status: HealthStatus,
     /// Latest bounded host-pressure classification.
     pub resource_pressure: ResourcePressure,
@@ -5748,14 +5817,21 @@ impl ControlService {
             HealthStatus::from_u8(self.state.catalog_status.load(Ordering::Acquire));
         let endpoint_status =
             HealthStatus::from_u8(self.state.endpoint_status.load(Ordering::Acquire));
+        let generation_status =
+            HealthStatus::from_u8(self.state.generation_status.load(Ordering::Acquire));
         let endpoint_ready = matches!(
             endpoint_status,
             HealthStatus::Healthy | HealthStatus::NotConfigured
+        );
+        let generation_ready = matches!(
+            generation_status,
+            HealthStatus::Healthy | HealthStatus::Degraded | HealthStatus::NotConfigured
         );
         Health {
             ready: lifecycle == DaemonLifecycle::Ready
                 && journal_healthy
                 && catalog_status == HealthStatus::Healthy
+                && generation_ready
                 && endpoint_ready,
             active_operations: admitted_operations,
             admitted_operations,
@@ -5770,9 +5846,13 @@ impl ControlService {
             journal_healthy,
             catalog_status,
             catalog_schema_version: rootlight_operations::OPERATION_SCHEMA_VERSION,
-            generation_status: HealthStatus::NotConfigured,
-            adapter_status: HealthStatus::NotConfigured,
-            watcher_status: HealthStatus::NotConfigured,
+            generation_status,
+            adapter_status: HealthStatus::from_u8(
+                self.state.adapter_status.load(Ordering::Acquire),
+            ),
+            watcher_status: HealthStatus::from_u8(
+                self.state.watcher_status.load(Ordering::Acquire),
+            ),
             resource_pressure: ResourcePressure::from_u8(
                 self.state.resource_pressure.load(Ordering::Acquire),
             ),
@@ -12136,6 +12216,70 @@ mod tests {
                 }
             ))
         ));
+    }
+
+    #[test]
+    fn health_projects_live_index_inventory_and_resource_state() {
+        let service = service();
+        let repository = RepositoryId::from_bytes([42; 16]);
+        let inventory = |checksum_status, adapter_available| IndexSupportInventory {
+            adapters: vec![SupportAdapterInventory {
+                name: "tree-sitter".to_owned(),
+                version: Some("builtin".to_owned()),
+                languages: vec!["rust".to_owned()],
+                available: adapter_available,
+                isolated: false,
+                binary_sha256: None,
+                artifact_sha256: None,
+            }],
+            repositories: vec![SupportRepositoryInventory {
+                repository_id: support_id(repository.as_bytes()),
+                root_fingerprint_sha256: None,
+                languages: vec!["rust".to_owned()],
+                tiers: vec!["structural".to_owned()],
+                state: "ready".to_owned(),
+                file_count: 1,
+                symbol_count: 1,
+                relationship_count: 0,
+                generation_count: 1,
+            }],
+            generations: vec![SupportGenerationInventory {
+                repository_id: support_id(repository.as_bytes()),
+                generation_id: support_id(&[43; 20]),
+                format_version: "1.2".to_owned(),
+                checksum_status,
+                disk_bytes: 4096,
+                state: "active".to_owned(),
+            }],
+            generation_format_version: Some("1.2".to_owned()),
+            generation_disk_bytes: 4096,
+            unreclaimed_temporary_bytes: 0,
+            disk_margin_bytes: Some(1024 * 1024),
+        };
+
+        service
+            .state()
+            .replace_index_support_inventory(inventory(SupportChecksumStatus::Verified, true))
+            .expect("verified inventory publishes");
+        service
+            .state()
+            .set_resource_pressure(ResourcePressure::High);
+        service.state().set_watcher_status(HealthStatus::Healthy);
+        let healthy = service.health();
+        assert_eq!(healthy.generation_status, HealthStatus::Healthy);
+        assert_eq!(healthy.adapter_status, HealthStatus::Healthy);
+        assert_eq!(healthy.watcher_status, HealthStatus::Healthy);
+        assert_eq!(healthy.resource_pressure, ResourcePressure::High);
+        assert!(healthy.ready);
+
+        service
+            .state()
+            .replace_index_support_inventory(inventory(SupportChecksumStatus::Failed, false))
+            .expect("failed inventory publishes");
+        let failed = service.health();
+        assert_eq!(failed.generation_status, HealthStatus::Failed);
+        assert_eq!(failed.adapter_status, HealthStatus::Unavailable);
+        assert!(!failed.ready);
     }
 
     #[test]

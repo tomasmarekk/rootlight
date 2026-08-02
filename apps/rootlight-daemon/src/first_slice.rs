@@ -31,8 +31,8 @@ use rootlight_adapter_host::{
 use rootlight_daemon_core::{
     ControlRequest, ControlResponse, DaemonState, FirstSliceEffectiveBudget, FirstSliceIpcContext,
     FirstSliceIpcFuture, FirstSliceIpcHandler, FirstSliceIpcRequest, FirstSliceIpcResponse,
-    HealthStatus, IndexSupportInventory, JournalActorHandle, RepositoryIndexProvider, ServiceError,
-    operation_record_to_wire,
+    HealthStatus, IndexSupportInventory, JournalActorHandle, RepositoryIndexProvider,
+    ResourcePressure, ServiceError, operation_record_to_wire,
 };
 use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
 use rootlight_ids::{
@@ -1697,8 +1697,8 @@ struct ProcessRssSampler {
 }
 
 impl ProcessRssSampler {
-    fn start(peak_rss_bytes: Arc<AtomicU64>) -> Self {
-        sample_current_process_rss(&peak_rss_bytes);
+    fn start(peak_rss_bytes: Arc<AtomicU64>, state: Option<Arc<DaemonState>>) -> Self {
+        sample_current_process_rss(&peak_rss_bytes, state.as_deref());
         let stopping = Arc::new(AtomicBool::new(false));
         let worker_stopping = Arc::clone(&stopping);
         let worker = thread::Builder::new()
@@ -1707,10 +1707,10 @@ impl ProcessRssSampler {
                 let pid = Pid::from_u32(std::process::id());
                 let mut system = System::new();
                 while !worker_stopping.load(Ordering::Acquire) {
-                    refresh_process_rss(&mut system, pid, &peak_rss_bytes);
+                    refresh_process_rss(&mut system, pid, &peak_rss_bytes, state.as_deref());
                     thread::park_timeout(Duration::from_millis(25));
                 }
-                refresh_process_rss(&mut system, pid, &peak_rss_bytes);
+                refresh_process_rss(&mut system, pid, &peak_rss_bytes, state.as_deref());
             })
             .ok();
         Self { stopping, worker }
@@ -1727,19 +1727,64 @@ impl Drop for ProcessRssSampler {
     }
 }
 
-fn sample_current_process_rss(peak_rss_bytes: &AtomicU64) {
+fn sample_current_process_rss(peak_rss_bytes: &AtomicU64, state: Option<&DaemonState>) {
     let mut system = System::new();
     refresh_process_rss(
         &mut system,
         Pid::from_u32(std::process::id()),
         peak_rss_bytes,
+        state,
     );
 }
 
-fn refresh_process_rss(system: &mut System, pid: Pid, peak_rss_bytes: &AtomicU64) {
+fn refresh_process_rss(
+    system: &mut System,
+    pid: Pid,
+    peak_rss_bytes: &AtomicU64,
+    state: Option<&DaemonState>,
+) {
+    system.refresh_memory();
     system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
     if let Some(process) = system.process(pid) {
-        peak_rss_bytes.fetch_max(process.memory(), Ordering::Relaxed);
+        let rss_bytes = process.memory();
+        peak_rss_bytes.fetch_max(rss_bytes, Ordering::Relaxed);
+        if let Some(state) = state {
+            state.set_resource_pressure(classify_resource_pressure(
+                system.total_memory(),
+                system.available_memory(),
+                rss_bytes,
+            ));
+        }
+    }
+}
+
+fn classify_resource_pressure(
+    total_memory_bytes: u64,
+    available_memory_bytes: u64,
+    process_rss_bytes: u64,
+) -> ResourcePressure {
+    if total_memory_bytes == 0 {
+        return ResourcePressure::Unknown;
+    }
+    let percent = |value: u64| {
+        u64::try_from(
+            u128::from(value)
+                .saturating_mul(100)
+                .checked_div(u128::from(total_memory_bytes))
+                .unwrap_or_default(),
+        )
+        .unwrap_or(u64::MAX)
+    };
+    let available_percent = percent(available_memory_bytes);
+    let process_percent = percent(process_rss_bytes);
+    if available_percent <= 5 || process_percent >= 80 {
+        ResourcePressure::Critical
+    } else if available_percent <= 10 || process_percent >= 65 {
+        ResourcePressure::High
+    } else if available_percent <= 20 || process_percent >= 50 {
+        ResourcePressure::Elevated
+    } else {
+        ResourcePressure::Normal
     }
 }
 
@@ -2556,7 +2601,8 @@ fn repository_index_with_intent(
         let _ = admitted.try_send(Ok(()));
     }
     let peak_rss_bytes = lock_metadata(metadata)?.resource_meter(operation)?;
-    let _rss_sampler = ProcessRssSampler::start(peak_rss_bytes);
+    let _rss_sampler =
+        ProcessRssSampler::start(peak_rss_bytes, lanes.support_state.as_ref().map(Arc::clone));
     if let Some(state) = lanes.support_state.as_deref() {
         state.record_repository_index_context(
             operation,
@@ -3059,6 +3105,14 @@ fn repository_index_with_intent(
             }
         }
     })();
+    if result
+        .as_ref()
+        .is_err_and(|error| error.code() == ErrorCode::AdapterFailed)
+        && matches!(intent, RepositoryIndexIntent::SemanticRefinement { .. })
+        && let Some(state) = lanes.support_state.as_deref()
+    {
+        state.set_adapter_status(HealthStatus::Degraded);
+    }
     if result.is_err() {
         read_service(service)?
             .restore_repository_registration(admission.root_identity, admission.repository)
@@ -3451,7 +3505,7 @@ fn persist_operation_resources(
         metadata.observe_written_bytes(operation, written_bytes);
         metadata.resource_meter(operation)?
     };
-    sample_current_process_rss(&peak_rss_bytes);
+    sample_current_process_rss(&peak_rss_bytes, None);
     let (peak_rss_bytes, written_bytes) = lock_metadata(metadata)?.resources(operation)?;
     journal_lifecycle_call(
         runtime,
@@ -6966,6 +7020,33 @@ mod tests {
         );
         assert_eq!(mapped.repositories[0].root_fingerprint_sha256, None);
         assert_eq!(mapped.repositories[0].generation_count, 1);
+    }
+
+    #[test]
+    fn resource_pressure_classification_is_bounded_and_monotonic() {
+        let gibibyte = 1024 * 1024 * 1024;
+        let total = 16 * gibibyte;
+
+        assert_eq!(
+            classify_resource_pressure(0, 0, 0),
+            ResourcePressure::Unknown
+        );
+        assert_eq!(
+            classify_resource_pressure(total, 8 * gibibyte, gibibyte),
+            ResourcePressure::Normal
+        );
+        assert_eq!(
+            classify_resource_pressure(total, 3 * gibibyte, 8 * gibibyte),
+            ResourcePressure::Elevated
+        );
+        assert_eq!(
+            classify_resource_pressure(total, gibibyte, 11 * gibibyte),
+            ResourcePressure::High
+        );
+        assert_eq!(
+            classify_resource_pressure(total, gibibyte / 2, 13 * gibibyte),
+            ResourcePressure::Critical
+        );
     }
 
     #[test]
