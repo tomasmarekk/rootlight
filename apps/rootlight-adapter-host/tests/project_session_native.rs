@@ -457,7 +457,7 @@ fn actual_child_output_quota_and_parent_cancellation_fail_closed() {
             &ExtensionSupport::default(),
             &deadline(),
         ),
-        Err(AdapterHostError::ProcessFailed)
+        Err(AdapterHostError::ProjectOutputLimit)
     ));
 
     let cancellation = Cancellation::new();
