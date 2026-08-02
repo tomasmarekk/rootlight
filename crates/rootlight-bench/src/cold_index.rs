@@ -17,7 +17,7 @@ use crate::sha256_hex;
 /// Schema of the checked-in real-repository corpus.
 pub const COLD_INDEX_CORPUS_SCHEMA: &str = "rootlight.cold-index-corpus/1";
 /// Schema of one real-repository measurement.
-pub const COLD_INDEX_EVIDENCE_SCHEMA: &str = "rootlight.cold-index-evidence/2";
+pub const COLD_INDEX_EVIDENCE_SCHEMA: &str = "rootlight.cold-index-evidence/3";
 /// Exact repository count required by the release gate.
 pub const COLD_INDEX_REPOSITORY_COUNT: usize = 8;
 /// Maximum accepted corpus document size.
@@ -105,6 +105,19 @@ pub struct ColdIndexResourceEvidence {
     pub files_examined: u64,
     /// Source bytes examined by this operation.
     pub bytes_examined: u64,
+}
+
+impl ColdIndexResourceEvidence {
+    /// Returns durable writes per examined source byte in thousandths.
+    #[must_use]
+    pub fn write_amplification_milli(&self) -> Option<u64> {
+        if self.bytes_examined == 0 {
+            return None;
+        }
+        self.written_bytes
+            .checked_mul(1_000)
+            .map(|scaled| scaled.div_ceil(self.bytes_examined))
+    }
 }
 
 /// One nonterminal durable progress observation.
@@ -247,6 +260,10 @@ pub struct ColdIndexEvidence {
     pub structural_operation: ColdIndexOperationEvidence,
     /// Separately owned terminal semantic refinement.
     pub semantic_operation: ColdIndexOperationEvidence,
+    /// Structural durable-write amplification in thousandths.
+    pub structural_write_amplification_milli: u64,
+    /// Semantic durable-write amplification in thousandths.
+    pub semantic_write_amplification_milli: u64,
     /// Total cold-index elapsed time.
     pub elapsed_ms: u64,
     /// Durable state bytes above the measured empty-state baseline.
@@ -395,6 +412,12 @@ pub fn verify_cold_index_evidence(
     validate_terminal_operation(&evidence.semantic_operation)?;
     let structural = evidence.structural_operation.resources;
     let semantic = evidence.semantic_operation.resources;
+    let structural_write_amplification = structural
+        .write_amplification_milli()
+        .ok_or(ColdIndexEvidenceError::InvalidEvidence)?;
+    let semantic_write_amplification = semantic
+        .write_amplification_milli()
+        .ok_or(ColdIndexEvidenceError::InvalidEvidence)?;
     let peak_rss_bytes = structural.peak_rss_bytes.max(semantic.peak_rss_bytes);
     if peak_rss_bytes > spec.maximum_peak_rss_bytes
         || structural.files_examined == 0
@@ -403,6 +426,8 @@ pub fn verify_cold_index_evidence(
         || semantic.files_examined == 0
         || semantic.bytes_examined == 0
         || semantic.written_bytes == 0
+        || evidence.structural_write_amplification_milli != structural_write_amplification
+        || evidence.semantic_write_amplification_milli != semantic_write_amplification
         || exceeds_ratio(
             evidence.durable_state_bytes,
             structural.bytes_examined,
@@ -766,6 +791,12 @@ mod tests {
             repository_id: "repo1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             structural_operation: operation("op1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             semantic_operation: operation("op1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            structural_write_amplification_milli: resources
+                .write_amplification_milli()
+                .expect("fixture has examined source bytes"),
+            semantic_write_amplification_milli: resources
+                .write_amplification_milli()
+                .expect("fixture has examined source bytes"),
             elapsed_ms: 60_000,
             durable_state_bytes: 64 * 1024 * 1024,
             primary_language_tier: ColdIndexTierEvidence {
@@ -870,6 +901,9 @@ mod tests {
         let mut excessive_storage = valid.clone();
         excessive_storage.durable_state_bytes = u64::MAX;
         cases.push(excessive_storage);
+        let mut incorrect_write_amplification = valid.clone();
+        incorrect_write_amplification.structural_write_amplification_milli += 1;
+        cases.push(incorrect_write_amplification);
         let mut changed_generation = valid.clone();
         changed_generation.restart.generation_after_restart = "other".to_owned();
         cases.push(changed_generation);

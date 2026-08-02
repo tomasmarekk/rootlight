@@ -174,6 +174,16 @@ fn real_repository_cold_index_is_release_bounded() {
         &located.source_ref,
         spec.sample_count,
     );
+    let structural_write_amplification_milli = structural
+        .operation
+        .resources
+        .write_amplification_milli()
+        .expect("structural operation examined source bytes");
+    let semantic_write_amplification_milli = semantic
+        .operation
+        .resources
+        .write_amplification_milli()
+        .expect("semantic operation examined source bytes");
 
     let evidence = ColdIndexEvidence {
         schema: COLD_INDEX_EVIDENCE_SCHEMA.to_owned(),
@@ -189,6 +199,8 @@ fn real_repository_cold_index_is_release_bounded() {
         repository_id: repository_id.clone(),
         structural_operation: structural.operation,
         semantic_operation: semantic.operation,
+        structural_write_amplification_milli,
+        semantic_write_amplification_milli,
         elapsed_ms,
         durable_state_bytes,
         primary_language_tier,

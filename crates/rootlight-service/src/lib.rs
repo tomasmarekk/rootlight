@@ -119,6 +119,9 @@ const MAX_FIRST_SLICE_STRUCTURAL_FACTS: usize = 1_048_576;
 const MAX_TOTAL_MATERIALIZED_RESOLUTION_CANDIDATES: usize = 1_000_000;
 const DURABLE_STAGING_FIXED_OVERHEAD_BYTES: u64 = 64 * 1024 * 1024;
 const DURABLE_DISK_SAFETY_MARGIN_BYTES: u64 = 64 * 1024 * 1024;
+// The large-repository capacity profile observed up to 20.3 durable write
+// bytes per examined source byte, so preflight rounds that measurement up.
+const DURABLE_SOURCE_WRITE_AMPLIFICATION_FACTOR: u64 = 21;
 // SQLite stores normalized fields across tables and indexes, so the streaming
 // JSON size is multiplied before any durable file is created.
 const DURABLE_ORACLE_SERIALIZED_EXPANSION_FACTOR: u64 = 8;
@@ -2560,7 +2563,7 @@ impl FirstSliceService {
         drop(pending);
         let maximum_source_bytes =
             u64::try_from(MAX_RETAINED_SOURCE_BYTES).map_err(|_| FirstSliceError::Limits)?;
-        let estimated_disk_bytes = durable_staging_reservation(maximum_source_bytes)?;
+        let estimated_disk_bytes = durable_initial_admission_reservation(maximum_source_bytes)?;
         if let Err(error) = self.ensure_durable_staging_capacity(estimated_disk_bytes) {
             self.release_index_admission(FirstSliceIndexAdmission {
                 repository,
@@ -7753,9 +7756,17 @@ fn preflight_source_inputs(
     })
 }
 
-fn durable_staging_reservation(source_bytes: u64) -> Result<u64, FirstSliceError> {
+fn durable_initial_admission_reservation(source_bytes: u64) -> Result<u64, FirstSliceError> {
     source_bytes
         .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(DURABLE_STAGING_FIXED_OVERHEAD_BYTES))
+        .and_then(|bytes| bytes.checked_add(DURABLE_DISK_SAFETY_MARGIN_BYTES))
+        .ok_or(FirstSliceError::Limits)
+}
+
+fn durable_staging_reservation(source_bytes: u64) -> Result<u64, FirstSliceError> {
+    source_bytes
+        .checked_mul(DURABLE_SOURCE_WRITE_AMPLIFICATION_FACTOR)
         .and_then(|bytes| bytes.checked_add(DURABLE_STAGING_FIXED_OVERHEAD_BYTES))
         .and_then(|bytes| bytes.checked_add(DURABLE_DISK_SAFETY_MARGIN_BYTES))
         .ok_or(FirstSliceError::Limits)
@@ -11194,6 +11205,25 @@ mod tests {
                 limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
             }) if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
         ));
+    }
+
+    #[test]
+    fn durable_preflight_reserves_the_large_repository_write_profile() {
+        let source_bytes = 1_000;
+        let fixed_bytes = DURABLE_STAGING_FIXED_OVERHEAD_BYTES
+            .checked_add(DURABLE_DISK_SAFETY_MARGIN_BYTES)
+            .expect("fixed reservation is representable");
+        let initial = durable_initial_admission_reservation(source_bytes)
+            .expect("initial reservation is representable");
+        let preflight =
+            durable_staging_reservation(source_bytes).expect("preflight is representable");
+
+        assert_eq!(initial - fixed_bytes, 2_000);
+        assert_eq!(
+            preflight - fixed_bytes,
+            source_bytes * DURABLE_SOURCE_WRITE_AMPLIFICATION_FACTOR
+        );
+        assert!(preflight > initial);
     }
 
     #[test]
