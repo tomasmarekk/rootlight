@@ -390,8 +390,14 @@ pub enum UpdateTransactionPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateRuntimeStatus {
-    /// Currently published active version.
+    /// Currently published active package version.
     pub active_version: String,
+    /// Package version selected by the installation manifest.
+    pub package_version: String,
+    /// Semantic version compiled into the running Rootlight binary.
+    pub binary_version: String,
+    /// Whether the active package and running binary use the same version.
+    pub package_matches_binary: bool,
     /// Retained rollback version.
     pub last_good_version: String,
     /// Pending durable transaction phase, when present.
@@ -1163,8 +1169,12 @@ impl InstallLayout {
             return Err(FilesystemUpdateError::InvalidInstall);
         }
         let transaction = self.read_transaction()?;
+        let binary_version = env!("CARGO_PKG_VERSION").to_owned();
         Ok(UpdateRuntimeStatus {
-            active_version: active,
+            active_version: active.clone(),
+            package_matches_binary: active == binary_version,
+            package_version: active,
+            binary_version,
             last_good_version: install.last_good_version().to_owned(),
             transaction_phase: transaction.as_ref().map(|value| value.phase),
             candidate_version: transaction
@@ -3326,6 +3336,9 @@ mod tests {
 
         assert_eq!(installed.version, "1.0.0");
         assert_eq!(status.active_version, "1.0.0");
+        assert_eq!(status.package_version, "1.0.0");
+        assert_eq!(status.binary_version, env!("CARGO_PKG_VERSION"));
+        assert!(!status.package_matches_binary);
         assert!(!status.recovery_required);
         let semantic_host = platform_executable_name("rootlight-semantic-host");
         let mcp = platform_executable_name("rootlight-mcp");
