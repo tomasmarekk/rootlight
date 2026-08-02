@@ -2624,7 +2624,7 @@ impl FirstSliceService {
                 let display_name = sanitized_repository_display_name(&canonical, repository)?;
                 // Opening the root now proves the reserved identity names a valid
                 // directory before the operation is acknowledged to the caller.
-                let _root = RepositoryRoot::open(repository, &canonical)
+                let _root = RepositoryRoot::open(repository, path)
                     .map_err(|_| FirstSliceError::Repository)?;
                 pending.insert(root_identity, (repository, display_name));
                 (repository, true)
@@ -3257,7 +3257,7 @@ impl FirstSliceService {
             None => sanitized_repository_display_name(&canonical, repository)?,
         };
         drop(pending);
-        let root_result = RepositoryRoot::open(repository, &canonical);
+        let root_result = RepositoryRoot::open(repository, path);
         check_cancellation(cancellation)?;
         let root = root_result.map_err(|_| FirstSliceError::Repository)?;
         let policy =
@@ -10948,6 +10948,58 @@ mod tests {
                 .repository,
             original.repository
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_operations_reject_symbolic_link_roots() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = TempDir::new().expect("fixture root exists");
+        let target = fixture.path().join("target");
+        fs::create_dir(&target).expect("repository target exists");
+        fs::write(target.join("lib.rs"), "pub fn answer() {}\n").expect("fixture source writes");
+        let linked_root = fixture.path().join("linked");
+        symlink(&target, &linked_root).expect("repository root symlink is created");
+
+        assert_linked_repository_root_is_rejected(&linked_root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn repository_operations_reject_windows_reparse_roots() {
+        use std::os::windows::fs::symlink_dir;
+
+        const ERROR_PRIVILEGE_NOT_HELD: i32 = 1_314;
+
+        let fixture = TempDir::new().expect("fixture root exists");
+        let target = fixture.path().join("target");
+        fs::create_dir(&target).expect("repository target exists");
+        fs::write(target.join("lib.rs"), "pub fn answer() {}\n").expect("fixture source writes");
+        let linked_root = fixture.path().join("linked");
+        match symlink_dir(&target, &linked_root) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD) => return,
+            Err(error) => panic!("repository root reparse point is created: {error}"),
+        }
+
+        assert_linked_repository_root_is_rejected(&linked_root);
+    }
+
+    #[cfg(any(unix, windows))]
+    fn assert_linked_repository_root_is_rejected(root: &Path) {
+        let service = FirstSliceService::new(2).expect("service initializes");
+        let cancellation = deadline();
+
+        assert!(matches!(
+            service.admit_repository(root, &cancellation),
+            Err(FirstSliceError::Repository)
+        ));
+        assert!(matches!(
+            service.prepare_repository(root, &cancellation),
+            Err(FirstSliceError::Repository)
+        ));
+        assert!(service.list_repositories().is_empty());
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
