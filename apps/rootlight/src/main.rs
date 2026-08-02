@@ -83,11 +83,13 @@ Usage:
   rootlight <command> [options]
 
 Repository commands:
-  repo index <root> [--mode auto|structural|deep] [--detached]
+  repo index <root> [--mode auto|structural|deep] [--attached|--detached]
   repo list [--max-results <count>] [--query <text>]
   repo status <repository-id> [--generation active|<generation-id>]
   operation status <operation-id> [--wait-ms <ms>] [--after-revision <revision>]
   operation cancel <operation-id>
+
+  Repository indexing is detached by default. Use --attached to wait for completion.
 
 Service commands:
   health [--json]
@@ -1111,8 +1113,8 @@ fn parse_repository_index_arguments(
         .to_owned();
     let mut mode = RepositoryIndexMode::Auto;
     let mut mode_seen = false;
-    let mut detached = false;
-    let mut detached_seen = false;
+    let mut detached = true;
+    let mut attachment_seen = false;
     let mut flags = flags.iter();
     while let Some(flag) = flags.next() {
         match flag.to_str() {
@@ -1120,9 +1122,13 @@ fn parse_repository_index_arguments(
                 mode = parse_repository_index_mode(flags.next().ok_or(CliError::Usage)?)?;
                 mode_seen = true;
             }
-            Some("--detached") if !detached_seen => {
+            Some("--detached") if !attachment_seen => {
                 detached = true;
-                detached_seen = true;
+                attachment_seen = true;
+            }
+            Some("--attached") if !attachment_seen => {
+                detached = false;
+                attachment_seen = true;
             }
             _ => return Err(CliError::Usage),
         }
@@ -2101,7 +2107,7 @@ impl CliHelp {
         Self {
             usage: "rootlight <command> [options]",
             repository_commands: [
-                "repo index <root> [--mode auto|structural|deep] [--detached]",
+                "repo index <root> [--mode auto|structural|deep] [--attached|--detached]",
                 "repo list [--max-results <count>] [--query <text>]",
                 "repo status <repository-id> [--generation active|<generation-id>]",
                 "operation status <operation-id> [--wait-ms <ms>] [--after-revision <revision>]",
@@ -2699,6 +2705,29 @@ mod tests {
 
     #[test]
     fn repository_lifecycle_commands_preserve_all_cli_options() {
+        let default_index = parse_repository_command(&arguments(&["index", "C:/source"]))
+            .expect("default repository index arguments parse");
+        assert_eq!(
+            default_index,
+            RepositoryCliCommand::Index {
+                root: "C:/source".to_owned(),
+                mode: RepositoryIndexMode::Auto,
+                detached: true,
+            }
+        );
+
+        let attached_index =
+            parse_repository_command(&arguments(&["index", "C:/source", "--attached"]))
+                .expect("attached repository index arguments parse");
+        assert_eq!(
+            attached_index,
+            RepositoryCliCommand::Index {
+                root: "C:/source".to_owned(),
+                mode: RepositoryIndexMode::Auto,
+                detached: false,
+            }
+        );
+
         let index = parse_repository_command(&arguments(&[
             "index",
             "C:/source",

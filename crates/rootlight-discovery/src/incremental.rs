@@ -15,7 +15,7 @@ use rootlight_incremental::{
     InputFingerprint, InputKey, InputSnapshot, MetadataBaseline, PlanningLimits,
     PlatformFileIdentity, ReconcileLimits, ReconcileMode, ScannedFile, plan_reconcile,
 };
-use rootlight_vfs::{EntryKind, RelativePath, RepositoryRoot, SnapshotMetadata};
+use rootlight_vfs::{EntryKind, RelativePath, RepositoryRoot, SnapshotMetadata, SourceSnapshot};
 
 use crate::{DiscoveryError, DiscoveryLimits, DiscoveryManifest, DiscoveryPolicy, child_path};
 
@@ -92,6 +92,7 @@ pub struct IncrementalDiscovery {
     changes: ChangeSet,
     file_changes: Vec<FileChange>,
     hashed_files: Vec<FileId>,
+    hashed_snapshots: BTreeMap<FileId, SourceSnapshot>,
 }
 
 impl IncrementalDiscovery {
@@ -123,6 +124,15 @@ impl IncrementalDiscovery {
     #[must_use]
     pub fn hashed_files(&self) -> &[FileId] {
         &self.hashed_files
+    }
+
+    /// Moves snapshots already captured for authoritative content hashing.
+    ///
+    /// A following clean discovery can reuse these immutable bytes instead of
+    /// opening the same files again.
+    #[must_use]
+    pub fn take_hashed_snapshots(&mut self) -> BTreeMap<FileId, SourceSnapshot> {
+        std::mem::take(&mut self.hashed_snapshots)
     }
 }
 
@@ -168,6 +178,7 @@ pub fn discover_incremental(
     .map_err(map_incremental_error)?;
     let hashed_files: Vec<_> = plan.files_to_hash().collect();
     let mut hashes = BTreeMap::new();
+    let mut hashed_snapshots = BTreeMap::new();
     for file in &hashed_files {
         cancellation.check()?;
         let path = candidate_scan
@@ -187,6 +198,9 @@ pub fn discover_incremental(
             return Err(DiscoveryError::IncrementalDrift);
         }
         hashes.insert(*file, snapshot.content_hash());
+        if hashed_snapshots.insert(*file, snapshot).is_some() {
+            return Err(DiscoveryError::IncrementalDrift);
+        }
     }
     let outcome = plan
         .finish(&hashes, reconcile_limits, cancellation)
@@ -207,6 +221,7 @@ pub fn discover_incremental(
         changes,
         file_changes,
         hashed_files,
+        hashed_snapshots,
     })
 }
 
@@ -327,6 +342,11 @@ pub fn correlate_incremental_manifest(
         .copied()
         .filter(|file| included.contains(file))
         .collect();
+    let hashed_snapshots = observed
+        .hashed_snapshots
+        .iter()
+        .filter_map(|(file, snapshot)| included.contains(file).then_some((*file, snapshot.clone())))
+        .collect();
     let baseline = IncrementalDiscoveryBaseline {
         metadata: outcome.baseline().clone(),
         inputs: current_inputs,
@@ -338,6 +358,7 @@ pub fn correlate_incremental_manifest(
         changes,
         file_changes,
         hashed_files,
+        hashed_snapshots,
     })
 }
 

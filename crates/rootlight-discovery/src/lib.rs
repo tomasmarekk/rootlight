@@ -463,6 +463,21 @@ impl DiscoveryManifest {
     }
 }
 
+/// Clean discovery output paired with the immutable bytes it classified.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DiscoveryResult {
+    manifest: DiscoveryManifest,
+    snapshots: BTreeMap<FileId, SourceSnapshot>,
+}
+
+impl DiscoveryResult {
+    /// Splits the canonical manifest from its matching source snapshots.
+    #[must_use]
+    pub fn into_parts(self) -> (DiscoveryManifest, BTreeMap<FileId, SourceSnapshot>) {
+        (self.manifest, self.snapshots)
+    }
+}
+
 /// Runs deterministic bounded discovery through the approved VFS root.
 ///
 /// # Errors
@@ -476,7 +491,31 @@ pub fn discover(
     limits: DiscoveryLimits,
     cancellation: &Cancellation,
 ) -> Result<DiscoveryManifest, DiscoveryError> {
-    let mut state = DiscoveryState::new(root, config, policy, limits, cancellation);
+    discover_with_snapshots(root, config, policy, limits, BTreeMap::new(), cancellation)
+        .map(|result| result.manifest)
+}
+
+/// Runs deterministic discovery while retaining the exact classified snapshots.
+///
+/// `cached_snapshots` must come from an immediately preceding authoritative
+/// metadata reconcile for the same repository. Every reused snapshot is checked
+/// against the clean traversal's current metadata before it becomes an input.
+///
+/// # Errors
+///
+/// Returns the same errors as [`discover`], plus
+/// [`DiscoveryError::IncrementalDrift`] when a cached snapshot no longer
+/// matches the clean traversal.
+pub fn discover_with_snapshots(
+    root: &RepositoryRoot,
+    config: &ConfigSnapshot,
+    policy: &DiscoveryPolicy,
+    limits: DiscoveryLimits,
+    cached_snapshots: BTreeMap<FileId, SourceSnapshot>,
+    cancellation: &Cancellation,
+) -> Result<DiscoveryResult, DiscoveryError> {
+    let mut state =
+        DiscoveryState::new(root, config, policy, limits, cached_snapshots, cancellation);
     state.run()?;
     Ok(state.finish())
 }
@@ -493,6 +532,8 @@ struct DiscoveryState<'a> {
     diagnostics: Vec<DiscoveryDiagnostic>,
     coverage: DiscoveryCoverage,
     scoped_ignores: ScopedIgnores,
+    cached_snapshots: BTreeMap<FileId, SourceSnapshot>,
+    snapshots: BTreeMap<FileId, SourceSnapshot>,
 }
 
 impl<'a> DiscoveryState<'a> {
@@ -501,6 +542,7 @@ impl<'a> DiscoveryState<'a> {
         config: &'a ConfigSnapshot,
         policy: &'a DiscoveryPolicy,
         limits: DiscoveryLimits,
+        cached_snapshots: BTreeMap<FileId, SourceSnapshot>,
         cancellation: &'a Cancellation,
     ) -> Self {
         let mut queue = VecDeque::new();
@@ -517,6 +559,8 @@ impl<'a> DiscoveryState<'a> {
             diagnostics: Vec::new(),
             coverage: DiscoveryCoverage::default(),
             scoped_ignores: ScopedIgnores::default(),
+            cached_snapshots,
+            snapshots: BTreeMap::new(),
         }
     }
 
@@ -564,11 +608,7 @@ impl<'a> DiscoveryState<'a> {
             return Ok(None);
         };
         let path = child_path(directory, &entry.name)?;
-        let snapshot = self.root.snapshot_with_cancellation(
-            &path,
-            self.limits.max_file_bytes,
-            self.cancellation,
-        )?;
+        let snapshot = self.snapshot_for_path(&path, entry.metadata)?;
         let contents =
             std::str::from_utf8(snapshot.content()).map_err(|_| DiscoveryError::InvalidPolicy)?;
         let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
@@ -623,9 +663,12 @@ impl<'a> DiscoveryState<'a> {
             EntryKind::Special => {
                 self.exclude(&path, ExclusionReason::Special, decision.decisive_rule);
             }
-            EntryKind::File => {
-                self.visit_file(path, entry.length, decision.decisive_rule, cached_snapshot)?
-            }
+            EntryKind::File => self.visit_file(
+                path,
+                entry.metadata,
+                decision.decisive_rule,
+                cached_snapshot,
+            )?,
         }
         Ok(())
     }
@@ -633,42 +676,44 @@ impl<'a> DiscoveryState<'a> {
     fn visit_file(
         &mut self,
         path: RelativePath,
-        observed_length: u64,
+        observed_metadata: rootlight_vfs::SnapshotMetadata,
         decisive_rule: Option<DecisiveRule>,
         cached_snapshot: Option<SourceSnapshot>,
     ) -> Result<(), DiscoveryError> {
-        if observed_length > self.limits.max_file_bytes {
+        if observed_metadata.length > self.limits.max_file_bytes {
             self.exclude(&path, ExclusionReason::Oversized, decisive_rule);
             return Ok(());
         }
         let snapshot_result = match cached_snapshot {
-            Some(snapshot) => Ok(snapshot),
-            None => self.root.snapshot_with_cancellation(
-                &path,
-                self.limits.max_file_bytes,
-                self.cancellation,
-            ),
+            Some(snapshot) => {
+                if snapshot.metadata() != observed_metadata {
+                    return Err(DiscoveryError::IncrementalDrift);
+                }
+                Ok(snapshot)
+            }
+            None => self.snapshot_for_path(&path, observed_metadata),
         };
         let snapshot = match snapshot_result {
             Ok(snapshot) => snapshot,
-            Err(VfsError::FileTooLarge { .. }) => {
+            Err(DiscoveryError::Vfs(VfsError::FileTooLarge { .. })) => {
                 self.exclude(&path, ExclusionReason::Oversized, decisive_rule);
                 return Ok(());
             }
-            Err(VfsError::LinkedPath | VfsError::OpenFile { .. }) => {
+            Err(DiscoveryError::Vfs(VfsError::LinkedPath | VfsError::OpenFile { .. })) => {
                 self.exclude(&path, ExclusionReason::Unreadable, decisive_rule);
                 self.diagnostic(Some(&path), "DISCOVERY_UNREADABLE");
                 return Ok(());
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(error),
         };
         if looks_binary(snapshot.content()) {
             self.exclude(&path, ExclusionReason::Binary, decisive_rule);
             return Ok(());
         }
         let (class, language_signals) = classify(&path, snapshot.content());
+        let file = snapshot.file();
         self.inputs.push(ManifestInput {
-            file: snapshot.file(),
+            file,
             path: path.as_str().to_owned(),
             content_hash: snapshot.content_hash(),
             bytes: snapshot.metadata().length,
@@ -676,8 +721,31 @@ impl<'a> DiscoveryState<'a> {
             language_signals,
             decisive_rule,
         });
+        if self.snapshots.insert(file, snapshot).is_some() {
+            return Err(DiscoveryError::IncrementalDrift);
+        }
         self.coverage.included = self.coverage.included.saturating_add(1);
         Ok(())
+    }
+
+    fn snapshot_for_path(
+        &mut self,
+        path: &RelativePath,
+        observed_metadata: rootlight_vfs::SnapshotMetadata,
+    ) -> Result<SourceSnapshot, DiscoveryError> {
+        let file = self.root.file_id(path);
+        if let Some(snapshot) = self.cached_snapshots.remove(&file) {
+            if snapshot.file() != file
+                || snapshot.path() != path
+                || snapshot.metadata() != observed_metadata
+            {
+                return Err(DiscoveryError::IncrementalDrift);
+            }
+            return Ok(snapshot);
+        }
+        self.root
+            .snapshot_with_cancellation(path, self.limits.max_file_bytes, self.cancellation)
+            .map_err(DiscoveryError::from)
     }
 
     fn exclude(
@@ -706,7 +774,7 @@ impl<'a> DiscoveryState<'a> {
         }
     }
 
-    fn finish(mut self) -> DiscoveryManifest {
+    fn finish(mut self) -> DiscoveryResult {
         self.inputs.sort_by(|left, right| {
             left.path
                 .cmp(&right.path)
@@ -722,7 +790,7 @@ impl<'a> DiscoveryState<'a> {
                 .cmp(&right.path)
                 .then_with(|| left.code.cmp(&right.code))
         });
-        DiscoveryManifest {
+        let manifest = DiscoveryManifest {
             version: DISCOVERY_MANIFEST_VERSION.to_owned(),
             repository: self.root.repository(),
             configuration_hash: self.config.hash(),
@@ -730,6 +798,10 @@ impl<'a> DiscoveryState<'a> {
             exclusions: self.exclusions,
             diagnostics: self.diagnostics,
             coverage: self.coverage,
+        };
+        DiscoveryResult {
+            manifest,
+            snapshots: self.snapshots,
         }
     }
 }

@@ -118,8 +118,8 @@ const PROJECT_ADAPTER_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const PROJECT_ADAPTER_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 // Source expands into normalized facts, so partitions need output and CPU
 // headroom even when the encoded request remains below the hard input limit.
-const PROJECT_ADAPTER_PARTITION_SOURCE_BYTES: u64 = 256 * 1024;
-const PROJECT_ADAPTER_PARTITION_FILES: usize = 8;
+const PROJECT_ADAPTER_PARTITION_SOURCE_BYTES: u64 = 1024 * 1024;
+const PROJECT_ADAPTER_PARTITION_FILES: usize = 64;
 const PROJECT_ADAPTER_HANDLES: u32 = 64;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
@@ -1826,16 +1826,6 @@ fn write_service(
     service.write().map_err(|_| internal_error())
 }
 
-fn try_write_service(
-    service: &RwLock<FirstSliceService>,
-) -> Result<RwLockWriteGuard<'_, FirstSliceService>, PublicError> {
-    match service.try_write() {
-        Ok(guard) => Ok(guard),
-        Err(TryLockError::WouldBlock) => Err(operation_in_progress()),
-        Err(TryLockError::Poisoned(_)) => Err(internal_error()),
-    }
-}
-
 fn lock_index_serialization(serialization: &Mutex<()>) -> Result<MutexGuard<'_, ()>, PublicError> {
     serialization.lock().map_err(|_| internal_error())
 }
@@ -2164,14 +2154,9 @@ fn repository_index_with_intent(
     }
     let peak_rss_bytes = lock_metadata(metadata)?.resource_meter(operation)?;
     let _rss_sampler = ProcessRssSampler::start(peak_rss_bytes);
-    let mut service_guard = match try_write_service(service) {
+    let service_guard = match read_service(service) {
         Ok(service_guard) => service_guard,
         Err(error) => {
-            let public = if error.code() == ErrorCode::Busy {
-                index_admission_in_progress(operation)
-            } else {
-                error
-            };
             return reject_index_admission(
                 runtime,
                 lifecycle_deadline,
@@ -2179,7 +2164,7 @@ fn repository_index_with_intent(
                 metadata,
                 operation,
                 &context.cancellation,
-                public,
+                error,
             );
         }
     };
@@ -2647,7 +2632,7 @@ fn repository_index_with_intent(
         }
     })();
     if result.is_err() {
-        write_service(service)?.release_index_admission(admission.repository);
+        read_service(service)?.release_index_admission(admission.repository);
     }
     match result {
         Ok(response) if auto_refinement => complete_auto_structural_index(
@@ -6246,6 +6231,7 @@ fn operation_in_progress() -> PublicError {
         .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
 }
 
+#[cfg(test)]
 fn index_admission_in_progress(operation: OperationId) -> PublicError {
     PublicError::builder(ErrorCode::Busy, "repository index is still running")
         .retryable()
@@ -6641,6 +6627,35 @@ mod tests {
                 .expect("input is measurable")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn project_partition_buffer_batches_small_files_for_large_repositories() {
+        let mut buffer =
+            ProjectPartitionBuffer::new(128, 8, usize::MAX).expect("partition buffer initializes");
+        for file_byte in 0_u8..u8::try_from(PROJECT_ADAPTER_PARTITION_FILES)
+            .expect("partition file limit fits one test byte")
+        {
+            assert!(
+                buffer
+                    .try_push(adapter::ProjectInput {
+                        file: Some(common::FileId {
+                            value: vec![file_byte; 20],
+                        }),
+                        path: format!("src/{file_byte}.ts"),
+                        language: "typescript".to_owned(),
+                        source_digest: Some(common::ContentHash {
+                            value: vec![file_byte; 32],
+                        }),
+                        source: b"export const value = 1;\n".to_vec(),
+                        generated: false,
+                        origins: Vec::new(),
+                    })
+                    .expect("input is measurable")
+                    .is_none()
+            );
+        }
+        assert_eq!(buffer.take().len(), PROJECT_ADAPTER_PARTITION_FILES);
     }
 
     #[test]

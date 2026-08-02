@@ -48,7 +48,7 @@ use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource};
 use rootlight_discovery::{
     DiscoveryError, DiscoveryLimits, DiscoveryPolicy, IncrementalDiscovery,
     IncrementalDiscoveryBaseline, IncrementalDiscoveryContext, InputClass, LanguageEvidence,
-    ManifestInput, correlate_incremental_manifest, discover, discover_incremental,
+    ManifestInput, correlate_incremental_manifest, discover_incremental, discover_with_snapshots,
 };
 use rootlight_ids::{
     ContentHash, FactId, FileId, GenerationId, GenerationIdentity, OperationId, RepositoryId,
@@ -2212,7 +2212,7 @@ pub struct FirstSliceService {
     // persists the random repository UUID instead of deriving public identity
     // from a local path.
     repositories: BTreeMap<ContentHash, RepositoryId>,
-    pending_repository_registrations: BTreeMap<ContentHash, (RepositoryId, String)>,
+    pending_repository_registrations: Mutex<BTreeMap<ContentHash, (RepositoryId, String)>>,
     repository_display_names: BTreeMap<RepositoryId, String>,
     published_generation_counts: BTreeMap<RepositoryId, u64>,
     active_by_repository: BTreeMap<RepositoryId, GenerationId>,
@@ -2425,7 +2425,7 @@ impl FirstSliceService {
     /// retention is full, random identity generation fails, cancellation wins,
     /// or the durable state root lacks the conservative staging capacity.
     pub fn admit_repository(
-        &mut self,
+        &self,
         path: &Path,
         cancellation: &Cancellation,
     ) -> Result<FirstSliceIndexAdmission, FirstSliceError> {
@@ -2433,34 +2433,33 @@ impl FirstSliceService {
         check_cancellation(cancellation)?;
         let canonical = canonical_repository_root(path, cancellation)?;
         let root_identity = repository_path_hash(&canonical)?;
+        let mut pending = self
+            .pending_repository_registrations
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
         let repository = if let Some(repository) = self.repositories.get(&root_identity).copied() {
             repository
-        } else if let Some((repository, _)) =
-            self.pending_repository_registrations.get(&root_identity)
-        {
+        } else if let Some((repository, _)) = pending.get(&root_identity) {
             *repository
         } else {
             let retained_repositories = self
                 .repository_display_names
                 .len()
-                .checked_add(self.pending_repository_registrations.len())
+                .checked_add(pending.len())
                 .ok_or(FirstSliceError::Retention)?;
             if retained_repositories >= MAX_FIRST_SLICE_REPOSITORIES {
                 return Err(FirstSliceError::Retention);
             }
-            let repository = random_repository_id_with_pending(
-                &self.repositories,
-                &self.pending_repository_registrations,
-            )?;
+            let repository = random_repository_id_with_pending(&self.repositories, &pending)?;
             let display_name = sanitized_repository_display_name(&canonical, repository)?;
             // Opening the root now proves the reserved identity names a valid
             // directory before the operation is acknowledged to the caller.
             let _root = RepositoryRoot::open(repository, &canonical)
                 .map_err(|_| FirstSliceError::Repository)?;
-            self.pending_repository_registrations
-                .insert(root_identity, (repository, display_name));
+            pending.insert(root_identity, (repository, display_name));
             repository
         };
+        drop(pending);
         let maximum_source_bytes =
             u64::try_from(MAX_RETAINED_SOURCE_BYTES).map_err(|_| FirstSliceError::Limits)?;
         let estimated_disk_bytes = durable_staging_reservation(maximum_source_bytes)?;
@@ -2488,7 +2487,7 @@ impl FirstSliceService {
     ///
     /// Returns the same errors as [`Self::admit_repository`].
     pub fn admit_rust_fixture(
-        &mut self,
+        &self,
         path: &Path,
         cancellation: &Cancellation,
     ) -> Result<FirstSliceIndexAdmission, FirstSliceError> {
@@ -2496,9 +2495,10 @@ impl FirstSliceService {
     }
 
     /// Releases an uncommitted repository identity reservation.
-    pub fn release_index_admission(&mut self, repository: RepositoryId) {
-        self.pending_repository_registrations
-            .retain(|_, (candidate, _)| *candidate != repository);
+    pub fn release_index_admission(&self, repository: RepositoryId) {
+        if let Ok(mut pending) = self.pending_repository_registrations.lock() {
+            pending.retain(|_, (candidate, _)| *candidate != repository);
+        }
     }
 
     fn new_with_source_limit(
@@ -2594,7 +2594,7 @@ impl FirstSliceService {
             analyzers,
             project_analyzer,
             repositories: BTreeMap::new(),
-            pending_repository_registrations: BTreeMap::new(),
+            pending_repository_registrations: Mutex::new(BTreeMap::new()),
             repository_display_names: BTreeMap::new(),
             published_generation_counts: BTreeMap::new(),
             active_by_repository: BTreeMap::new(),
@@ -2980,13 +2980,17 @@ impl FirstSliceService {
         let canonical = canonical_repository_root(path, cancellation)?;
         let root_identity = repository_path_hash(&canonical)?;
         let existing_repository = self.repositories.get(&root_identity).copied();
-        let reserved_repository = self.pending_repository_registrations.get(&root_identity);
+        let pending = self
+            .pending_repository_registrations
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        let reserved_repository = pending.get(&root_identity);
         if existing_repository.is_none()
             && reserved_repository.is_none()
             && self
                 .repository_display_names
                 .len()
-                .checked_add(self.pending_repository_registrations.len())
+                .checked_add(pending.len())
                 .ok_or(FirstSliceError::Retention)?
                 >= MAX_FIRST_SLICE_REPOSITORIES
         {
@@ -2995,12 +2999,7 @@ impl FirstSliceService {
         let repository_result = match existing_repository {
             Some(repository) => repository,
             None => reserved_repository.map_or_else(
-                || {
-                    random_repository_id_with_pending(
-                        &self.repositories,
-                        &self.pending_repository_registrations,
-                    )
-                },
+                || random_repository_id_with_pending(&self.repositories, &pending),
                 |(repository, _)| Ok(*repository),
             )?,
         };
@@ -3010,6 +3009,7 @@ impl FirstSliceService {
             Some((_, display_name)) => fallible_copy_string(display_name)?,
             None => sanitized_repository_display_name(&canonical, repository)?,
         };
+        drop(pending);
         let root_result = RepositoryRoot::open(repository, &canonical);
         check_cancellation(cancellation)?;
         let root = root_result.map_err(|_| FirstSliceError::Repository)?;
@@ -3026,7 +3026,7 @@ impl FirstSliceService {
             derive_fact("incremental-provider", INCREMENTAL_PROVIDER_SEED).id(),
             parser_provider_hash,
         );
-        let incremental = discover_incremental(
+        let mut incremental = discover_incremental(
             &root,
             parent_baseline,
             incremental_context,
@@ -3054,8 +3054,17 @@ impl FirstSliceService {
                 return Ok(FirstSliceIndexPreparation::Retained(receipt));
             }
         }
-        let manifest = discover(&root, &self.config, &policy, discovery_limits, cancellation)
-            .map_err(|error| map_discovery_error(error, cancellation))?;
+        let cached_snapshots = incremental.take_hashed_snapshots();
+        let (manifest, mut discovered_snapshots) = discover_with_snapshots(
+            &root,
+            &self.config,
+            &policy,
+            discovery_limits,
+            cached_snapshots,
+            cancellation,
+        )
+        .map_err(|error| map_discovery_error(error, cancellation))?
+        .into_parts();
         let incremental = correlate_incremental_manifest(
             &incremental,
             parent_baseline,
@@ -3091,8 +3100,6 @@ impl FirstSliceService {
             .map_err(|_| FirstSliceError::Limits)?;
         let mut source_languages = BTreeMap::new();
         let mut source_analysis_limits = BTreeMap::new();
-        let maximum_source_bytes = u64::try_from(self.analysis_limits.max_source_bytes())
-            .map_err(|_| FirstSliceError::Limits)?;
         for input in &manifest.inputs {
             check_cancellation(cancellation)?;
             let Some(language) = supported_source_language(input, &self.analyzers) else {
@@ -3100,9 +3107,9 @@ impl FirstSliceService {
             };
             let relative = RelativePath::parse(Path::new(&input.path))
                 .map_err(|_| FirstSliceError::Repository)?;
-            let snapshot = root
-                .snapshot_with_cancellation(&relative, maximum_source_bytes, cancellation)
-                .map_err(|error| map_vfs_error(error, cancellation))?;
+            let snapshot = discovered_snapshots
+                .remove(&input.file)
+                .ok_or(FirstSliceError::DiscoveryDrift)?;
             if snapshot.file() != input.file
                 || snapshot.content_hash() != input.content_hash
                 || u64::try_from(snapshot.content().len()).ok() != Some(input.bytes)
@@ -4134,7 +4141,10 @@ impl FirstSliceService {
                     self.repositories.insert(root_identity, receipt.repository);
                     self.repository_display_names
                         .insert(receipt.repository, display_name);
-                    self.pending_repository_registrations.remove(&root_identity);
+                    self.pending_repository_registrations
+                        .lock()
+                        .map_err(|_| FirstSliceError::Retention)?
+                        .remove(&root_identity);
                 }
                 if let Some(durable) = durable {
                     durable.disarm();
@@ -4277,7 +4287,10 @@ impl FirstSliceService {
                 durable.discard()?;
             }
             if register_repository {
-                self.pending_repository_registrations.remove(&root_identity);
+                self.pending_repository_registrations
+                    .lock()
+                    .map_err(|_| FirstSliceError::Retention)?
+                    .remove(&root_identity);
             }
         }
         Ok(())
