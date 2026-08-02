@@ -2479,7 +2479,27 @@ impl FirstSliceService {
         if self.repositories.is_empty() || self.receipts.is_empty() || self.generations.is_empty() {
             return Err(FirstSliceError::Retention);
         }
-        self.install_restored(restored.generations, false, cancellation)
+        let mut pending = Vec::new();
+        pending
+            .try_reserve_exact(restored.generations.len())
+            .map_err(|_| FirstSliceError::Retention)?;
+        for generation in restored.generations {
+            let receipt = &generation.receipt;
+            let Some(installed) = self.receipts.get(&receipt.generation) else {
+                pending.push(generation);
+                continue;
+            };
+            if installed != receipt
+                || self.repositories.get(&generation.root_identity) != Some(&receipt.repository)
+                || self
+                    .repository_display_names
+                    .get(&receipt.repository)
+                    .is_none_or(|display_name| display_name != &generation.display_name)
+            {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+        }
+        self.install_restored(pending, false, cancellation)
     }
 
     /// Resolves an already registered repository from its canonical root.
@@ -2887,6 +2907,15 @@ impl FirstSliceService {
                 .insert(restored.root_identity, receipt.repository);
             self.repository_display_names
                 .insert(receipt.repository, restored.display_name);
+            if self
+                .pending_repository_registrations
+                .get_mut()
+                .map_err(|_| FirstSliceError::Retention)?
+                .remove(&restored.root_identity)
+                .is_some_and(|(repository, _)| repository != receipt.repository)
+            {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
             self.receipts.insert(receipt.generation, receipt.clone());
             if self
                 .language_coverage_by_generation
@@ -11068,15 +11097,15 @@ mod tests {
         );
 
         let remaining_state = deferred
-            .restore_excluding(&BTreeSet::from([active.generation]), &cancellation)
-            .expect("retained history verifies after active recovery");
+            .restore_excluding(&BTreeSet::new(), &cancellation)
+            .expect("retained history and a concurrent active duplicate verify");
         assert_eq!(
             remaining_state.generation_ids(),
-            BTreeSet::from([retained.generation])
+            BTreeSet::from([retained.generation, active.generation])
         );
         restored
             .install_additional_deferred_restore(remaining_state, &cancellation)
-            .expect("retained history installs");
+            .expect("retained history installs while the active duplicate is ignored");
         assert_eq!(
             restored.active_generation_for(active.repository),
             Some(active.generation)

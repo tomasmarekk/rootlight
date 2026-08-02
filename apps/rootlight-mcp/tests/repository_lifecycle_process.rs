@@ -616,7 +616,19 @@ impl DaemonProcess {
             self.child.as_mut().expect("daemon child is retained"),
             SHUTDOWN_TIMEOUT,
         );
-        assert!(status.success(), "daemon process exits successfully");
+        let mut stderr = String::new();
+        self.child
+            .as_mut()
+            .expect("daemon child is retained")
+            .stderr
+            .take()
+            .expect("daemon stderr is piped")
+            .read_to_string(&mut stderr)
+            .expect("daemon stderr is readable");
+        assert!(
+            status.success(),
+            "daemon process exits successfully: {stderr}"
+        );
         self.child.take();
     }
 }

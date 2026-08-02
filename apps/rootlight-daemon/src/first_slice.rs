@@ -586,6 +586,7 @@ struct FirstSliceServiceLanes {
     semantic_refinements: SemanticRefinements,
     refinement: SyncSender<SemanticRefinementCommand>,
     recovery_ready: Arc<AtomicBool>,
+    recovery_complete: Arc<AtomicBool>,
     support_state: Option<Arc<DaemonState>>,
 }
 
@@ -882,6 +883,7 @@ impl FirstSliceDaemon {
                 .as_ref()
                 .is_none_or(|recovery| !recovery.restore_active),
         ));
+        let recovery_complete = Arc::new(AtomicBool::new(deferred_restore.is_none()));
         let (work, work_receiver) = mpsc::sync_channel(DEFAULT_WORK_QUEUE);
         let (read, read_receiver) = mpsc::sync_channel(DEFAULT_READ_QUEUE);
         let (control, control_receiver) = mpsc::sync_channel(DEFAULT_CONTROL_QUEUE);
@@ -892,6 +894,7 @@ impl FirstSliceDaemon {
             semantic_refinements: Arc::clone(&semantic_refinements),
             refinement: refinement.clone(),
             recovery_ready: Arc::clone(&recovery_ready),
+            recovery_complete,
             support_state,
         };
         let work_journal = journal.clone();
@@ -1805,6 +1808,7 @@ fn durable_recovery_worker(
     }
     let remaining_generations = remaining.generation_ids();
     if remaining_generations.is_empty() {
+        lanes.recovery_complete.store(true, Ordering::Release);
         return Ok(());
     }
     lanes
@@ -1821,7 +1825,9 @@ fn durable_recovery_worker(
         &runtime,
         &remaining_generations,
     )?;
-    refresh_recovery_support_inventory(&lanes)
+    refresh_recovery_support_inventory(&lanes)?;
+    lanes.recovery_complete.store(true, Ordering::Release);
+    Ok(())
 }
 
 fn reconcile_restored_publications(
@@ -2047,6 +2053,11 @@ fn execute_service_request(
             FirstSliceIpcRequest::RepositoryList(_)
                 | FirstSliceIpcRequest::RepositoryCatalogPage(_)
         )
+    {
+        return Err(recovery_in_progress());
+    }
+    if !lanes.recovery_complete.load(Ordering::Acquire)
+        && matches!(&request, FirstSliceIpcRequest::RepositoryIndex(_))
     {
         return Err(recovery_in_progress());
     }
@@ -7486,6 +7497,7 @@ mod tests {
             semantic_refinements,
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
+            recovery_complete: Arc::new(AtomicBool::new(true)),
             support_state: None,
         };
 
@@ -9080,6 +9092,7 @@ mod tests {
             semantic_refinements,
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
+            recovery_complete: Arc::new(AtomicBool::new(true)),
             support_state: None,
         };
         let error = repository_index(
@@ -9556,6 +9569,7 @@ mod tests {
             semantic_refinements: Arc::new(Mutex::new(BTreeMap::new())),
             refinement: _refinement,
             recovery_ready: Arc::new(AtomicBool::new(false)),
+            recovery_complete: Arc::new(AtomicBool::new(false)),
             support_state: None,
         };
         let resources = ServiceRequestResources {
@@ -9638,6 +9652,7 @@ mod tests {
             semantic_refinements: Arc::new(Mutex::new(BTreeMap::new())),
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
+            recovery_complete: Arc::new(AtomicBool::new(true)),
             support_state: None,
         };
         let resources = ServiceRequestResources {
