@@ -6216,8 +6216,8 @@ fn map_index_support_inventory(snapshot: FirstSliceSupportInventory) -> IndexSup
             .collect(),
         generation_format_version: Some(snapshot.generation_format),
         generation_disk_bytes: snapshot.generation_disk_bytes,
-        unreclaimed_temporary_bytes: 0,
-        disk_margin_bytes: None,
+        unreclaimed_temporary_bytes: snapshot.unreclaimed_temporary_bytes,
+        disk_margin_bytes: snapshot.disk_margin_bytes,
     }
 }
 
@@ -7066,6 +7066,8 @@ mod tests {
             generations: Vec::new(),
             generation_format: "1.2".to_owned(),
             generation_disk_bytes: 0,
+            unreclaimed_temporary_bytes: 64,
+            disk_margin_bytes: Some(1024),
         });
 
         assert_eq!(mapped.repositories.len(), 1);
@@ -7075,6 +7077,8 @@ mod tests {
         );
         assert_eq!(mapped.repositories[0].root_fingerprint_sha256, None);
         assert_eq!(mapped.repositories[0].generation_count, 1);
+        assert_eq!(mapped.unreclaimed_temporary_bytes, 64);
+        assert_eq!(mapped.disk_margin_bytes, Some(1024));
     }
 
     #[test]

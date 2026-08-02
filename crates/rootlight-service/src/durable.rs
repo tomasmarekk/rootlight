@@ -6,6 +6,10 @@ use std::{
     io::Write as _,
     path::{Path, PathBuf},
     str::FromStr as _,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use cap_std::{ambient_authority, fs::Dir};
@@ -59,6 +63,7 @@ pub(super) struct DurableCatalog {
     quarantine: PrivateDirectory<'static>,
     repositories_path: PathBuf,
     maximum_generations_per_repository: usize,
+    staging_bytes: Arc<AtomicU64>,
 }
 
 pub(super) struct DurablePreparedGeneration {
@@ -66,6 +71,8 @@ pub(super) struct DurablePreparedGeneration {
     staging_path: PathBuf,
     repository: Option<PrivateDirectory<'static>>,
     generation: GenerationId,
+    staging_bytes: Arc<AtomicU64>,
+    accounted_bytes: AtomicU64,
 }
 
 pub(super) struct DurablePublishedGeneration {
@@ -227,6 +234,7 @@ impl DurableCatalog {
             quarantine,
             repositories_path,
             maximum_generations_per_repository,
+            staging_bytes: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -248,6 +256,8 @@ impl DurableCatalog {
             staging_path,
             repository: Some(repository),
             generation,
+            staging_bytes: Arc::clone(&self.staging_bytes),
+            accounted_bytes: AtomicU64::new(0),
         })
     }
 
@@ -264,6 +274,12 @@ impl DurableCatalog {
             });
         }
         Ok(())
+    }
+
+    pub(super) fn storage_health_snapshot(&self) -> Result<(u64, u64), FirstSliceError> {
+        let available_bytes =
+            fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
+        Ok((self.staging_bytes.load(Ordering::Acquire), available_bytes))
     }
 
     pub(super) fn read_source(
@@ -737,11 +753,11 @@ impl DurablePreparedGeneration {
             file.write_all(source.snapshot.content())
                 .map_err(|_| FirstSliceError::Catalog)?;
             file.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+            let source_bytes = u64::try_from(source.snapshot.content().len())
+                .map_err(|_| FirstSliceError::Limits)?;
+            self.account_staging_bytes(source_bytes)?;
             written_bytes = written_bytes
-                .checked_add(
-                    u64::try_from(source.snapshot.content().len())
-                        .map_err(|_| FirstSliceError::Limits)?,
-                )
+                .checked_add(source_bytes)
                 .ok_or(FirstSliceError::Limits)?;
         }
         sources_directory
@@ -773,6 +789,7 @@ impl DurablePreparedGeneration {
             .inner
             .sync_all()
             .map_err(|_| FirstSliceError::Catalog)?;
+        self.account_staging_bytes(writer.bytes)?;
         let metadata = snapshot.metadata();
         let contract = metadata.contract_version();
         let recovery = DurableRecoverySnapshot {
@@ -800,6 +817,7 @@ impl DurablePreparedGeneration {
         descriptor_file
             .sync_all()
             .map_err(|_| FirstSliceError::Catalog)?;
+        self.account_staging_bytes(descriptor_bytes)?;
         writer
             .bytes
             .checked_add(descriptor_bytes)
@@ -834,7 +852,9 @@ impl DurablePreparedGeneration {
         file.sync_all().map_err(|_| FirstSliceError::Catalog)?;
         drop(file);
         staging.sync_all().map_err(|_| FirstSliceError::Catalog)?;
-        u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)
+        let manifest_bytes = u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)?;
+        self.account_staging_bytes(manifest_bytes)?;
+        Ok(manifest_bytes)
     }
 
     pub(super) fn publish(mut self) -> Result<DurablePublishedGeneration, FirstSliceError> {
@@ -844,13 +864,21 @@ impl DurablePreparedGeneration {
             .publish_noreplace(self.repository().capability(), OsStr::new(&generation_name))
         {
             Ok(directory) => directory,
-            Err(PublishError::NotCommitted { .. }) => return Err(FirstSliceError::Catalog),
-            Err(PublishError::CommittedButDurabilityUnknown { directory, .. }) => {
-                directory.remove().map_err(|_| FirstSliceError::Catalog)?;
+            Err(PublishError::NotCommitted { .. }) => {
+                self.release_staging_bytes();
                 return Err(FirstSliceError::Catalog);
             }
-            Err(_) => return Err(FirstSliceError::Catalog),
+            Err(PublishError::CommittedButDurabilityUnknown { directory, .. }) => {
+                directory.remove().map_err(|_| FirstSliceError::Catalog)?;
+                self.release_staging_bytes();
+                return Err(FirstSliceError::Catalog);
+            }
+            Err(_) => {
+                self.release_staging_bytes();
+                return Err(FirstSliceError::Catalog);
+            }
         };
+        self.release_staging_bytes();
         let repository = self.repository.take().ok_or(FirstSliceError::Catalog)?;
         Ok(DurablePublishedGeneration {
             directory: Some(directory),
@@ -869,6 +897,38 @@ impl DurablePreparedGeneration {
         self.repository
             .as_ref()
             .expect("prepared durable generation retains repository ownership")
+    }
+
+    pub(super) fn account_external_staging_bytes(&self, bytes: u64) -> Result<(), FirstSliceError> {
+        self.account_staging_bytes(bytes)
+    }
+
+    fn account_staging_bytes(&self, bytes: u64) -> Result<(), FirstSliceError> {
+        self.accounted_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(bytes)
+            })
+            .map_err(|_| FirstSliceError::Limits)?;
+        if self
+            .staging_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(bytes)
+            })
+            .is_err()
+        {
+            self.accounted_bytes.fetch_sub(bytes, Ordering::AcqRel);
+            return Err(FirstSliceError::Limits);
+        }
+        Ok(())
+    }
+
+    fn release_staging_bytes(&self) {
+        let bytes = self.accounted_bytes.swap(0, Ordering::AcqRel);
+        let _ = self
+            .staging_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_sub(bytes))
+            });
     }
 }
 
@@ -908,7 +968,9 @@ impl Drop for DurablePreparedGeneration {
         if let Some(staging) = self.staging.take() {
             // The primary preparation error remains authoritative; restart
             // recovery removes this validated staging tree if cleanup fails.
-            let _ = staging.remove();
+            if staging.remove().is_ok() {
+                self.release_staging_bytes();
+            }
         }
     }
 }

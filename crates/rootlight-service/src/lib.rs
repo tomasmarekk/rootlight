@@ -399,6 +399,10 @@ pub struct FirstSliceSupportInventory {
     pub generation_format: String,
     /// Total allocated bytes reported by retained generation receipts.
     pub generation_disk_bytes: u64,
+    /// Bytes currently owned by unpublished durable staging trees.
+    pub unreclaimed_temporary_bytes: u64,
+    /// Free bytes on the durable repository volume when persistence is enabled.
+    pub disk_margin_bytes: Option<u64>,
 }
 
 /// Coarse source-free stage reported while preparing an index generation.
@@ -3705,6 +3709,7 @@ impl FirstSliceService {
                 let allocated_bytes = oracle
                     .allocated_bytes(&context)
                     .map_err(|error| map_catalog_error(&error, cancellation))?;
+                prepared.account_external_staging_bytes(allocated_bytes)?;
                 let written_bytes = source_written_bytes
                     .checked_add(allocated_bytes)
                     .ok_or(FirstSliceError::Limits)?;
@@ -5033,6 +5038,14 @@ impl FirstSliceService {
             });
         }
 
+        let (unreclaimed_temporary_bytes, disk_margin_bytes) = self
+            .durable
+            .as_ref()
+            .map(|durable| durable.storage_health_snapshot())
+            .transpose()?
+            .map_or((0, None), |(temporary, available)| {
+                (temporary, Some(available))
+            });
         Ok(FirstSliceSupportInventory {
             adapters,
             repositories,
@@ -5043,6 +5056,8 @@ impl FirstSliceService {
                 GENERATION_CONTRACT_VERSION.minor()
             ),
             generation_disk_bytes,
+            unreclaimed_temporary_bytes,
+            disk_margin_bytes,
         })
     }
 
@@ -11895,6 +11910,43 @@ mod tests {
                     && adapter.languages.iter().any(|language| language == "rust")
                     && !adapter.isolated)
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn durable_support_inventory_tracks_and_reclaims_staging_bytes() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn staging_inventory_probe() -> u32 { 42 }\n",
+        )
+        .expect("fixture source writes");
+        let cancellation = deadline();
+        let service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+
+        let prepared = service
+            .prepare_rust_fixture(fixture.path(), &cancellation)
+            .expect("durable generation prepares");
+        let active = service
+            .support_inventory_snapshot()
+            .expect("active staging inventory builds");
+        assert!(active.unreclaimed_temporary_bytes > 0);
+        assert!(active.disk_margin_bytes.is_some());
+
+        drop(prepared);
+        let reclaimed = service
+            .support_inventory_snapshot()
+            .expect("reclaimed staging inventory builds");
+        assert_eq!(reclaimed.unreclaimed_temporary_bytes, 0);
+        assert!(reclaimed.disk_margin_bytes.is_some());
     }
 
     #[test]
