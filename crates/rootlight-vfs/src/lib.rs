@@ -1,7 +1,9 @@
-//! Capability-confined repository access and immutable source snapshots.
+//! Capability-confined local directory browsing, repository access, and
+//! immutable source snapshots.
 //!
-//! Repository paths are untrusted. Callers can address only validated relative
-//! paths beneath an opened root, and every source read verifies file stability.
+//! Local paths are presentation data rather than authorization. Retained
+//! directory handles govern browsing, repository paths are untrusted, and every
+//! source read verifies file stability.
 
 #![deny(unsafe_code)]
 
@@ -37,6 +39,12 @@ const SNAPSHOT_READ_CHUNK_BYTES: usize = 64 * 1024;
 pub const MAX_PATH_COMPONENTS: usize = 256;
 /// Maximum platform path bytes accepted by the VFS.
 pub const MAX_PATH_BYTES: usize = 32 * 1024;
+/// Hard ceiling for entries examined while capturing one browse snapshot.
+pub const MAX_BROWSE_DIRECTORY_ENTRIES: usize = 4_096;
+/// Maximum number of browse entries returned by one page.
+pub const MAX_BROWSE_PAGE_SIZE: usize = 256;
+/// Maximum platform bytes accepted for one browse child name.
+pub const MAX_BROWSE_CHILD_NAME_BYTES: usize = 4 * 1_024;
 
 /// A validated repository-relative path with platform-stable identity bytes.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -389,6 +397,363 @@ impl SnapshotMetadata {
             && self.change_token.is_some()
             && self.volume.is_some()
             && self.file_index.is_some()
+    }
+}
+
+/// A repository-independent capability for one securely opened directory.
+///
+/// The retained handle, not [`Self::local_path`], authorizes browsing. Child
+/// navigation always opens one validated name relative to this handle without
+/// following symbolic links or Windows reparse points.
+pub struct BrowseDirectory {
+    local_path: PathBuf,
+    directory: Dir,
+}
+
+impl BrowseDirectory {
+    /// Opens an absolute directory path without following linked components.
+    ///
+    /// The supplied path is retained only for local presentation and later
+    /// repository submission. Callers must not treat it as authorization for
+    /// filesystem access.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowseError`] when the path is invalid or oversized,
+    /// cancellation wins, or a stable directory capability cannot be opened.
+    pub fn open(path: &Path, cancellation: &Cancellation) -> Result<Self, BrowseError> {
+        validate_browse_root_path(path)?;
+        browse_check(cancellation)?;
+        let local_path =
+            std::path::absolute(path).map_err(|source| BrowseError::OpenRoot { source })?;
+        browse_check(cancellation)?;
+        let directory = open_browse_absolute_directory(&local_path, cancellation)?;
+        browse_check(cancellation)?;
+        Ok(Self {
+            local_path,
+            directory,
+        })
+    }
+
+    /// Opens exactly one child directory relative to the retained capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowseError`] when the child name is invalid or oversized,
+    /// cancellation wins, or the child is linked, replaced, unreadable, or not
+    /// a directory.
+    pub fn open_child(
+        &self,
+        name: &OsStr,
+        cancellation: &Cancellation,
+    ) -> Result<Self, BrowseError> {
+        validate_browse_child_name(name)?;
+        let local_path = self.local_path.join(name);
+        validate_browse_path_length(&local_path)?;
+        let directory = browse_controlled(cancellation, || {
+            self.directory
+                .open_dir_nofollow(name)
+                .map_err(|source| BrowseError::OpenChild { source })
+        })?;
+        let metadata = browse_controlled(cancellation, || {
+            directory
+                .dir_metadata()
+                .map_err(|source| BrowseError::OpenChild { source })
+        })?;
+        if !metadata.is_dir() || is_reparse_point(&metadata) {
+            return Err(BrowseError::ChildNotDirectory);
+        }
+        Ok(Self {
+            local_path,
+            directory,
+        })
+    }
+
+    /// Returns the local path for presentation or repository submission.
+    ///
+    /// This value is not an authorization capability. A later repository
+    /// submission must reopen and revalidate it through [`RepositoryRoot`].
+    #[must_use]
+    pub fn local_path(&self) -> &Path {
+        &self.local_path
+    }
+
+    /// Captures an immutable directories-only snapshot under the hard ceiling.
+    ///
+    /// Every directory entry is counted toward the ceiling, including files
+    /// and links that are omitted from the returned snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowseError::EntryLimitExceeded`] instead of returning a
+    /// misleading partial global order. Cancellation and deadline expiry are
+    /// checked around filesystem operations and enumeration steps.
+    pub fn snapshot(
+        &self,
+        cancellation: &Cancellation,
+    ) -> Result<BrowseDirectorySnapshot, BrowseError> {
+        self.snapshot_with_limit(MAX_BROWSE_DIRECTORY_ENTRIES, cancellation)
+    }
+
+    /// Captures an immutable directories-only snapshot under a narrower limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowseError::InvalidEntryLimit`] for zero or values above the
+    /// hard ceiling, [`BrowseError::EntryLimitExceeded`] when enumeration
+    /// crosses the accepted limit, and typed cancellation or filesystem
+    /// failures for interrupted or unreadable directories.
+    pub fn snapshot_with_limit(
+        &self,
+        maximum_entries: usize,
+        cancellation: &Cancellation,
+    ) -> Result<BrowseDirectorySnapshot, BrowseError> {
+        if !(1..=MAX_BROWSE_DIRECTORY_ENTRIES).contains(&maximum_entries) {
+            return Err(BrowseError::InvalidEntryLimit {
+                maximum: MAX_BROWSE_DIRECTORY_ENTRIES,
+            });
+        }
+
+        let directory = browse_controlled(cancellation, || {
+            self.directory
+                .try_clone()
+                .map_err(|source| BrowseError::ReadDirectory { source })
+        })?;
+        let read_directory = browse_controlled(cancellation, || {
+            directory
+                .entries()
+                .map_err(|source| BrowseError::ReadDirectory { source })
+        })?;
+        let mut examined_entries = 0usize;
+        let mut entries = Vec::new();
+        for result in read_directory {
+            let entry = browse_controlled(cancellation, || {
+                result.map_err(|source| BrowseError::ReadDirectory { source })
+            })?;
+            let name = entry.file_name();
+            if name == OsStr::new(".") || name == OsStr::new("..") {
+                continue;
+            }
+            examined_entries =
+                examined_entries
+                    .checked_add(1)
+                    .ok_or(BrowseError::EntryLimitExceeded {
+                        maximum: maximum_entries,
+                    })?;
+            if examined_entries > maximum_entries {
+                return Err(BrowseError::EntryLimitExceeded {
+                    maximum: maximum_entries,
+                });
+            }
+            validate_browse_child_name(&name)?;
+            let file_type = browse_controlled(cancellation, || {
+                entry
+                    .file_type()
+                    .map_err(|source| BrowseError::ReadDirectory { source })
+            })?;
+            let metadata = browse_controlled(cancellation, || {
+                entry
+                    .metadata()
+                    .map_err(|source| BrowseError::ReadDirectory { source })
+            })?;
+            if file_type.is_symlink()
+                || !file_type.is_dir()
+                || !metadata.is_dir()
+                || is_reparse_point(&metadata)
+            {
+                continue;
+            }
+            browse_controlled(cancellation, || {
+                entries
+                    .try_reserve(1)
+                    .map_err(|_| BrowseError::MemoryUnavailable)
+            })?;
+            let (display_name, sort_key) = canonical_component(&name);
+            entries.push(BrowseDirectoryEntry {
+                name,
+                display_name,
+                sort_key,
+            });
+        }
+        browse_check(cancellation)?;
+        entries.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
+        browse_check(cancellation)?;
+        Ok(BrowseDirectorySnapshot { entries })
+    }
+}
+
+impl fmt::Debug for BrowseDirectory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowseDirectory")
+            .finish_non_exhaustive()
+    }
+}
+
+/// One validated directory name retained by a browse snapshot.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BrowseDirectoryEntry {
+    name: OsString,
+    display_name: String,
+    sort_key: Vec<u8>,
+}
+
+impl BrowseDirectoryEntry {
+    /// Returns the exact platform child name for handle-relative navigation.
+    #[must_use]
+    pub fn name(&self) -> &OsStr {
+        &self.name
+    }
+
+    /// Returns a stable UTF-8 presentation of the child name.
+    ///
+    /// Platform names that are not valid UTF-8 use the VFS raw-byte label
+    /// encoding and must still be navigated through [`Self::name`].
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        &self.display_name
+    }
+}
+
+impl fmt::Debug for BrowseDirectoryEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowseDirectoryEntry")
+            .finish_non_exhaustive()
+    }
+}
+
+/// An immutable, globally sorted directories-only browse snapshot.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BrowseDirectorySnapshot {
+    entries: Vec<BrowseDirectoryEntry>,
+}
+
+impl BrowseDirectorySnapshot {
+    /// Returns the number of directories retained by this snapshot.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Reports whether this snapshot contains no directories.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Returns one bounded page without re-enumerating the filesystem.
+    #[must_use]
+    pub fn page(
+        &self,
+        offset: BrowsePageOffset,
+        page_size: BrowsePageSize,
+    ) -> BrowseDirectoryPage<'_> {
+        let start = offset.get().min(self.entries.len());
+        let end = start
+            .checked_add(page_size.get())
+            .unwrap_or(self.entries.len())
+            .min(self.entries.len());
+        let entries = self.entries.get(start..end).unwrap_or(&[]);
+        let next_offset = (end < self.entries.len()).then_some(BrowsePageOffset(end));
+        BrowseDirectoryPage {
+            entries,
+            next_offset,
+        }
+    }
+}
+
+impl fmt::Debug for BrowseDirectorySnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowseDirectorySnapshot")
+            .field("entry_count", &self.entries.len())
+            .finish()
+    }
+}
+
+/// A checked maximum number of browse entries returned by one page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BrowsePageSize(usize);
+
+impl BrowsePageSize {
+    /// Validates a nonzero browse page size against the hard ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowseError::InvalidPageSize`] for zero or values above
+    /// [`MAX_BROWSE_PAGE_SIZE`].
+    pub const fn new(value: usize) -> Result<Self, BrowseError> {
+        if value == 0 || value > MAX_BROWSE_PAGE_SIZE {
+            return Err(BrowseError::InvalidPageSize {
+                maximum: MAX_BROWSE_PAGE_SIZE,
+            });
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated page size.
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// A checked offset into one immutable browse snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BrowsePageOffset(usize);
+
+impl BrowsePageOffset {
+    /// Validates a browse offset against the snapshot hard ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrowseError::InvalidPageOffset`] for values above
+    /// [`MAX_BROWSE_DIRECTORY_ENTRIES`].
+    pub const fn new(value: usize) -> Result<Self, BrowseError> {
+        if value > MAX_BROWSE_DIRECTORY_ENTRIES {
+            return Err(BrowseError::InvalidPageOffset {
+                maximum: MAX_BROWSE_DIRECTORY_ENTRIES,
+            });
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated snapshot offset.
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// One borrowed page from an immutable browse snapshot.
+#[derive(Clone, Copy)]
+pub struct BrowseDirectoryPage<'snapshot> {
+    entries: &'snapshot [BrowseDirectoryEntry],
+    next_offset: Option<BrowsePageOffset>,
+}
+
+impl BrowseDirectoryPage<'_> {
+    /// Returns the sorted directory entries in this page.
+    #[must_use]
+    pub const fn entries(&self) -> &[BrowseDirectoryEntry] {
+        self.entries
+    }
+
+    /// Returns the next validated offset when more entries remain.
+    #[must_use]
+    pub const fn next_offset(&self) -> Option<BrowsePageOffset> {
+        self.next_offset
+    }
+}
+
+impl fmt::Debug for BrowseDirectoryPage<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowseDirectoryPage")
+            .field("entry_count", &self.entries.len())
+            .field("next_offset", &self.next_offset)
+            .finish()
     }
 }
 
@@ -900,6 +1265,137 @@ fn is_reparse_point(_metadata: &Metadata) -> bool {
     false
 }
 
+fn validate_browse_root_path(path: &Path) -> Result<(), BrowseError> {
+    if !path.is_absolute() || path_contains_nul(path.as_os_str()) {
+        return Err(BrowseError::InvalidRootPath);
+    }
+    validate_browse_path_length(path)?;
+    let mut normal_components = 0usize;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => {
+                normal_components = normal_components
+                    .checked_add(1)
+                    .ok_or(BrowseError::InvalidRootPath)?;
+                if normal_components > MAX_PATH_COMPONENTS {
+                    return Err(BrowseError::InvalidRootPath);
+                }
+            }
+            Component::Prefix(_) | Component::RootDir => {}
+            Component::CurDir | Component::ParentDir => {
+                return Err(BrowseError::InvalidRootPath);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_browse_path_length(path: &Path) -> Result<(), BrowseError> {
+    let length = platform_path_byte_len(path.as_os_str()).ok_or(BrowseError::RootPathTooLong {
+        maximum: MAX_PATH_BYTES,
+    })?;
+    if length > MAX_PATH_BYTES {
+        return Err(BrowseError::RootPathTooLong {
+            maximum: MAX_PATH_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_browse_child_name(name: &OsStr) -> Result<(), BrowseError> {
+    let length = platform_path_byte_len(name).ok_or(BrowseError::InvalidChildName {
+        maximum: MAX_BROWSE_CHILD_NAME_BYTES,
+    })?;
+    if !is_single_normal_component(name)
+        || path_contains_nul(name)
+        || length > MAX_BROWSE_CHILD_NAME_BYTES
+    {
+        return Err(BrowseError::InvalidChildName {
+            maximum: MAX_BROWSE_CHILD_NAME_BYTES,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn path_contains_nul(value: &OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    value.as_bytes().contains(&0)
+}
+
+#[cfg(windows)]
+fn path_contains_nul(value: &OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    value.encode_wide().any(|unit| unit == 0)
+}
+
+fn browse_check(cancellation: &Cancellation) -> Result<(), BrowseError> {
+    cancellation
+        .check()
+        .map_err(|cancelled| BrowseError::Cancelled(cancelled.reason()))
+}
+
+fn browse_controlled<T>(
+    cancellation: &Cancellation,
+    operation: impl FnOnce() -> Result<T, BrowseError>,
+) -> Result<T, BrowseError> {
+    browse_check(cancellation)?;
+    let result = operation();
+    browse_check(cancellation)?;
+    result
+}
+
+fn open_browse_absolute_directory(
+    path: &Path,
+    cancellation: &Cancellation,
+) -> Result<Dir, BrowseError> {
+    let mut anchor = PathBuf::new();
+    let mut relative = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir if relative.is_empty() => {
+                anchor.push(component.as_os_str());
+            }
+            Component::Normal(component) => {
+                relative
+                    .try_reserve(1)
+                    .map_err(|_| BrowseError::MemoryUnavailable)?;
+                relative.push(component.to_os_string());
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
+                return Err(BrowseError::InvalidRootPath);
+            }
+        }
+    }
+    if anchor.as_os_str().is_empty() {
+        return Err(BrowseError::InvalidRootPath);
+    }
+
+    let mut directory = browse_controlled(cancellation, || {
+        Dir::open_ambient_dir(anchor, ambient_authority())
+            .map_err(|source| BrowseError::OpenRoot { source })
+    })?;
+    for component in relative {
+        directory = browse_controlled(cancellation, || {
+            directory
+                .open_dir_nofollow(component)
+                .map_err(|source| BrowseError::OpenRoot { source })
+        })?;
+        let metadata = browse_controlled(cancellation, || {
+            directory
+                .dir_metadata()
+                .map_err(|source| BrowseError::OpenRoot { source })
+        })?;
+        if !metadata.is_dir() || is_reparse_point(&metadata) {
+            return Err(BrowseError::RootNotDirectory);
+        }
+    }
+    Ok(directory)
+}
+
 fn open_absolute_directory(path: &Path) -> Result<Dir, VfsError> {
     let mut anchor = PathBuf::new();
     let mut relative = Vec::new();
@@ -1104,6 +1600,84 @@ fn platform_path_bytes(value: &OsStr) -> Vec<u8> {
         .collect::<Vec<_>>()
 }
 
+/// Typed failures returned by repository-independent directory browsing.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum BrowseError {
+    /// The supplied browse root was not an absolute component-safe path.
+    #[error("invalid browse root path")]
+    InvalidRootPath,
+    /// The supplied or derived local path exceeded the hard byte ceiling.
+    #[error("browse path exceeds {maximum} bytes")]
+    RootPathTooLong {
+        /// Maximum permitted platform path bytes.
+        maximum: usize,
+    },
+    /// The browse root could not be opened without following links.
+    #[error("failed to open browse root")]
+    OpenRoot {
+        /// Underlying capability filesystem error.
+        #[source]
+        source: io::Error,
+    },
+    /// The opened browse root was not an ordinary directory.
+    #[error("browse root is not a regular directory")]
+    RootNotDirectory,
+    /// The supplied child name was not one bounded normal component.
+    #[error("browse child name is not one component within {maximum} bytes")]
+    InvalidChildName {
+        /// Maximum permitted platform bytes for one child name.
+        maximum: usize,
+    },
+    /// A child could not be opened without following links.
+    #[error("failed to open browse child")]
+    OpenChild {
+        /// Underlying capability filesystem error.
+        #[source]
+        source: io::Error,
+    },
+    /// The opened child was linked, replaced, or not an ordinary directory.
+    #[error("browse child is not a stable regular directory")]
+    ChildNotDirectory,
+    /// A browse directory could not be enumerated.
+    #[error("failed to enumerate browse directory")]
+    ReadDirectory {
+        /// Underlying capability filesystem error.
+        #[source]
+        source: io::Error,
+    },
+    /// The requested entry ceiling was zero or above the hard maximum.
+    #[error("browse entry limit must be between 1 and {maximum}")]
+    InvalidEntryLimit {
+        /// Maximum permitted entries examined in one snapshot.
+        maximum: usize,
+    },
+    /// Enumeration crossed the accepted entry ceiling.
+    #[error("browse directory exceeds {maximum} entries")]
+    EntryLimitExceeded {
+        /// Maximum entries permitted for this snapshot capture.
+        maximum: usize,
+    },
+    /// The requested page size was zero or above the hard maximum.
+    #[error("browse page size must be between 1 and {maximum}")]
+    InvalidPageSize {
+        /// Maximum permitted entries in one page.
+        maximum: usize,
+    },
+    /// The requested page offset was above the snapshot hard ceiling.
+    #[error("browse page offset exceeds {maximum}")]
+    InvalidPageOffset {
+        /// Maximum permitted snapshot offset.
+        maximum: usize,
+    },
+    /// A bounded browse operation could not reserve admitted memory.
+    #[error("browse snapshot memory is unavailable")]
+    MemoryUnavailable,
+    /// Cooperative cancellation or a monotonic deadline stopped browsing.
+    #[error("directory browsing was cancelled: {0:?}")]
+    Cancelled(CancellationReason),
+}
+
 /// Typed failures returned by the capability-confined VFS.
 #[derive(Debug, thiserror::Error)]
 pub enum VfsError {
@@ -1230,6 +1804,245 @@ mod tests {
         let mut check = || Ok(());
         root.capture(path, MAX_SNAPSHOT_BYTES, &mut check)
             .expect("fixture capture succeeds")
+    }
+
+    fn browse_deadline() -> Cancellation {
+        Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        )
+    }
+
+    fn browse_fixture() -> (tempfile::TempDir, BrowseDirectory) {
+        let temporary = local_tempdir();
+        let directory = BrowseDirectory::open(temporary.path(), &browse_deadline())
+            .expect("temporary directory is a valid browse root");
+        (temporary, directory)
+    }
+
+    #[test]
+    fn browse_snapshots_are_immutable_sorted_and_stably_paged() {
+        let (temporary, directory) = browse_fixture();
+        for name in ["zeta", "alpha", "middle"] {
+            fs::create_dir(temporary.path().join(name)).expect("fixture directory is created");
+        }
+        fs::write(temporary.path().join("ignored.rs"), b"source").expect("fixture file is created");
+
+        let snapshot = directory
+            .snapshot(&browse_deadline())
+            .expect("browse snapshot succeeds");
+        fs::create_dir(temporary.path().join("after-snapshot"))
+            .expect("post-snapshot directory is created");
+        let page_size = BrowsePageSize::new(2).expect("fixture page size is valid");
+        let first = snapshot.page(
+            BrowsePageOffset::new(0).expect("initial offset is valid"),
+            page_size,
+        );
+        let first_names = first
+            .entries()
+            .iter()
+            .map(BrowseDirectoryEntry::display_name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(snapshot.len(), 3);
+        assert_eq!(first_names, ["alpha", "middle"]);
+        assert_eq!(
+            first.next_offset(),
+            Some(BrowsePageOffset::new(2).expect("continuation offset is valid"))
+        );
+        let second = snapshot.page(
+            first.next_offset().expect("first page has a continuation"),
+            page_size,
+        );
+        assert_eq!(
+            second
+                .entries()
+                .iter()
+                .map(BrowseDirectoryEntry::display_name)
+                .collect::<Vec<_>>(),
+            ["zeta"]
+        );
+        assert!(second.next_offset().is_none());
+    }
+
+    #[test]
+    fn browse_page_bounds_fail_closed() {
+        assert!(matches!(
+            BrowsePageSize::new(0),
+            Err(BrowseError::InvalidPageSize {
+                maximum: MAX_BROWSE_PAGE_SIZE
+            })
+        ));
+        assert!(matches!(
+            BrowsePageSize::new(MAX_BROWSE_PAGE_SIZE + 1),
+            Err(BrowseError::InvalidPageSize {
+                maximum: MAX_BROWSE_PAGE_SIZE
+            })
+        ));
+        assert!(matches!(
+            BrowsePageOffset::new(MAX_BROWSE_DIRECTORY_ENTRIES + 1),
+            Err(BrowseError::InvalidPageOffset {
+                maximum: MAX_BROWSE_DIRECTORY_ENTRIES
+            })
+        ));
+    }
+
+    #[test]
+    fn browse_snapshots_reject_overflow_instead_of_returning_a_partial_order() {
+        let (temporary, directory) = browse_fixture();
+        for name in ["one", "two", "three"] {
+            fs::create_dir(temporary.path().join(name)).expect("fixture directory is created");
+        }
+
+        assert!(matches!(
+            directory.snapshot_with_limit(2, &browse_deadline()),
+            Err(BrowseError::EntryLimitExceeded { maximum: 2 })
+        ));
+        for invalid in [0, MAX_BROWSE_DIRECTORY_ENTRIES + 1] {
+            assert!(matches!(
+                directory.snapshot_with_limit(invalid, &browse_deadline()),
+                Err(BrowseError::InvalidEntryLimit {
+                    maximum: MAX_BROWSE_DIRECTORY_ENTRIES
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn browse_snapshots_filter_non_directories() {
+        let (temporary, directory) = browse_fixture();
+        fs::write(temporary.path().join("file"), b"content").expect("fixture file is created");
+
+        assert!(
+            directory
+                .snapshot(&browse_deadline())
+                .expect("browse snapshot succeeds")
+                .is_empty()
+        );
+        assert!(
+            directory
+                .open_child(OsStr::new("file"), &browse_deadline())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn browse_child_names_accept_exactly_one_bounded_component() {
+        let (temporary, directory) = browse_fixture();
+        fs::create_dir(temporary.path().join("child")).expect("fixture directory is created");
+        let child = directory
+            .open_child(OsStr::new("child"), &browse_deadline())
+            .expect("ordinary child opens");
+
+        assert_eq!(child.local_path(), temporary.path().join("child"));
+        for name in ["", ".", "..", "/", "nested/child", "nested\\child", "\0"] {
+            assert!(
+                matches!(
+                    directory.open_child(OsStr::new(name), &browse_deadline()),
+                    Err(BrowseError::InvalidChildName {
+                        maximum: MAX_BROWSE_CHILD_NAME_BYTES
+                    })
+                ),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn browse_roots_require_absolute_component_safe_paths() {
+        assert!(matches!(
+            BrowseDirectory::open(Path::new("."), &browse_deadline()),
+            Err(BrowseError::InvalidRootPath)
+        ));
+        assert!(matches!(
+            BrowseDirectory::open(Path::new("../parent"), &browse_deadline()),
+            Err(BrowseError::InvalidRootPath)
+        ));
+    }
+
+    #[test]
+    fn browse_operations_observe_cancellation_and_deadlines() {
+        let (temporary, directory) = browse_fixture();
+        let cancelled = Cancellation::new();
+        assert!(cancelled.cancel(CancellationReason::ClientRequest));
+
+        assert!(matches!(
+            directory.snapshot(&cancelled),
+            Err(BrowseError::Cancelled(CancellationReason::ClientRequest))
+        ));
+        assert!(matches!(
+            BrowseDirectory::open(temporary.path(), &cancelled),
+            Err(BrowseError::Cancelled(CancellationReason::ClientRequest))
+        ));
+
+        let now = Instant::now();
+        let expired =
+            Cancellation::with_deadline(now.checked_sub(Duration::from_nanos(1)).unwrap_or(now));
+        assert!(matches!(
+            directory.snapshot(&expired),
+            Err(BrowseError::Cancelled(CancellationReason::DeadlineExceeded))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browse_roots_and_children_reject_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let base = local_tempdir();
+        let target = local_tempdir();
+        let linked_root = base.path().join("linked");
+        symlink(target.path(), &linked_root).expect("directory symlink is created");
+        let cancellation = browse_deadline();
+
+        assert!(BrowseDirectory::open(&linked_root, &cancellation).is_err());
+        let base_directory =
+            BrowseDirectory::open(base.path(), &cancellation).expect("ordinary browse root opens");
+        assert!(
+            base_directory
+                .snapshot(&cancellation)
+                .expect("browse snapshot succeeds")
+                .is_empty()
+        );
+        assert!(
+            base_directory
+                .open_child(OsStr::new("linked"), &cancellation)
+                .is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browse_roots_and_children_reject_windows_reparse_points() {
+        use std::os::windows::fs::symlink_dir;
+
+        const ERROR_PRIVILEGE_NOT_HELD: i32 = 1_314;
+
+        let base = local_tempdir();
+        let target = local_tempdir();
+        let linked_root = base.path().join("linked");
+        match symlink_dir(target.path(), &linked_root) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD) => return,
+            Err(error) => panic!("directory reparse point is created: {error}"),
+        }
+        let cancellation = browse_deadline();
+
+        assert!(BrowseDirectory::open(&linked_root, &cancellation).is_err());
+        let base_directory =
+            BrowseDirectory::open(base.path(), &cancellation).expect("ordinary browse root opens");
+        assert!(
+            base_directory
+                .snapshot(&cancellation)
+                .expect("browse snapshot succeeds")
+                .is_empty()
+        );
+        assert!(
+            base_directory
+                .open_child(OsStr::new("linked"), &cancellation)
+                .is_err()
+        );
     }
 
     #[test]
