@@ -283,6 +283,7 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
                 "1.0 tool-contracts.json must contain a tools array".into(),
             )
         })?;
+    validate_retained_output_projections(&tools)?;
     let repo_list = tools
         .iter()
         .position(|entry| entry.get("tool") == Some(&Value::String("repo.list".into())))
@@ -292,11 +293,107 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
             )
         })?;
     tools[repo_list] = v2;
+    upgrade_operation_success_example(&mut tools, "repo.index", |data| {
+        data.insert("semantic_operation_id".to_owned(), Value::Null);
+        Ok(())
+    })?;
+    upgrade_operation_success_example(&mut tools, "operation.status", |data| {
+        data.insert("semantic_operation_id".to_owned(), Value::Null);
+        data.insert("index_stage".to_owned(), json!("analysis"));
+        let resources = data
+            .get_mut("operation")
+            .and_then(Value::as_object_mut)
+            .and_then(|operation| operation.get_mut("resources"))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                CompatibilityError::FixtureContract(
+                    "operation.status success resources must be an object".into(),
+                )
+            })?;
+        resources.insert("bytes_examined".to_owned(), json!(64));
+        Ok(())
+    })?;
     validate_examples(&tools)?;
     Ok(json!({
         "schema": CURRENT_SCHEMA,
         "tools": tools,
     }))
+}
+
+fn validate_retained_output_projections(tools: &[Value]) -> Result<(), CompatibilityError> {
+    let mut observed = BTreeSet::new();
+    for tool in VerticalTool::ALL {
+        let Some(schema) = tool.previous_output_schema_json() else {
+            continue;
+        };
+        let example = tools
+            .iter()
+            .find(|entry| entry.get("tool") == Some(&Value::String(tool.name().into())))
+            .ok_or_else(|| {
+                CompatibilityError::FixtureContract(format!(
+                    "retained output projections are missing {}",
+                    tool.name()
+                ))
+            })?;
+        let output = example.get("output").ok_or_else(|| {
+            CompatibilityError::FixtureContract(format!(
+                "retained output projection {} has no output",
+                tool.name()
+            ))
+        })?;
+        if output.get("schema_version") != Some(&Value::String("1.0".into())) {
+            return Err(CompatibilityError::FixtureContract(format!(
+                "retained output projection {} must select schema 1.0",
+                tool.name()
+            )));
+        }
+        validate_instance(tool, "retained output projection", schema, output)?;
+        observed.insert(tool.name());
+    }
+    let expected = retained_output_projection_tools()
+        .into_iter()
+        .map(VerticalTool::name)
+        .collect::<BTreeSet<_>>();
+    if observed != expected || observed.is_empty() {
+        return Err(CompatibilityError::FixtureContract(
+            "retained output projection inventory is incomplete".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn retained_output_projection_tools() -> Vec<VerticalTool> {
+    VerticalTool::ALL
+        .into_iter()
+        .filter(|tool| tool.previous_output_schema_json().is_some())
+        .collect()
+}
+
+fn upgrade_operation_success_example(
+    tools: &mut [Value],
+    tool: &'static str,
+    upgrade_data: impl FnOnce(&mut serde_json::Map<String, Value>) -> Result<(), CompatibilityError>,
+) -> Result<(), CompatibilityError> {
+    let example = tools
+        .iter_mut()
+        .find(|entry| entry.get("tool") == Some(&Value::String(tool.into())))
+        .ok_or_else(|| {
+            CompatibilityError::FixtureContract(format!("1.0 tool contracts are missing {tool}"))
+        })?;
+    let output = example
+        .get_mut("output")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            CompatibilityError::FixtureContract(format!("{tool} success output must be an object"))
+        })?;
+    output.insert("schema_version".to_owned(), json!("1.1"));
+    let data = output
+        .get_mut("data")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            CompatibilityError::FixtureContract(format!("{tool} success data must be an object"))
+        })?;
+    upgrade_data(data)
 }
 
 fn validate_examples(tools: &[Value]) -> Result<(), CompatibilityError> {
@@ -345,8 +442,16 @@ fn validate_examples(tools: &[Value]) -> Result<(), CompatibilityError> {
 fn error_examples() -> Result<Value, CompatibilityError> {
     let mut examples = Vec::with_capacity(VerticalTool::ALL.len());
     for tool in VerticalTool::ALL {
+        let schema_version = if matches!(
+            tool,
+            VerticalTool::RepoIndex | VerticalTool::OperationStatus
+        ) {
+            "1.1"
+        } else {
+            "1.0"
+        };
         let output = json!({
-            "schema_version": "1.0",
+            "schema_version": schema_version,
             "error": {
                 "code": "INVALID_ARGUMENT",
                 "message": "request is invalid",
@@ -394,6 +499,16 @@ fn validate_instance(
 }
 
 fn policy_snapshot() -> Value {
+    let retained_output_tools = retained_output_projection_tools()
+        .into_iter()
+        .map(|tool| {
+            json!({
+                "tool": tool.name(),
+                "current_version": tool.contract_version(),
+                "projected_version": "1.0",
+            })
+        })
+        .collect::<Vec<_>>();
     json!({
         "schema": CURRENT_SCHEMA,
         "unknown_fields": {
@@ -418,8 +533,13 @@ fn policy_snapshot() -> Value {
             "supported_version_detail": "supported_version",
         },
         "output_projection": {
-            "implemented": false,
-            "older_closed_output_claimed": false,
+            "implemented": true,
+            "older_closed_output_claimed": true,
+            "evidence": [
+                "retained_fixture_output_schema",
+                "explicit_version_stdio_process",
+            ],
+            "tools": retained_output_tools,
         },
         "cursor": {
             "current_prefix": "c3.",
@@ -975,13 +1095,13 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use rootlight_mcp_contract::pagination::{AuthenticatedCursor, CursorError};
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use tempfile::TempDir;
 
     use super::{
         CURRENT_FILES, CompatibilityError, MANIFEST_FILE, OwnerReview, ReleaseHistory,
-        policy_snapshot, refresh_current, required_prior_minors, validate_examples,
-        validate_history, validate_relative_path, verify,
+        expected_current, policy_snapshot, refresh_current, required_prior_minors,
+        validate_examples, validate_history, validate_relative_path, verify, write_json,
     };
 
     #[test]
@@ -1146,8 +1266,52 @@ mod tests {
         );
         assert_eq!(
             policy["output_projection"]["older_closed_output_claimed"],
-            false
+            true
         );
+        assert_eq!(
+            policy["output_projection"]["tools"],
+            json!([
+                {
+                    "tool": "repo.index",
+                    "current_version": "1.1",
+                    "projected_version": "1.0",
+                },
+                {
+                    "tool": "operation.status",
+                    "current_version": "1.1",
+                    "projected_version": "1.0",
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn current_gate_rejects_a_broken_retained_output_projection() {
+        let fixture = prepared_fixture();
+        let path = fixture
+            .root
+            .parent()
+            .expect("compatibility fixture has an MCP parent")
+            .join("1.0/tool-contracts.json");
+        let bytes = fs::read(&path).expect("retained contracts read");
+        let mut document: Value = serde_json::from_slice(&bytes).expect("retained contracts parse");
+        let operation = document["tools"]
+            .as_array_mut()
+            .expect("retained tools are an array")
+            .iter_mut()
+            .find(|entry| entry["tool"] == "operation.status")
+            .expect("retained operation.status exists");
+        operation["output"]["data"]["operation"]["resources"]
+            .as_object_mut()
+            .expect("retained resources are an object")
+            .remove("files_examined");
+        write_json(&path, &document).expect("broken retained fixture writes");
+
+        assert!(matches!(
+            expected_current(&fixture.root),
+            Err(CompatibilityError::InvalidExample { tool, kind, .. })
+                if tool == "operation.status" && kind == "retained output projection"
+        ));
     }
 
     struct PreparedFixture {

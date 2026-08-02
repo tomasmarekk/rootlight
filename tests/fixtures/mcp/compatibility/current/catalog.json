@@ -7,7 +7,7 @@
             "batchEligible": false,
             "batchSharedBudget": false,
             "budget": "none",
-            "contractVersion": "1.0",
+            "contractVersion": "1.1",
             "explainSupported": false,
             "fallbackSummary": "bounded attached durable generation creation",
             "generation": "creates_generation",
@@ -258,7 +258,7 @@
               ]
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/repo.index/input/1.0",
+          "$id": "https://rootlight.local/schema/mcp/repo.index/input/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `repo.index`.",
@@ -498,25 +498,6 @@
                 }
               ]
             },
-            "ErrorResponse": {
-              "additionalProperties": false,
-              "description": "Strict common error response for MCP contract failures.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable public error envelope."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
-            },
             "GenerationId": {
               "pattern": "^gen1_[a-z2-7]{39}$",
               "type": "string"
@@ -722,9 +703,38 @@
                 }
               ]
             },
+            "OperationErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for repository-operation schema 1.1.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/OperationSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
             "OperationId": {
               "pattern": "^op1_[a-z2-7]{32}$",
               "type": "string"
+            },
+            "OperationSchemaVersion": {
+              "description": "Version marker carried by additive repository-operation responses.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Tool contract version 1.1.",
+                  "type": "string"
+                }
+              ]
             },
             "OperationState": {
               "description": "Durable operation state.",
@@ -975,7 +985,7 @@
                 }
               ]
             },
-            "RepoIndexData": {
+            "RepoIndexDataV1_1": {
               "additionalProperties": false,
               "description": "`repo.index` result data.",
               "properties": {
@@ -1003,6 +1013,17 @@
                   "$ref": "#/$defs/RepositoryId",
                   "description": "Registered repository identity."
                 },
+                "semantic_operation_id": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/OperationId"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Separately journaled semantic refinement created by Auto mode."
+                },
                 "state": {
                   "$ref": "#/$defs/OperationState",
                   "description": "Current operation state."
@@ -1018,16 +1039,16 @@
               ],
               "type": "object"
             },
-            "RepoIndexSuccess": {
+            "RepoIndexSuccessV1_1": {
               "additionalProperties": false,
               "description": "Strict output for `repo.index`.",
               "properties": {
                 "data": {
-                  "$ref": "#/$defs/RepoIndexData",
+                  "$ref": "#/$defs/RepoIndexDataV1_1",
                   "description": "Operational result."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
+                  "$ref": "#/$defs/OperationSchemaVersion",
                   "description": "Tool response schema version."
                 }
               },
@@ -1059,16 +1080,6 @@
               "pattern": "^[A-Za-z0-9_.:-]+$",
               "type": "string"
             },
-            "SchemaVersion": {
-              "description": "Version marker carried by every first-slice response.",
-              "oneOf": [
-                {
-                  "const": "1.0",
-                  "description": "Tool contract version 1.0.",
-                  "type": "string"
-                }
-              ]
-            },
             "SourceFreeMessage": {
               "description": "A checked Rootlight-generated message that cannot contain paths or source.",
               "maxLength": 1024,
@@ -1077,20 +1088,20 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/repo.index/output/1.0",
+          "$id": "https://rootlight.local/schema/mcp/repo.index/output/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/RepoIndexSuccess",
-              "description": "A tool-specific successful response."
+              "$ref": "#/$defs/RepoIndexSuccessV1_1",
+              "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/ErrorResponse",
-              "description": "A versioned source-redacted domain error."
+              "$ref": "#/$defs/OperationErrorResponse",
+              "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
-          "title": "ToolResponse",
+          "description": "Success-or-error response for repository-operation schema 1.1.",
+          "title": "OperationToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },
@@ -4250,7 +4261,7 @@
             "batchEligible": false,
             "batchSharedBudget": false,
             "budget": "none",
-            "contractVersion": "1.0",
+            "contractVersion": "1.1",
             "explainSupported": false,
             "fallbackSummary": "bounded operation read and cancel",
             "generation": "none",
@@ -4299,7 +4310,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/operation.status/input/1.0",
+          "$id": "https://rootlight.local/schema/mcp/operation.status/input/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `operation.status`.",
@@ -4462,25 +4473,6 @@
                 }
               ]
             },
-            "ErrorResponse": {
-              "additionalProperties": false,
-              "description": "Strict common error response for MCP contract failures.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable public error envelope."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
-            },
             "GenerationId": {
               "pattern": "^gen1_[a-z2-7]{39}$",
               "type": "string"
@@ -4593,7 +4585,7 @@
                 }
               ]
             },
-            "OperationDetail": {
+            "OperationDetailV1_1": {
               "additionalProperties": false,
               "description": "One operation journal view.",
               "properties": {
@@ -4608,7 +4600,7 @@
                   "description": "Bounded progress counters."
                 },
                 "resources": {
-                  "$ref": "#/$defs/OperationResources",
+                  "$ref": "#/$defs/OperationResourcesV1_1",
                   "description": "Bounded resource summary."
                 },
                 "revision": {
@@ -4646,6 +4638,25 @@
               ],
               "type": "object"
             },
+            "OperationErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for repository-operation schema 1.1.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/OperationSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
             "OperationId": {
               "pattern": "^op1_[a-z2-7]{32}$",
               "type": "string"
@@ -4672,10 +4683,20 @@
               ],
               "type": "object"
             },
-            "OperationResources": {
+            "OperationResourcesV1_1": {
               "additionalProperties": false,
               "description": "Bounded resource counters for one operation.",
               "properties": {
+                "bytes_examined": {
+                  "description": "Source bytes examined so far.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
                 "files_examined": {
                   "description": "Files examined so far.",
                   "format": "uint64",
@@ -4704,6 +4725,16 @@
                 "files_examined"
               ],
               "type": "object"
+            },
+            "OperationSchemaVersion": {
+              "description": "Version marker carried by additive repository-operation responses.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Tool contract version 1.1.",
+                  "type": "string"
+                }
+              ]
             },
             "OperationState": {
               "description": "Durable operation state.",
@@ -4740,7 +4771,7 @@
                 }
               ]
             },
-            "OperationStatusData": {
+            "OperationStatusDataV1_1": {
               "additionalProperties": false,
               "description": "`operation.status` result data.",
               "properties": {
@@ -4748,8 +4779,17 @@
                   "$ref": "#/$defs/RequiredNullable3",
                   "description": "Terminal public error, if any."
                 },
+                "index_stage": {
+                  "description": "Current source-free repository-index stage.",
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "operation": {
-                  "$ref": "#/$defs/OperationDetail",
+                  "$ref": "#/$defs/OperationDetailV1_1",
                   "description": "Current operation view."
                 },
                 "published_generation": {
@@ -4759,6 +4799,17 @@
                 "retry_after_ms": {
                   "$ref": "#/$defs/RequiredNullable4",
                   "description": "Recommended delay before polling again."
+                },
+                "semantic_operation_id": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/OperationId"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Separately journaled semantic refinement created by a successful Auto operation."
                 }
               },
               "required": [
@@ -4769,16 +4820,16 @@
               ],
               "type": "object"
             },
-            "OperationStatusSuccess": {
+            "OperationStatusSuccessV1_1": {
               "additionalProperties": false,
               "description": "Strict output for `operation.status`.",
               "properties": {
                 "data": {
-                  "$ref": "#/$defs/OperationStatusData",
+                  "$ref": "#/$defs/OperationStatusDataV1_1",
                   "description": "Operation result."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
+                  "$ref": "#/$defs/OperationSchemaVersion",
                   "description": "Tool response schema version."
                 }
               },
@@ -5053,32 +5104,22 @@
               "minLength": 1,
               "pattern": "^[A-Za-z0-9_.:-]+$",
               "type": "string"
-            },
-            "SchemaVersion": {
-              "description": "Version marker carried by every first-slice response.",
-              "oneOf": [
-                {
-                  "const": "1.0",
-                  "description": "Tool contract version 1.0.",
-                  "type": "string"
-                }
-              ]
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/operation.status/output/1.0",
+          "$id": "https://rootlight.local/schema/mcp/operation.status/output/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/OperationStatusSuccess",
-              "description": "A tool-specific successful response."
+              "$ref": "#/$defs/OperationStatusSuccessV1_1",
+              "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/ErrorResponse",
-              "description": "A versioned source-redacted domain error."
+              "$ref": "#/$defs/OperationErrorResponse",
+              "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
-          "title": "ToolResponse",
+          "description": "Success-or-error response for repository-operation schema 1.1.",
+          "title": "OperationToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },

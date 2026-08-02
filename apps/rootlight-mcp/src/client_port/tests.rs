@@ -28,7 +28,8 @@ use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId
 use rootlight_mcp_contract::{
     ErrorCode, ExposureProfile, PublicError, ToolResponse, VerticalTool,
     vertical::{
-        AnalysisTier, CodeLocateOutput, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
+        AnalysisTier, CodeLocateOutput, OperationStatusOutputV1_1 as OperationStatusOutput,
+        OperationToolResponse, RepoIndexOutputV1_1 as RepoIndexOutput, SourceReadOutput,
         SymbolExplainOutput,
     },
 };
@@ -249,6 +250,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             Ok(RepositoryIndex {
                 repository: repository(),
                 operation,
+                semantic_operation: None,
                 mode: selected_mode,
                 state: OperationState::Succeeded,
                 revision: 2,
@@ -301,10 +303,13 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     recovery_class: RecoveryClass::NotApplicable,
                 },
                 published_generation: None,
+                semantic_operation: None,
                 started_unix_ms: 1_700_000_000_000,
                 peak_rss_bytes: 0,
                 written_bytes: 0,
                 files_examined: 1,
+                bytes_examined: 16,
+                index_stage: "discovery".to_owned(),
                 retry_after_ms: Some(10),
             })
         })
@@ -878,7 +883,7 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
         json!({"root": "C:/fixture", "mode": "auto", "detached": false}),
     )
     .await;
-    let ToolResponse::Success(index) = index else {
+    let OperationToolResponse::Success(index) = index else {
         panic!("index succeeds");
     };
     assert_eq!(index.data.accepted_plan.providers, [FIRST_SLICE_PROVIDER]);
@@ -909,7 +914,7 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
         }),
     )
     .await;
-    assert!(matches!(status, ToolResponse::Success(_)));
+    assert!(matches!(status, OperationToolResponse::Success(_)));
 
     let locate: CodeLocateOutput = execute(
         &executor,

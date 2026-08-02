@@ -31,9 +31,9 @@
       "tool": "repo.index",
       "profile": "compact",
       "framing": "compact_json_output_object",
-      "serialized_bytes": 324,
-      "o200k_tokens": 93,
-      "sha256": "b451aa27f777eabe41543bc6069189270aa0cfc39e471c9c0af269fe1990d54c",
+      "serialized_bytes": 353,
+      "o200k_tokens": 99,
+      "sha256": "b9000084190538db65e11881e6afc33d57eaf96a7bf6e5d8c56e57ecb2a624e1",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -64,9 +64,9 @@
       "tool": "operation.status",
       "profile": "compact",
       "framing": "compact_json_output_object",
-      "serialized_bytes": 347,
-      "o200k_tokens": 95,
-      "sha256": "c891364e1f09c40a600eae4ec8ef17b9ed2aa70a651bd036724986a64f0b5602",
+      "serialized_bytes": 421,
+      "o200k_tokens": 112,
+      "sha256": "52f1760e539dd4cb9aff8a13cc1f87a27adb4f81ea54ebbeca14221d9ea69558",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -501,6 +501,6 @@
       "hard_budget_ceiling_unchanged": true
     }
   ],
-  "total_serialized_bytes": 84857,
-  "total_o200k_tokens": 26379
+  "total_serialized_bytes": 84960,
+  "total_o200k_tokens": 26402
 }

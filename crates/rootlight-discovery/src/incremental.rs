@@ -17,7 +17,10 @@ use rootlight_incremental::{
 };
 use rootlight_vfs::{EntryKind, RelativePath, RepositoryRoot, SnapshotMetadata, SourceSnapshot};
 
-use crate::{DiscoveryError, DiscoveryLimits, DiscoveryManifest, DiscoveryPolicy, child_path};
+use crate::{
+    DiscoveryError, DiscoveryLimits, DiscoveryManifest, DiscoveryPolicy, MAX_RETAINED_SOURCE_BYTES,
+    RetainedSnapshotBudget, child_path,
+};
 
 /// Configuration and provider identities included in one incremental input set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +98,35 @@ pub struct IncrementalDiscovery {
     hashed_snapshots: BTreeMap<FileId, SourceSnapshot>,
 }
 
+/// Monotonic source observations emitted during authoritative content hashing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncrementalDiscoveryProgress {
+    /// Source files whose stable snapshots have been examined.
+    pub files_examined: u64,
+    /// Source bytes contained by the examined stable snapshots.
+    pub bytes_examined: u64,
+}
+
+/// Immutable reconciliation settings shared by progress-aware discovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncrementalDiscoveryOptions {
+    mode: ReconcileMode,
+    limits: DiscoveryLimits,
+    maximum_retained_source_bytes: u64,
+}
+
+impl IncrementalDiscoveryOptions {
+    /// Binds one reconciliation mode to its checked resource limits.
+    #[must_use]
+    pub const fn new(mode: ReconcileMode, limits: DiscoveryLimits) -> Self {
+        Self {
+            mode,
+            limits,
+            maximum_retained_source_bytes: MAX_RETAINED_SOURCE_BYTES,
+        }
+    }
+}
+
 impl IncrementalDiscovery {
     /// Returns the repository whose authoritative handle produced this scan.
     #[must_use]
@@ -158,6 +190,39 @@ pub fn discover_incremental(
     limits: DiscoveryLimits,
     cancellation: &Cancellation,
 ) -> Result<IncrementalDiscovery, DiscoveryError> {
+    discover_incremental_with_progress(
+        root,
+        parent,
+        context,
+        policy,
+        IncrementalDiscoveryOptions::new(mode, limits),
+        cancellation,
+        |_| {},
+    )
+}
+
+/// Reconciles authoritative metadata while reporting content-hashing progress.
+///
+/// The observer runs after each stable source snapshot and must remain
+/// lightweight. Observations contain counts only and never source paths or bytes.
+///
+/// # Errors
+///
+/// Returns the same failures as [`discover_incremental`].
+pub fn discover_incremental_with_progress(
+    root: &RepositoryRoot,
+    parent: Option<&IncrementalDiscoveryBaseline>,
+    context: IncrementalDiscoveryContext,
+    policy: &DiscoveryPolicy,
+    options: IncrementalDiscoveryOptions,
+    cancellation: &Cancellation,
+    mut observe_progress: impl FnMut(IncrementalDiscoveryProgress),
+) -> Result<IncrementalDiscovery, DiscoveryError> {
+    let IncrementalDiscoveryOptions {
+        mode,
+        limits,
+        maximum_retained_source_bytes,
+    } = options;
     let reconcile_limits =
         ReconcileLimits::new(limits.max_entries).map_err(map_incremental_error)?;
     let planning_limits = planning_limits(limits)?;
@@ -177,8 +242,19 @@ pub fn discover_incremental(
     )
     .map_err(map_incremental_error)?;
     let hashed_files: Vec<_> = plan.files_to_hash().collect();
+    let mut snapshot_budget = RetainedSnapshotBudget::new(maximum_retained_source_bytes);
+    for file in &hashed_files {
+        let expected = candidate_scan
+            .descriptors
+            .get(file)
+            .copied()
+            .ok_or(DiscoveryError::IncrementalDrift)?;
+        snapshot_budget.reserve(expected.metadata().length())?;
+    }
     let mut hashes = BTreeMap::new();
     let mut hashed_snapshots = BTreeMap::new();
+    let mut files_examined = 0_u64;
+    let mut bytes_examined = 0_u64;
     for file in &hashed_files {
         cancellation.check()?;
         let path = candidate_scan
@@ -190,13 +266,34 @@ pub fn discover_incremental(
             .get(file)
             .copied()
             .ok_or(DiscoveryError::IncrementalDrift)?;
-        let snapshot =
-            root.snapshot_with_cancellation(path, limits.max_file_bytes, cancellation)?;
+        // The complete scan supplied the aggregate reservation. A smaller
+        // capture ceiling keeps a racing file growth outside that reservation.
+        let capture_limit = expected.metadata().length().max(1);
+        let snapshot = root.snapshot_with_cancellation(path, capture_limit, cancellation)?;
         if snapshot.file() != *file
             || incremental_metadata(snapshot.metadata()) != expected.metadata()
         {
             return Err(DiscoveryError::IncrementalDrift);
         }
+        files_examined = files_examined
+            .checked_add(1)
+            .ok_or(DiscoveryError::IncrementalDrift)?;
+        let snapshot_bytes = u64::try_from(snapshot.content().len()).map_err(|_| {
+            DiscoveryError::RetainedSnapshotByteLimit {
+                observed: u64::MAX,
+                maximum: maximum_retained_source_bytes,
+            }
+        })?;
+        bytes_examined = bytes_examined.checked_add(snapshot_bytes).ok_or(
+            DiscoveryError::RetainedSnapshotByteLimit {
+                observed: u64::MAX,
+                maximum: maximum_retained_source_bytes,
+            },
+        )?;
+        observe_progress(IncrementalDiscoveryProgress {
+            files_examined,
+            bytes_examined,
+        });
         hashes.insert(*file, snapshot.content_hash());
         if hashed_snapshots.insert(*file, snapshot).is_some() {
             return Err(DiscoveryError::IncrementalDrift);
@@ -511,9 +608,76 @@ fn map_incremental_error(error: IncrementalError) -> DiscoveryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rootlight_ids::derive_repository;
     use rootlight_incremental::{
         BaselineFile, HashDecisionReason, MetadataReliability, ReconcileMode,
     };
+    use std::fs;
+    use tempfile::tempdir_in;
+
+    #[test]
+    fn incremental_hashing_preflights_aggregate_snapshot_bytes() {
+        let current = std::env::current_dir().expect("current directory is available");
+        let temporary = tempdir_in(current).expect("local temporary directory is available");
+        fs::write(temporary.path().join("first.rs"), b"aa").expect("first fixture is written");
+        fs::write(temporary.path().join("second.rs"), b"bbb").expect("second fixture is written");
+        let root = RepositoryRoot::open(
+            derive_repository(b"incremental-snapshot-budget").id(),
+            temporary.path(),
+        )
+        .expect("fixture repository opens");
+        let policy = DiscoveryPolicy::build(Vec::new(), false).expect("policy builds");
+        let context = IncrementalDiscoveryContext::new(
+            content_hash(b"config"),
+            FactId::from_bytes([7; 20]),
+            content_hash(b"provider"),
+        );
+        let limits =
+            DiscoveryLimits::new(10, 4, 16, 10).expect("fixture limits are within hard ceilings");
+
+        let exact = discover_incremental_with_progress(
+            &root,
+            None,
+            context,
+            &policy,
+            IncrementalDiscoveryOptions {
+                mode: ReconcileMode::Normal,
+                limits,
+                maximum_retained_source_bytes: 5,
+            },
+            &Cancellation::new(),
+            |_| {},
+        )
+        .expect("exact aggregate snapshot bytes are admitted");
+        assert_eq!(
+            exact
+                .hashed_snapshots
+                .values()
+                .map(|snapshot| snapshot.content().len())
+                .sum::<usize>(),
+            5
+        );
+
+        assert!(matches!(
+            discover_incremental_with_progress(
+                &root,
+                None,
+                context,
+                &policy,
+                IncrementalDiscoveryOptions {
+                    mode: ReconcileMode::Normal,
+                    limits,
+                    maximum_retained_source_bytes: 4,
+                },
+                &Cancellation::new(),
+                |_| {},
+            ),
+            Err(DiscoveryError::RetainedSnapshotByteLimit {
+                observed: 5,
+                maximum: 4
+            })
+        ));
+    }
 
     #[test]
     fn incomplete_vfs_metadata_is_untrusted_and_forces_hashing() {

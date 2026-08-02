@@ -20,9 +20,9 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 /// authenticated operation submission and cannot satisfy the current contract.
 pub const MINIMUM_PROTOCOL_MINOR: u32 = 1;
 /// Latest daemon protocol implemented by the current client and server.
-pub const CURRENT_PROTOCOL_MINOR: u32 = 8;
+pub const CURRENT_PROTOCOL_MINOR: u32 = 9;
 /// Current production protocol contract version.
-pub const PROTOCOL_VERSION: &str = "1.8";
+pub const PROTOCOL_VERSION: &str = "1.9";
 /// Schema version for a complete effective first-slice request budget.
 pub const FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION: u32 = 1;
 /// Hard transport admission maximum for logical rows.
@@ -93,6 +93,75 @@ mod tests {
             .expect("unknown protobuf field is skipped");
         assert_eq!(decoded.major, 1);
         assert_eq!(decoded.minor, CURRENT_PROTOCOL_MINOR);
+    }
+
+    #[test]
+    fn legacy_operation_status_decoder_ignores_current_additive_fields() {
+        use generated::{common::v1 as common, daemon::v1 as daemon};
+
+        // This local shape freezes the fields known to protocol 1.8 so an
+        // additive current response is exercised through an actual old decoder.
+        #[derive(Clone, PartialEq, Message)]
+        struct LegacyRepositoryOperationStatusResponse {
+            #[prost(message, optional, tag = "1")]
+            schema_version: Option<common::ContractVersion>,
+            #[prost(message, optional, tag = "2")]
+            operation: Option<daemon::OperationStatus>,
+            #[prost(message, optional, tag = "3")]
+            published_generation: Option<common::GenerationId>,
+            #[prost(uint64, tag = "4")]
+            started_unix_ms: u64,
+            #[prost(uint64, tag = "5")]
+            peak_rss_bytes: u64,
+            #[prost(uint64, tag = "6")]
+            written_bytes: u64,
+            #[prost(uint64, tag = "7")]
+            files_examined: u64,
+            #[prost(uint32, optional, tag = "8")]
+            retry_after_ms: Option<u32>,
+        }
+
+        let response = daemon::RepositoryOperationStatusResponse {
+            schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+            operation: Some(daemon::OperationStatus {
+                operation: Some(common::OperationId { value: vec![7; 20] }),
+                state: daemon::OperationState::Succeeded as i32,
+                revision: 9,
+                completed_units: 4,
+                total_units: 4,
+                error: None,
+                kind: daemon::OperationKind::RepositoryIndex as i32,
+                stage: daemon::OperationStage::Cleanup as i32,
+                plan_hash: vec![3; 32],
+                detached: true,
+                cancellation_requested: false,
+                deadline_unix_ms: None,
+                lease_expires_unix_ms: None,
+                recovery_class: daemon::RecoveryClass::NotApplicable as i32,
+            }),
+            published_generation: Some(common::GenerationId {
+                value: vec![11; 24],
+            }),
+            started_unix_ms: 1,
+            peak_rss_bytes: 2,
+            written_bytes: 3,
+            files_examined: 4,
+            retry_after_ms: None,
+            bytes_examined: 5,
+            index_stage: "complete".to_owned(),
+            semantic_operation: Some(common::OperationId {
+                value: vec![13; 20],
+            }),
+        };
+
+        let decoded =
+            LegacyRepositoryOperationStatusResponse::decode(response.encode_to_vec().as_slice())
+                .expect("a protocol 1.8 decoder skips protocol 1.9 fields");
+        assert_eq!(decoded.schema_version, response.schema_version);
+        assert_eq!(decoded.operation, response.operation);
+        assert_eq!(decoded.published_generation, response.published_generation);
+        assert_eq!(decoded.started_unix_ms, 1);
+        assert_eq!(decoded.files_examined, 4);
     }
 
     #[test]

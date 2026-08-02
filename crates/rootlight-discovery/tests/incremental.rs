@@ -12,7 +12,8 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_config::ConfigSnapshot;
 use rootlight_discovery::{
     DiscoveryError, DiscoveryLimits, DiscoveryPolicy, IncrementalDiscoveryContext,
-    correlate_incremental_manifest, discover, discover_incremental,
+    IncrementalDiscoveryOptions, correlate_incremental_manifest, discover, discover_incremental,
+    discover_incremental_with_progress,
 };
 use rootlight_ids::{FactId, RepositoryId, content_hash, derive_repository};
 use rootlight_incremental::{ChangeClass, FileChangeKind, ReconcileMode};
@@ -95,6 +96,34 @@ fn no_op_reuse_requires_a_platform_change_token_and_audit_always_rehashes() {
     .expect("audit reconcile succeeds");
     assert_eq!(audit.hashed_files().len(), 1);
     assert!(audit.changes().is_empty());
+}
+
+#[test]
+fn cold_incremental_discovery_reports_monotonic_file_and_byte_progress() {
+    let temporary = local_tempdir();
+    fs::write(temporary.path().join("first.rs"), b"aa").expect("first source is written");
+    fs::write(temporary.path().join("second.rs"), b"bbbb").expect("second source is written");
+    let root = root(&temporary, b"incremental-progress");
+    let mut progress = Vec::new();
+
+    let discovery = discover_incremental_with_progress(
+        &root,
+        None,
+        context(b"config-v1", b"provider-v1"),
+        &policy(),
+        IncrementalDiscoveryOptions::new(ReconcileMode::Normal, limits()),
+        &Cancellation::new(),
+        |observed| progress.push(observed),
+    )
+    .expect("cold discovery succeeds");
+
+    assert_eq!(discovery.hashed_files().len(), 2);
+    assert_eq!(progress.len(), 2);
+    assert_eq!(progress[0].files_examined, 1);
+    assert_eq!(progress[1].files_examined, 2);
+    assert!(progress[0].bytes_examined > 0);
+    assert!(progress[1].bytes_examined >= progress[0].bytes_examined);
+    assert_eq!(progress[1].bytes_examined, 6);
 }
 
 #[test]

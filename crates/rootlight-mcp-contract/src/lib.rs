@@ -28,9 +28,10 @@ pub use rootlight_error::{
 };
 pub use vertical::{
     CodeLocateInput, CodeLocateOutput, ContinuationCursor, GenerationSelector,
-    OperationStatusInput, OperationStatusOutput, RepoIndexInput, RepoIndexOutput,
-    RepositorySelector, SchemaVersion, SourceFreeMessage, SourceReadInput, SourceReadOutput,
-    SymbolExplainInput, SymbolExplainOutput, ToolResponse, VerticalTool,
+    OperationStatusInput, OperationStatusOutputV1_1 as OperationStatusOutput, RepoIndexInput,
+    RepoIndexOutputV1_1 as RepoIndexOutput, RepositorySelector, SchemaVersion, SourceFreeMessage,
+    SourceReadInput, SourceReadOutput, SymbolExplainInput, SymbolExplainOutput, ToolResponse,
+    VerticalTool,
 };
 
 /// The MCP specification revision fixed by the compatibility contract.
@@ -38,6 +39,9 @@ pub const MCP_SPECIFICATION_DATE: &str = "2025-11-25";
 
 /// The initial Rootlight MCP schema version.
 pub const MCP_SCHEMA_VERSION: &str = "1.0";
+
+/// The additive repository-operation tool schema version.
+pub const MCP_OPERATION_SCHEMA_VERSION: &str = "1.1";
 
 /// The repository catalog response schema version.
 pub const REPO_LIST_SCHEMA_VERSION: &str = "2.0";

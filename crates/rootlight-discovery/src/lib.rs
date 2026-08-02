@@ -28,7 +28,8 @@ mod incremental;
 
 pub use incremental::{
     IncrementalDiscovery, IncrementalDiscoveryBaseline, IncrementalDiscoveryContext,
-    correlate_incremental_manifest, discover_incremental,
+    IncrementalDiscoveryOptions, IncrementalDiscoveryProgress, correlate_incremental_manifest,
+    discover_incremental, discover_incremental_with_progress,
 };
 
 /// Initial deterministic discovery-manifest version.
@@ -41,6 +42,70 @@ pub const MAX_DISCOVERY_DEPTH: usize = 256;
 pub const MAX_DISCOVERY_DIAGNOSTICS: usize = 10_000;
 /// Maximum bytes read for bounded content classification.
 pub const MAX_CLASSIFICATION_BYTES: usize = 8 * 1024;
+/// Hard aggregate ceiling for source snapshots retained by one discovery.
+pub const MAX_RETAINED_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RetainedSnapshotBudget {
+    observed: u64,
+    maximum: u64,
+}
+
+impl RetainedSnapshotBudget {
+    pub(crate) const fn new(maximum: u64) -> Self {
+        Self {
+            observed: 0,
+            maximum,
+        }
+    }
+
+    pub(crate) fn preflight<'a>(
+        maximum: u64,
+        snapshots: impl IntoIterator<Item = &'a SourceSnapshot>,
+    ) -> Result<Self, DiscoveryError> {
+        let mut budget = Self::new(maximum);
+        for snapshot in snapshots {
+            budget.reserve(snapshot_byte_length(snapshot, maximum)?)?;
+        }
+        Ok(budget)
+    }
+
+    pub(crate) fn reserve(&mut self, bytes: u64) -> Result<(), DiscoveryError> {
+        let observed =
+            self.observed
+                .checked_add(bytes)
+                .ok_or(DiscoveryError::RetainedSnapshotByteLimit {
+                    observed: u64::MAX,
+                    maximum: self.maximum,
+                })?;
+        if observed > self.maximum {
+            return Err(DiscoveryError::RetainedSnapshotByteLimit {
+                observed,
+                maximum: self.maximum,
+            });
+        }
+        self.observed = observed;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn observed(self) -> u64 {
+        self.observed
+    }
+}
+
+fn snapshot_byte_length(snapshot: &SourceSnapshot, maximum: u64) -> Result<u64, DiscoveryError> {
+    let bytes = u64::try_from(snapshot.content().len()).map_err(|_| {
+        DiscoveryError::RetainedSnapshotByteLimit {
+            observed: u64::MAX,
+            maximum,
+        }
+    })?;
+    if bytes != snapshot.metadata().length {
+        return Err(DiscoveryError::IncrementalDrift);
+    }
+    Ok(bytes)
+}
 
 /// Per-scan resource limits below hard safety ceilings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -514,8 +579,35 @@ pub fn discover_with_snapshots(
     cached_snapshots: BTreeMap<FileId, SourceSnapshot>,
     cancellation: &Cancellation,
 ) -> Result<DiscoveryResult, DiscoveryError> {
-    let mut state =
-        DiscoveryState::new(root, config, policy, limits, cached_snapshots, cancellation);
+    discover_with_snapshots_at_limit(
+        root,
+        config,
+        policy,
+        limits,
+        cached_snapshots,
+        MAX_RETAINED_SOURCE_BYTES,
+        cancellation,
+    )
+}
+
+fn discover_with_snapshots_at_limit(
+    root: &RepositoryRoot,
+    config: &ConfigSnapshot,
+    policy: &DiscoveryPolicy,
+    limits: DiscoveryLimits,
+    cached_snapshots: BTreeMap<FileId, SourceSnapshot>,
+    maximum_retained_source_bytes: u64,
+    cancellation: &Cancellation,
+) -> Result<DiscoveryResult, DiscoveryError> {
+    let mut state = DiscoveryState::new(
+        root,
+        config,
+        policy,
+        limits,
+        cached_snapshots,
+        maximum_retained_source_bytes,
+        cancellation,
+    )?;
     state.run()?;
     Ok(state.finish())
 }
@@ -534,6 +626,7 @@ struct DiscoveryState<'a> {
     scoped_ignores: ScopedIgnores,
     cached_snapshots: BTreeMap<FileId, SourceSnapshot>,
     snapshots: BTreeMap<FileId, SourceSnapshot>,
+    snapshot_budget: RetainedSnapshotBudget,
 }
 
 impl<'a> DiscoveryState<'a> {
@@ -543,11 +636,16 @@ impl<'a> DiscoveryState<'a> {
         policy: &'a DiscoveryPolicy,
         limits: DiscoveryLimits,
         cached_snapshots: BTreeMap<FileId, SourceSnapshot>,
+        maximum_retained_source_bytes: u64,
         cancellation: &'a Cancellation,
-    ) -> Self {
+    ) -> Result<Self, DiscoveryError> {
+        let snapshot_budget = RetainedSnapshotBudget::preflight(
+            maximum_retained_source_bytes,
+            cached_snapshots.values(),
+        )?;
         let mut queue = VecDeque::new();
         queue.push_back((None, 0));
-        Self {
+        Ok(Self {
             root,
             config,
             policy,
@@ -561,7 +659,8 @@ impl<'a> DiscoveryState<'a> {
             scoped_ignores: ScopedIgnores::default(),
             cached_snapshots,
             snapshots: BTreeMap::new(),
-        }
+            snapshot_budget,
+        })
     }
 
     fn run(&mut self) -> Result<(), DiscoveryError> {
@@ -743,8 +842,17 @@ impl<'a> DiscoveryState<'a> {
             }
             return Ok(snapshot);
         }
+        if observed_metadata.length > self.limits.max_file_bytes {
+            return Err(DiscoveryError::Vfs(VfsError::FileTooLarge {
+                maximum: self.limits.max_file_bytes,
+            }));
+        }
+        self.snapshot_budget.reserve(observed_metadata.length)?;
+        // The traversal metadata is the aggregate reservation. Restricting the
+        // capture to that size prevents a racing growth from bypassing it.
+        let capture_limit = observed_metadata.length.max(1);
         self.root
-            .snapshot_with_cancellation(path, self.limits.max_file_bytes, self.cancellation)
+            .snapshot_with_cancellation(path, capture_limit, self.cancellation)
             .map_err(DiscoveryError::from)
     }
 
@@ -1007,6 +1115,14 @@ pub enum DiscoveryError {
         /// Maximum permitted visited entries.
         maximum: usize,
     },
+    /// Source snapshots crossed the hard aggregate retained-byte ceiling.
+    #[error("discovery retained snapshot bytes {observed} exceed {maximum}")]
+    RetainedSnapshotByteLimit {
+        /// Aggregate source bytes requested by the discovery.
+        observed: u64,
+        /// Maximum aggregate retained source bytes.
+        maximum: u64,
+    },
     /// The VFS rejected or failed one repository operation.
     #[error(transparent)]
     Vfs(#[from] VfsError),
@@ -1062,6 +1178,103 @@ mod tests {
     fn fixture_root(temporary: &TempDir, identity: &[u8]) -> RepositoryRoot {
         let repository = derive_repository(identity).id();
         RepositoryRoot::open(repository, temporary.path()).expect("fixture root opens")
+    }
+
+    #[test]
+    fn retained_snapshot_budget_accepts_exact_limit_and_rejects_next_byte() {
+        let mut exact = RetainedSnapshotBudget::new(5);
+        exact.reserve(2).expect("first reservation fits");
+        exact.reserve(3).expect("exact aggregate reservation fits");
+        assert_eq!(exact.observed(), 5);
+
+        let mut exceeded = RetainedSnapshotBudget::new(5);
+        exceeded.reserve(2).expect("first reservation fits");
+        assert!(matches!(
+            exceeded.reserve(4),
+            Err(DiscoveryError::RetainedSnapshotByteLimit {
+                observed: 6,
+                maximum: 5
+            })
+        ));
+    }
+
+    #[test]
+    fn clean_discovery_bounds_new_snapshots_at_the_aggregate_limit() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "first.rs", b"aa");
+        write_fixture(&temporary, "second.rs", b"bbb");
+        let root = fixture_root(&temporary, b"clean-snapshot-budget");
+        let policy = DiscoveryPolicy::build(Vec::new(), false).expect("policy builds");
+
+        let exact = discover_with_snapshots_at_limit(
+            &root,
+            &config(),
+            &policy,
+            limits(),
+            BTreeMap::new(),
+            5,
+            &Cancellation::new(),
+        )
+        .expect("exact aggregate snapshot bytes are admitted");
+        let (_, snapshots) = exact.into_parts();
+        assert_eq!(
+            snapshots
+                .values()
+                .map(|snapshot| snapshot.content().len())
+                .sum::<usize>(),
+            5
+        );
+
+        assert!(matches!(
+            discover_with_snapshots_at_limit(
+                &root,
+                &config(),
+                &policy,
+                limits(),
+                BTreeMap::new(),
+                4,
+                &Cancellation::new(),
+            ),
+            Err(DiscoveryError::RetainedSnapshotByteLimit {
+                observed: 5,
+                maximum: 4
+            })
+        ));
+    }
+
+    #[test]
+    fn clean_discovery_preflights_all_cached_snapshot_bytes() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "first.rs", b"aa");
+        write_fixture(&temporary, "second.rs", b"bbb");
+        let root = fixture_root(&temporary, b"cached-snapshot-budget");
+        let policy = DiscoveryPolicy::build(Vec::new(), false).expect("policy builds");
+        let mut cached = BTreeMap::new();
+        for path in ["first.rs", "second.rs"] {
+            let path = RelativePath::parse(Path::new(path)).expect("fixture path is valid");
+            let snapshot = root
+                .snapshot(&path, 3)
+                .expect("fixture snapshot is captured");
+            cached.insert(snapshot.file(), snapshot);
+        }
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+
+        assert!(matches!(
+            discover_with_snapshots_at_limit(
+                &root,
+                &config(),
+                &policy,
+                limits(),
+                cached,
+                4,
+                &cancellation,
+            ),
+            Err(DiscoveryError::RetainedSnapshotByteLimit {
+                observed: 5,
+                maximum: 4
+            })
+        ));
     }
 
     #[test]

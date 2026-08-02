@@ -92,10 +92,12 @@ use rootlight_mcp_contract::{
         ActiveGeneration, AnalysisTier, CacheStatus, CodeLocateData, CodeLocateInput,
         ContinuationCursor, CoverageSummary, DetailHandle, Diagnostic, EntityKind, Freshness,
         GenerationSummary, IndexMode, IndexPlanScope, IndexPlanSummary, LanguageCoverage,
-        LocateReason, LocatedItem, OperationAction, OperationDetail, OperationProgress,
-        OperationResources, OperationState, OperationStatusData, OperationStatusInput,
-        OperationStatusSuccess, ProvenanceLevel, ProvenanceSummary, QueryInterpretation,
-        ReadEnvelope, RepoIndexData, RepoIndexSuccess, RequiredNullable, ResolvedRepository,
+        LocateReason, LocatedItem, OperationAction, OperationDetailV1_1 as OperationDetail,
+        OperationProgress, OperationResourcesV1_1 as OperationResources, OperationSchemaVersion,
+        OperationState, OperationStatusDataV1_1 as OperationStatusData, OperationStatusInput,
+        OperationStatusSuccessV1_1 as OperationStatusSuccess, ProvenanceLevel, ProvenanceSummary,
+        QueryInterpretation, ReadEnvelope, RepoIndexDataV1_1 as RepoIndexData,
+        RepoIndexSuccessV1_1 as RepoIndexSuccess, RequiredNullable, ResolvedRepository,
         ResponseBudget, ResponseProfile, ResponseWarning, SearchMode, SourceChunk, SourceElision,
         SourceEncoding, SourceEncodingRequest, SourceReadData, SourceReadSelector,
         StaleSourceReference, SymbolExplainData, SymbolExplanation, UsageSummary,
@@ -6649,10 +6651,11 @@ fn map_repository_index(
             .then_with(|| left.message.as_str().cmp(right.message.as_str()))
     });
     Ok(RepoIndexSuccess {
-        schema_version: SchemaVersion::V1_0,
+        schema_version: OperationSchemaVersion::V1_1,
         data: RepoIndexData {
             repository_id: response.result.repository,
             operation_id: response.result.operation,
+            semantic_operation_id: response.result.semantic_operation,
             accepted_plan: response.accepted_plan,
             state: operation_state(response.result.state),
             published_generation: RequiredNullable(response.result.published_generation),
@@ -6675,7 +6678,7 @@ fn map_operation_status(
     }
     let total_units = (operation.total_units != 0).then_some(u64::from(operation.total_units));
     Ok(OperationStatusSuccess {
-        schema_version: SchemaVersion::V1_0,
+        schema_version: OperationSchemaVersion::V1_1,
         data: OperationStatusData {
             operation: OperationDetail {
                 kind: "repository_index".to_owned(),
@@ -6691,9 +6694,12 @@ fn map_operation_status(
                     peak_rss_bytes: response.peak_rss_bytes,
                     written_bytes: response.written_bytes,
                     files_examined: response.files_examined,
+                    bytes_examined: Some(response.bytes_examined),
                 },
             },
             published_generation: RequiredNullable(response.published_generation),
+            semantic_operation_id: response.semantic_operation,
+            index_stage: Some(response.index_stage),
             error: RequiredNullable(operation.error),
             retry_after_ms: RequiredNullable(response.retry_after_ms),
         },

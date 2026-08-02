@@ -653,6 +653,12 @@ pub struct RepositoryIndexResponse {
     #[prost(enumeration = "RepositoryIndexMode", tag = "14")]
     #[allow(missing_docs)]
     pub mode: i32,
+    /// Separately journaled semantic refinement created by Auto mode.
+    #[prost(message, optional, tag = "15")]
+    #[allow(missing_docs)]
+    pub semantic_operation: ::core::option::Option<
+        super::super::common::v1::OperationId,
+    >,
 }
 /// Reads or cooperatively cancels one operation created by repository indexing.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -675,7 +681,7 @@ pub struct RepositoryOperationStatusRequest {
     #[allow(missing_docs)]
     pub after_revision: ::core::option::Option<u64>,
 }
-/// Returns journal state plus same-process first-slice publication metadata.
+/// Returns journal state plus durable first-slice publication metadata.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RepositoryOperationStatusResponse {
     #[prost(message, optional, tag = "1")]
@@ -706,6 +712,18 @@ pub struct RepositoryOperationStatusResponse {
     #[prost(uint32, optional, tag = "8")]
     #[allow(missing_docs)]
     pub retry_after_ms: ::core::option::Option<u32>,
+    #[prost(uint64, tag = "9")]
+    #[allow(missing_docs)]
+    pub bytes_examined: u64,
+    #[prost(string, tag = "10")]
+    #[allow(missing_docs)]
+    pub index_stage: ::prost::alloc::string::String,
+    /// Separately journaled semantic refinement created by a successful Auto operation.
+    #[prost(message, optional, tag = "11")]
+    #[allow(missing_docs)]
+    pub semantic_operation: ::core::option::Option<
+        super::super::common::v1::OperationId,
+    >,
 }
 /// Bounded measured usage for one first-slice query.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]

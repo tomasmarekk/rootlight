@@ -102,6 +102,7 @@ impl McpTool {
     pub const fn contract_version(self) -> &'static str {
         match self {
             Self::RepoList => crate::REPO_LIST_SCHEMA_VERSION,
+            Self::RepoIndex | Self::OperationStatus => crate::MCP_OPERATION_SCHEMA_VERSION,
             _ => crate::MCP_SCHEMA_VERSION,
         }
     }
@@ -381,13 +382,19 @@ mod tests {
     }
 
     #[test]
-    fn repository_list_has_a_dedicated_two_zero_contract() {
+    fn tools_with_evolved_contracts_advertise_their_versions() {
         assert_eq!(
             McpTool::RepoList.contract_version(),
             crate::REPO_LIST_SCHEMA_VERSION
         );
+        for tool in [McpTool::RepoIndex, McpTool::OperationStatus] {
+            assert_eq!(tool.contract_version(), crate::MCP_OPERATION_SCHEMA_VERSION);
+        }
         for tool in McpTool::ALL {
-            if tool != McpTool::RepoList {
+            if !matches!(
+                tool,
+                McpTool::RepoList | McpTool::RepoIndex | McpTool::OperationStatus
+            ) {
                 assert_eq!(tool.contract_version(), crate::MCP_SCHEMA_VERSION);
             }
         }

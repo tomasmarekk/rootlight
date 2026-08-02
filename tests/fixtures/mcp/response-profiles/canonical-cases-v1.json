@@ -17,9 +17,10 @@
           "operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv",
           "published_generation": null,
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "semantic_operation_id": null,
           "state": "queued"
         },
-        "schema_version": "1.0"
+        "schema_version": "1.1"
       }
     },
     {
@@ -158,6 +159,7 @@
       "output": {
         "data": {
           "error": null,
+          "index_stage": "analysis",
           "operation": {
             "kind": "repository_index",
             "progress": {
@@ -165,6 +167,7 @@
               "total_units": null
             },
             "resources": {
+              "bytes_examined": 64,
               "files_examined": 1,
               "peak_rss_bytes": 0,
               "written_bytes": 0
@@ -175,9 +178,10 @@
             "state": "running"
           },
           "published_generation": null,
-          "retry_after_ms": null
+          "retry_after_ms": null,
+          "semantic_operation_id": null
         },
-        "schema_version": "1.0"
+        "schema_version": "1.1"
       }
     },
     {

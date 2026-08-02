@@ -7,12 +7,11 @@ use std::{fmt, future::Future, io, pin::Pin, sync::Arc};
 
 use jsonschema::{Validator, error::ValidationErrorKind};
 use rootlight_mcp_contract::{
-    CodeLocateInput, CodeLocateOutput, ContinuationCursor, DetailKey, ErrorCode, ErrorResponse,
-    ExposureProfile, GenerationSelector, McpTool, NextAction, OperationStatusInput,
-    OperationStatusOutput, PublicError, PublicErrorBuildError, PublicValue, RepoIndexInput,
-    RepoIndexOutput, RepositorySelector, SafeLabel, SchemaVersion, SourceReadInput,
-    SourceReadOutput, SymbolExplainInput, SymbolExplainOutput, ToolResponse, TrustClassification,
-    VerticalTool,
+    CodeLocateInput, CodeLocateOutput, ContinuationCursor, DetailKey, ErrorCode, ExposureProfile,
+    GenerationSelector, McpTool, NextAction, OperationStatusInput, OperationStatusOutput,
+    PublicError, PublicErrorBuildError, PublicValue, RepoIndexInput, RepoIndexOutput,
+    RepositorySelector, SafeLabel, SourceReadInput, SourceReadOutput, SymbolExplainInput,
+    SymbolExplainOutput, ToolResponse, TrustClassification, VerticalTool,
     capability::{
         CapabilityStatus, DISCOVERY_METADATA_KEY, ToolCapability, capability_for,
         discovery_metadata,
@@ -20,6 +19,7 @@ use rootlight_mcp_contract::{
     context::{BatchOperation, ContextPackInput, QueryAdvancedInput, QueryBatchInput},
     pagination::AuthenticatedCursor,
     repository::RepoListInput,
+    vertical::{OperationStatusOutputV1_0, RepoIndexOutputV1_0},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -322,15 +322,14 @@ where
                 HandlerResponse::error(INVALID_PARAMS, "tool is not available"),
             );
         }
-        if requested_contract_version
-            .as_deref()
-            .is_some_and(|requested| requested != contract.tool.contract_version())
-        {
+        let Some(selected_version) =
+            ContractSelection::select(contract, requested_contract_version.as_deref())
+        else {
             let response = unsupported_contract_version_error(contract)
-                .and_then(|error| tool_error(contract, error))
+                .and_then(|error| tool_error(contract, ContractSelection::Current, error))
                 .unwrap_or_else(|_| internal_tool_error("tool error validation failed"));
             return cancel_or(&cancellation, response);
-        }
+        };
         let arguments_value = Value::Object(arguments);
         let typed_input = match validate_contract_input(contract, &arguments_value, profile) {
             Ok(input) => input,
@@ -341,7 +340,7 @@ where
                 };
                 return cancel_or(
                     &cancellation,
-                    tool_error(contract, error)
+                    tool_error(contract, selected_version, error)
                         .unwrap_or_else(|_| internal_tool_error("tool error validation failed")),
                 );
             }
@@ -369,7 +368,7 @@ where
             }) => {
                 return cancel_or(
                     &cancellation,
-                    tool_error(contract, *error)
+                    tool_error(contract, selected_version, *error)
                         .unwrap_or_else(|_| internal_tool_error("tool error validation failed")),
                 );
             }
@@ -379,16 +378,32 @@ where
                 return cancel_or(&cancellation, internal_tool_error(failure.message()));
             }
         };
-        let output_value = Value::Object(output);
+        let output_value =
+            match select_output_version(contract.tool, selected_version, Value::Object(output)) {
+                Ok(output) => output,
+                Err(()) => {
+                    return cancel_or(
+                        &cancellation,
+                        internal_tool_error("tool output version conversion failed"),
+                    );
+                }
+            };
         if !serialized_json_fits(&output_value, MAX_TOOL_STRUCTURED_BYTES) {
             return cancel_or(
                 &cancellation,
-                tool_error(contract, resource_exhausted)
+                tool_error(contract, selected_version, resource_exhausted)
                     .unwrap_or_else(|_| internal_tool_error("tool error validation failed")),
             );
         }
-        if !contract.output_validator.is_valid(&output_value)
-            || !typed_output_is_valid(contract.tool, &typed_input, &output_value)
+        if !contract
+            .output_validator(selected_version)
+            .is_valid(&output_value)
+            || !typed_selected_output_is_valid(
+                contract.tool,
+                selected_version,
+                &typed_input,
+                &output_value,
+            )
         {
             return cancel_or(
                 &cancellation,
@@ -402,7 +417,7 @@ where
             Ok(response) => cancel_or(&cancellation, response),
             Err(ToolResultError::Limit) => cancel_or(
                 &cancellation,
-                tool_error(contract, resource_exhausted)
+                tool_error(contract, selected_version, resource_exhausted)
                     .unwrap_or_else(|_| internal_tool_error("tool error validation failed")),
             ),
             Err(ToolResultError::Serialize) => cancel_or(
@@ -472,6 +487,39 @@ struct ToolContract {
     definition: ToolDefinition,
     input_validator: Validator,
     output_validator: Validator,
+    previous_output_validator: Option<Validator>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContractSelection {
+    Current,
+    Previous,
+}
+
+impl ContractSelection {
+    fn select(contract: &ToolContract, requested: Option<&str>) -> Option<Self> {
+        match requested {
+            None => Some(Self::Current),
+            Some(requested) if requested == contract.tool.contract_version() => Some(Self::Current),
+            Some("1.0") if contract.previous_output_validator.is_some() => Some(Self::Previous),
+            Some(_) => None,
+        }
+    }
+
+    const fn schema_version(self, tool: VerticalTool) -> &'static str {
+        match self {
+            Self::Previous => "1.0",
+            Self::Current
+                if matches!(
+                    tool,
+                    VerticalTool::RepoIndex | VerticalTool::OperationStatus
+                ) =>
+            {
+                rootlight_mcp_contract::MCP_OPERATION_SCHEMA_VERSION
+            }
+            Self::Current => rootlight_mcp_contract::MCP_SCHEMA_VERSION,
+        }
+    }
 }
 
 /// Controls how unresolved batch bindings participate in capability admission.
@@ -982,6 +1030,26 @@ impl ToolContract {
                 direction: "output",
                 detail: source.to_string(),
             })?;
+        let previous_output_validator = tool
+            .previous_output_schema_json()
+            .map(|schema| {
+                let schema =
+                    parse_object_schema(tool, "previous output", schema).map_err(|source| {
+                        ToolRegistryError::ParseSchema {
+                            tool,
+                            direction: "previous output",
+                            source,
+                        }
+                    })?;
+                jsonschema::draft202012::new(&Value::Object(schema)).map_err(|source| {
+                    ToolRegistryError::CompileSchema {
+                        tool,
+                        direction: "previous output",
+                        detail: source.to_string(),
+                    }
+                })
+            })
+            .transpose()?;
         Ok(Self {
             tool,
             definition: ToolDefinition {
@@ -1003,7 +1071,18 @@ impl ToolContract {
             },
             input_validator,
             output_validator,
+            previous_output_validator,
         })
+    }
+
+    fn output_validator(&self, selection: ContractSelection) -> &Validator {
+        match selection {
+            ContractSelection::Current => &self.output_validator,
+            ContractSelection::Previous => self
+                .previous_output_validator
+                .as_ref()
+                .expect("previous selection requires a compiled schema"),
+        }
     }
 }
 
@@ -1502,6 +1581,22 @@ fn typed_output_is_valid(tool: VerticalTool, input: &TypedInput, output: &Value)
     }
 }
 
+fn typed_selected_output_is_valid(
+    tool: VerticalTool,
+    selection: ContractSelection,
+    input: &TypedInput,
+    output: &Value,
+) -> bool {
+    match selection {
+        ContractSelection::Current => typed_output_is_valid(tool, input, output),
+        ContractSelection::Previous => match tool {
+            VerticalTool::RepoIndex => RepoIndexOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::OperationStatus => OperationStatusOutputV1_0::deserialize(output).is_ok(),
+            _ => false,
+        },
+    }
+}
+
 fn source_read_output_invariants_are_valid(
     input: &SourceReadInput,
     output: &SourceReadOutput,
@@ -1637,15 +1732,15 @@ fn tool_success(structured: Value) -> Result<HandlerResponse, ToolResultError> {
 
 fn tool_error(
     contract: &ToolContract,
+    selection: ContractSelection,
     error: PublicError,
 ) -> Result<HandlerResponse, ToolResultError> {
-    let structured = serde_json::to_value(ErrorResponse {
-        schema_version: SchemaVersion::V1_0,
-        error,
-    })
-    .map_err(|_| ToolResultError::Serialize)?;
-    if !contract.output_validator.is_valid(&structured)
-        || !typed_error_output_is_valid(contract.tool, &structured)
+    let structured = json!({
+        "schema_version": selection.schema_version(contract.tool),
+        "error": error,
+    });
+    if !contract.output_validator(selection).is_valid(&structured)
+        || !typed_selected_error_output_is_valid(contract.tool, selection, &structured)
     {
         return Err(ToolResultError::Serialize);
     }
@@ -1692,6 +1787,54 @@ fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
         VerticalTool::SymbolExplain => SymbolExplainOutput::deserialize(output).is_ok(),
         VerticalTool::SourceRead => SourceReadOutput::deserialize(output).is_ok(),
     }
+}
+
+fn typed_selected_error_output_is_valid(
+    tool: VerticalTool,
+    selection: ContractSelection,
+    output: &Value,
+) -> bool {
+    match selection {
+        ContractSelection::Current => typed_error_output_is_valid(tool, output),
+        ContractSelection::Previous => match tool {
+            VerticalTool::RepoIndex => RepoIndexOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::OperationStatus => OperationStatusOutputV1_0::deserialize(output).is_ok(),
+            _ => false,
+        },
+    }
+}
+
+fn select_output_version(
+    tool: VerticalTool,
+    selection: ContractSelection,
+    mut output: Value,
+) -> Result<Value, ()> {
+    if selection == ContractSelection::Current {
+        return Ok(output);
+    }
+    let root = output.as_object_mut().ok_or(())?;
+    root.insert("schema_version".to_owned(), Value::String("1.0".to_owned()));
+    let data = root
+        .get_mut("data")
+        .and_then(Value::as_object_mut)
+        .ok_or(())?;
+    match tool {
+        VerticalTool::RepoIndex => {
+            data.remove("semantic_operation_id");
+        }
+        VerticalTool::OperationStatus => {
+            data.remove("semantic_operation_id");
+            data.remove("index_stage");
+            data.get_mut("operation")
+                .and_then(Value::as_object_mut)
+                .and_then(|operation| operation.get_mut("resources"))
+                .and_then(Value::as_object_mut)
+                .ok_or(())?
+                .remove("bytes_examined");
+        }
+        _ => return Err(()),
+    }
+    Ok(output)
 }
 
 fn tool_result(structured: Value, is_error: bool) -> Result<HandlerResponse, ToolResultError> {
@@ -1779,6 +1922,13 @@ mod tests {
     use super::*;
     use crate::{RequestCancellation, RequestId};
 
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct AnyErrorResponse {
+        schema_version: String,
+        error: PublicError,
+    }
+
     #[derive(Debug, Default)]
     struct FixtureExecutor {
         calls: AtomicUsize,
@@ -1796,10 +1946,11 @@ mod tests {
             Box::pin(async move {
                 if tool == VerticalTool::RepoIndex {
                     let Value::Object(output) = json!({
-                        "schema_version": "1.0",
+                        "schema_version": "1.1",
                         "data": {
                             "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
                             "operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv",
+                            "semantic_operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv",
                             "accepted_plan": {
                                 "scope": "repository",
                                 "mode": "auto",
@@ -2648,7 +2799,7 @@ mod tests {
                     )
                     .await;
                 let result = success(response);
-                let direct: ErrorResponse =
+                let direct: AnyErrorResponse =
                     serde_json::from_value(result["structuredContent"].clone())
                         .expect("capability rejection uses the checked error contract");
                 assert_eq!(
@@ -2761,7 +2912,7 @@ mod tests {
                     )
                     .await;
                 let result = success(response);
-                let error: ErrorResponse =
+                let error: AnyErrorResponse =
                     serde_json::from_value(result["structuredContent"].clone())
                         .expect("schema rejection uses the checked error contract");
                 assert_eq!(
@@ -2805,7 +2956,7 @@ mod tests {
             )
             .await;
         let result = success(response);
-        let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
+        let direct: AnyErrorResponse = serde_json::from_value(result["structuredContent"].clone())
             .expect("combination rejection uses the checked error contract");
         assert_eq!(direct.error.code(), ErrorCode::UnsupportedCapability);
         assert_eq!(
@@ -3049,7 +3200,7 @@ mod tests {
                     );
                 };
                 assert_eq!(result["isError"], true);
-                let error: ErrorResponse =
+                let error: AnyErrorResponse =
                     serde_json::from_value(result["structuredContent"].clone())
                         .expect("pre-execution rejection uses the checked error contract");
                 assert_eq!(error.error.code(), ErrorCode::InvalidArgument);
@@ -3098,8 +3249,8 @@ mod tests {
                     "726a8335eff1f901a176cf499ebcb827c14c8f628faf9e133e330b9687fc2993".to_owned(),
                 ),
                 (
-                    678_271,
-                    "fcf09303604e53e1f1974f8eed736b047950427c45f76b6bddfd2d279b81293b".to_owned(),
+                    678_676,
+                    "304cf6662e508bb2da27a5ff438509157afdd3efd8d2f1004f6ceaa4143d1b72".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -3279,7 +3430,7 @@ mod tests {
             result["structuredContent"]["error"]["code"],
             "INVALID_ARGUMENT"
         );
-        assert_eq!(result["structuredContent"]["schema_version"], "1.0");
+        assert_eq!(result["structuredContent"]["schema_version"], "1.1");
         serde_json::from_value::<RepoIndexOutput>(result["structuredContent"].clone())
             .expect("invalid input uses the advertised checked error envelope");
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
@@ -3305,7 +3456,7 @@ mod tests {
             )
             .await;
         let result = success(response);
-        let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
+        let direct: AnyErrorResponse = serde_json::from_value(result["structuredContent"].clone())
             .expect("schema rejection uses the checked error contract");
         assert_eq!(
             direct.error,
@@ -3349,7 +3500,7 @@ mod tests {
             )
             .await;
         let typed_result = success(typed_response);
-        let typed_direct: ErrorResponse =
+        let typed_direct: AnyErrorResponse =
             serde_json::from_value(typed_result["structuredContent"].clone())
                 .expect("typed rejection uses the checked error contract");
         let authoritative = public_error(MappedDomainFailure::invalid_argument("operations"))
@@ -3387,7 +3538,7 @@ mod tests {
             )
             .await;
         let result = success(response);
-        let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
+        let direct: AnyErrorResponse = serde_json::from_value(result["structuredContent"].clone())
             .expect("capability rejection uses the checked error contract");
         let authoritative = public_error(MappedDomainFailure::unsupported_capability("arguments"))
             .expect("authoritative capability mapping builds");
@@ -3508,7 +3659,7 @@ mod tests {
             )
             .await;
         let result = success(response);
-        let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
+        let direct: AnyErrorResponse = serde_json::from_value(result["structuredContent"].clone())
             .expect("typed invariant rejection uses the checked error contract");
 
         assert_eq!(direct.error.code(), ErrorCode::InvalidArgument);
@@ -3561,8 +3712,9 @@ mod tests {
                 .await;
             let result = success(response);
             assert_eq!(result["isError"], true);
-            let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
-                .expect("cursor rejection uses the checked error contract");
+            let direct: AnyErrorResponse =
+                serde_json::from_value(result["structuredContent"].clone())
+                    .expect("cursor rejection uses the checked error contract");
             assert_eq!(direct.error, authoritative);
         }
 
@@ -3616,7 +3768,7 @@ mod tests {
             .await;
         let result = success(response);
         assert_eq!(result["isError"], true);
-        assert_eq!(result["structuredContent"]["schema_version"], "1.0");
+        assert_eq!(result["structuredContent"]["schema_version"], "1.1");
         assert_eq!(result["structuredContent"]["error"]["code"], "NOT_FOUND");
         serde_json::from_value::<OperationStatusOutput>(result["structuredContent"].clone())
             .expect("domain error uses the advertised typed envelope");
@@ -3832,9 +3984,14 @@ mod tests {
                 )
                 .await;
             let result = success(response);
-            let error: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
-                .expect("version rejection uses the checked error contract");
+            let error: AnyErrorResponse =
+                serde_json::from_value(result["structuredContent"].clone())
+                    .expect("version rejection uses the checked error contract");
 
+            assert_eq!(
+                error.schema_version,
+                ContractSelection::Current.schema_version(tool)
+            );
             assert_eq!(error.error.code(), ErrorCode::ProtocolMismatch);
             assert_eq!(
                 error.error.details().get(&supported_key),
@@ -3856,10 +4013,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_tool_contract_version_reaches_execution_and_malformed_versions_do_not() {
+    async fn current_and_previous_operation_contracts_reach_versioned_execution() {
         let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
             .expect("registry compiles");
         let current = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "repo.index",
+                        "arguments": {"root": "C:/fixture"},
+                        "_meta": {
+                            (TOOL_CONTRACT_VERSION_META_KEY):
+                                VerticalTool::RepoIndex.contract_version()
+                        }
+                    }),
+                ),
+                cancellation(),
+            )
+            .await;
+        let current = success(current);
+        assert_eq!(current["isError"], false);
+        assert_eq!(current["structuredContent"]["schema_version"], "1.1");
+        assert!(current["structuredContent"]["data"]["semantic_operation_id"].is_string());
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 1);
+
+        let previous = router
             .handle(
                 request(
                     "tools/call",
@@ -3874,8 +4053,15 @@ mod tests {
                 cancellation(),
             )
             .await;
-        assert_eq!(success(current)["isError"], false);
-        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 1);
+        let previous = success(previous);
+        assert_eq!(previous["isError"], false);
+        assert_eq!(previous["structuredContent"]["schema_version"], "1.0");
+        assert!(
+            previous["structuredContent"]["data"]
+                .get("semantic_operation_id")
+                .is_none()
+        );
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 2);
 
         for malformed in [json!("1"), json!("1.0.0"), json!(""), json!(1)] {
             let response = router
@@ -3901,7 +4087,7 @@ mod tests {
                 }
             ));
         }
-        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]
@@ -3999,7 +4185,7 @@ mod tests {
         let contract =
             ToolContract::compile(VerticalTool::OperationStatus).expect("contract compiles");
         let output = json!({
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "data": {
                 "operation": {
                     "kind": "repository_index",
@@ -4043,7 +4229,7 @@ mod tests {
 
     #[test]
     fn repo_index_fixture_decodes_as_the_typed_output() {
-        serde_json::from_value::<RepoIndexOutput>(json!({
+        serde_json::from_value::<RepoIndexOutputV1_0>(json!({
             "schema_version": "1.0",
             "data": {
                 "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
@@ -4544,7 +4730,7 @@ mod tests {
             )
             .await;
         let result = success(response);
-        let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
+        let direct: AnyErrorResponse = serde_json::from_value(result["structuredContent"].clone())
             .expect("forbidden operator uses the checked error contract");
         assert_eq!(
             direct.error,
@@ -4612,7 +4798,7 @@ mod tests {
             )
             .await;
         let invalid_plan = success(invalid_plan);
-        let invalid_plan: ErrorResponse =
+        let invalid_plan: AnyErrorResponse =
             serde_json::from_value(invalid_plan["structuredContent"].clone())
                 .expect("batch plan failure uses the checked error contract");
         assert_eq!(
@@ -4645,7 +4831,7 @@ mod tests {
             )
             .await;
         let hidden = success(hidden);
-        let hidden: ErrorResponse = serde_json::from_value(hidden["structuredContent"].clone())
+        let hidden: AnyErrorResponse = serde_json::from_value(hidden["structuredContent"].clone())
             .expect("batch profile failure uses the checked error contract");
         assert_eq!(
             hidden.error,
@@ -4667,7 +4853,7 @@ mod tests {
             .expect("golden envelopes are an array")
             .iter()
             .map(|envelope| {
-                serde_json::from_value::<ErrorResponse>(envelope.clone())
+                serde_json::from_value::<AnyErrorResponse>(envelope.clone())
                     .expect("golden envelope satisfies the checked Rust contract")
                     .error
                     .code()
@@ -4686,7 +4872,7 @@ mod tests {
             ]
         );
 
-        let additive: ErrorResponse = serde_json::from_str(include_str!(
+        let additive: AnyErrorResponse = serde_json::from_str(include_str!(
             "../../../tests/fixtures/errors/mcp-error-envelope-1.0-additive-details.json"
         ))
         .expect("additive detail fixture remains compatible");

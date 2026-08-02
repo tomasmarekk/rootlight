@@ -25,7 +25,7 @@ use std::{
 
 pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_error::PublicError;
-use rootlight_ids::OperationId;
+use rootlight_ids::{GenerationId, OperationId, RepositoryId};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction,
     config::DbConfig,
@@ -79,6 +79,13 @@ const VERSION_TWO_MIGRATION_CHECKSUM: [u8; 32] = [
 // `application_meta` already belongs to schema two, so older schema-two binaries
 // safely ignore this namespaced retry intent without a rollback-breaking DDL change.
 const RELATIVE_TIMEOUT_META_PREFIX: &str = "operation_relative_timeout/";
+const REPOSITORY_OPERATION_META_PREFIX: &str = "operation_repository_context/";
+const REPOSITORY_OPERATION_CONTEXT_VERSION: u8 = 3;
+const LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES: usize = 71;
+const VERSION_TWO_REPOSITORY_OPERATION_CONTEXT_BYTES: usize =
+    LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES + 32;
+const REPOSITORY_OPERATION_CONTEXT_BYTES: usize =
+    LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES + 1 + 32 + 1 + 20;
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const SYSTEM_CLIENT_INSTANCE_ID: [u8; 16] = [0; 16];
 const CATALOG_MUTATION_BATCH: usize = 256;
@@ -213,6 +220,125 @@ impl OperationKind {
     }
 }
 
+/// Requested analysis mode retained with a repository-index operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RepositoryOperationMode {
+    /// Publish structural coverage, then start a separately owned semantic refinement.
+    Auto,
+    /// Publish bounded structural coverage.
+    Structural,
+    /// Publish the best installed project-level semantic coverage.
+    Deep,
+}
+
+impl RepositoryOperationMode {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Auto => 3,
+            Self::Structural => 1,
+            Self::Deep => 2,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, OperationError> {
+        match tag {
+            1 => Ok(Self::Structural),
+            2 => Ok(Self::Deep),
+            3 => Ok(Self::Auto),
+            _ => Err(OperationError::CorruptState),
+        }
+    }
+}
+
+/// Immutable repository context submitted atomically with an index operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepositoryOperationSubmission {
+    /// Repository reserved by admission.
+    pub repository: RepositoryId,
+    /// Generation active when admission completed.
+    pub parent_generation: Option<GenerationId>,
+    /// Wall-clock start timestamp retained for public status.
+    pub started_unix_ms: u64,
+    /// Conservative disk reservation computed during admission.
+    pub estimated_disk_bytes: u64,
+    /// Requested auto, structural, or deep analysis mode.
+    pub mode: RepositoryOperationMode,
+    /// Canonical repository-root identity retained for registration recovery.
+    pub root_identity: Option<[u8; 32]>,
+}
+
+impl RepositoryOperationSubmission {
+    /// Creates checked immutable repository-operation metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::InvalidSubmission`] when the start timestamp is zero.
+    pub const fn new(
+        repository: RepositoryId,
+        parent_generation: Option<GenerationId>,
+        started_unix_ms: u64,
+        estimated_disk_bytes: u64,
+        mode: RepositoryOperationMode,
+    ) -> Result<Self, OperationError> {
+        if started_unix_ms == 0 {
+            return Err(OperationError::InvalidSubmission);
+        }
+        Ok(Self {
+            repository,
+            parent_generation,
+            started_unix_ms,
+            estimated_disk_bytes,
+            mode,
+            root_identity: None,
+        })
+    }
+
+    /// Attaches the canonical root identity required to recover registration.
+    #[must_use]
+    pub const fn with_root_identity(mut self, root_identity: [u8; 32]) -> Self {
+        self.root_identity = Some(root_identity);
+        self
+    }
+}
+
+/// Durable repository context and live monotonic observations for one operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepositoryOperationContext {
+    /// Stable operation handle.
+    pub operation: OperationId,
+    /// Repository reserved by admission.
+    pub repository: RepositoryId,
+    /// Generation active when admission completed.
+    pub parent_generation: Option<GenerationId>,
+    /// Wall-clock start timestamp retained for public status.
+    pub started_unix_ms: u64,
+    /// Conservative disk reservation computed during admission.
+    pub estimated_disk_bytes: u64,
+    /// Requested auto, structural, or deep analysis mode.
+    pub mode: RepositoryOperationMode,
+    /// Canonical repository-root identity retained for registration recovery.
+    pub root_identity: Option<[u8; 32]>,
+    /// Source files examined so far.
+    pub files_examined: u64,
+    /// Source bytes examined so far.
+    pub bytes_examined: u64,
+    /// Generation durably published by a successful operation.
+    pub published_generation: Option<GenerationId>,
+}
+
+impl RepositoryOperationContext {
+    const fn submission(self) -> RepositoryOperationSubmission {
+        RepositoryOperationSubmission {
+            repository: self.repository,
+            parent_generation: self.parent_generation,
+            started_unix_ms: self.started_unix_ms,
+            estimated_disk_bytes: self.estimated_disk_bytes,
+            mode: self.mode,
+            root_identity: self.root_identity,
+        }
+    }
+}
+
 /// Monotonic stage within an operation kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OperationStage {
@@ -294,6 +420,8 @@ pub struct OperationSubmission {
     pub deadline_unix_ms: Option<u64>,
     /// Required wall-clock lease expiry for attached work.
     pub lease_expires_unix_ms: Option<u64>,
+    /// Optional repository context committed atomically with index admission.
+    pub repository_context: Option<RepositoryOperationSubmission>,
 }
 
 /// Retry comparison for a newly prepared operation deadline.
@@ -347,7 +475,24 @@ impl OperationSubmission {
             detached,
             deadline_unix_ms,
             lease_expires_unix_ms,
+            repository_context: None,
         })
+    }
+
+    /// Attaches immutable repository context to a repository-index submission.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::InvalidSubmission`] for another operation kind.
+    pub const fn with_repository_context(
+        mut self,
+        context: RepositoryOperationSubmission,
+    ) -> Result<Self, OperationError> {
+        if !matches!(self.kind, OperationKind::RepositoryIndex) {
+            return Err(OperationError::InvalidSubmission);
+        }
+        self.repository_context = Some(context);
+        Ok(self)
     }
 
     /// Creates the internal legacy control-probe submission.
@@ -361,6 +506,7 @@ impl OperationSubmission {
             detached: true,
             deadline_unix_ms: None,
             lease_expires_unix_ms: None,
+            repository_context: None,
         }
     }
 }
@@ -640,6 +786,7 @@ impl OperationJournal {
         {
             let connection = journal.lock_connection()?;
             reconcile_relative_timeout_intents(&connection)?;
+            reconcile_repository_operation_contexts(&connection)?;
         }
         Ok(journal)
     }
@@ -677,7 +824,16 @@ impl OperationJournal {
         if let Some((existing, stored_timeout_ms)) =
             load_record_with_retry_intent(&transaction, submission.operation)?
         {
-            if submission_matches(&existing, stored_timeout_ms, submission, deadline_retry) {
+            let stored_repository_context =
+                load_repository_operation_context(&transaction, submission.operation)?
+                    .map(RepositoryOperationContext::submission);
+            if submission_matches(
+                &existing,
+                stored_timeout_ms,
+                stored_repository_context,
+                submission,
+                deadline_retry,
+            ) {
                 transaction.commit().map_err(map_sqlite_error)?;
                 return Ok(SubmissionOutcome {
                     inserted: false,
@@ -714,6 +870,23 @@ impl OperationJournal {
             submission.operation,
             deadline_retry.relative_timeout_ms(),
         )?;
+        if let Some(context) = submission.repository_context {
+            store_repository_operation_context(
+                &transaction,
+                RepositoryOperationContext {
+                    operation: submission.operation,
+                    repository: context.repository,
+                    parent_generation: context.parent_generation,
+                    started_unix_ms: context.started_unix_ms,
+                    estimated_disk_bytes: context.estimated_disk_bytes,
+                    mode: context.mode,
+                    root_identity: context.root_identity,
+                    files_examined: 0,
+                    bytes_examined: 0,
+                    published_generation: None,
+                },
+            )?;
+        }
         transaction.commit().map_err(map_sqlite_error)?;
         self.lock_cancellations()?
             .insert(submission.operation, Cancellation::new());
@@ -754,7 +927,16 @@ impl OperationJournal {
         let (existing, stored_timeout_ms) =
             load_record_with_retry_intent(&connection, submission.operation)?
                 .ok_or(OperationError::NotFound)?;
-        if submission_matches(&existing, stored_timeout_ms, submission, deadline_retry) {
+        let stored_repository_context =
+            load_repository_operation_context(&connection, submission.operation)?
+                .map(RepositoryOperationContext::submission);
+        if submission_matches(
+            &existing,
+            stored_timeout_ms,
+            stored_repository_context,
+            submission,
+            deadline_retry,
+        ) {
             Ok(existing)
         } else {
             Err(OperationError::SubmissionConflict)
@@ -1975,6 +2157,133 @@ impl OperationJournal {
         Ok(record)
     }
 
+    /// Loads durable repository context for one index operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::NotFound`] when the operation or its repository
+    /// context is absent, or a typed corruption/storage failure.
+    pub fn repository_operation_context(
+        &self,
+        operation: OperationId,
+    ) -> Result<RepositoryOperationContext, OperationError> {
+        let connection = self.lock_connection()?;
+        let record = load_record(&connection, operation)?.ok_or(OperationError::NotFound)?;
+        if record.kind != OperationKind::RepositoryIndex {
+            return Err(OperationError::NotFound);
+        }
+        load_repository_operation_context(&connection, operation)?.ok_or(OperationError::NotFound)
+    }
+
+    /// Loads all retained repository contexts in newest-to-oldest order.
+    ///
+    /// The result is bounded by the operation journal's fixed row ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed corruption, allocation, or SQLite storage failure.
+    pub fn repository_operation_contexts(
+        &self,
+    ) -> Result<Vec<RepositoryOperationContext>, OperationError> {
+        let connection = self.lock_connection()?;
+        load_repository_operation_contexts(&connection)
+    }
+
+    /// Persists monotonic source-file and source-byte observations.
+    ///
+    /// Stale observations are idempotent. A changed observation advances the
+    /// operation revision in the same transaction as the durable context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::NotFound`] without retained repository context,
+    /// or a typed lifecycle, range, corruption, or storage failure.
+    pub fn update_repository_observation(
+        &self,
+        operation: OperationId,
+        files_examined: u64,
+        bytes_examined: u64,
+    ) -> Result<RepositoryOperationContext, OperationError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
+        let record = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        if record.kind != OperationKind::RepositoryIndex {
+            return Err(OperationError::NotFound);
+        }
+        let mut context = load_repository_operation_context(&transaction, operation)?
+            .ok_or(OperationError::NotFound)?;
+        let next_files = context.files_examined.max(files_examined);
+        let next_bytes = context.bytes_examined.max(bytes_examined);
+        if next_files == context.files_examined && next_bytes == context.bytes_examined {
+            transaction.commit().map_err(map_sqlite_error)?;
+            return Ok(context);
+        }
+        context.files_examined = next_files;
+        context.bytes_examined = next_bytes;
+        store_repository_operation_context(&transaction, context)?;
+        let updated = transaction
+            .execute(
+                "UPDATE operations SET revision = ?1
+                 WHERE operation = ?2 AND revision = ?3",
+                params![
+                    u64_to_i64(next_revision(record.revision)?)?,
+                    operation.as_bytes().as_slice(),
+                    u64_to_i64(record.revision)?,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        if updated != 1 {
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(context)
+    }
+
+    /// Persists the immutable generation published by a successful index operation.
+    ///
+    /// This projection outlives generation-retention pruning, so operation
+    /// status remains reconstructible for the full journal-retention window.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::NotFound`] without retained repository context,
+    /// [`OperationError::IllegalTransition`] before durable success, or a typed
+    /// conflict, corruption, allocation, or storage failure.
+    pub fn record_repository_publication(
+        &self,
+        operation: OperationId,
+        generation: GenerationId,
+    ) -> Result<RepositoryOperationContext, OperationError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
+        let record = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        if record.kind != OperationKind::RepositoryIndex {
+            return Err(OperationError::NotFound);
+        }
+        if record.state != OperationState::Succeeded {
+            return Err(OperationError::IllegalTransition {
+                from: record.state,
+                to: OperationState::Succeeded,
+            });
+        }
+        let mut context = load_repository_operation_context(&transaction, operation)?
+            .ok_or(OperationError::NotFound)?;
+        match context.published_generation {
+            Some(existing) if existing != generation => {
+                return Err(OperationError::SubmissionConflict);
+            }
+            Some(_) => {
+                transaction.commit().map_err(map_sqlite_error)?;
+                return Ok(context);
+            }
+            None => {}
+        }
+        context.published_generation = Some(generation);
+        store_repository_operation_context(&transaction, context)?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(context)
+    }
+
     /// Loads the newest bounded terminal records in newest-to-oldest order.
     ///
     /// The caller-provided limit is capped by [`MAX_RECENT_TERMINAL_OPERATIONS`]
@@ -2108,7 +2417,8 @@ impl OperationJournal {
         validate_catalog_identity(&connection)?;
         validate_schema(&connection, storage)?;
         validate_operation_row_limit(&connection)?;
-        validate_relative_timeout_intents(&connection)
+        validate_relative_timeout_intents(&connection)?;
+        validate_repository_operation_contexts(&connection)
     }
 
     /// Revalidates a persistent catalog through a separate read-only connection.
@@ -2308,9 +2618,13 @@ impl OperationJournal {
                 transaction
                     .execute(
                         "DELETE FROM application_meta
-                         WHERE key = ?1 || lower(hex(?2))",
+                         WHERE key IN (
+                             ?1 || lower(hex(?3)),
+                             ?2 || lower(hex(?3))
+                         )",
                         params![
                             RELATIVE_TIMEOUT_META_PREFIX,
+                            REPOSITORY_OPERATION_META_PREFIX,
                             operation.as_bytes().as_slice()
                         ],
                     )
@@ -2525,6 +2839,8 @@ fn open_validated_read_only_catalog(
     map_diagnostic_timeout(validate_operation_row_limit(&connection))?;
     check_diagnostic_deadline(deadline)?;
     map_diagnostic_timeout(validate_relative_timeout_intents(&connection))?;
+    check_diagnostic_deadline(deadline)?;
+    map_diagnostic_timeout(validate_repository_operation_contexts(&connection))?;
     check_diagnostic_deadline(deadline)?;
     Ok(connection)
 }
@@ -3438,6 +3754,297 @@ fn table_columns_named(
         .map_err(map_sqlite_error)
 }
 
+fn encode_repository_operation_context(context: RepositoryOperationContext) -> Vec<u8> {
+    let encoded_bytes = if context.published_generation.is_some() {
+        REPOSITORY_OPERATION_CONTEXT_BYTES
+    } else if context.root_identity.is_some() {
+        VERSION_TWO_REPOSITORY_OPERATION_CONTEXT_BYTES
+    } else {
+        LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES
+    };
+    let mut encoded = vec![0_u8; encoded_bytes];
+    encoded[0] = if context.published_generation.is_some() {
+        REPOSITORY_OPERATION_CONTEXT_VERSION
+    } else if context.root_identity.is_some() {
+        2
+    } else {
+        1
+    };
+    encoded[1..17].copy_from_slice(context.repository.as_bytes());
+    if let Some(parent) = context.parent_generation {
+        encoded[17] = 1;
+        encoded[18..38].copy_from_slice(parent.as_bytes());
+    }
+    encoded[38..46].copy_from_slice(&context.started_unix_ms.to_be_bytes());
+    encoded[46..54].copy_from_slice(&context.estimated_disk_bytes.to_be_bytes());
+    encoded[54] = context.mode.tag();
+    encoded[55..63].copy_from_slice(&context.files_examined.to_be_bytes());
+    encoded[63..71].copy_from_slice(&context.bytes_examined.to_be_bytes());
+    if encoded_bytes == REPOSITORY_OPERATION_CONTEXT_BYTES {
+        if let Some(root_identity) = context.root_identity {
+            encoded[71] = 1;
+            encoded[72..104].copy_from_slice(&root_identity);
+        }
+        if let Some(published_generation) = context.published_generation {
+            encoded[104] = 1;
+            encoded[105..125].copy_from_slice(published_generation.as_bytes());
+        }
+    } else if let Some(root_identity) = context.root_identity {
+        encoded[71..103].copy_from_slice(&root_identity);
+    }
+    encoded
+}
+
+fn decode_repository_operation_context(
+    operation: OperationId,
+    encoded: &[u8],
+) -> Result<RepositoryOperationContext, OperationError> {
+    if !matches!(
+        (encoded.first(), encoded.len()),
+        (Some(&1), LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES)
+            | (Some(&2), VERSION_TWO_REPOSITORY_OPERATION_CONTEXT_BYTES)
+            | (
+                Some(&REPOSITORY_OPERATION_CONTEXT_VERSION),
+                REPOSITORY_OPERATION_CONTEXT_BYTES
+            )
+    ) {
+        return Err(OperationError::CorruptState);
+    }
+    let repository = RepositoryId::from_bytes(
+        encoded[1..17]
+            .try_into()
+            .map_err(|_| OperationError::CorruptState)?,
+    );
+    let parent_generation = match encoded[17] {
+        0 if encoded[18..38].iter().all(|byte| *byte == 0) => None,
+        1 => Some(GenerationId::from_bytes(
+            encoded[18..38]
+                .try_into()
+                .map_err(|_| OperationError::CorruptState)?,
+        )),
+        _ => return Err(OperationError::CorruptState),
+    };
+    let started_unix_ms = u64::from_be_bytes(
+        encoded[38..46]
+            .try_into()
+            .map_err(|_| OperationError::CorruptState)?,
+    );
+    if started_unix_ms == 0 {
+        return Err(OperationError::CorruptState);
+    }
+    let estimated_disk_bytes = u64::from_be_bytes(
+        encoded[46..54]
+            .try_into()
+            .map_err(|_| OperationError::CorruptState)?,
+    );
+    let mode = RepositoryOperationMode::from_tag(encoded[54])?;
+    let files_examined = u64::from_be_bytes(
+        encoded[55..63]
+            .try_into()
+            .map_err(|_| OperationError::CorruptState)?,
+    );
+    let bytes_examined = u64::from_be_bytes(
+        encoded[63..71]
+            .try_into()
+            .map_err(|_| OperationError::CorruptState)?,
+    );
+    let root_identity = if encoded.len() == REPOSITORY_OPERATION_CONTEXT_BYTES {
+        match encoded[71] {
+            0 if encoded[72..104].iter().all(|byte| *byte == 0) => None,
+            1 => Some(
+                encoded[72..104]
+                    .try_into()
+                    .map_err(|_| OperationError::CorruptState)?,
+            ),
+            _ => return Err(OperationError::CorruptState),
+        }
+    } else if encoded.len() == VERSION_TWO_REPOSITORY_OPERATION_CONTEXT_BYTES {
+        Some(
+            encoded[71..103]
+                .try_into()
+                .expect("validated repository context has a complete root identity"),
+        )
+    } else {
+        None
+    };
+    let published_generation = if encoded.len() == REPOSITORY_OPERATION_CONTEXT_BYTES {
+        match encoded[104] {
+            1 => Some(GenerationId::from_bytes(
+                encoded[105..125]
+                    .try_into()
+                    .map_err(|_| OperationError::CorruptState)?,
+            )),
+            _ => return Err(OperationError::CorruptState),
+        }
+    } else {
+        None
+    };
+    Ok(RepositoryOperationContext {
+        operation,
+        repository,
+        parent_generation,
+        started_unix_ms,
+        estimated_disk_bytes,
+        mode,
+        root_identity,
+        files_examined,
+        bytes_examined,
+        published_generation,
+    })
+}
+
+fn store_repository_operation_context(
+    connection: &Connection,
+    context: RepositoryOperationContext,
+) -> Result<(), OperationError> {
+    let encoded = encode_repository_operation_context(context);
+    connection
+        .execute(
+            "INSERT INTO application_meta(key, value)
+             VALUES (?1 || lower(hex(?2)), ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![
+                REPOSITORY_OPERATION_META_PREFIX,
+                context.operation.as_bytes().as_slice(),
+                encoded.as_slice(),
+            ],
+        )
+        .map_err(map_sqlite_error)?;
+    Ok(())
+}
+
+fn load_repository_operation_context(
+    connection: &Connection,
+    operation: OperationId,
+) -> Result<Option<RepositoryOperationContext>, OperationError> {
+    let encoded = connection
+        .query_row(
+            "SELECT value FROM application_meta
+             WHERE key = ?1 || lower(hex(?2))",
+            params![
+                REPOSITORY_OPERATION_META_PREFIX,
+                operation.as_bytes().as_slice()
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    encoded
+        .map(|encoded| decode_repository_operation_context(operation, &encoded))
+        .transpose()
+}
+
+fn load_repository_operation_contexts(
+    connection: &Connection,
+) -> Result<Vec<RepositoryOperationContext>, OperationError> {
+    let count: i64 = connection
+        .query_row(
+            "SELECT count(*)
+             FROM operations
+             JOIN application_meta
+               ON application_meta.key =
+                  ?1 || lower(hex(operations.operation))
+             WHERE operations.kind = 'repository_index'",
+            [REPOSITORY_OPERATION_META_PREFIX],
+            |row| row.get(0),
+        )
+        .map_err(map_sqlite_error)?;
+    let count = usize::try_from(count).map_err(|_| OperationError::CorruptState)?;
+    if count > MAX_OPERATION_ROWS {
+        return Err(OperationError::CatalogRowLimitExceeded);
+    }
+    let mut contexts = Vec::new();
+    contexts
+        .try_reserve_exact(count)
+        .map_err(|_| OperationError::CatalogRowLimitExceeded)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT operations.operation, application_meta.value
+             FROM operations
+             JOIN application_meta
+               ON application_meta.key =
+                  ?1 || lower(hex(operations.operation))
+             WHERE operations.kind = 'repository_index'
+             ORDER BY operations.sequence DESC",
+        )
+        .map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map([REPOSITORY_OPERATION_META_PREFIX], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(map_sqlite_error)?;
+    for row in rows {
+        let (operation, encoded) = row.map_err(map_sqlite_error)?;
+        let operation = OperationId::from_bytes(
+            operation
+                .try_into()
+                .map_err(|_| OperationError::CorruptState)?,
+        );
+        contexts.push(decode_repository_operation_context(operation, &encoded)?);
+    }
+    Ok(contexts)
+}
+
+fn validate_repository_operation_contexts(connection: &Connection) -> Result<(), OperationError> {
+    let pattern = format!("{REPOSITORY_OPERATION_META_PREFIX}*");
+    let mut statement = connection
+        .prepare(
+            "SELECT operations.operation, operations.kind, application_meta.value
+             FROM application_meta
+             LEFT JOIN operations
+               ON application_meta.key =
+                  ?1 || lower(hex(operations.operation))
+             WHERE application_meta.key GLOB ?2",
+        )
+        .map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map(params![REPOSITORY_OPERATION_META_PREFIX, pattern], |row| {
+            Ok((
+                row.get::<_, Option<Vec<u8>>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })
+        .map_err(map_sqlite_error)?;
+    let mut count = 0_usize;
+    for row in rows {
+        let (operation, kind, encoded) = row.map_err(map_sqlite_error)?;
+        count = count
+            .checked_add(1)
+            .ok_or(OperationError::CatalogRowLimitExceeded)?;
+        if count > MAX_OPERATION_ROWS || kind.as_deref() != Some("repository_index") {
+            return Err(OperationError::CorruptState);
+        }
+        let operation = OperationId::from_bytes(
+            operation
+                .ok_or(OperationError::CorruptState)?
+                .try_into()
+                .map_err(|_| OperationError::CorruptState)?,
+        );
+        decode_repository_operation_context(operation, &encoded)?;
+    }
+    Ok(())
+}
+
+fn reconcile_repository_operation_contexts(connection: &Connection) -> Result<(), OperationError> {
+    // A rollback binary can prune operations without knowing about this
+    // sidecar. Remove only those orphans before validating the retained set.
+    let pattern = format!("{REPOSITORY_OPERATION_META_PREFIX}*");
+    connection
+        .execute(
+            "DELETE FROM application_meta
+             WHERE key GLOB ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM operations
+                   WHERE application_meta.key =
+                         ?2 || lower(hex(operations.operation))
+               )",
+            params![pattern, REPOSITORY_OPERATION_META_PREFIX],
+        )
+        .map_err(map_sqlite_error)?;
+    validate_repository_operation_contexts(connection)
+}
+
 fn store_relative_timeout_intent(
     connection: &Connection,
     operation: OperationId,
@@ -3831,6 +4438,7 @@ fn recovery_for(record: &OperationRecord, now_unix_ms: u64) -> RecoveryClass {
 fn submission_matches(
     record: &OperationRecord,
     stored_timeout_ms: Option<u64>,
+    stored_repository_context: Option<RepositoryOperationSubmission>,
     submission: OperationSubmission,
     deadline_retry: DeadlineRetry,
 ) -> bool {
@@ -3842,6 +4450,7 @@ fn submission_matches(
         && record.detached == submission.detached
         && deadline_matches(record, stored_timeout_ms, submission, deadline_retry)
         && record.lease_expires_unix_ms == submission.lease_expires_unix_ms
+        && stored_repository_context == submission.repository_context
 }
 
 fn deadline_matches(
@@ -3883,6 +4492,9 @@ fn validate_submission(submission: OperationSubmission) -> Result<(), OperationE
     if submission.deadline_unix_ms == Some(0)
         || submission.lease_expires_unix_ms == Some(0)
         || submission.detached == submission.lease_expires_unix_ms.is_some()
+        || submission.repository_context.is_some_and(|context| {
+            submission.kind != OperationKind::RepositoryIndex || context.started_unix_ms == 0
+        })
     {
         return Err(OperationError::InvalidSubmission);
     }
@@ -4378,6 +4990,34 @@ mod tests {
         .expect("submission is valid")
     }
 
+    fn repository_submission(
+        operation: OperationId,
+        repository: RepositoryId,
+        started_unix_ms: u64,
+    ) -> OperationSubmission {
+        OperationSubmission::new(
+            operation,
+            OperationKind::RepositoryIndex,
+            PlanHash::from_bytes([9; 32]),
+            ClientInstanceId::SYSTEM,
+            true,
+            Some(started_unix_ms + 60_000),
+            None,
+        )
+        .expect("repository submission is valid")
+        .with_repository_context(
+            RepositoryOperationSubmission::new(
+                repository,
+                Some(GenerationId::from_bytes([7; 20])),
+                started_unix_ms,
+                32_768,
+                RepositoryOperationMode::Deep,
+            )
+            .expect("repository context is valid"),
+        )
+        .expect("repository context attaches")
+    }
+
     fn insert_generated_operations(connection: &Connection, rows: usize, state: OperationState) {
         let rows = i64::try_from(rows).expect("test row count fits SQLite");
         connection
@@ -4518,6 +5158,209 @@ mod tests {
         assert_eq!(persisted.peak_rss_bytes, 16_384);
         assert_eq!(persisted.written_bytes, 8_192);
         assert_eq!(persisted.state, OperationState::Succeeded);
+    }
+
+    #[test]
+    fn repository_context_and_observations_are_atomic_retry_safe_and_durable() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let operation = operation(34);
+        let repository = RepositoryId::from_bytes([5; 16]);
+        let mut submission = repository_submission(operation, repository, 1_000);
+        let repository_context = submission
+            .repository_context
+            .as_mut()
+            .expect("repository context is attached");
+        repository_context.mode = RepositoryOperationMode::Auto;
+        repository_context.root_identity = Some([8; 32]);
+        {
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            let inserted = journal
+                .submit(submission)
+                .expect("repository operation submits");
+            assert!(inserted.inserted);
+            assert_eq!(
+                journal
+                    .repository_operation_context(operation)
+                    .expect("repository context loads")
+                    .files_examined,
+                0
+            );
+            journal
+                .start_execution(operation)
+                .expect("repository operation starts");
+            let observed = journal
+                .update_repository_observation(operation, 12, 4_096)
+                .expect("repository observations persist");
+            assert_eq!(observed.files_examined, 12);
+            assert_eq!(observed.bytes_examined, 4_096);
+            assert_eq!(
+                journal
+                    .update_repository_observation(operation, 3, 1_024)
+                    .expect("stale observations are idempotent"),
+                observed
+            );
+        }
+
+        let reopened = OperationJournal::open(&path).expect("journal reopens");
+        assert_eq!(
+            reopened
+                .status(operation)
+                .expect("operation survives restart")
+                .state,
+            OperationState::Interrupted
+        );
+        let restored = reopened
+            .repository_operation_context(operation)
+            .expect("repository context survives restart");
+        assert_eq!(restored.repository, repository);
+        assert_eq!(
+            restored.parent_generation,
+            Some(GenerationId::from_bytes([7; 20]))
+        );
+        assert_eq!(restored.started_unix_ms, 1_000);
+        assert_eq!(restored.estimated_disk_bytes, 32_768);
+        assert_eq!(restored.mode, RepositoryOperationMode::Auto);
+        assert_eq!(restored.root_identity, Some([8; 32]));
+        assert_eq!(restored.files_examined, 12);
+        assert_eq!(restored.bytes_examined, 4_096);
+        assert_eq!(
+            reopened
+                .repository_operation_contexts()
+                .expect("retained repository contexts list"),
+            vec![restored]
+        );
+        assert_eq!(
+            reopened
+                .retry_status(submission)
+                .expect("identical retry resolves")
+                .state,
+            OperationState::Interrupted
+        );
+
+        let conflicting =
+            repository_submission(operation, RepositoryId::from_bytes([6; 16]), 1_000);
+        assert!(matches!(
+            reopened.retry_status(conflicting),
+            Err(OperationError::SubmissionConflict)
+        ));
+        reopened
+            .quick_check()
+            .expect("repository metadata validates");
+    }
+
+    #[test]
+    fn published_generation_projection_survives_restart_independently() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let operation = operation(35);
+        let generation = GenerationId::from_bytes([9; 20]);
+        {
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            journal
+                .submit(repository_submission(
+                    operation,
+                    RepositoryId::from_bytes([10; 16]),
+                    2_000,
+                ))
+                .expect("repository operation submits");
+            journal
+                .start_execution(operation)
+                .expect("repository operation starts");
+            assert!(matches!(
+                journal.record_repository_publication(operation, generation),
+                Err(OperationError::IllegalTransition { .. })
+            ));
+            journal
+                .transition(operation, OperationState::Succeeded, None)
+                .expect("repository operation succeeds");
+            let recorded = journal
+                .record_repository_publication(operation, generation)
+                .expect("published generation persists");
+            assert_eq!(recorded.published_generation, Some(generation));
+            assert_eq!(
+                journal
+                    .record_repository_publication(operation, generation)
+                    .expect("matching publication is idempotent"),
+                recorded
+            );
+            assert!(matches!(
+                journal
+                    .record_repository_publication(operation, GenerationId::from_bytes([11; 20])),
+                Err(OperationError::SubmissionConflict)
+            ));
+        }
+
+        let reopened = OperationJournal::open(&path).expect("journal reopens");
+        let restored = reopened
+            .repository_operation_context(operation)
+            .expect("published generation projection reloads");
+        assert_eq!(restored.published_generation, Some(generation));
+        assert_eq!(
+            reopened.status(operation).expect("operation reloads").state,
+            OperationState::Succeeded
+        );
+        reopened
+            .quick_check()
+            .expect("published repository metadata validates");
+    }
+
+    #[test]
+    fn repository_context_orphans_from_rollback_pruning_are_reconciled() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let retained_operation = operation(36);
+        let pruned_operation = operation(37);
+        {
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            for current in [retained_operation, pruned_operation] {
+                journal
+                    .submit(repository_submission(
+                        current,
+                        RepositoryId::from_bytes([current.as_bytes()[0]; 16]),
+                        2_000,
+                    ))
+                    .expect("repository operation submits");
+            }
+        }
+
+        let rollback = Connection::open(&path).expect("rollback catalog opens");
+        rollback
+            .execute(
+                "DELETE FROM operations WHERE operation = ?1",
+                [pruned_operation.as_bytes().as_slice()],
+            )
+            .expect("rollback binary prunes the operation without its unknown sidecar");
+        let orphan_count = rollback
+            .query_row(
+                "SELECT count(*) FROM application_meta
+                 WHERE key = ?1 || lower(hex(?2))",
+                params![
+                    REPOSITORY_OPERATION_META_PREFIX,
+                    pruned_operation.as_bytes().as_slice(),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("orphaned sidecar count reads");
+        assert_eq!(orphan_count, 1);
+        drop(rollback);
+
+        let upgraded = OperationJournal::open(&path).expect("upgraded catalog reconciles");
+        let retained = upgraded
+            .repository_operation_context(retained_operation)
+            .expect("retained context survives");
+        assert_eq!(
+            retained.repository,
+            RepositoryId::from_bytes([retained_operation.as_bytes()[0]; 16])
+        );
+        assert_eq!(retained.started_unix_ms, 2_000);
+        assert!(matches!(
+            upgraded.repository_operation_context(pruned_operation),
+            Err(OperationError::NotFound)
+        ));
+        upgraded
+            .quick_check()
+            .expect("reconciled catalog remains valid");
     }
 
     #[test]

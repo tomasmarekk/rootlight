@@ -1875,7 +1875,7 @@ fn validate_v4_input(
         || inventory.repositories.len() > MAX_SUPPORT_REPOSITORIES
         || inventory.generations.len() > MAX_SUPPORT_GENERATIONS
         || inventory.runtime.protocol_major != 1
-        || inventory.runtime.protocol_minor != 8
+        || inventory.runtime.protocol_minor < 8
         || inventory.runtime.logical_processors == 0
         || inventory.configuration.schema_version == 0
         || inventory.storage.catalog_schema_version == 0
@@ -2798,6 +2798,28 @@ mod tests {
         ] {
             assert!(!archive_text.contains(forbidden));
         }
+
+        let mut additive_protocol = input.clone();
+        additive_protocol
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .runtime
+            .protocol_minor = 9;
+        build_support_bundle_for_schema(&additive_protocol, SupportBundleSchema::V4)
+            .expect("schema v4 accepts an additive daemon protocol minor");
+
+        let mut obsolete_protocol = input;
+        obsolete_protocol
+            .inventory
+            .as_mut()
+            .expect("production inventory exists")
+            .runtime
+            .protocol_minor = 7;
+        assert!(matches!(
+            build_support_bundle_for_schema(&obsolete_protocol, SupportBundleSchema::V4),
+            Err(SupportBundleError::InvalidInventory)
+        ));
     }
 
     #[test]

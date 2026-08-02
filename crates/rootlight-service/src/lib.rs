@@ -47,8 +47,9 @@ use rootlight_catalog::{CatalogError, CatalogErrorKind, EphemeralOracleWriter, O
 use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource};
 use rootlight_discovery::{
     DiscoveryError, DiscoveryLimits, DiscoveryPolicy, IncrementalDiscovery,
-    IncrementalDiscoveryBaseline, IncrementalDiscoveryContext, InputClass, LanguageEvidence,
-    ManifestInput, correlate_incremental_manifest, discover_incremental, discover_with_snapshots,
+    IncrementalDiscoveryBaseline, IncrementalDiscoveryContext, IncrementalDiscoveryOptions,
+    InputClass, LanguageEvidence, ManifestInput, correlate_incremental_manifest,
+    discover_incremental_with_progress, discover_with_snapshots,
 };
 use rootlight_ids::{
     ContentHash, FactId, FileId, GenerationId, GenerationIdentity, OperationId, RepositoryId,
@@ -108,6 +109,7 @@ use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot, VfsError};
 use serde::{Deserialize, Serialize};
 
 const MAX_RETAINED_SOURCE_BYTES: usize = 512 * 1024 * 1024;
+const DISCOVERY_PROGRESS_INTERVAL_FILES: u64 = 64;
 const MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RETAINED_OPTIONAL_EXTENSIONS: usize = 10_000;
 const MAX_RETAINED_OPTIONAL_EXTENSION_BYTES: usize = 16 * 1024 * 1024;
@@ -423,16 +425,31 @@ pub struct FirstSliceIndexProgress {
     pub completed: u64,
     /// Fixed total coarse units for this preparation.
     pub total: u64,
+    /// Source files examined so far.
+    pub files_examined: u64,
+    /// Source bytes examined so far.
+    pub bytes_examined: u64,
+    /// Durable bytes written so far.
+    pub written_bytes: u64,
 }
 
 impl FirstSliceIndexProgress {
     const TOTAL: u64 = 6;
 
-    const fn completed(stage: FirstSliceIndexStage, completed: u64) -> Self {
+    const fn observed(
+        stage: FirstSliceIndexStage,
+        completed: u64,
+        files_examined: u64,
+        bytes_examined: u64,
+        written_bytes: u64,
+    ) -> Self {
         Self {
             stage,
             completed,
             total: Self::TOTAL,
+            files_examined,
+            bytes_examined,
+            written_bytes,
         }
     }
 }
@@ -498,10 +515,13 @@ impl FirstSliceSharedGenerationExport {
 pub struct FirstSliceIndexAdmission {
     /// Stable identity reserved for the canonical repository root.
     pub repository: RepositoryId,
+    /// Canonical root identity retained for durable registration recovery.
+    pub root_identity: ContentHash,
     /// Active generation from which the admitted operation will derive.
     pub parent: Option<GenerationId>,
     /// Conservative upper bound reserved for durable staging and publication.
     pub estimated_disk_bytes: u64,
+    reservation_inserted: bool,
 }
 
 /// Evidence-backed semantic stitch between two active repository generations.
@@ -2140,6 +2160,42 @@ impl FirstSliceProjectAnalysis {
     }
 }
 
+/// Source-free progress from one whole-project analysis transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstSliceProjectAnalysisProgress {
+    /// Inputs completed by durable provider partitions.
+    pub completed_files: u64,
+    /// Total immutable inputs admitted to the provider transaction.
+    pub total_files: u64,
+    /// Source bytes completed by durable provider partitions.
+    pub completed_bytes: u64,
+    /// Total immutable source bytes admitted to the provider transaction.
+    pub total_bytes: u64,
+}
+
+impl FirstSliceProjectAnalysisProgress {
+    fn complete(
+        request: &FirstSliceProjectAnalysisRequest<'_>,
+    ) -> Result<Self, FirstSliceProjectAnalysisError> {
+        let total_files = u64::try_from(request.inputs().len())
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        let total_bytes = request.inputs().iter().try_fold(0_u64, |total, input| {
+            total
+                .checked_add(
+                    u64::try_from(input.source().len())
+                        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?,
+                )
+                .ok_or(FirstSliceProjectAnalysisError::Analysis)
+        })?;
+        Ok(Self {
+            completed_files: total_files,
+            total_files,
+            completed_bytes: total_bytes,
+            total_bytes,
+        })
+    }
+}
+
 /// Source-free failures from the optional whole-project analysis boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -2193,6 +2249,28 @@ pub trait FirstSliceProjectAnalyzer: Send + Sync {
         request: FirstSliceProjectAnalysisRequest<'_>,
         cancellation: &Cancellation,
     ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError>;
+
+    /// Produces one project document while reporting completed provider work.
+    ///
+    /// Implementations with multiple isolated partitions should override this
+    /// method and emit after each completed partition. The default preserves
+    /// compatibility for single-transaction providers.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same source-free provider or cancellation failures as
+    /// [`Self::analyze`].
+    fn analyze_with_progress(
+        &self,
+        request: FirstSliceProjectAnalysisRequest<'_>,
+        cancellation: &Cancellation,
+        observe_progress: &mut dyn FnMut(FirstSliceProjectAnalysisProgress),
+    ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
+        let completed = FirstSliceProjectAnalysisProgress::complete(&request)?;
+        let analysis = self.analyze(request, cancellation)?;
+        observe_progress(completed);
+        Ok(analysis)
+    }
 }
 
 /// Transport-independent owner of bounded repository generations.
@@ -2409,7 +2487,17 @@ impl FirstSliceService {
     ) -> Result<Option<RepositoryId>, FirstSliceError> {
         let canonical = canonical_repository_root(path, cancellation)?;
         let root_identity = repository_path_hash(&canonical)?;
-        Ok(self.repositories.get(&root_identity).copied())
+        if let Some(repository) = self.repositories.get(&root_identity).copied() {
+            return Ok(Some(repository));
+        }
+        self.pending_repository_registrations
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)
+            .map(|pending| {
+                pending
+                    .get(&root_identity)
+                    .map(|(repository, _)| *repository)
+            })
     }
 
     /// Reserves a repository identity and worst-case durable capacity.
@@ -2437,44 +2525,60 @@ impl FirstSliceService {
             .pending_repository_registrations
             .lock()
             .map_err(|_| FirstSliceError::Retention)?;
-        let repository = if let Some(repository) = self.repositories.get(&root_identity).copied() {
-            repository
-        } else if let Some((repository, _)) = pending.get(&root_identity) {
-            *repository
-        } else {
-            let retained_repositories = self
-                .repository_display_names
-                .len()
-                .checked_add(pending.len())
-                .ok_or(FirstSliceError::Retention)?;
-            if retained_repositories >= MAX_FIRST_SLICE_REPOSITORIES {
-                return Err(FirstSliceError::Retention);
-            }
-            let repository = random_repository_id_with_pending(&self.repositories, &pending)?;
-            let display_name = sanitized_repository_display_name(&canonical, repository)?;
-            // Opening the root now proves the reserved identity names a valid
-            // directory before the operation is acknowledged to the caller.
-            let _root = RepositoryRoot::open(repository, &canonical)
-                .map_err(|_| FirstSliceError::Repository)?;
-            pending.insert(root_identity, (repository, display_name));
-            repository
-        };
+        let (repository, reservation_inserted) =
+            if let Some(repository) = self.repositories.get(&root_identity).copied() {
+                (repository, false)
+            } else if let Some((repository, display_name)) = pending.get_mut(&root_identity) {
+                *display_name = sanitized_repository_display_name(&canonical, *repository)?;
+                (*repository, false)
+            } else {
+                let retained_repositories = self
+                    .repository_display_names
+                    .len()
+                    .checked_add(pending.len())
+                    .ok_or(FirstSliceError::Retention)?;
+                if retained_repositories >= MAX_FIRST_SLICE_REPOSITORIES {
+                    return Err(FirstSliceError::Retention);
+                }
+                let repository = random_repository_id_with_pending(&self.repositories, &pending)?;
+                let display_name = sanitized_repository_display_name(&canonical, repository)?;
+                // Opening the root now proves the reserved identity names a valid
+                // directory before the operation is acknowledged to the caller.
+                let _root = RepositoryRoot::open(repository, &canonical)
+                    .map_err(|_| FirstSliceError::Repository)?;
+                pending.insert(root_identity, (repository, display_name));
+                (repository, true)
+            };
         drop(pending);
         let maximum_source_bytes =
             u64::try_from(MAX_RETAINED_SOURCE_BYTES).map_err(|_| FirstSliceError::Limits)?;
         let estimated_disk_bytes = durable_staging_reservation(maximum_source_bytes)?;
         if let Err(error) = self.ensure_durable_staging_capacity(estimated_disk_bytes) {
-            self.release_index_admission(repository);
+            self.release_index_admission(FirstSliceIndexAdmission {
+                repository,
+                root_identity,
+                parent: self.active_by_repository.get(&repository).copied(),
+                estimated_disk_bytes,
+                reservation_inserted,
+            });
             return Err(error);
         }
         if let Err(error) = check_cancellation(cancellation) {
-            self.release_index_admission(repository);
+            self.release_index_admission(FirstSliceIndexAdmission {
+                repository,
+                root_identity,
+                parent: self.active_by_repository.get(&repository).copied(),
+                estimated_disk_bytes,
+                reservation_inserted,
+            });
             return Err(error);
         }
         Ok(FirstSliceIndexAdmission {
             repository,
+            root_identity,
             parent: self.active_by_repository.get(&repository).copied(),
             estimated_disk_bytes,
+            reservation_inserted,
         })
     }
 
@@ -2495,10 +2599,64 @@ impl FirstSliceService {
     }
 
     /// Releases an uncommitted repository identity reservation.
-    pub fn release_index_admission(&self, repository: RepositoryId) {
-        if let Ok(mut pending) = self.pending_repository_registrations.lock() {
-            pending.retain(|_, (candidate, _)| *candidate != repository);
+    pub fn release_index_admission(&self, admission: FirstSliceIndexAdmission) {
+        if !admission.reservation_inserted {
+            return;
         }
+        if let Ok(mut pending) = self.pending_repository_registrations.lock() {
+            pending.retain(|_, (candidate, _)| *candidate != admission.repository);
+        }
+    }
+
+    /// Restores one durable root-to-repository reservation without source paths.
+    ///
+    /// The next admission for the same canonical root replaces the source-free
+    /// fallback display name before a generation can be published.
+    ///
+    /// # Errors
+    ///
+    /// Returns a catalog-integrity or bounded-retention failure for conflicting
+    /// root identities, repository identities, or capacity.
+    pub fn restore_repository_registration(
+        &self,
+        root_identity: ContentHash,
+        repository: RepositoryId,
+    ) -> Result<(), FirstSliceError> {
+        if let Some(existing) = self.repositories.get(&root_identity) {
+            return (*existing == repository)
+                .then_some(())
+                .ok_or(FirstSliceError::CatalogCorrupt);
+        }
+        if self.repositories.iter().any(|(candidate_root, candidate)| {
+            *candidate == repository && *candidate_root != root_identity
+        }) {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let mut pending = self
+            .pending_repository_registrations
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        if let Some((existing, _)) = pending.get(&root_identity) {
+            return (*existing == repository)
+                .then_some(())
+                .ok_or(FirstSliceError::CatalogCorrupt);
+        }
+        if pending.iter().any(|(candidate_root, (candidate, _))| {
+            *candidate == repository && *candidate_root != root_identity
+        }) {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        if self
+            .repository_display_names
+            .len()
+            .checked_add(pending.len())
+            .ok_or(FirstSliceError::Retention)?
+            >= MAX_FIRST_SLICE_REPOSITORIES
+        {
+            return Err(FirstSliceError::Retention);
+        }
+        pending.insert(root_identity, (repository, repository.to_string()));
+        Ok(())
     }
 
     fn new_with_source_limit(
@@ -3026,14 +3184,33 @@ impl FirstSliceService {
             derive_fact("incremental-provider", INCREMENTAL_PROVIDER_SEED).id(),
             parser_provider_hash,
         );
-        let mut incremental = discover_incremental(
+        let mut discovery_files_examined = 0_u64;
+        let mut discovery_bytes_examined = 0_u64;
+        let mut last_reported_files = 0_u64;
+        let mut incremental = discover_incremental_with_progress(
             &root,
             parent_baseline,
             incremental_context,
             &policy,
-            ReconcileMode::Normal,
-            discovery_limits,
+            IncrementalDiscoveryOptions::new(ReconcileMode::Normal, discovery_limits),
             cancellation,
+            |progress| {
+                discovery_files_examined = progress.files_examined;
+                discovery_bytes_examined = progress.bytes_examined;
+                if progress.files_examined == 1
+                    || progress.files_examined.saturating_sub(last_reported_files)
+                        >= DISCOVERY_PROGRESS_INTERVAL_FILES
+                {
+                    last_reported_files = progress.files_examined;
+                    observe_progress(FirstSliceIndexProgress::observed(
+                        FirstSliceIndexStage::Discovery,
+                        0,
+                        progress.files_examined,
+                        progress.bytes_examined,
+                        0,
+                    ));
+                }
+            },
         )
         .map_err(|error| map_discovery_error(error, cancellation))?;
         // A no-op authoritative reconcile already proves that every tracked
@@ -3074,9 +3251,19 @@ impl FirstSliceService {
             cancellation,
         )
         .map_err(|error| map_discovery_error(error, cancellation))?;
-        observe_progress(FirstSliceIndexProgress::completed(
+        let manifest_bytes_examined = manifest.inputs.iter().try_fold(0_u64, |total, input| {
+            total
+                .checked_add(input.bytes)
+                .ok_or(FirstSliceError::Limits)
+        })?;
+        let files_examined = discovery_files_examined.max(manifest.coverage.included);
+        let bytes_examined = discovery_bytes_examined.max(manifest_bytes_examined);
+        observe_progress(FirstSliceIndexProgress::observed(
             FirstSliceIndexStage::Discovery,
             1,
+            files_examined,
+            bytes_examined,
+            0,
         ));
         let source_preflight = preflight_source_inputs(
             &manifest.inputs,
@@ -3149,9 +3336,12 @@ impl FirstSliceService {
             });
         }
         attach_generated_origin_mappings(&mut sources, &source_languages, cancellation)?;
-        observe_progress(FirstSliceIndexProgress::completed(
+        observe_progress(FirstSliceIndexProgress::observed(
             FirstSliceIndexStage::Snapshot,
             2,
+            files_examined,
+            bytes_examined,
+            0,
         ));
         let manifest_hash =
             GenerationManifestRecipe::new(repository, self.config.hash(), file_claims)
@@ -3218,6 +3408,16 @@ impl FirstSliceService {
             .map_err(|_| FirstSliceError::Retention)?;
         let mut parsed_files = 0usize;
         let mut reused_parser_artifacts = 0usize;
+        let mut analyzed_files = 0_u64;
+        let mut analyzed_bytes = 0_u64;
+        let mut last_reported_analyzed_files = 0_u64;
+        observe_progress(FirstSliceIndexProgress::observed(
+            FirstSliceIndexStage::Analysis,
+            2,
+            files_examined,
+            bytes_examined,
+            0,
+        ));
         for input in &sources {
             check_cancellation(cancellation)?;
             let snapshot = &input.snapshot;
@@ -3323,19 +3523,62 @@ impl FirstSliceService {
                     artifact,
                 });
             }
+            analyzed_files = analyzed_files
+                .checked_add(1)
+                .ok_or(FirstSliceError::Limits)?;
+            analyzed_bytes = analyzed_bytes
+                .checked_add(
+                    u64::try_from(snapshot.content().len()).map_err(|_| FirstSliceError::Limits)?,
+                )
+                .ok_or(FirstSliceError::Limits)?;
+            if analyzed_files == 1
+                || analyzed_files.saturating_sub(last_reported_analyzed_files)
+                    >= DISCOVERY_PROGRESS_INTERVAL_FILES
+            {
+                last_reported_analyzed_files = analyzed_files;
+                observe_progress(FirstSliceIndexProgress::observed(
+                    FirstSliceIndexStage::Analysis,
+                    2,
+                    files_examined
+                        .checked_add(analyzed_files)
+                        .ok_or(FirstSliceError::Limits)?,
+                    bytes_examined
+                        .checked_add(analyzed_bytes)
+                        .ok_or(FirstSliceError::Limits)?,
+                    0,
+                ));
+            }
         }
-        observe_progress(FirstSliceIndexProgress::completed(
-            FirstSliceIndexStage::Analysis,
-            3,
-        ));
-        self.append_best_available_documents(
+        let structurally_examined_files = files_examined
+            .checked_add(analyzed_files)
+            .ok_or(FirstSliceError::Limits)?;
+        let structurally_examined_bytes = bytes_examined
+            .checked_add(analyzed_bytes)
+            .ok_or(FirstSliceError::Limits)?;
+        let (provider_files, provider_bytes) = self.append_best_available_documents(
             &mut document,
             structural_documents,
             &sources,
             &source_languages,
             mode,
             cancellation,
+            structurally_examined_files,
+            structurally_examined_bytes,
+            &mut observe_progress,
         )?;
+        let fully_examined_files = structurally_examined_files
+            .checked_add(provider_files)
+            .ok_or(FirstSliceError::Limits)?;
+        let fully_examined_bytes = structurally_examined_bytes
+            .checked_add(provider_bytes)
+            .ok_or(FirstSliceError::Limits)?;
+        observe_progress(FirstSliceIndexProgress::observed(
+            FirstSliceIndexStage::Analysis,
+            3,
+            fully_examined_files,
+            fully_examined_bytes,
+            0,
+        ));
         let oversized_inputs = manifest
             .coverage
             .excluded
@@ -3349,9 +3592,12 @@ impl FirstSliceService {
                 self.analysis_limits.ir(),
             )?;
         }
-        observe_progress(FirstSliceIndexProgress::completed(
+        observe_progress(FirstSliceIndexProgress::observed(
             FirstSliceIndexStage::Merge,
             4,
+            fully_examined_files,
+            fully_examined_bytes,
+            0,
         ));
         incremental_plan.state.evidence.parsed_files =
             u64::try_from(parsed_files).map_err(|_| FirstSliceError::Limits)?;
@@ -3405,6 +3651,13 @@ impl FirstSliceService {
             if let Some(durable) = &self.durable {
                 let prepared = durable.begin_generation(repository, generation)?;
                 let source_written_bytes = prepared.write_sources(&sources)?;
+                observe_progress(FirstSliceIndexProgress::observed(
+                    FirstSliceIndexStage::Persistence,
+                    4,
+                    fully_examined_files,
+                    fully_examined_bytes,
+                    source_written_bytes,
+                ));
                 let (oracle, verified) = OracleWriter::create_in(prepared.path())
                     .map_err(|error| map_catalog_error(&error, cancellation))?
                     .seal_and_retain(verified, &context)
@@ -3415,6 +3668,13 @@ impl FirstSliceService {
                 let written_bytes = source_written_bytes
                     .checked_add(allocated_bytes)
                     .ok_or(FirstSliceError::Limits)?;
+                observe_progress(FirstSliceIndexProgress::observed(
+                    FirstSliceIndexStage::Persistence,
+                    4,
+                    fully_examined_files,
+                    fully_examined_bytes,
+                    written_bytes,
+                ));
                 (allocated_bytes, verified, Some(prepared), written_bytes)
             } else {
                 let (oracle, verified) = EphemeralOracleWriter::create()
@@ -3432,10 +3692,20 @@ impl FirstSliceService {
             written_bytes = written_bytes
                 .checked_add(recovery_bytes)
                 .ok_or(FirstSliceError::Limits)?;
+            observe_progress(FirstSliceIndexProgress::observed(
+                FirstSliceIndexStage::Persistence,
+                4,
+                fully_examined_files,
+                fully_examined_bytes,
+                written_bytes,
+            ));
         }
-        observe_progress(FirstSliceIndexProgress::completed(
+        observe_progress(FirstSliceIndexProgress::observed(
             FirstSliceIndexStage::Persistence,
             5,
+            fully_examined_files,
+            fully_examined_bytes,
+            written_bytes,
         ));
         let documents =
             project_lexical_documents(verified.snapshot(), BuildBudget::default(), cancellation)
@@ -3449,9 +3719,12 @@ impl FirstSliceService {
             cancellation,
         )
         .map_err(|error| map_search_error(error, cancellation))?;
-        observe_progress(FirstSliceIndexProgress::completed(
+        observe_progress(FirstSliceIndexProgress::observed(
             FirstSliceIndexStage::Search,
             6,
+            fully_examined_files,
+            fully_examined_bytes,
+            written_bytes,
         ));
         let indexed_files =
             u64::try_from(verified.document().files.len()).map_err(|_| FirstSliceError::Limits)?;
@@ -3525,6 +3798,29 @@ impl FirstSliceService {
         structural_generation: GenerationId,
         cancellation: &Cancellation,
     ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
+        self.prepare_semantic_refinement_with_progress(
+            path,
+            structural_generation,
+            cancellation,
+            |_| {},
+        )
+    }
+
+    /// Builds an eligible semantic refinement and reports monotonic progress.
+    ///
+    /// The callback observes the same bounded preparation stages and resource
+    /// counters as [`Self::prepare_repository_with_mode_and_progress`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::prepare_semantic_refinement`].
+    pub fn prepare_semantic_refinement_with_progress(
+        &self,
+        path: &Path,
+        structural_generation: GenerationId,
+        cancellation: &Cancellation,
+        observe_progress: impl FnMut(FirstSliceIndexProgress),
+    ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
         if self.durable.is_none() {
             return Err(FirstSliceError::Catalog);
         }
@@ -3535,8 +3831,12 @@ impl FirstSliceService {
             return Err(FirstSliceError::Retention);
         }
 
-        let preparation =
-            self.prepare_repository_with_mode(path, FirstSliceIndexMode::Deep, cancellation)?;
+        let preparation = self.prepare_repository_with_mode_and_progress(
+            path,
+            FirstSliceIndexMode::Deep,
+            cancellation,
+            observe_progress,
+        )?;
         let receipt = preparation.receipt();
         if receipt
             .diagnostics
@@ -3551,6 +3851,10 @@ impl FirstSliceService {
         Ok(preparation)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "analysis publication keeps independent generation, source-work, and progress invariants explicit"
+    )]
     fn append_best_available_documents(
         &self,
         target: &mut NormalizedIrDocument,
@@ -3559,8 +3863,13 @@ impl FirstSliceService {
         source_languages: &BTreeMap<FileId, String>,
         mode: FirstSliceIndexMode,
         cancellation: &Cancellation,
-    ) -> Result<(), FirstSliceError> {
+        baseline_files_examined: u64,
+        baseline_bytes_examined: u64,
+        observe_progress: &mut impl FnMut(FirstSliceIndexProgress),
+    ) -> Result<(u64, u64), FirstSliceError> {
         let mut append_state = DocumentAppendState::from_document(target)?;
+        let mut completed_provider_files = 0_u64;
+        let mut completed_provider_bytes = 0_u64;
         for (language, fallback_documents) in structural_documents {
             check_cancellation(cancellation)?;
             let mut inputs = Vec::new();
@@ -3604,7 +3913,60 @@ impl FirstSliceService {
                     context_manifest: &context_manifest,
                     inputs: &inputs,
                 };
-                match project_analyzer.analyze(request, cancellation) {
+                let language_base_files = completed_provider_files;
+                let language_base_bytes = completed_provider_bytes;
+                let expected_language_files =
+                    u64::try_from(inputs.len()).map_err(|_| FirstSliceError::Limits)?;
+                let expected_language_bytes = inputs.iter().try_fold(0_u64, |total, input| {
+                    total
+                        .checked_add(
+                            u64::try_from(input.source().len())
+                                .map_err(|_| FirstSliceError::Limits)?,
+                        )
+                        .ok_or(FirstSliceError::Limits)
+                })?;
+                let mut observed_language_files = 0_u64;
+                let mut observed_language_bytes = 0_u64;
+                let mut invalid_progress = false;
+                let analysis = project_analyzer.analyze_with_progress(
+                    request,
+                    cancellation,
+                    &mut |progress| {
+                        if progress.total_files != expected_language_files
+                            || progress.total_bytes != expected_language_bytes
+                            || progress.completed_files < observed_language_files
+                            || progress.completed_bytes < observed_language_bytes
+                            || progress.completed_files > progress.total_files
+                            || progress.completed_bytes > progress.total_bytes
+                        {
+                            invalid_progress = true;
+                            return;
+                        }
+                        observed_language_files =
+                            observed_language_files.max(progress.completed_files);
+                        observed_language_bytes =
+                            observed_language_bytes.max(progress.completed_bytes);
+                        let files = language_base_files.saturating_add(progress.completed_files);
+                        let bytes = language_base_bytes.saturating_add(progress.completed_bytes);
+                        observe_progress(FirstSliceIndexProgress::observed(
+                            FirstSliceIndexStage::Analysis,
+                            2,
+                            baseline_files_examined.saturating_add(files),
+                            baseline_bytes_examined.saturating_add(bytes),
+                            0,
+                        ));
+                    },
+                );
+                if invalid_progress {
+                    return Err(FirstSliceError::Adapter);
+                }
+                completed_provider_files = language_base_files
+                    .checked_add(observed_language_files)
+                    .ok_or(FirstSliceError::Limits)?;
+                completed_provider_bytes = language_base_bytes
+                    .checked_add(observed_language_bytes)
+                    .ok_or(FirstSliceError::Limits)?;
+                match analysis {
                     Ok(output) => {
                         let (documents, isolation_permits_deep_adapter, partitioned) =
                             output.into_parts();
@@ -3699,7 +4061,7 @@ impl FirstSliceService {
                 self.analysis_limits.ir(),
             )?;
         }
-        Ok(())
+        Ok((completed_provider_files, completed_provider_bytes))
     }
 
     /// Compatibility wrapper for callers using the original Rust-first API name.
@@ -5931,9 +6293,18 @@ impl FirstSliceService {
     }
 
     fn catalog_records(&self) -> Result<Vec<CatalogRepositoryRecord>, catalog::CatalogError> {
+        let pending = self
+            .pending_repository_registrations
+            .lock()
+            .map_err(|_| catalog::CatalogError::CatalogInvariant)?;
         let mut records = Vec::new();
         records
-            .try_reserve_exact(self.active_by_repository.len())
+            .try_reserve_exact(
+                self.active_by_repository
+                    .len()
+                    .checked_add(pending.len())
+                    .ok_or(catalog::CatalogError::SnapshotEntryBound)?,
+            )
             .map_err(|_| catalog::CatalogError::SnapshotEntryBound)?;
         for (repository, active_generation) in &self.active_by_repository {
             let receipt = self
@@ -5987,6 +6358,18 @@ impl FirstSliceService {
             .with_coverage(coverage)?;
             records.push(record);
         }
+        for (repository, display_name) in pending.values() {
+            if self.active_by_repository.contains_key(repository) {
+                continue;
+            }
+            records.push(CatalogRepositoryRecord::new(
+                *repository,
+                display_name.clone(),
+                None,
+                0,
+                CatalogRepositoryState::Indexing,
+            )?);
+        }
         Ok(records)
     }
 
@@ -6005,6 +6388,17 @@ impl FirstSliceService {
         repository: RepositoryId,
         generation: Option<GenerationId>,
     ) -> Result<RepositoryStatusDto, FirstSliceError> {
+        if generation.is_none()
+            && !self.active_by_repository.contains_key(&repository)
+            && self
+                .pending_repository_registrations
+                .lock()
+                .map_err(|_| FirstSliceError::Retention)?
+                .values()
+                .any(|(candidate, _)| *candidate == repository)
+        {
+            return Err(FirstSliceError::GenerationNotFound);
+        }
         let context = self.resolve_generation(repository, generation)?;
         self.generations
             .generation(context.generation)
@@ -8476,6 +8870,13 @@ fn map_discovery_error(error: DiscoveryError, cancellation: &Cancellation) -> Fi
         DiscoveryError::Vfs(VfsError::Cancelled(reason)) => FirstSliceError::Cancelled(reason),
         DiscoveryError::Incremental(error) => map_incremental_error(error, cancellation),
         DiscoveryError::IncrementalDrift => FirstSliceError::DiscoveryDrift,
+        DiscoveryError::RetainedSnapshotByteLimit { observed, maximum } => {
+            FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::SourceBytes,
+                observed,
+                limit: maximum,
+            }
+        }
         _ => FirstSliceError::Discovery,
     }
 }
@@ -9958,9 +10359,55 @@ mod tests {
                 &cancellation,
             )
             .expect("durable project service initializes");
-            let receipt = service
-                .index_repository_two_stage(&repository_root, &cancellation)
-                .expect("two-stage indexing publishes");
+            let structural = service
+                .index_repository_with_mode(
+                    &repository_root,
+                    FirstSliceIndexMode::Structural,
+                    &cancellation,
+                )
+                .expect("structural stage publishes");
+            let mut progress = Vec::new();
+            let semantic_preparation = service
+                .prepare_semantic_refinement_with_progress(
+                    &repository_root,
+                    structural.generation,
+                    &cancellation,
+                    |observed| progress.push(observed),
+                )
+                .expect("semantic refinement prepares");
+            assert_eq!(
+                progress
+                    .first()
+                    .map(|observed| (observed.completed, observed.total)),
+                Some((0, 6))
+            );
+            assert_eq!(
+                progress
+                    .last()
+                    .map(|observed| (observed.completed, observed.total)),
+                Some((6, 6))
+            );
+            assert!(progress.windows(2).all(|pair| {
+                pair[0].completed <= pair[1].completed
+                    && pair[0].files_examined <= pair[1].files_examined
+                    && pair[0].bytes_examined <= pair[1].bytes_examined
+                    && pair[0].written_bytes <= pair[1].written_bytes
+            }));
+            assert!(progress.iter().any(|observed| {
+                observed.completed > 0 && observed.files_examined > 0 && observed.bytes_examined > 0
+            }));
+            assert!(
+                progress
+                    .last()
+                    .is_some_and(|observed| observed.written_bytes > 0)
+            );
+            let semantic = service
+                .publish_prepared(semantic_preparation, &cancellation)
+                .expect("semantic refinement publishes");
+            let receipt = FirstSliceTwoStageIndexReceipt {
+                structural,
+                semantic,
+            };
             assert_eq!(
                 receipt.semantic().parent,
                 Some(receipt.structural().generation)
@@ -10256,6 +10703,66 @@ mod tests {
             Err(FirstSliceError::FixtureShape)
         );
         assert!(service.list_repositories().is_empty());
+    }
+
+    #[test]
+    fn restored_repository_registration_reuses_reserved_identity() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::write(fixture.path().join("lib.rs"), "pub fn answer() {}\n")
+            .expect("fixture source writes");
+        let cancellation = deadline();
+        let original = FirstSliceService::new(2)
+            .expect("service initializes")
+            .admit_repository(fixture.path(), &cancellation)
+            .expect("repository admission succeeds");
+
+        let restored = FirstSliceService::new(2).expect("replacement service initializes");
+        restored
+            .restore_repository_registration(original.root_identity, original.repository)
+            .expect("durable registration restores");
+        let repeated = restored
+            .admit_repository(fixture.path(), &cancellation)
+            .expect("restored repository is admitted");
+
+        assert_eq!(repeated.repository, original.repository);
+        assert_eq!(repeated.root_identity, original.root_identity);
+        restored.release_index_admission(repeated);
+        assert_eq!(
+            restored
+                .registered_repository_for_root(fixture.path(), &cancellation)
+                .expect("restored registration is queryable"),
+            Some(original.repository)
+        );
+        let catalog = restored
+            .repository_catalog_page(
+                CatalogPageRequest::new(
+                    None,
+                    None,
+                    catalog::CatalogListFilter::new(None, None, None)
+                        .expect("catalog filter is valid"),
+                    catalog::CatalogPageSize::new(20).expect("page size is valid"),
+                )
+                .expect("catalog request is valid"),
+                CatalogInstant::from_millis(0),
+            )
+            .expect("restored registration is publicly cataloged");
+        let [entry] = catalog.items() else {
+            panic!("one restored repository registration is expected");
+        };
+        assert_eq!(entry.repository(), original.repository);
+        assert_eq!(entry.state(), CatalogRepositoryState::Indexing);
+        assert!(entry.active_generation().is_none());
+        assert_eq!(
+            restored.repository_status(original.repository, None),
+            Err(FirstSliceError::GenerationNotFound)
+        );
+        assert_eq!(
+            restored
+                .admit_repository(fixture.path(), &cancellation)
+                .expect("failed reuse keeps durable reservation")
+                .repository,
+            original.repository
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -11036,6 +11543,20 @@ mod tests {
     fn query_and_source_budget_failures_remain_distinct() {
         let cancellation = Cancellation::new();
         assert_eq!(
+            map_discovery_error(
+                DiscoveryError::RetainedSnapshotByteLimit {
+                    observed: 513,
+                    maximum: 512,
+                },
+                &cancellation,
+            ),
+            FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::SourceBytes,
+                observed: 513,
+                limit: 512,
+            }
+        );
+        assert_eq!(
             map_vfs_error(
                 VfsError::FileTooLarge {
                     maximum: rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES,
@@ -11154,14 +11675,82 @@ mod tests {
             .expect("a source between one MiB and the configured bound prepares");
         assert_eq!(
             progress
-                .iter()
-                .map(|observed| (observed.completed, observed.total))
-                .collect::<Vec<_>>(),
-            vec![(1, 6), (2, 6), (3, 6), (4, 6), (5, 6), (6, 6)]
+                .first()
+                .map(|observed| (observed.completed, observed.total)),
+            Some((0, 6))
+        );
+        assert_eq!(
+            progress
+                .last()
+                .map(|observed| (observed.completed, observed.total)),
+            Some((6, 6))
+        );
+        assert!(
+            progress
+                .windows(2)
+                .all(|pair| pair[0].completed <= pair[1].completed
+                    && pair[0].files_examined <= pair[1].files_examined
+                    && pair[0].bytes_examined <= pair[1].bytes_examined)
+        );
+        let analysis = progress
+            .iter()
+            .filter(|observed| observed.stage == FirstSliceIndexStage::Analysis)
+            .collect::<Vec<_>>();
+        assert!(analysis.len() >= 2);
+        assert!(
+            analysis
+                .windows(2)
+                .any(|pair| pair[0].files_examined < pair[1].files_examined
+                    && pair[0].bytes_examined < pair[1].bytes_examined)
         );
         let receipt = service
             .publish_prepared(preparation, &cancellation)
             .expect("a source between one MiB and the configured bound publishes");
+        assert_eq!(receipt.indexed_files, 1);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn durable_preparation_reports_written_bytes_before_publication() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn progress_probe() -> u32 { 42 }\n",
+        )
+        .expect("fixture source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        let mut progress = Vec::new();
+
+        let preparation = service
+            .prepare_repository_with_mode_and_progress(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &cancellation,
+                |observed| progress.push(observed),
+            )
+            .expect("durable preparation succeeds");
+
+        let written = progress
+            .iter()
+            .filter_map(|observed| (observed.written_bytes > 0).then_some(observed.written_bytes))
+            .collect::<Vec<_>>();
+        assert!(!written.is_empty());
+        assert!(written.windows(2).all(|pair| pair[0] <= pair[1]));
+        let terminal = progress.last().expect("terminal progress exists");
+        assert_eq!((terminal.completed, terminal.total), (6, 6));
+        assert!(terminal.written_bytes > 0);
+        let receipt = service
+            .publish_prepared(preparation, &cancellation)
+            .expect("durable preparation publishes");
         assert_eq!(receipt.indexed_files, 1);
     }
 

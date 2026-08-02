@@ -1,0 +1,750 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/repo.index/output/1.1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OperationToolResponse",
+  "description": "Success-or-error response for repository-operation schema 1.1.",
+  "type": "object",
+  "anyOf": [
+    {
+      "description": "Tool-specific successful response.",
+      "$ref": "#/$defs/RepoIndexSuccessV1_1"
+    },
+    {
+      "description": "Checked source-redacted domain error.",
+      "$ref": "#/$defs/OperationErrorResponse"
+    }
+  ],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "DetailKey": {
+      "description": "A validated key for a bounded public error detail.",
+      "type": "string",
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z0-9_]+$"
+    },
+    "Diagnostic": {
+      "description": "Source-free diagnostic attached to an operational response.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Stable diagnostic code.",
+          "$ref": "#/$defs/SafeLabel"
+        },
+        "message": {
+          "description": "Static or Rootlight-generated source-free message.",
+          "$ref": "#/$defs/SourceFreeMessage"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "ErrorCode": {
+      "description": "Stable public error families shared by all Rootlight boundaries.",
+      "oneOf": [
+        {
+          "description": "The caller supplied an invalid value.",
+          "type": "string",
+          "const": "INVALID_ARGUMENT"
+        },
+        {
+          "description": "The requested entity does not exist.",
+          "type": "string",
+          "const": "NOT_FOUND"
+        },
+        {
+          "description": "The request conflicts with current state.",
+          "type": "string",
+          "const": "CONFLICT"
+        },
+        {
+          "description": "The selected generation is no longer valid for this operation.",
+          "type": "string",
+          "const": "STALE_GENERATION"
+        },
+        {
+          "description": "The requested capability is unavailable.",
+          "type": "string",
+          "const": "UNSUPPORTED_CAPABILITY"
+        },
+        {
+          "description": "The result is incomplete for the requested coverage.",
+          "type": "string",
+          "const": "INCOMPLETE_COVERAGE"
+        },
+        {
+          "description": "The operation exceeded an explicit work budget.",
+          "type": "string",
+          "const": "BUDGET_EXCEEDED"
+        },
+        {
+          "description": "A bounded resource is exhausted.",
+          "type": "string",
+          "const": "RESOURCE_EXHAUSTED"
+        },
+        {
+          "description": "The operation was cancelled before completion.",
+          "type": "string",
+          "const": "CANCELLED"
+        },
+        {
+          "description": "An isolated adapter failed.",
+          "type": "string",
+          "const": "ADAPTER_FAILED"
+        },
+        {
+          "description": "An index failed integrity checks.",
+          "type": "string",
+          "const": "INDEX_CORRUPT"
+        },
+        {
+          "description": "Stored data requires a supported migration.",
+          "type": "string",
+          "const": "MIGRATION_REQUIRED"
+        },
+        {
+          "description": "Policy denied the requested operation.",
+          "type": "string",
+          "const": "PERMISSION_DENIED"
+        },
+        {
+          "description": "A protocol or contract version is incompatible.",
+          "type": "string",
+          "const": "PROTOCOL_MISMATCH"
+        },
+        {
+          "description": "A conflicting operation temporarily owns the resource.",
+          "type": "string",
+          "const": "BUSY"
+        },
+        {
+          "description": "An internal failure cannot be safely disclosed.",
+          "type": "string",
+          "const": "INTERNAL"
+        },
+        {
+          "description": "A pagination cursor is invalid, expired, forged, or context-mismatched.",
+          "type": "string",
+          "const": "INVALID_CURSOR"
+        },
+        {
+          "description": "A supplied value has the wrong type for its target field.",
+          "type": "string",
+          "const": "TYPE_MISMATCH"
+        },
+        {
+          "description": "The request exceeded a cost limit before execution.",
+          "type": "string",
+          "const": "COST_LIMIT"
+        },
+        {
+          "description": "The query uses an operator outside the documented allowlist.",
+          "type": "string",
+          "const": "OPERATOR_FORBIDDEN"
+        },
+        {
+          "description": "A batch binding reference is malformed or unresolved.",
+          "type": "string",
+          "const": "BINDING_INVALID"
+        },
+        {
+          "description": "A batch binding produced a value of the wrong type for its target.",
+          "type": "string",
+          "const": "BINDING_TYPE_MISMATCH"
+        }
+      ]
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "IndexMode": {
+      "description": "Indexing mode requested by `repo.index`.",
+      "oneOf": [
+        {
+          "description": "Select the strongest available safe mode.",
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "description": "Build the structural tier only.",
+          "type": "string",
+          "const": "structural"
+        },
+        {
+          "description": "Request available deep tiers.",
+          "type": "string",
+          "const": "deep"
+        },
+        {
+          "description": "Rebuild from a clean generation.",
+          "type": "string",
+          "const": "rebuild"
+        }
+      ]
+    },
+    "IndexPlanScope": {
+      "description": "Compact normalized scope class.",
+      "oneOf": [
+        {
+          "description": "Whole repository.",
+          "type": "string",
+          "const": "repository"
+        },
+        {
+          "description": "Selected paths.",
+          "type": "string",
+          "const": "paths"
+        },
+        {
+          "description": "Selected packages.",
+          "type": "string",
+          "const": "packages"
+        },
+        {
+          "description": "Selected build targets.",
+          "type": "string",
+          "const": "build_targets"
+        }
+      ]
+    },
+    "IndexPlanSummary": {
+      "description": "Summary of one admitted indexing plan.",
+      "type": "object",
+      "properties": {
+        "estimated_disk_bytes": {
+          "description": "Estimated staging and publication bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "mode": {
+          "description": "Selected analysis mode.",
+          "$ref": "#/$defs/IndexMode"
+        },
+        "parent_generation": {
+          "description": "Parent generation, when an active generation existed.",
+          "$ref": "#/$defs/RequiredNullable"
+        },
+        "providers": {
+          "description": "Admitted providers in deterministic order.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "maxItems": 64
+        },
+        "scope": {
+          "description": "Normalized scope class.",
+          "$ref": "#/$defs/IndexPlanScope"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "mode",
+        "providers",
+        "parent_generation",
+        "estimated_disk_bytes"
+      ]
+    },
+    "NextAction": {
+      "description": "Stable remediation hints generated from a closed set of templates.",
+      "oneOf": [
+        {
+          "description": "Correct one named input field.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "correct_field"
+            },
+            "field": {
+              "description": "Stable name of the invalid field.",
+              "$ref": "#/$defs/DetailKey"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "field"
+          ]
+        },
+        {
+          "description": "Retry after the bounded delay in the envelope.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "retry"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Select a compatible contract version.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "select_supported_version"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Inspect the associated operation status.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "inspect_operation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Rebuild the affected repository generation.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "rebuild_repository"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Collect a protected source-free support bundle.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "collect_support_bundle"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Restart the enumeration or query from the beginning after an invalid\ncontinuation cursor.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "restart_enumeration"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        }
+      ]
+    },
+    "OperationErrorResponse": {
+      "description": "Checked error response for repository-operation schema 1.1.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "description": "Stable source-redacted error.",
+          "$ref": "#/$defs/PublicError"
+        },
+        "schema_version": {
+          "description": "Tool error schema version.",
+          "$ref": "#/$defs/OperationSchemaVersion"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "error"
+      ]
+    },
+    "OperationId": {
+      "type": "string",
+      "pattern": "^op1_[a-z2-7]{32}$"
+    },
+    "OperationSchemaVersion": {
+      "description": "Version marker carried by additive repository-operation responses.",
+      "oneOf": [
+        {
+          "description": "Tool contract version 1.1.",
+          "type": "string",
+          "const": "1.1"
+        }
+      ]
+    },
+    "OperationState": {
+      "description": "Durable operation state.",
+      "oneOf": [
+        {
+          "description": "Accepted but not started.",
+          "type": "string",
+          "const": "queued"
+        },
+        {
+          "description": "Actively running.",
+          "type": "string",
+          "const": "running"
+        },
+        {
+          "description": "Published an immutable generation.",
+          "type": "string",
+          "const": "published"
+        },
+        {
+          "description": "Failed without publishing partial state.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Cancelled without publishing partial state.",
+          "type": "string",
+          "const": "cancelled"
+        },
+        {
+          "description": "Waiting for explicit build or environment context.",
+          "type": "string",
+          "const": "waiting_for_context"
+        }
+      ]
+    },
+    "PublicError": {
+      "description": "A stable source-redacted failure safe to serialize across public boundaries.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[a-z0-9_]+$": {
+              "$ref": "#/$defs/PublicValue"
+            }
+          }
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GenerationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "next_actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NextAction"
+          },
+          "maxItems": 8
+        },
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repository": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepositoryId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retry_after_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 86400000,
+          "minimum": 0
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details",
+        "next_actions"
+      ]
+    },
+    "PublicValue": {
+      "description": "Bounded primitive values permitted in public error details.",
+      "oneOf": [
+        {
+          "description": "A boolean property.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "boolean"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "A signed integer property.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "integer"
+            },
+            "value": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "An unsigned integer property.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "unsigned"
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint64",
+              "maximum": 18446744073709551615,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "A repository identity.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "repository"
+            },
+            "value": {
+              "$ref": "#/$defs/RepositoryId"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "A generation identity.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "generation"
+            },
+            "value": {
+              "$ref": "#/$defs/GenerationId"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "An operation identity.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "operation"
+            },
+            "value": {
+              "$ref": "#/$defs/OperationId"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "A validated source-free label.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "label"
+            },
+            "value": {
+              "$ref": "#/$defs/SafeLabel"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        }
+      ]
+    },
+    "RepoIndexDataV1_1": {
+      "description": "`repo.index` result data.",
+      "type": "object",
+      "properties": {
+        "accepted_plan": {
+          "description": "Plan admitted by policy and resource checks.",
+          "$ref": "#/$defs/IndexPlanSummary"
+        },
+        "diagnostics": {
+          "description": "Source-free validation and capability notes.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Diagnostic"
+          },
+          "maxItems": 100
+        },
+        "operation_id": {
+          "description": "Process-local operation identity.",
+          "$ref": "#/$defs/OperationId"
+        },
+        "published_generation": {
+          "description": "Generation published before the attached call returns, if any.",
+          "$ref": "#/$defs/RequiredNullable"
+        },
+        "repository_id": {
+          "description": "Registered repository identity.",
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "semantic_operation_id": {
+          "description": "Separately journaled semantic refinement created by Auto mode.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "description": "Current operation state.",
+          "$ref": "#/$defs/OperationState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository_id",
+        "operation_id",
+        "accepted_plan",
+        "state",
+        "published_generation",
+        "diagnostics"
+      ]
+    },
+    "RepoIndexSuccessV1_1": {
+      "description": "Strict output for `repo.index`.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "description": "Operational result.",
+          "$ref": "#/$defs/RepoIndexDataV1_1"
+        },
+        "schema_version": {
+          "description": "Tool response schema version.",
+          "$ref": "#/$defs/OperationSchemaVersion"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "data"
+      ]
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "RequiredNullable": {
+      "description": "A property that must be present and may contain JSON `null`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GenerationId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "SafeLabel": {
+      "description": "A short source-free label permitted in public diagnostics.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_.:-]+$"
+    },
+    "SourceFreeMessage": {
+      "description": "A checked Rootlight-generated message that cannot contain paths or source.",
+      "type": "string",
+      "maxLength": 1024,
+      "minLength": 1,
+      "pattern": "^[a-z0-9 -]+$"
+    }
+  }
+}

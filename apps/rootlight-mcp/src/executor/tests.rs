@@ -76,6 +76,7 @@ use rootlight_mcp_contract::{
         FlowTraceOutput, RelationKind, SymbolRelationshipsOutput,
     },
     repository::{RepoListOutput, RepoStatusOutput, RepositoryState},
+    vertical::OperationToolResponse,
     vertical::{
         AnalysisTier, CacheStatus, Freshness, IndexMode, IndexPlanScope, IndexPlanSummary,
         LanguageCoverage, OperationState, RequiredNullable,
@@ -2945,6 +2946,7 @@ async fn maps_repository_index_without_replacing_stable_identities() {
         RepositoryIndex {
             repository: repository(),
             operation: operation(),
+            semantic_operation: Some(second_operation()),
             mode: client::RepositoryIndexMode::Structural,
             state: ClientOperationState::Succeeded,
             revision: 8,
@@ -2973,7 +2975,7 @@ async fn maps_repository_index_without_replacing_stable_identities() {
             VerticalTool::RepoIndex,
             json!({
                 "root": "C:/fixture",
-                "mode": "structural",
+                "mode": "auto",
                 "detached": true
             }),
         )
@@ -2981,18 +2983,19 @@ async fn maps_repository_index_without_replacing_stable_identities() {
         .expect("repository index maps"),
     );
 
-    let ToolResponse::Success(output) = output else {
+    let OperationToolResponse::Success(output) = output else {
         panic!("expected repository index success");
     };
     assert_eq!(output.data.repository_id, repository());
     assert_eq!(output.data.operation_id, operation());
+    assert_eq!(output.data.semantic_operation_id, Some(second_operation()));
     assert_eq!(output.data.state, OperationState::Published);
     assert_eq!(output.data.published_generation.0, Some(generation()));
     assert_eq!(output.data.accepted_plan.providers, ["treesitter-rust"]);
     assert!(matches!(
         harness.only_call(),
         ObservedCall::RepositoryIndex(RepositoryIndexPortRequest {
-            mode: IndexMode::Structural,
+            mode: IndexMode::Auto,
             detached: true,
             ..
         })
@@ -3040,6 +3043,7 @@ async fn repository_auto_mode_reports_the_selected_structural_plan() {
         RepositoryIndex {
             repository: repository(),
             operation: operation(),
+            semantic_operation: None,
             mode: client::RepositoryIndexMode::Structural,
             state: ClientOperationState::Succeeded,
             revision: 8,
@@ -3072,7 +3076,7 @@ async fn repository_auto_mode_reports_the_selected_structural_plan() {
         .await
         .expect("auto selects the structural first-slice plan"),
     );
-    let ToolResponse::Success(output) = output else {
+    let OperationToolResponse::Success(output) = output else {
         panic!("expected repository index success");
     };
 
@@ -3092,6 +3096,7 @@ async fn repository_deep_mode_preserves_the_isolated_project_plan() {
         RepositoryIndex {
             repository: repository(),
             operation: operation(),
+            semantic_operation: None,
             mode: client::RepositoryIndexMode::Deep,
             state: ClientOperationState::Succeeded,
             revision: 8,
@@ -3127,7 +3132,7 @@ async fn repository_deep_mode_preserves_the_isolated_project_plan() {
         .await
         .expect("deep selects the isolated project plan"),
     );
-    let ToolResponse::Success(output) = output else {
+    let OperationToolResponse::Success(output) = output else {
         panic!("expected repository index success");
     };
 
@@ -3148,6 +3153,7 @@ async fn identical_index_inputs_may_use_fresh_operations_but_converge_generation
             RepositoryIndex {
                 repository: repository(),
                 operation,
+                semantic_operation: None,
                 mode: client::RepositoryIndexMode::Structural,
                 state: ClientOperationState::Succeeded,
                 revision: 8,
@@ -3190,7 +3196,9 @@ async fn identical_index_inputs_may_use_fresh_operations_but_converge_generation
             .await
             .expect("second index maps"),
     );
-    let (ToolResponse::Success(first), ToolResponse::Success(second)) = (first, second) else {
+    let (OperationToolResponse::Success(first), OperationToolResponse::Success(second)) =
+        (first, second)
+    else {
         panic!("expected repository index successes");
     };
 
@@ -3207,10 +3215,13 @@ async fn maps_operation_status_action_time_progress_and_resources() {
     let response = RepositoryOperationStatus {
         operation: operation_status(ClientOperationState::Running),
         published_generation: None,
+        semantic_operation: None,
         started_unix_ms: 1,
         peak_rss_bytes: 100,
         written_bytes: 200,
         files_examined: 3,
+        bytes_examined: 300,
+        index_stage: "analysis".to_owned(),
         retry_after_ms: Some(0),
     };
     let harness = Harness::new(FakeOutcome::OperationStatus(Ok(response)));
@@ -3229,7 +3240,7 @@ async fn maps_operation_status_action_time_progress_and_resources() {
         .expect("operation status maps"),
     );
 
-    let ToolResponse::Success(output) = output else {
+    let OperationToolResponse::Success(output) = output else {
         panic!("expected operation status success");
     };
     assert_eq!(output.data.operation.state, OperationState::Running);
@@ -12064,6 +12075,7 @@ async fn accepted_effect_defaults_match_omitted_values() {
                     RepositoryIndex {
                         repository: repository(),
                         operation: operation(),
+                        semantic_operation: None,
                         mode: client::RepositoryIndexMode::Structural,
                         state: ClientOperationState::Succeeded,
                         revision: 8,

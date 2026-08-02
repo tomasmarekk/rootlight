@@ -45,7 +45,7 @@ use rootlight_operations::{
     CancellationReason, ClientInstanceId, DeadlineRetry, InternalCancellationAuthority,
     MAX_RECENT_TERMINAL_OPERATIONS, OperationError, OperationJournal, OperationKind,
     OperationRecord, OperationStage, OperationState, OperationSubmission, PlanHash, Progress,
-    RecoveryClass, SubmissionOutcome,
+    RecoveryClass, RepositoryOperationContext, SubmissionOutcome,
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
@@ -1209,6 +1209,27 @@ enum JournalCommand {
         claim: MutationClaim,
         reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
+    RepositoryOperationContext {
+        operation: OperationId,
+        reply: tokio::sync::oneshot::Sender<Result<RepositoryOperationContext, OperationError>>,
+    },
+    RepositoryOperationContexts {
+        reply:
+            tokio::sync::oneshot::Sender<Result<Vec<RepositoryOperationContext>, OperationError>>,
+    },
+    UpdateRepositoryObservation {
+        operation: OperationId,
+        files_examined: u64,
+        bytes_examined: u64,
+        claim: MutationClaim,
+        reply: tokio::sync::oneshot::Sender<Result<RepositoryOperationContext, OperationError>>,
+    },
+    RecordRepositoryPublication {
+        operation: OperationId,
+        generation: GenerationId,
+        claim: MutationClaim,
+        reply: tokio::sync::oneshot::Sender<Result<RepositoryOperationContext, OperationError>>,
+    },
     CompletePublication {
         operation: OperationId,
         admission: Option<FirstSliceAdmission>,
@@ -1623,6 +1644,97 @@ impl JournalActorHandle {
                 operation,
                 peak_rss_bytes,
                 written_bytes,
+                claim: claim.clone(),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
+    }
+
+    /// Loads durable context for one repository-index operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, actor, missing-record, corruption, or journal failure.
+    pub async fn repository_operation_context(
+        &self,
+        operation: OperationId,
+    ) -> Result<RepositoryOperationContext, ServiceError> {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Control,
+            JournalCommand::RepositoryOperationContext { operation, reply },
+        )?;
+        receiver
+            .await
+            .map_err(|_| ServiceError::ChannelClosed)?
+            .map_err(ServiceError::Operations)
+    }
+
+    /// Loads all bounded retained repository-index contexts.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, actor, allocation, corruption, or journal failure.
+    pub async fn repository_operation_contexts(
+        &self,
+    ) -> Result<Vec<RepositoryOperationContext>, ServiceError> {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Control,
+            JournalCommand::RepositoryOperationContexts { reply },
+        )?;
+        receiver
+            .await
+            .map_err(|_| ServiceError::ChannelClosed)?
+            .map_err(ServiceError::Operations)
+    }
+
+    /// Persists repository source observations before an absolute deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, actor, range, corruption, or journal failure.
+    pub async fn update_repository_observation_until(
+        &self,
+        operation: OperationId,
+        files_examined: u64,
+        bytes_examined: u64,
+        deadline: Instant,
+    ) -> Result<RepositoryOperationContext, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::UpdateRepositoryObservation {
+                operation,
+                files_examined,
+                bytes_examined,
+                claim: claim.clone(),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
+    }
+
+    /// Persists one successful repository publication before an absolute deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, actor, lifecycle, corruption, or journal failure.
+    pub async fn record_repository_publication_until(
+        &self,
+        operation: OperationId,
+        generation: GenerationId,
+        deadline: Instant,
+    ) -> Result<RepositoryOperationContext, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::RecordRepositoryPublication {
+                operation,
+                generation,
                 claim: claim.clone(),
                 reply,
             },
@@ -2423,6 +2535,33 @@ fn execute_journal_command(
         } => {
             let _ = reply.send(execute_claimed(Some(&claim), || {
                 journal.update_resources(operation, peak_rss_bytes, written_bytes)
+            }));
+        }
+        JournalCommand::RepositoryOperationContext { operation, reply } => {
+            let _ = reply.send(journal.repository_operation_context(operation));
+        }
+        JournalCommand::RepositoryOperationContexts { reply } => {
+            let _ = reply.send(journal.repository_operation_contexts());
+        }
+        JournalCommand::UpdateRepositoryObservation {
+            operation,
+            files_examined,
+            bytes_examined,
+            claim,
+            reply,
+        } => {
+            let _ = reply.send(execute_claimed(Some(&claim), || {
+                journal.update_repository_observation(operation, files_examined, bytes_examined)
+            }));
+        }
+        JournalCommand::RecordRepositoryPublication {
+            operation,
+            generation,
+            claim,
+            reply,
+        } => {
+            let _ = reply.send(execute_claimed(Some(&claim), || {
+                journal.record_repository_publication(operation, generation)
             }));
         }
         JournalCommand::CompletePublication {
@@ -11430,7 +11569,7 @@ mod tests {
         assert_eq!(inventory.repositories.len(), 1);
         assert_eq!(inventory.generations.len(), 1);
         assert_eq!(inventory.storage.generation_disk_bytes, 4096);
-        assert_eq!(inventory.runtime.protocol_minor, 8);
+        assert_eq!(inventory.runtime.protocol_minor, PROTOCOL_MINOR);
     }
 
     #[test]
@@ -16601,6 +16740,7 @@ mod tests {
             estimated_disk_bytes: 4_096,
             diagnostics: Vec::new(),
             mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
+            semantic_operation: None,
         };
         assert!(first_slice_response_correlates(
             &index_request,
@@ -16679,6 +16819,9 @@ mod tests {
             written_bytes: 0,
             files_examined: 0,
             retry_after_ms: None,
+            bytes_examined: 0,
+            index_stage: "discovery".to_owned(),
+            semantic_operation: None,
         };
         assert!(first_slice_response_correlates(
             &status_request,

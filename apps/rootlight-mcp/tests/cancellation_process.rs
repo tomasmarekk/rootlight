@@ -335,6 +335,12 @@ fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str)
             "operation.status",
             json!({"operation_id": operation_id, "wait_ms": 1_000}),
         );
+        if status["result"]["isError"] == true
+            && status["result"]["structuredContent"]["error"]["code"] == "BUSY"
+        {
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
         assert_success(&status, "operation.status");
         match status["result"]["structuredContent"]["data"]["operation"]["state"].as_str() {
             Some("published") => return,

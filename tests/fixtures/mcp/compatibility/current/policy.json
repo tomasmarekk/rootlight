@@ -10,14 +10,30 @@
     ]
   },
   "output_projection": {
-    "implemented": false,
-    "older_closed_output_claimed": false
+    "evidence": [
+      "retained_fixture_output_schema",
+      "explicit_version_stdio_process"
+    ],
+    "implemented": true,
+    "older_closed_output_claimed": true,
+    "tools": [
+      {
+        "current_version": "1.1",
+        "projected_version": "1.0",
+        "tool": "repo.index"
+      },
+      {
+        "current_version": "1.1",
+        "projected_version": "1.0",
+        "tool": "operation.status"
+      }
+    ]
   },
   "schema": "rootlight.mcp-compatibility-current/1",
   "tool_contract_versions": [
     {
       "tool": "repo.index",
-      "version": "1.0"
+      "version": "1.1"
     },
     {
       "tool": "repo.status",
@@ -29,7 +45,7 @@
     },
     {
       "tool": "operation.status",
-      "version": "1.0"
+      "version": "1.1"
     },
     {
       "tool": "code.locate",

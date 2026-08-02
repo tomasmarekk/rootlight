@@ -714,6 +714,8 @@ pub struct RepositoryIndex {
     pub repository: RepositoryId,
     /// Durable operation identity.
     pub operation: OperationId,
+    /// Separately owned semantic refinement created by Auto mode.
+    pub semantic_operation: Option<OperationId>,
     /// Terminal operation state.
     pub state: OperationState,
     /// Durable operation revision.
@@ -745,6 +747,8 @@ pub struct RepositoryOperationStatus {
     pub operation: OperationStatus,
     /// Published generation after successful completion.
     pub published_generation: Option<GenerationId>,
+    /// Separately owned semantic refinement created by a successful Auto operation.
+    pub semantic_operation: Option<OperationId>,
     /// Best-effort operation start time.
     pub started_unix_ms: u64,
     /// Peak resident memory measured for this operation.
@@ -753,6 +757,10 @@ pub struct RepositoryOperationStatus {
     pub written_bytes: u64,
     /// Repository inputs examined.
     pub files_examined: u64,
+    /// Repository source bytes examined.
+    pub bytes_examined: u64,
+    /// Current source-free indexing stage.
+    pub index_stage: String,
     /// Bounded polling delay for a nonterminal operation.
     pub retry_after_ms: Option<u32>,
 }
@@ -7264,6 +7272,10 @@ fn parse_repository_index(
         .published_generation
         .map(parse_generation)
         .transpose()?;
+    let semantic_operation = response
+        .semantic_operation
+        .map(|operation| parse_operation(Some(operation)))
+        .transpose()?;
     let parent_generation = response
         .parent_generation
         .map(parse_generation)
@@ -7271,6 +7283,8 @@ fn parse_repository_index(
     let diagnostics = parse_repository_index_diagnostics(response.diagnostics)?;
     if operation != expected_operation
         || response.indexed_files > response.discovered_inputs
+        || semantic_operation == Some(operation)
+        || semantic_operation.is_some() && state != OperationState::Succeeded
         || parent_generation.is_some() && parent_generation == published_generation
         || state != OperationState::Succeeded && !diagnostics.is_empty()
         || match state {
@@ -7292,6 +7306,7 @@ fn parse_repository_index(
                 .ok_or(ClientError::InvalidResponseCorrelation)?,
         )?,
         operation,
+        semantic_operation,
         state,
         revision: response.revision,
         mode,
@@ -7367,15 +7382,28 @@ fn parse_repository_operation_status(
         .published_generation
         .map(parse_generation)
         .transpose()?;
+    let semantic_operation = response
+        .semantic_operation
+        .map(|operation| parse_operation(Some(operation)))
+        .transpose()?;
+    let index_stage =
+        parse_repository_index_stage(response.index_stage, operation.state, operation.stage)?;
     let coherent = match operation.state {
         OperationState::Queued | OperationState::Running | OperationState::Cancelling => {
             published_generation.is_none()
+                && semantic_operation.is_none()
+                && index_stage != "complete"
         }
         OperationState::Succeeded => {
-            published_generation.is_some() && response.retry_after_ms.is_none()
+            published_generation.is_some()
+                && semantic_operation != Some(expected_operation)
+                && response.retry_after_ms.is_none()
+                && index_stage == "complete"
         }
         OperationState::Failed | OperationState::Interrupted | OperationState::Cancelled => {
-            published_generation.is_none() && response.retry_after_ms.is_none()
+            published_generation.is_none()
+                && semantic_operation.is_none()
+                && response.retry_after_ms.is_none()
         }
     };
     if !coherent {
@@ -7384,12 +7412,41 @@ fn parse_repository_operation_status(
     Ok(RepositoryOperationStatus {
         operation,
         published_generation,
+        semantic_operation,
         started_unix_ms: response.started_unix_ms,
         peak_rss_bytes: response.peak_rss_bytes,
         written_bytes: response.written_bytes,
         files_examined: response.files_examined,
+        bytes_examined: response.bytes_examined,
+        index_stage,
         retry_after_ms: response.retry_after_ms,
     })
+}
+
+fn parse_repository_index_stage(
+    stage: String,
+    legacy_state: OperationState,
+    legacy_stage: OperationStage,
+) -> Result<String, ClientError> {
+    if stage.is_empty() {
+        if legacy_state == OperationState::Succeeded {
+            return Ok("complete".to_owned());
+        }
+        return Ok(match legacy_stage {
+            OperationStage::Accepted => "discovery",
+            OperationStage::Executing => "analysis",
+            OperationStage::Cleanup => "persistence",
+        }
+        .to_owned());
+    }
+    if matches!(
+        stage.as_str(),
+        "discovery" | "snapshot" | "analysis" | "merge" | "persistence" | "search" | "complete"
+    ) {
+        Ok(stage)
+    } else {
+        Err(ClientError::InvalidResponseCorrelation)
+    }
 }
 
 fn parse_repository_list(
@@ -10851,6 +10908,7 @@ mod tests {
             estimated_disk_bytes: 128 * 1024 * 1024,
             diagnostics: Vec::new(),
             mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
+            semantic_operation: None,
         }
     }
 
@@ -10864,6 +10922,9 @@ mod tests {
             written_bytes: 0,
             files_examined: 1,
             retry_after_ms: None,
+            bytes_examined: 16,
+            index_stage: "complete".to_owned(),
+            semantic_operation: None,
         }
     }
 
@@ -12788,8 +12849,23 @@ mod tests {
             estimated_disk_bytes: 128 * 1024 * 1024,
             diagnostics: Vec::new(),
             mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
+            semantic_operation: None,
         };
         assert!(parse_repository_index(index.clone(), operation).is_ok());
+        let mut auto = index.clone();
+        auto.semantic_operation = Some(operation_to_wire(foreign_operation));
+        assert_eq!(
+            parse_repository_index(auto, operation)
+                .expect("separate semantic operation is accepted")
+                .semantic_operation,
+            Some(foreign_operation)
+        );
+        let mut self_refinement = index.clone();
+        self_refinement.semantic_operation = Some(operation_to_wire(operation));
+        assert!(matches!(
+            parse_repository_index(self_refinement, operation),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
         let mut diagnostic = index.clone();
         diagnostic.diagnostics = vec![daemon::RepositoryIndexDiagnostic {
             code: "syntax-error-recovery".to_owned(),
@@ -12841,8 +12917,28 @@ mod tests {
             written_bytes: 0,
             files_examined: 5,
             retry_after_ms: None,
+            bytes_examined: 80,
+            index_stage: "complete".to_owned(),
+            semantic_operation: None,
         };
         assert!(parse_repository_operation_status(status.clone(), operation).is_ok());
+        let mut legacy_status = status.clone();
+        legacy_status.bytes_examined = 0;
+        legacy_status.index_stage.clear();
+        legacy_status.semantic_operation = None;
+        let parsed_legacy = parse_repository_operation_status(legacy_status, operation)
+            .expect("a new client accepts an additive-field-free daemon response");
+        assert_eq!(parsed_legacy.bytes_examined, 0);
+        assert_eq!(parsed_legacy.index_stage, "complete");
+        assert_eq!(parsed_legacy.semantic_operation, None);
+        let mut refined_status = status.clone();
+        refined_status.semantic_operation = Some(operation_to_wire(foreign_operation));
+        assert_eq!(
+            parse_repository_operation_status(refined_status, operation)
+                .expect("terminal status accepts a separate semantic operation")
+                .semantic_operation,
+            Some(foreign_operation)
+        );
         let mut queued_without_retry = status.clone();
         queued_without_retry
             .operation
@@ -12850,6 +12946,7 @@ mod tests {
             .expect("operation exists")
             .state = daemon::OperationState::Queued as i32;
         queued_without_retry.published_generation = None;
+        queued_without_retry.index_stage = "discovery".to_owned();
         assert!(parse_repository_operation_status(queued_without_retry.clone(), operation).is_ok());
         queued_without_retry.retry_after_ms = Some(0);
         assert!(parse_repository_operation_status(queued_without_retry, operation).is_ok());

@@ -7,7 +7,8 @@ use rootlight_mcp::{
     ToolExecutionFuture, ToolExecutor, ToolRouter, serve,
 };
 use rootlight_mcp_contract::{
-    ErrorCode, ExposureProfile, OperationStatusOutput, PublicError, RepoIndexOutput, VerticalTool,
+    ErrorCode, ExposureProfile, PublicError, VerticalTool,
+    vertical::{OperationStatusOutputV1_0, RepoIndexOutputV1_0},
 };
 use serde_json::{Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -65,15 +66,18 @@ async fn retained_tool_transcript_preserves_protocol_and_contract_outcomes() {
     let mut responses = Vec::new();
 
     for frame in include_str!("../../../tests/fixtures/mcp/1.0/tool-transcript.jsonl").lines() {
+        let mut request: Value =
+            serde_json::from_str(frame).expect("transcript frame is valid JSON");
+        select_retained_contract(&mut request);
+        let frame = serde_json::to_vec(&request).expect("transcript frame serializes");
         input_writer
-            .write_all(frame.as_bytes())
+            .write_all(&frame)
             .await
             .expect("transcript frame writes");
         input_writer
             .write_all(b"\n")
             .await
             .expect("transcript delimiter writes");
-        let request: Value = serde_json::from_str(frame).expect("transcript frame is valid JSON");
         if request.get("id").is_some() {
             let response = output_lines
                 .next_line()
@@ -122,7 +126,7 @@ async fn retained_tool_transcript_preserves_protocol_and_contract_outcomes() {
 
     let index = &response("index")["result"];
     assert_eq!(index["isError"], false);
-    serde_json::from_value::<RepoIndexOutput>(index["structuredContent"].clone())
+    serde_json::from_value::<RepoIndexOutputV1_0>(index["structuredContent"].clone())
         .expect("index output follows the typed contract");
     assert_eq!(
         serde_json::from_str::<Value>(
@@ -140,17 +144,36 @@ async fn retained_tool_transcript_preserves_protocol_and_contract_outcomes() {
         invalid["structuredContent"]["error"]["code"],
         "INVALID_ARGUMENT"
     );
-    serde_json::from_value::<RepoIndexOutput>(invalid["structuredContent"].clone())
+    serde_json::from_value::<RepoIndexOutputV1_0>(invalid["structuredContent"].clone())
         .expect("invalid input follows the checked tool error contract");
 
     let domain = &response("domain-error")["result"];
     assert_eq!(domain["isError"], true);
     assert_eq!(domain["structuredContent"]["error"]["code"], "NOT_FOUND");
-    serde_json::from_value::<OperationStatusOutput>(domain["structuredContent"].clone())
+    serde_json::from_value::<OperationStatusOutputV1_0>(domain["structuredContent"].clone())
         .expect("domain error follows the checked tool error contract");
 
     assert_eq!(response("invalid-meta")["error"]["code"], -32_602);
     assert_eq!(response("unsupported-task")["error"]["code"], -32_601);
+}
+
+fn select_retained_contract(request: &mut Value) {
+    if request["method"] != "tools/call" {
+        return;
+    }
+    let params = request["params"]
+        .as_object_mut()
+        .expect("retained tool call has object parameters");
+    let metadata = params
+        .entry("_meta")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .expect("retained tool call metadata is an object");
+    // The recorded client predates version selection, so pin its frozen output contract on replay.
+    metadata.insert(
+        "rootlight/toolContractVersion".to_owned(),
+        Value::String("1.0".to_owned()),
+    );
 }
 
 fn retained_output(name: &str) -> Map<String, Value> {

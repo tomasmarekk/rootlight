@@ -46,10 +46,13 @@ use rootlight_observability::{
     SupportAdapterInventory, SupportChecksumStatus, SupportGenerationInventory,
     SupportRepositoryInventory,
 };
+#[cfg(test)]
+use rootlight_operations::RecoveryClass;
 use rootlight_operations::{
     Cancellation, CancellationAuthority, CancellationReason, ClientInstanceId,
     InternalCancellationAuthority, OperationError, OperationKind, OperationRecord, OperationStage,
-    OperationState, OperationSubmission, PlanHash, Progress, RecoveryClass,
+    OperationState, OperationSubmission, PlanHash, Progress, RepositoryOperationContext,
+    RepositoryOperationMode, RepositoryOperationSubmission,
 };
 use rootlight_protocol::{
     MAX_CODE_LOCATE_LANGUAGE_BYTES, MAX_CODE_LOCATE_LANGUAGES,
@@ -71,8 +74,9 @@ use rootlight_service::{
     FirstSliceError, FirstSliceGenerationContext, FirstSliceIndexAdmission, FirstSliceIndexMode,
     FirstSliceIndexProgress, FirstSliceIndexProvider, FirstSliceIndexReceipt,
     FirstSliceObservedFreshness, FirstSliceOperationContext, FirstSliceProjectAnalysis,
-    FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer,
-    FirstSliceService, FirstSliceSupportInventory, HistoryChangeKind, PlanChangeObjective,
+    FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisProgress,
+    FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer, FirstSliceService,
+    FirstSliceSupportInventory, HistoryChangeKind, PlanChangeObjective,
     SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
@@ -96,6 +100,7 @@ const OPERATION_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 // maximum long poll for serialization, IPC scheduling, and client decoding.
 const OPERATION_STATUS_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 const LIFECYCLE_FINALIZATION_GRACE: Duration = Duration::from_secs(2);
+const REFINEMENT_ADMISSION_WAIT: Duration = Duration::from_secs(2);
 const DETACHED_INDEX_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const DEFAULT_RELATIONSHIP_RESULTS: u32 = 100;
 const DEFAULT_FLOW_DEPTH: u32 = 3;
@@ -119,7 +124,7 @@ const PROJECT_ADAPTER_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 // Source expands into normalized facts, so partitions need output and CPU
 // headroom even when the encoded request remains below the hard input limit.
 const PROJECT_ADAPTER_PARTITION_SOURCE_BYTES: u64 = 1024 * 1024;
-const PROJECT_ADAPTER_PARTITION_FILES: usize = 64;
+const PROJECT_ADAPTER_PARTITION_FILES: usize = 512;
 const PROJECT_ADAPTER_HANDLES: u32 = 64;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
@@ -177,6 +182,15 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
         request: FirstSliceProjectAnalysisRequest<'_>,
         cancellation: &Cancellation,
     ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
+        self.analyze_with_progress(request, cancellation, &mut |_| {})
+    }
+
+    fn analyze_with_progress(
+        &self,
+        request: FirstSliceProjectAnalysisRequest<'_>,
+        cancellation: &Cancellation,
+        observe_progress: &mut dyn FnMut(FirstSliceProjectAnalysisProgress),
+    ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
         let mut ordered_inputs: Vec<&rootlight_service::FirstSliceProjectInput<'_>> = Vec::new();
         ordered_inputs
             .try_reserve_exact(request.inputs().len())
@@ -186,6 +200,16 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
         if ordered_inputs.is_empty() {
             return Err(FirstSliceProjectAnalysisError::Analysis);
         }
+        let total_files = u64::try_from(ordered_inputs.len())
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        let total_bytes = ordered_inputs.iter().try_fold(0_u64, |total, input| {
+            total
+                .checked_add(
+                    u64::try_from(input.source().len())
+                        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?,
+                )
+                .ok_or(FirstSliceProjectAnalysisError::Analysis)
+        })?;
         let files = u32::try_from(ordered_inputs.len())
             .unwrap_or(u32::MAX)
             .min(PROJECT_ADAPTER_HARD_LIMITS.files);
@@ -235,6 +259,8 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
             .try_reserve(maximum_partitions.min(16))
             .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
         let mut isolation_permits_deep_adapter = true;
+        let mut completed_files = 0_u64;
+        let mut completed_bytes = 0_u64;
         for input in ordered_inputs {
             let wire_input = project_input_to_wire(&request, input)?;
             if let Some(rejected) = partition.try_push(wire_input)? {
@@ -242,10 +268,23 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
                 if batch.is_empty() {
                     return Err(FirstSliceProjectAnalysisError::Analysis);
                 }
+                let (partition_files, partition_bytes) = project_partition_progress(&batch)?;
                 let (document, isolated) =
                     self.execute_partition(&request, &session, batch, cancellation)?;
                 documents.push(document);
                 isolation_permits_deep_adapter &= isolated;
+                completed_files = completed_files
+                    .checked_add(partition_files)
+                    .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                completed_bytes = completed_bytes
+                    .checked_add(partition_bytes)
+                    .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                observe_progress(FirstSliceProjectAnalysisProgress {
+                    completed_files,
+                    total_files,
+                    completed_bytes,
+                    total_bytes,
+                });
                 if partition.try_push(rejected)?.is_some() {
                     return Err(FirstSliceProjectAnalysisError::Analysis);
                 }
@@ -255,15 +294,44 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
         if batch.is_empty() {
             return Err(FirstSliceProjectAnalysisError::Analysis);
         }
+        let (partition_files, partition_bytes) = project_partition_progress(&batch)?;
         let (document, isolated) =
             self.execute_partition(&request, &session, batch, cancellation)?;
         documents.push(document);
         isolation_permits_deep_adapter &= isolated;
+        completed_files = completed_files
+            .checked_add(partition_files)
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        completed_bytes = completed_bytes
+            .checked_add(partition_bytes)
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+        observe_progress(FirstSliceProjectAnalysisProgress {
+            completed_files,
+            total_files,
+            completed_bytes,
+            total_bytes,
+        });
         Ok(FirstSliceProjectAnalysis::new_partitioned(
             documents,
             isolation_permits_deep_adapter,
         ))
     }
+}
+
+fn project_partition_progress(
+    inputs: &[adapter::ProjectInput],
+) -> Result<(u64, u64), FirstSliceProjectAnalysisError> {
+    let files =
+        u64::try_from(inputs.len()).map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+    let bytes = inputs.iter().try_fold(0_u64, |total, input| {
+        total
+            .checked_add(
+                u64::try_from(input.source.len())
+                    .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?,
+            )
+            .ok_or(FirstSliceProjectAnalysisError::Analysis)
+    })?;
+    Ok((files, bytes))
 }
 
 impl InstalledProjectAnalyzer {
@@ -499,6 +567,7 @@ struct SemanticRefinementCommand {
     operation: OperationId,
     repository: RepositoryId,
     structural_generation: GenerationId,
+    admitted: SyncSender<Result<(), PublicError>>,
 }
 
 struct PendingSemanticRefinement {
@@ -645,6 +714,7 @@ impl FirstSliceDaemon {
         let durable_publications =
             Self::reconcile_startup_publications(&journal, &service, &installed_generations)
                 .await?;
+        let durable_contexts = Self::load_startup_repository_contexts(&journal).await?;
         let inventory = index_support_inventory(&service).map_err(FirstSliceHostError::Service)?;
         support_state
             .replace_index_support_inventory(inventory)
@@ -654,6 +724,7 @@ impl FirstSliceDaemon {
             service,
             None,
             durable_publications,
+            durable_contexts,
             Some(support_state),
             Some(DeferredRecoveryWork {
                 restore: deferred_restore,
@@ -684,7 +755,15 @@ impl FirstSliceDaemon {
         let service =
             FirstSliceService::new_durable(DEFAULT_GENERATION_RETENTION, state_root, &cancellation)
                 .map_err(FirstSliceHostError::Service)?;
-        Self::start_workers(journal, service, Some(hook), Vec::new(), None, None)
+        Self::start_workers(
+            journal,
+            service,
+            Some(hook),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+        )
     }
 
     #[cfg(test)]
@@ -694,7 +773,15 @@ impl FirstSliceDaemon {
     ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
         let service = FirstSliceService::new(DEFAULT_GENERATION_RETENTION)
             .map_err(FirstSliceHostError::Service)?;
-        Self::start_workers(journal, service, publication_hook, Vec::new(), None, None)
+        Self::start_workers(
+            journal,
+            service,
+            publication_hook,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+        )
     }
 
     async fn reconcile_startup_publications(
@@ -712,7 +799,23 @@ impl FirstSliceDaemon {
                 .reconcile_committed_publication(publication.operation)
                 .await
             {
-                Ok(record) => restored.push((publication, record)),
+                Ok(record) => {
+                    let deadline = Instant::now()
+                        .checked_add(LIFECYCLE_FINALIZATION_GRACE)
+                        .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
+                    match journal
+                        .record_repository_publication_until(
+                            publication.operation,
+                            publication.receipt.generation,
+                            deadline,
+                        )
+                        .await
+                    {
+                        Ok(_) | Err(ServiceError::Operations(OperationError::NotFound)) => {}
+                        Err(error) => return Err(FirstSliceHostError::Journal(error)),
+                    }
+                    restored.push((publication, record));
+                }
                 // A retained generation can outlive the bounded operation
                 // journal without recreating source-free status metadata.
                 Err(ServiceError::Operations(OperationError::NotFound)) => {}
@@ -722,11 +825,36 @@ impl FirstSliceDaemon {
         Ok(restored)
     }
 
+    async fn load_startup_repository_contexts(
+        journal: &JournalActorHandle,
+    ) -> Result<Vec<(RepositoryOperationContext, OperationRecord)>, FirstSliceHostError> {
+        let contexts = journal
+            .repository_operation_contexts()
+            .await
+            .map_err(FirstSliceHostError::Journal)?;
+        let mut restored = Vec::new();
+        restored
+            .try_reserve_exact(contexts.len())
+            .map_err(|_| FirstSliceHostError::Service(FirstSliceError::Retention))?;
+        for context in contexts {
+            let response = journal
+                .control(ControlRequest::OperationStatus(context.operation))
+                .await
+                .map_err(FirstSliceHostError::Journal)?;
+            let ControlResponse::OperationStatus(record) = response else {
+                return Err(FirstSliceHostError::Service(FirstSliceError::Retention));
+            };
+            restored.push((context, record));
+        }
+        Ok(restored)
+    }
+
     fn start_workers(
         journal: JournalActorHandle,
         service: FirstSliceService,
         publication_hook: Option<PublicationBoundaryHook>,
         durable_publications: Vec<(FirstSliceDurableOperation, OperationRecord)>,
+        durable_contexts: Vec<(RepositoryOperationContext, OperationRecord)>,
         support_state: Option<Arc<DaemonState>>,
         deferred_restore: Option<DeferredRecoveryWork>,
     ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
@@ -750,7 +878,29 @@ impl FirstSliceDaemon {
             .enable_time()
             .build()
             .map_err(FirstSliceHostError::AsyncRuntime)?;
+        for (context, _) in &durable_contexts {
+            if let Some(root_identity) = context.root_identity {
+                service
+                    .restore_repository_registration(
+                        ContentHash::from_bytes(root_identity),
+                        context.repository,
+                    )
+                    .map_err(FirstSliceHostError::Service)?;
+            }
+        }
         let mut operation_metadata = OperationMetadataSet::new(DEFAULT_OPERATION_METADATA);
+        for (context, record) in durable_contexts {
+            if let Some(state) = support_state.as_deref() {
+                state.record_repository_index_context(
+                    context.operation,
+                    context.repository,
+                    repository_operation_support_provider(context.mode),
+                );
+            }
+            operation_metadata
+                .restore_context(context, &record)
+                .map_err(FirstSliceHostError::Service)?;
+        }
         for (publication, record) in durable_publications {
             if let Some(state) = support_state.as_deref() {
                 state.record_repository_index_context(
@@ -1182,11 +1332,43 @@ struct OperationMetadata {
     parent_generation: Option<GenerationId>,
     estimated_disk_bytes: u64,
     receipt: Option<FirstSliceIndexReceipt>,
+    published_generation: Option<GenerationId>,
     peak_rss_bytes: Arc<AtomicU64>,
     written_bytes: u64,
+    files_examined: u64,
+    bytes_examined: u64,
     publication: PublicationState,
     terminal: bool,
     terminal_snapshot: Option<OperationStatusSnapshot>,
+}
+
+impl OperationMetadata {
+    fn from_durable_context(context: RepositoryOperationContext, record: &OperationRecord) -> Self {
+        Self {
+            started_unix_ms: context.started_unix_ms,
+            repository: Some(context.repository),
+            parent_generation: context.parent_generation,
+            estimated_disk_bytes: context.estimated_disk_bytes,
+            receipt: None,
+            published_generation: context.published_generation,
+            peak_rss_bytes: Arc::new(AtomicU64::new(record.peak_rss_bytes)),
+            written_bytes: record.written_bytes,
+            files_examined: context.files_examined,
+            bytes_examined: context.bytes_examined,
+            publication: if context.published_generation.is_some()
+                && record.state == OperationState::Succeeded
+            {
+                PublicationState::Committed
+            } else {
+                PublicationState::None
+            },
+            terminal: record.state.is_terminal(),
+            terminal_snapshot: record
+                .state
+                .is_terminal()
+                .then(|| OperationStatusSnapshot::from_record(record)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1237,12 +1419,28 @@ impl OperationMetadataSet {
         publication: rootlight_service::FirstSliceDurableOperation,
         record: &OperationRecord,
     ) -> Result<(), FirstSliceError> {
-        if self.records.len() >= self.maximum
-            || self.records.contains_key(&publication.operation)
-            || record.operation != publication.operation
-            || record.state != OperationState::Succeeded
-        {
+        if record.operation != publication.operation || record.state != OperationState::Succeeded {
             return Err(FirstSliceError::Retention);
+        }
+        if let Some(metadata) = self.records.get_mut(&publication.operation) {
+            if metadata.repository != Some(publication.receipt.repository)
+                || metadata.parent_generation != publication.receipt.parent
+                || metadata.started_unix_ms != publication.started_unix_ms
+            {
+                return Err(FirstSliceError::Retention);
+            }
+            metadata.estimated_disk_bytes = publication.receipt.estimated_disk_bytes;
+            metadata.published_generation = Some(publication.receipt.generation);
+            metadata.receipt = Some(publication.receipt);
+            metadata.peak_rss_bytes = Arc::new(AtomicU64::new(record.peak_rss_bytes));
+            metadata.written_bytes = record.written_bytes;
+            metadata.publication = PublicationState::Committed;
+            metadata.terminal = true;
+            metadata.terminal_snapshot = Some(OperationStatusSnapshot::from_record(record));
+            return Ok(());
+        }
+        if self.records.len() >= self.maximum {
+            return Ok(());
         }
         self.records.insert(
             publication.operation,
@@ -1251,6 +1449,9 @@ impl OperationMetadataSet {
                 repository: Some(publication.receipt.repository),
                 parent_generation: publication.receipt.parent,
                 estimated_disk_bytes: publication.receipt.estimated_disk_bytes,
+                files_examined: publication.receipt.discovered_inputs,
+                bytes_examined: 0,
+                published_generation: Some(publication.receipt.generation),
                 receipt: Some(publication.receipt),
                 peak_rss_bytes: Arc::new(AtomicU64::new(record.peak_rss_bytes)),
                 written_bytes: record.written_bytes,
@@ -1258,6 +1459,37 @@ impl OperationMetadataSet {
                 terminal: true,
                 terminal_snapshot: Some(OperationStatusSnapshot::from_record(record)),
             },
+        );
+        Ok(())
+    }
+
+    fn restore_context(
+        &mut self,
+        context: RepositoryOperationContext,
+        record: &OperationRecord,
+    ) -> Result<(), FirstSliceError> {
+        if self.records.contains_key(&context.operation)
+            || record.operation != context.operation
+            || record.kind != OperationKind::RepositoryIndex
+        {
+            return Err(FirstSliceError::Retention);
+        }
+        if self.records.len() >= self.maximum {
+            if record.state.is_terminal() {
+                return Ok(());
+            }
+            let oldest_terminal = self
+                .records
+                .iter()
+                .filter(|(_, metadata)| metadata.terminal)
+                .min_by_key(|(operation, metadata)| (metadata.started_unix_ms, **operation))
+                .map(|(operation, _)| *operation)
+                .ok_or(FirstSliceError::Retention)?;
+            self.records.remove(&oldest_terminal);
+        }
+        self.records.insert(
+            context.operation,
+            OperationMetadata::from_durable_context(context, record),
         );
         Ok(())
     }
@@ -1294,9 +1526,12 @@ impl OperationMetadataSet {
                 repository,
                 parent_generation: None,
                 estimated_disk_bytes: 0,
+                published_generation: None,
                 receipt: None,
                 peak_rss_bytes: Arc::new(AtomicU64::new(0)),
                 written_bytes: 0,
+                files_examined: 0,
+                bytes_examined: 0,
                 publication: PublicationState::None,
                 terminal: false,
                 terminal_snapshot: None,
@@ -1309,6 +1544,7 @@ impl OperationMetadataSet {
         if let Some(metadata) = self.records.get_mut(&operation) {
             metadata.repository = Some(receipt.repository);
             metadata.parent_generation = receipt.parent;
+            metadata.published_generation = Some(receipt.generation);
             metadata.receipt = Some(receipt);
             metadata.publication = PublicationState::Staged;
         }
@@ -1324,6 +1560,13 @@ impl OperationMetadataSet {
     fn observe_written_bytes(&mut self, operation: OperationId, written_bytes: u64) {
         if let Some(metadata) = self.records.get_mut(&operation) {
             metadata.written_bytes = metadata.written_bytes.max(written_bytes);
+        }
+    }
+
+    fn observe_inputs(&mut self, operation: OperationId, files_examined: u64, bytes_examined: u64) {
+        if let Some(metadata) = self.records.get_mut(&operation) {
+            metadata.files_examined = metadata.files_examined.max(files_examined);
+            metadata.bytes_examined = metadata.bytes_examined.max(bytes_examined);
         }
     }
 
@@ -1385,6 +1628,7 @@ impl OperationMetadataSet {
             return Err(internal_error());
         }
         metadata.receipt = None;
+        metadata.published_generation = None;
         metadata.publication = PublicationState::None;
         Ok(())
     }
@@ -1552,11 +1796,24 @@ fn reconcile_restored_publications(
             return Ok(());
         }
         match runtime.block_on(journal.reconcile_committed_publication(publication.operation)) {
-            Ok(record) => metadata
-                .lock()
-                .map_err(|_| FirstSliceHostError::ThreadPanicked)?
-                .restore_committed(publication, &record)
-                .map_err(FirstSliceHostError::Service)?,
+            Ok(record) => {
+                let deadline = Instant::now()
+                    .checked_add(LIFECYCLE_FINALIZATION_GRACE)
+                    .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
+                match runtime.block_on(journal.record_repository_publication_until(
+                    publication.operation,
+                    publication.receipt.generation,
+                    deadline,
+                )) {
+                    Ok(_) | Err(ServiceError::Operations(OperationError::NotFound)) => {}
+                    Err(error) => return Err(FirstSliceHostError::Journal(error)),
+                }
+                metadata
+                    .lock()
+                    .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+                    .restore_committed(publication, &record)
+                    .map_err(FirstSliceHostError::Service)?;
+            }
             // Durable generation history may legitimately outlive the bounded
             // operation journal, so no status is reconstructed without its
             // original journal identity.
@@ -1666,7 +1923,7 @@ fn semantic_refinement_worker(
             publication_hook: None,
         };
         let mut reply = None;
-        drop(repository_index_with_intent(
+        let result = repository_index_with_intent(
             &lanes,
             resources,
             command.request,
@@ -1675,7 +1932,11 @@ fn semantic_refinement_worker(
             RepositoryIndexIntent::SemanticRefinement {
                 structural_generation: command.structural_generation,
             },
-        ));
+            Some(&command.admitted),
+        );
+        if let Err(error) = result {
+            let _ = command.admitted.try_send(Err(error));
+        }
         if remove_semantic_refinement(&lanes.semantic_refinements, command.operation).is_err() {
             return;
         }
@@ -1824,6 +2085,16 @@ fn write_service(
     service: &RwLock<FirstSliceService>,
 ) -> Result<RwLockWriteGuard<'_, FirstSliceService>, PublicError> {
     service.write().map_err(|_| internal_error())
+}
+
+fn try_write_service(
+    service: &RwLock<FirstSliceService>,
+) -> Result<RwLockWriteGuard<'_, FirstSliceService>, PublicError> {
+    match service.try_write() {
+        Ok(guard) => Ok(guard),
+        Err(TryLockError::WouldBlock) => Err(operation_in_progress()),
+        Err(TryLockError::Poisoned(_)) => Err(internal_error()),
+    }
 }
 
 fn lock_index_serialization(serialization: &Mutex<()>) -> Result<MutexGuard<'_, ()>, PublicError> {
@@ -1996,6 +2267,7 @@ fn repository_index(
         context,
         reply,
         RepositoryIndexIntent::Requested,
+        None,
     )
 }
 
@@ -2012,6 +2284,7 @@ fn repository_index_with_intent(
     context: &FirstSliceIpcContext,
     reply: &mut Option<Reply>,
     intent: RepositoryIndexIntent,
+    admission_ack: Option<&SyncSender<Result<(), PublicError>>>,
 ) -> Result<daemon::RepositoryIndexResponse, PublicError> {
     let service = &lanes.service;
     let index_serialization = &lanes.index_serialization;
@@ -2088,7 +2361,7 @@ fn repository_index_with_intent(
             plan_hasher.update(structural_generation.as_bytes());
         }
     }
-    let submission = OperationSubmission::new(
+    let mut submission = OperationSubmission::new(
         operation,
         OperationKind::RepositoryIndex,
         PlanHash::from_bytes(*plan_hasher.finalize().as_bytes()),
@@ -2107,12 +2380,38 @@ fn repository_index_with_intent(
             // The request deadline is transport-local and is recomputed for a
             // retry. Reuse the durable first submission's deadline while still
             // checking every caller-controlled immutable field.
+            let repository_context = match journal_call(
+                runtime,
+                context.deadline,
+                journal.repository_operation_context(operation),
+            ) {
+                Ok(context) => {
+                    let submission = RepositoryOperationSubmission::new(
+                        context.repository,
+                        context.parent_generation,
+                        context.started_unix_ms,
+                        context.estimated_disk_bytes,
+                        context.mode,
+                    )
+                    .map_err(|error| operation_error(&error, Some(operation)))?;
+                    Some(match context.root_identity {
+                        Some(root_identity) => submission.with_root_identity(root_identity),
+                        None => submission,
+                    })
+                }
+                Err(error) if error.code() == ErrorCode::NotFound => None,
+                Err(error) => return Err(error),
+            };
             let retry = OperationSubmission {
                 deadline_unix_ms: existing.deadline_unix_ms,
                 lease_expires_unix_ms: existing.lease_expires_unix_ms,
+                repository_context,
                 ..submission
             };
             let existing = journal_call(runtime, context.deadline, journal.retry_status(retry))?;
+            if let Some(admitted) = admission_ack {
+                let _ = admitted.try_send(Ok(()));
+            }
             let response = retry_index_response(metadata, existing, mode)?;
             if auto_refinement {
                 return complete_auto_structural_index(
@@ -2137,54 +2436,61 @@ fn repository_index_with_intent(
         cancel_semantic_refinements(semantic_refinements, repository)?;
     }
     let started_unix_ms = unix_time_ms()?;
-    lock_metadata(metadata)?.reserve(operation, started_unix_ms, requested_repository)?;
+    let service_guard = read_service(service)?;
+    let admission = service_guard
+        .admit_rust_fixture(&root, &context.cancellation)
+        .map_err(service_error)?;
+    drop(service_guard);
+    let metadata_admission = match lock_metadata(metadata) {
+        Ok(mut operation_metadata) => operation_metadata
+            .reserve(operation, started_unix_ms, Some(admission.repository))
+            .map(|()| operation_metadata.admit(operation, admission)),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = metadata_admission {
+        read_service(service)?.release_index_admission(admission);
+        return Err(error);
+    }
+    submission = submission
+        .with_repository_context(
+            RepositoryOperationSubmission::new(
+                admission.repository,
+                admission.parent,
+                started_unix_ms,
+                admission.estimated_disk_bytes,
+                if auto_refinement {
+                    RepositoryOperationMode::Auto
+                } else {
+                    repository_operation_mode(mode)
+                },
+            )
+            .unwrap_or_else(|_| unreachable!("wall-clock starts are nonzero"))
+            .with_root_identity(*admission.root_identity.as_bytes()),
+        )
+        .unwrap_or_else(|_| unreachable!("repository context matches the operation kind"));
     let submitted =
         match journal_lifecycle_call(runtime, journal.submit_until(submission, context.deadline)) {
             Ok(submitted) => submitted,
             Err(error) => {
                 lock_metadata(metadata)?.remove_unpublished(operation);
+                read_service(service)?.release_index_admission(admission);
                 return Err(error);
             }
         };
     if !submitted.inserted {
+        if let Some(admitted) = admission_ack {
+            let _ = admitted.try_send(Ok(()));
+        }
         return retry_index_response(metadata, submitted.operation, mode);
     }
     if let Some(admission) = context.index_admission.as_ref() {
         admission.mark_inserted();
     }
+    if let Some(admitted) = admission_ack {
+        let _ = admitted.try_send(Ok(()));
+    }
     let peak_rss_bytes = lock_metadata(metadata)?.resource_meter(operation)?;
     let _rss_sampler = ProcessRssSampler::start(peak_rss_bytes);
-    let service_guard = match read_service(service) {
-        Ok(service_guard) => service_guard,
-        Err(error) => {
-            return reject_index_admission(
-                runtime,
-                lifecycle_deadline,
-                journal,
-                metadata,
-                operation,
-                &context.cancellation,
-                error,
-            );
-        }
-    };
-    let admission = match service_guard.admit_rust_fixture(&root, &context.cancellation) {
-        Ok(admission) => admission,
-        Err(error) => {
-            drop(service_guard);
-            return reject_index_admission(
-                runtime,
-                lifecycle_deadline,
-                journal,
-                metadata,
-                operation,
-                &context.cancellation,
-                service_error(error),
-            );
-        }
-    };
-    drop(service_guard);
-    lock_metadata(metadata)?.admit(operation, admission);
     if let Some(state) = lanes.support_state.as_deref() {
         state.record_repository_index_context(
             operation,
@@ -2253,6 +2559,60 @@ fn repository_index_with_intent(
         }
         let mut progress_failure = None;
         let preparation = {
+            let mut observe_progress = |observed: FirstSliceIndexProgress| {
+                if progress_failure.is_some() {
+                    return;
+                }
+                let progress = match operation_progress(observed) {
+                    Ok(progress) => progress,
+                    Err(error) => {
+                        progress_failure = Some(error);
+                        return;
+                    }
+                };
+                if let Err(error) = journal_lifecycle_call(
+                    runtime,
+                    journal.update_progress_until(operation, progress, lifecycle_deadline),
+                ) {
+                    progress_failure = Some(error);
+                    return;
+                }
+                match lock_metadata(metadata) {
+                    Ok(mut metadata) => metadata.observe_inputs(
+                        operation,
+                        observed.files_examined,
+                        observed.bytes_examined,
+                    ),
+                    Err(error) => {
+                        progress_failure = Some(error);
+                        return;
+                    }
+                }
+                if let Err(error) = journal_lifecycle_call(
+                    runtime,
+                    journal.update_repository_observation_until(
+                        operation,
+                        observed.files_examined,
+                        observed.bytes_examined,
+                        lifecycle_deadline,
+                    ),
+                ) {
+                    progress_failure = Some(error);
+                    return;
+                }
+                if observed.written_bytes > 0
+                    && let Err(error) = persist_operation_resources(
+                        runtime,
+                        lifecycle_deadline,
+                        journal,
+                        metadata,
+                        operation,
+                        observed.written_bytes,
+                    )
+                {
+                    progress_failure = Some(error);
+                }
+            };
             let service = read_service(service)?;
             match intent {
                 RepositoryIndexIntent::Requested => service
@@ -2260,34 +2620,16 @@ fn repository_index_with_intent(
                         &root,
                         mode,
                         &cancellation,
-                        |observed| {
-                            if progress_failure.is_some() {
-                                return;
-                            }
-                            let progress = match operation_progress(observed) {
-                                Ok(progress) => progress,
-                                Err(error) => {
-                                    progress_failure = Some(error);
-                                    return;
-                                }
-                            };
-                            if let Err(error) = journal_lifecycle_call(
-                                runtime,
-                                journal.update_progress_until(
-                                    operation,
-                                    progress,
-                                    lifecycle_deadline,
-                                ),
-                            ) {
-                                progress_failure = Some(error);
-                            }
-                        },
+                        &mut observe_progress,
                     ),
                 RepositoryIndexIntent::SemanticRefinement {
                     structural_generation,
-                } => {
-                    service.prepare_semantic_refinement(&root, structural_generation, &cancellation)
-                }
+                } => service.prepare_semantic_refinement_with_progress(
+                    &root,
+                    structural_generation,
+                    &cancellation,
+                    &mut observe_progress,
+                ),
             }
         };
         if let Some(error) = progress_failure {
@@ -2368,10 +2710,18 @@ fn repository_index_with_intent(
                         Some(guard)
                     }
                 };
-                let staged = match write_service(service)?.stage_prepared(prepared, &cancellation) {
+                let staged = match try_write_service(service).and_then(|mut service| {
+                    service
+                        .stage_prepared(prepared, &cancellation)
+                        .map_err(service_error)
+                }) {
                     Ok(staged) => staged,
                     Err(error) => {
-                        let public = service_error(error);
+                        let public = if error.code() == ErrorCode::Busy {
+                            index_admission_in_progress(operation)
+                        } else {
+                            error
+                        };
                         finish_failed_index(
                             runtime,
                             lifecycle_deadline,
@@ -2604,6 +2954,26 @@ fn repository_index_with_intent(
                     )
                     .unwrap_or(operation_record),
                 };
+                let publication_deadline = fresh_lifecycle_deadline(lifecycle_deadline)?;
+                let publication_projection = journal_lifecycle_call(
+                    runtime,
+                    journal.record_repository_publication_until(
+                        operation,
+                        receipt.generation,
+                        publication_deadline,
+                    ),
+                );
+                if publication_projection.is_err() {
+                    let retry_deadline = fresh_lifecycle_deadline(lifecycle_deadline)?;
+                    let _ = journal_lifecycle_call(
+                        runtime,
+                        journal.record_repository_publication_until(
+                            operation,
+                            receipt.generation,
+                            retry_deadline,
+                        ),
+                    );
+                }
                 let mut metadata = lock_metadata(metadata)?;
                 metadata.observe_terminal(&operation_record);
                 metadata.commit(operation)?;
@@ -2632,7 +3002,9 @@ fn repository_index_with_intent(
         }
     })();
     if result.is_err() {
-        read_service(service)?.release_index_admission(admission.repository);
+        read_service(service)?
+            .restore_repository_registration(admission.root_identity, admission.repository)
+            .map_err(service_error)?;
     }
     match result {
         Ok(response) if auto_refinement => complete_auto_structural_index(
@@ -2653,7 +3025,7 @@ fn complete_auto_structural_index(
     operation: OperationId,
     context: &FirstSliceIpcContext,
     reply: &mut Option<Reply>,
-    response: daemon::RepositoryIndexResponse,
+    mut response: daemon::RepositoryIndexResponse,
     semantic_refinements: &SemanticRefinements,
     refinement: &SyncSender<SemanticRefinementCommand>,
 ) -> Result<daemon::RepositoryIndexResponse, PublicError> {
@@ -2676,6 +3048,7 @@ fn complete_auto_structural_index(
         effective_budget: context.effective_budget,
         index_admission: None,
     };
+    let (admitted, admission) = mpsc::sync_channel(1);
     let command = SemanticRefinementCommand {
         request: daemon::RepositoryIndexRequest {
             schema_version: Some(schema_version()),
@@ -2688,7 +3061,9 @@ fn complete_auto_structural_index(
         operation: semantic_operation,
         repository,
         structural_generation,
+        admitted,
     };
+    let mut scheduled = false;
     if register_semantic_refinement(
         semantic_refinements,
         semantic_operation,
@@ -2696,16 +3071,24 @@ fn complete_auto_structural_index(
         cancellation,
     )? {
         match refinement.try_send(command) {
-            Ok(()) => {}
+            Ok(()) => {
+                scheduled = true;
+            }
             Err(TrySendError::Full(_)) => {
                 remove_semantic_refinement(semantic_refinements, semantic_operation)?;
-                return Err(operation_in_progress());
             }
             Err(TrySendError::Disconnected(_)) => {
                 remove_semantic_refinement(semantic_refinements, semantic_operation)?;
-                return Err(internal_error());
             }
         }
+    }
+    if scheduled
+        && matches!(
+            admission.recv_timeout(REFINEMENT_ADMISSION_WAIT),
+            Ok(Ok(()))
+        )
+    {
+        response.semantic_operation = Some(operation_to_wire(semantic_operation));
     }
 
     // The bounded refinement lane now owns the expensive follow-up. Queries
@@ -2832,6 +3215,7 @@ fn propagate_peer_cancellation(
     }
 }
 
+#[cfg(test)]
 fn reject_index_admission(
     runtime: &tokio::runtime::Runtime,
     deadline: Instant,
@@ -2875,6 +3259,7 @@ fn reject_index_admission(
     }
 }
 
+#[cfg(test)]
 fn reject_activated_index_admission(
     runtime: &tokio::runtime::Runtime,
     deadline: Instant,
@@ -2900,6 +3285,7 @@ fn reject_activated_index_admission(
     ))
 }
 
+#[cfg(test)]
 fn rejected_index_response_error(
     record: &OperationRecord,
     local_reason: Option<CancellationReason>,
@@ -3120,6 +3506,7 @@ fn pending_index_response(
         estimated_disk_bytes,
         diagnostics: Vec::new(),
         mode: repository_index_mode_to_wire(mode) as i32,
+        semantic_operation: None,
     }
 }
 
@@ -3150,6 +3537,7 @@ fn index_response(
             })
             .collect(),
         mode: repository_index_mode_to_wire(mode) as i32,
+        semantic_operation: None,
     }
 }
 
@@ -3191,11 +3579,17 @@ fn repository_operation_status(
     if record.kind != OperationKind::RepositoryIndex {
         return Err(not_found());
     }
-    let metadata = lock_metadata(metadata)?
-        .records
-        .get(&operation)
-        .cloned()
-        .ok_or_else(unsupported_restart_state)?;
+    let metadata = match lock_metadata(metadata)?.records.get(&operation).cloned() {
+        Some(metadata) => metadata,
+        None => {
+            let durable_context = journal_call(
+                runtime,
+                context.deadline,
+                journal.repository_operation_context(operation),
+            )?;
+            OperationMetadata::from_durable_context(durable_context, &record)
+        }
+    };
     if metadata.publication == PublicationState::FailedClosed {
         // Journal success closes the cancellation race before the process-local
         // generation commit. A later commit failure cannot rewrite that durable
@@ -3212,11 +3606,11 @@ fn repository_operation_status(
             started_unix_ms: metadata.started_unix_ms,
             peak_rss_bytes,
             written_bytes,
-            files_examined: metadata
-                .receipt
-                .as_ref()
-                .map_or(0, |receipt| receipt.discovered_inputs),
+            files_examined: metadata.files_examined,
             retry_after_ms: None,
+            bytes_examined: metadata.bytes_examined,
+            index_stage: repository_operation_stage(&visible).to_owned(),
+            semantic_operation: None,
         });
     }
     let published_generation = if record.state == OperationState::Succeeded {
@@ -3229,15 +3623,46 @@ fn repository_operation_status(
         }
         Some(
             metadata
-                .receipt
-                .as_ref()
-                .ok_or_else(internal_error)?
-                .generation,
+                .published_generation
+                .or_else(|| metadata.receipt.as_ref().map(|receipt| receipt.generation))
+                .ok_or_else(internal_error)?,
         )
     } else {
         None
     };
     let (peak_rss_bytes, written_bytes) = public_operation_resources(&record, &metadata);
+    let semantic_operation = if record.state == OperationState::Succeeded {
+        let repository_context = match journal_call(
+            runtime,
+            context.deadline,
+            journal.repository_operation_context(operation),
+        ) {
+            Ok(context) => Some(context),
+            Err(error) if error.code() == ErrorCode::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if repository_context.is_some_and(|context| context.mode == RepositoryOperationMode::Auto) {
+            let candidate = semantic_refinement_operation(operation);
+            match journal_call(
+                runtime,
+                context.deadline,
+                journal.control(ControlRequest::OperationStatus(candidate)),
+            ) {
+                Ok(ControlResponse::OperationStatus(child))
+                    if child.kind == OperationKind::RepositoryIndex =>
+                {
+                    Some(candidate)
+                }
+                Ok(ControlResponse::OperationStatus(_)) | Ok(_) => return Err(internal_error()),
+                Err(error) if error.code() == ErrorCode::NotFound => None,
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     Ok(daemon::RepositoryOperationStatusResponse {
         schema_version: Some(schema_version()),
         operation: Some(operation_record_to_wire(&record)),
@@ -3245,12 +3670,27 @@ fn repository_operation_status(
         started_unix_ms: metadata.started_unix_ms,
         peak_rss_bytes,
         written_bytes,
-        files_examined: metadata
-            .receipt
-            .as_ref()
-            .map_or(0, |receipt| receipt.discovered_inputs),
+        files_examined: metadata.files_examined,
         retry_after_ms: (!record.state.is_terminal()).then_some(RETRY_AFTER_MS),
+        bytes_examined: metadata.bytes_examined,
+        index_stage: repository_operation_stage(&record).to_owned(),
+        semantic_operation: semantic_operation.map(operation_to_wire),
     })
+}
+
+const fn repository_operation_stage(record: &OperationRecord) -> &'static str {
+    if matches!(record.state, OperationState::Succeeded) {
+        return "complete";
+    }
+    match record.progress.completed {
+        0 => "discovery",
+        1 => "snapshot",
+        2 => "analysis",
+        3 => "merge",
+        4 => "persistence",
+        5 => "search",
+        _ => "search",
+    }
 }
 
 fn public_operation_resources(
@@ -6111,6 +6551,24 @@ const fn first_slice_index_provider(mode: FirstSliceIndexMode) -> FirstSliceInde
     }
 }
 
+const fn repository_operation_mode(mode: FirstSliceIndexMode) -> RepositoryOperationMode {
+    match mode {
+        FirstSliceIndexMode::Structural => RepositoryOperationMode::Structural,
+        FirstSliceIndexMode::Deep => RepositoryOperationMode::Deep,
+    }
+}
+
+const fn repository_operation_support_provider(
+    mode: RepositoryOperationMode,
+) -> RepositoryIndexProvider {
+    match mode {
+        RepositoryOperationMode::Auto | RepositoryOperationMode::Structural => {
+            RepositoryIndexProvider::TreeSitter
+        }
+        RepositoryOperationMode::Deep => RepositoryIndexProvider::ProjectAnalyzer,
+    }
+}
+
 const fn repository_index_support_provider(
     provider: FirstSliceIndexProvider,
 ) -> RepositoryIndexProvider {
@@ -6139,13 +6597,22 @@ fn repository_status_error(
     let FirstSliceError::GenerationNotFound = error else {
         return service_error(error);
     };
-    let mut builder =
-        PublicError::builder(ErrorCode::StaleGeneration, "generation is not retained")
-            .repository(repository)
-            .next_action(NextAction::RestartEnumeration);
-    if let Some(generation) = selected {
-        builder = builder.generation(generation);
-    }
+    let builder = match selected {
+        Some(generation) => {
+            PublicError::builder(ErrorCode::StaleGeneration, "generation is not retained")
+                .repository(repository)
+                .generation(generation)
+                .next_action(NextAction::RestartEnumeration)
+        }
+        None => PublicError::builder(
+            ErrorCode::StaleGeneration,
+            "repository has no published generation",
+        )
+        .repository(repository)
+        .retryable()
+        .next_action(NextAction::InspectOperation)
+        .next_action(NextAction::Retry),
+    };
     builder
         .build()
         .unwrap_or_else(|_| unreachable!("repository status errors are statically bounded"))
@@ -6231,7 +6698,6 @@ fn operation_in_progress() -> PublicError {
         .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
 }
 
-#[cfg(test)]
 fn index_admission_in_progress(operation: OperationId) -> PublicError {
     PublicError::builder(ErrorCode::Busy, "repository index is still running")
         .retryable()
@@ -6633,19 +7099,20 @@ mod tests {
     fn project_partition_buffer_batches_small_files_for_large_repositories() {
         let mut buffer =
             ProjectPartitionBuffer::new(128, 8, usize::MAX).expect("partition buffer initializes");
-        for file_byte in 0_u8..u8::try_from(PROJECT_ADAPTER_PARTITION_FILES)
-            .expect("partition file limit fits one test byte")
-        {
+        for file_index in 0..PROJECT_ADAPTER_PARTITION_FILES {
+            let encoded = u16::try_from(file_index)
+                .expect("partition fixture index fits")
+                .to_le_bytes();
+            let file_id = encoded.repeat(10);
+            let source_digest = encoded.repeat(16);
             assert!(
                 buffer
                     .try_push(adapter::ProjectInput {
-                        file: Some(common::FileId {
-                            value: vec![file_byte; 20],
-                        }),
-                        path: format!("src/{file_byte}.ts"),
+                        file: Some(common::FileId { value: file_id }),
+                        path: format!("src/{file_index}.ts"),
                         language: "typescript".to_owned(),
                         source_digest: Some(common::ContentHash {
-                            value: vec![file_byte; 32],
+                            value: source_digest,
                         }),
                         source: b"export const value = 1;\n".to_vec(),
                         generated: false,
@@ -6819,6 +7286,17 @@ mod tests {
             daemon::RepositoryIndexMode::RepositoryIndexStructural as i32
         );
         assert!(response.published_generation.is_some());
+        assert!(
+            response.semantic_operation.is_none(),
+            "the parent cannot advertise a child before durable child admission"
+        );
+        assert_eq!(
+            journal
+                .repository_operation_context(operation)
+                .expect("auto operation context persists")
+                .mode,
+            RepositoryOperationMode::Auto
+        );
         let delivered = runtime
             .block_on(reply_receiver)
             .expect("structural response is delivered")
@@ -6914,6 +7392,7 @@ mod tests {
             RepositoryIndexIntent::SemanticRefinement {
                 structural_generation: refinement.structural_generation,
             },
+            None,
         ));
         assert_eq!(calls.load(AtomicOrdering::Relaxed), 1);
         assert_eq!(
@@ -6923,16 +7402,122 @@ mod tests {
                 .state,
             OperationState::Succeeded
         );
+        let semantic_operation = semantic_refinement_operation(operation);
+        let semantic_record = journal
+            .status(semantic_operation)
+            .expect("semantic operation remains queryable");
+        assert_eq!(semantic_record.state, OperationState::Failed);
+        assert!(semantic_record.progress.completed > 0);
+        assert_eq!(semantic_record.progress.total, 6);
+        let semantic_context = journal
+            .repository_operation_context(semantic_operation)
+            .expect("semantic operation observations remain queryable");
+        assert!(semantic_context.files_examined > 0);
+        assert!(semantic_context.bytes_examined > 0);
+        let status = repository_operation_status(
+            &handle,
+            &metadata,
+            &runtime,
+            daemon::RepositoryOperationStatusRequest {
+                schema_version: Some(schema_version()),
+                operation: Some(operation_to_wire(operation)),
+                action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                wait_ms: None,
+                after_revision: None,
+            },
+            &context,
+        )
+        .expect("parent status is available");
         assert_eq!(
-            journal
-                .status(semantic_refinement_operation(operation))
-                .expect("semantic operation remains queryable")
-                .state,
-            OperationState::Failed
+            parse_operation(status.semantic_operation.as_ref())
+                .expect("durably admitted semantic child is exposed"),
+            semantic_refinement_operation(operation)
         );
 
         drop(handle);
         actor.join().expect("journal actor joins");
+        drop(journal);
+        let reopened = OperationJournal::open(&paths.operation_journal_path())
+            .expect("operation journal reopens");
+        let recovered = reopened
+            .status(semantic_operation)
+            .expect("semantic progress survives restart");
+        assert_eq!(recovered.progress, semantic_record.progress);
+        let recovered_context = reopened
+            .repository_operation_context(semantic_operation)
+            .expect("semantic resource observations survive restart");
+        assert_eq!(
+            (
+                recovered_context.files_examined,
+                recovered_context.bytes_examined
+            ),
+            (
+                semantic_context.files_examined,
+                semantic_context.bytes_examined
+            )
+        );
+    }
+
+    #[test]
+    fn full_refinement_queue_preserves_the_published_structural_response() {
+        let repository = RepositoryId::from_bytes([31; 16]);
+        let generation = GenerationId::from_bytes([32; 20]);
+        let operation = OperationId::from_bytes([33; 16]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::from_bytes([34; 16]),
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation: Cancellation::with_deadline(deadline),
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+        let (refinement, receiver) = mpsc::sync_channel(1);
+        let (occupied_admitted, _occupied_admission) = mpsc::sync_channel(1);
+        refinement
+            .try_send(SemanticRefinementCommand {
+                request: daemon::RepositoryIndexRequest::default(),
+                context: context.clone(),
+                operation: OperationId::from_bytes([35; 16]),
+                repository,
+                structural_generation: generation,
+                admitted: occupied_admitted,
+            })
+            .expect("refinement queue is occupied");
+        let response = daemon::RepositoryIndexResponse {
+            repository: Some(repository_to_wire(repository)),
+            operation: Some(operation_to_wire(operation)),
+            state: daemon::OperationState::Succeeded as i32,
+            published_generation: Some(generation_to_wire(generation)),
+            mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
+            ..daemon::RepositoryIndexResponse::default()
+        };
+        let semantic_refinements = Arc::new(Mutex::new(BTreeMap::new()));
+        let mut reply = None;
+
+        let completed = complete_auto_structural_index(
+            "repository",
+            operation,
+            &context,
+            &mut reply,
+            response.clone(),
+            &semantic_refinements,
+            &refinement,
+        )
+        .expect("queue pressure cannot replace structural success");
+
+        assert_eq!(
+            completed.published_generation,
+            response.published_generation
+        );
+        assert!(completed.semantic_operation.is_none());
+        assert!(
+            semantic_refinements
+                .lock()
+                .expect("refinement metadata locks")
+                .is_empty()
+        );
+        drop(receiver);
     }
 
     #[test]
@@ -7159,6 +7744,189 @@ mod tests {
             panic!("code locate response expected");
         };
         assert_eq!(located.hits.len(), 1);
+
+        drop(daemon);
+        runtime
+            .block_on(workers.stop(tokio::time::Instant::now() + Duration::from_secs(5)))
+            .expect("workers stop");
+        actor.join().expect("journal actor joins");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn durable_unpublished_repository_operation_remains_queryable_after_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn restarted_answer() -> u32 { 42 }\n",
+        )
+        .expect("fixture source writes");
+        let admission = {
+            let cancellation =
+                Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+            FirstSliceService::new_durable(
+                DEFAULT_GENERATION_RETENTION,
+                paths.state_dir(),
+                &cancellation,
+            )
+            .expect("durable service initializes")
+            .admit_repository(fixture.path(), &cancellation)
+            .expect("repository registration is reserved")
+        };
+        let operation = OperationId::from_bytes([78; 16]);
+        let repository = admission.repository;
+        {
+            let journal = OperationJournal::open(&paths.operation_journal_path())
+                .expect("persistent journal opens");
+            let submission = OperationSubmission::new(
+                operation,
+                OperationKind::RepositoryIndex,
+                PlanHash::from_bytes([78; 32]),
+                ClientInstanceId::from_bytes([78; 16]),
+                true,
+                None,
+                None,
+            )
+            .expect("operation submission is valid")
+            .with_repository_context(
+                RepositoryOperationSubmission::new(
+                    repository,
+                    None,
+                    1_700_000_000_000,
+                    128 * 1024 * 1024,
+                    RepositoryOperationMode::Structural,
+                )
+                .expect("repository context is valid")
+                .with_root_identity(*admission.root_identity.as_bytes()),
+            )
+            .expect("repository context attaches");
+            journal.submit(submission).expect("operation submits");
+            journal
+                .start_execution(operation)
+                .expect("operation starts");
+            journal
+                .update_progress(operation, Progress::new(2, 6).expect("progress is valid"))
+                .expect("progress persists");
+            journal
+                .update_repository_observation(operation, 12, 4_096)
+                .expect("input observations persist");
+            journal
+                .update_resources(operation, 64 * 1024 * 1024, 8_192)
+                .expect("resource observations persist");
+        }
+
+        let journal = Arc::new(
+            OperationJournal::open(&paths.operation_journal_path())
+                .expect("persistent journal reopens"),
+        );
+        let interrupted = journal.status(operation).expect("recovered status loads");
+        assert_eq!(interrupted.state, OperationState::Interrupted);
+        assert_eq!(
+            interrupted.recovery_class,
+            RecoveryClass::InterruptedByRestart
+        );
+        let actor =
+            JournalActor::start(Arc::clone(&journal), 16, 16).expect("journal actor starts");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let (daemon, workers) = runtime
+            .block_on(FirstSliceDaemon::start_durable(
+                actor.handle(),
+                paths.state_dir(),
+                Arc::new(DaemonState::starting()),
+                None,
+            ))
+            .expect("daemon restores unpublished operation context");
+
+        let status = execute(
+            &daemon,
+            FirstSliceIpcRequest::RepositoryOperationStatus(
+                daemon::RepositoryOperationStatusRequest {
+                    schema_version: Some(schema_version()),
+                    operation: Some(operation_to_wire(operation)),
+                    action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                    wait_ms: None,
+                    after_revision: None,
+                },
+            ),
+        );
+        let FirstSliceIpcResponse::RepositoryOperationStatus(status) = status else {
+            panic!("repository operation status response expected");
+        };
+        let visible = status.operation.expect("operation remains visible");
+        assert_eq!(visible.state, daemon::OperationState::Interrupted as i32);
+        assert_eq!(status.started_unix_ms, 1_700_000_000_000);
+        assert_eq!(status.peak_rss_bytes, 64 * 1024 * 1024);
+        assert_eq!(status.written_bytes, 8_192);
+        assert_eq!(status.files_examined, 12);
+        assert_eq!(status.bytes_examined, 4_096);
+        assert_eq!(status.index_stage, "analysis");
+        assert!(status.published_generation.is_none());
+        assert!(status.semantic_operation.is_none());
+
+        let catalog = execute(
+            &daemon,
+            FirstSliceIpcRequest::RepositoryCatalogPage(catalog_request(
+                20,
+                true,
+                vec!["indexing"],
+                None,
+                None,
+            )),
+        );
+        let FirstSliceIpcResponse::RepositoryCatalogPage(catalog) = catalog else {
+            panic!("repository catalog response expected");
+        };
+        let [cataloged] = catalog.repositories.as_slice() else {
+            panic!("one restored unpublished registration is expected");
+        };
+        assert_eq!(
+            parse_repository(cataloged.repository.as_ref()).expect("repository identity decodes"),
+            repository
+        );
+        assert_eq!(cataloged.state, "indexing");
+        assert!(cataloged.active_generation.is_none());
+
+        let pending_status = execute_with_timeout(
+            &daemon,
+            FirstSliceIpcRequest::RepositoryStatus(status_request(repository, None)),
+        )
+        .expect_err("unpublished repository has no generation status yet");
+        assert_eq!(pending_status.code(), ErrorCode::StaleGeneration);
+        assert_eq!(pending_status.repository(), Some(repository));
+        assert_eq!(
+            pending_status.next_actions(),
+            &[NextAction::InspectOperation, NextAction::Retry]
+        );
+
+        let resumed = execute(
+            &daemon,
+            FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root: fixture.path().to_string_lossy().into_owned(),
+                operation: Some(operation_to_wire(OperationId::from_bytes([76; 16]))),
+                detached: false,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
+            }),
+        );
+        let FirstSliceIpcResponse::RepositoryIndex(resumed) = resumed else {
+            panic!("repository index response expected");
+        };
+        assert_eq!(
+            parse_repository(resumed.repository.as_ref())
+                .expect("restored repository registration maps"),
+            repository
+        );
+        assert!(resumed.published_generation.is_some());
 
         drop(daemon);
         runtime
@@ -8370,6 +9138,55 @@ mod tests {
     }
 
     #[test]
+    fn startup_context_restore_bounds_terminal_metadata_without_failure() {
+        fn retained_operation(index: u16) -> OperationId {
+            let mut bytes = [0_u8; 16];
+            bytes[..2].copy_from_slice(&index.to_be_bytes());
+            OperationId::from_bytes(bytes)
+        }
+
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let repository = RepositoryId::from_bytes([62; 16]);
+        for index in 1_u16..=257 {
+            let operation = retained_operation(index);
+            let submission = repository_submission(operation, 62)
+                .with_repository_context(
+                    RepositoryOperationSubmission::new(
+                        repository,
+                        None,
+                        1_700_000_000_000 + u64::from(index),
+                        64 * 1024 * 1024,
+                        RepositoryOperationMode::Structural,
+                    )
+                    .expect("repository context is valid")
+                    .with_root_identity([63; 32]),
+                )
+                .expect("repository context attaches");
+            journal.submit(submission).expect("operation submits");
+            journal
+                .interrupt_deadline(operation)
+                .expect("operation becomes terminal");
+        }
+
+        let mut metadata = OperationMetadataSet::new(DEFAULT_OPERATION_METADATA);
+        for context in journal
+            .repository_operation_contexts()
+            .expect("startup contexts load")
+        {
+            let record = journal
+                .status(context.operation)
+                .expect("startup operation status loads");
+            metadata
+                .restore_context(context, &record)
+                .expect("bounded startup restore cannot fail on terminal history");
+        }
+
+        assert_eq!(metadata.records.len(), DEFAULT_OPERATION_METADATA);
+        assert!(metadata.records.contains_key(&retained_operation(257)));
+        assert!(!metadata.records.contains_key(&retained_operation(1)));
+    }
+
+    #[test]
     fn deferred_recovery_keeps_catalog_reads_and_lifecycle_failures_bounded() {
         let service = Arc::new(RwLock::new(
             FirstSliceService::new(DEFAULT_GENERATION_RETENTION)
@@ -8523,7 +9340,7 @@ mod tests {
         )
         .expect_err("contended admission is rejected");
         assert!(
-            started.elapsed() < Duration::from_millis(500),
+            started.elapsed() < LIFECYCLE_FINALIZATION_GRACE,
             "contended admission queued behind the read lock"
         );
         assert_eq!(error.code(), ErrorCode::Busy);
@@ -8562,7 +9379,7 @@ mod tests {
         )
         .expect("read lane remains responsive after rejected admission");
         assert!(
-            read_started.elapsed() < Duration::from_millis(500),
+            read_started.elapsed() < LIFECYCLE_FINALIZATION_GRACE,
             "rejected admission left a writer queued"
         );
         assert!(matches!(
@@ -9674,7 +10491,8 @@ mod tests {
             daemon::OperationState::Succeeded as i32
         );
         assert!(status.published_generation.is_some());
-        assert_eq!(status.files_examined, 1);
+        assert_eq!(status.files_examined, 2);
+        assert!(status.bytes_examined > 0);
         let generation = status
             .published_generation
             .clone()
@@ -10242,6 +11060,75 @@ mod tests {
         )
         .expect_err("missing receipt fails closed");
         assert_eq!(error.code(), ErrorCode::Internal);
+        actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn succeeded_status_reloads_published_generation_after_metadata_eviction() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = OperationId::from_bytes([56; 16]);
+        let repository = RepositoryId::from_bytes([57; 16]);
+        let generation = GenerationId::from_bytes([58; 20]);
+        let submission = repository_submission(operation, 56)
+            .with_repository_context(
+                RepositoryOperationSubmission::new(
+                    repository,
+                    None,
+                    1_700_000_000_056,
+                    64 * 1024 * 1024,
+                    RepositoryOperationMode::Structural,
+                )
+                .expect("repository context is valid")
+                .with_root_identity([59; 32]),
+            )
+            .expect("repository context attaches");
+        journal
+            .submit(submission)
+            .expect("repository operation submits");
+        journal
+            .start_execution(operation)
+            .expect("repository operation starts");
+        journal
+            .complete_repository_publication(operation)
+            .expect("publication succeeds");
+        journal
+            .record_repository_publication(operation, generation)
+            .expect("published generation projects durably");
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        let status = repository_operation_status(
+            &actor.handle(),
+            &Mutex::new(OperationMetadataSet::new(1)),
+            &runtime,
+            daemon::RepositoryOperationStatusRequest {
+                schema_version: Some(schema_version()),
+                operation: Some(operation_to_wire(operation)),
+                action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                after_revision: None,
+                wait_ms: None,
+            },
+            &FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::from_bytes([56; 16]),
+                selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+                cancellation: Cancellation::with_deadline(deadline),
+                deadline,
+                effective_budget: None,
+                index_admission: None,
+            },
+        )
+        .expect("durable context reconstructs evicted status");
+
+        assert_eq!(
+            parse_generation(status.published_generation.as_ref())
+                .expect("published generation is retained"),
+            generation
+        );
+        assert_eq!(status.started_unix_ms, 1_700_000_000_056);
         actor.join().expect("actor joins");
     }
 

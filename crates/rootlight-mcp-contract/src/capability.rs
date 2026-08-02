@@ -1788,7 +1788,12 @@ mod tests {
         assert!(
             CAPABILITIES
                 .iter()
-                .filter(|entry| entry.tool != McpTool::RepoList)
+                .filter(|entry| {
+                    !matches!(
+                        entry.tool,
+                        McpTool::RepoList | McpTool::RepoIndex | McpTool::OperationStatus
+                    )
+                })
                 .all(|entry| entry.contract_version == crate::MCP_SCHEMA_VERSION)
         );
     }
