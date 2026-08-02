@@ -1,0 +1,28 @@
+[package]
+name = "rootlight-web"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+data-encoding.workspace = true
+getrandom.workspace = true
+mime_guess.workspace = true
+rootlight-client = { path = "../../crates/rootlight-client" }
+rootlight-runtime = { path = "../../crates/rootlight-runtime" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

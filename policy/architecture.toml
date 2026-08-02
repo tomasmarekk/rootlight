@@ -5,6 +5,7 @@ workspace_members = [
   "rootlight-mcp",
   "rootlight-adapter-host",
   "rootlight-semantic-host",
+  "rootlight-web",
   "rootlight-adapter-sdk",
   "rootlight-adapter-treesitter",
   "rootlight-adapters",
@@ -97,6 +98,14 @@ allowed_internal_dependencies = [
   "rootlight-cancel",
   "rootlight-ids",
   "rootlight-semantic",
+]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-web"
+allowed_internal_dependencies = [
+  "rootlight-client",
+  "rootlight-runtime",
 ]
 allow_build_script = false
 
