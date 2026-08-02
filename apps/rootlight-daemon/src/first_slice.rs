@@ -96,6 +96,7 @@ const DEFAULT_OPERATION_METADATA: usize = 256;
 const RETRY_AFTER_MS: u32 = 100;
 const MAX_OPERATION_STATUS_WAIT_MS: u32 = 30_000;
 const OPERATION_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const PUBLICATION_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(2);
 // The public client timeout is also 30 seconds. Leave enough time after a
 // maximum long poll for serialization, IPC scheduling, and client decoding.
 const OPERATION_STATUS_RESPONSE_GRACE: Duration = Duration::from_secs(2);
@@ -2015,7 +2016,6 @@ fn execute_service_request(
     }
     let request = match request {
         FirstSliceIpcRequest::RepositoryIndex(request) => {
-            let _index = try_lock_index_serialization(&lanes.index_serialization)?;
             return repository_index(lanes, resources, request, &context, reply)
                 .map(FirstSliceIpcResponse::RepositoryIndex);
         }
@@ -2098,27 +2098,82 @@ fn write_service(
     service.write().map_err(|_| internal_error())
 }
 
-fn try_write_service(
-    service: &RwLock<FirstSliceService>,
-) -> Result<RwLockWriteGuard<'_, FirstSliceService>, PublicError> {
-    match service.try_write() {
-        Ok(guard) => Ok(guard),
-        Err(TryLockError::WouldBlock) => Err(operation_in_progress()),
-        Err(TryLockError::Poisoned(_)) => Err(internal_error()),
-    }
+fn lock_publication_until<'a>(
+    serialization: &'a Mutex<()>,
+    service: &'a RwLock<FirstSliceService>,
+    cancellation: &Cancellation,
+    deadline: Instant,
+) -> Result<(MutexGuard<'a, ()>, RwLockWriteGuard<'a, FirstSliceService>), PublicError> {
+    let serialization = loop {
+        cancellation
+            .check()
+            .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
+        match serialization.try_lock() {
+            Ok(guard) => break guard,
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::park_timeout(PUBLICATION_LOCK_POLL_INTERVAL);
+            }
+            Err(TryLockError::WouldBlock) => return Err(operation_in_progress()),
+            Err(TryLockError::Poisoned(_)) => return Err(internal_error()),
+        }
+    };
+    let service = loop {
+        cancellation
+            .check()
+            .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
+        match service.try_write() {
+            Ok(guard) => break guard,
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                // Preparation readers never acquire the publication mutex until
+                // after releasing their read guard, so bounded polling here
+                // preserves the prepared candidate without creating a lock cycle.
+                thread::park_timeout(PUBLICATION_LOCK_POLL_INTERVAL);
+            }
+            Err(TryLockError::WouldBlock) => return Err(operation_in_progress()),
+            Err(TryLockError::Poisoned(_)) => return Err(internal_error()),
+        }
+    };
+    Ok((serialization, service))
 }
 
-fn lock_index_serialization(serialization: &Mutex<()>) -> Result<MutexGuard<'_, ()>, PublicError> {
-    serialization.lock().map_err(|_| internal_error())
+fn retry_after() -> Duration {
+    Duration::from_millis(u64::from(RETRY_AFTER_MS))
 }
 
-fn try_lock_index_serialization(
-    serialization: &Mutex<()>,
-) -> Result<MutexGuard<'_, ()>, PublicError> {
-    match serialization.try_lock() {
-        Ok(guard) => Ok(guard),
-        Err(TryLockError::WouldBlock) => Err(operation_in_progress()),
-        Err(TryLockError::Poisoned(_)) => Err(internal_error()),
+fn operation_in_progress() -> PublicError {
+    PublicError::builder(ErrorCode::Busy, "repository index is still running")
+        .retry_after(retry_after())
+        .next_action(NextAction::Retry)
+        .build()
+        .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
+}
+
+fn index_admission_in_progress(operation: OperationId) -> PublicError {
+    PublicError::builder(ErrorCode::Busy, "repository index is still running")
+        .retry_after(retry_after())
+        .operation(operation)
+        .next_action(NextAction::InspectOperation)
+        .next_action(NextAction::Retry)
+        .build()
+        .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
+}
+
+fn recovery_in_progress() -> PublicError {
+    PublicError::builder(
+        ErrorCode::Busy,
+        "durable repository recovery is still running",
+    )
+    .retry_after(retry_after())
+    .next_action(NextAction::Retry)
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
+}
+
+fn publication_error(operation: OperationId, error: PublicError) -> PublicError {
+    if error.code() == ErrorCode::Busy {
+        index_admission_in_progress(operation)
+    } else {
+        error
     }
 }
 
@@ -2675,64 +2730,18 @@ fn repository_index_with_intent(
                     )?;
                     return Err(cancelled_error());
                 }
-                let _refinement_publication = match intent {
-                    RepositoryIndexIntent::Requested => None,
-                    RepositoryIndexIntent::SemanticRefinement {
-                        structural_generation,
-                    } => {
-                        // Preparation intentionally runs beside queries and a
-                        // successor structural index. Only this short boundary
-                        // is serialized, and the parent check rejects output
-                        // prepared against a generation superseded meanwhile.
-                        let guard = lock_index_serialization(index_serialization)?;
-                        if propagate_peer_cancellation(
-                            runtime,
-                            journal,
-                            operation,
-                            context,
-                            lifecycle_deadline,
-                        )? {
-                            finish_failed_index(
-                                runtime,
-                                lifecycle_deadline,
-                                journal,
-                                metadata,
-                                operation,
-                                &cancellation,
-                                &cancelled_error(),
-                            )?;
-                            return Err(cancelled_error());
-                        }
-                        let active =
-                            read_service(service)?.active_generation_for(admission.repository);
-                        if active != Some(structural_generation) {
-                            let error = stale_generation();
-                            finish_failed_index(
-                                runtime,
-                                lifecycle_deadline,
-                                journal,
-                                metadata,
-                                operation,
-                                &cancellation,
-                                &error,
-                            )?;
-                            return Err(error);
-                        }
-                        Some(guard)
-                    }
-                };
-                let staged = match try_write_service(service).and_then(|mut service| {
-                    service
-                        .stage_prepared(prepared, &cancellation)
-                        .map_err(service_error)
-                }) {
-                    Ok(staged) => staged,
+                // Independent repositories prepare concurrently. Only the
+                // generation switch is serialized, and the same prepared value
+                // remains owned while transient readers leave the boundary.
+                let (_publication, mut service_guard) = match lock_publication_until(
+                    index_serialization,
+                    service,
+                    &cancellation,
+                    work_deadline,
+                ) {
+                    Ok(guards) => guards,
                     Err(error) => {
-                        let public = if error.code() == ErrorCode::Busy {
-                            index_admission_in_progress(operation)
-                        } else {
-                            error
-                        };
+                        let public = publication_error(operation, error);
                         finish_failed_index(
                             runtime,
                             lifecycle_deadline,
@@ -2745,6 +2754,44 @@ fn repository_index_with_intent(
                         return Err(public);
                     }
                 };
+                if let RepositoryIndexIntent::SemanticRefinement {
+                    structural_generation,
+                } = intent
+                    && service_guard.active_generation_for(admission.repository)
+                        != Some(structural_generation)
+                {
+                    let error = stale_generation();
+                    finish_failed_index(
+                        runtime,
+                        lifecycle_deadline,
+                        journal,
+                        metadata,
+                        operation,
+                        &cancellation,
+                        &error,
+                    )?;
+                    return Err(error);
+                }
+                let staged = match service_guard
+                    .stage_prepared(prepared, &cancellation)
+                    .map_err(service_error)
+                {
+                    Ok(staged) => staged,
+                    Err(error) => {
+                        let public = publication_error(operation, error);
+                        finish_failed_index(
+                            runtime,
+                            lifecycle_deadline,
+                            journal,
+                            metadata,
+                            operation,
+                            &cancellation,
+                            &public,
+                        )?;
+                        return Err(public);
+                    }
+                };
+                drop(service_guard);
                 let staged_written_bytes = staged.written_bytes();
                 let staged_receipt = staged.receipt();
                 {
@@ -6701,35 +6748,6 @@ fn incomplete_coverage() -> PublicError {
     .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
 }
 
-fn operation_in_progress() -> PublicError {
-    PublicError::builder(ErrorCode::Busy, "repository index is still running")
-        .retryable()
-        .next_action(NextAction::Retry)
-        .build()
-        .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
-}
-
-fn index_admission_in_progress(operation: OperationId) -> PublicError {
-    PublicError::builder(ErrorCode::Busy, "repository index is still running")
-        .retryable()
-        .operation(operation)
-        .next_action(NextAction::InspectOperation)
-        .next_action(NextAction::Retry)
-        .build()
-        .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
-}
-
-fn recovery_in_progress() -> PublicError {
-    PublicError::builder(
-        ErrorCode::Busy,
-        "durable repository recovery is still running",
-    )
-    .retryable()
-    .next_action(NextAction::Retry)
-    .build()
-    .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
-}
-
 fn failed_closed_publication(operation: OperationId) -> PublicError {
     PublicError::builder(
         ErrorCode::IndexCorrupt,
@@ -9366,7 +9384,7 @@ mod tests {
     }
 
     #[test]
-    fn contended_index_admission_is_terminal_and_does_not_queue_a_writer() {
+    fn contended_publication_preserves_the_prepared_operation() {
         let service = Arc::new(RwLock::new(
             FirstSliceService::new(DEFAULT_GENERATION_RETENTION)
                 .expect("empty service initializes"),
@@ -9422,92 +9440,57 @@ mod tests {
                 mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
             })
         };
-        let blocked_operation = OperationId::from_bytes([94; 16]);
-        let blocked_admission = rootlight_daemon_core::FirstSliceAdmission::default();
-        let read_guard = service.read().expect("service read lock is healthy");
+        let operation = OperationId::from_bytes([94; 16]);
+        let admission = rootlight_daemon_core::FirstSliceAdmission::default();
+        let (locked_sender, locked_receiver) = mpsc::sync_channel(1);
+        let blocking_service = Arc::clone(&service);
+        let blocker = thread::spawn(move || {
+            let _read_guard = blocking_service
+                .read()
+                .expect("service read lock is healthy");
+            locked_sender.send(()).expect("lock signal sends");
+            thread::sleep(Duration::from_millis(100));
+        });
+        locked_receiver.recv().expect("read lock is held");
         let mut reply = None;
 
         let started = Instant::now();
-        let error = execute_service_request(
+        let indexed = execute_service_request(
             &lanes,
             resources,
-            request(blocked_operation, true),
-            context(blocked_admission.clone()),
+            request(operation, false),
+            context(admission.clone()),
             &mut reply,
         )
-        .expect_err("contended admission is rejected");
+        .expect("prepared generation waits for the publication boundary");
         assert!(
-            started.elapsed() < LIFECYCLE_FINALIZATION_GRACE,
-            "contended admission queued behind the read lock"
-        );
-        assert_eq!(error.code(), ErrorCode::Busy);
-        assert!(error.retryable());
-        assert_eq!(error.operation(), Some(blocked_operation));
-        assert_eq!(
-            error.next_actions(),
-            &[NextAction::InspectOperation, NextAction::Retry]
-        );
-        assert!(blocked_admission.was_inserted());
-        assert_eq!(
-            journal
-                .status(blocked_operation)
-                .expect("rejected operation is durable")
-                .state,
-            OperationState::Failed
-        );
-        let metadata = metadata.lock().expect("metadata lock is healthy");
-        let rejected = metadata
-            .records
-            .get(&blocked_operation)
-            .expect("rejected operation metadata remains inspectable");
-        assert!(rejected.terminal);
-        drop(metadata);
-
-        let read_started = Instant::now();
-        let listed = execute_service_request(
-            &lanes,
-            resources,
-            FirstSliceIpcRequest::RepositoryList(daemon::RepositoryListRequest {
-                max_results: Some(20),
-                query: None,
-            }),
-            context(rootlight_daemon_core::FirstSliceAdmission::default()),
-            &mut reply,
-        )
-        .expect("read lane remains responsive after rejected admission");
-        assert!(
-            read_started.elapsed() < LIFECYCLE_FINALIZATION_GRACE,
-            "rejected admission left a writer queued"
+            started.elapsed() >= Duration::from_millis(75),
+            "publication did not overlap the held read lock"
         );
         assert!(matches!(
-            listed,
-            FirstSliceIpcResponse::RepositoryList(ref response)
-                if response.repositories.is_empty()
-        ));
-
-        drop(read_guard);
-        let retry_operation = OperationId::from_bytes([95; 16]);
-        let retried = execute_service_request(
-            &lanes,
-            resources,
-            request(retry_operation, false),
-            context(rootlight_daemon_core::FirstSliceAdmission::default()),
-            &mut reply,
-        )
-        .expect("retry succeeds after the read lock is released");
-        assert!(matches!(
-            retried,
+            indexed,
             FirstSliceIpcResponse::RepositoryIndex(ref response)
                 if response.operation.as_ref().map(|id| id.value.as_slice())
-                    == Some(retry_operation.as_bytes().as_slice())
+                    == Some(operation.as_bytes().as_slice())
         ));
+        assert!(admission.was_inserted());
         assert_eq!(
             journal
-                .status(retry_operation)
-                .expect("retried operation is durable")
+                .status(operation)
+                .expect("original operation is durable")
                 .state,
             OperationState::Succeeded
         );
+        let metadata = metadata.lock().expect("metadata lock is healthy");
+        let completed = metadata
+            .records
+            .get(&operation)
+            .expect("operation metadata remains inspectable");
+        assert!(completed.terminal);
+        assert!(completed.files_examined > 0);
+        assert!(completed.bytes_examined > 0);
+        drop(metadata);
+        blocker.join().expect("read lock holder joins");
 
         drop(refinement_receiver);
         actor.join().expect("journal actor joins");
