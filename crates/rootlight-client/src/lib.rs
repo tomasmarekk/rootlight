@@ -5993,7 +5993,17 @@ fn classify_health_probe(
     health: Result<Health, ClientError>,
 ) -> Result<ProbeOutcome, ClientError> {
     match health {
-        Ok(health) if health.ready && health.lifecycle == DaemonLifecycle::Ready => {
+        Ok(health)
+            if health.lifecycle == DaemonLifecycle::Ready
+                && health.catalog_status == HealthStatus::Healthy
+                && matches!(
+                    health.endpoint_status,
+                    HealthStatus::Healthy | HealthStatus::NotConfigured
+                ) =>
+        {
+            // Connection coordination needs the published control endpoint, not
+            // completion of generation recovery. First-slice requests retain
+            // their own bounded recovery response until last-good data is loaded.
             Ok(ProbeOutcome::Ready(ReadyDaemon { client, identity }))
         }
         Ok(_) => Ok(ProbeOutcome::Unavailable),
@@ -13767,6 +13777,44 @@ mod tests {
             classify_health_probe(client, identity, Err(ClientError::ProtocolMismatch)),
             Err(ClientError::ProtocolMismatch)
         ));
+    }
+
+    #[test]
+    fn readiness_probe_connects_while_generation_recovery_is_explicit() {
+        let client = Client::new(test_endpoint("recovery"), [1; 16], [2; 16]);
+        let identity = ReadyDaemonIdentity {
+            pid: 1,
+            instance_nonce: [1; 16],
+        };
+        let probe = classify_health_probe(
+            client,
+            identity,
+            Ok(Health {
+                ready: false,
+                active_operations: 0,
+                admitted_operations: 0,
+                protocol_version: "1.8".to_owned(),
+                lifecycle: DaemonLifecycle::Ready,
+                accepting_operations: true,
+                active_connections: 0,
+                connection_limit: 16,
+                queued_operations: 0,
+                running_operations: 0,
+                operation_queue_limit: 64,
+                journal_healthy: true,
+                catalog_status: HealthStatus::Healthy,
+                catalog_schema_version: 1,
+                generation_status: HealthStatus::Unavailable,
+                adapter_status: HealthStatus::Healthy,
+                watcher_status: HealthStatus::NotConfigured,
+                resource_pressure: ResourcePressure::Normal,
+                endpoint_status: HealthStatus::Healthy,
+                endpoint_schema_version: 2,
+            }),
+        )
+        .expect("published endpoint is connectable during generation recovery");
+
+        assert!(matches!(probe, ProbeOutcome::Ready(_)));
     }
 
     #[test]
