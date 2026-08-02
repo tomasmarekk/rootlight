@@ -2212,6 +2212,12 @@ pub enum FirstSliceProjectAnalysisError {
     /// The native isolation boundary could not be established.
     #[error("project adapter isolation failed")]
     Isolation,
+    /// The isolated adapter crossed its configured wall-time ceiling.
+    #[error("project adapter wall-time limit was reached")]
+    WallTimeLimit,
+    /// The isolated adapter process exited without a valid result.
+    #[error("project adapter process failed")]
+    ProcessFailure,
     /// The bounded project analysis could not complete.
     #[error("project adapter analysis failed")]
     Analysis,
@@ -2224,6 +2230,8 @@ impl FirstSliceProjectAnalysisError {
             Self::Identity => "project-adapter-identity-fallback",
             Self::Protocol => "project-adapter-protocol-fallback",
             Self::Isolation => "project-adapter-isolation-fallback",
+            Self::WallTimeLimit => "project-adapter-wall-time-fallback",
+            Self::ProcessFailure => "project-adapter-process-fallback",
             Self::Analysis => "project-adapter-analysis-fallback",
         }
     }
@@ -3838,12 +3846,12 @@ impl FirstSliceService {
             observe_progress,
         )?;
         let receipt = preparation.receipt();
-        if receipt
+        if let Some(error) = receipt
             .diagnostics
             .iter()
-            .any(|diagnostic| is_project_fallback_code(&diagnostic.code))
+            .find_map(|diagnostic| project_fallback_error(&diagnostic.code))
         {
-            return Err(FirstSliceError::Adapter);
+            return Err(error);
         }
         if receipt.parent != Some(structural_generation) {
             return Err(FirstSliceError::Identity);
@@ -6601,6 +6609,12 @@ pub enum FirstSliceError {
     /// Parser or normalized adapter output failed.
     #[error("first-slice analysis failed")]
     Adapter,
+    /// The isolated project adapter crossed its configured wall-time ceiling.
+    #[error("first-slice project adapter wall-time limit was reached")]
+    AdapterWallTimeLimit,
+    /// The isolated project adapter process exited without a valid result.
+    #[error("first-slice project adapter process failed")]
+    AdapterProcessFailure,
     /// Bounded semantic resolution failed.
     #[error("first-slice semantic resolution failed")]
     Resolution,
@@ -8097,6 +8111,15 @@ fn append_project_partition_diagnostic(
 
 fn is_project_fallback_code(code: &str) -> bool {
     code.starts_with("project-adapter-") && code.ends_with("-fallback")
+}
+
+fn project_fallback_error(code: &str) -> Option<FirstSliceError> {
+    match code {
+        "project-adapter-wall-time-fallback" => Some(FirstSliceError::AdapterWallTimeLimit),
+        "project-adapter-process-fallback" => Some(FirstSliceError::AdapterProcessFailure),
+        _ if is_project_fallback_code(code) => Some(FirstSliceError::Adapter),
+        _ => None,
+    }
 }
 
 fn append_project_fallback_diagnostic(
@@ -10125,6 +10148,23 @@ mod tests {
                 && coverage.status == "complete"
         }));
         assert_eq!(status.semantic_freshness, "pending_refinement");
+    }
+
+    #[test]
+    fn project_fallback_errors_preserve_bounded_adapter_failures() {
+        assert_eq!(
+            project_fallback_error("project-adapter-wall-time-fallback"),
+            Some(FirstSliceError::AdapterWallTimeLimit)
+        );
+        assert_eq!(
+            project_fallback_error("project-adapter-process-fallback"),
+            Some(FirstSliceError::AdapterProcessFailure)
+        );
+        assert_eq!(
+            project_fallback_error("project-adapter-analysis-fallback"),
+            Some(FirstSliceError::Adapter)
+        );
+        assert_eq!(project_fallback_error("unrelated-diagnostic"), None);
     }
 
     #[test]

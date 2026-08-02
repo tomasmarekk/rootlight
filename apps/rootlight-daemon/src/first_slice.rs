@@ -545,11 +545,10 @@ fn map_project_adapter_error(error: AdapterHostError) -> FirstSliceProjectAnalys
         | AdapterHostError::ProvenanceMismatch => FirstSliceProjectAnalysisError::Identity,
         AdapterHostError::Process
         | AdapterHostError::ProcessIo
-        | AdapterHostError::ProcessTimeout
         | AdapterHostError::IsolationEvidence => FirstSliceProjectAnalysisError::Isolation,
-        AdapterHostError::ProcessFailed | AdapterHostError::ProjectAnalysis => {
-            FirstSliceProjectAnalysisError::Analysis
-        }
+        AdapterHostError::ProcessTimeout => FirstSliceProjectAnalysisError::WallTimeLimit,
+        AdapterHostError::ProcessFailed => FirstSliceProjectAnalysisError::ProcessFailure,
+        AdapterHostError::ProjectAnalysis => FirstSliceProjectAnalysisError::Analysis,
         _ => FirstSliceProjectAnalysisError::Protocol,
     }
 }
@@ -3097,10 +3096,12 @@ fn repository_index_with_intent(
             }
         }
     })();
-    if result
-        .as_ref()
-        .is_err_and(|error| error.code() == ErrorCode::AdapterFailed)
-        && matches!(intent, RepositoryIndexIntent::SemanticRefinement { .. })
+    if result.as_ref().is_err_and(|error| {
+        matches!(
+            error.code(),
+            ErrorCode::AdapterFailed | ErrorCode::ResourceExhausted
+        )
+    }) && matches!(intent, RepositoryIndexIntent::SemanticRefinement { .. })
         && let Some(state) = lanes.support_state.as_deref()
     {
         state.set_adapter_status(HealthStatus::Degraded);
@@ -6487,6 +6488,20 @@ fn build_service_error(
             "adapter",
             "analysis",
         ),
+        FirstSliceError::AdapterWallTimeLimit => (
+            ErrorCode::ResourceExhausted,
+            "project adapter wall-time limit was reached",
+            true,
+            "adapter_wall_time_limit",
+            "analysis",
+        ),
+        FirstSliceError::AdapterProcessFailure => (
+            ErrorCode::AdapterFailed,
+            "project adapter process failed",
+            true,
+            "adapter_process_failure",
+            "analysis",
+        ),
         FirstSliceError::Resolution => (
             ErrorCode::Internal,
             "semantic resolution failed",
@@ -6616,12 +6631,48 @@ fn build_service_error(
     }
     if matches!(
         error,
+        FirstSliceError::AdapterWallTimeLimit | FirstSliceError::AdapterProcessFailure
+    ) {
+        builder = builder
+            .detail(
+                static_detail_key("structural_fallback"),
+                PublicValue::Boolean(true),
+            )
+            .next_action(NextAction::CollectSupportBundle);
+    }
+    if error == FirstSliceError::AdapterWallTimeLimit {
+        builder = builder
+            .detail(
+                static_detail_key("resource"),
+                PublicValue::Label(static_safe_label("adapter_wall_time_ms")),
+            )
+            .detail(
+                static_detail_key("limit"),
+                PublicValue::Unsigned(PROJECT_ADAPTER_WALL_TIME_MS),
+            );
+    }
+    if error == FirstSliceError::AdapterProcessFailure {
+        builder = builder.detail(
+            static_detail_key("resource"),
+            PublicValue::Label(static_safe_label("adapter_process")),
+        );
+    }
+    if matches!(
+        error,
         FirstSliceError::CatalogCorrupt | FirstSliceError::CatalogMigrationRequired
     ) {
         builder = builder.next_action(NextAction::RebuildRepository);
     }
     if retryable {
-        builder = builder.retryable().next_action(NextAction::Retry);
+        builder = if matches!(
+            error,
+            FirstSliceError::AdapterWallTimeLimit | FirstSliceError::AdapterProcessFailure
+        ) {
+            builder.retry_after(retry_after())
+        } else {
+            builder.retryable()
+        }
+        .next_action(NextAction::Retry);
     }
     if matches!(
         error,
@@ -6954,6 +7005,7 @@ mod tests {
 
     struct FailingSemanticAnalyzer {
         calls: Arc<AtomicUsize>,
+        error: FirstSliceProjectAnalysisError,
     }
 
     impl FirstSliceProjectAnalyzer for FailingSemanticAnalyzer {
@@ -6967,7 +7019,7 @@ mod tests {
             _cancellation: &Cancellation,
         ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
             self.calls.fetch_add(1, AtomicOrdering::Relaxed);
-            Err(FirstSliceProjectAnalysisError::Analysis)
+            Err(self.error)
         }
     }
 
@@ -7228,6 +7280,63 @@ mod tests {
     }
 
     #[test]
+    fn project_adapter_failures_keep_their_public_resource_class() {
+        assert_eq!(
+            map_project_adapter_error(AdapterHostError::ProcessTimeout),
+            FirstSliceProjectAnalysisError::WallTimeLimit
+        );
+        assert_eq!(
+            map_project_adapter_error(AdapterHostError::ProcessFailed),
+            FirstSliceProjectAnalysisError::ProcessFailure
+        );
+
+        let operation = OperationId::from_bytes([17; 16]);
+        let repository = RepositoryId::from_bytes([18; 16]);
+        let context = RepositoryIndexErrorContext {
+            operation,
+            repository,
+            provider: repository_index_provider(FirstSliceIndexMode::Deep),
+        };
+        let wall_time = repository_index_error(FirstSliceError::AdapterWallTimeLimit, context);
+
+        assert_eq!(wall_time.code(), ErrorCode::ResourceExhausted);
+        assert!(wall_time.retryable());
+        assert_eq!(wall_time.retry_after_ms(), Some(u64::from(RETRY_AFTER_MS)));
+        assert_eq!(
+            wall_time.details().get(&static_detail_key("resource")),
+            Some(&PublicValue::Label(static_safe_label(
+                "adapter_wall_time_ms"
+            )))
+        );
+        assert_eq!(
+            wall_time.details().get(&static_detail_key("limit")),
+            Some(&PublicValue::Unsigned(PROJECT_ADAPTER_WALL_TIME_MS))
+        );
+        assert_eq!(
+            wall_time
+                .details()
+                .get(&static_detail_key("structural_fallback")),
+            Some(&PublicValue::Boolean(true))
+        );
+        assert_eq!(
+            wall_time.next_actions(),
+            &[
+                NextAction::InspectOperation,
+                NextAction::CollectSupportBundle,
+                NextAction::Retry,
+            ]
+        );
+
+        let process = repository_index_error(FirstSliceError::AdapterProcessFailure, context);
+        assert_eq!(process.code(), ErrorCode::AdapterFailed);
+        assert_eq!(
+            process.details().get(&static_detail_key("resource")),
+            Some(&PublicValue::Label(static_safe_label("adapter_process")))
+        );
+        assert_eq!(process.retry_after_ms(), Some(u64::from(RETRY_AFTER_MS)));
+    }
+
+    #[test]
     fn repository_index_failures_retain_safe_operation_context() {
         let operation = OperationId::from_bytes([19; 16]);
         let repository = RepositoryId::from_bytes([23; 16]);
@@ -7319,6 +7428,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let analyzer: Arc<dyn FirstSliceProjectAnalyzer> = Arc::new(FailingSemanticAnalyzer {
             calls: Arc::clone(&calls),
+            error: FirstSliceProjectAnalysisError::WallTimeLimit,
         });
         let deadline = Instant::now() + Duration::from_secs(30);
         let cancellation = Cancellation::with_deadline(deadline);
@@ -7509,6 +7619,24 @@ mod tests {
             .status(semantic_operation)
             .expect("semantic operation remains queryable");
         assert_eq!(semantic_record.state, OperationState::Failed);
+        let semantic_error = semantic_record.error.as_ref().expect("failure is recorded");
+        assert_eq!(semantic_error.code(), ErrorCode::ResourceExhausted);
+        assert_eq!(
+            semantic_error.details().get(&static_detail_key("resource")),
+            Some(&PublicValue::Label(static_safe_label(
+                "adapter_wall_time_ms"
+            )))
+        );
+        assert_eq!(
+            semantic_error
+                .details()
+                .get(&static_detail_key("structural_fallback")),
+            Some(&PublicValue::Boolean(true))
+        );
+        assert_eq!(
+            semantic_error.retry_after_ms(),
+            Some(u64::from(RETRY_AFTER_MS))
+        );
         assert!(semantic_record.progress.completed > 0);
         assert_eq!(semantic_record.progress.total, 6);
         let semantic_context = journal
