@@ -543,6 +543,9 @@ fn map_project_adapter_error(error: AdapterHostError) -> FirstSliceProjectAnalys
         | AdapterHostError::ProcessIo
         | AdapterHostError::IsolationEvidence => FirstSliceProjectAnalysisError::Isolation,
         AdapterHostError::ProcessTimeout => FirstSliceProjectAnalysisError::WallTimeLimit,
+        AdapterHostError::ProjectInputLimit => FirstSliceProjectAnalysisError::InputLimit,
+        AdapterHostError::ProjectOutputLimit => FirstSliceProjectAnalysisError::OutputLimit,
+        AdapterHostError::ProjectMemoryLimit => FirstSliceProjectAnalysisError::MemoryLimit,
         AdapterHostError::ProcessFailed => FirstSliceProjectAnalysisError::ProcessFailure,
         AdapterHostError::ProjectAnalysis => FirstSliceProjectAnalysisError::Analysis,
         _ => FirstSliceProjectAnalysisError::Protocol,
@@ -6502,6 +6505,27 @@ fn build_service_error(
             "adapter_wall_time_limit",
             "analysis",
         ),
+        FirstSliceError::AdapterInputLimit => (
+            ErrorCode::ResourceExhausted,
+            "project adapter input limit was reached",
+            true,
+            "adapter_input_limit",
+            "analysis",
+        ),
+        FirstSliceError::AdapterOutputLimit => (
+            ErrorCode::ResourceExhausted,
+            "project adapter output limit was reached",
+            true,
+            "adapter_output_limit",
+            "analysis",
+        ),
+        FirstSliceError::AdapterMemoryLimit => (
+            ErrorCode::ResourceExhausted,
+            "project adapter memory limit was reached",
+            true,
+            "adapter_memory_limit",
+            "analysis",
+        ),
         FirstSliceError::AdapterProcessFailure => (
             ErrorCode::AdapterFailed,
             "project adapter process failed",
@@ -6638,7 +6662,11 @@ fn build_service_error(
     }
     if matches!(
         error,
-        FirstSliceError::AdapterWallTimeLimit | FirstSliceError::AdapterProcessFailure
+        FirstSliceError::AdapterWallTimeLimit
+            | FirstSliceError::AdapterInputLimit
+            | FirstSliceError::AdapterOutputLimit
+            | FirstSliceError::AdapterMemoryLimit
+            | FirstSliceError::AdapterProcessFailure
     ) {
         builder = builder
             .detail(
@@ -6658,6 +6686,39 @@ fn build_service_error(
                 PublicValue::Unsigned(PROJECT_ADAPTER_WALL_TIME_MS),
             );
     }
+    if error == FirstSliceError::AdapterInputLimit {
+        builder = builder
+            .detail(
+                static_detail_key("resource"),
+                PublicValue::Label(static_safe_label("adapter_input_bytes")),
+            )
+            .detail(
+                static_detail_key("limit"),
+                PublicValue::Unsigned(PROJECT_ADAPTER_INPUT_BYTES),
+            );
+    }
+    if error == FirstSliceError::AdapterOutputLimit {
+        builder = builder
+            .detail(
+                static_detail_key("resource"),
+                PublicValue::Label(static_safe_label("adapter_output_bytes")),
+            )
+            .detail(
+                static_detail_key("limit"),
+                PublicValue::Unsigned(PROJECT_ADAPTER_OUTPUT_BYTES),
+            );
+    }
+    if error == FirstSliceError::AdapterMemoryLimit {
+        builder = builder
+            .detail(
+                static_detail_key("resource"),
+                PublicValue::Label(static_safe_label("adapter_memory_bytes")),
+            )
+            .detail(
+                static_detail_key("limit"),
+                PublicValue::Unsigned(PROJECT_ADAPTER_MEMORY_BYTES),
+            );
+    }
     if error == FirstSliceError::AdapterProcessFailure {
         builder = builder.detail(
             static_detail_key("resource"),
@@ -6673,7 +6734,11 @@ fn build_service_error(
     if retryable {
         builder = if matches!(
             error,
-            FirstSliceError::AdapterWallTimeLimit | FirstSliceError::AdapterProcessFailure
+            FirstSliceError::AdapterWallTimeLimit
+                | FirstSliceError::AdapterInputLimit
+                | FirstSliceError::AdapterOutputLimit
+                | FirstSliceError::AdapterMemoryLimit
+                | FirstSliceError::AdapterProcessFailure
         ) {
             builder.retry_after(retry_after())
         } else {
@@ -7297,6 +7362,10 @@ mod tests {
             FirstSliceProjectAnalysisError::WallTimeLimit
         );
         assert_eq!(
+            map_project_adapter_error(AdapterHostError::ProjectOutputLimit),
+            FirstSliceProjectAnalysisError::OutputLimit
+        );
+        assert_eq!(
             map_project_adapter_error(AdapterHostError::ProcessFailed),
             FirstSliceProjectAnalysisError::ProcessFailure
         );
@@ -7331,6 +7400,35 @@ mod tests {
         );
         assert_eq!(
             wall_time.next_actions(),
+            &[
+                NextAction::InspectOperation,
+                NextAction::CollectSupportBundle,
+                NextAction::Retry,
+            ]
+        );
+
+        let output = repository_index_error(FirstSliceError::AdapterOutputLimit, context);
+        assert_eq!(output.code(), ErrorCode::ResourceExhausted);
+        assert!(output.retryable());
+        assert_eq!(output.retry_after_ms(), Some(u64::from(RETRY_AFTER_MS)));
+        assert_eq!(
+            output.details().get(&static_detail_key("resource")),
+            Some(&PublicValue::Label(static_safe_label(
+                "adapter_output_bytes"
+            )))
+        );
+        assert_eq!(
+            output.details().get(&static_detail_key("limit")),
+            Some(&PublicValue::Unsigned(PROJECT_ADAPTER_OUTPUT_BYTES))
+        );
+        assert_eq!(
+            output
+                .details()
+                .get(&static_detail_key("structural_fallback")),
+            Some(&PublicValue::Boolean(true))
+        );
+        assert_eq!(
+            output.next_actions(),
             &[
                 NextAction::InspectOperation,
                 NextAction::CollectSupportBundle,

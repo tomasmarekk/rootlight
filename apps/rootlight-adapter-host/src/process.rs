@@ -159,7 +159,7 @@ pub fn execute_isolated_project_adapter(
         .map_err(|_| AdapterHostError::Process)?;
     cancellation.check()?;
     if !status.success() || !diagnostic.is_empty() {
-        return Err(AdapterHostError::ProcessFailed);
+        return Err(classify_process_failure(&diagnostic));
     }
 
     let frame = decode_exact_packet(&output)?;
@@ -175,6 +175,19 @@ pub fn execute_isolated_project_adapter(
         document,
         isolation,
     })
+}
+
+fn classify_process_failure(diagnostic: &[u8]) -> AdapterHostError {
+    let diagnostic = diagnostic
+        .strip_suffix(b"\r\n")
+        .or_else(|| diagnostic.strip_suffix(b"\n"))
+        .unwrap_or(diagnostic);
+    match diagnostic {
+        b"error: adapter project input limit exceeded" => AdapterHostError::ProjectInputLimit,
+        b"error: adapter project output limit exceeded" => AdapterHostError::ProjectOutputLimit,
+        b"error: adapter project memory limit exceeded" => AdapterHostError::ProjectMemoryLimit,
+        _ => AdapterHostError::ProcessFailed,
+    }
 }
 
 fn spawn_reader(
@@ -310,6 +323,33 @@ mod tests {
         assert!(matches!(
             decode_exact_packet(&trailing),
             Err(AdapterHostError::UnexpectedFrame)
+        ));
+    }
+
+    #[test]
+    fn process_failures_preserve_closed_resource_limit_diagnostics() {
+        for (diagnostic, expected) in [
+            (
+                b"error: adapter project input limit exceeded\n".as_slice(),
+                AdapterHostError::ProjectInputLimit,
+            ),
+            (
+                b"error: adapter project output limit exceeded\r\n".as_slice(),
+                AdapterHostError::ProjectOutputLimit,
+            ),
+            (
+                b"error: adapter project memory limit exceeded\n".as_slice(),
+                AdapterHostError::ProjectMemoryLimit,
+            ),
+        ] {
+            assert_eq!(
+                std::mem::discriminant(&classify_process_failure(diagnostic)),
+                std::mem::discriminant(&expected)
+            );
+        }
+        assert!(matches!(
+            classify_process_failure(b"error: unrecognized adapter failure\n"),
+            AdapterHostError::ProcessFailed
         ));
     }
 }

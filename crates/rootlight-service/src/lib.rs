@@ -2255,6 +2255,15 @@ pub enum FirstSliceProjectAnalysisError {
     /// The isolated adapter crossed its configured wall-time ceiling.
     #[error("project adapter wall-time limit was reached")]
     WallTimeLimit,
+    /// The isolated adapter crossed its configured input-volume ceiling.
+    #[error("project adapter input limit was reached")]
+    InputLimit,
+    /// The isolated adapter crossed its configured output-volume ceiling.
+    #[error("project adapter output limit was reached")]
+    OutputLimit,
+    /// The isolated adapter crossed its configured memory ceiling.
+    #[error("project adapter memory limit was reached")]
+    MemoryLimit,
     /// The isolated adapter process exited without a valid result.
     #[error("project adapter process failed")]
     ProcessFailure,
@@ -2271,6 +2280,9 @@ impl FirstSliceProjectAnalysisError {
             Self::Protocol => "project-adapter-protocol-fallback",
             Self::Isolation => "project-adapter-isolation-fallback",
             Self::WallTimeLimit => "project-adapter-wall-time-fallback",
+            Self::InputLimit => "project-adapter-input-limit-fallback",
+            Self::OutputLimit => "project-adapter-output-limit-fallback",
+            Self::MemoryLimit => "project-adapter-memory-limit-fallback",
             Self::ProcessFailure => "project-adapter-process-fallback",
             Self::Analysis => "project-adapter-analysis-fallback",
         }
@@ -6692,6 +6704,15 @@ pub enum FirstSliceError {
     /// The isolated project adapter crossed its configured wall-time ceiling.
     #[error("first-slice project adapter wall-time limit was reached")]
     AdapterWallTimeLimit,
+    /// The isolated project adapter crossed its configured input-volume ceiling.
+    #[error("first-slice project adapter input limit was reached")]
+    AdapterInputLimit,
+    /// The isolated project adapter crossed its configured output-volume ceiling.
+    #[error("first-slice project adapter output limit was reached")]
+    AdapterOutputLimit,
+    /// The isolated project adapter crossed its configured memory ceiling.
+    #[error("first-slice project adapter memory limit was reached")]
+    AdapterMemoryLimit,
     /// The isolated project adapter process exited without a valid result.
     #[error("first-slice project adapter process failed")]
     AdapterProcessFailure,
@@ -8217,6 +8238,9 @@ fn is_project_fallback_code(code: &str) -> bool {
 fn project_fallback_error(code: &str) -> Option<FirstSliceError> {
     match code {
         "project-adapter-wall-time-fallback" => Some(FirstSliceError::AdapterWallTimeLimit),
+        "project-adapter-input-limit-fallback" => Some(FirstSliceError::AdapterInputLimit),
+        "project-adapter-output-limit-fallback" => Some(FirstSliceError::AdapterOutputLimit),
+        "project-adapter-memory-limit-fallback" => Some(FirstSliceError::AdapterMemoryLimit),
         "project-adapter-process-fallback" => Some(FirstSliceError::AdapterProcessFailure),
         _ if is_project_fallback_code(code) => Some(FirstSliceError::Adapter),
         _ => None,
@@ -10266,6 +10290,18 @@ mod tests {
         assert_eq!(
             project_fallback_error("project-adapter-wall-time-fallback"),
             Some(FirstSliceError::AdapterWallTimeLimit)
+        );
+        assert_eq!(
+            project_fallback_error("project-adapter-input-limit-fallback"),
+            Some(FirstSliceError::AdapterInputLimit)
+        );
+        assert_eq!(
+            project_fallback_error("project-adapter-output-limit-fallback"),
+            Some(FirstSliceError::AdapterOutputLimit)
+        );
+        assert_eq!(
+            project_fallback_error("project-adapter-memory-limit-fallback"),
+            Some(FirstSliceError::AdapterMemoryLimit)
         );
         assert_eq!(
             project_fallback_error("project-adapter-process-fallback"),

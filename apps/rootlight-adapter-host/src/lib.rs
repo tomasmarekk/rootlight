@@ -968,6 +968,15 @@ pub enum AdapterHostError {
     /// The isolated adapter exceeded its wall-time limit.
     #[error("adapter process wall-time limit exceeded")]
     ProcessTimeout,
+    /// Project input crossed a configured adapter transaction ceiling.
+    #[error("adapter project input limit exceeded")]
+    ProjectInputLimit,
+    /// Project output crossed a configured adapter transaction ceiling.
+    #[error("adapter project output limit exceeded")]
+    ProjectOutputLimit,
+    /// Project analysis exhausted its configured memory ceiling.
+    #[error("adapter project memory limit exceeded")]
+    ProjectMemoryLimit,
     /// The isolated adapter exited unsuccessfully or emitted diagnostics.
     #[error("adapter process failed")]
     ProcessFailed,

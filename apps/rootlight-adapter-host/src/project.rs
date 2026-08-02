@@ -15,10 +15,11 @@ use std::{
 };
 
 use rootlight_adapter_sdk::{
-    AnalysisLimits, AnalysisUnitId, BatchThresholds, BuildTargetId, EncodingId,
+    AdapterError, AnalysisLimits, AnalysisUnitId, BatchThresholds, BuildTargetId, EncodingId,
     GeneratedOriginMapping, GenerationBoundSnapshot, LanguageId, MemoryAdmissionPolicy,
     ProjectAnalysisLimits, ProjectAnalysisRequest as SdkProjectAnalysisRequest, ProjectSourceInput,
-    StreamLimits, TransformationId, execute_project_analysis,
+    ReportError, RequestError, ResourceKind, SinkError, StreamLimits, TransformationId,
+    execute_project_analysis,
 };
 use rootlight_adapter_treesitter::{ParserSettings, RuntimeConfig, TreeSitterProvider};
 use rootlight_adapters::{SemanticProjectAnalyzer, SemanticProjectLanguage};
@@ -393,8 +394,11 @@ fn analyze_project_request(
     validate_nonce(&request.request_id)?;
     validate_metadata_label(&request.analysis_unit)?;
     validate_metadata_label(&request.target)?;
-    if request.inputs.is_empty() || request.inputs.len() > limits.files {
+    if request.inputs.is_empty() {
         return Err(AdapterHostError::ProjectRequest);
+    }
+    if request.inputs.len() > limits.files {
+        return Err(AdapterHostError::ProjectInputLimit);
     }
 
     let repository = RepositoryId::from_bytes(fixed_wire_id(
@@ -412,11 +416,14 @@ fn analyze_project_request(
     let build_context_digest = wire_digest(request.build_context.as_ref())?;
     let configuration_digest = wire_digest(request.config_digest.as_ref())?;
     if request.context_manifest.is_empty()
-        || request.context_manifest.len() > MAX_PROJECT_CONTEXT_BYTES
-        || request.context_manifest.len() > limits.input_bytes
         || content_hash(&request.context_manifest) != configuration_digest
     {
         return Err(AdapterHostError::ProjectRequest);
+    }
+    if request.context_manifest.len() > MAX_PROJECT_CONTEXT_BYTES
+        || request.context_manifest.len() > limits.input_bytes
+    {
+        return Err(AdapterHostError::ProjectInputLimit);
     }
     let requested_tier = requested_tier(request.requested_tier)?;
     validate_wire_input_order(&request.inputs)?;
@@ -430,7 +437,7 @@ fn analyze_project_request(
             .checked_add(input.source.len())
             .ok_or(AdapterHostError::Limit)?;
         if total_input_bytes > limits.input_bytes {
-            return Err(AdapterHostError::ProjectRequest);
+            return Err(AdapterHostError::ProjectInputLimit);
         }
         let language = semantic_language(&input.language)?;
         if selected_language.is_some_and(|selected| selected != language) {
@@ -535,14 +542,14 @@ fn analyze_project_request(
         MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         cancellation,
     )
-    .map_err(|_| AdapterHostError::ProjectAnalysis)?;
+    .map_err(map_project_execution_error)?;
     let normalized_ir =
         serde_json::to_vec(output.document()).map_err(|_| AdapterHostError::ProjectAnalysis)?;
-    if normalized_ir.is_empty()
-        || normalized_ir.len() > limits.output_bytes
-        || normalized_ir.len() > MAX_ADAPTER_FRAME_BYTES
-    {
+    if normalized_ir.is_empty() {
         return Err(AdapterHostError::ProjectAnalysis);
+    }
+    if normalized_ir.len() > limits.output_bytes || normalized_ir.len() > MAX_ADAPTER_FRAME_BYTES {
+        return Err(AdapterHostError::ProjectOutputLimit);
     }
     let output_digest = content_hash(&normalized_ir);
     Ok(ProjectAnalysisResult {
@@ -553,6 +560,37 @@ fn analyze_project_request(
             value: output_digest.as_bytes().to_vec(),
         }),
     })
+}
+
+fn map_project_execution_error(error: AdapterError) -> AdapterHostError {
+    match error {
+        AdapterError::RejectedRequest(RequestError::ProviderLimit { resource, .. })
+        | AdapterError::Sink(SinkError::BatchLimit { resource, .. })
+        | AdapterError::Sink(SinkError::StreamLimit { resource, .. })
+        | AdapterError::InvalidReport(ReportError::ResourceLimit { resource, .. }) => {
+            project_resource_limit_error(resource)
+        }
+        AdapterError::Sink(SinkError::AllocationFailed) => AdapterHostError::ProjectMemoryLimit,
+        _ => AdapterHostError::ProjectAnalysis,
+    }
+}
+
+fn project_resource_limit_error(resource: ResourceKind) -> AdapterHostError {
+    match resource {
+        ResourceKind::SourceBytes
+        | ResourceKind::ProjectFiles
+        | ResourceKind::ProjectSourceBytes
+        | ResourceKind::ProjectContextBytes
+        | ResourceKind::GeneratedMappings
+        | ResourceKind::GeneratedMappingBytes
+        | ResourceKind::AnalysisUnitBytes
+        | ResourceKind::BuildTargetBytes
+        | ResourceKind::IncludedRanges
+        | ResourceKind::SyntaxNodes
+        | ResourceKind::SyntaxDepth => AdapterHostError::ProjectInputLimit,
+        ResourceKind::ReportedMemoryBytes => AdapterHostError::ProjectMemoryLimit,
+        _ => AdapterHostError::ProjectOutputLimit,
+    }
 }
 
 struct DecodedProjectInput {
@@ -1107,5 +1145,39 @@ mod tests {
         assert!(extensions.iter().all(|extension| {
             extension.version == Some(ContractVersion { major: 1, minor: 0 }) && !extension.critical
         }));
+    }
+
+    #[test]
+    fn project_execution_preserves_resource_limit_categories() {
+        assert!(matches!(
+            map_project_execution_error(AdapterError::RejectedRequest(
+                RequestError::ProviderLimit {
+                    resource: ResourceKind::ProjectSourceBytes,
+                    observed: 2,
+                    limit: 1,
+                }
+            )),
+            AdapterHostError::ProjectInputLimit
+        ));
+        assert!(matches!(
+            map_project_execution_error(AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::OutputBytes,
+                observed: 2,
+                limit: 1,
+            })),
+            AdapterHostError::ProjectOutputLimit
+        ));
+        assert!(matches!(
+            map_project_execution_error(AdapterError::InvalidReport(ReportError::ResourceLimit {
+                resource: ResourceKind::ReportedMemoryBytes,
+                observed: 2,
+                limit: 1,
+            })),
+            AdapterHostError::ProjectMemoryLimit
+        ));
+        assert!(matches!(
+            map_project_execution_error(AdapterError::Sink(SinkError::AllocationFailed)),
+            AdapterHostError::ProjectMemoryLimit
+        ));
     }
 }
