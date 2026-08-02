@@ -2632,6 +2632,33 @@ impl Client {
         }
     }
 
+    /// Reads daemon health without blocking the calling async executor.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid timeout, negotiation, transport,
+    /// pairing, or response errors.
+    pub async fn health_async(&self, timeout: RequestTimeout) -> Result<Health, ClientError> {
+        let (response, selected_protocol_minor) = self
+            .request_async_with_protocol(
+                daemon::request_envelope::Request::Health(daemon::HealthRequest {}),
+                timeout,
+            )
+            .await?;
+        match response {
+            daemon::response_envelope::Response::Health(health) => {
+                parse_health(health, selected_protocol_minor)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
     /// Runs bounded source-free quick diagnostics.
     ///
     /// # Errors
@@ -2641,6 +2668,38 @@ impl Client {
         match self.request(daemon::request_envelope::Request::DiagnosticsQuick(
             daemon::DiagnosticsQuickRequest {},
         ))? {
+            daemon::response_envelope::Response::DiagnosticsQuick(response) => {
+                parse_diagnostics_quick(response)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Runs bounded source-free quick diagnostics asynchronously.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid timeout, unavailable protocol
+    /// support, transport failure, or malformed results.
+    pub async fn diagnostics_quick_async(
+        &self,
+        timeout: RequestTimeout,
+    ) -> Result<DiagnosticsQuick, ClientError> {
+        match self
+            .request_async(
+                daemon::request_envelope::Request::DiagnosticsQuick(
+                    daemon::DiagnosticsQuickRequest {},
+                ),
+                timeout,
+            )
+            .await?
+        {
             daemon::response_envelope::Response::DiagnosticsQuick(response) => {
                 parse_diagnostics_quick(response)
             }
@@ -2658,6 +2717,37 @@ impl Client {
         let (response, selected_protocol_minor) = self.request_with_protocol(
             daemon::request_envelope::Request::SupportBundle(daemon::SupportBundleRequest {}),
         )?;
+        match response {
+            daemon::response_envelope::Response::SupportBundle(response) => {
+                parse_support_bundle(response, selected_protocol_minor)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Builds one bounded source-free support archive asynchronously.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid timeout, unavailable protocol
+    /// support, transport failure, malformed bounds, a digest mismatch, or a
+    /// response that claims to contain source.
+    pub async fn support_bundle_async(
+        &self,
+        timeout: RequestTimeout,
+    ) -> Result<SupportBundle, ClientError> {
+        let (response, selected_protocol_minor) = self
+            .request_async_with_protocol(
+                daemon::request_envelope::Request::SupportBundle(daemon::SupportBundleRequest {}),
+                timeout,
+            )
+            .await?;
         match response {
             daemon::response_envelope::Response::SupportBundle(response) => {
                 parse_support_bundle(response, selected_protocol_minor)
@@ -5398,11 +5488,33 @@ impl Client {
             .await
     }
 
+    async fn request_async_with_protocol(
+        &self,
+        request: daemon::request_envelope::Request,
+        timeout: RequestTimeout,
+    ) -> Result<(daemon::response_envelope::Response, u32), ClientError> {
+        self.request_async_with_options_and_protocol(
+            request,
+            RequestOptions::new().with_timeout(timeout),
+        )
+        .await
+    }
+
     async fn request_async_with_options(
         &self,
         request: daemon::request_envelope::Request,
         options: RequestOptions,
     ) -> Result<daemon::response_envelope::Response, ClientError> {
+        self.request_async_with_options_and_protocol(request, options)
+            .await
+            .map(|(response, _)| response)
+    }
+
+    async fn request_async_with_options_and_protocol(
+        &self,
+        request: daemon::request_envelope::Request,
+        options: RequestOptions,
+    ) -> Result<(daemon::response_envelope::Response, u32), ClientError> {
         let timeout = request_options_timeout(options);
         let deadline = TokioInstant::now()
             .checked_add(timeout)
@@ -5426,7 +5538,7 @@ impl Client {
         effective_budget: Option<daemon::FirstSliceEffectiveBudget>,
         deadline: TokioInstant,
         codec: FrameCodec,
-    ) -> Result<daemon::response_envelope::Response, ClientError> {
+    ) -> Result<(daemon::response_envelope::Response, u32), ClientError> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         if request_id == 0 {
             return Err(ClientError::RequestIdExhausted);
@@ -5468,7 +5580,7 @@ impl Client {
             daemon::response_envelope::Response::Error(error) => {
                 Err(ClientError::Public(Box::new(parse_public_error(error)?)))
             }
-            response => Ok(response),
+            response => Ok((response, selected_protocol_minor)),
         }
     }
 }
@@ -11447,6 +11559,104 @@ mod tests {
             requests[4].request.as_ref(),
             Some(daemon::request_envelope::Request::SourceRead(request))
                 if request.references == vec![wire_source(&source)]
+        ));
+    }
+
+    #[tokio::test]
+    async fn async_control_reads_preserve_checked_decoders() {
+        let (_temporary, endpoint) = async_test_endpoint("async-control-reads");
+        let listener = AsyncLocalListener::bind(endpoint.clone()).expect("listener binds");
+        let instance_nonce = [17; 16];
+        let client = Client::new(endpoint, instance_nonce, [18; 16]);
+        let timeout =
+            RequestTimeout::new(Duration::from_secs(5)).expect("request timeout validates");
+        let health_wire = daemon::HealthResponse {
+            ready: true,
+            active_operations: 0,
+            admitted_operations: 0,
+            protocol_version: format!("1.{CURRENT_PROTOCOL_MINOR}"),
+            lifecycle: daemon::DaemonLifecycle::Ready as i32,
+            accepting_operations: true,
+            active_connections: 1,
+            connection_limit: 128,
+            queued_operations: 0,
+            running_operations: 0,
+            operation_queue_limit: 256,
+            journal_healthy: true,
+            catalog_status: daemon::HealthStatus::Healthy as i32,
+            catalog_schema_version: 2,
+            generation_status: daemon::HealthStatus::Healthy as i32,
+            adapter_status: daemon::HealthStatus::Healthy as i32,
+            watcher_status: daemon::HealthStatus::NotConfigured as i32,
+            resource_pressure: daemon::ResourcePressure::Normal as i32,
+            endpoint_status: daemon::HealthStatus::Healthy as i32,
+            endpoint_schema_version: 2,
+        };
+        let diagnostics_wire = daemon::DiagnosticsQuickResponse {
+            schema_version: 1,
+            overall_status: daemon::HealthStatus::Healthy as i32,
+            results: vec![daemon::DiagnosticResult {
+                check: daemon::DiagnosticCheck::CatalogQuickCheck as i32,
+                outcome: daemon::DiagnosticOutcome::Passed as i32,
+                duration_ms: 1,
+                error: None,
+            }],
+        };
+        let support_wire = support_response_with_schema(
+            valid_support_archive_v4(),
+            CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        );
+        let expected_health = parse_health(health_wire.clone(), CURRENT_PROTOCOL_MINOR)
+            .expect("health fixture parses");
+        let expected_diagnostics =
+            parse_diagnostics_quick(diagnostics_wire.clone()).expect("diagnostics fixture parses");
+        let expected_support = parse_support_bundle(support_wire.clone(), CURRENT_PROTOCOL_MINOR)
+            .expect("support fixture parses");
+        let server = tokio::spawn(serve_async_responses(
+            listener,
+            instance_nonce,
+            vec![
+                daemon::response_envelope::Response::Health(health_wire),
+                daemon::response_envelope::Response::DiagnosticsQuick(diagnostics_wire),
+                daemon::response_envelope::Response::SupportBundle(support_wire),
+            ],
+        ));
+
+        assert_eq!(
+            client
+                .health_async(timeout)
+                .await
+                .expect("async health succeeds"),
+            expected_health
+        );
+        assert_eq!(
+            client
+                .diagnostics_quick_async(timeout)
+                .await
+                .expect("async diagnostics succeeds"),
+            expected_diagnostics
+        );
+        assert_eq!(
+            client
+                .support_bundle_async(timeout)
+                .await
+                .expect("async support bundle succeeds"),
+            expected_support
+        );
+
+        let requests = server.await.expect("server task joins");
+        assert_eq!(requests.len(), 3);
+        assert!(matches!(
+            requests[0].request,
+            Some(daemon::request_envelope::Request::Health(_))
+        ));
+        assert!(matches!(
+            requests[1].request,
+            Some(daemon::request_envelope::Request::DiagnosticsQuick(_))
+        ));
+        assert!(matches!(
+            requests[2].request,
+            Some(daemon::request_envelope::Request::SupportBundle(_))
         ));
     }
 
