@@ -45,6 +45,21 @@ pub const MIN_SQLITE_VERSION_NUMBER: i32 = 3_051_003;
 /// Bounded wait in milliseconds for transient SQLite contention.
 pub const SQLITE_BUSY_TIMEOUT_MS: u64 = 250;
 
+fn sqlite_database_path(directory: &Path, filename: &str) -> Result<PathBuf, CatalogError> {
+    #[cfg(windows)]
+    {
+        // SQLite derives rollback-journal and WAL sidecar names after opening
+        // the database, so it must receive a verbatim path before that boundary.
+        let directory = std::fs::canonicalize(directory)
+            .map_err(|error| CatalogError::io(CatalogErrorKind::Storage, error))?;
+        Ok(directory.join(filename))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(directory.join(filename))
+    }
+}
+
 /// SQLite schema identity pinned by generated compatibility fixtures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchemaCompatibility {
@@ -114,7 +129,7 @@ impl Catalog {
     /// root and enforce a no-link, owner-only database file. Other targets fail
     /// closed until their native access-control boundary is implemented.
     pub fn open_in(state_root: &Path) -> Result<Self, CatalogError> {
-        let path = state_root.join(CATALOG_FILENAME);
+        let path = sqlite_database_path(state_root, CATALOG_FILENAME)?;
         let connection = schema::open_control(&path)?;
         Ok(Self { connection })
     }
@@ -155,7 +170,7 @@ impl OracleWriter {
     /// Other targets fail closed until their native access-control boundary is
     /// implemented.
     pub fn create_in(generation_directory: &Path) -> Result<Self, CatalogError> {
-        let path = generation_directory.join(ORACLE_FILENAME);
+        let path = sqlite_database_path(generation_directory, ORACLE_FILENAME)?;
         let connection = schema::create_oracle(&path)?;
         Ok(Self { connection, path })
     }
@@ -271,7 +286,10 @@ impl OracleReader {
         generation_directory: &Path,
         context: &GenerationContext<'_>,
     ) -> Result<Self, CatalogError> {
-        Self::open_path(generation_directory.join(ORACLE_FILENAME), context)
+        Self::open_path(
+            sqlite_database_path(generation_directory, ORACLE_FILENAME)?,
+            context,
+        )
     }
 
     /// Returns SQLite bytes allocated by the sealed on-disk database.

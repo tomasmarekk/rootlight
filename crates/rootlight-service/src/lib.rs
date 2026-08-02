@@ -10345,6 +10345,90 @@ mod tests {
         assert_eq!(read.data.generation, receipt.generation);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_durable_generation_publishes_and_restores_past_legacy_path_limit() {
+        use std::os::windows::ffi::OsStrExt as _;
+
+        fn utf16_len(path: &Path) -> usize {
+            path.as_os_str().encode_wide().count()
+        }
+
+        let storage = durable_test_tempdir();
+        let storage_root = storage.path().to_path_buf();
+        let padding_length = 107_usize
+            .checked_sub(utf16_len(&storage_root) + 1)
+            .expect("temporary root leaves room for the long state path");
+        assert!(
+            padding_length <= 255,
+            "fixture padding must fit one Windows path component"
+        );
+        let state_root = storage_root.join("s".repeat(padding_length));
+        assert_eq!(utf16_len(&state_root), 107);
+        let paths = RuntimePaths::new(state_root, storage_root.join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn long_path_answer() -> u32 {\n    42\n}\n",
+        )
+        .expect("fixture source writes");
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+
+        let receipt = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("durable generation publishes across the legacy path limit")
+        };
+        let projected_journal = paths
+            .state_dir()
+            .join("first-slice/repositories")
+            .join(receipt.repository.to_string())
+            .join(format!("stage-{}-0000000000000000", receipt.generation))
+            .join("oracle.sqlite3-journal");
+        assert!(utf16_len(&projected_journal) > 260);
+
+        let (mut restored, deferred) =
+            FirstSliceService::open_durable_deferred(2, paths.state_dir())
+                .expect("durable boundary reopens");
+        let restored_state = deferred
+            .restore(&cancellation)
+            .expect("long-path generation verifies");
+        restored
+            .install_deferred_restore(restored_state, &cancellation)
+            .expect("long-path generation installs");
+        assert_eq!(
+            restored.active_generation_for(receipt.repository),
+            Some(receipt.generation)
+        );
+        assert!(
+            !restored
+                .code_locate(
+                    receipt.generation,
+                    "long_path_answer".to_owned(),
+                    LocateMode::Exact,
+                    8,
+                    0,
+                    &cancellation,
+                )
+                .expect("restored long-path query succeeds")
+                .data
+                .hits
+                .is_empty()
+        );
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
     fn durable_restore_makes_active_generation_ready_before_retained_history() {

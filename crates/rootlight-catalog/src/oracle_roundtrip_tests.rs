@@ -626,6 +626,50 @@ fn oracle_is_exactly_named_and_cannot_be_overwritten() {
     assert_eq!(error.kind(), CatalogErrorKind::AlreadyExists);
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_oracle_round_trip_crosses_legacy_journal_path_limit() {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    fn utf16_len(path: &Path) -> usize {
+        path.as_os_str().encode_wide().count()
+    }
+
+    let temporary = TempDir::new().expect("temporary generation root is created");
+    let root = fs::canonicalize(temporary.path()).expect("temporary root canonicalizes");
+    let unpadded_database_length = utf16_len(&root.join(ORACLE_FILENAME));
+    let padding_length = 254_usize
+        .checked_sub(unpadded_database_length + 1)
+        .expect("temporary root leaves room for the long-path fixture");
+    assert!(
+        padding_length <= 255,
+        "fixture padding must fit one Windows path component"
+    );
+    let generation_directory = root.join("x".repeat(padding_length));
+    fs::create_dir(&generation_directory).expect("long generation directory is created");
+
+    let database_path = generation_directory.join(ORACLE_FILENAME);
+    let mut journal_name = database_path.as_os_str().to_os_string();
+    journal_name.push("-journal");
+    let journal_path = PathBuf::from(journal_name);
+    assert_eq!(utf16_len(&database_path), 254);
+    assert!(utf16_len(&journal_path) > 260);
+
+    let expected = write_fixture(&generation_directory);
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let reopened = OracleReader::open_in(&generation_directory, &context)
+        .expect("sealed oracle reopens across the legacy path limit");
+    assert_eq!(
+        reopened
+            .read(&context)
+            .expect("reopened long-path oracle remains readable"),
+        expected
+    );
+    assert!(database_path.is_file());
+    assert!(!journal_path.exists());
+}
+
 #[test]
 fn preflight_budget_and_cancellation_leave_no_payload_rows() {
     let budget_directory = TempDir::new().expect("budget staging directory is created");
