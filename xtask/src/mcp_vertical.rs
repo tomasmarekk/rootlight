@@ -250,7 +250,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
 
     let daemon_started = Instant::now();
     let mut daemon = SupervisedDaemon::spawn(&daemon_binary, &environment)?;
-    wait_until_ready(&paths)?;
+    wait_until_ready(&paths, &mut daemon)?;
     daemon_ready_samples.push(elapsed_micros(daemon_started.elapsed()));
 
     let (mut mcp, catalog, bridge_start) =
@@ -415,7 +415,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
 
     let restart_started = Instant::now();
     let mut restarted_daemon = SupervisedDaemon::spawn(&daemon_binary, &environment)?;
-    wait_until_ready(&paths)?;
+    wait_until_ready(&paths, &mut restarted_daemon)?;
     daemon_ready_samples.push(elapsed_micros(restart_started.elapsed()));
     let (mut restarted_mcp, restarted_catalog, restarted_bridge_start) =
         open_session("restart", &mcp_binary, &environment, &mut transcript)?;
@@ -499,7 +499,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     restore_fixture_v1(&fixture, &repository_root)?;
     let rebuild_started = Instant::now();
     let mut rebuilt_daemon = SupervisedDaemon::spawn(&daemon_binary, &environment)?;
-    wait_until_ready(&paths)?;
+    wait_until_ready(&paths, &mut rebuilt_daemon)?;
     daemon_ready_samples.push(elapsed_micros(rebuild_started.elapsed()));
     let (mut rebuilt_mcp, rebuilt_catalog, rebuilt_bridge_start) =
         open_session("rebuild", &mcp_binary, &environment, &mut transcript)?;
@@ -4535,6 +4535,26 @@ impl SupervisedDaemon {
             })
         }
     }
+
+    fn require_running(&mut self) -> Result<(), VerticalError> {
+        let child = self.child.as_mut().ok_or(VerticalError::Invariant(
+            "supervised daemon was already stopped",
+        ))?;
+        let Some(status) = child.try_wait().map_err(|source| VerticalError::Io {
+            action: "probe supervised daemon",
+            source,
+        })?
+        else {
+            return Ok(());
+        };
+        let stderr = join_stderr(&mut self.stderr_reader)?;
+        self.child.take();
+        Err(VerticalError::ChildFailed {
+            name: "rootlight-daemon",
+            status,
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        })
+    }
 }
 
 impl Drop for SupervisedDaemon {
@@ -4894,11 +4914,15 @@ fn terminate_child(child: &mut Option<Child>) {
     }
 }
 
-fn wait_until_ready(paths: &RuntimePaths) -> Result<(), VerticalError> {
+fn wait_until_ready(
+    paths: &RuntimePaths,
+    daemon: &mut SupervisedDaemon,
+) -> Result<(), VerticalError> {
     let deadline = Instant::now()
         .checked_add(START_TIMEOUT)
         .ok_or(VerticalError::Clock)?;
     loop {
+        daemon.require_running()?;
         if paths.discover().is_ok()
             && Client::connect_or_start(paths, [0x71; 16], ConnectPolicy::ExistingOnly)
                 .and_then(|client| client.health())

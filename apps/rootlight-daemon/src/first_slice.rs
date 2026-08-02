@@ -858,26 +858,6 @@ impl FirstSliceDaemon {
         support_state: Option<Arc<DaemonState>>,
         deferred_restore: Option<DeferredRecoveryWork>,
     ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
-        let work_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .map_err(FirstSliceHostError::AsyncRuntime)?;
-        let read_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .map_err(FirstSliceHostError::AsyncRuntime)?;
-        let control_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .map_err(FirstSliceHostError::AsyncRuntime)?;
-        let refinement_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .map_err(FirstSliceHostError::AsyncRuntime)?;
-        let recovery_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .map_err(FirstSliceHostError::AsyncRuntime)?;
         for (context, _) in &durable_contexts {
             if let Some(root_identity) = context.root_identity {
                 service
@@ -913,6 +893,29 @@ impl FirstSliceDaemon {
                 .restore_committed(publication, &record)
                 .map_err(FirstSliceHostError::Service)?;
         }
+        // Complete fallible durable restoration before constructing owned
+        // runtimes. Async daemon bootstrap cannot drop a Tokio runtime when a
+        // later restoration error unwinds this function.
+        let work_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(FirstSliceHostError::AsyncRuntime)?;
+        let read_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(FirstSliceHostError::AsyncRuntime)?;
+        let control_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(FirstSliceHostError::AsyncRuntime)?;
+        let refinement_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(FirstSliceHostError::AsyncRuntime)?;
+        let recovery_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(FirstSliceHostError::AsyncRuntime)?;
         let metadata = Arc::new(Mutex::new(operation_metadata));
         let stopping = Arc::new(AtomicBool::new(false));
         let service = Arc::new(RwLock::new(service));
@@ -1423,9 +1426,17 @@ impl OperationMetadataSet {
             return Err(FirstSliceError::Retention);
         }
         if let Some(metadata) = self.records.get_mut(&publication.operation) {
+            // A no-change publication is admitted against the current active
+            // generation, while its reused receipt keeps that generation's
+            // original lineage parent. The durable projection binds the
+            // operation to the exact reused generation in that case.
+            let reused_generation_matches = metadata.parent_generation
+                == Some(publication.receipt.generation)
+                && metadata.published_generation == Some(publication.receipt.generation);
             if metadata.repository != Some(publication.receipt.repository)
-                || metadata.parent_generation != publication.receipt.parent
                 || metadata.started_unix_ms != publication.started_unix_ms
+                || (metadata.parent_generation != publication.receipt.parent
+                    && !reused_generation_matches)
             {
                 return Err(FirstSliceError::Retention);
             }
@@ -9135,6 +9146,92 @@ mod tests {
             .expect("terminal metadata is evicted");
         assert!(!metadata.records.contains_key(&first));
         assert!(metadata.records.contains_key(&second));
+    }
+
+    #[test]
+    fn committed_restore_accepts_a_reused_generation_lineage() {
+        let operation = OperationId::from_bytes([62; 16]);
+        let repository = RepositoryId::from_bytes([63; 16]);
+        let generation = GenerationId::from_bytes([64; 20]);
+        let lineage_parent = GenerationId::from_bytes([65; 20]);
+        let started_unix_ms = 1_700_000_000_066;
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let submission = repository_submission(operation, 62)
+            .with_repository_context(
+                RepositoryOperationSubmission::new(
+                    repository,
+                    Some(generation),
+                    started_unix_ms,
+                    64 * 1024 * 1024,
+                    RepositoryOperationMode::Deep,
+                )
+                .expect("repository context is valid")
+                .with_root_identity([67; 32]),
+            )
+            .expect("repository context attaches");
+        journal.submit(submission).expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        journal
+            .complete_repository_publication(operation)
+            .expect("operation succeeds");
+        let context = journal
+            .record_repository_publication(operation, generation)
+            .expect("published generation projects durably");
+        let mut unrelated_parent_context = context;
+        unrelated_parent_context.parent_generation = Some(GenerationId::from_bytes([66; 20]));
+        let record = journal
+            .status(operation)
+            .expect("operation remains visible");
+        let receipt = FirstSliceIndexReceipt {
+            repository,
+            generation,
+            parent: Some(lineage_parent),
+            discovered_inputs: 3,
+            visited_entries: 4,
+            excluded_inputs: 1,
+            oversized_inputs: 0,
+            indexed_files: 3,
+            entities: 6,
+            lexical_documents: 3,
+            oracle_allocated_bytes: 4_096,
+            estimated_disk_bytes: 64 * 1024 * 1024,
+            diagnostics: Vec::new(),
+            elapsed_micros: 10,
+        };
+        let publication = FirstSliceDurableOperation {
+            operation,
+            started_unix_ms,
+            provider: FirstSliceIndexProvider::Unknown,
+            receipt,
+        };
+        let mut metadata = OperationMetadataSet::new(1);
+        metadata
+            .restore_context(context, &record)
+            .expect("durable context restores");
+
+        metadata
+            .restore_committed(publication.clone(), &record)
+            .expect("the exact reused generation restores");
+        let restored = metadata
+            .records
+            .get(&operation)
+            .expect("restored metadata remains visible");
+        assert_eq!(restored.parent_generation, Some(generation));
+        assert_eq!(restored.published_generation, Some(generation));
+        assert_eq!(restored.receipt.as_ref(), Some(&publication.receipt));
+
+        let mut unrelated_parent = OperationMetadataSet::new(1);
+        unrelated_parent
+            .restore_context(unrelated_parent_context, &record)
+            .expect("durable context with an unrelated parent restores");
+        assert_eq!(
+            unrelated_parent
+                .restore_committed(publication, &record)
+                .expect_err("an unrelated parent cannot reuse the lineage exception"),
+            FirstSliceError::Retention
+        );
     }
 
     #[test]
