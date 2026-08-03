@@ -1,6 +1,8 @@
 // Verifies controlled native-dialog dismissal without third-party overlay side effects.
 
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { NativeDialog } from "../src/components/native-dialog";
@@ -75,5 +77,38 @@ describe("NativeDialog", () => {
     );
     fireEvent.mouseDown(screen.getByRole("dialog", { name: "Native confirmation" }));
     expect(onDismiss).toHaveBeenCalledOnce();
+  });
+
+  it("restores focus to the opener after native cancellation", async () => {
+    const user = userEvent.setup();
+
+    function DialogFixture() {
+      const [isOpen, setIsOpen] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setIsOpen(true)}>
+            Open confirmation
+          </button>
+          <NativeDialog
+            ariaLabelledBy="focus-dialog-heading"
+            className="test-dialog"
+            isOpen={isOpen}
+            onDismiss={() => setIsOpen(false)}
+          >
+            <h2 id="focus-dialog-heading">Focus confirmation</h2>
+            <button type="button">Continue</button>
+          </NativeDialog>
+        </>
+      );
+    }
+
+    render(<DialogFixture />);
+    const opener = screen.getByRole("button", { name: "Open confirmation" });
+    await user.click(opener);
+    const dialog = screen.getByRole("dialog", { name: "Focus confirmation" });
+    fireEvent(dialog, new Event("cancel", { cancelable: true }));
+
+    expect(screen.queryByRole("dialog", { name: "Focus confirmation" })).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
   });
 });

@@ -21,12 +21,18 @@ export function NativeDialog({
   onDismiss,
 }: NativeDialogProps) {
   const dialogReference = useRef<HTMLDialogElement>(null);
+  const restoreFocusReference = useRef<HTMLElement>(null);
 
   useLayoutEffect(() => {
     const dialog = dialogReference.current;
     if (dialog === null) {
       return;
     }
+    const activeElement = document.activeElement;
+    restoreFocusReference.current =
+      activeElement instanceof HTMLElement && activeElement !== document.body
+        ? activeElement
+        : null;
     if (!dialog.open) {
       if (typeof dialog.showModal === "function") {
         dialog.showModal();
@@ -43,6 +49,12 @@ export function NativeDialog({
         dialog.close();
       } else {
         dialog.removeAttribute("open");
+      }
+      // Controlled unmounting can precede the browser's native focus restoration.
+      const restoreTarget = restoreFocusReference.current;
+      restoreFocusReference.current = null;
+      if (restoreTarget?.isConnected) {
+        restoreTarget.focus({ preventScroll: true });
       }
     };
   }, [isOpen]);
