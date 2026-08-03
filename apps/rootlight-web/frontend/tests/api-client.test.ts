@@ -13,6 +13,19 @@ afterEach(() => {
 });
 
 describe("browser API client", () => {
+  it("publishes a process-local daemon recovery signal with deterministic cleanup", async () => {
+    const { publishDaemonReconnected, subscribeDaemonReconnected } =
+      await import("../src/api/client");
+    const listener = vi.fn();
+    const unsubscribe = subscribeDaemonReconnected(listener);
+
+    publishDaemonReconnected();
+    expect(listener).toHaveBeenCalledOnce();
+    unsubscribe();
+    publishDaemonReconnected();
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
   it("restores an existing HttpOnly-cookie session", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()

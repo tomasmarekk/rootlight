@@ -19,6 +19,7 @@ import {
   fetchRelationships,
   readSource,
   runChangeImpact,
+  subscribeDaemonReconnected,
 } from "../../../api/client";
 import type { BrowserGraphNode, GraphRelationKind } from "../../graph/model/graph-contracts";
 import type {
@@ -144,11 +145,16 @@ export function EvidenceInspector({
         includeTests,
       }),
   });
+  const impactReset = useRef(impact.reset);
   const relationshipGroups = useMemo(
     () => relationships.data?.pages.flatMap((page) => page.groups) ?? [],
     [relationships.data],
   );
   const relationshipCompleteness = relationships.data?.pages.at(-1)?.completeness;
+
+  useEffect(() => {
+    impactReset.current = impact.reset;
+  }, [impact.reset]);
 
   useEffect(() => {
     heading.current?.focus();
@@ -167,6 +173,20 @@ export function EvidenceInspector({
       onImpactChange([]);
     };
   }, [onClose, onImpactChange]);
+
+  useEffect(
+    () =>
+      subscribeDaemonReconnected(() => {
+        sourceAbort.current?.abort();
+        sourceAbort.current = null;
+        setSource(null);
+        setSourceFailed(false);
+        setSourceLoading(false);
+        impactReset.current();
+        onImpactChange([]);
+      }),
+    [onImpactChange],
+  );
 
   async function loadSource() {
     sourceAbort.current?.abort();

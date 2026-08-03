@@ -1,7 +1,7 @@
 // Verifies explicit source disclosure, isolated failures, and typed impact interactions.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -27,16 +27,24 @@ const generationId = `gen1_${"b".repeat(39)}`;
 const symbolId = `sym1_${"c".repeat(39)}`;
 const targetId = `sym1_${"d".repeat(39)}`;
 const capability = "e".repeat(43);
+const reconnectMocks = vi.hoisted(() => ({
+  listeners: new Set<() => void>(),
+}));
 
 vi.mock("../src/api/client", () => ({
   fetchNodeDetail: vi.fn(),
   fetchRelationships: vi.fn(),
   readSource: vi.fn(),
   runChangeImpact: vi.fn(),
+  subscribeDaemonReconnected: vi.fn((listener: () => void) => {
+    reconnectMocks.listeners.add(listener);
+    return () => reconnectMocks.listeners.delete(listener);
+  }),
 }));
 
 beforeEach(() => {
   vi.clearAllMocks();
+  reconnectMocks.listeners.clear();
   vi.mocked(fetchNodeDetail).mockResolvedValue(nodeDetail());
   vi.mocked(fetchRelationships).mockResolvedValue(relationships());
   vi.mocked(readSource).mockResolvedValue(sourceRead());
@@ -102,6 +110,26 @@ describe("EvidenceInspector", () => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(onClose).toHaveBeenCalledOnce();
     expect(screen.queryByText("untrusted repository failure")).not.toBeInTheDocument();
+  });
+
+  it("clears source and analytical overlay state after daemon recovery", async () => {
+    const onImpactChange = vi.fn();
+    renderInspector({ onImpactChange });
+    expect(await screen.findByRole("heading", { name: "run" })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Show source" }));
+    expect(await screen.findByLabelText("Explicitly loaded source")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Calculate impact" }));
+    expect(await screen.findByText("medium risk")).toBeVisible();
+
+    act(() => {
+      for (const listener of reconnectMocks.listeners) {
+        listener();
+      }
+    });
+
+    expect(screen.queryByLabelText("Explicitly loaded source")).not.toBeInTheDocument();
+    expect(screen.queryByText("medium risk")).not.toBeInTheDocument();
+    expect(onImpactChange).toHaveBeenLastCalledWith([]);
   });
 });
 

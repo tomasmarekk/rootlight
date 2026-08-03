@@ -2,7 +2,12 @@
 
 import { useEffect, useState } from "react";
 
-import { fetchNextGraphPage, openGraphProjection, releaseGraphProjection } from "../api/client";
+import {
+  fetchNextGraphPage,
+  openGraphProjection,
+  releaseGraphProjection,
+  subscribeDaemonReconnected,
+} from "../api/client";
 import { GraphDecoderClient } from "../features/graph/controller/graph-decoder-client";
 import type {
   GraphBudgetProfile,
@@ -51,6 +56,14 @@ export function useGraphProjection(input: GraphProjectionInput): GraphProjection
     view,
   } = input;
   const relationFingerprint = relations.join("\u001f");
+  const [reconnectRevision, setReconnectRevision] = useState(0);
+  useEffect(
+    () =>
+      subscribeDaemonReconnected(() => {
+        setReconnectRevision((current) => current + 1);
+      }),
+    [],
+  );
   const projectionIdentity = [
     repositoryId,
     generationId,
@@ -60,6 +73,7 @@ export function useGraphProjection(input: GraphProjectionInput): GraphProjection
     String(minimumConfidence),
     budgetProfile,
     String(retryKey),
+    String(reconnectRevision),
   ].join("\u001e");
   const [state, setState] = useState<GraphProjectionState & { identity: string }>({
     identity: "",

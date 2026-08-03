@@ -1,6 +1,6 @@
 // Verifies exact-generation graph loading, bounded page accumulation, and handle cleanup.
 
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fetchNextGraphPage, openGraphProjection, releaseGraphProjection } from "../src/api/client";
@@ -18,11 +18,18 @@ const decoderMocks = vi.hoisted(() => ({
   decode: vi.fn(),
   dispose: vi.fn(),
 }));
+const reconnectMocks = vi.hoisted(() => ({
+  listeners: new Set<() => void>(),
+}));
 
 vi.mock("../src/api/client", () => ({
   openGraphProjection: vi.fn(),
   fetchNextGraphPage: vi.fn(),
   releaseGraphProjection: vi.fn(),
+  subscribeDaemonReconnected: vi.fn((listener: () => void) => {
+    reconnectMocks.listeners.add(listener);
+    return () => reconnectMocks.listeners.delete(listener);
+  }),
 }));
 
 vi.mock("../src/features/graph/controller/graph-decoder-client", () => ({
@@ -34,6 +41,7 @@ vi.mock("../src/features/graph/controller/graph-decoder-client", () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  reconnectMocks.listeners.clear();
   vi.mocked(openGraphProjection).mockResolvedValue(graphPageFixture(0));
   vi.mocked(fetchNextGraphPage).mockResolvedValue(graphPageFixture(1));
   vi.mocked(releaseGraphProjection).mockResolvedValue({
@@ -128,5 +136,53 @@ describe("useGraphProjection", () => {
     await waitFor(() => expect(result.current.failed).toBe(true));
     expect(result.current.model).toBeNull();
     expect(releaseGraphProjection).not.toHaveBeenCalled();
+  });
+
+  it("disposes and reopens the exact projection after daemon recovery", async () => {
+    decoderMocks.decode
+      .mockResolvedValueOnce(
+        decodeGraphPage({
+          type: "decode",
+          jobId: 3,
+          page: graphPageFixture(0),
+          expectedRepositoryId: graphRepositoryId,
+          expectedGenerationId: graphGenerationId,
+          layoutIdentity: graphLayoutIdentity,
+        }),
+      )
+      .mockResolvedValueOnce(
+        decodeGraphPage({
+          type: "decode",
+          jobId: 4,
+          page: graphPageFixture(1),
+          expectedRepositoryId: graphRepositoryId,
+          expectedGenerationId: graphGenerationId,
+          expectedProjectionToken: graphProjectionToken,
+          layoutIdentity: graphLayoutIdentity,
+        }),
+      );
+    const { result } = renderHook(() =>
+      useGraphProjection({
+        repositoryId: graphRepositoryId,
+        generationId: graphGenerationId,
+        view: "architecture",
+        relations: ["calls"],
+        minimumConfidence: 500,
+        budgetProfile: "balanced",
+        retryKey: 0,
+      }),
+    );
+    await waitFor(() => expect(result.current.model?.nodes).toHaveLength(3));
+
+    act(() => {
+      for (const listener of reconnectMocks.listeners) {
+        listener();
+      }
+    });
+
+    await waitFor(() => expect(openGraphProjection).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.model?.nodes).toHaveLength(3));
+    expect(decoderMocks.dispose).toHaveBeenCalledOnce();
+    expect(releaseGraphProjection).toHaveBeenCalledTimes(2);
   });
 });

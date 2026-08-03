@@ -16,7 +16,7 @@ import {
 import { useEffect, useRef } from "react";
 import { NavLink, Outlet } from "react-router";
 
-import { fetchHealth } from "../api/client";
+import { fetchHealth, publishDaemonReconnected } from "../api/client";
 import type { Health } from "../api/contracts";
 import { useSession } from "../session/session-context";
 
@@ -47,6 +47,7 @@ export function AppShell() {
       void queryClient.invalidateQueries({
         predicate: (query) => query.queryKey[0] !== "health",
       });
+      publishDaemonReconnected();
     }
   }, [health.data, health.isError, queryClient]);
 

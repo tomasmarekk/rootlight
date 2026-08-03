@@ -54,6 +54,7 @@ const maximumSupportArchiveBytes = 768 * 1024;
 const bootstrapPattern = /^[A-Za-z0-9_-]{43}$/u;
 const publicErrorPattern = /^[a-z][a-z0-9_]{0,63}$/u;
 const sessionExpiredEvent = "rootlight:session-expired";
+const daemonReconnectedEvent = "rootlight:daemon-reconnected";
 
 let csrfToken: string | undefined;
 let initialization: Promise<Session> | undefined;
@@ -78,6 +79,15 @@ export function initializeSession(): Promise<Session> {
 export function subscribeSessionExpired(listener: () => void): () => void {
   window.addEventListener(sessionExpiredEvent, listener);
   return () => window.removeEventListener(sessionExpiredEvent, listener);
+}
+
+export function publishDaemonReconnected(): void {
+  window.dispatchEvent(new Event(daemonReconnectedEvent));
+}
+
+export function subscribeDaemonReconnected(listener: () => void): () => void {
+  window.addEventListener(daemonReconnectedEvent, listener);
+  return () => window.removeEventListener(daemonReconnectedEvent, listener);
 }
 
 export async function fetchHealth(signal?: AbortSignal): Promise<Health> {
