@@ -198,9 +198,19 @@ def process_environment(root: Path) -> dict[str, str]:
     return environment
 
 
-def wait_for_daemon(rootlight: Path, environment: dict[str, str]) -> None:
+def wait_for_daemon(
+    rootlight: Path,
+    environment: dict[str, str],
+    process: subprocess.Popen[bytes],
+) -> None:
+    discovery = Path(environment["ROOTLIGHT_RUNTIME_DIR"]) / "daemon.json"
     deadline = time.monotonic() + START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("installed daemon exited before becoming ready")
+        if not discovery.is_file():
+            time.sleep(0.1)
+            continue
         try:
             completed = subprocess.run(
                 [rootlight, "health"],
@@ -394,7 +404,7 @@ def main() -> None:
         )
         web_process: subprocess.Popen[str] | None = None
         try:
-            wait_for_daemon(rootlight, environment)
+            wait_for_daemon(rootlight, environment, daemon_process)
             web_process, origin, secret = start_web(rootlight, environment)
             exercise_session(
                 origin, secret, identities["share/rootlight/web/index.html"]

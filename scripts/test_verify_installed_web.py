@@ -7,8 +7,10 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 
@@ -20,6 +22,69 @@ SPEC.loader.exec_module(installed_web)
 
 
 class InstalledWebSmokeTests(unittest.TestCase):
+    def test_readiness_probe_waits_for_spawned_daemon_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            discovery = runtime / "daemon.json"
+            environment = {"ROOTLIGHT_RUNTIME_DIR": str(runtime)}
+            process = mock.Mock()
+            process.poll.return_value = None
+            healthy = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "ok": True,
+                        "result": {"data": {"ready": True}},
+                    }
+                ).encode(),
+                stderr=b"",
+            )
+
+            def publish_discovery(_seconds: float) -> None:
+                discovery.write_text("{}", encoding="utf-8")
+
+            def probe(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                self.assertTrue(discovery.is_file())
+                return healthy
+
+            with (
+                mock.patch.object(
+                    installed_web.time,
+                    "sleep",
+                    side_effect=publish_discovery,
+                ),
+                mock.patch.object(
+                    installed_web.subprocess,
+                    "run",
+                    side_effect=probe,
+                ) as run,
+            ):
+                installed_web.wait_for_daemon(
+                    Path("rootlight"),
+                    environment,
+                    process,
+                )
+
+            run.assert_called_once()
+            self.assertGreaterEqual(process.poll.call_count, 2)
+
+    def test_readiness_probe_rejects_an_exited_spawned_daemon(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = {"ROOTLIGHT_RUNTIME_DIR": temporary}
+            process = mock.Mock()
+            process.poll.return_value = 1
+            with (
+                mock.patch.object(installed_web.subprocess, "run") as run,
+                self.assertRaisesRegex(RuntimeError, "before becoming ready"),
+            ):
+                installed_web.wait_for_daemon(
+                    Path("rootlight"),
+                    environment,
+                    process,
+                )
+            run.assert_not_called()
+
     def test_archive_extraction_and_manifest_identity_are_exact(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
