@@ -8227,22 +8227,25 @@ mod tests {
             daemon::OperationState::Succeeded as i32
         );
 
-        let located = execute(
+        let located = execute_retrying_busy(
             &daemon,
-            FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
-                schema_version: Some(schema_version()),
-                repository: Some(repository_to_wire(receipt.repository)),
-                generation: Some(daemon::GenerationSelector {
-                    selector: Some(daemon::generation_selector::Selector::Generation(
-                        generation_to_wire(receipt.generation),
-                    )),
-                }),
-                query: "crash_safe_answer".to_owned(),
-                mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
-                maximum_results: 8,
-                page_offset: 0,
-                languages: Vec::new(),
-            }),
+            || {
+                FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+                    schema_version: Some(schema_version()),
+                    repository: Some(repository_to_wire(receipt.repository)),
+                    generation: Some(daemon::GenerationSelector {
+                        selector: Some(daemon::generation_selector::Selector::Generation(
+                            generation_to_wire(receipt.generation),
+                        )),
+                    }),
+                    query: "crash_safe_answer".to_owned(),
+                    mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+                    maximum_results: 8,
+                    page_offset: 0,
+                    languages: Vec::new(),
+                })
+            },
+            "reconciled generation becomes readable after background recovery",
         );
         let FirstSliceIpcResponse::CodeLocate(located) = located else {
             panic!("code locate response expected");
