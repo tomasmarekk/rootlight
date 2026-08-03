@@ -1,13 +1,18 @@
 // Validates the dark authenticated shell and its initial accessibility baseline.
 
+import { createHash } from "node:crypto";
+
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
 const repositoryId = `repo1_${"a".repeat(32)}`;
 const generationId = `gen1_${"b".repeat(39)}`;
 const operationId = `op1_${"c".repeat(32)}`;
+const symbolId = `sym1_${"c".repeat(39)}`;
+const targetSymbolId = `sym1_${"d".repeat(39)}`;
 const browseToken = "d".repeat(43);
 const rootCapability = "e".repeat(43);
+const projectionToken = "f".repeat(43);
 
 const health = {
   webReady: true,
@@ -60,11 +65,16 @@ test("opens an exact generation from an immutable catalog page", async ({ page }
   await page.getByRole("searchbox", { name: "Search projects" }).press("Enter");
   await page.getByRole("link", { name: /Rootlight/u }).click();
 
-  await expect(page).toHaveURL(
-    new RegExp(`/projects/${repositoryId}\\?generation=${generationId}$`, "u"),
-  );
+  await expect(page).toHaveURL((url) => {
+    return (
+      url.pathname === `/projects/${repositoryId}` &&
+      url.searchParams.get("generation") === generationId
+    );
+  });
   await expect(page.getByRole("heading", { name: "Rootlight", level: 1 })).toBeVisible();
-  await expect(page.getByText("published", { exact: true })).toBeVisible();
+  await expect(
+    page.getByLabel("Project status").getByText("published", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByText("90% indexed coverage")).not.toBeVisible();
   await expect(page.getByText("9 / 10 files")).toBeVisible();
   await expect(page.getByText("repository index")).toBeVisible();
@@ -104,9 +114,12 @@ test("admits a capability-bound detached index and opens its publication", async
   expect(JSON.stringify(workflow.admissionRequest)).not.toContain("\\");
 
   await projectLink.click();
-  await expect(page).toHaveURL(
-    new RegExp(`/projects/${repositoryId}\\?generation=${generationId}$`, "u"),
-  );
+  await expect(page).toHaveURL((url) => {
+    return (
+      url.pathname === `/projects/${repositoryId}` &&
+      url.searchParams.get("generation") === generationId
+    );
+  });
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations).toEqual([]);
 });
@@ -133,7 +146,122 @@ test("requires confirmation before cancelling a running index", async ({ page })
   expect(workflow.cancelCsrf).toBe("csrf");
 });
 
+test("explores exact-generation evidence through the accessible graph companion", async ({
+  page,
+}) => {
+  await mockApplication(page, [projectSummary()]);
+  await mockEvidence(page);
+  await page.goto(`/#bootstrap=${"a".repeat(43)}`);
+  await page.getByRole("link", { name: /Rootlight/u }).click();
+
+  const runNode = page.getByRole("button", { name: /run symbol src\/main\.rs/u });
+  await expect(runNode).toBeVisible();
+  await runNode.click();
+  await expect(page.getByRole("heading", { name: "run", level: 2 })).toBeVisible();
+  await expectNoSeriousAccessibilityViolations(page);
+
+  await page.getByRole("button", { name: "Show source" }).click();
+  const source = page.getByLabel("Explicitly loaded source");
+  await expect(source).toContainText("<img src=x onerror=repositoryAttack()>");
+  await expect(page.locator("img")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Calculate impact" }).click();
+  await expect(page.getByText("medium risk")).toBeVisible();
+  await expect(page.getByText("Impact overlay · 1")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /dispatch symbol src\/dispatch\.rs.*Change impact/u }),
+  ).toBeVisible();
+  await expectNoSeriousAccessibilityViolations(page);
+
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("complementary", { name: "run" })).not.toBeVisible();
+});
+
+test("keeps session-owned operations and local diagnostics usable end to end", async ({ page }) => {
+  await mockApplication(page, []);
+  await mockIndexWorkflow(page, "running");
+  await mockDiagnostics(page);
+  await page.goto(`/#bootstrap=${"a".repeat(43)}`);
+
+  await page.getByRole("button", { name: "Add project" }).click();
+  await page.getByRole("button", { name: "Home" }).click();
+  await expect(page.getByRole("button", { name: "crates" })).toBeVisible();
+  await expectNoSeriousAccessibilityViolations(page);
+  await page.getByRole("button", { name: "Select this folder" }).click();
+  await page.getByRole("button", { name: "Start detached index" }).click();
+  await page.getByRole("link", { name: "Operations" }).click();
+
+  await expect(page.getByRole("heading", { name: "Operations", level: 1 })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Index operations" })).toContainText(operationId);
+  await page
+    .getByRole("region", { name: "Index operations" })
+    .getByRole("button", { name: "Cancel" })
+    .click();
+  const cancelDialog = page.getByRole("dialog", { name: "Cancel index operation?" });
+  await cancelDialog.getByRole("button", { name: "Request cancellation" }).click();
+  await expect(page.getByText("cancelling", { exact: true })).toBeVisible();
+  await expect(cancelDialog).toHaveCount(0);
+  await expectNoSeriousAccessibilityViolations(page);
+
+  await page.getByRole("link", { name: "Diagnostics" }).click();
+  await expect(page.getByRole("heading", { name: "Diagnostics", level: 1 })).toBeVisible();
+  await page.getByRole("button", { name: "Quick diagnostics" }).click();
+  await expect(page.getByText("Catalog check timed out")).toBeVisible();
+  await page.getByRole("button", { name: "Prepare support bundle" }).click();
+  await expect(page.getByText("9 bytes")).toBeVisible();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Verify and download" }).click();
+  expect((await download).suggestedFilename()).toBe("rootlight-support-bundle.zip");
+  await expect(page.getByText(/This single-use archive was downloaded/u)).toBeVisible();
+  await expectNoSeriousAccessibilityViolations(page);
+});
+
+test("reopens a fallback projection, clears source, and expires the session fail closed", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1_024, height: 800 });
+  await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
+  await page.addInitScript(() => {
+    Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
+      configurable: true,
+      value: () => null,
+    });
+  });
+  const application = await mockApplication(page, [projectSummary()]);
+  const evidence = await mockEvidence(page);
+  await page.goto(`/#bootstrap=${"a".repeat(43)}`);
+  await page.getByRole("link", { name: /Rootlight/u }).click();
+
+  await expect(page.getByRole("heading", { name: "Graphical view is unavailable" })).toBeVisible();
+  await page.getByRole("button", { name: /run symbol src\/main\.rs/u }).click();
+  await page.getByRole("button", { name: "Show source" }).click();
+  await expect(page.getByLabel("Explicitly loaded source")).toBeVisible();
+  const openCount = application.graphOpenCount();
+
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("rootlight:daemon-reconnected"));
+  });
+
+  await expect(page.getByLabel("Explicitly loaded source")).not.toBeVisible();
+  await expect
+    .poll(() => application.graphOpenCount(), { timeout: 5_000 })
+    .toBeGreaterThan(openCount);
+  await expect(page.getByRole("heading", { name: "Graphical view is unavailable" })).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+    ),
+  ).toBe(true);
+
+  evidence.expireSession();
+  await page.getByRole("button", { name: "Calculate impact" }).click();
+  await expect(page.getByRole("heading", { name: "This local session has ended" })).toBeVisible();
+  await expect(page.getByLabel("Explicitly loaded source")).not.toBeVisible();
+  await expectNoSeriousAccessibilityViolations(page);
+});
+
 async function mockApplication(page: Page, projects: ReturnType<typeof projectSummary>[]) {
+  let graphOpenCount = 0;
   await page.route("**/api/v1/session/bootstrap", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -159,6 +287,29 @@ async function mockApplication(page: Page, projects: ReturnType<typeof projectSu
         : projectDetail();
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
   });
+  await page.route("**/api/v1/graph/projections**", async (route) => {
+    if (route.request().method() === "DELETE") {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          schema: "rootlight.web-graph-release/1",
+          projectionToken,
+          released: true,
+        }),
+      });
+      return;
+    }
+    if (new URL(route.request().url()).pathname === "/api/v1/graph/projections") {
+      graphOpenCount += 1;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(graphPage()),
+    });
+  });
+  return {
+    graphOpenCount: () => graphOpenCount,
+  };
 }
 
 async function mockIndexWorkflow(page: Page, terminalState: "running" | "succeeded") {
@@ -241,6 +392,111 @@ async function mockIndexWorkflow(page: Page, terminalState: "running" | "succeed
   });
 
   return workflow;
+}
+
+async function mockEvidence(page: Page) {
+  let expired = false;
+  await page.route("**/api/v1/projects/*/nodes/*", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(nodeDetail()),
+    });
+  });
+  await page.route("**/api/v1/projects/*/relationships", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(relationships()),
+    });
+  });
+  await page.route("**/api/v1/projects/*/source", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(sourceRead()),
+    });
+  });
+  await page.route("**/api/v1/projects/*/change-impact", async (route) => {
+    if (expired) {
+      await route.fulfill({
+        status: 401,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "session_required" } }),
+      });
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(changeImpact()),
+    });
+  });
+  return {
+    expireSession: () => {
+      expired = true;
+    },
+  };
+}
+
+async function mockDiagnostics(page: Page) {
+  const archive = Buffer.from("rootlight", "utf8");
+  const digest = createHash("sha256").update(archive).digest("hex");
+  const receipt = "s".repeat(43);
+  await page.route("**/api/v1/diagnostics/quick", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema: "rootlight.web-quick-diagnostics/1",
+        schemaVersion: 1,
+        overallStatus: "degraded",
+        durationMs: 125,
+        checks: [
+          {
+            name: "catalog",
+            outcome: "timed_out",
+            durationMs: 125,
+            error: {
+              code: 12,
+              message: "Catalog check timed out",
+              retryable: true,
+              retryAfterMs: "1000",
+            },
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/v1/diagnostics/support-bundle", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema: "rootlight.web-support-bundle/1",
+        receipt,
+        downloadPath: `/api/v1/diagnostics/support-bundles/${receipt}`,
+        archiveBytes: String(archive.byteLength),
+        sha256: digest,
+        containsSource: false,
+        expiresInSeconds: 120,
+      }),
+    });
+  });
+  await page.route(`**/api/v1/diagnostics/support-bundles/${receipt}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      body: archive,
+      headers: {
+        "content-length": String(archive.byteLength),
+        "content-type": "application/zip",
+        "x-rootlight-sha256": digest,
+      },
+    });
+  });
+}
+
+async function expectNoSeriousAccessibilityViolations(page: Page) {
+  const result = await new AxeBuilder({ page }).analyze();
+  expect(
+    result.violations.filter(
+      (violation) => violation.impact === "serious" || violation.impact === "critical",
+    ),
+  ).toEqual([]);
 }
 
 function indexAdmission() {
@@ -345,5 +601,232 @@ function projectDetail() {
         startedUnixMs: "1",
       },
     ],
+  };
+}
+
+function nodeDetail() {
+  return {
+    schema: "rootlight.web-node-detail/1",
+    repositoryId,
+    generationId,
+    nodeId: symbolId,
+    idKind: "symbol",
+    kind: "function",
+    displayName: "run",
+    qualifiedName: null,
+    signature: "fn run()",
+    language: "rust",
+    tier: "tier_a",
+    confidence: 950,
+    provider: "scip",
+    evidence: "definition",
+    outboundExact: "1",
+    outboundCandidates: "0",
+    inboundExact: "0",
+    inboundCandidates: "0",
+    referenceCount: "1",
+    generated: null,
+    sourceReferences: [{ capability: rootCapability, expiresInSeconds: 60 }],
+    context: evidenceContext(),
+    completeness: complete(),
+  };
+}
+
+function relationships() {
+  return {
+    schema: "rootlight.web-relationships/1",
+    context: evidenceContext(),
+    groups: [
+      {
+        seedId: symbolId,
+        relation: "calls",
+        direction: "outbound",
+        totalCount: "1",
+        targets: [{ symbolId: targetSymbolId, confidence: 900, sourceReferences: [] }],
+      },
+    ],
+    returnedEdges: "1",
+    totalEdges: "1",
+    exact: true,
+    truncated: false,
+    nextPageOffset: null,
+    completeness: complete(),
+  };
+}
+
+function sourceRead() {
+  const content = "<img src=x onerror=repositoryAttack()>";
+  const sourceBytes = String(new TextEncoder().encode(content).byteLength);
+  return {
+    schema: "rootlight.web-source/1",
+    repositoryId,
+    generationId,
+    chunks: [
+      {
+        fileId: `file1_${"f".repeat(39)}`,
+        path: "src/untrusted.rs",
+        requestedStartByte: "0",
+        requestedEndByte: sourceBytes,
+        includedStartByte: "0",
+        includedEndByte: sourceBytes,
+        includedStartLine: "1",
+        includedEndLine: "1",
+        content,
+        encoding: "utf8",
+        contentHash: `b3_${"a".repeat(58)}`,
+        language: "rust",
+        tier: "tier_a",
+        generated: false,
+      },
+    ],
+    totalSourceBytes: sourceBytes,
+    truncated: false,
+    context: evidenceContext(sourceBytes),
+    completeness: complete(),
+  };
+}
+
+function changeImpact() {
+  return {
+    schema: "rootlight.web-change-impact/1",
+    context: evidenceContext(),
+    resolvedChanges: [{ symbolId, fileId: null, classification: "resolved", kind: "function" }],
+    impacted: [
+      {
+        sourceIndex: 0,
+        dependents: [
+          {
+            symbolId: targetSymbolId,
+            kind: "function",
+            distance: 1,
+            confidence: 900,
+            via: ["calls"],
+            isPublic: true,
+          },
+        ],
+      },
+    ],
+    tests: [],
+    riskSummary: {
+      level: "medium",
+      reasons: ["public_fanout"],
+      coverage: "bounded",
+      breakingSurface: true,
+      fanout: 1,
+      dynamicBlindSpots: false,
+    },
+    completeness: complete(),
+  };
+}
+
+function evidenceContext(sourceBytes = "0") {
+  return {
+    repositoryId,
+    generationId,
+    parentGenerationId: null,
+    activeGeneration: true,
+    structuralFreshness: "current",
+    semanticFreshness: "current",
+    tier: "tier_a",
+    coverageStatus: "complete",
+    skippedInputs: "0",
+    usage: {
+      rows: "1",
+      edges: "1",
+      results: "1",
+      sourceBytes,
+      jsonBytes: "128",
+      estimatedTokens: "32",
+      tokenAccountingProfile: null,
+      memoryBytes: null,
+      elapsedMicros: "10",
+    },
+  };
+}
+
+function graphPage() {
+  return {
+    schema: "rootlight.web-graph-page/1",
+    projectionToken,
+    pageOrdinal: 0,
+    context: {
+      repositoryId,
+      generationId,
+      parentGenerationId: null,
+      activeGeneration: true,
+      structuralFreshness: "current",
+      semanticFreshness: "current",
+      tier: "tier_a",
+      coverageStatus: "complete",
+      skippedInputs: "0",
+    },
+    nodes: [
+      graphNode(0, symbolId, "run", "src/main.rs", 950),
+      graphNode(1, targetSymbolId, "dispatch", "src/dispatch.rs", 900),
+    ],
+    edges: [
+      {
+        sourceOrdinal: 0,
+        targetOrdinal: 1,
+        relation: "calls",
+        weight: 1,
+        confidence: 900,
+        exact: true,
+        inferred: false,
+        evidenceCount: 1,
+        overlay: "none",
+      },
+    ],
+    completeness: complete(),
+    effectiveBudget: {
+      pageNodes: 200,
+      pageEdges: 500,
+      aggregateNodes: 512,
+      aggregateEdges: 1_000,
+    },
+    returnedNodesCumulative: "2",
+    returnedEdgesCumulative: "1",
+    totalMatchingNodes: "2",
+    totalMatchingEdges: "1",
+    totalKnownNodes: "2",
+    totalKnownEdges: "1",
+    edgesOmittedForUnavailableEndpoints: "0",
+    skippedForCoverage: "0",
+    hasNextPage: false,
+  };
+}
+
+function graphNode(
+  ordinal: number,
+  stableId: string,
+  label: string,
+  path: string,
+  confidence: number,
+) {
+  return {
+    ordinal,
+    stableId,
+    idKind: "symbol",
+    label,
+    path,
+    kind: "symbol",
+    confidence,
+    generated: false,
+    community: "core",
+    component: null,
+    symbolCount: null,
+    fanIn: ordinal,
+    fanOut: 1,
+    hotspotScore: ordinal * 20,
+    evidence: "structural",
+  };
+}
+
+function complete() {
+  return {
+    state: "complete",
+    limitingResources: [],
+    continuation: "not_applicable",
+    guidance: [],
   };
 }

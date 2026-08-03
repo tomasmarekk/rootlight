@@ -405,7 +405,11 @@ function DirectoryBrowser({
             </div>
           ) : (
             <>
-              <nav className="directory-breadcrumbs" aria-label="Selected folder breadcrumbs">
+              <nav
+                aria-label="Selected folder breadcrumbs"
+                className="directory-breadcrumbs"
+                tabIndex={0}
+              >
                 {page.breadcrumbs.map((breadcrumb, index) => (
                   <span key={breadcrumb.browseToken}>
                     {index > 0 ? <ChevronRight size={12} aria-hidden="true" /> : null}

@@ -29,7 +29,10 @@ import {
 export function ProjectWorkspacePage() {
   const { repositoryId } = useParams();
   const location = useLocation();
-  const catalogLocationState = parseCatalogLocationState(location.state);
+  const catalogLocationState = useMemo(
+    () => parseCatalogLocationState(location.state),
+    [location.state],
+  );
   const [searchParameters] = useSearchParams();
   const workspaceState = parseProjectWorkspaceState(searchParameters);
   const project = useQuery({
@@ -121,9 +124,12 @@ function ProjectWorkspace({
 
   useEffect(() => {
     if (canonicalParameters.toString() !== searchParameters.toString()) {
-      setSearchParameters(canonicalParameters, { replace: true });
+      setSearchParameters(canonicalParameters, {
+        replace: true,
+        state: catalogLocationState,
+      });
     }
-  }, [canonicalParameters, searchParameters, setSearchParameters]);
+  }, [canonicalParameters, catalogLocationState, searchParameters, setSearchParameters]);
 
   const selectedOrdinals = useMemo(() => {
     const model = graph.model;
@@ -166,9 +172,12 @@ function ProjectWorkspace({
 
   const updateWorkspace = useCallback(
     (update: (current: ProjectWorkspaceState) => ProjectWorkspaceState, replace = false) => {
-      setSearchParameters(serializeProjectWorkspaceState(update(workspaceState)), { replace });
+      setSearchParameters(serializeProjectWorkspaceState(update(workspaceState)), {
+        replace,
+        state: catalogLocationState,
+      });
     },
-    [setSearchParameters, workspaceState],
+    [catalogLocationState, setSearchParameters, workspaceState],
   );
 
   const closeInspector = useCallback(() => {
@@ -442,7 +451,12 @@ function ProjectWorkspace({
         </aside>
         <WorkspaceResizer width={railWidth} onWidthChange={setRailWidth} />
 
-        <main className="graph-workspace" id="project-graph" tabIndex={-1}>
+        <section
+          aria-label="Project graph workspace"
+          className="graph-workspace"
+          id="project-graph"
+          tabIndex={-1}
+        >
           <a className="skip-graph-link" href="#graph-companion-title">
             Skip graph canvas
           </a>
@@ -512,7 +526,7 @@ function ProjectWorkspace({
               }}
             />
           )}
-        </main>
+        </section>
         {selectedNode === undefined ? null : (
           <EvidenceInspectorBoundary
             key={`${detail.resolvedGenerationId}:${selectedNode.stableId}`}
