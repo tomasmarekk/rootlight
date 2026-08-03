@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Rootlight protocol literals that resemble generic API keys"
+regexes = [
+  '''utf8_byte_upper_bound_v1''',
+]
