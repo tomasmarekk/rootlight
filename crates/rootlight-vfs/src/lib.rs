@@ -781,8 +781,12 @@ impl RepositoryRoot {
     ///
     /// Returns [`VfsError`] when the root cannot be opened as a stable directory.
     pub fn open(repository: RepositoryId, path: &Path) -> Result<Self, VfsError> {
-        let canonical_path =
+        let absolute_path =
             std::path::absolute(path).map_err(|source| VfsError::OpenRoot { source })?;
+        #[cfg(target_os = "macos")]
+        let canonical_path = normalize_macos_system_root_alias(absolute_path);
+        #[cfg(not(target_os = "macos"))]
+        let canonical_path = absolute_path;
         let directory = open_absolute_directory(&canonical_path)?;
         Ok(Self {
             repository,
@@ -1429,6 +1433,21 @@ fn open_absolute_directory(path: &Path) -> Result<Dir, VfsError> {
         }
     }
     Ok(directory)
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_macos_system_root_alias(path: PathBuf) -> PathBuf {
+    // macOS exposes writable system locations through fixed aliases. Rewrite only
+    // those OS-owned first components so later repository components remain no-follow.
+    for (alias, private_root) in [
+        (Path::new("/var"), Path::new("/private/var")),
+        (Path::new("/tmp"), Path::new("/private/tmp")),
+    ] {
+        if let Ok(relative) = path.strip_prefix(alias) {
+            return private_root.join(relative);
+        }
+    }
+    path
 }
 
 fn canonical_component(component: &OsStr) -> (String, Vec<u8>) {
@@ -2411,6 +2430,30 @@ mod tests {
         let nested = real.join("repository");
         fs::create_dir(&nested).expect("nested repository directory is created");
         assert!(RepositoryRoot::open(repository, &base.path().join("link/repository")).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn repository_roots_accept_macos_system_aliases_without_following_descendants() {
+        let temporary = tempfile::Builder::new()
+            .prefix("rootlight-vfs-alias-")
+            .tempdir_in("/private/tmp")
+            .expect("private temporary directory is created");
+        let relative = temporary
+            .path()
+            .strip_prefix("/private/tmp")
+            .expect("temporary directory uses the requested private root");
+        let aliased = Path::new("/tmp").join(relative);
+        let repository = derive_repository(b"macos-system-alias").id();
+
+        let root =
+            RepositoryRoot::open(repository, &aliased).expect("macOS system alias is accepted");
+
+        assert_eq!(root.local_path(), temporary.path());
+        assert_eq!(
+            normalize_macos_system_root_alias(PathBuf::from("/var/folders/example")),
+            Path::new("/private/var/folders/example")
+        );
     }
 
     #[cfg(unix)]
