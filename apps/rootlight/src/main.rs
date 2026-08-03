@@ -69,6 +69,8 @@ const SHARED_GENERATION_RECEIPT_SCHEMA: &str = "rootlight.shared-generation-rece
 const RUNTIME_TRACE_RECEIPT_SCHEMA: &str = "rootlight.runtime-trace-receipt/1";
 const SHARED_GENERATION_RETENTION: usize = 8;
 const MAX_REPAIR_INVENTORY_BYTES: u64 = 2 * 1024 * 1024;
+const DAEMON_UNINSTALL_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const DAEMON_UNINSTALL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_UPDATE_CONTEXT_BYTES: u64 = 64 * 1024;
 const MAX_UPDATE_KEY_FILE_BYTES: u64 = 256;
 const MAX_UPDATE_CHECKSUM_FILE_BYTES: u64 = 512;
@@ -288,7 +290,11 @@ fn execute_web_service(arguments: &[std::ffi::OsString]) -> Result<CommandResult
     let status = match arguments {
         [command] if command == "status" => web_service::status(&paths)?,
         [command] if command == "stop" => web_service::stop(&paths)?,
-        [command] if command == "uninstall" => web_service::uninstall(&paths)?,
+        [command] if command == "uninstall" => {
+            let status = web_service::uninstall(&paths)?;
+            stop_sibling_daemon_for_uninstall()?;
+            status
+        }
         [command] if command == "install" || command == "start" || command == "restart" => {
             let current = env::current_exe().map_err(CliError::CurrentExecutable)?;
             let executable = web_executable_for(&current)?;
@@ -310,6 +316,49 @@ fn web_executable_for(current: &Path) -> Result<PathBuf, CliError> {
         return Err(CliError::InvalidInstalledLayout);
     }
     Ok(parent.join(format!("rootlight-web{}", env::consts::EXE_SUFFIX)))
+}
+
+fn stop_sibling_daemon_for_uninstall() -> Result<(), CliError> {
+    let current = env::current_exe().map_err(CliError::CurrentExecutable)?;
+    let directory = current.parent().ok_or(CliError::InvalidInstalledLayout)?;
+    let daemon = directory.join(daemon_executable_name());
+    let daemon = match fs::canonicalize(daemon) {
+        Ok(daemon) => daemon,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(CliError::DaemonUninstallStop(error)),
+    };
+    let deadline = Instant::now()
+        .checked_add(DAEMON_UNINSTALL_STOP_TIMEOUT)
+        .ok_or(CliError::DaemonUninstallStopTimedOut)?;
+    let mut system = System::new();
+    let mut termination_requested = false;
+    loop {
+        system.refresh_processes(ProcessesToUpdate::All, true);
+        let mut running = false;
+        for process in system.processes().values() {
+            let matches_daemon = process
+                .exe()
+                .and_then(|executable| fs::canonicalize(executable).ok())
+                .is_some_and(|executable| executable == daemon);
+            if !matches_daemon {
+                continue;
+            }
+            running = true;
+            if !termination_requested && !process.kill() {
+                return Err(CliError::DaemonUninstallStop(std::io::Error::other(
+                    "daemon process termination was rejected",
+                )));
+            }
+        }
+        if !running {
+            return Ok(());
+        }
+        termination_requested = true;
+        if Instant::now() >= deadline {
+            return Err(CliError::DaemonUninstallStopTimedOut);
+        }
+        std::thread::sleep(DAEMON_UNINSTALL_POLL_INTERVAL);
+    }
 }
 
 fn render_json(value: &CliEnvelope) -> Result<String, ()> {
@@ -2470,6 +2519,10 @@ enum CliError {
     InvalidInstalledLayout,
     #[error("stop the active Rootlight daemon before uninstalling")]
     DaemonActiveDuringUninstall,
+    #[error("installed daemon shutdown failed")]
+    DaemonUninstallStop(#[source] std::io::Error),
+    #[error("installed daemon did not stop before the uninstall deadline")]
+    DaemonUninstallStopTimedOut,
     #[error("candidate health probe filesystem setup failed")]
     HealthProbeIo(#[source] std::io::Error),
     #[error("candidate health probe did not reach ready state")]
