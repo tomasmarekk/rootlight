@@ -10,6 +10,7 @@ import type { GraphRenderModel } from "../model/graph-model";
 export type GraphCompanionListProps = {
   model: GraphRenderModel;
   selectedOrdinals: readonly number[];
+  overlayOrdinals?: readonly number[];
   onSelect: (ordinal: number, fit: boolean) => void;
   height?: number;
   rowHeight?: number;
@@ -23,6 +24,7 @@ type CompanionRow = {
 /** Renders only the visible text rows while preserving screen-reader and keyboard controls. */
 export function GraphCompanionList({
   model,
+  overlayOrdinals = [],
   selectedOrdinals,
   onSelect,
   height = 320,
@@ -53,6 +55,7 @@ export function GraphCompanionList({
   const visibleCount = Math.ceil(height / rowHeight) + overscan * 2;
   const visibleRows = rows.slice(start, start + visibleCount);
   const selected = new Set(selectedOrdinals);
+  const overlay = new Set(overlayOrdinals);
 
   const handleScroll = (event: UIEvent<HTMLDivElement>) => {
     setScrollTop(event.currentTarget.scrollTop);
@@ -100,6 +103,7 @@ export function GraphCompanionList({
               <button
                 type="button"
                 aria-pressed={selected.has(ordinal)}
+                data-impact-overlay={overlay.has(ordinal) || undefined}
                 onClick={() => {
                   onSelect(ordinal, false);
                 }}
@@ -111,6 +115,9 @@ export function GraphCompanionList({
                 <span>{node.kind}</span>
                 <span>{node.path ?? "No path context"}</span>
                 <span>{formatConfidence(node.confidence)} confidence</span>
+                {overlay.has(ordinal) ? (
+                  <span className="graph-companion__impact">Change impact</span>
+                ) : null}
               </button>
             </li>
           ))}

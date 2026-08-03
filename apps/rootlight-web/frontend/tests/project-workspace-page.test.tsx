@@ -3,6 +3,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -38,6 +39,7 @@ vi.mock("../src/features/graph/components/graph-viewport", () => ({
   GraphViewport: (props: {
     onSelectionChange?: (ordinals: readonly number[]) => void;
     onLabelsVisibleChange?: (visible: boolean) => void;
+    overlayOrdinals?: readonly number[];
   }) => (
     <div aria-label="Mock graph viewport">
       <button type="button" onClick={() => props.onSelectionChange?.([1])}>
@@ -46,7 +48,26 @@ vi.mock("../src/features/graph/components/graph-viewport", () => ({
       <button type="button" onClick={() => props.onLabelsVisibleChange?.(false)}>
         Hide labels
       </button>
+      <output>Overlay {props.overlayOrdinals?.length ?? 0}</output>
     </div>
+  ),
+}));
+
+vi.mock("../src/features/inspector/components/evidence-inspector", () => ({
+  EvidenceInspectorBoundary: ({ children }: { children: ReactNode }) => children,
+  EvidenceInspector: (props: {
+    selectedNode: { stableId: string };
+    onClose: () => void;
+    onImpactChange: (symbolIds: readonly string[]) => void;
+  }) => (
+    <aside aria-label="Mock node inspector">
+      <button type="button" onClick={() => props.onImpactChange([props.selectedNode.stableId])}>
+        Apply impact
+      </button>
+      <button type="button" onClick={props.onClose}>
+        Close inspector
+      </button>
+    </aside>
   ),
 }));
 
@@ -116,6 +137,9 @@ describe("ProjectWorkspacePage", () => {
     expect(screen.getByRole("radio", { name: "symbols" })).toBeDisabled();
 
     await userEvent.click(screen.getByRole("button", { name: "Select symbol" }));
+    expect(screen.getByLabelText("Mock node inspector")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Apply impact" }));
+    expect(screen.getByText("Overlay 1")).toBeVisible();
     expect(screen.getByRole("radio", { name: "symbols" })).toBeEnabled();
     await userEvent.click(screen.getByRole("radio", { name: "symbols" }));
     await userEvent.click(screen.getByRole("button", { name: "Hide labels" }));

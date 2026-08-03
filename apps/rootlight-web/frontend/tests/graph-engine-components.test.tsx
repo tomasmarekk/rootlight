@@ -57,6 +57,7 @@ describe("graph engine components", () => {
       <GraphCompanionList
         model={graphModelFixture()}
         selectedOrdinals={[1]}
+        overlayOrdinals={[2]}
         onSelect={onSelect}
         height={120}
       />,
@@ -69,6 +70,8 @@ describe("graph engine components", () => {
     expect(onSelect).toHaveBeenCalledWith(1, false);
     await userEvent.dblClick(selected);
     expect(onSelect).toHaveBeenLastCalledWith(1, true);
+    const impacted = screen.getByRole("button", { name: /config.*change impact/i });
+    expect(impacted).toHaveAttribute("data-impact-overlay", "true");
 
     await userEvent.type(screen.getByRole("searchbox", { name: "Search visible nodes" }), "config");
     expect(screen.getByText("1 of 3 returned nodes")).toBeVisible();

@@ -3,14 +3,18 @@
 import { Button } from "@heroui/react/button";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, ArrowLeft, Database, RefreshCw, RotateCcw, TriangleAlert } from "lucide-react";
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Link, useLocation, useParams, useSearchParams } from "react-router";
 
 import { ApiError, fetchProjectDetail } from "../api/client";
 import type { ProjectDetail } from "../api/contracts";
 import { WorkspaceResizer } from "../components/workspace-resizer";
 import { GraphViewport } from "../features/graph/components/graph-viewport";
-import type { GraphView } from "../features/graph/model/graph-contracts";
+import type { BrowserGraphNode, GraphView } from "../features/graph/model/graph-contracts";
+import {
+  EvidenceInspector,
+  EvidenceInspectorBoundary,
+} from "../features/inspector/components/evidence-inspector";
 import { useGraphProjection } from "../hooks/use-graph-projection";
 import { useWorkspaceRailWidth } from "../hooks/use-workspace-rail-width";
 import { parseCatalogLocationState } from "../routing/catalog-location-state";
@@ -101,6 +105,7 @@ function ProjectWorkspace({
   );
   const { width: railWidth, setWidth: setRailWidth } = useWorkspaceRailWidth();
   const [retryKey, setRetryKey] = useState(0);
+  const [impactSymbolIds, setImpactSymbolIds] = useState<readonly string[]>([]);
   const graph = useGraphProjection({
     repositoryId,
     generationId: detail.resolvedGenerationId,
@@ -130,14 +135,63 @@ function ProjectWorkspace({
     const ordinal = index < 0 ? undefined : model.nodeOrdinals[index];
     return ordinal === undefined ? [] : [ordinal];
   }, [graph.model, workspaceState.selected]);
+  const selectedNode = useMemo(() => {
+    const selected = workspaceState.selected;
+    if (selected === undefined) {
+      return undefined;
+    }
+    return (
+      graph.model?.nodes.find((node) => node.stableId === selected) ??
+      selectionPlaceholder(selected)
+    );
+  }, [graph.model, workspaceState.selected]);
+  const impactOrdinals = useMemo(() => {
+    const model = graph.model;
+    if (model === null || impactSymbolIds.length === 0) {
+      return [];
+    }
+    const impacted = new Set(impactSymbolIds);
+    const ordinals: number[] = [];
+    for (let index = 0; index < model.nodes.length; index += 1) {
+      if (impacted.has(model.nodes[index]?.stableId ?? "")) {
+        const ordinal = model.nodeOrdinals[index];
+        if (ordinal !== undefined) {
+          ordinals.push(ordinal);
+        }
+      }
+    }
+    return ordinals;
+  }, [graph.model, impactSymbolIds]);
   const canOpenSeededView = workspaceState.selected?.startsWith("sym1_") === true;
 
-  function updateWorkspace(
-    update: (current: ProjectWorkspaceState) => ProjectWorkspaceState,
-    replace = false,
-  ) {
-    setSearchParameters(serializeProjectWorkspaceState(update(workspaceState)), { replace });
-  }
+  const updateWorkspace = useCallback(
+    (update: (current: ProjectWorkspaceState) => ProjectWorkspaceState, replace = false) => {
+      setSearchParameters(serializeProjectWorkspaceState(update(workspaceState)), { replace });
+    },
+    [setSearchParameters, workspaceState],
+  );
+
+  const closeInspector = useCallback(() => {
+    updateWorkspace((current) => ({
+      ...current,
+      selected: undefined,
+      view:
+        current.view === "symbols" || current.view === "neighborhood"
+          ? "architecture"
+          : current.view,
+    }));
+  }, [updateWorkspace]);
+
+  const openInspectorNode = useCallback(
+    (stableId: string) => {
+      updateWorkspace((current) => ({ ...current, selected: stableId }));
+    },
+    [updateWorkspace],
+  );
+
+  const updateImpactOverlay = useCallback((stableIds: readonly string[]) => {
+    setImpactSymbolIds(stableIds);
+  }, []);
 
   function selectGraphNode(ordinals: readonly number[]) {
     const ordinal = ordinals[0];
@@ -217,7 +271,7 @@ function ProjectWorkspace({
       </header>
 
       <div
-        className="workspace-grid"
+        className={`workspace-grid${selectedNode === undefined ? "" : " workspace-grid--inspector"}`}
         style={{ "--workspace-rail-width": `${String(railWidth)}px` } as CSSProperties}
       >
         <aside className="workspace-rail" id="project-information">
@@ -403,6 +457,11 @@ function ProjectWorkspace({
                 <code>{shortId(workspaceState.selected)}</code>
               </>
             )}
+            {impactOrdinals.length === 0 ? null : (
+              <strong className="impact-overlay-label">
+                Impact overlay · {impactOrdinals.length}
+              </strong>
+            )}
           </div>
 
           {graph.loading && graph.model === null ? (
@@ -445,6 +504,7 @@ function ProjectWorkspace({
               budgetProfile={workspaceState.budgetProfile}
               loadingNextPage={graph.loadingNextPage}
               selectedOrdinals={selectedOrdinals}
+              overlayOrdinals={impactOrdinals}
               labelsVisible={workspaceState.labels}
               onSelectionChange={selectGraphNode}
               onLabelsVisibleChange={(labels) => {
@@ -453,6 +513,23 @@ function ProjectWorkspace({
             />
           )}
         </main>
+        {selectedNode === undefined ? null : (
+          <EvidenceInspectorBoundary
+            key={`${detail.resolvedGenerationId}:${selectedNode.stableId}`}
+            onClose={closeInspector}
+          >
+            <EvidenceInspector
+              repositoryId={repositoryId}
+              generationId={detail.resolvedGenerationId}
+              selectedNode={selectedNode}
+              relations={workspaceState.relations}
+              minimumConfidence={workspaceState.minConfidence}
+              onClose={closeInspector}
+              onOpenNode={openInspectorNode}
+              onImpactChange={updateImpactOverlay}
+            />
+          </EvidenceInspectorBoundary>
+        )}
       </div>
     </div>
   );
@@ -485,4 +562,25 @@ function viewAvailability(view: GraphView, hasSymbolSeed: boolean) {
     return "Select a symbol from the current projection first";
   }
   return `${humanize(view)} graph`;
+}
+
+function selectionPlaceholder(stableId: string): BrowserGraphNode {
+  const idKind = stableId.startsWith("sym1_") ? "symbol" : "file";
+  return {
+    ordinal: 0,
+    stableId,
+    idKind,
+    label: shortId(stableId),
+    path: null,
+    kind: idKind,
+    confidence: 0,
+    generated: null,
+    community: null,
+    component: null,
+    symbolCount: null,
+    fanIn: null,
+    fanOut: null,
+    hotspotScore: null,
+    evidence: "unknown",
+  };
 }

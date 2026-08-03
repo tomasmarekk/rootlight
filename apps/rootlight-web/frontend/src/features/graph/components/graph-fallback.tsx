@@ -12,6 +12,7 @@ export type GraphFallbackProps = {
   budgetProfile: GraphBudgetProfile;
   reason: string;
   selectedOrdinals: readonly number[];
+  overlayOrdinals?: readonly number[];
   onSelect: (ordinal: number, fit: boolean) => void;
   onRetry?: () => void;
 };
@@ -31,6 +32,7 @@ export function GraphFallback(props: GraphFallbackProps) {
       <GraphCompanionList
         model={props.model}
         selectedOrdinals={props.selectedOrdinals}
+        overlayOrdinals={props.overlayOrdinals}
         onSelect={props.onSelect}
       />
     </section>

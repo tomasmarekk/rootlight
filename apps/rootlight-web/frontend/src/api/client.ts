@@ -37,6 +37,16 @@ import {
   type BrowserGraphRelease,
   type GraphProjectionOpenRequest,
 } from "../features/graph/model/graph-contracts";
+import {
+  parseChangeImpact,
+  parseNodeDetail,
+  parseRelationships,
+  parseSourceRead,
+  type ChangeImpact,
+  type NodeDetail,
+  type Relationships,
+  type SourceRead,
+} from "../features/inspector/model/evidence-contracts";
 
 const maximumJsonBytes = 1024 * 1024;
 const maximumErrorBytes = 16 * 1024;
@@ -320,6 +330,120 @@ export async function releaseGraphProjection(
       signal,
       "DELETE",
     ),
+  );
+}
+
+export async function fetchNodeDetail(
+  repositoryId: string,
+  generationId: string,
+  nodeId: string,
+  signal?: AbortSignal,
+): Promise<NodeDetail> {
+  const parameters = new URLSearchParams({ generation: generationId, kind: "symbol" });
+  return parseNodeDetail(
+    await requestJson(
+      `/api/v1/projects/${encodeURIComponent(repositoryId)}/nodes/${encodeURIComponent(nodeId)}?${parameters.toString()}`,
+      { signal },
+    ),
+    repositoryId,
+    generationId,
+    nodeId,
+  );
+}
+
+export type RelationshipsRequest = {
+  repositoryId: string;
+  generationId: string;
+  seedIds: string[];
+  relations: string[];
+  direction: "inbound" | "outbound" | "both";
+  minimumConfidence: number;
+  pageOffset?: string;
+};
+
+export async function fetchRelationships(
+  request: RelationshipsRequest,
+  signal?: AbortSignal,
+): Promise<Relationships> {
+  return parseRelationships(
+    await mutationJson(
+      `/api/v1/projects/${encodeURIComponent(request.repositoryId)}/relationships`,
+      {
+        schema: "rootlight.web-relationships-request/1",
+        generationId: request.generationId,
+        seedIds: request.seedIds,
+        relations: request.relations,
+        direction: request.direction,
+        minConfidence: request.minimumConfidence,
+        maxResults: 100,
+        pageOffset: request.pageOffset ?? "0",
+      },
+      signal,
+    ),
+    request.repositoryId,
+    request.generationId,
+  );
+}
+
+export type SourceReadRequest = {
+  repositoryId: string;
+  generationId: string;
+  capability: string;
+  encoding: "utf8" | "bytes_base64";
+};
+
+export async function readSource(
+  request: SourceReadRequest,
+  signal?: AbortSignal,
+): Promise<SourceRead> {
+  return parseSourceRead(
+    await mutationJson(
+      `/api/v1/projects/${encodeURIComponent(request.repositoryId)}/source`,
+      {
+        schema: "rootlight.web-source-request/1",
+        generationId: request.generationId,
+        sourceCapability: request.capability,
+        contextLinesBefore: 4,
+        contextLinesAfter: 4,
+        includeLineNumbers: true,
+        encoding: request.encoding,
+      },
+      signal,
+    ),
+    request.repositoryId,
+    request.generationId,
+  );
+}
+
+export type ChangeImpactRequest = {
+  repositoryId: string;
+  generationId: string;
+  changedSymbolIds: string[];
+  maximumDepth: number;
+  minimumConfidence: number;
+  includeTests: boolean;
+};
+
+export async function runChangeImpact(
+  request: ChangeImpactRequest,
+  signal?: AbortSignal,
+): Promise<ChangeImpact> {
+  return parseChangeImpact(
+    await mutationJson(
+      `/api/v1/projects/${encodeURIComponent(request.repositoryId)}/change-impact`,
+      {
+        schema: "rootlight.web-change-impact-request/1",
+        generationId: request.generationId,
+        changedSymbolIds: request.changedSymbolIds,
+        maxDepth: request.maximumDepth,
+        minConfidence: request.minimumConfidence,
+        includeTests: request.includeTests,
+        maxDependents: 200,
+      },
+      signal,
+    ),
+    request.repositoryId,
+    request.generationId,
   );
 }
 

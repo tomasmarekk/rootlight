@@ -89,6 +89,7 @@ export class CosmosGraphController {
   #container: HTMLDivElement | null = null;
   #graph: CosmosGraphPort | null = null;
   #model: GraphRenderModel | null = null;
+  #overlayOrdinals: readonly number[] = [];
   #canvas: HTMLCanvasElement | null = null;
   #resizeObserver: ResizeObserver | null = null;
   #resizeFrame: number | null = null;
@@ -176,6 +177,17 @@ export class CosmosGraphController {
    */
   syncSelection(ordinals: readonly number[]): void {
     this.#updateSelection(ordinals, false);
+  }
+
+  /** Synchronizes a typed analytical overlay without changing controlled graph selection. */
+  syncOverlay(ordinals: readonly number[]): void {
+    this.#assertActive();
+    const normalized = this.#normalizeOrdinals(ordinals, 200);
+    if (sameOrdinals(normalized, this.#overlayOrdinals)) {
+      return;
+    }
+    this.#overlayOrdinals = normalized;
+    this.#applySelectionConfig();
   }
 
   #updateSelection(ordinals: readonly number[], notify: boolean): void {
@@ -269,6 +281,7 @@ export class CosmosGraphController {
     this.#detachGraphResources();
     this.#container = null;
     this.#model = null;
+    this.#overlayOrdinals = [];
     this.#subscribers.clear();
     this.#snapshot = { ...this.#snapshot, lifecycle: "disposed", simulation: "paused" };
     performance.mark("rootlight.graph.controller.dispose");
@@ -376,9 +389,12 @@ export class CosmosGraphController {
       return;
     }
     const selection = projectGraphSelection(model, this.#snapshot.selectedOrdinals);
+    const overlay = projectGraphSelection(model, this.#overlayOrdinals, 200);
     graph.setConfigPartial({
       outlinedPointIndices: [...selection.selectedPointIndices],
-      highlightedPointIndices: [...selection.connectedPointIndices],
+      highlightedPointIndices: [
+        ...new Set([...selection.connectedPointIndices, ...overlay.selectedPointIndices]),
+      ],
       highlightedLinkIndices: [...selection.connectedLinkIndices],
     });
     graph.render(undefined, this.#motionDuration(100));
@@ -535,12 +551,16 @@ export class CosmosGraphController {
   }
 
   #normalizeSelection(ordinals: readonly number[]) {
+    return this.#normalizeOrdinals(ordinals, 64);
+  }
+
+  #normalizeOrdinals(ordinals: readonly number[], maximum: number) {
     const model = this.#model;
     return model === null
       ? []
       : [...new Set(ordinals)]
           .filter((ordinal) => model.ordinalToPointIndex.has(ordinal))
-          .slice(0, 64);
+          .slice(0, maximum);
   }
 
   #setSnapshot(patch: Partial<CosmosGraphControllerSnapshot>) {

@@ -23,6 +23,7 @@ export type GraphViewportProps = {
   budgetProfile: GraphBudgetProfile;
   loadingNextPage?: boolean;
   selectedOrdinals?: readonly number[];
+  overlayOrdinals?: readonly number[];
   labelsVisible?: boolean;
   capabilityOverride?: WebGlCapability;
   factory?: CosmosGraphFactory;
@@ -44,6 +45,7 @@ export function GraphViewport(props: GraphViewportProps) {
     onHoverChange,
     onLabelsVisibleChange,
     onSelectionChange,
+    overlayOrdinals,
     selectedOrdinals,
     view,
   } = props;
@@ -108,6 +110,10 @@ export function GraphViewport(props: GraphViewportProps) {
   }, [capability.state, controller, fallbackReason, model.revision, selectedOrdinals]);
 
   useEffect(() => {
+    controller.syncOverlay(overlayOrdinals ?? []);
+  }, [controller, model.revision, overlayOrdinals]);
+
+  useEffect(() => {
     if (labelsVisible !== undefined) {
       controller.setLabelsVisible(labelsVisible);
     }
@@ -148,6 +154,7 @@ export function GraphViewport(props: GraphViewportProps) {
             : "The graphics renderer is unavailable.")
         }
         selectedOrdinals={selectedOrdinals ?? fallbackSelection}
+        overlayOrdinals={overlayOrdinals}
         onSelect={selectFromCompanion}
       />
     );
@@ -204,6 +211,7 @@ export function GraphViewport(props: GraphViewportProps) {
       <GraphCompanionList
         model={model}
         selectedOrdinals={selectedOrdinals ?? snapshot.selectedOrdinals}
+        overlayOrdinals={overlayOrdinals}
         onSelect={selectFromCompanion}
       />
     </section>

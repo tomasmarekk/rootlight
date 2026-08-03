@@ -87,6 +87,14 @@ describe("CosmosGraphController", () => {
     controller.applyModel({ ...model, revision: 2 });
     expect(graph.fitView).toHaveBeenCalledOnce();
 
+    controller.syncSelection([]);
+    controller.syncOverlay([1]);
+    expect(graph.setConfigPartial).toHaveBeenLastCalledWith({
+      outlinedPointIndices: [],
+      highlightedPointIndices: [1],
+      highlightedLinkIndices: [],
+    });
+
     config.onPointClick?.(1, [0, 0], new MouseEvent("click"));
     expect(controller.getSnapshot().selectedOrdinals).toEqual([1]);
     expect(selectionChanges).toHaveBeenLastCalledWith([1]);
