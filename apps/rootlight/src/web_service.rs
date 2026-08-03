@@ -7,13 +7,20 @@ use std::{
     io::{self, Read as _, Write as _},
     net::{Ipv4Addr, SocketAddrV4, TcpStream},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
 use rootlight_runtime::{RuntimeError, RuntimePaths, WEB_UI_PORT, WebDiscoveryRecord};
+#[cfg(windows)]
+use rootlight_sandbox::{ChildProcess, ProcessCommand};
 use serde::{Deserialize, Serialize};
+
+#[cfg(not(windows))]
+type DetachedChild = std::process::Child;
+#[cfg(windows)]
+type DetachedChild = ChildProcess;
 
 const ORIGIN: &str = "http://127.0.0.1:43127";
 const MAX_HTTP_RESPONSE_BYTES: u64 = 16 * 1024;
@@ -58,8 +65,12 @@ impl WebServiceStatus {
 pub(crate) enum WebServiceError {
     #[error("Web UI runtime discovery failed")]
     Runtime(#[from] RuntimeError),
+    #[cfg(not(windows))]
     #[error("Web UI process launch failed")]
     Launch(#[source] io::Error),
+    #[cfg(windows)]
+    #[error("Web UI process launch failed")]
+    WindowsLaunch(#[source] rootlight_sandbox::ProcessError),
     #[error("Web UI process exited before becoming ready")]
     EarlyExit,
     #[error("Web UI service did not become ready before the startup deadline")]
@@ -94,7 +105,17 @@ pub(crate) fn start(
         return Ok(WebServiceStatus::running(record.pid()));
     }
     remove_stale_record(paths)?;
+    if registration_exists() && start_registered() {
+        return wait_until_started(paths, None);
+    }
     let mut child = spawn_detached(executable)?;
+    wait_until_started(paths, Some(&mut child))
+}
+
+fn wait_until_started(
+    paths: &RuntimePaths,
+    mut child: Option<&mut DetachedChild>,
+) -> Result<WebServiceStatus, WebServiceError> {
     let deadline = Instant::now()
         .checked_add(START_TIMEOUT)
         .ok_or(WebServiceError::StartTimedOut)?;
@@ -102,7 +123,9 @@ pub(crate) fn start(
         if let Some(record) = live_record(paths)? {
             return Ok(WebServiceStatus::running(record.pid()));
         }
-        if child.try_wait().map_err(WebServiceError::Launch)?.is_some() {
+        if let Some(child) = child.as_mut()
+            && detached_child_exited(child)?
+        {
             return Err(WebServiceError::EarlyExit);
         }
         if Instant::now() >= deadline {
@@ -195,27 +218,41 @@ fn discovered_record(paths: &RuntimePaths) -> Result<Option<WebDiscoveryRecord>,
     }
 }
 
-fn spawn_detached(executable: &Path) -> Result<Child, WebServiceError> {
+#[cfg(windows)]
+fn spawn_detached(executable: &Path) -> Result<DetachedChild, WebServiceError> {
+    ProcessCommand::new(executable)
+        .arg("--service")
+        .spawn()
+        .map_err(WebServiceError::WindowsLaunch)
+}
+
+#[cfg(not(windows))]
+fn spawn_detached(executable: &Path) -> Result<DetachedChild, WebServiceError> {
     let mut command = Command::new(executable);
     command
         .arg("--service")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-        use windows::Win32::System::Threading::{
-            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
-        };
-        command.creation_flags((CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | DETACHED_PROCESS).0);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        command.process_group(0);
-    }
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(0);
     command.spawn().map_err(WebServiceError::Launch)
+}
+
+#[cfg(windows)]
+fn detached_child_exited(child: &mut DetachedChild) -> Result<bool, WebServiceError> {
+    child
+        .try_wait()
+        .map(|status| status.is_some())
+        .map_err(WebServiceError::WindowsLaunch)
+}
+
+#[cfg(not(windows))]
+fn detached_child_exited(child: &mut DetachedChild) -> Result<bool, WebServiceError> {
+    child
+        .try_wait()
+        .map(|status| status.is_some())
+        .map_err(WebServiceError::Launch)
 }
 
 fn probe() -> Result<u32, WebServiceError> {
@@ -353,6 +390,13 @@ fn register_autostart(executable: &Path) -> Result<(), WebServiceError> {
 }
 
 #[cfg(windows)]
+fn start_registered() -> bool {
+    // Task Scheduler provides login durability; immediate launches need the
+    // explicit child-handle allowlist enforced by `spawn_detached`.
+    false
+}
+
+#[cfg(windows)]
 fn unregister_autostart() -> Result<(), WebServiceError> {
     const SCRIPT: &str = "$task=Get-ScheduledTask -TaskName 'Rootlight Web UI' \
         -ErrorAction SilentlyContinue;if($null -ne $task){\
@@ -363,6 +407,11 @@ fn unregister_autostart() -> Result<(), WebServiceError> {
 
 #[cfg(windows)]
 fn registration_exists() -> bool {
+    windows_task_exists() || windows_startup_path().is_ok_and(|path| path.is_file())
+}
+
+#[cfg(windows)]
+fn windows_task_exists() -> bool {
     let mut command = Command::new("schtasks.exe");
     command
         .args(["/Query", "/TN", WINDOWS_TASK_NAME])
@@ -370,7 +419,6 @@ fn registration_exists() -> bool {
         .stderr(Stdio::null());
     hide_windows_command(&mut command);
     command.status().is_ok_and(|status| status.success())
-        || windows_startup_path().is_ok_and(|path| path.is_file())
 }
 
 #[cfg(windows)]
@@ -451,6 +499,17 @@ fn register_autostart(executable: &Path) -> Result<(), WebServiceError> {
         .args(["--user", "daemon-reload"])
         .status();
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn start_registered() -> bool {
+    let mut command = Command::new("systemctl");
+    command
+        .args(["--user", "start", LINUX_UNIT_NAME])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.status().is_ok_and(|status| status.success())
 }
 
 #[cfg(target_os = "linux")]
@@ -585,6 +644,21 @@ fn register_autostart(executable: &Path) -> Result<(), WebServiceError> {
             .status();
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn start_registered() -> bool {
+    let Ok(domain) = macos_launch_domain() else {
+        return false;
+    };
+    let target = format!("{domain}/{MACOS_LABEL}");
+    let mut command = Command::new("launchctl");
+    command
+        .args(["kickstart", "-k", &target])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.status().is_ok_and(|status| status.success())
 }
 
 #[cfg(target_os = "macos")]
