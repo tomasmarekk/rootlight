@@ -3260,6 +3260,67 @@ async fn maps_operation_status_action_time_progress_and_resources() {
 }
 
 #[tokio::test]
+async fn maps_interrupted_operation_status_to_typed_terminal_errors() {
+    for (recovery_class, code, message) in [
+        (
+            RecoveryClass::InterruptedByRestart,
+            ErrorCode::Busy,
+            "operation was interrupted by restart",
+        ),
+        (
+            RecoveryClass::DeadlineElapsed,
+            ErrorCode::Busy,
+            "operation deadline elapsed",
+        ),
+        (
+            RecoveryClass::LeaseExpired,
+            ErrorCode::Cancelled,
+            "operation lease expired",
+        ),
+    ] {
+        let mut operation_status = operation_status(ClientOperationState::Interrupted);
+        operation_status.recovery_class = recovery_class;
+        let response = RepositoryOperationStatus {
+            operation: operation_status,
+            published_generation: None,
+            semantic_operation: None,
+            started_unix_ms: 1,
+            peak_rss_bytes: 100,
+            written_bytes: 200,
+            files_examined: 3,
+            bytes_examined: 300,
+            index_stage: "analysis".to_owned(),
+            retry_after_ms: None,
+        };
+        let harness = Harness::new(FakeOutcome::OperationStatus(Ok(response)));
+        let output: OperationStatusOutput = decode(
+            execute(
+                &harness.executor,
+                VerticalTool::OperationStatus,
+                json!({"operation_id": operation()}),
+            )
+            .await
+            .expect("interrupted operation status maps"),
+        );
+
+        let OperationToolResponse::Success(output) = output else {
+            panic!("expected interrupted operation status success");
+        };
+        let error = output
+            .data
+            .error
+            .0
+            .expect("interrupted operation retains a typed error");
+        assert_eq!(output.data.operation.state, OperationState::Failed);
+        assert_eq!(error.code(), code);
+        assert_eq!(error.message(), message);
+        assert!(error.retryable());
+        assert_eq!(error.operation(), Some(operation()));
+        assert_eq!(error.next_actions(), &[NextAction::Retry]);
+    }
+}
+
+#[tokio::test]
 async fn maps_code_locate_with_trust_generation_and_deterministic_output() {
     let response = locate_response();
     let response_debug = format!("{response:?}");

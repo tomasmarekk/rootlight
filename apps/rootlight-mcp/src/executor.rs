@@ -6676,6 +6676,7 @@ fn map_operation_status(
     {
         return Err(internal(ToolExecutionFailure::InvalidResponse));
     }
+    let error = operation_status_error(&operation)?;
     let total_units = (operation.total_units != 0).then_some(u64::from(operation.total_units));
     Ok(OperationStatusSuccess {
         schema_version: OperationSchemaVersion::V1_1,
@@ -6700,10 +6701,43 @@ fn map_operation_status(
             published_generation: RequiredNullable(response.published_generation),
             semantic_operation_id: response.semantic_operation,
             index_stage: Some(response.index_stage),
-            error: RequiredNullable(operation.error),
+            error: RequiredNullable(error),
             retry_after_ms: RequiredNullable(response.retry_after_ms),
         },
     })
+}
+
+fn operation_status_error(
+    operation: &client::OperationStatus,
+) -> Result<Option<PublicError>, ToolExecutionError> {
+    if operation.state != client::OperationState::Interrupted {
+        if operation.recovery_class != client::RecoveryClass::NotApplicable
+            || (operation.state == client::OperationState::Failed) != operation.error.is_some()
+        {
+            return Err(internal(ToolExecutionFailure::InvalidResponse));
+        }
+        return Ok(operation.error.clone());
+    }
+    if operation.error.is_some() {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    let (code, message) = match operation.recovery_class {
+        client::RecoveryClass::InterruptedByRestart => {
+            (ErrorCode::Busy, "operation was interrupted by restart")
+        }
+        client::RecoveryClass::DeadlineElapsed => (ErrorCode::Busy, "operation deadline elapsed"),
+        client::RecoveryClass::LeaseExpired => (ErrorCode::Cancelled, "operation lease expired"),
+        client::RecoveryClass::NotApplicable => {
+            return Err(internal(ToolExecutionFailure::InvalidResponse));
+        }
+    };
+    PublicError::builder(code, message)
+        .retryable()
+        .operation(operation.operation)
+        .next_action(NextAction::Retry)
+        .build()
+        .map(Some)
+        .map_err(|_| internal(ToolExecutionFailure::Executor))
 }
 
 fn map_code_locate(
