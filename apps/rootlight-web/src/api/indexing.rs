@@ -673,7 +673,7 @@ mod tests {
 
     impl TestApp {
         fn new() -> Self {
-            let asset_root = TempDir::new().expect("asset root exists");
+            let asset_root = crate::test_support::local_tempdir();
             let index = b"<!doctype html><html></html>";
             fs::write(asset_root.path().join("index.html"), index).expect("index writes");
             let manifest = serde_json::to_vec(&json!({
@@ -699,7 +699,7 @@ mod tests {
                 .expect("session authenticates");
             let cookie = format!("{SESSION_COOKIE_NAME}={}", credentials.cookie_value);
             let filesystem = Arc::new(FilesystemRegistry::new());
-            let root = TempDir::new().expect("repository root exists");
+            let root = crate::test_support::local_tempdir();
             let directory = BrowseDirectory::open(root.path(), &Cancellation::new())
                 .expect("repository root opens");
             let root_capability = filesystem

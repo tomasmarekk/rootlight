@@ -633,7 +633,7 @@ mod tests {
     }
 
     fn browse_directory() -> (TempDir, BrowseDirectory) {
-        let temporary = TempDir::new().expect("temporary directory exists");
+        let temporary = crate::test_support::local_tempdir();
         let directory = BrowseDirectory::open(temporary.path(), &Cancellation::new())
             .expect("temporary directory opens through VFS");
         (temporary, directory)
@@ -714,7 +714,7 @@ mod tests {
         let mut first_token = None;
         let mut directories = Vec::new();
         for index in 0..=MAX_CAPABILITIES_PER_SESSION {
-            let temporary = TempDir::new().expect("temporary directory exists");
+            let temporary = crate::test_support::local_tempdir();
             fs::create_dir(temporary.path().join("child")).expect("fixture child exists");
             let directory = BrowseDirectory::open(temporary.path(), &Cancellation::new())
                 .expect("temporary directory opens through VFS");

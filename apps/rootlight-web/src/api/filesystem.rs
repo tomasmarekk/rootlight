@@ -701,7 +701,6 @@ mod tests {
         RepositoryStatus, RepositoryStatusRequest, RequestTimeout, ResourcePressure,
     };
     use serde_json::{Value, json};
-    use tempfile::TempDir;
     use tower::ServiceExt as _;
 
     use super::*;
@@ -723,7 +722,7 @@ mod tests {
     #[tokio::test]
     async fn direct_open_and_browse_are_path_redacted_and_snapshot_paged() {
         let fixture = TestApp::new();
-        let repository = TempDir::new().expect("temporary repository exists");
+        let repository = crate::test_support::local_tempdir();
         for name in ["zeta", "alpha", "middle"] {
             fs::create_dir(repository.path().join(name)).expect("fixture directory exists");
         }
@@ -806,7 +805,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_does_not_enumerate_and_root_capability_is_retry_bound() {
         let fixture = TestApp::new();
-        let repository = TempDir::new().expect("temporary repository exists");
+        let repository = crate::test_support::local_tempdir();
         for index in 0..=rootlight_vfs::MAX_BROWSE_DIRECTORY_ENTRIES {
             fs::write(repository.path().join(format!("file-{index}")), [])
                 .expect("bounded fixture file exists");
@@ -866,8 +865,8 @@ mod tests {
 
     #[test]
     fn rendered_page_omits_files_and_linked_directories() {
-        let repository = TempDir::new().expect("temporary repository exists");
-        let outside = TempDir::new().expect("outside directory exists");
+        let repository = crate::test_support::local_tempdir();
+        let outside = crate::test_support::local_tempdir();
         fs::create_dir(repository.path().join("ordinary")).expect("ordinary directory exists");
         fs::write(repository.path().join("source.rs"), b"source").expect("fixture file exists");
         let linked = create_directory_link(outside.path(), &repository.path().join("linked"));
@@ -941,7 +940,7 @@ mod tests {
 
     impl TestApp {
         fn new() -> Self {
-            let asset_root = TempDir::new().expect("asset root exists");
+            let asset_root = crate::test_support::local_tempdir();
             let index = b"<!doctype html><html></html>";
             fs::write(asset_root.path().join("index.html"), index).expect("index writes");
             let manifest = serde_json::to_vec(&json!({

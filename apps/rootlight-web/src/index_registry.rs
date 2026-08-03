@@ -257,7 +257,7 @@ mod tests {
     }
 
     fn admission() -> (TempDir, Arc<RootAdmission>) {
-        let temporary = TempDir::new().expect("temporary root exists");
+        let temporary = crate::test_support::local_tempdir();
         let directory = BrowseDirectory::open(temporary.path(), &Cancellation::new())
             .expect("temporary root opens");
         (

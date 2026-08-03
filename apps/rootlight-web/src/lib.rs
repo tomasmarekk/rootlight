@@ -105,3 +105,11 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
+
+#[cfg(test)]
+mod test_support {
+    pub(crate) fn local_tempdir() -> tempfile::TempDir {
+        let current = std::env::current_dir().expect("current directory is available");
+        tempfile::tempdir_in(current).expect("local temporary directory is available")
+    }
+}
