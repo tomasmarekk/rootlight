@@ -202,7 +202,7 @@
     },
     {
       "path": "xtask/src/main.rs",
-      "blake3": "d170aa07b71cde21192758bdbe33a78773693882082c77cf6125f71f752139f5"
+      "blake3": "170cb0c6de948fda2d458743ea7453a821506d5f44fa3f4b31d2448a5c61387d"
     },
     {
       "path": "xtask/src/schemas.rs",
