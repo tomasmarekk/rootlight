@@ -632,33 +632,15 @@ fn register_autostart(executable: &Path) -> Result<(), WebServiceError> {
         xml_escape(executable)
     );
     let path = macos_launch_agent_path()?;
-    write_registration_file(&path, plist.as_bytes())?;
-    if let Ok(domain) = macos_launch_domain() {
-        let _ = Command::new("launchctl")
-            .args(["bootout", &domain])
-            .arg(&path)
-            .status();
-        let _ = Command::new("launchctl")
-            .args(["bootstrap", &domain])
-            .arg(&path)
-            .status();
-    }
-    Ok(())
+    write_registration_file(&path, plist.as_bytes())
 }
 
 #[cfg(target_os = "macos")]
 fn start_registered() -> bool {
-    let Ok(domain) = macos_launch_domain() else {
-        return false;
-    };
-    let target = format!("{domain}/{MACOS_LABEL}");
-    let mut command = Command::new("launchctl");
-    command
-        .args(["kickstart", "-k", &target])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    command.status().is_ok_and(|status| status.success())
+    // LaunchAgents provide login durability. The CLI starts the current
+    // session directly because headless macOS sessions lack a usable GUI
+    // launchd domain even though the registration remains valid for login.
+    false
 }
 
 #[cfg(target_os = "macos")]
