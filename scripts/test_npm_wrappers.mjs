@@ -52,6 +52,16 @@ try {
     join(nativeRoot, "package.json"),
     `${JSON.stringify({ name: nativePackage, version: "0.0.0" })}\n`,
   );
+  writeFileSync(
+    join(temporary, "service"),
+    [
+      'const { spawn } = require("node:child_process");',
+      'if (!new Set(["install", "uninstall"]).has(process.argv[2])) process.exit(1);',
+      'const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 3000)"], { stdio: "inherit" });',
+      "child.unref();",
+      "",
+    ].join("\n"),
+  );
 
   const suffix = process.platform === "win32" ? ".exe" : "";
   for (const executable of ["rootlight", "rootlight-mcp"]) {
@@ -65,6 +75,22 @@ try {
     );
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), process.version);
+    assert.equal(result.stderr, "");
+  }
+
+  for (const lifecycle of ["postinstall", "preuninstall"]) {
+    const started = Date.now();
+    const result = spawnSync(
+      process.execPath,
+      [join(rootBin, `${lifecycle}.mjs`)],
+      { cwd: temporary, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(
+      Date.now() - started < 2000,
+      `${lifecycle} waited for a persistent descendant`,
+    );
+    assert.equal(result.stdout, "");
     assert.equal(result.stderr, "");
   }
 } finally {

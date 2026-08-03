@@ -33,7 +33,14 @@ export function runLifecycle(action) {
   if (!new Set(["install", "uninstall"]).has(action)) {
     fail("rootlight: unsupported npm lifecycle action");
   }
-  exitFor(spawnNative("rootlight", ["service", action]));
+  const result = spawnNative("rootlight", ["service", action], "ignore");
+  if (result.error !== undefined) {
+    fail(`rootlight: failed to start the native executable: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    fail(`rootlight: failed to ${action} the local service`);
+  }
+  process.exit(0);
 }
 
 function uninstallRootlight() {
@@ -54,9 +61,9 @@ function uninstallRootlight() {
   exitFor(result);
 }
 
-function spawnNative(executable, arguments_) {
+function spawnNative(executable, arguments_, stdio = "inherit") {
   const path = resolveNativeExecutable(executable);
-  return spawnSync(path, arguments_, { stdio: "inherit" });
+  return spawnSync(path, arguments_, { stdio });
 }
 
 function resolveNativeExecutable(executable) {

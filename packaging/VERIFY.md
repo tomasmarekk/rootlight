@@ -3,7 +3,9 @@
 Rootlight distributions are deterministic ZIP archives intended for per-user,
 least-privilege installation. The archive does not enable daemon autostart.
 Registration of the packaged platform template requires an explicit user
-choice.
+choice. The root npm package has a separate product contract: its lifecycle
+scripts register and start the complete per-user Web UI service from this
+verified native payload, and unregister it before npm removes package files.
 
 Run the package contract and ownership checks:
 
@@ -53,3 +55,9 @@ observations to the candidate archive digest and source revision.
 Installers must preserve user data, activate new versions side by side, retain
 the last good version for rollback, and remove only paths and platform
 resources recorded in `state/install-manifest.json`.
+
+The npm install smoke additionally packs the root and host platform packages,
+installs them into a clean global prefix without registry access, verifies the
+stable Web UI URL and direct session creation, exercises stop and restart, and
+proves that `rootlight uninstall` removes the npm root package only after the
+service and login registration are gone.

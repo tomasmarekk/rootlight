@@ -2087,6 +2087,16 @@ jobs:
       - name: Install pinned Rust
         shell: bash
         run: rustup show active-toolchain
+      - name: Install pinned Node.js and npm
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.11.1
+          package-manager-cache: false
+      - name: Verify exact npm install toolchain
+        shell: bash
+        run: |
+          test "$(node --version)" = "v24.11.1"
+          test "$(npm --version)" = "11.6.2"
       - name: Restore exact installed-package build inputs
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -2164,6 +2174,17 @@ jobs:
             --output "artifacts/ci-package/$TARGET_TRIPLE.web-smoke.json" \
             --source-revision "$SOURCE_REVISION" \
             --target "$TARGET_TRIPLE"
+          python scripts/prepare_npm_packages.py host \
+            --archive "$candidate" \
+            --target "$TARGET_TRIPLE" \
+            --version "$CANDIDATE_VERSION" \
+            --source-revision "$SOURCE_REVISION" \
+            --output-dir artifacts/ci-package/npm-packages
+          python scripts/verify-npm-install.py \
+            --packages-dir artifacts/ci-package/npm-packages \
+            --target "$TARGET_TRIPLE" \
+            --output-dir artifacts/ci-package/npm-smoke \
+            --evidence "artifacts/ci-package/$TARGET_TRIPLE.npm-smoke.json"
       - name: Upload installed-package failure evidence
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

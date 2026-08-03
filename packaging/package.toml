@@ -1,6 +1,7 @@
 # Canonical package inventory for deterministic per-user distributions.
 # Every installed path is relative to an installer-selected root, while
-# platform autostart resources remain disabled unless the user opts in.
+# native ZIP autostart templates remain disabled unless the user opts in.
+# The root npm package separately registers the complete local Web UI service.
 
 schema = "rootlight.package-spec/2"
 autostart_default = "disabled"

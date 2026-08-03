@@ -19,6 +19,7 @@ class PublicationTests(unittest.TestCase):
             "license": publish_npm_packages.PACKAGE_LICENSE,
             "name": "@tomasmarekk/rootlight",
             "version": "0.1.0",
+            "scripts": publish_npm_packages.ROOT_LIFECYCLE_SCRIPTS.copy(),
             "publishConfig": {"access": "public", "provenance": True},
             "repository": {
                 "url": "git+https://github.com/tomasmarekk/rootlight.git"
@@ -41,12 +42,23 @@ class PublicationTests(unittest.TestCase):
                 list(publish_npm_packages.PACKAGE_NAMES),
             )
 
-    def test_package_manifest_forbids_lifecycle_scripts(self) -> None:
+    def test_root_manifest_requires_exact_lifecycle_scripts(self) -> None:
         package = self.package_manifest()
         package["scripts"] = {"postinstall": "download-binary"}
         with self.assertRaises(publish_npm_packages.NpmPublicationError):
             publish_npm_packages.validate_package_json(
                 package, "@tomasmarekk/rootlight", "0.1.0", "0" * 40
+            )
+
+    def test_platform_manifest_forbids_lifecycle_scripts(self) -> None:
+        package = self.package_manifest()
+        package["name"] = "@tomasmarekk/rootlight-linux-x64-gnu"
+        with self.assertRaises(publish_npm_packages.NpmPublicationError):
+            publish_npm_packages.validate_package_json(
+                package,
+                "@tomasmarekk/rootlight-linux-x64-gnu",
+                "0.1.0",
+                "0" * 40,
             )
 
     def test_package_manifest_requires_the_project_license(self) -> None:

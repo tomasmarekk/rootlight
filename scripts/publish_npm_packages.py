@@ -21,6 +21,11 @@ PACKAGE_NAMES = (
     "@tomasmarekk/rootlight-win32-x64-msvc",
     "@tomasmarekk/rootlight",
 )
+ROOT_PACKAGE = "@tomasmarekk/rootlight"
+ROOT_LIFECYCLE_SCRIPTS = {
+    "postinstall": "node ./bin/postinstall.mjs",
+    "preuninstall": "node ./bin/preuninstall.mjs",
+}
 PACKAGE_LICENSE = "AGPL-3.0-only"
 VERSION_PATTERN = re.compile(
     r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
@@ -188,8 +193,9 @@ def validate_package_json(
         "git+https://github.com/tomasmarekk/rootlight.git"
     ):
         raise NpmPublicationError("npm package repository identity differs")
-    if "scripts" in package:
-        raise NpmPublicationError("npm release packages must not define lifecycle scripts")
+    expected_scripts = ROOT_LIFECYCLE_SCRIPTS if name == ROOT_PACKAGE else None
+    if package.get("scripts") != expected_scripts:
+        raise NpmPublicationError("npm package lifecycle policy differs")
 
 
 def pack_package(package_dir: Path, tarballs: Path) -> dict[str, Any]:
