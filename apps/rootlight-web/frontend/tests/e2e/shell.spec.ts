@@ -279,8 +279,13 @@ test("completes the critical local path using keyboard input only", async ({ pag
   await mockDiagnostics(page);
   await page.goto(`/#bootstrap=${"a".repeat(43)}`);
 
-  await activate(page.getByRole("button", { name: "Add project" }));
+  const addProject = page.getByRole("button", { name: "Add project" });
+  await activate(addProject);
   await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(addProject).toBeFocused();
+  await activate(addProject);
   await activate(page.getByRole("button", { name: "Home" }));
   await expect(page.getByRole("button", { name: "crates" })).toBeVisible();
   await activate(page.getByRole("radio", { name: /Deep/u }), "Space");
