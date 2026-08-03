@@ -31,6 +31,9 @@ const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+// Graceful shutdown can close the listener before its 202 response reaches
+// the controller, so both control delivery and process absence need consensus.
+const STOP_CONFIRMATIONS: u8 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct WebServiceStatus {
@@ -142,18 +145,26 @@ pub(crate) fn stop(paths: &RuntimePaths) -> Result<WebServiceStatus, WebServiceE
     let Some(record) = discovered_record(paths)? else {
         return Ok(WebServiceStatus::stopped());
     };
-    if probe().ok() != Some(record.pid()) {
+    if !recorded_process_is_live(record.pid()) {
         paths.remove_web_discovery_if_matches(record.instance_nonce())?;
         return Ok(WebServiceStatus::stopped());
     }
-    shutdown(&record)?;
+    request_shutdown(&record)?;
     let deadline = Instant::now()
         .checked_add(STOP_TIMEOUT)
         .ok_or(WebServiceError::StopTimedOut)?;
+    let mut unavailable_observations = 0_u8;
     loop {
-        if probe().is_err() {
-            paths.remove_web_discovery_if_matches(record.instance_nonce())?;
-            return Ok(WebServiceStatus::stopped());
+        match probe() {
+            Ok(pid) if pid == record.pid() => unavailable_observations = 0,
+            Ok(_) => return Err(WebServiceError::InvalidResponse),
+            Err(_) => {
+                unavailable_observations = unavailable_observations.saturating_add(1);
+                if unavailable_observations >= STOP_CONFIRMATIONS {
+                    paths.remove_web_discovery_if_matches(record.instance_nonce())?;
+                    return Ok(WebServiceStatus::stopped());
+                }
+            }
         }
         if Instant::now() >= deadline {
             return Err(WebServiceError::StopTimedOut);
@@ -286,6 +297,35 @@ fn shutdown(record: &WebDiscoveryRecord) -> Result<(), WebServiceError> {
         return Err(WebServiceError::InvalidResponse);
     }
     Ok(())
+}
+
+fn request_shutdown(record: &WebDiscoveryRecord) -> Result<(), WebServiceError> {
+    let mut last_error = None;
+    for attempt in 0..STOP_CONFIRMATIONS {
+        match shutdown(record) {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < STOP_CONFIRMATIONS {
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+    if recorded_process_is_live(record.pid()) {
+        Err(last_error.unwrap_or(WebServiceError::InvalidResponse))
+    } else {
+        Ok(())
+    }
+}
+
+fn recorded_process_is_live(pid: u32) -> bool {
+    for attempt in 0..STOP_CONFIRMATIONS {
+        match probe() {
+            Ok(observed_pid) => return observed_pid == pid,
+            Err(_) if attempt + 1 < STOP_CONFIRMATIONS => thread::sleep(POLL_INTERVAL),
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 fn request(

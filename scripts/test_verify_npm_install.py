@@ -49,6 +49,30 @@ class VerifyNpmInstallTests(unittest.TestCase):
         ):
             verify_npm_install.npm_executable("nt")
 
+    def test_failed_lifecycle_command_identifies_its_stage(self) -> None:
+        completed = verify_npm_install.subprocess.CompletedProcess(
+            args=["/private/install/rootlight", "service", "restart"],
+            returncode=3,
+            stdout="",
+            stderr="local web service is unavailable",
+        )
+        with (
+            mock.patch.object(
+                verify_npm_install.subprocess,
+                "run",
+                return_value=completed,
+            ),
+            self.assertRaisesRegex(
+                verify_npm_install.NpmInstallError,
+                r"^service restart failed with exit code 3:",
+            ),
+        ):
+            verify_npm_install.run(
+                completed.args,
+                {},
+                stage="service restart",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

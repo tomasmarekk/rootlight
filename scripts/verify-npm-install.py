@@ -110,22 +110,30 @@ def verify_install(
         if not cli.is_file():
             raise NpmInstallError("npm did not create the Rootlight command shim")
 
-        initial = service_status(cli, environment)
+        initial = service_status(cli, environment, "postinstall service status")
         require_service_state(initial, registered=True, running=True)
         initial_pid = require_pid(initial)
         verify_http_session()
 
-        stopped = run_json([str(cli), "service", "stop"], environment)
+        stopped = run_json(
+            [str(cli), "service", "stop"],
+            environment,
+            stage="service stop",
+        )
         require_service_state(service_data(stopped), registered=True, running=False)
         wait_for_port(closed=True)
 
-        restarted = run_json([str(cli), "service", "restart"], environment)
+        restarted = run_json(
+            [str(cli), "service", "restart"],
+            environment,
+            stage="service restart",
+        )
         restarted_data = service_data(restarted)
         require_service_state(restarted_data, registered=True, running=True)
         restarted_pid = require_pid(restarted_data)
         verify_http_session()
 
-        run([str(cli), "uninstall"], environment)
+        run([str(cli), "uninstall"], environment, stage="rootlight uninstall")
         if (
             cli.exists()
             or root_package_path(prefix).exists()
@@ -220,6 +228,7 @@ def run(
     environment: dict[str, str],
     *,
     check: bool = True,
+    stage: str = "command",
 ) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         command,
@@ -242,13 +251,18 @@ def run(
     if check and completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise NpmInstallError(
-            f"command failed with exit code {completed.returncode}: {detail[:2000]}"
+            f"{stage} failed with exit code {completed.returncode}: {detail[:2000]}"
         )
     return completed
 
 
-def run_json(command: list[str], environment: dict[str, str]) -> dict[str, Any]:
-    completed = run(command, environment)
+def run_json(
+    command: list[str],
+    environment: dict[str, str],
+    *,
+    stage: str = "Rootlight command",
+) -> dict[str, Any]:
+    completed = run(command, environment, stage=stage)
     try:
         document = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
@@ -258,8 +272,18 @@ def run_json(command: list[str], environment: dict[str, str]) -> dict[str, Any]:
     return document
 
 
-def service_status(cli: Path, environment: dict[str, str]) -> dict[str, Any]:
-    return service_data(run_json([str(cli), "service", "status"], environment))
+def service_status(
+    cli: Path,
+    environment: dict[str, str],
+    stage: str = "service status",
+) -> dict[str, Any]:
+    return service_data(
+        run_json(
+            [str(cli), "service", "status"],
+            environment,
+            stage=stage,
+        )
+    )
 
 
 def service_data(document: dict[str, Any]) -> dict[str, Any]:
