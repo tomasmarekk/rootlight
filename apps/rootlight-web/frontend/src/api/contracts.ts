@@ -40,15 +40,55 @@ export type Health = {
   lifecycle: DaemonLifecycle;
   acceptingOperations: boolean;
   activeOperations: number;
+  admittedOperations: number;
   queuedOperations: number;
   runningOperations: number;
+  activeConnections: number;
+  connectionLimit: number;
+  operationQueueLimit: number;
   journalHealthy: boolean;
+  catalogSchemaVersion: number;
+  endpointSchemaVersion: number;
   catalogStatus: HealthStatus;
   generationStatus: HealthStatus;
   adapterStatus: HealthStatus;
   watcherStatus: HealthStatus;
   endpointStatus: HealthStatus;
   resourcePressure: ResourcePressure;
+};
+
+export type DiagnosticOutcome = "passed" | "failed" | "timed_out" | "unavailable" | "unknown";
+
+export type DiagnosticError = {
+  code: number;
+  message: string;
+  retryable: boolean;
+  retryAfterMs: string | null;
+};
+
+export type DiagnosticCheck = {
+  name: string;
+  outcome: DiagnosticOutcome;
+  durationMs: number;
+  error: DiagnosticError | null;
+};
+
+export type QuickDiagnostics = {
+  schema: "rootlight.web-quick-diagnostics/1";
+  schemaVersion: number;
+  overallStatus: HealthStatus;
+  durationMs: number;
+  checks: DiagnosticCheck[];
+};
+
+export type SupportBundle = {
+  schema: "rootlight.web-support-bundle/1";
+  receipt: string;
+  downloadPath: string;
+  archiveBytes: string;
+  sha256: string;
+  containsSource: false;
+  expiresInSeconds: number;
 };
 
 export type CoverageEntry = {
@@ -294,6 +334,12 @@ const recoveryClassValues = new Set<RecoveryClass>([
   "deadline_elapsed",
   "lease_expired",
 ]);
+const diagnosticOutcomeValues = new Set<DiagnosticOutcome>([
+  "passed",
+  "failed",
+  "timed_out",
+  "unavailable",
+]);
 
 export function parseSession(value: unknown): Session {
   const record = asRecord(value);
@@ -311,15 +357,59 @@ export function parseHealth(value: unknown): Health {
     lifecycle: asEnumOrUnknown(record.lifecycle, lifecycleValues),
     acceptingOperations: asBoolean(record.acceptingOperations),
     activeOperations: asBoundedInteger(record.activeOperations, 0, 1_000_000),
+    admittedOperations: asBoundedInteger(record.admittedOperations, 0, 1_000_000),
     queuedOperations: asBoundedInteger(record.queuedOperations, 0, 1_000_000),
     runningOperations: asBoundedInteger(record.runningOperations, 0, 1_000_000),
+    activeConnections: asBoundedInteger(record.activeConnections, 0, 1_000_000),
+    connectionLimit: asBoundedInteger(record.connectionLimit, 1, 1_000_000),
+    operationQueueLimit: asBoundedInteger(record.operationQueueLimit, 1, 1_000_000),
     journalHealthy: asBoolean(record.journalHealthy),
+    catalogSchemaVersion: asBoundedInteger(record.catalogSchemaVersion, 1, 1_000),
+    endpointSchemaVersion: asBoundedInteger(record.endpointSchemaVersion, 1, 1_000),
     catalogStatus: asEnumOrUnknown(record.catalogStatus, healthStatusValues),
     generationStatus: asEnumOrUnknown(record.generationStatus, healthStatusValues),
     adapterStatus: asEnumOrUnknown(record.adapterStatus, healthStatusValues),
     watcherStatus: asEnumOrUnknown(record.watcherStatus, healthStatusValues),
     endpointStatus: asEnumOrUnknown(record.endpointStatus, healthStatusValues),
     resourcePressure: asEnumOrUnknown(record.resourcePressure, resourcePressureValues),
+  };
+}
+
+export function parseQuickDiagnostics(value: unknown): QuickDiagnostics {
+  const record = asRecord(value);
+  return {
+    schema: asLiteral(record.schema, "rootlight.web-quick-diagnostics/1"),
+    schemaVersion: asBoundedInteger(record.schemaVersion, 1, 1_000),
+    overallStatus: asEnumOrUnknown(record.overallStatus, healthStatusValues),
+    durationMs: asBoundedInteger(record.durationMs, 0, 4_294_967_295),
+    checks: asBoundedArray(record.checks, 64).map(parseDiagnosticCheck),
+  };
+}
+
+export function parseSupportBundle(value: unknown): SupportBundle {
+  const record = asRecord(value);
+  const receipt = asOpaqueToken(record.receipt);
+  const downloadPath = asBoundedString(record.downloadPath, 256);
+  const expectedPath = `/api/v1/diagnostics/support-bundles/${receipt}`;
+  if (downloadPath !== expectedPath) {
+    throw new Error("API response has an invalid support bundle path");
+  }
+  const containsSource = asBoolean(record.containsSource);
+  if (containsSource) {
+    throw new Error("API response contains a source-bearing support bundle");
+  }
+  const sha256 = asBoundedString(record.sha256, 64);
+  if (!/^[a-f0-9]{64}$/u.test(sha256)) {
+    throw new Error("API response has an invalid support bundle digest");
+  }
+  return {
+    schema: asLiteral(record.schema, "rootlight.web-support-bundle/1"),
+    receipt,
+    downloadPath,
+    archiveBytes: asBoundedDecimalString(record.archiveBytes, 768 * 1_024),
+    sha256,
+    containsSource: false,
+    expiresInSeconds: asBoundedInteger(record.expiresInSeconds, 1, 3_600),
   };
 }
 
@@ -603,6 +693,26 @@ function parseOperationKind(value: unknown): RepositoryOperation["kind"] {
   return kind === "repository_index" ? kind : "unknown";
 }
 
+function parseDiagnosticCheck(value: unknown): DiagnosticCheck {
+  const record = asRecord(value);
+  return {
+    name: asBoundedString(record.name, 64),
+    outcome: asEnumOrUnknown(record.outcome, diagnosticOutcomeValues),
+    durationMs: asBoundedInteger(record.durationMs, 0, 4_294_967_295),
+    error: record.error === null ? null : parseDiagnosticError(record.error),
+  };
+}
+
+function parseDiagnosticError(value: unknown): DiagnosticError {
+  const record = asRecord(value);
+  return {
+    code: asBoundedInteger(record.code, -2_147_483_648, 2_147_483_647),
+    message: asBoundedString(record.message, 512),
+    retryable: asBoolean(record.retryable),
+    retryAfterMs: asOptionalDecimalString(record.retryAfterMs),
+  };
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("API response has an invalid shape");
@@ -676,6 +786,14 @@ function asDecimalString(value: unknown): string {
   const text = asBoundedString(value, 20);
   if (!/^(?:0|[1-9][0-9]*)$/u.test(text)) {
     throw new Error("API response has an invalid decimal");
+  }
+  return text;
+}
+
+function asBoundedDecimalString(value: unknown, maximum: number): string {
+  const text = asDecimalString(value);
+  if (BigInt(text) > BigInt(maximum)) {
+    throw new Error("API response has an out-of-range decimal");
   }
   return text;
 }

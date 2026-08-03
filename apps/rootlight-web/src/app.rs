@@ -31,6 +31,7 @@ use crate::{
         AuthenticatedSession, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, SessionRegistry,
         idle_ttl_seconds,
     },
+    support_registry::SupportRegistry,
 };
 
 const MAX_BROWSER_BODY_BYTES: usize = 16 * 1024;
@@ -45,6 +46,7 @@ pub(crate) struct AppState {
     filesystem: Arc<FilesystemRegistry>,
     indexes: Arc<IndexRegistry>,
     graphs: Arc<GraphRegistry>,
+    support: Arc<SupportRegistry>,
 }
 
 impl AppState {
@@ -55,6 +57,7 @@ impl AppState {
         filesystem: Arc<FilesystemRegistry>,
         indexes: Arc<IndexRegistry>,
         graphs: Arc<GraphRegistry>,
+        support: Arc<SupportRegistry>,
     ) -> Self {
         Self {
             assets,
@@ -63,6 +66,7 @@ impl AppState {
             filesystem,
             indexes,
             graphs,
+            support,
         }
     }
 
@@ -82,6 +86,10 @@ impl AppState {
         &self.graphs
     }
 
+    pub(crate) fn support(&self) -> &Arc<SupportRegistry> {
+        &self.support
+    }
+
     fn reap_expired_session_resources(&self, now: Instant) {
         let expired = self.sessions.expire(now);
         self.filesystem.clear_sessions(&expired);
@@ -90,6 +98,8 @@ impl AppState {
         self.indexes.reap(now);
         self.graphs.clear_sessions(&expired);
         self.graphs.reap(now);
+        self.support.clear_sessions(&expired);
+        self.support.reap(now);
     }
 }
 
@@ -118,6 +128,11 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
             "/api/v1/graph/projections/{projection_token}",
             delete(api::graph::release),
         )
+        .route("/api/v1/diagnostics/quick", post(api::diagnostics::quick))
+        .route(
+            "/api/v1/diagnostics/support-bundle",
+            post(api::diagnostics::create_support_bundle),
+        )
         .route_layer(middleware::from_fn(require_mutation_csrf));
     let protected_api = Router::new()
         .route(
@@ -126,6 +141,10 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
         )
         .route("/api/v1/health", get(health))
         .route("/api/v1/filesystem/roots", get(api::filesystem::roots))
+        .route(
+            "/api/v1/diagnostics/support-bundles/{receipt}",
+            get(api::diagnostics::download_support_bundle),
+        )
         .route(
             "/api/v1/operations/{operation_id}",
             get(api::indexing::status),
@@ -331,6 +350,34 @@ impl ApiError {
         }
     }
 
+    pub(crate) const fn diagnostics_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "diagnostics_unavailable",
+        }
+    }
+
+    pub(crate) const fn support_bundle_busy() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "support_bundle_busy",
+        }
+    }
+
+    pub(crate) const fn support_bundle_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "support_bundle_not_found",
+        }
+    }
+
+    pub(crate) const fn support_bundle_invalid() -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "support_bundle_invalid",
+        }
+    }
+
     pub(crate) fn from_daemon(error: &ClientError) -> Self {
         match error {
             ClientError::Ipc(_)
@@ -408,6 +455,7 @@ async fn logout_session(
     require_csrf(&session, &headers)?;
     state.filesystem.clear_session(session.identity());
     state.indexes.clear_session(session.identity());
+    state.support.clear_session(session.identity());
     if let Ok(handles) = state.graphs.clear_session(session.identity())
         && let Ok(timeout) = RequestTimeout::try_from(GRAPH_RELEASE_TIMEOUT)
     {
@@ -438,9 +486,15 @@ struct HealthResponse {
     lifecycle: &'static str,
     accepting_operations: bool,
     active_operations: u32,
+    admitted_operations: u32,
     queued_operations: u32,
     running_operations: u32,
+    active_connections: u32,
+    connection_limit: u32,
+    operation_queue_limit: u32,
     journal_healthy: bool,
+    catalog_schema_version: u32,
+    endpoint_schema_version: u32,
     catalog_status: &'static str,
     generation_status: &'static str,
     adapter_status: &'static str,
@@ -468,9 +522,15 @@ fn map_health(health: Health) -> HealthResponse {
         lifecycle: lifecycle_label(health.lifecycle),
         accepting_operations: health.accepting_operations,
         active_operations: health.active_operations,
+        admitted_operations: health.admitted_operations,
         queued_operations: health.queued_operations,
         running_operations: health.running_operations,
+        active_connections: health.active_connections,
+        connection_limit: health.connection_limit,
+        operation_queue_limit: health.operation_queue_limit,
         journal_healthy: health.journal_healthy,
+        catalog_schema_version: health.catalog_schema_version,
+        endpoint_schema_version: health.endpoint_schema_version,
         catalog_status: health_status_label(health.catalog_status),
         generation_status: health_status_label(health.generation_status),
         adapter_status: health_status_label(health.adapter_status),
@@ -680,6 +740,7 @@ mod tests {
             Arc::new(FilesystemRegistry::new()),
             Arc::new(IndexRegistry::new()),
             Arc::new(GraphRegistry::new()),
+            Arc::new(SupportRegistry::new()),
         );
         let app = router(state, SecurityPolicy::loopback(43_127));
         let bootstrap_body =

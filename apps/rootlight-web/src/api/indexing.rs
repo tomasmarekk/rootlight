@@ -508,6 +508,7 @@ mod tests {
         index_registry::IndexRegistry,
         security::SecurityPolicy,
         session::{CSRF_HEADER_NAME, SESSION_COOKIE_NAME, SessionRegistry},
+        support_registry::SupportRegistry,
     };
 
     const TEST_PORT: u16 = 43_141;
@@ -717,6 +718,7 @@ mod tests {
                 filesystem,
                 Arc::new(IndexRegistry::new()),
                 Arc::new(GraphRegistry::new()),
+                Arc::new(SupportRegistry::new()),
             );
             Self {
                 router: app::router(state, SecurityPolicy::loopback(TEST_PORT)),

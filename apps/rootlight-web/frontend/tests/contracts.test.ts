@@ -12,8 +12,10 @@ import {
   parseProjectCatalogPage,
   parseProjectDetail,
   parseProjectIndexAdmission,
+  parseQuickDiagnostics,
   parseRepositoryOperation,
   parseSession,
+  parseSupportBundle,
 } from "../src/api/contracts";
 
 describe("browser API contracts", () => {
@@ -29,6 +31,66 @@ describe("browser API contracts", () => {
     expect(() => parseHealth({ ...healthFixture(), lifecycle: 1 })).toThrow();
     expect(() => parseHealth({ ...healthFixture(), webReady: "yes" })).toThrow();
     expect(() => parseHealth(null)).toThrow();
+  });
+
+  it("parses bounded source-free diagnostics and additive outcomes", () => {
+    const diagnostics = {
+      schema: "rootlight.web-quick-diagnostics/1",
+      schemaVersion: 1,
+      overallStatus: "degraded",
+      durationMs: 125,
+      checks: [
+        {
+          name: "catalog",
+          outcome: "future_outcome",
+          durationMs: 125,
+          error: {
+            code: 12,
+            message: "Catalog check timed out",
+            retryable: true,
+            retryAfterMs: "1000",
+          },
+        },
+      ],
+    };
+
+    expect(parseQuickDiagnostics(diagnostics).checks[0]?.outcome).toBe("unknown");
+    expect(() =>
+      parseQuickDiagnostics({
+        ...diagnostics,
+        checks: Array.from({ length: 65 }, () => diagnostics.checks[0]),
+      }),
+    ).toThrow();
+    expect(() =>
+      parseQuickDiagnostics({
+        ...diagnostics,
+        checks: [{ ...diagnostics.checks[0], error: { message: "incomplete" } }],
+      }),
+    ).toThrow();
+  });
+
+  it("admits only matching source-free support bundle receipts", () => {
+    const receipt = "a".repeat(43);
+    const bundle = {
+      schema: "rootlight.web-support-bundle/1",
+      receipt,
+      downloadPath: `/api/v1/diagnostics/support-bundles/${receipt}`,
+      archiveBytes: "1024",
+      sha256: "b".repeat(64),
+      containsSource: false,
+      expiresInSeconds: 120,
+    };
+
+    expect(parseSupportBundle(bundle)).toEqual(bundle);
+    expect(() => parseSupportBundle({ ...bundle, containsSource: true })).toThrow();
+    expect(() =>
+      parseSupportBundle({
+        ...bundle,
+        downloadPath: "/api/v1/diagnostics/support-bundles/other",
+      }),
+    ).toThrow();
+    expect(() => parseSupportBundle({ ...bundle, archiveBytes: "786433" })).toThrow();
+    expect(() => parseSupportBundle({ ...bundle, sha256: "not-a-digest" })).toThrow();
   });
 
   it("bounds session credentials", () => {
@@ -306,9 +368,15 @@ function healthFixture() {
     lifecycle: "ready",
     acceptingOperations: true,
     activeOperations: 0,
+    admittedOperations: 1,
     queuedOperations: 0,
     runningOperations: 0,
+    activeConnections: 1,
+    connectionLimit: 64,
+    operationQueueLimit: 128,
     journalHealthy: true,
+    catalogSchemaVersion: 4,
+    endpointSchemaVersion: 1,
     catalogStatus: "healthy",
     generationStatus: "healthy",
     adapterStatus: "healthy",

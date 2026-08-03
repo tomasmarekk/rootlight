@@ -3,10 +3,11 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use rootlight_client::{
-    Client, ClientError, ConnectPolicy, GraphProjectionContinuation, GraphProjectionId,
-    GraphProjectionPage, GraphProjectionRequest, Health, OperationId, RepositoryCatalogPage,
-    RepositoryCatalogPageRequest, RepositoryIndex, RepositoryIndexMode, RepositoryOperationAction,
-    RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestTimeout,
+    Client, ClientError, ConnectPolicy, DiagnosticsQuick, GraphProjectionContinuation,
+    GraphProjectionId, GraphProjectionPage, GraphProjectionRequest, Health, OperationId,
+    RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryIndex, RepositoryIndexMode,
+    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
+    RepositoryStatusRequest, RequestTimeout, SupportBundle,
 };
 use rootlight_runtime::RuntimePaths;
 
@@ -73,6 +74,17 @@ pub(crate) trait DaemonClient: Send + Sync {
         _projection: GraphProjectionId,
         _timeout: RequestTimeout,
     ) -> ClientFuture<'a, bool> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
+
+    fn diagnostics_quick<'a>(
+        &'a self,
+        _timeout: RequestTimeout,
+    ) -> ClientFuture<'a, DiagnosticsQuick> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
+
+    fn support_bundle<'a>(&'a self, _timeout: RequestTimeout) -> ClientFuture<'a, SupportBundle> {
         Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
     }
 }
@@ -147,6 +159,17 @@ impl DaemonClient for Client {
         timeout: RequestTimeout,
     ) -> ClientFuture<'a, bool> {
         Box::pin(self.graph_projection_release_async(projection, timeout))
+    }
+
+    fn diagnostics_quick<'a>(
+        &'a self,
+        timeout: RequestTimeout,
+    ) -> ClientFuture<'a, DiagnosticsQuick> {
+        Box::pin(self.diagnostics_quick_async(timeout))
+    }
+
+    fn support_bundle<'a>(&'a self, timeout: RequestTimeout) -> ClientFuture<'a, SupportBundle> {
+        Box::pin(self.support_bundle_async(timeout))
     }
 }
 

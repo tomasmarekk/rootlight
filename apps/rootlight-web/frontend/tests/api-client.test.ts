@@ -8,6 +8,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -266,6 +267,76 @@ describe("browser API client", () => {
     expect(fetchMock.mock.calls[3]?.[0]).toBe(`/api/v1/graph/projections/${projectionToken}`);
     expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({ method: "DELETE" });
     expect(JSON.stringify(fetchMock.mock.calls)).not.toContain("daemon-cursor");
+  });
+
+  it("runs local diagnostics and verifies a bounded single-use support download", async () => {
+    const receipt = "s".repeat(43);
+    const archive = new TextEncoder().encode("PK-support");
+    const sha256 = "fee6455d2bd1080e637683af146b094978794c7e770b99d74227071706101057";
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ csrfToken: "csrf", idleTtlSeconds: 1_800 }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          schema: "rootlight.web-quick-diagnostics/1",
+          schemaVersion: 1,
+          overallStatus: "healthy",
+          durationMs: 2,
+          checks: [{ name: "catalog", outcome: "passed", durationMs: 2, error: null }],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          schema: "rootlight.web-support-bundle/1",
+          receipt,
+          downloadPath: `/api/v1/diagnostics/support-bundles/${receipt}`,
+          archiveBytes: String(archive.byteLength),
+          sha256,
+          containsSource: false,
+          expiresInSeconds: 120,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(archive, {
+          status: 200,
+          headers: {
+            "content-type": "application/zip",
+            "content-length": String(archive.byteLength),
+            "x-rootlight-sha256": sha256,
+          },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const createObjectUrl = vi.fn(() => "blob:rootlight-support");
+    const revokeObjectUrl = vi.fn();
+    class DownloadUrl extends URL {}
+    DownloadUrl.createObjectURL = createObjectUrl;
+    DownloadUrl.revokeObjectURL = revokeObjectUrl;
+    vi.stubGlobal("URL", DownloadUrl);
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+    const { createSupportBundle, downloadSupportBundle, initializeSession, runQuickDiagnostics } =
+      await import("../src/api/client");
+    await initializeSession();
+
+    await expect(runQuickDiagnostics()).resolves.toMatchObject({ overallStatus: "healthy" });
+    const bundle = await createSupportBundle();
+    await expect(downloadSupportBundle(bundle)).resolves.toBeUndefined();
+    await Promise.resolve();
+
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-rootlight-csrf": "csrf",
+      },
+    });
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("/api/v1/diagnostics/support-bundle");
+    expect(fetchMock.mock.calls[3]?.[0]).toBe(bundle.downloadPath);
+    expect(anchorClick).toHaveBeenCalledOnce();
+    expect(createObjectUrl).toHaveBeenCalledOnce();
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:rootlight-support");
   });
 });
 

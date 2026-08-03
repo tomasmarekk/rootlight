@@ -10,8 +10,10 @@ import {
   parseProjectCatalogPage,
   parseProjectDetail,
   parseProjectIndexAdmission,
+  parseQuickDiagnostics,
   parseRepositoryOperation,
   parseSession,
+  parseSupportBundle,
   type FilesystemBrowsePage,
   type FilesystemRoots,
   type Health,
@@ -23,8 +25,10 @@ import {
   type ProjectDetail,
   type ProjectIndexAdmission,
   type ProjectLifecycleFilter,
+  type QuickDiagnostics,
   type RepositoryOperation,
   type Session,
+  type SupportBundle,
 } from "./contracts";
 import {
   parseBrowserGraphPage,
@@ -36,6 +40,7 @@ import {
 
 const maximumJsonBytes = 1024 * 1024;
 const maximumErrorBytes = 16 * 1024;
+const maximumSupportArchiveBytes = 768 * 1024;
 const bootstrapPattern = /^[A-Za-z0-9_-]{43}$/u;
 const publicErrorPattern = /^[a-z][a-z0-9_]{0,63}$/u;
 
@@ -61,6 +66,42 @@ export function initializeSession(): Promise<Session> {
 
 export async function fetchHealth(signal?: AbortSignal): Promise<Health> {
   return parseHealth(await requestJson("/api/v1/health", { signal }));
+}
+
+export async function runQuickDiagnostics(signal?: AbortSignal): Promise<QuickDiagnostics> {
+  return parseQuickDiagnostics(await mutationJson("/api/v1/diagnostics/quick", {}, signal));
+}
+
+export async function createSupportBundle(signal?: AbortSignal): Promise<SupportBundle> {
+  return parseSupportBundle(await mutationJson("/api/v1/diagnostics/support-bundle", {}, signal));
+}
+
+export async function downloadSupportBundle(bundle: SupportBundle): Promise<void> {
+  const response = await request(bundle.downloadPath);
+  if (response.headers.get("content-type")?.toLowerCase() !== "application/zip") {
+    throw new ApiError(502, "invalid_support_bundle");
+  }
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (
+    !Number.isSafeInteger(declaredLength) ||
+    declaredLength <= 0 ||
+    declaredLength > maximumSupportArchiveBytes ||
+    String(declaredLength) !== bundle.archiveBytes
+  ) {
+    throw new ApiError(502, "invalid_support_bundle");
+  }
+  if (response.headers.get("x-rootlight-sha256") !== bundle.sha256) {
+    throw new ApiError(502, "invalid_support_bundle");
+  }
+  const archive = await readBoundedBytes(response, maximumSupportArchiveBytes);
+  const archiveBuffer = copyToArrayBuffer(archive);
+  if (archive.byteLength !== declaredLength || (await sha256Hex(archiveBuffer)) !== bundle.sha256) {
+    throw new ApiError(502, "invalid_support_bundle");
+  }
+  triggerDownload(
+    new Blob([archiveBuffer], { type: "application/zip" }),
+    "rootlight-support-bundle.zip",
+  );
 }
 
 export type ProjectCatalogRequest = {
@@ -366,6 +407,57 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
     throw new ApiError(response.status, await readErrorCode(response));
   }
   return response;
+}
+
+async function readBoundedBytes(response: Response, maximumBytes: number): Promise<Uint8Array> {
+  const reader = response.body?.getReader();
+  if (reader === undefined) {
+    throw new ApiError(502, "invalid_support_bundle");
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const result = await reader.read();
+    if (result.done) {
+      break;
+    }
+    total += result.value.byteLength;
+    if (total > maximumBytes) {
+      await reader.cancel();
+      throw new ApiError(502, "invalid_support_bundle");
+    }
+    chunks.push(result.value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+function copyToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
+}
+
+async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function triggerDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.hidden = true;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  queueMicrotask(() => URL.revokeObjectURL(url));
 }
 
 async function readErrorCode(response: Response): Promise<string> {

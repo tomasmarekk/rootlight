@@ -14,6 +14,7 @@ mod graph_registry;
 mod index_registry;
 mod security;
 mod session;
+mod support_registry;
 
 use std::{
     ffi::OsString,
@@ -64,6 +65,7 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     let filesystem = Arc::new(filesystem_registry::FilesystemRegistry::new());
     let indexes = Arc::new(index_registry::IndexRegistry::new());
     let graphs = Arc::new(graph_registry::GraphRegistry::new());
+    let support = Arc::new(support_registry::SupportRegistry::new());
     let bootstrap = sessions.issue_bootstrap(Instant::now())?;
     let url = format!("{}/#bootstrap={}", policy.origin(), bootstrap.encoded());
     println!("Rootlight Web UI: {url}");
@@ -77,6 +79,7 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
         Arc::clone(&filesystem),
         Arc::clone(&indexes),
         Arc::clone(&graphs),
+        Arc::clone(&support),
     );
     let router = app::router(state, policy);
     let result = axum::serve(listener, router)
@@ -86,6 +89,7 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     sessions.clear();
     filesystem.clear();
     indexes.clear();
+    support.clear();
     if let Ok(timeout) = RequestTimeout::try_from(Duration::from_secs(2)) {
         for handle in graphs.clear() {
             let _ = daemon
