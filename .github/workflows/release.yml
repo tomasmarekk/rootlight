@@ -214,6 +214,7 @@ jobs:
               --candidate-archive "$(basename "$archive")" \
               --candidate-sha256 "$(cut -d ' ' -f 1 "$archive.sha256")"
             test -f "artifacts/release-candidates/$target.candidate.json"
+            test -f "artifacts/release-candidates/$target.web-smoke.json"
             find artifacts/release-trust \
               -type f -name "rootlight-$version-$target.zip.sigstore.json" \
               -print -quit | grep --quiet .
@@ -243,9 +244,13 @@ jobs:
               record = json.loads((root / f"{target}.candidate.json").read_bytes())
               expected = {
                   "lifecycle_report": f"{target}.lifecycle.json",
+                  "schema": "rootlight.release-package-candidate/2",
                   "source_revision": os.environ["SOURCE_REVISION"],
                   "target": target,
                   "version": os.environ["VERSION"],
+                  "web_node_version": "24.11.1",
+                  "web_npm_version": "11.6.2",
+                  "web_smoke_report": f"{target}.web-smoke.json",
               }
               if {key: record.get(key) for key in expected} != expected:
                   raise SystemExit(f"candidate record differs for {target}: {record!r}")
@@ -271,7 +276,7 @@ jobs:
                   "committed_active_version": os.environ["VERSION"],
                   "committed_last_good_version": "0.0.0",
                   "rollback_active_version": "0.0.0",
-                  "schema": "rootlight.package-lifecycle/4",
+                  "schema": "rootlight.package-lifecycle/5",
                   "source_revision": os.environ["SOURCE_REVISION"],
               }
               if {
@@ -285,6 +290,10 @@ jobs:
                   "launcher_probe_observed",
                   "unowned_data_preserved",
                   "user_data_preserved",
+                  "web_payload_owned",
+                  "web_payload_rollback_observed",
+                  "web_payload_uninstall_observed",
+                  "web_payload_version_bound",
               )
               if any(lifecycle.get(field) is not True for field in observations):
                   raise SystemExit(f"candidate lifecycle is incomplete for {target}")
@@ -292,6 +301,21 @@ jobs:
                   raise SystemExit(f"candidate bootstrap owned no files for {target}")
               if lifecycle.get("uninstall_removed_versions") != 2:
                   raise SystemExit(f"candidate uninstall differs for {target}")
+              web_smoke_path = root / f"{target}.web-smoke.json"
+              web_smoke_bytes = web_smoke_path.read_bytes()
+              if (
+                  record.get("web_smoke_sha256")
+                  != hashlib.sha256(web_smoke_bytes).hexdigest()
+              ):
+                  raise SystemExit(f"candidate web smoke digest differs for {target}")
+              web_smoke = json.loads(web_smoke_bytes)
+              if (
+                  web_smoke.get("schema") != "rootlight.installed-web-smoke/1"
+                  or web_smoke.get("candidate_version") != os.environ["VERSION"]
+                  or web_smoke.get("target") != target
+                  or web_smoke.get("node_runtime_required") is not False
+              ):
+                  raise SystemExit(f"candidate web smoke differs for {target}")
           if not any(Path("artifacts/release-sbom").rglob("*.cdx.json")):
               raise SystemExit("release SBOM set is empty")
           performance = Path("artifacts/release-performance")
