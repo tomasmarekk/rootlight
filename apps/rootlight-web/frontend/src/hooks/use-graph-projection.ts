@@ -56,6 +56,8 @@ export function useGraphProjection(input: GraphProjectionInput): GraphProjection
     view,
   } = input;
   const relationFingerprint = relations.join("\u001f");
+  const scopedSelectedSymbolId =
+    view === "symbols" || view === "neighborhood" ? selectedSymbolId : undefined;
   const [reconnectRevision, setReconnectRevision] = useState(0);
   useEffect(
     () =>
@@ -68,7 +70,7 @@ export function useGraphProjection(input: GraphProjectionInput): GraphProjection
     repositoryId,
     generationId,
     view,
-    selectedSymbolId ?? "",
+    scopedSelectedSymbolId ?? "",
     relationFingerprint,
     String(minimumConfidence),
     budgetProfile,
@@ -92,9 +94,7 @@ export function useGraphProjection(input: GraphProjectionInput): GraphProjection
       maximumMemoryBytes: maximumClientMemoryBytes,
     });
     const selectedSymbols =
-      (view === "symbols" || view === "neighborhood") && selectedSymbolId !== undefined
-        ? [selectedSymbolId]
-        : undefined;
+      scopedSelectedSymbolId === undefined ? undefined : [scopedSelectedSymbolId];
     const requestedRelations =
       selectedSymbols === undefined
         ? undefined
@@ -106,7 +106,7 @@ export function useGraphProjection(input: GraphProjectionInput): GraphProjection
       repositoryId,
       generationId,
       view,
-      scopeFingerprint: selectedSymbolId ?? "repository",
+      scopeFingerprint: scopedSelectedSymbolId ?? "repository",
       layoutVersion: "atlas-v1",
     };
     let projectionToken: string | undefined;
@@ -200,7 +200,7 @@ export function useGraphProjection(input: GraphProjectionInput): GraphProjection
     relationFingerprint,
     repositoryId,
     retryKey,
-    selectedSymbolId,
+    scopedSelectedSymbolId,
     view,
   ]);
 

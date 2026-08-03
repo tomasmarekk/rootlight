@@ -138,6 +138,34 @@ describe("useGraphProjection", () => {
     expect(releaseGraphProjection).not.toHaveBeenCalled();
   });
 
+  it.each(["architecture", "files"] as const)(
+    "keeps the %s projection mounted when only the selected node changes",
+    async (view) => {
+      const initialProps: { selectedSymbolId?: string } = {};
+      const { result, rerender } = renderHook(
+        ({ selectedSymbolId }: { selectedSymbolId?: string }) =>
+          useGraphProjection({
+            repositoryId: graphRepositoryId,
+            generationId: graphGenerationId,
+            view,
+            selectedSymbolId,
+            relations: ["calls"],
+            minimumConfidence: 500,
+            budgetProfile: "balanced",
+            retryKey: 0,
+          }),
+        { initialProps },
+      );
+
+      await waitFor(() => expect(result.current.model?.nodes).toHaveLength(3));
+      rerender({ selectedSymbolId: "sym1_selected" });
+
+      expect(result.current.model?.nodes).toHaveLength(3);
+      expect(openGraphProjection).toHaveBeenCalledOnce();
+      expect(decoderMocks.dispose).not.toHaveBeenCalled();
+    },
+  );
+
   it("disposes and reopens the exact projection after daemon recovery", async () => {
     decoderMocks.decode
       .mockResolvedValueOnce(
