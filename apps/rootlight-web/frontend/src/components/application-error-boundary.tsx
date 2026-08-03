@@ -8,17 +8,17 @@ type BoundaryState = {
 };
 
 export class ApplicationErrorBoundary extends Component<{ children: ReactNode }, BoundaryState> {
-  public state: BoundaryState = { failed: false };
+  public override state: BoundaryState = { failed: false };
 
   public static getDerivedStateFromError(): BoundaryState {
     return { failed: true };
   }
 
-  public componentDidCatch() {
+  public override componentDidCatch() {
     // Exception bodies may contain untrusted repository data, so the local UI does not log them.
   }
 
-  public render() {
+  public override render() {
     if (!this.state.failed) {
       return this.props.children;
     }
