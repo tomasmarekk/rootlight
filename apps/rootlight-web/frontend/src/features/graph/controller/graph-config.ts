@@ -82,7 +82,8 @@ export function createCosmosGraphConfig(input: CosmosGraphConfigInput): GraphCon
   const density = graphDensityProfile(input.nodeCount, input.edgeCount);
   const collisionAllowed = input.view === "architecture" || input.view === "files";
   return {
-    attribution: "Rendered with cosmos.gl",
+    attribution: "",
+    backgroundColor: "#080a0f",
     randomSeed: input.randomSeed,
     fitViewOnInit: false,
     enableDrag: false,

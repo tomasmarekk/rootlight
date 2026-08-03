@@ -179,6 +179,8 @@ export function ProjectsPage() {
             <label className="state-filter">
               <span>State</span>
               <select
+                id="project-state-filter"
+                name="project-state-filter"
                 value={stateFilter}
                 onChange={(event) => {
                   setStateFilter(event.currentTarget.value as ProjectLifecycleFilter | "all");
@@ -198,6 +200,8 @@ export function ProjectsPage() {
               <Search size={16} aria-hidden="true" />
               <span className="sr-only">Search projects</span>
               <input
+                id="project-search"
+                name="project-search"
                 type="search"
                 aria-label="Search projects"
                 maxLength={256}
@@ -411,9 +415,12 @@ function ProjectCard({
         <span>Structural {humanize(project.structuralFreshness)}</span>
         <span>Semantic {humanize(project.semanticFreshness)}</span>
       </div>
-      <div className="coverage-track">
-        <span style={{ width: `${String(coverage.percent)}%` }} />
-      </div>
+      <progress
+        aria-label={coverage.label}
+        className="coverage-track"
+        max={100}
+        value={coverage.percent}
+      />
       <div className="project-card__coverage">
         <span>{coverage.label}</span>
         <span>{project.coverage.length} coverage groups</span>

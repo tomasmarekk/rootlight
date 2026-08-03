@@ -336,8 +336,9 @@ describe("ProjectsPage", () => {
     renderPage();
 
     expect(await screen.findByText("200% indexed coverage")).toBeVisible();
-    expect(screen.getByText("200% indexed coverage").parentElement?.previousSibling).toContainHTML(
-      "width: 100%",
+    expect(screen.getByRole("progressbar", { name: "200% indexed coverage" })).toHaveAttribute(
+      "value",
+      "100",
     );
   });
 });

@@ -47,7 +47,8 @@ describe("graph renderer policy", () => {
 
     expect(config).toMatchObject({
       randomSeed: "seed",
-      attribution: "Rendered with cosmos.gl",
+      attribution: "",
+      backgroundColor: "#080a0f",
       transitionDuration: 0,
       fitViewOnInit: false,
       enableDrag: false,

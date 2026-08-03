@@ -1,4 +1,4 @@
-// Verifies graph HUD truthfulness, accessible controls, virtualization, and text fallback.
+// Verifies graph HUD truthfulness, accessible controls, bounded companion rows, and text fallback.
 
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -59,7 +59,6 @@ describe("graph engine components", () => {
         selectedOrdinals={[1]}
         overlayOrdinals={[2]}
         onSelect={onSelect}
-        height={120}
       />,
     );
 

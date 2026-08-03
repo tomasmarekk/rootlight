@@ -374,6 +374,7 @@ function DirectoryBrowser({
           <label htmlFor="direct-project-path">Direct absolute path</label>
           <input
             id="direct-project-path"
+            name="direct-project-path"
             maxLength={8_192}
             placeholder="Enter an absolute path"
             value={directPath}
@@ -429,7 +430,9 @@ function DirectoryBrowser({
                 <input
                   autoFocus
                   aria-label="Filter directories"
+                  id="directory-filter"
                   maxLength={256}
+                  name="directory-filter"
                   placeholder="Filter this folder"
                   value={filter}
                   onChange={(event) => onFilterChange(event.currentTarget.value)}

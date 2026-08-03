@@ -128,7 +128,7 @@ describe("SessionOperationList", () => {
     expect(screen.getByText("Structural fallback was retained.")).toBeVisible();
     expect(
       screen.getByRole("progressbar", { name: "Structural operation progress" }),
-    ).toHaveAttribute("aria-valuenow", "50");
+    ).toHaveAttribute("value", "50");
     await userEvent.click(screen.getByText("Technical detail"));
     expect(screen.getByText("2 MiB")).toBeVisible();
 

@@ -207,16 +207,12 @@ function TrackedOperation({
             <span />
           </div>
         ) : (
-          <div
+          <progress
             className="operation-progress"
-            role="progressbar"
             aria-label={`${isSemantic ? "Semantic" : "Structural"} operation progress`}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={percent}
-          >
-            <span style={{ width: `${String(percent)}%` }} />
-          </div>
+            max={100}
+            value={percent}
+          />
         )}
         <div>
           <span>{operationStage(current, state)}</span>

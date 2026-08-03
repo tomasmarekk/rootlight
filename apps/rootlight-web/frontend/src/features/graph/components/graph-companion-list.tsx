@@ -1,7 +1,7 @@
-// Provides a bounded, virtualized, source-free text path through the current projection.
+// Provides a bounded, source-free text path through the current projection.
 // It supports the same stable ordinal selection and focus callbacks as the canvas.
 
-import { useMemo, useState, type UIEvent } from "react";
+import { useMemo, useState } from "react";
 
 import type { BrowserGraphNode } from "../model/graph-contracts";
 import type { GraphRenderModel } from "../model/graph-model";
@@ -12,8 +12,6 @@ export type GraphCompanionListProps = {
   selectedOrdinals: readonly number[];
   overlayOrdinals?: readonly number[];
   onSelect: (ordinal: number, fit: boolean) => void;
-  height?: number;
-  rowHeight?: number;
 };
 
 type CompanionRow = {
@@ -21,17 +19,14 @@ type CompanionRow = {
   node: BrowserGraphNode;
 };
 
-/** Renders only the visible text rows while preserving screen-reader and keyboard controls. */
+/** Renders the bounded projection as a complete screen-reader and keyboard-accessible list. */
 export function GraphCompanionList({
   model,
   overlayOrdinals = [],
   selectedOrdinals,
   onSelect,
-  height = 320,
-  rowHeight = 54,
 }: GraphCompanionListProps) {
   const [query, setQuery] = useState("");
-  const [scrollTop, setScrollTop] = useState(0);
   const rows = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
     const filtered: CompanionRow[] = [];
@@ -50,16 +45,8 @@ export function GraphCompanionList({
       return left.node.label.localeCompare(right.node.label) || left.ordinal - right.ordinal;
     });
   }, [model, query]);
-  const overscan = 4;
-  const start = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
-  const visibleCount = Math.ceil(height / rowHeight) + overscan * 2;
-  const visibleRows = rows.slice(start, start + visibleCount);
   const selected = new Set(selectedOrdinals);
   const overlay = new Set(overlayOrdinals);
-
-  const handleScroll = (event: UIEvent<HTMLDivElement>) => {
-    setScrollTop(event.currentTarget.scrollTop);
-  };
 
   return (
     <section className="graph-companion" aria-labelledby="graph-companion-title">
@@ -67,39 +54,22 @@ export function GraphCompanionList({
       <label>
         Search visible nodes
         <input
+          id="graph-companion-search"
+          name="graph-companion-search"
           type="search"
           value={query}
           onChange={(event) => {
             setQuery(event.currentTarget.value);
-            setScrollTop(0);
           }}
         />
       </label>
       <p role="status">
         {rows.length.toLocaleString()} of {model.nodes.length.toLocaleString()} returned nodes
       </p>
-      <div
-        className="graph-companion__viewport"
-        style={{ height, overflowY: "auto" }}
-        onScroll={handleScroll}
-        tabIndex={-1}
-      >
-        <ul
-          aria-label="Visible graph nodes"
-          className="graph-companion__rows"
-          style={{ height: rows.length * rowHeight, margin: 0, position: "relative" }}
-        >
-          {visibleRows.map(({ ordinal, node }, index) => (
-            <li
-              key={ordinal}
-              style={{
-                height: rowHeight,
-                left: 0,
-                position: "absolute",
-                right: 0,
-                top: (start + index) * rowHeight,
-              }}
-            >
+      <div className="graph-companion__viewport" tabIndex={-1}>
+        <ul aria-label="Visible graph nodes" className="graph-companion__rows">
+          {rows.map(({ ordinal, node }) => (
+            <li key={ordinal}>
               <button
                 type="button"
                 aria-pressed={selected.has(ordinal)}

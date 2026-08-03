@@ -357,6 +357,8 @@ export function EvidenceInspector({
                 <label>
                   Presentation
                   <select
+                    id="source-presentation"
+                    name="source-presentation"
                     value={sourceEncoding}
                     onChange={(event) => {
                       setSourceEncoding(event.currentTarget.value as typeof sourceEncoding);
@@ -407,6 +409,8 @@ export function EvidenceInspector({
               <label>
                 Maximum depth
                 <select
+                  id="impact-maximum-depth"
+                  name="impact-maximum-depth"
                   value={maximumDepth}
                   onChange={(event) => setMaximumDepth(Number(event.currentTarget.value))}
                 >
@@ -419,6 +423,8 @@ export function EvidenceInspector({
               </label>
               <label className="impact-checkbox">
                 <input
+                  id="impact-include-tests"
+                  name="impact-include-tests"
                   type="checkbox"
                   checked={includeTests}
                   onChange={(event) => setIncludeTests(event.currentTarget.checked)}

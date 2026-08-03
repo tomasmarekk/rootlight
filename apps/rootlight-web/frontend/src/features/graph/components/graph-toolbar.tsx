@@ -41,6 +41,8 @@ export function GraphToolbar(props: GraphToolbarProps) {
       </button>
       <label>
         <input
+          id="graph-labels-visible"
+          name="graph-labels-visible"
           type="checkbox"
           checked={props.labelsVisible}
           onChange={(event) => {

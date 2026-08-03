@@ -3,7 +3,7 @@
 import { Button } from "@heroui/react/button";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, ArrowLeft, Database, RefreshCw, RotateCcw, TriangleAlert } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useParams, useSearchParams } from "react-router";
 
 import { ApiError, fetchProjectDetail } from "../api/client";
@@ -16,7 +16,7 @@ import {
   EvidenceInspectorBoundary,
 } from "../features/inspector/components/evidence-inspector";
 import { useGraphProjection } from "../hooks/use-graph-projection";
-import { useWorkspaceRailWidth } from "../hooks/use-workspace-rail-width";
+import { useWorkspaceRailWidth, workspaceRailWidthClass } from "../hooks/use-workspace-rail-width";
 import { parseCatalogLocationState } from "../routing/catalog-location-state";
 import {
   defaultProjectWorkspaceState,
@@ -244,6 +244,8 @@ function ProjectWorkspace({
           <label>
             <span>Generation</span>
             <select
+              id="workspace-generation"
+              name="workspace-generation"
               value={workspaceState.generation}
               onChange={(event) => {
                 const generation = event.currentTarget.value;
@@ -280,8 +282,9 @@ function ProjectWorkspace({
       </header>
 
       <div
-        className={`workspace-grid${selectedNode === undefined ? "" : " workspace-grid--inspector"}`}
-        style={{ "--workspace-rail-width": `${String(railWidth)}px` } as CSSProperties}
+        className={`workspace-grid ${workspaceRailWidthClass(railWidth)}${
+          selectedNode === undefined ? "" : " workspace-grid--inspector"
+        }`}
       >
         <aside className="workspace-rail" id="project-information">
           <p className="eyebrow">Exact generation</p>
@@ -336,6 +339,8 @@ function ProjectWorkspace({
             <label>
               <span>Minimum confidence</span>
               <select
+                id="workspace-minimum-confidence"
+                name="workspace-minimum-confidence"
                 value={workspaceState.minConfidence}
                 onChange={(event) => {
                   const minimumConfidence = Number(
@@ -356,6 +361,8 @@ function ProjectWorkspace({
             <label>
               <span>Projection budget</span>
               <select
+                id="workspace-projection-budget"
+                name="workspace-projection-budget"
                 value={workspaceState.budgetProfile}
                 onChange={(event) => {
                   const budgetProfile = event.currentTarget
@@ -378,6 +385,8 @@ function ProjectWorkspace({
                 {projectGraphRelationKinds.map((relation) => (
                   <label key={relation}>
                     <input
+                      id={`workspace-relation-${relation}`}
+                      name="workspace-relations"
                       type="checkbox"
                       checked={workspaceState.relations.includes(relation)}
                       onChange={(event) => {

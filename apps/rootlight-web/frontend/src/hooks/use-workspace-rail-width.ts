@@ -6,6 +6,7 @@ const storageKey = "rootlight:workspace-rail-width:v1";
 const preferredMaximumWidth = 460;
 const defaultWidth = 320;
 const minimumCanvasWidth = 560;
+const workspaceRailStep = 4;
 
 export const minimumWorkspaceRailWidth = 264;
 
@@ -34,17 +35,28 @@ export function useWorkspaceRailWidth() {
 }
 
 export function clampWorkspaceRailWidth(width: number, viewportWidth: number): number {
+  const maximum = maximumWorkspaceRailWidth(viewportWidth);
+  const bounded = Math.min(Math.max(Math.round(width), minimumWorkspaceRailWidth), maximum);
   return Math.min(
-    Math.max(Math.round(width), minimumWorkspaceRailWidth),
-    maximumWorkspaceRailWidth(viewportWidth),
+    minimumWorkspaceRailWidth +
+      Math.round((bounded - minimumWorkspaceRailWidth) / workspaceRailStep) * workspaceRailStep,
+    maximum,
   );
 }
 
 export function maximumWorkspaceRailWidth(viewportWidth: number) {
-  return Math.max(
+  const bounded = Math.max(
     minimumWorkspaceRailWidth,
     Math.min(preferredMaximumWidth, viewportWidth - minimumCanvasWidth),
   );
+  return (
+    minimumWorkspaceRailWidth +
+    Math.floor((bounded - minimumWorkspaceRailWidth) / workspaceRailStep) * workspaceRailStep
+  );
+}
+
+export function workspaceRailWidthClass(width: number) {
+  return `workspace-grid--rail-${String(width)}`;
 }
 
 function loadWidth(viewportWidth: number) {

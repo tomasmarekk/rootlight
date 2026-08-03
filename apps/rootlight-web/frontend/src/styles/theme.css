@@ -1,5 +1,12 @@
 /* Styles Rootlight's persistent shell and current bounded route surfaces. */
 
+/* Mirrors the pinned React Aria press rule without requiring an inline style under CSP. */
+@layer {
+  [data-react-aria-pressable] {
+    touch-action: pan-x pan-y pinch-zoom;
+  }
+}
+
 .app-frame {
   min-height: 100vh;
 }
@@ -612,17 +619,31 @@
 }
 
 .coverage-track {
+  display: block;
+  width: calc(100% - 47px);
   height: 3px;
+  padding: 0;
   overflow: hidden;
   margin-left: 47px;
+  border: 0;
   border-radius: 999px;
   background: var(--rl-border);
+  appearance: none;
 }
 
-.coverage-track span {
-  display: block;
+.coverage-track::-webkit-progress-bar {
+  background: var(--rl-border);
+  border-radius: inherit;
+}
+
+.coverage-track::-webkit-progress-value {
   min-width: 2px;
-  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--rl-primary), var(--rl-focus));
+}
+
+.coverage-track::-moz-progress-bar {
+  min-width: 2px;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--rl-primary), var(--rl-focus));
 }
@@ -1047,6 +1068,207 @@
   grid-template-columns: var(--workspace-rail-width, 320px) 8px minmax(560px, 1fr);
 }
 
+/* Quantized classes keep the resizer dynamic without violating the no-inline-style CSP. */
+.workspace-grid--rail-264 {
+  --workspace-rail-width: 264px;
+}
+
+.workspace-grid--rail-268 {
+  --workspace-rail-width: 268px;
+}
+
+.workspace-grid--rail-272 {
+  --workspace-rail-width: 272px;
+}
+
+.workspace-grid--rail-276 {
+  --workspace-rail-width: 276px;
+}
+
+.workspace-grid--rail-280 {
+  --workspace-rail-width: 280px;
+}
+
+.workspace-grid--rail-284 {
+  --workspace-rail-width: 284px;
+}
+
+.workspace-grid--rail-288 {
+  --workspace-rail-width: 288px;
+}
+
+.workspace-grid--rail-292 {
+  --workspace-rail-width: 292px;
+}
+
+.workspace-grid--rail-296 {
+  --workspace-rail-width: 296px;
+}
+
+.workspace-grid--rail-300 {
+  --workspace-rail-width: 300px;
+}
+
+.workspace-grid--rail-304 {
+  --workspace-rail-width: 304px;
+}
+
+.workspace-grid--rail-308 {
+  --workspace-rail-width: 308px;
+}
+
+.workspace-grid--rail-312 {
+  --workspace-rail-width: 312px;
+}
+
+.workspace-grid--rail-316 {
+  --workspace-rail-width: 316px;
+}
+
+.workspace-grid--rail-320 {
+  --workspace-rail-width: 320px;
+}
+
+.workspace-grid--rail-324 {
+  --workspace-rail-width: 324px;
+}
+
+.workspace-grid--rail-328 {
+  --workspace-rail-width: 328px;
+}
+
+.workspace-grid--rail-332 {
+  --workspace-rail-width: 332px;
+}
+
+.workspace-grid--rail-336 {
+  --workspace-rail-width: 336px;
+}
+
+.workspace-grid--rail-340 {
+  --workspace-rail-width: 340px;
+}
+
+.workspace-grid--rail-344 {
+  --workspace-rail-width: 344px;
+}
+
+.workspace-grid--rail-348 {
+  --workspace-rail-width: 348px;
+}
+
+.workspace-grid--rail-352 {
+  --workspace-rail-width: 352px;
+}
+
+.workspace-grid--rail-356 {
+  --workspace-rail-width: 356px;
+}
+
+.workspace-grid--rail-360 {
+  --workspace-rail-width: 360px;
+}
+
+.workspace-grid--rail-364 {
+  --workspace-rail-width: 364px;
+}
+
+.workspace-grid--rail-368 {
+  --workspace-rail-width: 368px;
+}
+
+.workspace-grid--rail-372 {
+  --workspace-rail-width: 372px;
+}
+
+.workspace-grid--rail-376 {
+  --workspace-rail-width: 376px;
+}
+
+.workspace-grid--rail-380 {
+  --workspace-rail-width: 380px;
+}
+
+.workspace-grid--rail-384 {
+  --workspace-rail-width: 384px;
+}
+
+.workspace-grid--rail-388 {
+  --workspace-rail-width: 388px;
+}
+
+.workspace-grid--rail-392 {
+  --workspace-rail-width: 392px;
+}
+
+.workspace-grid--rail-396 {
+  --workspace-rail-width: 396px;
+}
+
+.workspace-grid--rail-400 {
+  --workspace-rail-width: 400px;
+}
+
+.workspace-grid--rail-404 {
+  --workspace-rail-width: 404px;
+}
+
+.workspace-grid--rail-408 {
+  --workspace-rail-width: 408px;
+}
+
+.workspace-grid--rail-412 {
+  --workspace-rail-width: 412px;
+}
+
+.workspace-grid--rail-416 {
+  --workspace-rail-width: 416px;
+}
+
+.workspace-grid--rail-420 {
+  --workspace-rail-width: 420px;
+}
+
+.workspace-grid--rail-424 {
+  --workspace-rail-width: 424px;
+}
+
+.workspace-grid--rail-428 {
+  --workspace-rail-width: 428px;
+}
+
+.workspace-grid--rail-432 {
+  --workspace-rail-width: 432px;
+}
+
+.workspace-grid--rail-436 {
+  --workspace-rail-width: 436px;
+}
+
+.workspace-grid--rail-440 {
+  --workspace-rail-width: 440px;
+}
+
+.workspace-grid--rail-444 {
+  --workspace-rail-width: 444px;
+}
+
+.workspace-grid--rail-448 {
+  --workspace-rail-width: 448px;
+}
+
+.workspace-grid--rail-452 {
+  --workspace-rail-width: 452px;
+}
+
+.workspace-grid--rail-456 {
+  --workspace-rail-width: 456px;
+}
+
+.workspace-grid--rail-460 {
+  --workspace-rail-width: 460px;
+}
+
 .workspace-grid--inspector {
   grid-template-columns:
     var(--workspace-rail-width, 320px) 8px minmax(420px, 1fr)
@@ -1429,10 +1651,41 @@
 .graph-viewport__canvas {
   min-width: 0;
   min-height: 0;
+  background: #080a0f;
 }
 
-.graph-viewport__canvas canvas {
+.rootlight-cosmos-canvas {
   display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.rootlight-cosmos-canvas--interactive {
+  touch-action: none;
+}
+
+.rootlight-cosmos-canvas--point,
+.rootlight-cosmos-canvas--link {
+  cursor: pointer;
+}
+
+.rootlight-cosmos-canvas--grab {
+  cursor: grab;
+}
+
+.rootlight-cosmos-canvas--grabbing {
+  cursor: grabbing;
+}
+
+.graph-attribution {
+  position: absolute;
+  z-index: 2;
+  right: 10px;
+  bottom: 8px;
+  color: var(--rl-foreground-subtle);
+  font-size: 8px;
+  pointer-events: none;
+  user-select: none;
 }
 
 .graph-toolbar {
@@ -1613,19 +1866,28 @@
 }
 
 .graph-companion__viewport {
+  height: 320px;
+  overflow-y: auto;
   max-height: 320px;
   scrollbar-color: var(--rl-border-strong) transparent;
 }
 
 .graph-companion__rows {
+  margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.graph-companion__rows li {
+  min-height: 54px;
+  content-visibility: auto;
+  contain-intrinsic-block-size: 54px;
 }
 
 .graph-companion__rows button {
   display: grid;
   width: 100%;
-  height: calc(100% - 3px);
+  min-height: 51px;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 2px 8px;
   padding: 6px 8px;
@@ -2703,15 +2965,35 @@
 
 .operation-progress {
   position: relative;
+  display: block;
+  width: 100%;
   height: 3px;
+  padding: 0;
   overflow: hidden;
+  border: 0;
   border-radius: 999px;
   background: var(--rl-border);
+  appearance: none;
 }
 
 .operation-progress span {
   display: block;
   height: 100%;
+  border-radius: inherit;
+  background: var(--rl-primary);
+}
+
+.operation-progress::-webkit-progress-bar {
+  background: var(--rl-border);
+  border-radius: inherit;
+}
+
+.operation-progress::-webkit-progress-value {
+  border-radius: inherit;
+  background: var(--rl-primary);
+}
+
+.operation-progress::-moz-progress-bar {
   border-radius: inherit;
   background: var(--rl-primary);
 }
@@ -2730,9 +3012,29 @@
   background: var(--rl-success);
 }
 
+.tracked-operation--succeeded .operation-progress::-webkit-progress-value {
+  background: var(--rl-success);
+}
+
+.tracked-operation--succeeded .operation-progress::-moz-progress-bar {
+  background: var(--rl-success);
+}
+
 .tracked-operation--failed .operation-progress span,
 .tracked-operation--interrupted .operation-progress span,
 .tracked-operation--cancelled .operation-progress span {
+  background: var(--rl-danger);
+}
+
+.tracked-operation--failed .operation-progress::-webkit-progress-value,
+.tracked-operation--interrupted .operation-progress::-webkit-progress-value,
+.tracked-operation--cancelled .operation-progress::-webkit-progress-value {
+  background: var(--rl-danger);
+}
+
+.tracked-operation--failed .operation-progress::-moz-progress-bar,
+.tracked-operation--interrupted .operation-progress::-moz-progress-bar,
+.tracked-operation--cancelled .operation-progress::-moz-progress-bar {
   background: var(--rl-danger);
 }
 
