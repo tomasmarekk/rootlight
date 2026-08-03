@@ -31,6 +31,7 @@ use crate::{
         AuthenticatedSession, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, SessionRegistry,
         idle_ttl_seconds,
     },
+    source_registry::SourceCapabilityRegistry,
     support_registry::SupportRegistry,
 };
 
@@ -46,6 +47,7 @@ pub(crate) struct AppState {
     filesystem: Arc<FilesystemRegistry>,
     indexes: Arc<IndexRegistry>,
     graphs: Arc<GraphRegistry>,
+    sources: Arc<SourceCapabilityRegistry>,
     support: Arc<SupportRegistry>,
 }
 
@@ -66,6 +68,7 @@ impl AppState {
             filesystem,
             indexes,
             graphs,
+            sources: Arc::new(SourceCapabilityRegistry::new()),
             support,
         }
     }
@@ -86,6 +89,10 @@ impl AppState {
         &self.graphs
     }
 
+    pub(crate) fn sources(&self) -> &Arc<SourceCapabilityRegistry> {
+        &self.sources
+    }
+
     pub(crate) fn support(&self) -> &Arc<SupportRegistry> {
         &self.support
     }
@@ -98,6 +105,8 @@ impl AppState {
         self.indexes.reap(now);
         self.graphs.clear_sessions(&expired);
         self.graphs.reap(now);
+        self.sources.clear_sessions(&expired);
+        self.sources.reap(now);
         self.support.clear_sessions(&expired);
         self.support.reap(now);
     }
@@ -133,6 +142,18 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
             "/api/v1/diagnostics/support-bundle",
             post(api::diagnostics::create_support_bundle),
         )
+        .route(
+            "/api/v1/projects/{repository_id}/relationships",
+            post(api::evidence::relationships),
+        )
+        .route(
+            "/api/v1/projects/{repository_id}/source",
+            post(api::evidence::source),
+        )
+        .route(
+            "/api/v1/projects/{repository_id}/change-impact",
+            post(api::evidence::change_impact),
+        )
         .route_layer(middleware::from_fn(require_mutation_csrf));
     let protected_api = Router::new()
         .route(
@@ -153,6 +174,10 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
         .route(
             "/api/v1/projects/{repository_id}",
             get(api::projects::detail),
+        )
+        .route(
+            "/api/v1/projects/{repository_id}/nodes/{node_id}",
+            get(api::evidence::node_detail),
         )
         .merge(filesystem_mutations)
         .route_layer(middleware::from_fn_with_state(
@@ -378,6 +403,62 @@ impl ApiError {
         }
     }
 
+    pub(crate) const fn invalid_node_request() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_node_request",
+        }
+    }
+
+    pub(crate) const fn node_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "node_not_found",
+        }
+    }
+
+    pub(crate) const fn invalid_relationships_request() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_relationships_request",
+        }
+    }
+
+    pub(crate) const fn invalid_source_request() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_source_request",
+        }
+    }
+
+    pub(crate) const fn source_capability_invalid() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "source_capability_invalid",
+        }
+    }
+
+    pub(crate) const fn source_capability_limit_reached() -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "source_capability_limit_reached",
+        }
+    }
+
+    pub(crate) const fn invalid_change_impact_request() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_change_impact_request",
+        }
+    }
+
+    pub(crate) const fn daemon_response_invalid() -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "daemon_response_invalid",
+        }
+    }
+
     pub(crate) fn from_daemon(error: &ClientError) -> Self {
         match error {
             ClientError::Ipc(_)
@@ -455,6 +536,7 @@ async fn logout_session(
     require_csrf(&session, &headers)?;
     state.filesystem.clear_session(session.identity());
     state.indexes.clear_session(session.identity());
+    state.sources.clear_session(session.identity());
     state.support.clear_session(session.identity());
     if let Ok(handles) = state.graphs.clear_session(session.identity())
         && let Ok(timeout) = RequestTimeout::try_from(GRAPH_RELEASE_TIMEOUT)

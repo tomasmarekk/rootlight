@@ -3,17 +3,20 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use rootlight_client::{
-    Client, ClientError, ConnectPolicy, DiagnosticsQuick, GraphProjectionContinuation,
-    GraphProjectionId, GraphProjectionPage, GraphProjectionRequest, Health, OperationId,
-    RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryIndex, RepositoryIndexMode,
+    ChangeImpact, Client, ClientError, ConnectPolicy, DiagnosticsQuick, EffectiveBudget,
+    EffectiveBudgetLimits, GenerationSelector, GraphProjectionContinuation, GraphProjectionId,
+    GraphProjectionPage, GraphProjectionRequest, Health, OperationId, RepositoryCatalogPage,
+    RepositoryCatalogPageRequest, RepositoryId, RepositoryIndex, RepositoryIndexMode,
     RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
-    RepositoryStatusRequest, RequestTimeout, SupportBundle,
+    RepositoryStatusRequest, RequestOptions, RequestTimeout, SourceRead, SourceReadOptions,
+    SourceReference, SupportBundle, SymbolExplain, SymbolId, SymbolRelationships,
 };
 use rootlight_runtime::RuntimePaths;
 
 use crate::error::WebError;
 
 const WEB_CLIENT_INSTANCE_PREFIX: [u8; 8] = *b"rootweb1";
+const WEB_SOURCE_BYTES: u64 = 64 * 1024;
 
 type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ClientError>> + Send + 'a>>;
 
@@ -85,6 +88,64 @@ pub(crate) trait DaemonClient: Send + Sync {
     }
 
     fn support_bundle<'a>(&'a self, _timeout: RequestTimeout) -> ClientFuture<'a, SupportBundle> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
+
+    fn symbol_explain<'a>(
+        &'a self,
+        _repository: RepositoryId,
+        _generation: GenerationSelector,
+        _symbols: &'a [SymbolId],
+        _timeout: RequestTimeout,
+    ) -> ClientFuture<'a, SymbolExplain> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded relationships query dimension"
+    )]
+    fn symbol_relationships<'a>(
+        &'a self,
+        _repository: RepositoryId,
+        _generation: GenerationSelector,
+        _seeds: &'a [SymbolId],
+        _relations: &'a [String],
+        _direction: Option<&'a str>,
+        _min_confidence: Option<u16>,
+        _max_results: Option<u16>,
+        _page_offset: u64,
+        _timeout: RequestTimeout,
+    ) -> ClientFuture<'a, SymbolRelationships> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
+
+    fn source_read<'a>(
+        &'a self,
+        _repository: RepositoryId,
+        _generation: GenerationSelector,
+        _references: &'a [SourceReference],
+        _projection: SourceReadOptions,
+        _timeout: RequestTimeout,
+    ) -> ClientFuture<'a, SourceRead> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded change-impact query dimension"
+    )]
+    fn change_impact<'a>(
+        &'a self,
+        _repository: RepositoryId,
+        _generation: GenerationSelector,
+        _changed_symbols: &'a [SymbolId],
+        _max_depth: Option<u8>,
+        _min_confidence: Option<u16>,
+        _include_tests: Option<bool>,
+        _max_dependents: Option<u16>,
+        _timeout: RequestTimeout,
+    ) -> ClientFuture<'a, ChangeImpact> {
         Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
     }
 }
@@ -170,6 +231,99 @@ impl DaemonClient for Client {
 
     fn support_bundle<'a>(&'a self, timeout: RequestTimeout) -> ClientFuture<'a, SupportBundle> {
         Box::pin(self.support_bundle_async(timeout))
+    }
+
+    fn symbol_explain<'a>(
+        &'a self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        symbols: &'a [SymbolId],
+        timeout: RequestTimeout,
+    ) -> ClientFuture<'a, SymbolExplain> {
+        Box::pin(self.symbol_explain_async(repository, generation, symbols, timeout))
+    }
+
+    fn symbol_relationships<'a>(
+        &'a self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: &'a [SymbolId],
+        relations: &'a [String],
+        direction: Option<&'a str>,
+        min_confidence: Option<u16>,
+        max_results: Option<u16>,
+        page_offset: u64,
+        timeout: RequestTimeout,
+    ) -> ClientFuture<'a, SymbolRelationships> {
+        Box::pin(self.symbol_relationships_async(
+            repository,
+            generation,
+            seeds,
+            relations,
+            direction,
+            min_confidence,
+            max_results,
+            page_offset,
+            timeout,
+        ))
+    }
+
+    fn source_read<'a>(
+        &'a self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        references: &'a [SourceReference],
+        projection: SourceReadOptions,
+        timeout: RequestTimeout,
+    ) -> ClientFuture<'a, SourceRead> {
+        Box::pin(async move {
+            let budget = EffectiveBudget::new(EffectiveBudgetLimits {
+                rows: 256,
+                edges: 1,
+                results: 1,
+                source_bytes: WEB_SOURCE_BYTES,
+                json_bytes: 256 * 1024,
+                estimated_tokens: 256 * 1024,
+                memory_bytes: 512 * 1024,
+                duration: timeout.duration(),
+                depth: None,
+                paths: None,
+            })?;
+            self.source_read_projected_async_with_options(
+                repository,
+                generation,
+                references,
+                projection,
+                RequestOptions::new()
+                    .with_timeout(timeout)
+                    .with_effective_budget(budget),
+            )
+            .await
+        })
+    }
+
+    fn change_impact<'a>(
+        &'a self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        changed_symbols: &'a [SymbolId],
+        max_depth: Option<u8>,
+        min_confidence: Option<u16>,
+        include_tests: Option<bool>,
+        max_dependents: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> ClientFuture<'a, ChangeImpact> {
+        Box::pin(self.change_impact_async(
+            repository,
+            generation,
+            changed_symbols,
+            &[],
+            max_depth,
+            min_confidence,
+            include_tests,
+            max_dependents,
+            timeout,
+        ))
     }
 }
 

@@ -14,6 +14,7 @@ mod graph_registry;
 mod index_registry;
 mod security;
 mod session;
+mod source_registry;
 mod support_registry;
 
 use std::{
@@ -81,7 +82,7 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
         Arc::clone(&graphs),
         Arc::clone(&support),
     );
-    let router = app::router(state, policy);
+    let router = app::router(state.clone(), policy);
     let result = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -89,6 +90,7 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     sessions.clear();
     filesystem.clear();
     indexes.clear();
+    state.sources().clear();
     support.clear();
     if let Ok(timeout) = RequestTimeout::try_from(Duration::from_secs(2)) {
         for handle in graphs.clear() {
