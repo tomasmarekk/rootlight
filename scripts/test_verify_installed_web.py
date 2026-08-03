@@ -30,13 +30,11 @@ class InstalledWebSmokeTests(unittest.TestCase):
         self.assertIsNone(installed_web.smoke_temporary_parent("linux"))
         self.assertIsNone(installed_web.smoke_temporary_parent("win32"))
 
-    def test_readiness_probe_waits_for_spawned_daemon_discovery(self) -> None:
+    def test_readiness_probe_waits_for_service_daemon_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary)
             discovery = runtime / "daemon.json"
             environment = {"ROOTLIGHT_RUNTIME_DIR": str(runtime)}
-            process = mock.Mock()
-            process.poll.return_value = None
             healthy = subprocess.CompletedProcess(
                 args=[],
                 returncode=0,
@@ -71,27 +69,73 @@ class InstalledWebSmokeTests(unittest.TestCase):
                 installed_web.wait_for_daemon(
                     Path("rootlight"),
                     environment,
-                    process,
                 )
 
             run.assert_called_once()
-            self.assertGreaterEqual(process.poll.call_count, 2)
 
-    def test_readiness_probe_rejects_an_exited_spawned_daemon(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            environment = {"ROOTLIGHT_RUNTIME_DIR": temporary}
-            process = mock.Mock()
-            process.poll.return_value = 1
-            with (
-                mock.patch.object(installed_web.subprocess, "run") as run,
-                self.assertRaisesRegex(RuntimeError, "before becoming ready"),
-            ):
-                installed_web.wait_for_daemon(
-                    Path("rootlight"),
-                    environment,
-                    process,
-                )
-            run.assert_not_called()
+    def test_start_web_accepts_the_stable_service_url(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="Rootlight Web UI: http://127.0.0.1:43127/\n",
+            stderr="",
+        )
+        with mock.patch.object(
+            installed_web.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            origin = installed_web.start_web(Path("rootlight"), {})
+
+        self.assertEqual(origin, "http://127.0.0.1:43127")
+        run.assert_called_once()
+
+    def test_start_web_rejects_a_bootstrap_fragment(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "Rootlight Web UI: http://127.0.0.1:43127/"
+                f"#bootstrap={'a' * 43}\n"
+            ),
+            stderr="",
+        )
+        with (
+            mock.patch.object(
+                installed_web.subprocess,
+                "run",
+                return_value=completed,
+            ),
+            self.assertRaisesRegex(ValueError, "invalid URL"),
+        ):
+            installed_web.start_web(Path("rootlight"), {})
+
+    def test_stop_web_uses_the_service_control_command(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "result": {
+                        "type": "web_service",
+                        "data": {"running": False},
+                    },
+                }
+            ),
+            stderr="",
+        )
+        with mock.patch.object(
+            installed_web.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            installed_web.stop_web(Path("rootlight"), {})
+
+        self.assertEqual(
+            run.call_args.args[0],
+            [Path("rootlight"), "service", "stop"],
+        )
 
     def test_shutdown_probe_waits_for_owned_daemon_discovery_removal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

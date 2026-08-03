@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the installed native web command without a Node.js runtime."""
+"""Exercise the installed native web service without a Node.js runtime."""
 
 from __future__ import annotations
 
@@ -9,14 +9,11 @@ import http.client
 import json
 import os
 from pathlib import Path, PurePosixPath
-import queue
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -24,7 +21,7 @@ import zipfile
 
 
 PACKAGE_SCHEMA = "rootlight.package-manifest/3"
-REPORT_SCHEMA = "rootlight.installed-web-smoke/1"
+REPORT_SCHEMA = "rootlight.installed-web-smoke/2"
 SOURCE_REVISION = re.compile(r"^[0-9a-f]{40}$")
 TARGET = re.compile(
     r"^(?:aarch64-apple-darwin|aarch64-unknown-linux-gnu|"
@@ -36,9 +33,7 @@ VERSION = re.compile(
     r"(?:0|[1-9][0-9]*)(?:-alpha\.(?:0|[1-9][0-9]*))?$"
 )
 WEB_URL = re.compile(
-    r"^Rootlight Web UI: "
-    r"(http://127\.0\.0\.1:([1-9][0-9]{0,4}))/"
-    r"#bootstrap=([A-Za-z0-9_-]{43})\r?\n$"
+    r"^Rootlight Web UI: (http://127\.0\.0\.1:43127)/\r?\n$"
 )
 MAX_ARCHIVE_ENTRIES = 2_048
 MAX_ARCHIVE_FILE_BYTES = 256 * 1024 * 1024
@@ -209,13 +204,10 @@ def smoke_temporary_parent(platform: str) -> Path | None:
 def wait_for_daemon(
     rootlight: Path,
     environment: dict[str, str],
-    process: subprocess.Popen[str],
 ) -> None:
     discovery = Path(environment["ROOTLIGHT_RUNTIME_DIR"]) / "daemon.json"
     deadline = time.monotonic() + START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise RuntimeError("installed daemon exited before becoming ready")
         if not discovery.is_file():
             time.sleep(0.1)
             continue
@@ -266,38 +258,22 @@ def remove_windows_daemon_after_shutdown(package_root: Path) -> None:
 
 def start_web(
     rootlight: Path, environment: dict[str, str]
-) -> tuple[subprocess.Popen[str], str, str]:
-    options: dict[str, object] = {}
-    if os.name == "nt":
-        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        options["start_new_session"] = True
-    process = subprocess.Popen(
+) -> str:
+    completed = subprocess.run(
         [rootlight, "web", "--no-open"],
         env=environment,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        check=False,
+        capture_output=True,
         text=True,
         encoding="utf-8",
-        **options,
+        timeout=START_TIMEOUT_SECONDS,
     )
-    assert process.stdout is not None
-    line_queue: queue.Queue[str] = queue.Queue(maxsize=1)
-    reader = threading.Thread(
-        target=lambda: line_queue.put(process.stdout.readline()),
-        name="rootlight-web-url",
-        daemon=True,
-    )
-    reader.start()
-    try:
-        line = line_queue.get(timeout=START_TIMEOUT_SECONDS)
-    except queue.Empty as error:
-        raise TimeoutError("installed web host did not publish its URL") from error
-    match = WEB_URL.fullmatch(line)
-    if match is None or int(match.group(2)) > 65_535:
+    if completed.returncode != 0:
+        raise RuntimeError("installed web command failed to start the service")
+    match = WEB_URL.fullmatch(completed.stdout)
+    if match is None:
         raise ValueError("installed web host published an invalid URL")
-    return process, match.group(1), match.group(3)
+    return match.group(1)
 
 
 def read_http_response(response: http.client.HTTPResponse) -> bytes:
@@ -307,10 +283,11 @@ def read_http_response(response: http.client.HTTPResponse) -> bytes:
     return content
 
 
-def exercise_session(origin: str, secret: str, expected_index_sha256: str) -> None:
+def exercise_session(origin: str, expected_index_sha256: str) -> None:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(f"{origin}/", timeout=5) as response:
         index = read_http_response(response)
+        set_cookie = response.headers.get("Set-Cookie", "")
         if (
             response.status != 200
             or not response.headers.get("Content-Security-Policy")
@@ -318,28 +295,41 @@ def exercise_session(origin: str, secret: str, expected_index_sha256: str) -> No
         ):
             raise ValueError("installed web entrypoint response is invalid")
 
-    body = json.dumps({"secret": secret}, separators=(",", ":")).encode("utf-8")
+    cookie = set_cookie.split(";", 1)[0]
+    cookie_attributes = {
+        attribute.strip().lower() for attribute in set_cookie.split(";")[1:]
+    }
+    if (
+        not cookie.startswith("rootlight_session=")
+        or "httponly" not in cookie_attributes
+        or "samesite=strict" not in cookie_attributes
+        or "path=/" not in cookie_attributes
+    ):
+        raise ValueError("installed web entrypoint session cookie is invalid")
+
     request = urllib.request.Request(
-        f"{origin}/api/v1/session/bootstrap",
-        data=body,
-        method="POST",
+        f"{origin}/api/v1/session",
+        method="GET",
         headers={
-            "Content-Type": "application/json",
+            "Cookie": cookie,
             "Origin": origin,
             "Sec-Fetch-Site": "same-origin",
         },
     )
     with opener.open(request, timeout=5) as response:
         session_body = read_http_response(response)
-        cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+        if (
+            response.status != 200
+            or response.headers.get("Cache-Control") != "no-store"
+            or not response.headers.get("Content-Security-Policy")
+        ):
+            raise ValueError("installed web session response headers are invalid")
     session = json.loads(session_body)
     if (
-        not cookie.startswith("rootlight_session=")
-        or not isinstance(session.get("csrfToken"), str)
+        not isinstance(session.get("csrfToken"), str)
         or len(session["csrfToken"]) != 43
-        or secret.encode("ascii") in session_body
     ):
-        raise ValueError("installed web bootstrap response is invalid")
+        raise ValueError("installed web direct session response is invalid")
 
     request = urllib.request.Request(
         f"{origin}/api/v1/health",
@@ -363,21 +353,31 @@ def exercise_session(origin: str, secret: str, expected_index_sha256: str) -> No
         raise ValueError("installed web health response is not ready")
 
 
-def stop_web(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        raise RuntimeError("installed web command exited before shutdown")
-    if os.name == "nt":
-        process.send_signal(signal.CTRL_BREAK_EVENT)
-    else:
-        os.killpg(process.pid, signal.SIGINT)
+def stop_web(rootlight: Path, environment: dict[str, str]) -> None:
     try:
-        process.wait(timeout=STOP_TIMEOUT_SECONDS)
+        completed = subprocess.run(
+            [rootlight, "service", "stop"],
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=STOP_TIMEOUT_SECONDS,
+        )
     except subprocess.TimeoutExpired as error:
-        process.kill()
-        process.wait()
-        raise TimeoutError(
-            "installed web command did not stop after interrupt"
-        ) from error
+        raise TimeoutError("installed web service did not stop") from error
+    try:
+        document = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise ValueError("installed web stop response is invalid") from error
+    data = document.get("result", {}).get("data", {})
+    if (
+        completed.returncode != 0
+        or document.get("ok") is not True
+        or document.get("result", {}).get("type") != "web_service"
+        or data.get("running") is not False
+    ):
+        raise RuntimeError("installed web service did not stop cleanly")
 
 
 def main() -> None:
@@ -412,21 +412,25 @@ def main() -> None:
         suffix = ".exe" if os.name == "nt" else ""
         rootlight = package_root / "bin" / f"rootlight{suffix}"
         environment = process_environment(root)
-        web_process: subprocess.Popen[str] | None = None
+        web_started = False
         try:
-            web_process, origin, secret = start_web(rootlight, environment)
-            wait_for_daemon(rootlight, environment, web_process)
-            exercise_session(
-                origin, secret, identities["share/rootlight/web/index.html"]
-            )
-            stop_web(web_process)
-            web_process = None
+            origin = start_web(rootlight, environment)
+            web_started = True
+            wait_for_daemon(rootlight, environment)
+            exercise_session(origin, identities["share/rootlight/web/index.html"])
+            stop_web(rootlight, environment)
+            web_started = False
             wait_for_daemon_shutdown(environment)
             remove_windows_daemon_after_shutdown(package_root)
         finally:
-            if web_process is not None and web_process.poll() is None:
-                web_process.kill()
-                web_process.wait()
+            if web_started:
+                subprocess.run(
+                    [rootlight, "service", "stop"],
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    timeout=STOP_TIMEOUT_SECONDS,
+                )
 
         report = {
             "schema": REPORT_SCHEMA,
@@ -439,7 +443,7 @@ def main() -> None:
             "graceful_shutdown_observed": True,
             "native_cli_dispatch_observed": True,
             "node_runtime_required": False,
-            "session_bootstrap_observed": True,
+            "direct_session_observed": True,
             "source_revision": args.source_revision,
             "target": args.target,
         }
