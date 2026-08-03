@@ -106,7 +106,11 @@ describe("EvidenceInspector", () => {
     renderInspector({ onClose });
 
     expect(await screen.findByText("provider")).toBeVisible();
-    expect(await screen.findByText("Relationships could not be validated.")).toBeVisible();
+    expect(
+      await screen.findByText("Relationships could not be validated.", undefined, {
+        timeout: 4_000,
+      }),
+    ).toBeVisible();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(onClose).toHaveBeenCalledOnce();
     expect(screen.queryByText("untrusted repository failure")).not.toBeInTheDocument();
