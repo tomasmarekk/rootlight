@@ -125,6 +125,7 @@ function TrackedOperation({
   const publishedGenerationId =
     current?.publishedGenerationId ??
     (isSemantic ? null : operation.admission.publishedGenerationId);
+  const waitingForSemanticAdmission = isSemantic && current === undefined && state === "queued";
   const status = useQuery({
     queryKey: ["index-operation", operationId],
     queryFn: ({ signal }) =>
@@ -224,7 +225,7 @@ function TrackedOperation({
         </div>
       </div>
 
-      {status.isError ? (
+      {status.isError && !waitingForSemanticAdmission ? (
         <div className="operation-notice operation-notice--warning" role="status">
           <TriangleAlert size={14} aria-hidden="true" />
           <span>The latest daemon revision is temporarily unavailable.</span>
