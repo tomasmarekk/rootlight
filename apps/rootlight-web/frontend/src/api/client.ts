@@ -58,6 +58,7 @@ const daemonReconnectedEvent = "rootlight:daemon-reconnected";
 
 let csrfToken: string | undefined;
 let initialization: Promise<Session> | undefined;
+let bootstrapSecret: string | undefined;
 
 export class ApiError extends Error {
   public readonly status: number;
@@ -72,7 +73,15 @@ export class ApiError extends Error {
 }
 
 export function initializeSession(): Promise<Session> {
-  initialization ??= initializeSessionOnce();
+  if (initialization === undefined) {
+    const pending = initializeSessionOnce();
+    initialization = pending;
+    void pending.catch(() => {
+      if (initialization === pending) {
+        initialization = undefined;
+      }
+    });
+  }
   return initialization;
 }
 
@@ -463,6 +472,7 @@ export async function logout(): Promise<void> {
     headers: csrfToken === undefined ? undefined : { "x-rootlight-csrf": csrfToken },
   });
   csrfToken = undefined;
+  bootstrapSecret = undefined;
   initialization = undefined;
 }
 
@@ -487,17 +497,27 @@ async function mutationJson(
 }
 
 async function initializeSessionOnce(): Promise<Session> {
-  const bootstrap = takeBootstrapSecret();
-  const session =
-    bootstrap === undefined
-      ? parseSession(await requestJson("/api/v1/session"))
-      : parseSession(
-          await requestJson("/api/v1/session/bootstrap", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ secret: bootstrap }),
-          }),
-        );
+  bootstrapSecret ??= takeBootstrapSecret();
+  const bootstrap = bootstrapSecret;
+  let session: Session;
+  try {
+    session =
+      bootstrap === undefined
+        ? parseSession(await requestJson("/api/v1/session"))
+        : parseSession(
+            await requestJson("/api/v1/session/bootstrap", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ secret: bootstrap }),
+            }),
+          );
+  } catch (error) {
+    if (error instanceof ApiError) {
+      bootstrapSecret = undefined;
+    }
+    throw error;
+  }
+  bootstrapSecret = undefined;
   csrfToken = session.csrfToken;
   return session;
 }

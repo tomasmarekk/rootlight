@@ -10,6 +10,7 @@ import { SessionContext, type SessionContextValue } from "./session-context";
 
 export function SessionProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
+  const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<
     | { kind: "loading" }
     | { kind: "ready"; session: Session }
@@ -42,7 +43,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       active = false;
       unsubscribe();
     };
-  }, [queryClient]);
+  }, [attempt, queryClient]);
 
   const value = useMemo<SessionContextValue | undefined>(() => {
     if (state.kind !== "ready") {
@@ -61,7 +62,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return <SessionLoading />;
   }
   if (state.kind === "error") {
-    return <SessionFailure />;
+    return (
+      <SessionFailure
+        onRetry={() => {
+          setState({ kind: "loading" });
+          setAttempt((current) => current + 1);
+        }}
+      />
+    );
   }
   if (state.kind === "ended") {
     return <SessionEnded />;
@@ -86,7 +94,7 @@ function SessionLoading() {
   );
 }
 
-function SessionFailure() {
+function SessionFailure({ onRetry }: { onRetry: () => void }) {
   return (
     <main className="session-state">
       <div className="brand-mark brand-mark--large" aria-hidden="true">
@@ -95,7 +103,7 @@ function SessionFailure() {
       <p className="eyebrow eyebrow--danger">Session unavailable</p>
       <h1>This Rootlight link is no longer valid</h1>
       <p>Return to the terminal and run the web command again to create a fresh local session.</p>
-      <Button variant="primary" onPress={() => window.location.reload()}>
+      <Button variant="primary" onPress={onRetry}>
         Retry session
       </Button>
     </main>

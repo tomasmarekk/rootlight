@@ -14,7 +14,7 @@ use crate::error::WebError;
 pub(crate) const SESSION_COOKIE_NAME: &str = "rootlight_session";
 pub(crate) const CSRF_HEADER_NAME: &str = "x-rootlight-csrf";
 const SECRET_BYTES: usize = 32;
-const BOOTSTRAP_TTL: Duration = Duration::from_secs(120);
+const BOOTSTRAP_TTL: Duration = Duration::from_secs(10 * 60);
 const SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 const SESSION_ABSOLUTE_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const MAX_OUTSTANDING_BOOTSTRAPS: usize = 8;
@@ -330,6 +330,24 @@ mod tests {
             registry
                 .authenticate(&credentials.cookie_value, after_absolute_expiry)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn bootstrap_survives_a_normal_manual_browser_handoff() {
+        let registry = SessionRegistry::new();
+        let now = Instant::now();
+        let bootstrap = registry
+            .issue_bootstrap(now)
+            .expect("bootstrap secret issues");
+        let after_manual_handoff = now
+            .checked_add(Duration::from_secs(5 * 60))
+            .expect("test time is representable");
+
+        assert!(
+            registry
+                .consume_bootstrap(bootstrap.encoded(), after_manual_handoff)
+                .is_some()
         );
     }
 }

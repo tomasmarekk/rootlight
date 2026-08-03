@@ -54,6 +54,34 @@ describe("browser API client", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("retries a transient bootstrap exchange without restoring the fragment", async () => {
+    const secret = "a".repeat(43);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError("connection interrupted"))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          csrfToken: "csrf",
+          idleTtlSeconds: 1_800,
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState(null, "", `/#bootstrap=${secret}`);
+    const { initializeSession } = await import("../src/api/client");
+
+    await expect(initializeSession()).rejects.toThrow("connection interrupted");
+    expect(window.location.hash).toBe("");
+    await expect(initializeSession()).resolves.toEqual({
+      csrfToken: "csrf",
+      idleTtlSeconds: 1_800,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map((call) => call[1]?.body)).toEqual([
+      JSON.stringify({ secret }),
+      JSON.stringify({ secret }),
+    ]);
+  });
+
   it("rejects oversized, malformed, and unauthorized health responses", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()

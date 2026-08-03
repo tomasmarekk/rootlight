@@ -63,6 +63,36 @@ describe("SessionProvider", () => {
     expect(screen.queryByText("Authenticated content")).not.toBeInTheDocument();
   });
 
+  it("retries a transient bootstrap exchange from the failure screen", async () => {
+    const { SessionProvider } = await import("../src/session/session-provider");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError("connection interrupted"))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ csrfToken: "csrf", idleTtlSeconds: 1_800 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState(null, "", `/#bootstrap=${"a".repeat(43)}`);
+    const user = userEvent.setup();
+
+    render(
+      <TestProviders>
+        <SessionProvider>
+          <p>Authenticated content</p>
+        </SessionProvider>
+      </TestProviders>,
+    );
+
+    await screen.findByRole("heading", { name: "This Rootlight link is no longer valid" });
+    await user.click(screen.getByRole("button", { name: "Retry session" }));
+
+    expect(await screen.findByText("Authenticated content")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps CSRF in memory and closes the session after logout", async () => {
     const { SessionProvider } = await import("../src/session/session-provider");
     const { useSession } = await import("../src/session/session-context");
