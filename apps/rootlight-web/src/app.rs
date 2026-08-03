@@ -17,7 +17,7 @@ use axum::{
 use rootlight_client::{
     ClientError, DaemonLifecycle, Health, HealthStatus, RequestTimeout, ResourcePressure,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     api,
@@ -156,10 +156,7 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
         )
         .route_layer(middleware::from_fn(require_mutation_csrf));
     let protected_api = Router::new()
-        .route(
-            "/api/v1/session",
-            get(session_status).delete(logout_session),
-        )
+        .route("/api/v1/session", delete(logout_session))
         .route("/api/v1/health", get(health))
         .route("/api/v1/filesystem/roots", get(api::filesystem::roots))
         .route(
@@ -185,7 +182,7 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
             require_session,
         ));
     Router::new()
-        .route("/api/v1/session/bootstrap", post(bootstrap_session))
+        .route("/api/v1/session", get(session_status_or_create))
         .merge(protected_api)
         .route("/", get(index))
         .route("/{*path}", get(asset_or_route))
@@ -217,12 +214,6 @@ async fn require_mutation_csrf(request: Request, next: Next) -> Result<Response,
         .ok_or_else(ApiError::unauthorized)?;
     require_csrf(session, request.headers())?;
     Ok(next.run(request).await)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BootstrapRequest {
-    secret: String,
 }
 
 #[derive(Serialize)]
@@ -260,6 +251,13 @@ impl ApiError {
         Self {
             status: StatusCode::FORBIDDEN,
             code: "csrf_required",
+        }
+    }
+
+    const fn session_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "session_unavailable",
         }
     }
 
@@ -493,39 +491,32 @@ impl IntoResponse for ApiError {
     }
 }
 
-async fn bootstrap_session(
+async fn session_status_or_create(
     State(state): State<AppState>,
-    Json(request): Json<BootstrapRequest>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let now = Instant::now();
     state.reap_expired_session_resources(now);
+    if let Some(session) =
+        session_cookie(&headers).and_then(|cookie| state.sessions.authenticate(cookie, now))
+    {
+        return Ok(Json(SessionResponse {
+            csrf_token: session.csrf_token(),
+            idle_ttl_seconds: idle_ttl_seconds(),
+        })
+        .into_response());
+    }
     let credentials = state
         .sessions
-        .consume_bootstrap(&request.secret, now)
-        .ok_or_else(ApiError::unauthorized)?;
-    let cookie = format!(
-        "{SESSION_COOKIE_NAME}={}; Path=/; HttpOnly; SameSite=Strict",
-        credentials.cookie_value
-    );
+        .issue_session(now)
+        .map_err(|_| ApiError::session_unavailable())?;
     let mut response = Json(SessionResponse {
         csrf_token: credentials.csrf_token,
         idle_ttl_seconds: credentials.idle_ttl_seconds,
     })
     .into_response();
-    response.headers_mut().insert(
-        SET_COOKIE,
-        HeaderValue::from_str(&cookie).map_err(|_| ApiError::unauthorized())?,
-    );
+    set_session_cookie(&mut response, &credentials.cookie_value)?;
     Ok(response)
-}
-
-async fn session_status(
-    Extension(session): Extension<AuthenticatedSession>,
-) -> Result<Json<SessionResponse>, ApiError> {
-    Ok(Json(SessionResponse {
-        csrf_token: session.csrf_token(),
-        idle_ttl_seconds: idle_ttl_seconds(),
-    }))
 }
 
 async fn logout_session(
@@ -622,8 +613,8 @@ fn map_health(health: Health) -> HealthResponse {
     }
 }
 
-async fn index(State(state): State<AppState>) -> Response {
-    asset_response(state.assets.index())
+async fn index(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
+    session_asset_response(&state, state.assets.index(), &headers)
 }
 
 async fn asset_or_route(
@@ -643,9 +634,40 @@ async fn asset_or_route(
             .next()
             .is_some_and(|name| name.contains('.'))
     {
-        return asset_response(state.assets.index());
+        return session_asset_response(&state, state.assets.index(), &headers)
+            .unwrap_or_else(IntoResponse::into_response);
     }
     StatusCode::NOT_FOUND.into_response()
+}
+
+fn session_asset_response(
+    state: &AppState,
+    asset: &Asset,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let now = Instant::now();
+    state.reap_expired_session_resources(now);
+    if session_cookie(headers)
+        .is_some_and(|cookie| state.sessions.authenticate(cookie, now).is_some())
+    {
+        return Ok(asset_response(asset));
+    }
+    let credentials = state
+        .sessions
+        .issue_session(now)
+        .map_err(|_| ApiError::session_unavailable())?;
+    let mut response = asset_response(asset);
+    set_session_cookie(&mut response, &credentials.cookie_value)?;
+    Ok(response)
+}
+
+fn set_session_cookie(response: &mut Response, cookie_value: &str) -> Result<(), ApiError> {
+    let cookie = format!("{SESSION_COOKIE_NAME}={cookie_value}; Path=/; HttpOnly; SameSite=Strict");
+    response.headers_mut().insert(
+        SET_COOKIE,
+        HeaderValue::from_str(&cookie).map_err(|_| ApiError::session_unavailable())?,
+    );
+    Ok(())
 }
 
 fn asset_response(asset: &Asset) -> Response {
@@ -793,7 +815,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_enforces_bootstrap_session_csrf_and_security_headers() {
+    async fn router_enforces_direct_session_csrf_and_security_headers() {
         let asset_root = TempDir::new().expect("asset root exists");
         let index = b"<!doctype html><html class=\"dark\"></html>";
         fs::write(asset_root.path().join("index.html"), index).expect("index writes");
@@ -810,11 +832,6 @@ mod tests {
             .expect("manifest writes");
         let assets = AssetInventory::load(asset_root.path()).expect("assets validate");
         let sessions = Arc::new(SessionRegistry::new());
-        let bootstrap = sessions
-            .issue_bootstrap(Instant::now())
-            .expect("bootstrap issues")
-            .encoded()
-            .to_owned();
         let state = AppState::new(
             assets,
             Arc::new(FakeDaemon),
@@ -825,8 +842,50 @@ mod tests {
             Arc::new(SupportRegistry::new()),
         );
         let app = router(state, SecurityPolicy::loopback(43_127));
-        let bootstrap_body =
-            serde_json::to_vec(&json!({ "secret": bootstrap })).expect("bootstrap body serializes");
+
+        let direct_navigation = Request::builder()
+            .uri("/")
+            .header(HOST, "127.0.0.1:43127")
+            .header("sec-fetch-site", "none")
+            .header(ACCEPT, "text/html")
+            .body(Body::empty())
+            .expect("direct navigation request builds");
+        let direct_response = app
+            .clone()
+            .oneshot(direct_navigation)
+            .await
+            .expect("direct navigation response returns");
+        assert_eq!(direct_response.status(), StatusCode::OK);
+        let direct_cookie = direct_response
+            .headers()
+            .get(SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .expect("direct navigation creates a browser session")
+            .to_owned();
+        let direct_session = Request::builder()
+            .uri("/api/v1/session")
+            .header(HOST, "127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .header(COOKIE, &direct_cookie)
+            .body(Body::empty())
+            .expect("direct browser session request builds");
+        let direct_session_response = app
+            .clone()
+            .oneshot(direct_session)
+            .await
+            .expect("direct browser session response returns");
+        assert_eq!(direct_session_response.status(), StatusCode::OK);
+        let response_body = to_bytes(direct_session_response.into_body(), MAX_BROWSER_BODY_BYTES)
+            .await
+            .expect("direct session response body reads");
+        let response_json: serde_json::Value =
+            serde_json::from_slice(&response_body).expect("direct session response parses");
+        let csrf = response_json["csrfToken"]
+            .as_str()
+            .expect("csrf token returns")
+            .to_owned();
+        let cookie = direct_cookie;
 
         let unauthenticated_malformed_query = Request::builder()
             .uri(format!("/api/v1/projects?snapshot={}", "x".repeat(2_000)))
@@ -845,12 +904,14 @@ mod tests {
 
         let hostile = Request::builder()
             .method(Method::POST)
-            .uri("/api/v1/session/bootstrap")
+            .uri("/api/v1/filesystem/open-path")
             .header(HOST, "localhost:43127")
             .header("origin", "http://localhost:43127")
             .header("sec-fetch-site", "same-origin")
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(bootstrap_body.clone()))
+            .header(COOKIE, &cookie)
+            .header(CSRF_HEADER_NAME, &csrf)
+            .body(Body::from("{}"))
             .expect("hostile request builds");
         assert_eq!(
             app.clone()
@@ -860,38 +921,6 @@ mod tests {
                 .status(),
             StatusCode::FORBIDDEN
         );
-
-        let bootstrap_request = Request::builder()
-            .method(Method::POST)
-            .uri("/api/v1/session/bootstrap")
-            .header(HOST, "127.0.0.1:43127")
-            .header("origin", "http://127.0.0.1:43127")
-            .header("sec-fetch-site", "same-origin")
-            .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(bootstrap_body.clone()))
-            .expect("bootstrap request builds");
-        let bootstrap_response = app
-            .clone()
-            .oneshot(bootstrap_request)
-            .await
-            .expect("bootstrap response returns");
-        assert_eq!(bootstrap_response.status(), StatusCode::OK);
-        let cookie = bootstrap_response
-            .headers()
-            .get(SET_COOKIE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next())
-            .expect("session cookie returns")
-            .to_owned();
-        let response_body = to_bytes(bootstrap_response.into_body(), MAX_BROWSER_BODY_BYTES)
-            .await
-            .expect("bootstrap response body reads");
-        let response_json: serde_json::Value =
-            serde_json::from_slice(&response_body).expect("bootstrap response parses");
-        let csrf = response_json["csrfToken"]
-            .as_str()
-            .expect("csrf token returns")
-            .to_owned();
 
         let unauthenticated_filesystem_mutation = Request::builder()
             .method(Method::POST)
@@ -928,24 +957,6 @@ mod tests {
                 .expect("filesystem CSRF rejection returns")
                 .status(),
             StatusCode::FORBIDDEN
-        );
-
-        let replay = Request::builder()
-            .method(Method::POST)
-            .uri("/api/v1/session/bootstrap")
-            .header(HOST, "127.0.0.1:43127")
-            .header("origin", "http://127.0.0.1:43127")
-            .header("sec-fetch-site", "same-origin")
-            .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(bootstrap_body))
-            .expect("replay request builds");
-        assert_eq!(
-            app.clone()
-                .oneshot(replay)
-                .await
-                .expect("replay response returns")
-                .status(),
-            StatusCode::UNAUTHORIZED
         );
 
         let health_request = Request::builder()

@@ -17,12 +17,7 @@ mod session;
 mod source_registry;
 mod support_registry;
 
-use std::{
-    ffi::OsString,
-    net::Ipv4Addr,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{ffi::OsString, net::Ipv4Addr, sync::Arc, time::Duration};
 
 use rootlight_client::RequestTimeout;
 use tokio::net::TcpListener;
@@ -67,8 +62,7 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     let indexes = Arc::new(index_registry::IndexRegistry::new());
     let graphs = Arc::new(graph_registry::GraphRegistry::new());
     let support = Arc::new(support_registry::SupportRegistry::new());
-    let bootstrap = sessions.issue_bootstrap(Instant::now())?;
-    let url = format!("{}/#bootstrap={}", policy.origin(), bootstrap.encoded());
+    let url = format!("{}/", policy.origin());
     println!("Rootlight Web UI: {url}");
     if config.open_browser() {
         let _ = browser::open(&url);

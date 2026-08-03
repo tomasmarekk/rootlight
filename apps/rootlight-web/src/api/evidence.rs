@@ -2007,22 +2007,14 @@ mod tests {
 
     fn issue_session(sessions: &SessionRegistry) -> TestSession {
         let now = Instant::now();
-        let bootstrap = sessions
-            .issue_bootstrap(now)
-            .expect("bootstrap issues")
-            .encoded()
-            .to_owned();
-        let credentials = sessions
-            .consume_bootstrap(&bootstrap, now)
-            .expect("session issues");
-        let identity = sessions
+        let credentials = sessions.issue_session(now).expect("browser session issues");
+        let session = sessions
             .authenticate(&credentials.cookie_value, now)
-            .expect("session authenticates")
-            .identity();
+            .expect("session authenticates");
         TestSession {
             cookie: format!("{SESSION_COOKIE_NAME}={}", credentials.cookie_value),
-            csrf: credentials.csrf_token,
-            identity,
+            csrf: session.csrf_token(),
+            identity: session.identity(),
         }
     }
 

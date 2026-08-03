@@ -957,10 +957,7 @@ mod tests {
             let assets = AssetInventory::load(asset_root.path()).expect("assets validate");
             let sessions = Arc::new(SessionRegistry::new());
             let now = Instant::now();
-            let bootstrap = sessions.issue_bootstrap(now).expect("bootstrap issues");
-            let credentials = sessions
-                .consume_bootstrap(bootstrap.encoded(), now)
-                .expect("session issues");
+            let credentials = sessions.issue_session(now).expect("browser session issues");
             let identity = sessions
                 .authenticate(&credentials.cookie_value, now)
                 .expect("session authenticates")

@@ -1,4 +1,4 @@
-// Exercises bounded response handling and fail-closed session bootstrap parsing.
+// Exercises bounded response handling and direct local-session recovery.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -40,22 +40,7 @@ describe("browser API client", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/session");
   });
 
-  it("removes and rejects a malformed bootstrap fragment before fetch", async () => {
-    const fetchMock = vi.fn<typeof fetch>();
-    vi.stubGlobal("fetch", fetchMock);
-    window.history.replaceState(null, "", "/#bootstrap=too-short");
-    const { initializeSession } = await import("../src/api/client");
-
-    await expect(initializeSession()).rejects.toMatchObject({
-      status: 401,
-      code: "invalid_bootstrap",
-    });
-    expect(window.location.hash).toBe("");
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("retries a transient bootstrap exchange without restoring the fragment", async () => {
-    const secret = "a".repeat(43);
+  it("retries a transient direct-session request", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockRejectedValueOnce(new TypeError("connection interrupted"))
@@ -66,19 +51,17 @@ describe("browser API client", () => {
         }),
       );
     vi.stubGlobal("fetch", fetchMock);
-    window.history.replaceState(null, "", `/#bootstrap=${secret}`);
     const { initializeSession } = await import("../src/api/client");
 
     await expect(initializeSession()).rejects.toThrow("connection interrupted");
-    expect(window.location.hash).toBe("");
     await expect(initializeSession()).resolves.toEqual({
       csrfToken: "csrf",
       idleTtlSeconds: 1_800,
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls.map((call) => call[1]?.body)).toEqual([
-      JSON.stringify({ secret }),
-      JSON.stringify({ secret }),
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "/api/v1/session",
+      "/api/v1/session",
     ]);
   });
 

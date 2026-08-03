@@ -1,4 +1,4 @@
-// Exercises one-time fragment exchange and the authenticated shell boundary.
+// Exercises direct local-session initialization and the authenticated shell boundary.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
@@ -17,7 +17,7 @@ afterEach(() => {
 });
 
 describe("SessionProvider", () => {
-  it("exchanges and removes a valid bootstrap fragment", async () => {
+  it("initializes a direct local session", async () => {
     const { SessionProvider } = await import("../src/session/session-provider");
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify({ csrfToken: "csrf", idleTtlSeconds: 1_800 }), {
@@ -26,7 +26,6 @@ describe("SessionProvider", () => {
       }),
     );
     vi.stubGlobal("fetch", fetchMock);
-    window.history.replaceState(null, "", `/#bootstrap=${"a".repeat(43)}`);
 
     render(
       <TestProviders>
@@ -37,12 +36,11 @@ describe("SessionProvider", () => {
     );
 
     expect(await screen.findByText("Authenticated content")).toBeInTheDocument();
-    expect(window.location.hash).toBe("");
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/session/bootstrap");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/session");
   });
 
-  it("fails closed when neither a cookie nor a valid bootstrap is accepted", async () => {
+  it("reports a local service connection failure", async () => {
     const { SessionProvider } = await import("../src/session/session-provider");
     vi.stubGlobal(
       "fetch",
@@ -58,12 +56,12 @@ describe("SessionProvider", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: "This Rootlight link is no longer valid" }),
+      await screen.findByRole("heading", { name: "Rootlight could not reconnect" }),
     ).toBeVisible();
     expect(screen.queryByText("Authenticated content")).not.toBeInTheDocument();
   });
 
-  it("retries a transient bootstrap exchange from the failure screen", async () => {
+  it("retries a transient local service connection", async () => {
     const { SessionProvider } = await import("../src/session/session-provider");
     const fetchMock = vi
       .fn<typeof fetch>()
@@ -73,9 +71,8 @@ describe("SessionProvider", () => {
           status: 200,
           headers: { "content-type": "application/json" },
         }),
-      );
+    );
     vi.stubGlobal("fetch", fetchMock);
-    window.history.replaceState(null, "", `/#bootstrap=${"a".repeat(43)}`);
     const user = userEvent.setup();
 
     render(
@@ -86,8 +83,8 @@ describe("SessionProvider", () => {
       </TestProviders>,
     );
 
-    await screen.findByRole("heading", { name: "This Rootlight link is no longer valid" });
-    await user.click(screen.getByRole("button", { name: "Retry session" }));
+    await screen.findByRole("heading", { name: "Rootlight could not reconnect" });
+    await user.click(screen.getByRole("button", { name: "Retry connection" }));
 
     expect(await screen.findByText("Authenticated content")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);

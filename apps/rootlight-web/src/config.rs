@@ -10,7 +10,7 @@ use rootlight_runtime::RuntimePaths;
 
 use crate::error::WebError;
 
-const DEFAULT_LISTEN_PORT: u16 = 0;
+pub(crate) const DEFAULT_LISTEN_PORT: u16 = 43_127;
 
 /// Validated process configuration for one loopback web-host instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,23 +32,25 @@ impl WebConfig {
     /// incomplete, non-Unicode, or release-forbidden argument.
     pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Self, WebError> {
         let mut open_browser = true;
-        let mut listen_port = DEFAULT_LISTEN_PORT;
+        let mut listen_port = None;
         let mut asset_root = None;
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             if argument == OsStr::new("--no-open") {
                 open_browser = false;
             } else if argument == OsStr::new("--listen-port") {
-                if listen_port != DEFAULT_LISTEN_PORT || !cfg!(debug_assertions) {
+                if listen_port.is_some() || !cfg!(debug_assertions) {
                     return Err(WebError::InvalidArguments);
                 }
                 let value = arguments.next().ok_or(WebError::InvalidArguments)?;
                 let value = value.to_str().ok_or(WebError::InvalidArguments)?;
-                listen_port = value
-                    .parse::<u16>()
-                    .ok()
-                    .filter(|port| *port != 0)
-                    .ok_or(WebError::InvalidArguments)?;
+                listen_port = Some(
+                    value
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|port| *port != 0)
+                        .ok_or(WebError::InvalidArguments)?,
+                );
             } else if argument == OsStr::new("--asset-dir") {
                 if asset_root.is_some() || !cfg!(debug_assertions) {
                     return Err(WebError::InvalidArguments);
@@ -68,7 +70,7 @@ impl WebConfig {
         };
         Ok(Self {
             open_browser,
-            listen_port,
+            listen_port: listen_port.unwrap_or(DEFAULT_LISTEN_PORT),
             asset_root,
         })
     }
@@ -79,7 +81,7 @@ impl WebConfig {
         self.open_browser
     }
 
-    /// Returns the validated loopback port, or zero for OS assignment.
+    /// Returns the validated stable loopback port.
     #[must_use]
     pub(crate) const fn listen_port(&self) -> u16 {
         self.listen_port
@@ -141,7 +143,7 @@ mod tests {
         let config =
             WebConfig::parse([OsString::from("--no-open")]).expect("no-open config validates");
         assert!(!config.open_browser());
-        assert_eq!(config.listen_port(), 0);
+        assert_eq!(config.listen_port(), DEFAULT_LISTEN_PORT);
 
         if cfg!(debug_assertions) {
             let config = WebConfig::parse([

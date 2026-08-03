@@ -100,11 +100,11 @@ function SessionFailure({ onRetry }: { onRetry: () => void }) {
       <div className="brand-mark brand-mark--large" aria-hidden="true">
         R
       </div>
-      <p className="eyebrow eyebrow--danger">Session unavailable</p>
-      <h1>This Rootlight link is no longer valid</h1>
-      <p>Return to the terminal and run the web command again to create a fresh local session.</p>
+      <p className="eyebrow eyebrow--danger">Local service unavailable</p>
+      <h1>Rootlight could not reconnect</h1>
+      <p>The local service may still be starting. Retry the connection in a moment.</p>
       <Button variant="primary" onPress={onRetry}>
-        Retry session
+        Retry connection
       </Button>
     </main>
   );
@@ -118,7 +118,7 @@ function SessionEnded() {
       </div>
       <p className="eyebrow">Session closed</p>
       <h1>Rootlight is disconnected from this tab</h1>
-      <p>Run the web command again when you want to reopen the local workspace.</p>
+      <p>Reload the page when you want to reconnect to the local workspace.</p>
     </main>
   );
 }
@@ -131,10 +131,7 @@ function SessionExpired() {
       </div>
       <p className="eyebrow eyebrow--danger">Session expired</p>
       <h1>This local session has ended</h1>
-      <p>
-        Sensitive browser state was cleared. Return to the terminal and run the web command again to
-        open a new authenticated session.
-      </p>
+      <p>Sensitive browser state was cleared. Reload the page to start a new local session.</p>
     </main>
   );
 }
