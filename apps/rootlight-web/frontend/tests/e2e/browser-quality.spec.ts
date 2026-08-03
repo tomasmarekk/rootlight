@@ -21,6 +21,10 @@ const distRoot = resolve(import.meta.dirname, "../../dist");
 const maximumInitialJavaScriptGzipBytes = 350 * 1_024;
 const maximumFirstUsefulMilliseconds = 2_000;
 const maximumSelectionP95Milliseconds = 100;
+// One full interaction warms the lazy graph path. Twenty retained samples make
+// nearest-rank p95 distinct from the maximum while preserving an explicit outlier.
+const graphPerformanceWarmupIterations = 1;
+const graphPerformanceSamples = 20;
 
 test("keeps the Projects entry bounded and lazy-loads graph resources", async ({
   page,
@@ -105,7 +109,7 @@ test("meets maximum supported graph interaction and disposal budgets", async ({
   browserName,
   page,
 }, testInfo) => {
-  test.setTimeout(90_000);
+  test.setTimeout(150_000);
   await installWorkerTracker(page);
   const quality = monitorBrowserQuality(page);
   const application = await installQualityApplication(page);
@@ -118,7 +122,8 @@ test("meets maximum supported graph interaction and disposal budgets", async ({
   const settleMilliseconds: number[] = [];
   const longTasks: number[] = [];
 
-  for (let iteration = 0; iteration < 5; iteration += 1) {
+  const graphPerformanceIterations = graphPerformanceWarmupIterations + graphPerformanceSamples;
+  for (let iteration = 0; iteration < graphPerformanceIterations; iteration += 1) {
     const priorFirstUseful = await markCount(page, "rootlight.graph.first-useful");
     const priorSettle = await markCount(page, "rootlight.graph.controller.settle");
     await page.getByRole("link", { name: /Synthetic Atlas/u }).click();
@@ -136,44 +141,36 @@ test("meets maximum supported graph interaction and disposal budgets", async ({
       .toBeGreaterThan(priorSettle);
 
     const browserTiming = await latestGraphTiming(page);
-    firstUsefulMilliseconds.push(browserTiming.firstUsefulMilliseconds);
-    settleMilliseconds.push(browserTiming.settleMilliseconds);
-    longTasks.push(...browserTiming.longTasks);
-
     const firstNode = page.getByRole("button", {
       name: /component-000 symbol synthetic\/module-000/u,
     });
     await expect(firstNode).toBeVisible();
-    selectionMilliseconds.push(await measureSelection(firstNode));
+    const selection = await measureSelection(firstNode);
     await expect(firstNode).toHaveAttribute("aria-pressed", "true");
 
     const priorDispose = await markCount(page, "rootlight.graph.controller.dispose");
-    disposalMilliseconds.push(
-      await measureClickToMark(
-        page.locator("#main-content").getByRole("link", { name: "Projects", exact: true }),
-        "rootlight.graph.controller.dispose",
-        priorDispose,
-      ),
+    const disposal = await measureClickToMark(
+      page.locator("#main-content").getByRole("link", { name: "Projects", exact: true }),
+      "rootlight.graph.controller.dispose",
+      priorDispose,
     );
     await expect(page.getByRole("heading", { name: "Projects", level: 1 })).toBeVisible();
     await expect.poll(() => application.graphReleaseCount()).toBe(application.graphOpenCount());
     await expect.poll(() => workerStats(page)).toMatchObject({ active: 0 });
+
+    if (iteration >= graphPerformanceWarmupIterations) {
+      firstUsefulMilliseconds.push(browserTiming.firstUsefulMilliseconds);
+      selectionMilliseconds.push(selection);
+      disposalMilliseconds.push(disposal);
+      settleMilliseconds.push(browserTiming.settleMilliseconds);
+      longTasks.push(...browserTiming.longTasks);
+    }
   }
 
   const firstUseful = summarize(firstUsefulMilliseconds);
   const selection = summarize(selectionMilliseconds);
   const disposal = summarize(disposalMilliseconds);
   const settle = summarize(settleMilliseconds);
-  expect(firstUseful.p95).toBeLessThanOrEqual(maximumFirstUsefulMilliseconds);
-  expect(selection.p95).toBeLessThanOrEqual(maximumSelectionP95Milliseconds);
-  expect(disposal.p95).toBeLessThanOrEqual(500);
-  expect(settle.p95).toBeLessThanOrEqual(1_600);
-  expect(longTasks.filter((duration) => duration > 50)).toEqual([]);
-  expect(application.activeProjectionCount()).toBe(0);
-  expect(application.graphOpenCount()).toBe(5);
-  expect(application.graphReleaseCount()).toBe(5);
-  expect(await workerStats(page)).toMatchObject({ active: 0, maximumActive: 1 });
-
   const environment = await browserEnvironment(page);
   const evidence = {
     schema: "rootlight.web-graph-performance/1",
@@ -198,7 +195,7 @@ test("meets maximum supported graph interaction and disposal budgets", async ({
       webProfileMaximumNodes: 250,
       webProfileMaximumEdges: 1_000,
     },
-    samples: 5,
+    samples: graphPerformanceSamples,
     measurementsMilliseconds: {
       firstUseful,
       selection,
@@ -215,6 +212,16 @@ test("meets maximum supported graph interaction and disposal budgets", async ({
     body: Buffer.from(JSON.stringify(evidence)),
     contentType: "application/json",
   });
+
+  expect(firstUseful.p95).toBeLessThanOrEqual(maximumFirstUsefulMilliseconds);
+  expect(selection.p95).toBeLessThanOrEqual(maximumSelectionP95Milliseconds);
+  expect(disposal.p95).toBeLessThanOrEqual(500);
+  expect(settle.p95).toBeLessThanOrEqual(1_600);
+  expect(longTasks.filter((duration) => duration > 50)).toEqual([]);
+  expect(application.activeProjectionCount()).toBe(0);
+  expect(application.graphOpenCount()).toBe(graphPerformanceIterations);
+  expect(application.graphReleaseCount()).toBe(graphPerformanceIterations);
+  expect(await workerStats(page)).toMatchObject({ active: 0, maximumActive: 1 });
   await quality.assertClean();
 });
 
