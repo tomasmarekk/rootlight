@@ -34,11 +34,17 @@ try {
   const nativeBin = join(nativeRoot, "bin");
   mkdirSync(rootBin, { recursive: true });
   mkdirSync(nativeBin, { recursive: true });
+  writeFileSync(
+    join(scope, "rootlight", "package.json"),
+    `${JSON.stringify({ name: "@tomasmarekk/rootlight", version: "0.0.0" })}\n`,
+  );
 
   for (const file of [
     "rootlight.mjs",
     "rootlight-mcp.mjs",
     "run-native.mjs",
+    "postinstall.mjs",
+    "preuninstall.mjs",
   ]) {
     copyFileSync(join(sourceRoot, "packaging", "npm", file), join(rootBin, file));
   }

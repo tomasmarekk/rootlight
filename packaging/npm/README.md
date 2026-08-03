@@ -8,16 +8,15 @@ for the current supported platform.
 npm install --global @tomasmarekk/rootlight
 ```
 
-Start the CLI-connected local Web UI with:
+The installation registers and starts Rootlight as a private per-user local
+service. The complete Web UI and its backend are ready when the npm command
+returns:
 
-```sh
-rootlight web
-```
+<http://127.0.0.1:43127/>
 
-Rootlight starts its private local backend automatically, opens an authenticated
-loopback URL, and stops the backend it owns when the Web UI command exits. If a
-browser cannot be opened automatically, use the complete URL printed in the
-terminal. Keep the terminal process running while using the Web UI.
+No terminal process needs to remain open. `rootlight web` can reopen the local
+application later, while `rootlight service status`, `rootlight service stop`,
+and `rootlight service restart` provide explicit lifecycle control.
 
 Update the npm-managed installation with:
 
@@ -25,14 +24,17 @@ Update the npm-managed installation with:
 npm update --global @tomasmarekk/rootlight
 ```
 
-Close active Rootlight commands and sessions before removing the package:
+Remove the complete npm-managed installation with either command:
 
 ```sh
+rootlight uninstall
+# or
 npm uninstall --global @tomasmarekk/rootlight
 ```
 
-Uninstalling the npm package removes its executables but preserves repositories
-and Rootlight's local user data.
+Uninstall stops the Web UI and backend, removes login autostart, and removes the
+npm executables. Indexed repositories and Rootlight's local user data are
+preserved.
 
 The installer selects a signed release package for macOS (Apple Silicon or
 Intel), Linux glibc (Arm64 or x64), or Windows x64. Release archives,

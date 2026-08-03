@@ -46,8 +46,16 @@ class PackagePreparationTests(unittest.TestCase):
                 },
             )
             self.assertEqual(len(root_package["optionalDependencies"]), 5)
+            self.assertEqual(
+                root_package["scripts"],
+                {
+                    "postinstall": "node ./bin/postinstall.mjs",
+                    "preuninstall": "node ./bin/preuninstall.mjs",
+                },
+            )
             readme = (output / "rootlight/README.md").read_text(encoding="utf-8")
             self.assertIn("rootlight web", readme)
+            self.assertIn("http://127.0.0.1:43127/", readme)
             self.assertIn(
                 "npm update --global @tomasmarekk/rootlight",
                 readme,
@@ -60,6 +68,8 @@ class PackagePreparationTests(unittest.TestCase):
                 "rootlight.mjs",
                 "rootlight-mcp.mjs",
                 "run-native.mjs",
+                "postinstall.mjs",
+                "preuninstall.mjs",
             ):
                 self.assertTrue((output / "rootlight/bin" / runtime_file).is_file())
             for target in npm_packages.TARGETS:
@@ -100,6 +110,36 @@ class PackagePreparationTests(unittest.TestCase):
                 npm_packages.prepare_release(
                     workspace_root(), candidates, VERSION, REVISION, root / "output"
                 )
+
+    def test_host_packages_bind_one_exact_native_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidates = root / "candidates"
+            candidates.mkdir()
+            target = npm_packages.TARGETS[-1]
+            write_candidate(candidates, target, VERSION, REVISION)
+            archive = candidates / f"rootlight-{VERSION}-{target.triple}.zip"
+            output = root / "output"
+
+            npm_packages.prepare_host(
+                workspace_root(),
+                archive,
+                target.triple,
+                VERSION,
+                REVISION,
+                output,
+            )
+
+            package = json.loads((output / "rootlight/package.json").read_bytes())
+            self.assertEqual(
+                package["optionalDependencies"],
+                {target.package_name: VERSION},
+            )
+            order = json.loads((output / "publish-order.json").read_bytes())
+            self.assertEqual(
+                [entry["name"] for entry in order],
+                [target.package_name, npm_packages.ROOT_PACKAGE],
+            )
 
     def test_missing_public_executable_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -46,6 +46,8 @@ NPM_RUNTIME_FILES = (
     "packaging/npm/rootlight.mjs",
     "packaging/npm/rootlight-mcp.mjs",
     "packaging/npm/run-native.mjs",
+    "packaging/npm/postinstall.mjs",
+    "packaging/npm/preuninstall.mjs",
 )
 
 
@@ -92,6 +94,14 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
     release.add_argument("--output-dir", type=Path, required=True)
     release.add_argument("--workspace", type=Path, default=Path.cwd())
 
+    host = subparsers.add_parser("host")
+    host.add_argument("--archive", type=Path, required=True)
+    host.add_argument("--target", required=True)
+    host.add_argument("--version", required=True)
+    host.add_argument("--source-revision", required=True)
+    host.add_argument("--output-dir", type=Path, required=True)
+    host.add_argument("--workspace", type=Path, default=Path.cwd())
+
     bootstrap = subparsers.add_parser("bootstrap")
     bootstrap.add_argument("--version", default=BOOTSTRAP_VERSION)
     bootstrap.add_argument("--output-dir", type=Path, required=True)
@@ -106,6 +116,15 @@ def main(arguments: list[str]) -> int:
             prepare_release(
                 options.workspace,
                 options.candidates_dir,
+                options.version,
+                options.source_revision,
+                options.output_dir,
+            )
+        elif options.mode == "host":
+            prepare_host(
+                options.workspace,
+                options.archive,
+                options.target,
                 options.version,
                 options.source_revision,
                 options.output_dir,
@@ -155,6 +174,53 @@ def prepare_release(
     )
     published.append(publication_record(ROOT_PACKAGE, root_dir.name))
     write_json_new(output_dir / "publish-order.json", published)
+
+
+def prepare_host(
+    workspace: Path,
+    archive: Path,
+    target_triple: str,
+    version: str,
+    source_revision: str,
+    output_dir: Path,
+) -> None:
+    validate_release_version(version)
+    validate_source_revision(source_revision)
+    workspace = validate_workspace(workspace)
+    target = next(
+        (candidate for candidate in TARGETS if candidate.triple == target_triple),
+        None,
+    )
+    if target is None:
+        raise PackagePreparationError("host target is unsupported")
+    create_output_dir(output_dir)
+
+    package_dir = output_dir / target.directory_name
+    package_dir.mkdir()
+    verify_archive_digest(archive)
+    extract_candidate(archive, package_dir, target, version, source_revision)
+    write_json_new(
+        package_dir / "package.json",
+        platform_package_json(target, version, source_revision),
+    )
+
+    root_dir = output_dir / "rootlight"
+    root_dir.mkdir()
+    write_root_package(
+        workspace,
+        root_dir,
+        version,
+        source_revision,
+        include_runtime=True,
+        targets=(target,),
+    )
+    write_json_new(
+        output_dir / "publish-order.json",
+        [
+            publication_record(target.package_name, package_dir.name),
+            publication_record(ROOT_PACKAGE, root_dir.name),
+        ],
+    )
 
 
 def prepare_bootstrap(workspace: Path, version: str, output_dir: Path) -> None:
@@ -358,6 +424,7 @@ def write_root_package(
     source_revision: str | None,
     *,
     include_runtime: bool,
+    targets: tuple[NativeTarget, ...] = TARGETS,
 ) -> None:
     package = common_package_json(
         ROOT_PACKAGE,
@@ -371,7 +438,11 @@ def write_root_package(
             "rootlight-mcp": "bin/rootlight-mcp.mjs",
         }
         package["optionalDependencies"] = {
-            target.package_name: version for target in TARGETS
+            target.package_name: version for target in targets
+        }
+        package["scripts"] = {
+            "postinstall": "node ./bin/postinstall.mjs",
+            "preuninstall": "node ./bin/preuninstall.mjs",
         }
         package["files"] = ["bin", "LICENSE", "README.md"]
         bin_dir = output_dir / "bin"
