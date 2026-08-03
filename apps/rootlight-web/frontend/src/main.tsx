@@ -5,6 +5,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { RootlightRouter } from "./router";
+import { OperationProvider } from "./operations/operation-provider";
 import { SessionProvider } from "./session/session-provider";
 import "./styles/globals.css";
 
@@ -28,7 +29,9 @@ createRoot(root).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <SessionProvider>
-        <RootlightRouter />
+        <OperationProvider>
+          <RootlightRouter />
+        </OperationProvider>
       </SessionProvider>
     </QueryClientProvider>
   </StrictMode>,

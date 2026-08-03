@@ -59,6 +59,28 @@ describe("browser API client", () => {
     await expect(fetchHealth()).rejects.toMatchObject({ code: "session_required" });
   });
 
+  it("keeps only bounded public error codes from the host envelope", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { code: "index_limit_reached" } }), {
+          status: 429,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { code: "unsafe-error detail" } }), {
+          status: 502,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const { fetchHealth } = await import("../src/api/client");
+
+    await expect(fetchHealth()).rejects.toMatchObject({ code: "index_limit_reached" });
+    await expect(fetchHealth()).rejects.toMatchObject({ code: "request_failed" });
+  });
+
   it("encodes bounded catalog filters and continuation without merging snapshots", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({
@@ -87,6 +109,112 @@ describe("browser API client", () => {
       "/api/v1/projects?page_size=50&query=root+light&state=ready&state=degraded&snapshot=snapshot-token&after=cursor-token&sort_version=1",
     );
   });
+
+  it("sends filesystem capabilities only through authenticated CSRF mutations", async () => {
+    const token = "a".repeat(43);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ csrfToken: "csrf", idleTtlSeconds: 1_800 }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          schema: "rootlight.web-filesystem-browse/1",
+          browseToken: token,
+          label: "rootlight",
+          depth: 0,
+          maximumDepth: 32,
+          breadcrumbs: [{ label: "rootlight", browseToken: token }],
+          directories: [],
+          nextCursor: null,
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const { browseFilesystem, initializeSession } = await import("../src/api/client");
+    await initializeSession();
+
+    await browseFilesystem({
+      browseToken: token,
+      action: { type: "current" },
+      pageSize: 64,
+      filter: "src",
+    });
+
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/v1/filesystem/browse");
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "content-type": "application/json",
+        "x-rootlight-csrf": "csrf",
+      },
+    });
+    const requestBody = fetchMock.mock.calls[1]?.[1]?.body;
+    expect(typeof requestBody).toBe("string");
+    expect(JSON.parse(requestBody as string)).toEqual({
+      browseToken: token,
+      action: { type: "current" },
+      pageSize: 64,
+      filter: "src",
+    });
+  });
+
+  it("submits detached indexes and follows bounded operation revisions with CSRF", async () => {
+    const operationId = `op1_${"c".repeat(32)}`;
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ csrfToken: "csrf", idleTtlSeconds: 1_800 }))
+      .mockResolvedValueOnce(jsonResponse(indexAdmissionFixture(operationId)))
+      .mockResolvedValueOnce(jsonResponse(operationFixture(operationId)))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          schema: "rootlight.web-operation-cancel/1",
+          accepted: true,
+          operation: {
+            ...operationFixture(operationId),
+            state: "cancelling",
+            revision: "3",
+            cancellationRequested: true,
+          },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const {
+      cancelIndexOperation,
+      createClientRequestId,
+      fetchIndexOperation,
+      initializeSession,
+      submitProjectIndex,
+    } = await import("../src/api/client");
+    await initializeSession();
+    const requestId = createClientRequestId();
+
+    expect(requestId).toMatch(/^idx_[a-f0-9]{48}$/u);
+    await submitProjectIndex({
+      rootCapability: "a".repeat(43),
+      mode: "auto",
+      clientRequestId: requestId,
+    });
+    await fetchIndexOperation(operationId, { waitMs: 15_000, afterRevision: "1" });
+    await cancelIndexOperation(operationId);
+
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/v1/projects/index");
+    expect(JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string)).toEqual({
+      rootCapability: "a".repeat(43),
+      mode: "auto",
+      detached: true,
+      clientRequestId: requestId,
+    });
+    expect(fetchMock.mock.calls[2]?.[0]).toBe(
+      `/api/v1/operations/${operationId}?wait_ms=15000&after_revision=1`,
+    );
+    expect(fetchMock.mock.calls[3]?.[0]).toBe(`/api/v1/operations/${operationId}/cancel`);
+    expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-rootlight-csrf": "csrf",
+      },
+    });
+  });
 });
 
 function jsonResponse(value: unknown): Response {
@@ -94,4 +222,54 @@ function jsonResponse(value: unknown): Response {
     status: 200,
     headers: { "content-type": "application/json" },
   });
+}
+
+function indexAdmissionFixture(operationId: string) {
+  return {
+    schema: "rootlight.web-project-index/1",
+    displayLabel: "rootlight",
+    repositoryId: `repo1_${"a".repeat(32)}`,
+    operationId,
+    semanticOperationId: null,
+    state: "queued",
+    revision: "1",
+    mode: "auto",
+    parentGenerationId: null,
+    publishedGenerationId: null,
+    discoveredInputs: "0",
+    indexedFiles: "0",
+    entities: "0",
+    elapsedMicros: "0",
+    estimatedDiskBytes: "0",
+    diagnostics: [],
+  };
+}
+
+function operationFixture(operationId: string) {
+  return {
+    schema: "rootlight.web-repository-operation/1",
+    displayLabel: "rootlight",
+    mode: "auto",
+    ownedBySession: true,
+    operationId,
+    state: "running",
+    revision: "2",
+    completedUnits: 2,
+    totalUnits: 4,
+    kind: "repository_index",
+    stage: "executing",
+    detached: true,
+    cancellationRequested: false,
+    recoveryClass: "not_applicable",
+    error: null,
+    publishedGenerationId: null,
+    semanticOperationId: null,
+    startedUnixMs: "1",
+    peakRssBytes: "2",
+    writtenBytes: "3",
+    filesExamined: "4",
+    bytesExamined: "5",
+    indexStage: "indexing",
+    retryAfterMs: 100,
+  };
 }

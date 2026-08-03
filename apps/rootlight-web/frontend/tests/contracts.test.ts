@@ -3,9 +3,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  parseFilesystemBrowsePage,
+  parseFilesystemRoots,
   parseHealth,
+  parseIndexPreflight,
+  parseOpenFilesystemPath,
+  parseOperationCancel,
   parseProjectCatalogPage,
   parseProjectDetail,
+  parseProjectIndexAdmission,
+  parseRepositoryOperation,
   parseSession,
 } from "../src/api/contracts";
 
@@ -128,11 +135,168 @@ describe("browser API contracts", () => {
       publicationState: "unknown",
     });
   });
+
+  it("parses bounded filesystem capabilities without accepting path-like tokens", () => {
+    const token = "a".repeat(43);
+    expect(
+      parseFilesystemRoots({
+        schema: "rootlight.web-filesystem-roots/1",
+        roots: [{ label: "Home", browseToken: token, readable: true, selectable: true }],
+      }).roots[0],
+    ).toEqual({ label: "Home", browseToken: token, readable: true, selectable: true });
+    expect(
+      parseOpenFilesystemPath({
+        schema: "rootlight.web-filesystem-open-path/1",
+        label: "rootlight",
+        browseToken: token,
+      }).label,
+    ).toBe("rootlight");
+    expect(() =>
+      parseOpenFilesystemPath({
+        schema: "rootlight.web-filesystem-open-path/1",
+        label: "rootlight",
+        browseToken: "C:\\source",
+      }),
+    ).toThrow();
+  });
+
+  it("correlates filesystem depth, breadcrumbs, and bounded directory pages", () => {
+    const token = "a".repeat(43);
+    const page = parseFilesystemBrowsePage({
+      schema: "rootlight.web-filesystem-browse/1",
+      browseToken: token,
+      label: "rootlight",
+      depth: 1,
+      maximumDepth: 32,
+      breadcrumbs: [
+        { label: "Home", browseToken: token },
+        { label: "rootlight", browseToken: "b".repeat(43) },
+      ],
+      directories: [{ name: "crates", kind: "directory", readable: true, selectable: true }],
+      nextCursor: "c".repeat(43),
+    });
+    expect(page.directories).toHaveLength(1);
+    expect(page.nextCursor).toBe("c".repeat(43));
+    expect(() =>
+      parseFilesystemBrowsePage({
+        ...page,
+        breadcrumbs: page.breadcrumbs.slice(0, 1),
+      }),
+    ).toThrow();
+    expect(() =>
+      parseFilesystemBrowsePage({
+        ...page,
+        directories: Array.from({ length: 257 }, () => page.directories[0]),
+      }),
+    ).toThrow();
+  });
+
+  it("keeps index modes and preflight capability semantics closed", () => {
+    const token = "a".repeat(43);
+    const preflight = {
+      schema: "rootlight.web-index-preflight/1",
+      selectable: true,
+      normalizedDisplayLabel: "rootlight",
+      daemonAcceptingOperations: true,
+      selectedMode: "auto",
+      supportedModes: ["auto", "structural", "deep"],
+      adapterIsolation: "available",
+      estimatedLimitations: ["repository_contents_not_scanned"],
+      warnings: [],
+      rootCapability: token,
+      rootCapabilityExpiresInSeconds: 120,
+    };
+    expect(parseIndexPreflight(preflight).supportedModes).toEqual(["auto", "structural", "deep"]);
+    expect(() => parseIndexPreflight({ ...preflight, selectedMode: "future" })).toThrow();
+    expect(() => parseIndexPreflight({ ...preflight, supportedModes: ["auto", "auto"] })).toThrow();
+  });
+
+  it("parses bounded index admission and source-free diagnostics", () => {
+    const admission = parseProjectIndexAdmission(indexAdmissionFixture());
+    expect(admission).toMatchObject({
+      repositoryId,
+      operationId,
+      semanticOperationId,
+      state: "running",
+      mode: "auto",
+    });
+    expect(admission.diagnostics).toEqual([
+      { code: "adapter_degraded", message: "Semantic refinement will run separately." },
+    ]);
+    expect(() =>
+      parseProjectIndexAdmission({
+        ...indexAdmissionFixture(),
+        diagnostics: Array.from({ length: 65 }, () => ({
+          code: "bounded",
+          message: "bounded",
+        })),
+      }),
+    ).toThrow();
+  });
+
+  it("correlates operation status and maps additive states conservatively", () => {
+    const operation = parseRepositoryOperation(operationFixture(), operationId);
+    expect(operation).toMatchObject({
+      operationId,
+      state: "running",
+      stage: "executing",
+      recoveryClass: "not_applicable",
+      cancellationRequested: false,
+    });
+    expect(
+      parseRepositoryOperation(
+        {
+          ...operationFixture(),
+          state: "future_running",
+          stage: "future_stage",
+          recoveryClass: "future_recovery",
+          kind: "future_kind",
+        },
+        operationId,
+      ),
+    ).toMatchObject({
+      state: "unknown",
+      stage: "unknown",
+      recoveryClass: "unknown",
+      kind: "unknown",
+    });
+    expect(() => parseRepositoryOperation(operationFixture(), `op1_${"e".repeat(32)}`)).toThrow();
+    expect(() =>
+      parseRepositoryOperation({ ...operationFixture(), revision: "01" }, operationId),
+    ).toThrow();
+  });
+
+  it("parses cancellation only when the nested operation remains correlated", () => {
+    expect(
+      parseOperationCancel(
+        {
+          schema: "rootlight.web-operation-cancel/1",
+          accepted: true,
+          operation: { ...operationFixture(), cancellationRequested: true, state: "cancelling" },
+        },
+        operationId,
+      ),
+    ).toMatchObject({
+      accepted: true,
+      operation: { state: "cancelling", cancellationRequested: true },
+    });
+    expect(() =>
+      parseOperationCancel(
+        {
+          schema: "rootlight.web-operation-cancel/1",
+          accepted: true,
+          operation: { ...operationFixture(), operationId: `op1_${"f".repeat(32)}` },
+        },
+        operationId,
+      ),
+    ).toThrow();
+  });
 });
 
 const repositoryId = `repo1_${"a".repeat(32)}`;
 const generationId = `gen1_${"b".repeat(39)}`;
 const operationId = `op1_${"c".repeat(32)}`;
+const semanticOperationId = `op1_${"d".repeat(32)}`;
 
 function healthFixture() {
   return {
@@ -217,5 +381,60 @@ function projectOperationFixture() {
     totalUnits: 4,
     ownedByClient: true,
     startedUnixMs: "1",
+  };
+}
+
+function indexAdmissionFixture() {
+  return {
+    schema: "rootlight.web-project-index/1",
+    displayLabel: "rootlight",
+    repositoryId,
+    operationId,
+    semanticOperationId,
+    state: "running",
+    revision: "1",
+    mode: "auto",
+    parentGenerationId: null,
+    publishedGenerationId: null,
+    discoveredInputs: "10",
+    indexedFiles: "4",
+    entities: "100",
+    elapsedMicros: "2000",
+    estimatedDiskBytes: "4096",
+    diagnostics: [
+      {
+        code: "adapter_degraded",
+        message: "Semantic refinement will run separately.",
+      },
+    ],
+  };
+}
+
+function operationFixture() {
+  return {
+    schema: "rootlight.web-repository-operation/1",
+    displayLabel: "rootlight",
+    mode: "auto",
+    ownedBySession: true,
+    operationId,
+    state: "running",
+    revision: "2",
+    completedUnits: 2,
+    totalUnits: 4,
+    kind: "repository_index",
+    stage: "executing",
+    detached: true,
+    cancellationRequested: false,
+    recoveryClass: "not_applicable",
+    error: null,
+    publishedGenerationId: null,
+    semanticOperationId,
+    startedUnixMs: "1",
+    peakRssBytes: "2048",
+    writtenBytes: "1024",
+    filesExamined: "5",
+    bytesExamined: "4096",
+    indexStage: "indexing",
+    retryAfterMs: 100,
   };
 }

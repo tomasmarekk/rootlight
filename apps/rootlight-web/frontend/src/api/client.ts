@@ -1,19 +1,36 @@
 // Enforces bounded same-origin API reads and keeps CSRF credentials in memory.
 
 import {
+  parseFilesystemBrowsePage,
+  parseFilesystemRoots,
   parseHealth,
+  parseIndexPreflight,
+  parseOpenFilesystemPath,
+  parseOperationCancel,
   parseProjectCatalogPage,
   parseProjectDetail,
+  parseProjectIndexAdmission,
+  parseRepositoryOperation,
   parseSession,
+  type FilesystemBrowsePage,
+  type FilesystemRoots,
   type Health,
+  type IndexMode,
+  type IndexPreflight,
+  type OpenFilesystemPath,
+  type OperationCancel,
   type ProjectCatalogPage,
   type ProjectDetail,
+  type ProjectIndexAdmission,
   type ProjectLifecycleFilter,
+  type RepositoryOperation,
   type Session,
 } from "./contracts";
 
 const maximumJsonBytes = 1024 * 1024;
+const maximumErrorBytes = 16 * 1024;
 const bootstrapPattern = /^[A-Za-z0-9_-]{43}$/u;
+const publicErrorPattern = /^[a-z][a-z0-9_]{0,63}$/u;
 
 let csrfToken: string | undefined;
 let initialization: Promise<Session> | undefined;
@@ -95,6 +112,120 @@ export async function fetchProjectDetail(
   );
 }
 
+export async function fetchFilesystemRoots(signal?: AbortSignal): Promise<FilesystemRoots> {
+  return parseFilesystemRoots(await requestJson("/api/v1/filesystem/roots", { signal }));
+}
+
+export async function openFilesystemPath(
+  path: string,
+  signal?: AbortSignal,
+): Promise<OpenFilesystemPath> {
+  return parseOpenFilesystemPath(
+    await mutationJson("/api/v1/filesystem/open-path", { path }, signal),
+  );
+}
+
+export type FilesystemBrowseRequest = {
+  browseToken: string;
+  action: { type: "current" } | { type: "parent" } | { type: "child"; name: string };
+  pageSize: number;
+  cursor?: string;
+  filter?: string;
+};
+
+export async function browseFilesystem(
+  browse: FilesystemBrowseRequest,
+  signal?: AbortSignal,
+): Promise<FilesystemBrowsePage> {
+  return parseFilesystemBrowsePage(
+    await mutationJson(
+      "/api/v1/filesystem/browse",
+      {
+        browseToken: browse.browseToken,
+        action: browse.action,
+        pageSize: browse.pageSize,
+        cursor: browse.cursor,
+        filter: browse.filter,
+      },
+      signal,
+    ),
+  );
+}
+
+export async function preflightFilesystemIndex(
+  browseToken: string,
+  mode: IndexMode,
+  signal?: AbortSignal,
+): Promise<IndexPreflight> {
+  return parseIndexPreflight(
+    await mutationJson("/api/v1/filesystem/preflight-index", { browseToken, mode }, signal),
+  );
+}
+
+export type ProjectIndexRequest = {
+  rootCapability: string;
+  mode: IndexMode;
+  clientRequestId: string;
+};
+
+export async function submitProjectIndex(
+  index: ProjectIndexRequest,
+  signal?: AbortSignal,
+): Promise<ProjectIndexAdmission> {
+  return parseProjectIndexAdmission(
+    await mutationJson(
+      "/api/v1/projects/index",
+      {
+        rootCapability: index.rootCapability,
+        mode: index.mode,
+        detached: true,
+        clientRequestId: index.clientRequestId,
+      },
+      signal,
+    ),
+  );
+}
+
+export type OperationStatusRequest = {
+  waitMs?: number;
+  afterRevision?: string;
+};
+
+export async function fetchIndexOperation(
+  operationId: string,
+  status: OperationStatusRequest = {},
+  signal?: AbortSignal,
+): Promise<RepositoryOperation> {
+  const parameters = new URLSearchParams();
+  if (status.waitMs !== undefined) {
+    parameters.set("wait_ms", String(status.waitMs));
+  }
+  if (status.afterRevision !== undefined) {
+    parameters.set("after_revision", status.afterRevision);
+  }
+  const query = parameters.size === 0 ? "" : `?${parameters.toString()}`;
+  return parseRepositoryOperation(
+    await requestJson(`/api/v1/operations/${encodeURIComponent(operationId)}${query}`, { signal }),
+    operationId,
+  );
+}
+
+export async function cancelIndexOperation(
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<OperationCancel> {
+  return parseOperationCancel(
+    await mutationJson(`/api/v1/operations/${encodeURIComponent(operationId)}/cancel`, {}, signal),
+    operationId,
+  );
+}
+
+export function createClientRequestId(): string {
+  const entropy = new Uint8Array(24);
+  crypto.getRandomValues(entropy);
+  return `idx_${Array.from(entropy, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
 export async function logout(): Promise<void> {
   await request("/api/v1/session", {
     method: "DELETE",
@@ -102,6 +233,21 @@ export async function logout(): Promise<void> {
   });
   csrfToken = undefined;
   initialization = undefined;
+}
+
+async function mutationJson(path: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
+  if (csrfToken === undefined) {
+    throw new ApiError(401, "session_required");
+  }
+  return requestJson(path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-rootlight-csrf": csrfToken,
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
 }
 
 async function initializeSessionOnce(): Promise<Session> {
@@ -162,10 +308,33 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
     cache: "no-store",
   });
   if (!response.ok) {
-    throw new ApiError(
-      response.status,
-      response.status === 401 ? "session_required" : "request_failed",
-    );
+    throw new ApiError(response.status, await readErrorCode(response));
   }
   return response;
+}
+
+async function readErrorCode(response: Response): Promise<string> {
+  const fallback = response.status === 401 ? "session_required" : "request_failed";
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > maximumErrorBytes) {
+    return fallback;
+  }
+  try {
+    const body = await response.arrayBuffer();
+    if (body.byteLength > maximumErrorBytes) {
+      return fallback;
+    }
+    const parsed = JSON.parse(new TextDecoder().decode(body)) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return fallback;
+    }
+    const error = (parsed as Record<string, unknown>).error;
+    if (typeof error !== "object" || error === null || Array.isArray(error)) {
+      return fallback;
+    }
+    const code = (error as Record<string, unknown>).code;
+    return typeof code === "string" && publicErrorPattern.test(code) ? code : fallback;
+  } catch {
+    return fallback;
+  }
 }

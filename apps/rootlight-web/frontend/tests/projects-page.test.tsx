@@ -8,11 +8,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fetchProjects } from "../src/api/client";
 import type { ProjectCatalogPage, ProjectSummary } from "../src/api/contracts";
+import { OperationProvider } from "../src/operations/operation-provider";
 import { createCatalogLocationState } from "../src/routing/catalog-location-state";
 import { ProjectsPage } from "../src/views/projects-page";
 
 vi.mock("../src/api/client", () => ({
+  createClientRequestId: vi.fn(() => "idx_test-request"),
   fetchProjects: vi.fn(),
+  submitProjectIndex: vi.fn(),
 }));
 
 const repositoryId = `repo1_${"a".repeat(32)}`;
@@ -95,7 +98,7 @@ describe("ProjectsPage", () => {
 
     expect(await screen.findByText("No projects have been loaded yet")).toBeVisible();
     expect(screen.getByText("Exact total is unavailable")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Add your first project" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Add your first project" })).toBeEnabled();
   });
 
   it("sends closed lifecycle and debounced search filters, then clears them", async () => {
@@ -361,9 +364,11 @@ function renderPage(locationState?: unknown) {
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={[{ pathname: "/projects", state: locationState }]}>
-        <ProjectsPage />
-      </MemoryRouter>
+      <OperationProvider>
+        <MemoryRouter initialEntries={[{ pathname: "/projects", state: locationState }]}>
+          <ProjectsPage />
+        </MemoryRouter>
+      </OperationProvider>
     </QueryClientProvider>,
   );
 }

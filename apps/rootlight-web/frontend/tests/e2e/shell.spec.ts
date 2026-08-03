@@ -5,6 +5,9 @@ import { expect, test, type Page } from "@playwright/test";
 
 const repositoryId = `repo1_${"a".repeat(32)}`;
 const generationId = `gen1_${"b".repeat(39)}`;
+const operationId = `op1_${"c".repeat(32)}`;
+const browseToken = "d".repeat(43);
+const rootCapability = "e".repeat(43);
 
 const health = {
   webReady: true,
@@ -67,6 +70,63 @@ test("opens an exact generation from an immutable catalog page", async ({ page }
   expect(accessibility.violations).toEqual([]);
 });
 
+test("admits a capability-bound detached index and opens its publication", async ({ page }) => {
+  await mockApplication(page, []);
+  const workflow = await mockIndexWorkflow(page, "succeeded");
+  await page.goto(`/#bootstrap=${"a".repeat(43)}`);
+
+  await page.getByRole("button", { name: "Add project" }).click();
+  await page.getByRole("button", { name: "Home" }).click();
+  await expect(page.getByRole("button", { name: "crates" })).toBeVisible();
+  await page.getByRole("radio", { name: /Deep/u }).click();
+  await page.getByRole("button", { name: "Select this folder" }).click();
+  await expect(page.getByRole("heading", { name: "Ready to index" })).toBeVisible();
+  await page.getByRole("button", { name: "Start detached index" }).click();
+
+  await expect(page.getByRole("heading", { name: "Index operations" })).toBeVisible();
+  const projectLink = page.getByRole("link", { name: "Open project" });
+  await expect(projectLink).toHaveAttribute(
+    "href",
+    `/projects/${repositoryId}?generation=${generationId}`,
+  );
+  expect(workflow.admissionRequest).toMatchObject({
+    rootCapability,
+    mode: "deep",
+    detached: true,
+  });
+  expect(workflow.admissionRequest?.clientRequestId).toMatch(/^idx_[a-f0-9]{48}$/u);
+  expect(JSON.stringify(workflow.admissionRequest)).not.toContain("\\");
+
+  await projectLink.click();
+  await expect(page).toHaveURL(
+    new RegExp(`/projects/${repositoryId}\\?generation=${generationId}$`, "u"),
+  );
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(accessibility.violations).toEqual([]);
+});
+
+test("requires confirmation before cancelling a running index", async ({ page }) => {
+  await mockApplication(page, []);
+  const workflow = await mockIndexWorkflow(page, "running");
+  await page.goto(`/#bootstrap=${"a".repeat(43)}`);
+
+  await page.getByRole("button", { name: "Add project" }).click();
+  await page.getByRole("button", { name: "Home" }).click();
+  await page.getByRole("button", { name: "Select this folder" }).click();
+  await page.getByRole("button", { name: "Start detached index" }).click();
+  await page
+    .getByRole("region", { name: "Index operations" })
+    .getByRole("button", { name: "Cancel" })
+    .click();
+
+  const dialog = page.getByRole("dialog", { name: "Cancel index operation?" });
+  await expect(dialog).toContainText(operationId);
+  await dialog.getByRole("button", { name: "Request cancellation" }).click();
+  await expect(page.getByText("cancelling", { exact: true })).toBeVisible();
+  expect(workflow.cancelRequests).toBe(1);
+  expect(workflow.cancelCsrf).toBe("csrf");
+});
+
 async function mockApplication(page: Page, projects: ReturnType<typeof projectSummary>[]) {
   await page.route("**/api/v1/session/bootstrap", async (route) => {
     await route.fulfill({
@@ -93,6 +153,139 @@ async function mockApplication(page: Page, projects: ReturnType<typeof projectSu
         : projectDetail();
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
   });
+}
+
+async function mockIndexWorkflow(page: Page, terminalState: "running" | "succeeded") {
+  const workflow: {
+    admissionRequest?: Record<string, unknown>;
+    cancelRequests: number;
+    cancelCsrf?: string;
+  } = { cancelRequests: 0 };
+  let cancelled = false;
+
+  await page.route("**/api/v1/filesystem/roots", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema: "rootlight.web-filesystem-roots/1",
+        roots: [{ label: "Home", browseToken, readable: true, selectable: true }],
+      }),
+    });
+  });
+  await page.route("**/api/v1/filesystem/browse", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema: "rootlight.web-filesystem-browse/1",
+        browseToken,
+        label: "Home",
+        depth: 0,
+        maximumDepth: 32,
+        breadcrumbs: [{ label: "Home", browseToken }],
+        directories: [{ name: "crates", kind: "directory", readable: true, selectable: true }],
+        nextCursor: null,
+      }),
+    });
+  });
+  await page.route("**/api/v1/filesystem/preflight-index", async (route) => {
+    const request = (await route.request().postDataJSON()) as Record<string, unknown>;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema: "rootlight.web-index-preflight/1",
+        selectable: true,
+        normalizedDisplayLabel: "rootlight",
+        daemonAcceptingOperations: true,
+        selectedMode: request.mode,
+        supportedModes: ["auto", "structural", "deep"],
+        adapterIsolation: "available",
+        estimatedLimitations: [],
+        warnings: ["repository_contents_not_scanned"],
+        rootCapability,
+        rootCapabilityExpiresInSeconds: 120,
+      }),
+    });
+  });
+  await page.route("**/api/v1/projects/index", async (route) => {
+    workflow.admissionRequest = (await route.request().postDataJSON()) as Record<string, unknown>;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(indexAdmission()),
+    });
+  });
+  await page.route("**/api/v1/operations/**", async (route) => {
+    if (new URL(route.request().url()).pathname.endsWith("/cancel")) {
+      cancelled = true;
+      workflow.cancelRequests += 1;
+      workflow.cancelCsrf = route.request().headers()["x-rootlight-csrf"];
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          schema: "rootlight.web-operation-cancel/1",
+          accepted: true,
+          operation: operationStatus("cancelling"),
+        }),
+      });
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(operationStatus(cancelled ? "cancelling" : terminalState)),
+    });
+  });
+
+  return workflow;
+}
+
+function indexAdmission() {
+  return {
+    schema: "rootlight.web-project-index/1",
+    displayLabel: "rootlight",
+    repositoryId,
+    operationId,
+    semanticOperationId: null,
+    state: "queued",
+    revision: "1",
+    mode: "deep",
+    parentGenerationId: null,
+    publishedGenerationId: null,
+    discoveredInputs: "0",
+    indexedFiles: "0",
+    entities: "0",
+    elapsedMicros: "0",
+    estimatedDiskBytes: "0",
+    diagnostics: [],
+  };
+}
+
+function operationStatus(state: "cancelling" | "running" | "succeeded") {
+  const succeeded = state === "succeeded";
+  return {
+    schema: "rootlight.web-repository-operation/1",
+    displayLabel: "rootlight",
+    mode: "deep",
+    ownedBySession: true,
+    operationId,
+    state,
+    revision: state === "running" ? "2" : "3",
+    completedUnits: succeeded ? 4 : 2,
+    totalUnits: 4,
+    kind: "repository_index",
+    stage: succeeded ? "completed" : "executing",
+    detached: true,
+    cancellationRequested: state === "cancelling",
+    recoveryClass: "not_applicable",
+    error: null,
+    publishedGenerationId: succeeded ? generationId : null,
+    semanticOperationId: null,
+    startedUnixMs: "1",
+    peakRssBytes: "2",
+    writtenBytes: "3",
+    filesExamined: "4",
+    bytesExamined: "5",
+    indexStage: succeeded ? "published" : "indexing",
+    retryAfterMs: state === "running" ? 100 : null,
+  };
 }
 
 function projectSummary() {
@@ -137,7 +330,7 @@ function projectDetail() {
     coverage: projectSummary().coverage,
     operations: [
       {
-        operationId: `op1_${"c".repeat(32)}`,
+        operationId,
         kind: "repository_index",
         state: "running",
         completedUnits: 2,

@@ -25,6 +25,8 @@ export type OperationState =
   | "interrupted"
   | "cancelled"
   | "unknown";
+export type IndexMode = "auto" | "structural" | "deep";
+export type AdapterIsolation = "available" | "degraded" | "unavailable" | "not_configured";
 
 export type Session = {
   csrfToken: string;
@@ -109,6 +111,129 @@ export type ProjectDetail = {
   operations: ProjectOperation[];
 };
 
+export type FilesystemRoot = {
+  label: string;
+  browseToken: string;
+  readable: boolean;
+  selectable: boolean;
+};
+
+export type FilesystemRoots = {
+  schema: "rootlight.web-filesystem-roots/1";
+  roots: FilesystemRoot[];
+};
+
+export type OpenFilesystemPath = {
+  schema: "rootlight.web-filesystem-open-path/1";
+  label: string;
+  browseToken: string;
+};
+
+export type FilesystemBreadcrumb = {
+  label: string;
+  browseToken: string;
+};
+
+export type FilesystemDirectory = {
+  name: string;
+  kind: "directory";
+  readable: boolean;
+  selectable: boolean;
+};
+
+export type FilesystemBrowsePage = {
+  schema: "rootlight.web-filesystem-browse/1";
+  browseToken: string;
+  label: string;
+  depth: number;
+  maximumDepth: number;
+  breadcrumbs: FilesystemBreadcrumb[];
+  directories: FilesystemDirectory[];
+  nextCursor: string | null;
+};
+
+export type IndexPreflight = {
+  schema: "rootlight.web-index-preflight/1";
+  selectable: boolean;
+  normalizedDisplayLabel: string;
+  daemonAcceptingOperations: boolean;
+  selectedMode: IndexMode;
+  supportedModes: IndexMode[];
+  adapterIsolation: AdapterIsolation;
+  estimatedLimitations: string[];
+  warnings: string[];
+  rootCapability: string;
+  rootCapabilityExpiresInSeconds: number;
+};
+
+export type IndexDiagnostic = {
+  code: string;
+  message: string;
+};
+
+export type ProjectIndexAdmission = {
+  schema: "rootlight.web-project-index/1";
+  displayLabel: string;
+  repositoryId: string;
+  operationId: string;
+  semanticOperationId: string | null;
+  state: OperationState;
+  revision: string;
+  mode: IndexMode;
+  parentGenerationId: string | null;
+  publishedGenerationId: string | null;
+  discoveredInputs: string;
+  indexedFiles: string;
+  entities: string;
+  elapsedMicros: string;
+  estimatedDiskBytes: string;
+  diagnostics: IndexDiagnostic[];
+};
+
+export type OperationStage = "accepted" | "executing" | "cleanup" | "unknown";
+export type RecoveryClass =
+  "not_applicable" | "interrupted_by_restart" | "deadline_elapsed" | "lease_expired" | "unknown";
+
+export type OperationError = {
+  code: number;
+  message: string;
+  retryable: boolean;
+  retryAfterMs: string | null;
+};
+
+export type RepositoryOperation = {
+  schema: "rootlight.web-repository-operation/1";
+  displayLabel: string;
+  mode: IndexMode;
+  ownedBySession: boolean;
+  operationId: string;
+  state: OperationState;
+  revision: string;
+  completedUnits: number;
+  totalUnits: number;
+  kind: "repository_index" | "unknown";
+  stage: OperationStage;
+  detached: boolean;
+  cancellationRequested: boolean;
+  recoveryClass: RecoveryClass;
+  error: OperationError | null;
+  publishedGenerationId: string | null;
+  semanticOperationId: string | null;
+  startedUnixMs: string;
+  peakRssBytes: string;
+  writtenBytes: string;
+  filesExamined: string;
+  bytesExamined: string;
+  indexStage: string;
+  retryAfterMs: number | null;
+};
+
+export type OperationCancel = {
+  schema: "rootlight.web-operation-cancel/1";
+  accepted: boolean;
+  operation: RepositoryOperation;
+};
+
 const lifecycleValues = new Set<DaemonLifecycle>([
   "starting",
   "ready",
@@ -154,6 +279,20 @@ const operationStateValues = new Set<OperationState>([
   "failed",
   "interrupted",
   "cancelled",
+]);
+const indexModeValues = new Set<IndexMode>(["auto", "structural", "deep"]);
+const adapterIsolationValues = new Set<AdapterIsolation>([
+  "available",
+  "degraded",
+  "unavailable",
+  "not_configured",
+]);
+const operationStageValues = new Set<OperationStage>(["accepted", "executing", "cleanup"]);
+const recoveryClassValues = new Set<RecoveryClass>([
+  "not_applicable",
+  "interrupted_by_restart",
+  "deadline_elapsed",
+  "lease_expired",
 ]);
 
 export function parseSession(value: unknown): Session {
@@ -239,6 +378,163 @@ export function parseProjectDetail(
   return detail;
 }
 
+export function parseFilesystemRoots(value: unknown): FilesystemRoots {
+  const record = asRecord(value);
+  return {
+    schema: asLiteral(record.schema, "rootlight.web-filesystem-roots/1"),
+    roots: asBoundedArray(record.roots, 32).map((root) => {
+      const rootRecord = asRecord(root);
+      return {
+        label: asBoundedString(rootRecord.label, 256),
+        browseToken: asOpaqueToken(rootRecord.browseToken),
+        readable: asBoolean(rootRecord.readable),
+        selectable: asBoolean(rootRecord.selectable),
+      };
+    }),
+  };
+}
+
+export function parseOpenFilesystemPath(value: unknown): OpenFilesystemPath {
+  const record = asRecord(value);
+  return {
+    schema: asLiteral(record.schema, "rootlight.web-filesystem-open-path/1"),
+    label: asBoundedString(record.label, 256),
+    browseToken: asOpaqueToken(record.browseToken),
+  };
+}
+
+export function parseFilesystemBrowsePage(value: unknown): FilesystemBrowsePage {
+  const record = asRecord(value);
+  const maximumDepth = asBoundedInteger(record.maximumDepth, 0, 64);
+  const depth = asBoundedInteger(record.depth, 0, maximumDepth);
+  const breadcrumbs = asBoundedArray(record.breadcrumbs, maximumDepth + 1).map((breadcrumb) => {
+    const breadcrumbRecord = asRecord(breadcrumb);
+    return {
+      label: asBoundedString(breadcrumbRecord.label, 256),
+      browseToken: asOpaqueToken(breadcrumbRecord.browseToken),
+    };
+  });
+  if (breadcrumbs.length !== depth + 1) {
+    throw new Error("API response has invalid filesystem breadcrumbs");
+  }
+  return {
+    schema: asLiteral(record.schema, "rootlight.web-filesystem-browse/1"),
+    browseToken: asOpaqueToken(record.browseToken),
+    label: asBoundedString(record.label, 256),
+    depth,
+    maximumDepth,
+    breadcrumbs,
+    directories: asBoundedArray(record.directories, 256).map((directory) => {
+      const directoryRecord = asRecord(directory);
+      return {
+        name: asBoundedString(directoryRecord.name, 1_024),
+        kind: asLiteral(directoryRecord.kind, "directory"),
+        readable: asBoolean(directoryRecord.readable),
+        selectable: asBoolean(directoryRecord.selectable),
+      };
+    }),
+    nextCursor: asOptionalOpaqueToken(record.nextCursor),
+  };
+}
+
+export function parseIndexPreflight(value: unknown): IndexPreflight {
+  const record = asRecord(value);
+  const selectedMode = asClosedEnum(record.selectedMode, indexModeValues);
+  const supportedModes = asBoundedArray(record.supportedModes, 3).map((mode) =>
+    asClosedEnum(mode, indexModeValues),
+  );
+  if (new Set(supportedModes).size !== supportedModes.length) {
+    throw new Error("API response has duplicate index modes");
+  }
+  return {
+    schema: asLiteral(record.schema, "rootlight.web-index-preflight/1"),
+    selectable: asBoolean(record.selectable),
+    normalizedDisplayLabel: asBoundedString(record.normalizedDisplayLabel, 256),
+    daemonAcceptingOperations: asBoolean(record.daemonAcceptingOperations),
+    selectedMode,
+    supportedModes,
+    adapterIsolation: asClosedEnum(record.adapterIsolation, adapterIsolationValues),
+    estimatedLimitations: asBoundedArray(record.estimatedLimitations, 16).map((limitation) =>
+      asBoundedString(limitation, 128),
+    ),
+    warnings: asBoundedArray(record.warnings, 16).map((warning) => asBoundedString(warning, 128)),
+    rootCapability: asOpaqueToken(record.rootCapability),
+    rootCapabilityExpiresInSeconds: asBoundedInteger(
+      record.rootCapabilityExpiresInSeconds,
+      1,
+      3_600,
+    ),
+  };
+}
+
+export function parseProjectIndexAdmission(value: unknown): ProjectIndexAdmission {
+  const record = asRecord(value);
+  return {
+    schema: asLiteral(record.schema, "rootlight.web-project-index/1"),
+    displayLabel: asBoundedString(record.displayLabel, 256),
+    repositoryId: asStableId(record.repositoryId, "repo1_"),
+    operationId: asStableId(record.operationId, "op1_"),
+    semanticOperationId: asOptionalStableId(record.semanticOperationId, "op1_"),
+    state: asEnumOrUnknown(record.state, operationStateValues),
+    revision: asDecimalString(record.revision),
+    mode: asClosedEnum(record.mode, indexModeValues),
+    parentGenerationId: asOptionalStableId(record.parentGenerationId, "gen1_"),
+    publishedGenerationId: asOptionalStableId(record.publishedGenerationId, "gen1_"),
+    discoveredInputs: asDecimalString(record.discoveredInputs),
+    indexedFiles: asDecimalString(record.indexedFiles),
+    entities: asDecimalString(record.entities),
+    elapsedMicros: asDecimalString(record.elapsedMicros),
+    estimatedDiskBytes: asDecimalString(record.estimatedDiskBytes),
+    diagnostics: asBoundedArray(record.diagnostics, 64).map(parseIndexDiagnostic),
+  };
+}
+
+export function parseRepositoryOperation(
+  value: unknown,
+  expectedOperationId: string,
+): RepositoryOperation {
+  const record = asRecord(value);
+  const operation: RepositoryOperation = {
+    schema: asLiteral(record.schema, "rootlight.web-repository-operation/1"),
+    displayLabel: asBoundedString(record.displayLabel, 256),
+    mode: asClosedEnum(record.mode, indexModeValues),
+    ownedBySession: asBoolean(record.ownedBySession),
+    operationId: asStableId(record.operationId, "op1_"),
+    state: asEnumOrUnknown(record.state, operationStateValues),
+    revision: asDecimalString(record.revision),
+    completedUnits: asBoundedInteger(record.completedUnits, 0, 1_000_000_000),
+    totalUnits: asBoundedInteger(record.totalUnits, 0, 1_000_000_000),
+    kind: parseOperationKind(record.kind),
+    stage: asEnumOrUnknown(record.stage, operationStageValues),
+    detached: asBoolean(record.detached),
+    cancellationRequested: asBoolean(record.cancellationRequested),
+    recoveryClass: asEnumOrUnknown(record.recoveryClass, recoveryClassValues),
+    error: record.error === null ? null : parseOperationError(record.error),
+    publishedGenerationId: asOptionalStableId(record.publishedGenerationId, "gen1_"),
+    semanticOperationId: asOptionalStableId(record.semanticOperationId, "op1_"),
+    startedUnixMs: asDecimalString(record.startedUnixMs),
+    peakRssBytes: asDecimalString(record.peakRssBytes),
+    writtenBytes: asDecimalString(record.writtenBytes),
+    filesExamined: asDecimalString(record.filesExamined),
+    bytesExamined: asDecimalString(record.bytesExamined),
+    indexStage: asBoundedText(record.indexStage, 128),
+    retryAfterMs: asOptionalBoundedInteger(record.retryAfterMs, 0, 4_294_967_295),
+  };
+  if (operation.operationId !== expectedOperationId) {
+    throw new Error("API response does not match the requested operation");
+  }
+  return operation;
+}
+
+export function parseOperationCancel(value: unknown, expectedOperationId: string): OperationCancel {
+  const record = asRecord(value);
+  return {
+    schema: asLiteral(record.schema, "rootlight.web-operation-cancel/1"),
+    accepted: asBoolean(record.accepted),
+    operation: parseRepositoryOperation(record.operation, expectedOperationId),
+  };
+}
+
 function parseProjectSummary(value: unknown): ProjectSummary {
   const record = asRecord(value);
   return {
@@ -284,6 +580,29 @@ function parseProjectOperation(value: unknown): ProjectOperation {
   };
 }
 
+function parseIndexDiagnostic(value: unknown): IndexDiagnostic {
+  const record = asRecord(value);
+  return {
+    code: asBoundedString(record.code, 128),
+    message: asBoundedString(record.message, 512),
+  };
+}
+
+function parseOperationError(value: unknown): OperationError {
+  const record = asRecord(value);
+  return {
+    code: asBoundedInteger(record.code, -2_147_483_648, 2_147_483_647),
+    message: asBoundedString(record.message, 512),
+    retryable: asBoolean(record.retryable),
+    retryAfterMs: asOptionalDecimalString(record.retryAfterMs),
+  };
+}
+
+function parseOperationKind(value: unknown): RepositoryOperation["kind"] {
+  const kind = asBoundedString(value, 64);
+  return kind === "repository_index" ? kind : "unknown";
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("API response has an invalid shape");
@@ -312,6 +631,13 @@ function asBoundedString(value: unknown, maximumLength: number): string {
   return value;
 }
 
+function asBoundedText(value: unknown, maximumLength: number): string {
+  if (typeof value !== "string" || value.length > maximumLength) {
+    throw new Error("API response has invalid text");
+  }
+  return value;
+}
+
 function asOptionalBoundedString(value: unknown, maximumLength: number): string | null {
   return value === null ? null : asBoundedString(value, maximumLength);
 }
@@ -332,6 +658,18 @@ function asStableId(value: unknown, prefix: string): string {
 
 function asOptionalStableId(value: unknown, prefix: string): string | null {
   return value === null ? null : asStableId(value, prefix);
+}
+
+function asOpaqueToken(value: unknown): string {
+  const token = asBoundedString(value, 128);
+  if (!/^[A-Za-z0-9_-]{43}$/u.test(token)) {
+    throw new Error("API response has an invalid opaque token");
+  }
+  return token;
+}
+
+function asOptionalOpaqueToken(value: unknown): string | null {
+  return value === null ? null : asOpaqueToken(value);
 }
 
 function asDecimalString(value: unknown): string {
@@ -360,6 +698,10 @@ function asBoundedInteger(value: unknown, minimum: number, maximum: number): num
   return value as number;
 }
 
+function asOptionalBoundedInteger(value: unknown, minimum: number, maximum: number): number | null {
+  return value === null ? null : asBoundedInteger(value, minimum, maximum);
+}
+
 function asEnumOrUnknown<Value extends string>(
   value: unknown,
   accepted: ReadonlySet<Value>,
@@ -368,4 +710,11 @@ function asEnumOrUnknown<Value extends string>(
     throw new Error("API response has an invalid state");
   }
   return accepted.has(value as Value) ? (value as Value) : "unknown";
+}
+
+function asClosedEnum<Value extends string>(value: unknown, accepted: ReadonlySet<Value>): Value {
+  if (typeof value !== "string" || !accepted.has(value as Value)) {
+    throw new Error("API response has an invalid closed enum");
+  }
+  return value as Value;
 }

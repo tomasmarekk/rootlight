@@ -19,10 +19,13 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router";
 
-import { fetchProjects } from "../api/client";
+import { createClientRequestId, fetchProjects, submitProjectIndex } from "../api/client";
 import type { ProjectCatalogPage, ProjectLifecycleFilter, ProjectSummary } from "../api/contracts";
+import { AddProjectDialog, type ProjectIndexSelection } from "../components/add-project-dialog";
 import { PageHeading } from "../components/page-heading";
+import { SessionOperationList } from "../components/session-operation-list";
 import { StatusCard } from "../components/status-card";
+import { useOperations } from "../operations/operation-context";
 import {
   createCatalogLocationState,
   parseCatalogLocationState,
@@ -34,6 +37,7 @@ const pageSize = 50;
 
 export function ProjectsPage() {
   const location = useLocation();
+  const { register } = useOperations();
   const [restored] = useState(() => parseCatalogLocationState(location.state)?.catalog);
   const [searchInput, setSearchInput] = useState(restored?.searchInput ?? "");
   const [query, setQuery] = useState(restored?.query ?? "");
@@ -41,6 +45,8 @@ export function ProjectsPage() {
     restored?.stateFilter ?? "all",
   );
   const [history, setHistory] = useState<CatalogCursorState[]>(restored?.history ?? []);
+  const [addProjectOpen, setAddProjectOpen] = useState(false);
+  const [focusOperationId, setFocusOperationId] = useState<string>();
   const cursor = history.at(-1);
   const isInitialSearchEffect = useRef(true);
   const hasPendingInitialSearch = useRef(searchInput.trim() !== query);
@@ -93,6 +99,17 @@ export function ProjectsPage() {
     history,
   });
 
+  async function submitSelection(selection: ProjectIndexSelection) {
+    const requestId = createClientRequestId();
+    const admission = await submitProjectIndex({
+      rootCapability: selection.rootCapability,
+      mode: selection.mode,
+      clientRequestId: requestId,
+    });
+    register(admission, requestId);
+    setFocusOperationId(admission.operationId);
+  }
+
   return (
     <div className="content-container">
       <PageHeading
@@ -110,18 +127,10 @@ export function ProjectsPage() {
               <RefreshCw size={15} aria-hidden="true" />
               Refresh
             </Button>
-            <Button
-              aria-describedby="project-onboarding-unavailable"
-              isDisabled
-              size="sm"
-              variant="primary"
-            >
+            <Button size="sm" variant="primary" onPress={() => setAddProjectOpen(true)}>
               <FolderPlus size={15} aria-hidden="true" />
               Add project
             </Button>
-            <span id="project-onboarding-unavailable" className="sr-only">
-              Project onboarding is not available in this build yet.
-            </span>
           </>
         }
       />
@@ -154,6 +163,11 @@ export function ProjectsPage() {
           detail="Current page only"
         />
       </section>
+
+      <SessionOperationList
+        focusOperationId={focusOperationId}
+        onFocused={() => setFocusOperationId(undefined)}
+      />
 
       <section className="catalog-panel" aria-labelledby="catalog-heading">
         <div className="catalog-toolbar">
@@ -212,6 +226,7 @@ export function ProjectsPage() {
           catalog={catalog}
           hasFilter={hasFilter}
           locationState={catalogLocationState}
+          onAddProject={() => setAddProjectOpen(true)}
           onClearFilters={() => {
             setSearchInput("");
             setQuery("");
@@ -257,6 +272,12 @@ export function ProjectsPage() {
           </nav>
         ) : null}
       </section>
+
+      <AddProjectDialog
+        isOpen={addProjectOpen}
+        onOpenChange={setAddProjectOpen}
+        onSubmit={submitSelection}
+      />
     </div>
   );
 }
@@ -265,11 +286,13 @@ function CatalogContent({
   catalog,
   hasFilter,
   locationState,
+  onAddProject,
   onClearFilters,
 }: {
   catalog: UseQueryResult<ProjectCatalogPage>;
   hasFilter: boolean;
   locationState: CatalogLocationState;
+  onAddProject: () => void;
   onClearFilters: () => void;
 }) {
   if (catalog.isPending) {
@@ -330,20 +353,10 @@ function CatalogContent({
                 Clear filters
               </Button>
             ) : (
-              <>
-                <Button
-                  aria-describedby="first-project-onboarding-unavailable"
-                  isDisabled
-                  size="sm"
-                  variant="primary"
-                >
-                  <FolderPlus size={15} aria-hidden="true" />
-                  Add your first project
-                </Button>
-                <span id="first-project-onboarding-unavailable" className="sr-only">
-                  Project onboarding is not available in this build yet.
-                </span>
-              </>
+              <Button size="sm" variant="primary" onPress={onAddProject}>
+                <FolderPlus size={15} aria-hidden="true" />
+                Add your first project
+              </Button>
             )}
           </Card.Content>
         </Card>
