@@ -28,7 +28,6 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-rootlight-sandbox = { path = "../../crates/rootlight-sandbox" }
 windows.workspace = true
 
 [dev-dependencies]

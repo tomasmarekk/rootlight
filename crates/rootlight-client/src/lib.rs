@@ -2310,6 +2310,57 @@ pub enum ConnectPolicy {
     StartIfMissing,
 }
 
+/// Owned Windows child launched without inheriting ambient standard handles.
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct DetachedProcess {
+    child: ChildProcess,
+}
+
+/// Failure while launching or querying a detached Windows process.
+#[cfg(windows)]
+#[derive(Debug, thiserror::Error)]
+#[error("detached process operation failed")]
+pub struct DetachedProcessError(#[source] ProcessError);
+
+#[cfg(windows)]
+impl DetachedProcess {
+    /// Returns the exit status when the exact child has terminated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operating-system process handle cannot be queried.
+    pub fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>, DetachedProcessError> {
+        self.child.try_wait().map_err(DetachedProcessError)
+    }
+}
+
+/// Launches a Windows child with all standard streams connected to the null device.
+///
+/// The explicit process facade prevents unrelated inheritable handles from the
+/// invoking package manager or shell from keeping their pipelines open.
+///
+/// # Errors
+///
+/// Returns an error when command validation or operating-system process creation fails.
+#[cfg(windows)]
+pub fn spawn_detached_null_stdio_process(
+    executable: &std::path::Path,
+    arguments: &[&str],
+) -> Result<DetachedProcess, DetachedProcessError> {
+    let mut command = ProcessCommand::new(executable)
+        .stdin(StdioMode::Null)
+        .stdout(StdioMode::Null)
+        .stderr(StdioMode::Null);
+    for argument in arguments {
+        command = command.arg(argument);
+    }
+    command
+        .spawn()
+        .map(|child| DetachedProcess { child })
+        .map_err(DetachedProcessError)
+}
+
 /// One negotiated daemon control client.
 #[derive(Debug)]
 pub struct Client {
@@ -10717,6 +10768,43 @@ mod tests {
     use tokio::io::AsyncReadExt as _;
 
     const STARTUP_CHILD_ROOT_ENV: &str = "ROOTLIGHT_TEST_STARTUP_CHILD_ROOT";
+
+    #[cfg(windows)]
+    #[test]
+    fn detached_process_facade_launches_and_observes_exact_child() {
+        let executable = std::env::current_exe().expect("test executable resolves");
+        let mut child = spawn_detached_null_stdio_process(
+            &executable,
+            &[
+                "--exact",
+                "tests::detached_process_facade_child",
+                "--nocapture",
+            ],
+        )
+        .expect("detached child starts");
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(5))
+            .expect("child deadline is representable");
+
+        loop {
+            if child
+                .try_wait()
+                .expect("detached child status reads")
+                .is_some()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "detached child did not exit before its deadline"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detached_process_facade_child() {}
 
     fn test_endpoint(label: &str) -> Endpoint {
         #[cfg(unix)]

@@ -12,15 +12,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rootlight_runtime::{RuntimeError, RuntimePaths, WEB_UI_PORT, WebDiscoveryRecord};
 #[cfg(windows)]
-use rootlight_sandbox::{ChildProcess, ProcessCommand};
+use rootlight_client::{DetachedProcess, DetachedProcessError, spawn_detached_null_stdio_process};
+use rootlight_runtime::{RuntimeError, RuntimePaths, WEB_UI_PORT, WebDiscoveryRecord};
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(windows))]
 type DetachedChild = std::process::Child;
 #[cfg(windows)]
-type DetachedChild = ChildProcess;
+type DetachedChild = DetachedProcess;
 
 const ORIGIN: &str = "http://127.0.0.1:43127";
 const MAX_HTTP_RESPONSE_BYTES: u64 = 16 * 1024;
@@ -70,7 +70,7 @@ pub(crate) enum WebServiceError {
     Launch(#[source] io::Error),
     #[cfg(windows)]
     #[error("Web UI process launch failed")]
-    WindowsLaunch(#[source] rootlight_sandbox::ProcessError),
+    WindowsLaunch(#[source] DetachedProcessError),
     #[error("Web UI process exited before becoming ready")]
     EarlyExit,
     #[error("Web UI service did not become ready before the startup deadline")]
@@ -220,9 +220,7 @@ fn discovered_record(paths: &RuntimePaths) -> Result<Option<WebDiscoveryRecord>,
 
 #[cfg(windows)]
 fn spawn_detached(executable: &Path) -> Result<DetachedChild, WebServiceError> {
-    ProcessCommand::new(executable)
-        .arg("--service")
-        .spawn()
+    spawn_detached_null_stdio_process(executable, &["--service"])
         .map_err(WebServiceError::WindowsLaunch)
 }
 

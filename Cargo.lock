@@ -2063,7 +2063,6 @@ dependencies = [
  "rootlight-operations",
  "rootlight-protocol",
  "rootlight-runtime",
- "rootlight-sandbox",
  "rootlight-service",
  "semver",
  "serde",
