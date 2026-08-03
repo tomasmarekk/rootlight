@@ -10,6 +10,7 @@ mod config;
 mod daemon;
 mod error;
 mod filesystem_registry;
+mod index_registry;
 mod security;
 mod session;
 
@@ -54,6 +55,7 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     let policy = security::SecurityPolicy::loopback(address.port());
     let sessions = Arc::new(session::SessionRegistry::new());
     let filesystem = Arc::new(filesystem_registry::FilesystemRegistry::new());
+    let indexes = Arc::new(index_registry::IndexRegistry::new());
     let bootstrap = sessions.issue_bootstrap(Instant::now())?;
     let url = format!("{}/#bootstrap={}", policy.origin(), bootstrap.encoded());
     println!("Rootlight Web UI: {url}");
@@ -65,6 +67,7 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
         daemon,
         Arc::clone(&sessions),
         Arc::clone(&filesystem),
+        Arc::clone(&indexes),
     );
     let router = app::router(state, policy);
     let result = axum::serve(listener, router)
@@ -73,6 +76,7 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
         .map_err(|_| WebError::ServerFailed);
     sessions.clear();
     filesystem.clear();
+    indexes.clear();
     result
 }
 

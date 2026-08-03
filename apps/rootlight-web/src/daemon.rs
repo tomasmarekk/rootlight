@@ -3,8 +3,9 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use rootlight_client::{
-    Client, ClientError, ConnectPolicy, Health, RepositoryCatalogPage,
-    RepositoryCatalogPageRequest, RepositoryStatus, RepositoryStatusRequest, RequestTimeout,
+    Client, ClientError, ConnectPolicy, Health, OperationId, RepositoryCatalogPage,
+    RepositoryCatalogPageRequest, RepositoryIndex, RepositoryIndexMode, RepositoryOperationAction,
+    RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestTimeout,
 };
 use rootlight_runtime::RuntimePaths;
 
@@ -28,6 +29,27 @@ pub(crate) trait DaemonClient: Send + Sync {
         request: RepositoryStatusRequest,
         timeout: RequestTimeout,
     ) -> ClientFuture<'a, RepositoryStatus>;
+
+    fn repository_index<'a>(
+        &'a self,
+        _root: &'a str,
+        _operation: OperationId,
+        _mode: RepositoryIndexMode,
+        _timeout: RequestTimeout,
+    ) -> ClientFuture<'a, RepositoryIndex> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
+
+    fn repository_operation_status<'a>(
+        &'a self,
+        _operation: OperationId,
+        _action: RepositoryOperationAction,
+        _wait_ms: Option<u32>,
+        _after_revision: Option<u64>,
+        _timeout: RequestTimeout,
+    ) -> ClientFuture<'a, RepositoryOperationStatus> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
 }
 
 impl DaemonClient for Client {
@@ -49,6 +71,33 @@ impl DaemonClient for Client {
         timeout: RequestTimeout,
     ) -> ClientFuture<'a, RepositoryStatus> {
         Box::pin(self.repository_status_with_options_async(request, timeout))
+    }
+
+    fn repository_index<'a>(
+        &'a self,
+        root: &'a str,
+        operation: OperationId,
+        mode: RepositoryIndexMode,
+        timeout: RequestTimeout,
+    ) -> ClientFuture<'a, RepositoryIndex> {
+        Box::pin(self.repository_index_async_with_mode(root, operation, true, mode, timeout))
+    }
+
+    fn repository_operation_status<'a>(
+        &'a self,
+        operation: OperationId,
+        action: RepositoryOperationAction,
+        wait_ms: Option<u32>,
+        after_revision: Option<u64>,
+        timeout: RequestTimeout,
+    ) -> ClientFuture<'a, RepositoryOperationStatus> {
+        Box::pin(self.repository_operation_status_async(
+            operation,
+            action,
+            wait_ms,
+            after_revision,
+            timeout,
+        ))
     }
 }
 

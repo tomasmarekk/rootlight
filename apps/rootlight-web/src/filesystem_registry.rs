@@ -48,18 +48,12 @@ struct CapabilityRecord {
     value: Capability,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "root capabilities are consumed by the subsequent index submission slice"
-    )
-)]
 enum Capability {
     Browse(Arc<BrowseNode>),
     Root {
         token: OpaqueToken,
-        admission: RootAdmission,
+        admission: Arc<RootAdmission>,
+        idempotency_digest: Option<[u8; 32]>,
     },
 }
 
@@ -149,13 +143,6 @@ impl fmt::Debug for BrowseNode {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "root admission data is consumed by the subsequent index submission slice"
-    )
-)]
 pub(crate) struct RootAdmission {
     directory: BrowseDirectory,
     display_label: String,
@@ -169,24 +156,10 @@ impl RootAdmission {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the subsequent index submission slice revalidates this path"
-        )
-    )]
     pub(crate) fn local_path(&self) -> &Path {
         self.directory.local_path()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the subsequent index submission slice retains this safe label"
-        )
-    )]
     pub(crate) fn display_label(&self) -> &str {
         &self.display_label
     }
@@ -362,40 +335,47 @@ impl FilesystemRegistry {
             owner,
             created_at: now,
             last_seen: now,
-            value: Capability::Root { token, admission },
+            value: Capability::Root {
+                token,
+                admission: Arc::new(admission),
+                idempotency_digest: None,
+            },
         });
         Ok(IssuedRootCapability { token: encoded })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the subsequent index submission slice consumes this capability"
-        )
-    )]
-    pub(crate) fn consume_root(
+    pub(crate) fn bind_root(
         &self,
         owner: SessionIdentity,
         encoded: &str,
+        idempotency_digest: [u8; 32],
         now: Instant,
-    ) -> Result<RootAdmission, FilesystemRegistryError> {
+    ) -> Result<Arc<RootAdmission>, FilesystemRegistryError> {
         let digest = decode_token_digest(encoded)?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| FilesystemRegistryError::ResourceUnavailable)?;
         reap_expired(&mut state, now);
-        let index = state
+        let record = state
             .capabilities
-            .iter()
-            .position(|record| {
+            .iter_mut()
+            .find(|record| {
                 record.owner == owner
                     && matches!(&record.value, Capability::Root { token, .. } if token_matches(&token.digest, &digest))
             })
             .ok_or(FilesystemRegistryError::CapabilityInvalid)?;
-        match state.capabilities.remove(index).value {
-            Capability::Root { admission, .. } => Ok(admission),
+        record.last_seen = now;
+        match &mut record.value {
+            Capability::Root {
+                admission,
+                idempotency_digest: bound_digest,
+                ..
+            } if bound_digest.is_none() || *bound_digest == Some(idempotency_digest) => {
+                *bound_digest = Some(idempotency_digest);
+                Ok(Arc::clone(admission))
+            }
+            Capability::Root { .. } => Err(FilesystemRegistryError::CapabilityInvalid),
             Capability::Browse(_) => Err(FilesystemRegistryError::CapabilityInvalid),
         }
     }
@@ -768,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn root_capability_is_single_use_and_cleanup_is_session_exact() {
+    fn root_capability_allows_only_same_idempotency_retry_and_cleanup_is_session_exact() {
         let registry = FilesystemRegistry::new();
         let now = Instant::now();
         let (_temporary, directory) = browse_directory();
@@ -782,17 +762,22 @@ mod tests {
 
         assert!(
             registry
-                .consume_root(identity(5), &issued.token, now)
+                .bind_root(identity(5), &issued.token, [1; 32], now)
                 .is_err()
         );
         let admission = registry
-            .consume_root(identity(4), &issued.token, now)
-            .expect("owner consumes root capability");
+            .bind_root(identity(4), &issued.token, [1; 32], now)
+            .expect("owner binds root capability");
         assert_eq!(admission.display_label(), "selected");
         assert!(admission.local_path().is_absolute());
         assert!(
             registry
-                .consume_root(identity(4), &issued.token, now)
+                .bind_root(identity(4), &issued.token, [1; 32], now)
+                .is_ok()
+        );
+        assert!(
+            registry
+                .bind_root(identity(4), &issued.token, [2; 32], now)
                 .is_err()
         );
 

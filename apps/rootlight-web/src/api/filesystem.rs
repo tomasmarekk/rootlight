@@ -710,6 +710,7 @@ mod tests {
         assets::AssetInventory,
         daemon::DaemonClient,
         filesystem_registry::FilesystemRegistry,
+        index_registry::IndexRegistry,
         security::SecurityPolicy,
         session::{CSRF_HEADER_NAME, SESSION_COOKIE_NAME, SessionIdentity, SessionRegistry},
     };
@@ -801,7 +802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preflight_does_not_enumerate_and_root_capability_is_single_use() {
+    async fn preflight_does_not_enumerate_and_root_capability_is_retry_bound() {
         let fixture = TestApp::new();
         let repository = TempDir::new().expect("temporary repository exists");
         for index in 0..=rootlight_vfs::MAX_BROWSE_DIRECTORY_ENTRIES {
@@ -836,13 +837,19 @@ mod tests {
             .expect("root capability is returned");
         let admission = fixture
             .filesystem
-            .consume_root(fixture.identity, root_capability, Instant::now())
-            .expect("root capability is consumed once");
+            .bind_root(fixture.identity, root_capability, [1; 32], Instant::now())
+            .expect("root capability is bound");
         assert_eq!(admission.local_path(), repository.path());
         assert!(
             fixture
                 .filesystem
-                .consume_root(fixture.identity, root_capability, Instant::now())
+                .bind_root(fixture.identity, root_capability, [1; 32], Instant::now())
+                .is_ok()
+        );
+        assert!(
+            fixture
+                .filesystem
+                .bind_root(fixture.identity, root_capability, [2; 32], Instant::now())
                 .is_err()
         );
 
@@ -964,6 +971,7 @@ mod tests {
                 Arc::new(FilesystemDaemon),
                 sessions,
                 Arc::clone(&filesystem),
+                Arc::new(IndexRegistry::new()),
             );
             Self {
                 router: app::router(state, SecurityPolicy::loopback(TEST_PORT)),

@@ -24,6 +24,7 @@ use crate::{
     assets::{Asset, AssetInventory},
     daemon::DaemonClient,
     filesystem_registry::FilesystemRegistry,
+    index_registry::IndexRegistry,
     security::{self, SecurityPolicy},
     session::{
         AuthenticatedSession, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, SessionRegistry,
@@ -40,6 +41,7 @@ pub(crate) struct AppState {
     daemon: Arc<dyn DaemonClient>,
     sessions: Arc<SessionRegistry>,
     filesystem: Arc<FilesystemRegistry>,
+    indexes: Arc<IndexRegistry>,
 }
 
 impl AppState {
@@ -48,12 +50,14 @@ impl AppState {
         daemon: Arc<dyn DaemonClient>,
         sessions: Arc<SessionRegistry>,
         filesystem: Arc<FilesystemRegistry>,
+        indexes: Arc<IndexRegistry>,
     ) -> Self {
         Self {
             assets,
             daemon,
             sessions,
             filesystem,
+            indexes,
         }
     }
 
@@ -65,10 +69,16 @@ impl AppState {
         &self.filesystem
     }
 
+    pub(crate) fn indexes(&self) -> &Arc<IndexRegistry> {
+        &self.indexes
+    }
+
     fn reap_expired_session_resources(&self, now: Instant) {
         let expired = self.sessions.expire(now);
         self.filesystem.clear_sessions(&expired);
         self.filesystem.reap(now);
+        self.indexes.clear_sessions(&expired);
+        self.indexes.reap(now);
     }
 }
 
@@ -83,6 +93,11 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
             "/api/v1/filesystem/preflight-index",
             post(api::filesystem::preflight_index),
         )
+        .route("/api/v1/projects/index", post(api::indexing::submit))
+        .route(
+            "/api/v1/operations/{operation_id}/cancel",
+            post(api::indexing::cancel),
+        )
         .route_layer(middleware::from_fn(require_mutation_csrf));
     let protected_api = Router::new()
         .route(
@@ -91,6 +106,10 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
         )
         .route("/api/v1/health", get(health))
         .route("/api/v1/filesystem/roots", get(api::filesystem::roots))
+        .route(
+            "/api/v1/operations/{operation_id}",
+            get(api::indexing::status),
+        )
         .route("/api/v1/projects", get(api::projects::list))
         .route(
             "/api/v1/projects/{repository_id}",
@@ -229,6 +248,41 @@ impl ApiError {
         }
     }
 
+    pub(crate) const fn invalid_index_request() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_index_request",
+        }
+    }
+
+    pub(crate) const fn invalid_operation_request() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_operation_request",
+        }
+    }
+
+    pub(crate) const fn index_request_conflict() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "index_request_conflict",
+        }
+    }
+
+    pub(crate) const fn index_limit_reached() -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "index_limit_reached",
+        }
+    }
+
+    pub(crate) const fn operation_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "operation_not_found",
+        }
+    }
+
     pub(crate) fn from_daemon(error: &ClientError) -> Self {
         match error {
             ClientError::Ipc(_)
@@ -305,6 +359,7 @@ async fn logout_session(
 ) -> Result<Response, ApiError> {
     require_csrf(&session, &headers)?;
     state.filesystem.clear_session(session.identity());
+    state.indexes.clear_session(session.identity());
     state.sessions.logout(&session);
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
@@ -565,6 +620,7 @@ mod tests {
             Arc::new(FakeDaemon),
             Arc::clone(&sessions),
             Arc::new(FilesystemRegistry::new()),
+            Arc::new(IndexRegistry::new()),
         );
         let app = router(state, SecurityPolicy::loopback(43_127));
         let bootstrap_body =
