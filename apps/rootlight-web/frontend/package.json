@@ -23,6 +23,7 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
+    "@cosmos.gl/graph": "3.4.0",
     "@heroui/react": "3.2.3",
     "@tanstack/react-query": "5.101.4",
     "lucide-react": "1.28.0",
