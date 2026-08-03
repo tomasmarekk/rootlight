@@ -2,12 +2,20 @@
 
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 const developmentApiPort = process.env.ROOTLIGHT_WEB_DEV_API_PORT ?? "43127";
+// gl-bench publishes a valid ESM module but prioritizes its UMD browser build.
+const glBenchEsmEntry = fileURLToPath(
+  new URL("./node_modules/gl-bench/dist/gl-bench.module.js", import.meta.url),
+);
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: [{ find: /^gl-bench$/u, replacement: glBenchEsmEntry }],
+  },
   server: {
     host: "127.0.0.1",
     port: 5173,

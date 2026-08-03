@@ -1,34 +1,40 @@
-// Resolves the exact immutable generation before any graph request is admitted.
+// Resolves an immutable generation before mounting the bounded Atlas workspace.
 
 import { Button } from "@heroui/react/button";
 import { useQuery } from "@tanstack/react-query";
-import {
-  Activity,
-  ArrowLeft,
-  Database,
-  Network,
-  RefreshCw,
-  RotateCcw,
-  TriangleAlert,
-} from "lucide-react";
+import { Activity, ArrowLeft, Database, RefreshCw, RotateCcw, TriangleAlert } from "lucide-react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Link, useLocation, useParams, useSearchParams } from "react-router";
 
 import { ApiError, fetchProjectDetail } from "../api/client";
+import type { ProjectDetail } from "../api/contracts";
+import { WorkspaceResizer } from "../components/workspace-resizer";
+import { GraphViewport } from "../features/graph/components/graph-viewport";
+import type { GraphView } from "../features/graph/model/graph-contracts";
+import { useGraphProjection } from "../hooks/use-graph-projection";
+import { useWorkspaceRailWidth } from "../hooks/use-workspace-rail-width";
 import { parseCatalogLocationState } from "../routing/catalog-location-state";
+import {
+  defaultProjectWorkspaceState,
+  parseProjectWorkspaceState,
+  projectGraphRelationKinds,
+  serializeProjectWorkspaceState,
+  type ProjectWorkspaceState,
+} from "../routing/project-workspace-state";
 
 export function ProjectWorkspacePage() {
   const { repositoryId } = useParams();
   const location = useLocation();
   const catalogLocationState = parseCatalogLocationState(location.state);
-  const [searchParameters, setSearchParameters] = useSearchParams();
-  const generation = searchParameters.get("generation") ?? "active";
+  const [searchParameters] = useSearchParams();
+  const workspaceState = parseProjectWorkspaceState(searchParameters);
   const project = useQuery({
-    queryKey: ["project", repositoryId, generation],
+    queryKey: ["project", repositoryId, workspaceState.generation],
     queryFn: ({ signal }) => {
       if (repositoryId === undefined) {
         throw new Error("Repository identity is unavailable");
       }
-      return fetchProjectDetail(repositoryId, generation, signal);
+      return fetchProjectDetail(repositoryId, workspaceState.generation, signal);
     },
     enabled: repositoryId !== undefined,
   });
@@ -41,7 +47,7 @@ export function ProjectWorkspacePage() {
       </div>
     );
   }
-  if (project.isError) {
+  if (project.isError || repositoryId === undefined) {
     const invalidIdentifier = project.error instanceof ApiError && project.error.status === 400;
     return (
       <div className="workspace-error" role="alert">
@@ -66,47 +72,162 @@ export function ProjectWorkspacePage() {
     );
   }
 
-  const detail = project.data;
+  return (
+    <ProjectWorkspace
+      repositoryId={repositoryId}
+      detail={project.data}
+      catalogLocationState={catalogLocationState}
+    />
+  );
+}
+
+function ProjectWorkspace({
+  catalogLocationState,
+  detail,
+  repositoryId,
+}: {
+  catalogLocationState: ReturnType<typeof parseCatalogLocationState>;
+  detail: ProjectDetail;
+  repositoryId: string;
+}) {
+  const [searchParameters, setSearchParameters] = useSearchParams();
+  const workspaceState = useMemo(
+    () => parseProjectWorkspaceState(searchParameters),
+    [searchParameters],
+  );
+  const canonicalParameters = useMemo(
+    () => serializeProjectWorkspaceState(workspaceState),
+    [workspaceState],
+  );
+  const { width: railWidth, setWidth: setRailWidth } = useWorkspaceRailWidth();
+  const [retryKey, setRetryKey] = useState(0);
+  const graph = useGraphProjection({
+    repositoryId,
+    generationId: detail.resolvedGenerationId,
+    view: workspaceState.view,
+    selectedSymbolId: workspaceState.selected?.startsWith("sym1_")
+      ? workspaceState.selected
+      : undefined,
+    relations: workspaceState.relations,
+    minimumConfidence: workspaceState.minConfidence,
+    budgetProfile: workspaceState.budgetProfile,
+    retryKey,
+  });
+
+  useEffect(() => {
+    if (canonicalParameters.toString() !== searchParameters.toString()) {
+      setSearchParameters(canonicalParameters, { replace: true });
+    }
+  }, [canonicalParameters, searchParameters, setSearchParameters]);
+
+  const selectedOrdinals = useMemo(() => {
+    const model = graph.model;
+    const selected = workspaceState.selected;
+    if (model === null || selected === undefined) {
+      return [];
+    }
+    const index = model.nodes.findIndex((node) => node.stableId === selected);
+    const ordinal = index < 0 ? undefined : model.nodeOrdinals[index];
+    return ordinal === undefined ? [] : [ordinal];
+  }, [graph.model, workspaceState.selected]);
+  const canOpenSeededView = workspaceState.selected?.startsWith("sym1_") === true;
+
+  function updateWorkspace(
+    update: (current: ProjectWorkspaceState) => ProjectWorkspaceState,
+    replace = false,
+  ) {
+    setSearchParameters(serializeProjectWorkspaceState(update(workspaceState)), { replace });
+  }
+
+  function selectGraphNode(ordinals: readonly number[]) {
+    const ordinal = ordinals[0];
+    const model = graph.model;
+    const pointIndex =
+      ordinal === undefined || model === null ? undefined : model.ordinalToPointIndex.get(ordinal);
+    const stableId =
+      pointIndex === undefined || model === null ? undefined : model.nodes[pointIndex]?.stableId;
+    updateWorkspace((current) => ({
+      ...current,
+      selected: stableId,
+      view:
+        stableId?.startsWith("sym1_") === true ||
+        (current.view !== "symbols" && current.view !== "neighborhood")
+          ? current.view
+          : "architecture",
+    }));
+  }
+
   return (
     <div className="workspace-frame">
       <header className="project-header">
-        <div>
+        <div className="project-header__identity">
           <Link className="back-link" state={catalogLocationState} to="/projects">
             <ArrowLeft size={14} aria-hidden="true" />
             Projects
           </Link>
-          <h1>{detail.displayName}</h1>
-          <code>{detail.repositoryId}</code>
+          <div>
+            <h1>{detail.displayName}</h1>
+            {detail.alias === null ? null : <span>{detail.alias}</span>}
+            <code title={detail.repositoryId}>{detail.repositoryId}</code>
+          </div>
+        </div>
+        <div className="project-header__status" aria-label="Project status">
+          <span className={`state-label state-label--${publicationTone(detail.publicationState)}`}>
+            {humanize(detail.publicationState)}
+          </span>
+          <span>{humanize(detail.lifecycleState)}</span>
         </div>
         <div className="project-header__actions">
           <label>
             <span>Generation</span>
             <select
-              value={generation}
+              value={workspaceState.generation}
               onChange={(event) => {
-                const next = new URLSearchParams(searchParameters);
-                next.set("generation", event.currentTarget.value);
-                setSearchParameters(next);
+                const generation = event.currentTarget.value;
+                updateWorkspace((current) => ({
+                  ...current,
+                  generation,
+                  view: "architecture",
+                  selected: undefined,
+                }));
               }}
             >
-              <option value="active">Active · {shortId(detail.activeGenerationId)}</option>
-              {generation === "active" ? null : (
+              <option value="active">Follow active · {shortId(detail.activeGenerationId)}</option>
+              {workspaceState.generation === "active" ? null : (
                 <option value={detail.resolvedGenerationId}>
                   Pinned · {shortId(detail.resolvedGenerationId)}
                 </option>
               )}
             </select>
           </label>
-          <Button size="sm" variant="ghost">
+          <Button
+            size="sm"
+            variant="ghost"
+            onPress={() => {
+              updateWorkspace(() => ({
+                ...defaultProjectWorkspaceState,
+                generation: workspaceState.generation,
+              }));
+            }}
+          >
             <RotateCcw size={15} aria-hidden="true" />
             Reset view
           </Button>
         </div>
       </header>
-      <div className="workspace-grid">
-        <aside className="workspace-rail">
-          <p className="eyebrow">Generation overview</p>
+
+      <div
+        className="workspace-grid"
+        style={{ "--workspace-rail-width": `${String(railWidth)}px` } as CSSProperties}
+      >
+        <aside className="workspace-rail" id="project-information">
+          <p className="eyebrow">Exact generation</p>
           <h2>{shortId(detail.resolvedGenerationId)}</h2>
+          <p className="workspace-generation-note">
+            {detail.resolvedGenerationId === detail.activeGenerationId
+              ? "This projection matches the active generation."
+              : "Historical projection pinned independently of the active pointer."}
+          </p>
           <dl className="generation-facts">
             <div>
               <dt>Publication</dt>
@@ -125,6 +246,92 @@ export function ProjectWorkspacePage() {
               <dd>{humanize(detail.semanticFreshness)}</dd>
             </div>
           </dl>
+
+          <fieldset className="workspace-view-selector">
+            <legend>Graph view</legend>
+            {(["architecture", "files", "symbols", "neighborhood"] as const).map((view) => (
+              <label key={view} title={viewAvailability(view, canOpenSeededView)}>
+                <input
+                  type="radio"
+                  name="graph-view"
+                  value={view}
+                  checked={workspaceState.view === view}
+                  disabled={(view === "symbols" || view === "neighborhood") && !canOpenSeededView}
+                  onChange={() => {
+                    updateWorkspace((current) => ({ ...current, view }));
+                  }}
+                />
+                <span>{humanize(view)}</span>
+              </label>
+            ))}
+            {!canOpenSeededView ? (
+              <small>Select a returned symbol to enable bounded symbol views.</small>
+            ) : null}
+          </fieldset>
+
+          <div className="workspace-filter-grid">
+            <label>
+              <span>Minimum confidence</span>
+              <select
+                value={workspaceState.minConfidence}
+                onChange={(event) => {
+                  const minimumConfidence = Number(
+                    event.currentTarget.value,
+                  ) as ProjectWorkspaceState["minConfidence"];
+                  updateWorkspace((current) => ({
+                    ...current,
+                    minConfidence: minimumConfidence,
+                  }));
+                }}
+              >
+                <option value={0}>All · 0+</option>
+                <option value={250}>25% · 250+</option>
+                <option value={500}>50% · 500+</option>
+                <option value={750}>75% · 750+</option>
+              </select>
+            </label>
+            <label>
+              <span>Projection budget</span>
+              <select
+                value={workspaceState.budgetProfile}
+                onChange={(event) => {
+                  const budgetProfile = event.currentTarget
+                    .value as ProjectWorkspaceState["budgetProfile"];
+                  updateWorkspace((current) => ({ ...current, budgetProfile }));
+                }}
+              >
+                <option value="compact">Compact</option>
+                <option value="balanced">Balanced</option>
+                <option value="expanded">Expanded</option>
+              </select>
+            </label>
+          </div>
+
+          {workspaceState.view === "symbols" || workspaceState.view === "neighborhood" ? (
+            <details className="workspace-relations">
+              <summary>Relation families · {workspaceState.relations.length}</summary>
+              <fieldset>
+                <legend>Server-side relation filter</legend>
+                {projectGraphRelationKinds.map((relation) => (
+                  <label key={relation}>
+                    <input
+                      type="checkbox"
+                      checked={workspaceState.relations.includes(relation)}
+                      onChange={(event) => {
+                        const next = event.currentTarget.checked
+                          ? [...workspaceState.relations, relation]
+                          : workspaceState.relations.filter((value) => value !== relation);
+                        if (next.length > 0) {
+                          updateWorkspace((current) => ({ ...current, relations: next }));
+                        }
+                      }}
+                    />
+                    {humanize(relation)}
+                  </label>
+                ))}
+              </fieldset>
+            </details>
+          ) : null}
 
           <div className="workspace-section">
             <div className="workspace-section__heading">
@@ -178,22 +385,74 @@ export function ProjectWorkspacePage() {
               </ul>
             )}
           </div>
-
-          <div className="workspace-section">
-            <h3>Projection controls</h3>
-            <p>
-              Architecture, file, and symbol filters activate after graph capability negotiation.
-            </p>
-          </div>
         </aside>
-        <section className="graph-placeholder" aria-label="Graph visualization">
-          <Network size={30} aria-hidden="true" />
-          <h2>Bounded graph projection not loaded</h2>
-          <p>
-            Generation {shortId(detail.resolvedGenerationId)} is pinned. The canvas opens only after
-            the daemon advertises the graph projection capability.
-          </p>
-        </section>
+        <WorkspaceResizer width={railWidth} onWidthChange={setRailWidth} />
+
+        <main className="graph-workspace" id="project-graph" tabIndex={-1}>
+          <a className="skip-graph-link" href="#graph-companion-title">
+            Skip graph canvas
+          </a>
+          <div className="graph-scope">
+            <span>Repository</span>
+            <strong>{detail.displayName}</strong>
+            <span aria-hidden="true">/</span>
+            <span>{humanize(workspaceState.view)}</span>
+            {workspaceState.selected === undefined ? null : (
+              <>
+                <span aria-hidden="true">/</span>
+                <code>{shortId(workspaceState.selected)}</code>
+              </>
+            )}
+          </div>
+
+          {graph.loading && graph.model === null ? (
+            <div className="graph-phase" aria-busy="true" role="status">
+              <RefreshCw className="spin" size={24} aria-hidden="true" />
+              <strong>Preparing bounded {humanize(workspaceState.view)} projection</strong>
+              <span>{shortId(detail.resolvedGenerationId)}</span>
+            </div>
+          ) : null}
+          {graph.failed ? (
+            <div className="graph-phase graph-phase--error" role="alert">
+              <TriangleAlert size={24} aria-hidden="true" />
+              <strong>Graph projection is unavailable</strong>
+              <span>
+                The daemon rejected, disconnected from, or could not validate this bounded view.
+              </span>
+              <Button
+                size="sm"
+                variant="primary"
+                onPress={() => {
+                  setRetryKey((current) => current + 1);
+                }}
+              >
+                Retry projection
+              </Button>
+            </div>
+          ) : null}
+          {graph.model === null ? null : (
+            <GraphViewport
+              key={graph.model.projectionToken}
+              model={graph.model}
+              layoutIdentity={{
+                repositoryId,
+                generationId: detail.resolvedGenerationId,
+                view: workspaceState.view,
+                scopeFingerprint: workspaceState.selected ?? "repository",
+                layoutVersion: "atlas-v1",
+              }}
+              view={workspaceState.view}
+              budgetProfile={workspaceState.budgetProfile}
+              loadingNextPage={graph.loadingNextPage}
+              selectedOrdinals={selectedOrdinals}
+              labelsVisible={workspaceState.labels}
+              onSelectionChange={selectGraphNode}
+              onLabelsVisibleChange={(labels) => {
+                updateWorkspace((current) => ({ ...current, labels }), true);
+              }}
+            />
+          )}
+        </main>
       </div>
     </div>
   );
@@ -215,4 +474,15 @@ function operationTone(state: string) {
     return "warning";
   }
   return "neutral";
+}
+
+function publicationTone(state: string) {
+  return state === "published" ? "success" : "warning";
+}
+
+function viewAvailability(view: GraphView, hasSymbolSeed: boolean) {
+  if ((view === "symbols" || view === "neighborhood") && !hasSymbolSeed) {
+    return "Select a symbol from the current projection first";
+  }
+  return `${humanize(view)} graph`;
 }

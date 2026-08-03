@@ -1,7 +1,10 @@
 // Builds small source-free graph pages and accumulated models for engine tests.
 // Fixtures preserve the same strict identifier, counter, and continuation contracts as production.
 
-import type { BrowserGraphNode } from "../src/features/graph/model/graph-contracts";
+import type {
+  BrowserGraphNode,
+  BrowserGraphPage,
+} from "../src/features/graph/model/graph-contracts";
 import type { GraphLayoutIdentity } from "../src/features/graph/model/graph-layout";
 import { GraphPageAccumulator } from "../src/features/graph/model/graph-page-accumulator";
 import type { GraphRenderModel } from "../src/features/graph/model/graph-model";
@@ -26,7 +29,7 @@ export const graphLayoutIdentity: GraphLayoutIdentity = {
 };
 
 /** Returns one of two ordered graph page wire fixtures. */
-export function graphPageFixture(pageOrdinal: 0 | 1 = 0) {
+export function graphPageFixture(pageOrdinal: 0 | 1 = 0): BrowserGraphPage {
   const firstPage = pageOrdinal === 0;
   return {
     schema: "rootlight.web-graph-page/1" as const,
@@ -126,7 +129,12 @@ export function graphModelFixture(pageCount: 1 | 2 = 2): GraphRenderModel {
   return accumulator.snapshot();
 }
 
-function graphNode(ordinal: number, label: string, path: string, kind: BrowserGraphNode["kind"]) {
+function graphNode(
+  ordinal: number,
+  label: string,
+  path: string,
+  kind: BrowserGraphNode["kind"],
+): BrowserGraphNode {
   return {
     ordinal,
     stableId: `${kind}:${label}`,
