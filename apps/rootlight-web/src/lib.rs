@@ -75,7 +75,7 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     }
     let state = app::AppState::new(
         assets,
-        Arc::clone(&daemon),
+        daemon.client(),
         Arc::clone(&sessions),
         Arc::clone(&filesystem),
         Arc::clone(&indexes),
@@ -95,11 +95,15 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     if let Ok(timeout) = RequestTimeout::try_from(Duration::from_secs(2)) {
         for handle in graphs.clear() {
             let _ = daemon
+                .client()
                 .graph_projection_release(handle.projection(), timeout)
                 .await;
         }
     }
-    result
+    drop(state);
+    let shutdown = daemon.shutdown().await;
+    result?;
+    shutdown
 }
 
 async fn shutdown_signal() {

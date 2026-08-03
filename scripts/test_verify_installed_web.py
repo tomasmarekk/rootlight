@@ -93,6 +93,25 @@ class InstalledWebSmokeTests(unittest.TestCase):
                 )
             run.assert_not_called()
 
+    def test_shutdown_probe_waits_for_owned_daemon_discovery_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            discovery = runtime / "daemon.json"
+            discovery.write_text("{}", encoding="utf-8")
+            environment = {"ROOTLIGHT_RUNTIME_DIR": str(runtime)}
+
+            def remove_discovery(_seconds: float) -> None:
+                discovery.unlink()
+
+            with mock.patch.object(
+                installed_web.time,
+                "sleep",
+                side_effect=remove_discovery,
+            ) as sleep:
+                installed_web.wait_for_daemon_shutdown(environment)
+
+            sleep.assert_called_once()
+
     def test_archive_extraction_and_manifest_identity_are_exact(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

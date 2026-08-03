@@ -5,9 +5,9 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use rootlight_client::{
     ChangeImpact, Client, ClientError, ConnectPolicy, DiagnosticsQuick, EffectiveBudget,
     EffectiveBudgetLimits, GenerationSelector, GraphProjectionContinuation, GraphProjectionId,
-    GraphProjectionPage, GraphProjectionRequest, Health, OperationId, RepositoryCatalogPage,
-    RepositoryCatalogPageRequest, RepositoryId, RepositoryIndex, RepositoryIndexMode,
-    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
+    GraphProjectionPage, GraphProjectionRequest, Health, OperationId, OwnedDaemon,
+    RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryId, RepositoryIndex,
+    RepositoryIndexMode, RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
     RepositoryStatusRequest, RequestOptions, RequestTimeout, SourceRead, SourceReadOptions,
     SourceReference, SupportBundle, SymbolExplain, SymbolId, SymbolRelationships,
 };
@@ -619,27 +619,70 @@ async fn connect_once(
     .map_err(|_| WebError::TaskFailed)?
 }
 
+async fn connect_owned_once(
+    paths: RuntimePaths,
+    client_instance_id: [u8; 16],
+) -> Result<(Arc<Client>, Option<OwnedDaemon>), WebError> {
+    tokio::task::spawn_blocking(move || {
+        Client::connect_or_start_owned(&paths, client_instance_id, ConnectPolicy::StartIfMissing)
+            .map(|(client, owned)| (Arc::new(client), owned))
+            .map_err(|_| WebError::DaemonUnavailable)
+    })
+    .await
+    .map_err(|_| WebError::TaskFailed)?
+}
+
+/// A resilient daemon client plus exact ownership when this host started it.
+pub(crate) struct DaemonConnection {
+    client: Arc<dyn DaemonClient>,
+    owned: Option<OwnedDaemon>,
+}
+
+impl DaemonConnection {
+    /// Clones the resilient client used by the HTTP application state.
+    pub(crate) fn client(&self) -> Arc<dyn DaemonClient> {
+        Arc::clone(&self.client)
+    }
+
+    /// Stops and reaps the daemon only when this web host won startup.
+    pub(crate) async fn shutdown(self) -> Result<(), WebError> {
+        drop(self.client);
+        let Some(owned) = self.owned else {
+            return Ok(());
+        };
+        tokio::task::spawn_blocking(move || owned.shutdown())
+            .await
+            .map_err(|_| WebError::TaskFailed)?
+            .map_err(|_| WebError::DaemonUnavailable)
+    }
+}
+
 /// Connects a web-session client to the authenticated local daemon.
 ///
 /// The synchronous discovery/start protocol runs on Tokio's blocking pool so
-/// it never occupies an async HTTP worker.
+/// it never occupies an async HTTP worker. When this process wins daemon
+/// startup, the returned connection retains exact child ownership for bounded
+/// shutdown with the web host.
 ///
 /// # Errors
 ///
 /// Returns a source-free [`WebError`] when randomness, discovery, daemon
 /// startup, or the blocking task boundary fails.
-pub(crate) async fn connect(paths: RuntimePaths) -> Result<Arc<dyn DaemonClient>, WebError> {
+pub(crate) async fn connect(paths: RuntimePaths) -> Result<DaemonConnection, WebError> {
     let mut client_instance_id = [0_u8; 16];
     client_instance_id[..WEB_CLIENT_INSTANCE_PREFIX.len()]
         .copy_from_slice(&WEB_CLIENT_INSTANCE_PREFIX);
     getrandom::fill(&mut client_instance_id[WEB_CLIENT_INSTANCE_PREFIX.len()..])
         .map_err(|_| WebError::RandomUnavailable)?;
-    let initial = connect_once(paths.clone(), client_instance_id).await?;
+    let (initial, owned) = connect_owned_once(paths.clone(), client_instance_id).await?;
     let reconnect = Arc::new(RuntimeReconnect {
         paths,
         client_instance_id,
     });
-    Ok(Arc::new(ResilientDaemonClient::new(initial, reconnect)))
+    Ok(DaemonConnection {
+        client: Arc::new(ResilientDaemonClient::new(initial, reconnect)),
+        owned,
+    })
 }
 
 #[cfg(test)]

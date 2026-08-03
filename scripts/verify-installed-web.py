@@ -209,7 +209,7 @@ def smoke_temporary_parent(platform: str) -> Path | None:
 def wait_for_daemon(
     rootlight: Path,
     environment: dict[str, str],
-    process: subprocess.Popen[bytes],
+    process: subprocess.Popen[str],
 ) -> None:
     discovery = Path(environment["ROOTLIGHT_RUNTIME_DIR"]) / "daemon.json"
     deadline = time.monotonic() + START_TIMEOUT_SECONDS
@@ -238,6 +238,16 @@ def wait_for_daemon(
             pass
         time.sleep(0.1)
     raise TimeoutError("installed daemon did not become ready")
+
+
+def wait_for_daemon_shutdown(environment: dict[str, str]) -> None:
+    discovery = Path(environment["ROOTLIGHT_RUNTIME_DIR"]) / "daemon.json"
+    deadline = time.monotonic() + STOP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if not discovery.exists():
+            return
+        time.sleep(0.1)
+    raise TimeoutError("installed web command did not stop its owned daemon")
 
 
 def start_web(
@@ -356,23 +366,6 @@ def stop_web(process: subprocess.Popen[str]) -> None:
         ) from error
 
 
-def stop_daemon(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        raise RuntimeError("installed daemon exited before shutdown")
-    assert process.stdin is not None
-    process.stdin.write(b"shutdown\n")
-    process.stdin.flush()
-    process.stdin.close()
-    try:
-        return_code = process.wait(timeout=STOP_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired as error:
-        process.kill()
-        process.wait()
-        raise TimeoutError("installed daemon did not stop after shutdown") from error
-    if return_code != 0:
-        raise RuntimeError("installed daemon shutdown failed")
-
-
 def main() -> None:
     args = parse_args()
     if (
@@ -404,32 +397,21 @@ def main() -> None:
         verify_installed_hashes(package_root, identities)
         suffix = ".exe" if os.name == "nt" else ""
         rootlight = package_root / "bin" / f"rootlight{suffix}"
-        daemon = package_root / "bin" / f"rootlight-daemon{suffix}"
         environment = process_environment(root)
-        daemon_process = subprocess.Popen(
-            [daemon, "--supervised-stdio"],
-            env=environment,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
         web_process: subprocess.Popen[str] | None = None
         try:
-            wait_for_daemon(rootlight, environment, daemon_process)
             web_process, origin, secret = start_web(rootlight, environment)
+            wait_for_daemon(rootlight, environment, web_process)
             exercise_session(
                 origin, secret, identities["share/rootlight/web/index.html"]
             )
             stop_web(web_process)
             web_process = None
-            stop_daemon(daemon_process)
+            wait_for_daemon_shutdown(environment)
         finally:
             if web_process is not None and web_process.poll() is None:
                 web_process.kill()
                 web_process.wait()
-            if daemon_process.poll() is None:
-                daemon_process.kill()
-                daemon_process.wait()
 
         report = {
             "schema": REPORT_SCHEMA,
