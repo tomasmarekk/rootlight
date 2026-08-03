@@ -104,8 +104,10 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-web"
 allowed_internal_dependencies = [
+  "rootlight-cancel",
   "rootlight-client",
   "rootlight-runtime",
+  "rootlight-vfs",
 ]
 allow_build_script = false
 

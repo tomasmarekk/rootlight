@@ -49,12 +49,26 @@ pub(crate) struct AuthenticatedSession {
 }
 
 impl AuthenticatedSession {
+    pub(crate) const fn identity(&self) -> SessionIdentity {
+        SessionIdentity(self.key)
+    }
+
     pub(crate) fn csrf_token(&self) -> String {
         BASE64URL_NOPAD.encode(&self.csrf)
     }
 
     pub(crate) fn validate_csrf(&self, encoded: &str) -> bool {
         decode_secret(encoded).is_some_and(|candidate| bool::from(self.csrf.ct_eq(&candidate)))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionIdentity([u8; 32]);
+
+#[cfg(test)]
+impl SessionIdentity {
+    pub(crate) const fn from_test_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 }
 
@@ -156,6 +170,13 @@ impl SessionRegistry {
         })
     }
 
+    pub(crate) fn expire(&self, now: Instant) -> Vec<SessionIdentity> {
+        let Ok(mut state) = self.state.lock() else {
+            return Vec::new();
+        };
+        reap_expired(&mut state, now)
+    }
+
     pub(crate) fn logout(&self, session: &AuthenticatedSession) {
         if let Ok(mut state) = self.state.lock()
             && let Some(index) = constant_time_session_index(&state.sessions, &session.key)
@@ -213,8 +234,9 @@ fn constant_time_session_index(records: &[SessionRecord], candidate: &[u8; 32]) 
         })
 }
 
-fn reap_expired(state: &mut RegistryState, now: Instant) {
+fn reap_expired(state: &mut RegistryState, now: Instant) -> Vec<SessionIdentity> {
     state.bootstraps.retain(|record| record.expires_at > now);
+    let mut expired = Vec::new();
     state.sessions.retain(|record| {
         let idle_valid = now
             .checked_duration_since(record.last_seen)
@@ -222,8 +244,13 @@ fn reap_expired(state: &mut RegistryState, now: Instant) {
         let lifetime_valid = now
             .checked_duration_since(record.created_at)
             .is_some_and(|lifetime| lifetime < SESSION_ABSOLUTE_TTL);
-        idle_valid && lifetime_valid
+        let valid = idle_valid && lifetime_valid;
+        if !valid {
+            expired.push(SessionIdentity(record.key));
+        }
+        valid
     });
+    expired
 }
 
 #[cfg(test)]

@@ -23,6 +23,7 @@ use crate::{
     api,
     assets::{Asset, AssetInventory},
     daemon::DaemonClient,
+    filesystem_registry::FilesystemRegistry,
     security::{self, SecurityPolicy},
     session::{
         AuthenticatedSession, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, SessionRegistry,
@@ -38,6 +39,7 @@ pub(crate) struct AppState {
     assets: AssetInventory,
     daemon: Arc<dyn DaemonClient>,
     sessions: Arc<SessionRegistry>,
+    filesystem: Arc<FilesystemRegistry>,
 }
 
 impl AppState {
@@ -45,31 +47,56 @@ impl AppState {
         assets: AssetInventory,
         daemon: Arc<dyn DaemonClient>,
         sessions: Arc<SessionRegistry>,
+        filesystem: Arc<FilesystemRegistry>,
     ) -> Self {
         Self {
             assets,
             daemon,
             sessions,
+            filesystem,
         }
     }
 
     pub(crate) fn daemon(&self) -> &Arc<dyn DaemonClient> {
         &self.daemon
     }
+
+    pub(crate) fn filesystem(&self) -> &Arc<FilesystemRegistry> {
+        &self.filesystem
+    }
+
+    fn reap_expired_session_resources(&self, now: Instant) {
+        let expired = self.sessions.expire(now);
+        self.filesystem.clear_sessions(&expired);
+        self.filesystem.reap(now);
+    }
 }
 
 pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
+    let filesystem_mutations = Router::new()
+        .route(
+            "/api/v1/filesystem/open-path",
+            post(api::filesystem::open_path),
+        )
+        .route("/api/v1/filesystem/browse", post(api::filesystem::browse))
+        .route(
+            "/api/v1/filesystem/preflight-index",
+            post(api::filesystem::preflight_index),
+        )
+        .route_layer(middleware::from_fn(require_mutation_csrf));
     let protected_api = Router::new()
         .route(
             "/api/v1/session",
             get(session_status).delete(logout_session),
         )
         .route("/api/v1/health", get(health))
+        .route("/api/v1/filesystem/roots", get(api::filesystem::roots))
         .route("/api/v1/projects", get(api::projects::list))
         .route(
             "/api/v1/projects/{repository_id}",
             get(api::projects::detail),
         )
+        .merge(filesystem_mutations)
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_session,
@@ -93,8 +120,19 @@ async fn require_session(
     mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let session = authenticate(&state.sessions, request.headers())?;
+    let now = Instant::now();
+    state.reap_expired_session_resources(now);
+    let session = authenticate_at(&state.sessions, request.headers(), now)?;
     request.extensions_mut().insert(session);
+    Ok(next.run(request).await)
+}
+
+async fn require_mutation_csrf(request: Request, next: Next) -> Result<Response, ApiError> {
+    let session = request
+        .extensions()
+        .get::<AuthenticatedSession>()
+        .ok_or_else(ApiError::unauthorized)?;
+    require_csrf(session, request.headers())?;
     Ok(next.run(request).await)
 }
 
@@ -146,6 +184,34 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             code: "invalid_request",
+        }
+    }
+
+    pub(crate) const fn invalid_filesystem_request() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_filesystem_request",
+        }
+    }
+
+    pub(crate) const fn filesystem_capability_invalid() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "filesystem_capability_invalid",
+        }
+    }
+
+    pub(crate) const fn filesystem_limit_reached() -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "filesystem_limit_reached",
+        }
+    }
+
+    pub(crate) const fn filesystem_unavailable() -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "filesystem_unavailable",
         }
     }
 
@@ -201,9 +267,11 @@ async fn bootstrap_session(
     State(state): State<AppState>,
     Json(request): Json<BootstrapRequest>,
 ) -> Result<Response, ApiError> {
+    let now = Instant::now();
+    state.reap_expired_session_resources(now);
     let credentials = state
         .sessions
-        .consume_bootstrap(&request.secret, Instant::now())
+        .consume_bootstrap(&request.secret, now)
         .ok_or_else(ApiError::unauthorized)?;
     let cookie = format!(
         "{SESSION_COOKIE_NAME}={}; Path=/; HttpOnly; SameSite=Strict",
@@ -236,6 +304,7 @@ async fn logout_session(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     require_csrf(&session, &headers)?;
+    state.filesystem.clear_session(session.identity());
     state.sessions.logout(&session);
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
@@ -349,13 +418,14 @@ fn accepts_html(headers: &HeaderMap) -> bool {
         })
 }
 
-pub(crate) fn authenticate(
+fn authenticate_at(
     sessions: &SessionRegistry,
     headers: &HeaderMap,
+    now: Instant,
 ) -> Result<AuthenticatedSession, ApiError> {
     let cookie = session_cookie(headers).ok_or_else(ApiError::unauthorized)?;
     sessions
-        .authenticate(cookie, Instant::now())
+        .authenticate(cookie, now)
         .ok_or_else(ApiError::unauthorized)
 }
 
@@ -490,7 +560,12 @@ mod tests {
             .expect("bootstrap issues")
             .encoded()
             .to_owned();
-        let state = AppState::new(assets, Arc::new(FakeDaemon), Arc::clone(&sessions));
+        let state = AppState::new(
+            assets,
+            Arc::new(FakeDaemon),
+            Arc::clone(&sessions),
+            Arc::new(FilesystemRegistry::new()),
+        );
         let app = router(state, SecurityPolicy::loopback(43_127));
         let bootstrap_body =
             serde_json::to_vec(&json!({ "secret": bootstrap })).expect("bootstrap body serializes");
@@ -559,6 +634,43 @@ mod tests {
             .as_str()
             .expect("csrf token returns")
             .to_owned();
+
+        let unauthenticated_filesystem_mutation = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/filesystem/open-path")
+            .header(HOST, "127.0.0.1:43127")
+            .header("origin", "http://127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from("{"))
+            .expect("unauthenticated filesystem request builds");
+        assert_eq!(
+            app.clone()
+                .oneshot(unauthenticated_filesystem_mutation)
+                .await
+                .expect("unauthenticated filesystem response returns")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let filesystem_mutation_without_csrf = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/filesystem/open-path")
+            .header(HOST, "127.0.0.1:43127")
+            .header("origin", "http://127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .header(CONTENT_TYPE, "application/json")
+            .header(COOKIE, &cookie)
+            .body(Body::from("{"))
+            .expect("filesystem request without CSRF builds");
+        assert_eq!(
+            app.clone()
+                .oneshot(filesystem_mutation_without_csrf)
+                .await
+                .expect("filesystem CSRF rejection returns")
+                .status(),
+            StatusCode::FORBIDDEN
+        );
 
         let replay = Request::builder()
             .method(Method::POST)

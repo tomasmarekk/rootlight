@@ -9,6 +9,7 @@ mod browser;
 mod config;
 mod daemon;
 mod error;
+mod filesystem_registry;
 mod security;
 mod session;
 
@@ -52,19 +53,26 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     }
     let policy = security::SecurityPolicy::loopback(address.port());
     let sessions = Arc::new(session::SessionRegistry::new());
+    let filesystem = Arc::new(filesystem_registry::FilesystemRegistry::new());
     let bootstrap = sessions.issue_bootstrap(Instant::now())?;
     let url = format!("{}/#bootstrap={}", policy.origin(), bootstrap.encoded());
     println!("Rootlight Web UI: {url}");
     if config.open_browser() {
         let _ = browser::open(&url);
     }
-    let state = app::AppState::new(assets, daemon, Arc::clone(&sessions));
+    let state = app::AppState::new(
+        assets,
+        daemon,
+        Arc::clone(&sessions),
+        Arc::clone(&filesystem),
+    );
     let router = app::router(state, policy);
     let result = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|_| WebError::ServerFailed);
     sessions.clear();
+    filesystem.clear();
     result
 }
 

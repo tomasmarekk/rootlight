@@ -9,11 +9,14 @@ license.workspace = true
 [dependencies]
 axum.workspace = true
 data-encoding.workspace = true
+directories.workspace = true
 form_urlencoded.workspace = true
 getrandom.workspace = true
 mime_guess.workspace = true
+rootlight-cancel = { path = "../../crates/rootlight-cancel" }
 rootlight-client = { path = "../../crates/rootlight-client" }
 rootlight-runtime = { path = "../../crates/rootlight-runtime" }
+rootlight-vfs = { path = "../../crates/rootlight-vfs" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
