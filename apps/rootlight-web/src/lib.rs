@@ -106,8 +106,35 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     shutdown
 }
 
+#[cfg(not(windows))]
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(windows)]
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::windows::ctrl_c().ok();
+    let ctrl_break = tokio::signal::windows::ctrl_break().ok();
+    tokio::select! {
+        () = receive_ctrl_c(ctrl_c) => {}
+        () = receive_ctrl_break(ctrl_break) => {}
+    }
+}
+
+#[cfg(windows)]
+async fn receive_ctrl_c(signal: Option<tokio::signal::windows::CtrlC>) {
+    let Some(mut signal) = signal else {
+        std::future::pending().await
+    };
+    let _ = signal.recv().await;
+}
+
+#[cfg(windows)]
+async fn receive_ctrl_break(signal: Option<tokio::signal::windows::CtrlBreak>) {
+    let Some(mut signal) = signal else {
+        std::future::pending().await
+    };
+    let _ = signal.recv().await;
 }
 
 #[cfg(test)]
