@@ -1,9 +1,12 @@
 //! Persistent local Web UI process discovery and authenticated lifecycle control.
 
 use std::{
+    env,
+    ffi::OsString,
+    fs,
     io::{self, Read as _, Write as _},
     net::{Ipv4Addr, SocketAddrV4, TcpStream},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -23,6 +26,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct WebServiceStatus {
     pub(crate) schema_version: u16,
+    pub(crate) registered: bool,
     pub(crate) running: bool,
     pub(crate) origin: &'static str,
     pub(crate) pid: Option<u32>,
@@ -32,6 +36,7 @@ impl WebServiceStatus {
     fn stopped() -> Self {
         Self {
             schema_version: 1,
+            registered: registration_exists(),
             running: false,
             origin: ORIGIN,
             pid: None,
@@ -41,6 +46,7 @@ impl WebServiceStatus {
     fn running(pid: u32) -> Self {
         Self {
             schema_version: 1,
+            registered: registration_exists(),
             running: true,
             origin: ORIGIN,
             pid: Some(pid),
@@ -66,6 +72,8 @@ pub(crate) enum WebServiceError {
     InvalidResponse,
     #[error("browser launch failed")]
     Browser(#[source] io::Error),
+    #[error("Web UI login registration failed")]
+    Registration(#[source] io::Error),
 }
 
 pub(crate) fn status(paths: &RuntimePaths) -> Result<WebServiceStatus, WebServiceError> {
@@ -134,6 +142,20 @@ pub(crate) fn restart(
 ) -> Result<WebServiceStatus, WebServiceError> {
     stop(paths)?;
     start(paths, executable)
+}
+
+pub(crate) fn install(
+    paths: &RuntimePaths,
+    executable: &Path,
+) -> Result<WebServiceStatus, WebServiceError> {
+    register_autostart(executable)?;
+    start(paths, executable)
+}
+
+pub(crate) fn uninstall(paths: &RuntimePaths) -> Result<WebServiceStatus, WebServiceError> {
+    stop(paths)?;
+    unregister_autostart()?;
+    Ok(WebServiceStatus::stopped())
 }
 
 pub(crate) fn open_browser() -> Result<(), WebServiceError> {
@@ -288,6 +310,420 @@ fn parse_http_response(mut bytes: Vec<u8>) -> Result<HttpResponse, WebServiceErr
     Ok(HttpResponse { status, body })
 }
 
+#[cfg(windows)]
+const WINDOWS_TASK_NAME: &str = "Rootlight Web UI";
+#[cfg(windows)]
+const WINDOWS_STARTUP_FILE: &str = "Rootlight Web UI.vbs";
+#[cfg(target_os = "linux")]
+const LINUX_UNIT_NAME: &str = "rootlight-web.service";
+#[cfg(target_os = "linux")]
+const LINUX_DESKTOP_FILE: &str = "rootlight-web.desktop";
+#[cfg(target_os = "macos")]
+const MACOS_LABEL: &str = "dev.tomasmarekk.rootlight.web";
+
+#[cfg(windows)]
+fn register_autostart(executable: &Path) -> Result<(), WebServiceError> {
+    const SCRIPT: &str = "$identity=[System.Security.Principal.WindowsIdentity]::GetCurrent().Name;\
+        $action=New-ScheduledTaskAction -Execute $env:ROOTLIGHT_SERVICE_EXECUTABLE \
+        -Argument '--service';\
+        $trigger=New-ScheduledTaskTrigger -AtLogOn -User $identity;\
+        $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) \
+        -MultipleInstances IgnoreNew -RestartCount 3 \
+        -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable \
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries;\
+        $principal=New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive \
+        -RunLevel Limited;\
+        Register-ScheduledTask -TaskName 'Rootlight Web UI' -Action $action -Trigger $trigger \
+        -Settings $settings -Principal $principal -Force | Out-Null";
+    if powershell(SCRIPT, Some(executable.as_os_str())).is_ok() {
+        remove_file_if_present(&windows_startup_path()?)?;
+        return Ok(());
+    }
+    let executable = executable.to_str().ok_or_else(|| {
+        WebServiceError::Registration(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "service executable path is not Unicode",
+        ))
+    })?;
+    let script = format!(
+        "CreateObject(\"Wscript.Shell\").Run Chr(34) & \"{}\" & Chr(34) & \" --service\", 0, False\r\n",
+        executable.replace('"', "\"\"")
+    );
+    write_registration_file(&windows_startup_path()?, script.as_bytes())
+}
+
+#[cfg(windows)]
+fn unregister_autostart() -> Result<(), WebServiceError> {
+    const SCRIPT: &str = "$task=Get-ScheduledTask -TaskName 'Rootlight Web UI' \
+        -ErrorAction SilentlyContinue;if($null -ne $task){\
+        Unregister-ScheduledTask -TaskName 'Rootlight Web UI' -Confirm:$false}";
+    let _ = powershell(SCRIPT, None);
+    remove_file_if_present(&windows_startup_path()?)
+}
+
+#[cfg(windows)]
+fn registration_exists() -> bool {
+    let mut command = Command::new("schtasks.exe");
+    command
+        .args(["/Query", "/TN", WINDOWS_TASK_NAME])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    hide_windows_command(&mut command);
+    command.status().is_ok_and(|status| status.success())
+        || windows_startup_path().is_ok_and(|path| path.is_file())
+}
+
+#[cfg(windows)]
+fn windows_startup_path() -> Result<PathBuf, WebServiceError> {
+    let app_data = required_absolute_env_path("APPDATA")?;
+    Ok(app_data
+        .join("Microsoft")
+        .join("Windows")
+        .join("Start Menu")
+        .join("Programs")
+        .join("Startup")
+        .join(WINDOWS_STARTUP_FILE))
+}
+
+#[cfg(windows)]
+fn powershell(script: &str, executable: Option<&std::ffi::OsStr>) -> Result<(), WebServiceError> {
+    let mut command = Command::new("powershell.exe");
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(executable) = executable {
+        command.env("ROOTLIGHT_SERVICE_EXECUTABLE", executable);
+    }
+    hide_windows_command(&mut command);
+    let status = command.status().map_err(WebServiceError::Registration)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(WebServiceError::Registration(io::Error::other(
+            "PowerShell service registration failed",
+        )))
+    }
+}
+
+#[cfg(windows)]
+fn hide_windows_command(command: &mut Command) {
+    use std::os::windows::process::CommandExt as _;
+    use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+    command.creation_flags(CREATE_NO_WINDOW.0);
+}
+
+#[cfg(target_os = "linux")]
+fn register_autostart(executable: &Path) -> Result<(), WebServiceError> {
+    let config = linux_config_home()?;
+    let unit_path = config.join("systemd").join("user").join(LINUX_UNIT_NAME);
+    let executable = executable.to_str().ok_or_else(|| {
+        WebServiceError::Registration(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "service executable path is not Unicode",
+        ))
+    })?;
+    let unit = format!(
+        "[Unit]\nDescription=Rootlight local Web UI\nAfter=graphical-session.target\n\n\
+         [Service]\nType=simple\nExecStart={} --service\nRestart=on-failure\nRestartSec=2\n\n\
+         [Install]\nWantedBy=default.target\n",
+        systemd_quote(executable)
+    );
+    write_registration_file(&unit_path, unit.as_bytes())?;
+    enable_linux_unit(&unit_path)?;
+
+    let desktop_path = config.join("autostart").join(LINUX_DESKTOP_FILE);
+    let desktop = format!(
+        "[Desktop Entry]\nType=Application\nName=Rootlight\nComment=Rootlight local Web UI\n\
+         Exec={} --service\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+        desktop_quote(executable)
+    );
+    write_registration_file(&desktop_path, desktop.as_bytes())?;
+    let _ = Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status();
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn unregister_autostart() -> Result<(), WebServiceError> {
+    let config = linux_config_home()?;
+    let _ = Command::new("systemctl")
+        .args(["--user", "disable", "--now", LINUX_UNIT_NAME])
+        .status();
+    remove_linux_unit_link(&config)?;
+    remove_file_if_present(&config.join("systemd").join("user").join(LINUX_UNIT_NAME))?;
+    remove_file_if_present(&config.join("autostart").join(LINUX_DESKTOP_FILE))?;
+    let _ = Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status();
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn registration_exists() -> bool {
+    linux_config_home().is_ok_and(|config| {
+        config
+            .join("systemd")
+            .join("user")
+            .join(LINUX_UNIT_NAME)
+            .is_file()
+            || config.join("autostart").join(LINUX_DESKTOP_FILE).is_file()
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_config_home() -> Result<PathBuf, WebServiceError> {
+    match env::var_os("XDG_CONFIG_HOME") {
+        Some(value) if !value.is_empty() => checked_absolute_path(value),
+        _ => Ok(required_absolute_env_path("HOME")?.join(".config")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn enable_linux_unit(unit_path: &Path) -> Result<(), WebServiceError> {
+    let config = linux_config_home()?;
+    let wants = config
+        .join("systemd")
+        .join("user")
+        .join("default.target.wants");
+    fs::create_dir_all(&wants).map_err(WebServiceError::Registration)?;
+    let link = wants.join(LINUX_UNIT_NAME);
+    let expected = Path::new("..").join(LINUX_UNIT_NAME);
+    match fs::symlink_metadata(&link) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if fs::read_link(&link).map_err(WebServiceError::Registration)? != expected {
+                return Err(WebServiceError::Registration(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "foreign systemd unit link exists",
+                )));
+            }
+        }
+        Ok(_) => {
+            return Err(WebServiceError::Registration(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "foreign systemd unit link exists",
+            )));
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            use std::os::unix::fs::symlink;
+            symlink(&expected, &link).map_err(WebServiceError::Registration)?;
+        }
+        Err(source) => return Err(WebServiceError::Registration(source)),
+    }
+    if !unit_path.is_file() {
+        return Err(WebServiceError::Registration(io::Error::new(
+            io::ErrorKind::NotFound,
+            "systemd unit is unavailable",
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn remove_linux_unit_link(config: &Path) -> Result<(), WebServiceError> {
+    let link = config
+        .join("systemd")
+        .join("user")
+        .join("default.target.wants")
+        .join(LINUX_UNIT_NAME);
+    match fs::symlink_metadata(&link) {
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                && fs::read_link(&link).map_err(WebServiceError::Registration)?
+                    == Path::new("..").join(LINUX_UNIT_NAME) =>
+        {
+            fs::remove_file(link).map_err(WebServiceError::Registration)
+        }
+        Ok(_) => Err(WebServiceError::Registration(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "foreign systemd unit link cannot be removed",
+        ))),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(WebServiceError::Registration(source)),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn register_autostart(executable: &Path) -> Result<(), WebServiceError> {
+    let executable = executable.to_str().ok_or_else(|| {
+        WebServiceError::Registration(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "service executable path is not Unicode",
+        ))
+    })?;
+    let plist = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\"><dict>\n<key>Label</key><string>{MACOS_LABEL}</string>\n\
+         <key>ProgramArguments</key><array><string>{}</string><string>--service</string></array>\n\
+         <key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict>\
+         <key>SuccessfulExit</key><false/></dict>\n<key>ThrottleInterval</key><integer>5</integer>\n\
+         <key>StandardOutPath</key><string>/dev/null</string>\n\
+         <key>StandardErrorPath</key><string>/dev/null</string>\n</dict></plist>\n",
+        xml_escape(executable)
+    );
+    let path = macos_launch_agent_path()?;
+    write_registration_file(&path, plist.as_bytes())?;
+    if let Ok(domain) = macos_launch_domain() {
+        let _ = Command::new("launchctl")
+            .args(["bootout", &domain])
+            .arg(&path)
+            .status();
+        let _ = Command::new("launchctl")
+            .args(["bootstrap", &domain])
+            .arg(&path)
+            .status();
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn unregister_autostart() -> Result<(), WebServiceError> {
+    let path = macos_launch_agent_path()?;
+    if let Ok(domain) = macos_launch_domain() {
+        let _ = Command::new("launchctl")
+            .args(["bootout", &domain])
+            .arg(&path)
+            .status();
+    }
+    remove_file_if_present(&path)
+}
+
+#[cfg(target_os = "macos")]
+fn registration_exists() -> bool {
+    macos_launch_agent_path().is_ok_and(|path| path.is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_launch_agent_path() -> Result<PathBuf, WebServiceError> {
+    Ok(required_absolute_env_path("HOME")?
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{MACOS_LABEL}.plist")))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_launch_domain() -> Result<String, WebServiceError> {
+    let output = Command::new("id")
+        .arg("-u")
+        .output()
+        .map_err(WebServiceError::Registration)?;
+    if !output.status.success() {
+        return Err(WebServiceError::Registration(io::Error::other(
+            "current user identifier is unavailable",
+        )));
+    }
+    let uid = std::str::from_utf8(&output.stdout)
+        .ok()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .ok_or_else(|| {
+            WebServiceError::Registration(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "current user identifier is invalid",
+            ))
+        })?;
+    Ok(format!("gui/{uid}"))
+}
+
+fn write_registration_file(path: &Path, bytes: &[u8]) -> Result<(), WebServiceError> {
+    let parent = path.parent().ok_or_else(|| {
+        WebServiceError::Registration(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "registration path has no parent",
+        ))
+    })?;
+    fs::create_dir_all(parent).map_err(WebServiceError::Registration)?;
+    if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.file_type().is_file()) {
+        return Err(WebServiceError::Registration(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "registration path is not a regular file",
+        )));
+    }
+    fs::write(path, bytes).map_err(WebServiceError::Registration)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(WebServiceError::Registration)?;
+    }
+    Ok(())
+}
+
+fn remove_file_if_present(path: &Path) -> Result<(), WebServiceError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            fs::remove_file(path).map_err(WebServiceError::Registration)
+        }
+        Ok(_) => Err(WebServiceError::Registration(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "foreign registration resource cannot be removed",
+        ))),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(WebServiceError::Registration(source)),
+    }
+}
+
+fn required_absolute_env_path(name: &str) -> Result<PathBuf, WebServiceError> {
+    let value = env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            WebServiceError::Registration(io::Error::new(
+                io::ErrorKind::NotFound,
+                "required user directory is unavailable",
+            ))
+        })?;
+    checked_absolute_path(value)
+}
+
+fn checked_absolute_path(value: OsString) -> Result<PathBuf, WebServiceError> {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(WebServiceError::Registration(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "user directory is not absolute",
+        )))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn systemd_quote(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('%', "%%")
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(target_os = "macos")]
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProbeResponse {
@@ -317,6 +753,7 @@ mod tests {
             WebServiceStatus::stopped(),
             WebServiceStatus {
                 schema_version: 1,
+                registered: registration_exists(),
                 running: false,
                 origin: "http://127.0.0.1:43127",
                 pid: None,

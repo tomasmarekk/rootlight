@@ -95,7 +95,7 @@ Repository commands:
 
 Service commands:
   web [--no-open]
-  service <start|status|stop|restart>
+  service <install|start|status|stop|restart|uninstall>
   health [--json]
   diagnostics quick
   support-bundle --output <file>
@@ -288,13 +288,15 @@ fn execute_web_service(arguments: &[std::ffi::OsString]) -> Result<CommandResult
     let status = match arguments {
         [command] if command == "status" => web_service::status(&paths)?,
         [command] if command == "stop" => web_service::stop(&paths)?,
-        [command] if command == "start" || command == "restart" => {
+        [command] if command == "uninstall" => web_service::uninstall(&paths)?,
+        [command] if command == "install" || command == "start" || command == "restart" => {
             let current = env::current_exe().map_err(CliError::CurrentExecutable)?;
             let executable = web_executable_for(&current)?;
-            if command == "start" {
-                web_service::start(&paths, &executable)?
-            } else {
-                web_service::restart(&paths, &executable)?
+            match command.to_str() {
+                Some("install") => web_service::install(&paths, &executable)?,
+                Some("start") => web_service::start(&paths, &executable)?,
+                Some("restart") => web_service::restart(&paths, &executable)?,
+                _ => return Err(CliError::Usage),
             }
         }
         _ => return Err(CliError::Usage),
@@ -2188,7 +2190,7 @@ impl CliHelp {
             ],
             service_commands: [
                 "web [--no-open]",
-                "service <start|status|stop|restart>",
+                "service <install|start|status|stop|restart|uninstall>",
                 "health [--json]",
                 "diagnostics quick",
                 "support-bundle --output <file>",
