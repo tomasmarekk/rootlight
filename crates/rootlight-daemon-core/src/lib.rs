@@ -10792,6 +10792,21 @@ mod tests {
             .expect("submission timing prepares")
     }
 
+    fn assert_retry_reuses_operation(initial: &OperationRecord, retried: &OperationRecord) {
+        assert_eq!(retried.operation, initial.operation);
+        assert_eq!(retried.kind, initial.kind);
+        assert_eq!(retried.plan_hash, initial.plan_hash);
+        assert_eq!(retried.owner, initial.owner);
+        assert_eq!(retried.detached, initial.detached);
+        assert_eq!(retried.deadline_unix_ms, initial.deadline_unix_ms);
+        assert_eq!(retried.lease_expires_unix_ms, initial.lease_expires_unix_ms);
+        assert!(matches!(
+            retried.state,
+            OperationState::Queued | OperationState::Running
+        ));
+        assert!(retried.revision >= initial.revision);
+    }
+
     fn prepared_at(
         submission: OperationSubmission,
         clock: AdmissionClockSample,
@@ -15037,7 +15052,7 @@ mod tests {
             .schedule(prepared(first))
             .await
             .expect("identical retry bypasses saturated admission");
-        assert_eq!(retried, running);
+        assert_retry_reuses_operation(&running, &retried);
 
         let conflict = OperationSubmission {
             plan_hash: PlanHash::from_bytes([9; 32]),
@@ -15109,7 +15124,7 @@ mod tests {
             .schedule(prepared(first))
             .await
             .expect("identical retry bypasses client quota");
-        assert_eq!(retried, running);
+        assert_retry_reuses_operation(&running, &retried);
         let conflict = OperationSubmission {
             plan_hash: PlanHash::from_bytes([9; 32]),
             ..first
