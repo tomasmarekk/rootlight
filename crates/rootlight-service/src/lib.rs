@@ -3749,7 +3749,7 @@ impl FirstSliceService {
                 ));
                 let (oracle, verified) = OracleWriter::create_in(prepared.path())
                     .map_err(|error| map_catalog_error(&error, cancellation))?
-                    .seal_and_retain(verified, &context)
+                    .seal_preserving_verified(verified, &context)
                     .map_err(|error| map_catalog_error(&error, cancellation))?;
                 let allocated_bytes = oracle
                     .allocated_bytes(&context)

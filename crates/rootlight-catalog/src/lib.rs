@@ -213,6 +213,26 @@ impl OracleWriter {
         Ok((reader, readback))
     }
 
+    /// Writes one generation while retaining the verified input capability.
+    ///
+    /// The reopened reader still validates the sealed schema and exact
+    /// generation statistics. This variant avoids a full materializing
+    /// readback when the already verified in-memory generation remains the
+    /// publication authority. A later durable reopen still performs the full
+    /// canonical document-hash verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::seal`].
+    pub fn seal_preserving_verified(
+        self,
+        generation: IdentityVerifiedGeneration,
+        context: &GenerationContext<'_>,
+    ) -> Result<(OracleReader, IdentityVerifiedGeneration), CatalogError> {
+        let reader = self.seal_snapshot(generation.snapshot(), context)?;
+        Ok((reader, generation))
+    }
+
     #[cfg(test)]
     pub(crate) fn seal_unverified_for_test(
         self,

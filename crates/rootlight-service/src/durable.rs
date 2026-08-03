@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
-    io::Write as _,
+    io::{BufWriter, Write as _},
     path::{Path, PathBuf},
     str::FromStr as _,
     sync::{
@@ -51,6 +51,7 @@ const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_ACTIVATION_MANIFEST_BYTES: u64 = 4 * 1024;
 const MAX_RECOVERY_MANIFEST_BYTES: u64 = 4 * 1024;
 const MAX_RECOVERY_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const RECOVERY_WRITE_BUFFER_BYTES: usize = 1024 * 1024;
 const MAX_DURABLE_ENTRIES: usize = 65_536;
 const MAX_RESTORED_OPERATIONS: usize = 256;
 const MAX_QUARANTINED_GENERATIONS: usize = 256;
@@ -190,6 +191,10 @@ impl<W> RecoverySnapshotWriter<W> {
             bytes: 0,
         }
     }
+}
+
+fn buffered_recovery_writer<W: std::io::Write>(inner: W) -> RecoverySnapshotWriter<BufWriter<W>> {
+    RecoverySnapshotWriter::new(BufWriter::with_capacity(RECOVERY_WRITE_BUFFER_BYTES, inner))
 }
 
 impl<W: std::io::Write> std::io::Write for RecoverySnapshotWriter<W> {
@@ -778,7 +783,7 @@ impl DurablePreparedGeneration {
         let file = staging
             .create_file(OsStr::new(RECOVERY_SNAPSHOT_FILENAME))
             .map_err(|_| FirstSliceError::Catalog)?;
-        let mut writer = RecoverySnapshotWriter::new(file);
+        let mut writer = buffered_recovery_writer(file);
         serde_json::to_writer(&mut writer, snapshot.document())
             .map_err(|_| FirstSliceError::Catalog)?;
         writer.flush().map_err(|_| FirstSliceError::Catalog)?;
@@ -787,6 +792,7 @@ impl DurablePreparedGeneration {
         }
         writer
             .inner
+            .get_ref()
             .sync_all()
             .map_err(|_| FirstSliceError::Catalog)?;
         self.account_staging_bytes(writer.bytes)?;
@@ -1517,8 +1523,32 @@ mod tests {
     use rootlight_cancel::Cancellation;
     use rootlight_ids::{GenerationIdentity, content_hash, derive_generation, derive_repository};
     use rootlight_runtime::RuntimePaths;
-    use std::{fs, time::Duration};
+    use std::{fs, io, time::Duration};
     use tempfile::TempDir;
+
+    #[derive(Default)]
+    struct CountingWriter {
+        bytes: usize,
+        writes: usize,
+    }
+
+    impl io::Write for CountingWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.bytes = self
+                .bytes
+                .checked_add(buffer.len())
+                .expect("test byte count is representable");
+            self.writes = self
+                .writes
+                .checked_add(1)
+                .expect("test write count is representable");
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn durable_test_tempdir() -> TempDir {
         #[cfg(target_os = "macos")]
@@ -1550,6 +1580,21 @@ mod tests {
         let name = activation_name(42, generation);
         assert_eq!(parse_activation_name(&name), Some((42, generation)));
         assert!(parse_activation_name("activation-42-invalid").is_none());
+    }
+
+    #[test]
+    fn recovery_snapshot_writer_batches_small_serialization_fragments() {
+        let mut writer = buffered_recovery_writer(CountingWriter::default());
+        for _ in 0..10_000 {
+            writer
+                .write_all(b"x")
+                .expect("buffered recovery fragment writes");
+        }
+        writer.flush().expect("buffered recovery writer flushes");
+
+        assert_eq!(writer.bytes, 10_000);
+        assert_eq!(writer.inner.get_ref().bytes, 10_000);
+        assert_eq!(writer.inner.get_ref().writes, 1);
     }
 
     #[test]
