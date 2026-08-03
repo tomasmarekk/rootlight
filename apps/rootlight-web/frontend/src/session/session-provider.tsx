@@ -16,15 +16,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     | { kind: "ready"; session: Session }
     | { kind: "error" }
     | { kind: "ended" }
-    | { kind: "expired" }
   >({ kind: "loading" });
 
   useEffect(() => {
     let active = true;
     const unsubscribe = subscribeSessionExpired(() => {
       if (active) {
+        // The local host keeps sessions in memory, so a service restart needs
+        // a fresh credential only after all data from the old session is gone.
         queryClient.clear();
-        setState({ kind: "expired" });
+        setState({ kind: "loading" });
+        setAttempt((current) => current + 1);
       }
     });
     void initializeSession().then(
@@ -74,9 +76,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   if (state.kind === "ended") {
     return <SessionEnded />;
   }
-  if (state.kind === "expired") {
-    return <SessionExpired />;
-  }
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
 
@@ -119,19 +118,6 @@ function SessionEnded() {
       <p className="eyebrow">Session closed</p>
       <h1>Rootlight is disconnected from this tab</h1>
       <p>Reload the page when you want to reconnect to the local workspace.</p>
-    </main>
-  );
-}
-
-function SessionExpired() {
-  return (
-    <main className="session-state">
-      <div className="brand-mark brand-mark--large" aria-hidden="true">
-        R
-      </div>
-      <p className="eyebrow eyebrow--danger">Session expired</p>
-      <h1>This local session has ended</h1>
-      <p>Sensitive browser state was cleared. Reload the page to start a new local session.</p>
     </main>
   );
 }

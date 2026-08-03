@@ -128,7 +128,7 @@ describe("SessionProvider", () => {
     });
   });
 
-  it("clears authenticated content when a later API request reports expiry", async () => {
+  it("renews the local session when a later API request reports expiry", async () => {
     const { SessionProvider } = await import("../src/session/session-provider");
     const { fetchHealth } = await import("../src/api/client");
     const fetchMock = vi
@@ -139,7 +139,13 @@ describe("SessionProvider", () => {
           headers: { "content-type": "application/json" },
         }),
       )
-      .mockResolvedValueOnce(new Response(null, { status: 401 }));
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ csrfToken: "renewed-csrf", idleTtlSeconds: 1_800 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     function SessionConsumer() {
@@ -157,10 +163,9 @@ describe("SessionProvider", () => {
     );
 
     await userEvent.click(await screen.findByRole("button", { name: "Check health" }));
-    expect(
-      await screen.findByRole("heading", { name: "This local session has ended" }),
-    ).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Check health" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Check health" })).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("/api/v1/session");
   });
 });
 
