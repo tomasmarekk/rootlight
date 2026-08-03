@@ -1867,7 +1867,7 @@ fn install_launchers(
     #[cfg(not(windows))]
     {
         let _ = install_root;
-        for binary in expected_binaries {
+        for &binary in expected_binaries {
             let (launcher, kind) = if binary == "rootlight-mcp" {
                 manifest
                     .mcp_launcher_binary
