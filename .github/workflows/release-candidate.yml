@@ -452,7 +452,7 @@ jobs:
           web_smoke_bytes = web_smoke_path.read_bytes()
           web_smoke = json.loads(web_smoke_bytes)
           if (
-              web_smoke.get("schema") != "rootlight.installed-web-smoke/1"
+              web_smoke.get("schema") != "rootlight.installed-web-smoke/2"
               or web_smoke.get("target") != target
               or web_smoke.get("candidate_version") != os.environ["VERSION"]
               or any(
@@ -461,7 +461,7 @@ jobs:
                       "authenticated_health_observed",
                       "graceful_shutdown_observed",
                       "native_cli_dispatch_observed",
-                      "session_bootstrap_observed",
+                      "direct_session_observed",
                   )
               )
               or web_smoke.get("node_runtime_required") is not False
@@ -664,7 +664,7 @@ jobs:
                   raise SystemExit(f"{target} installed web smoke digest differs")
               web_smoke = json.loads(web_smoke_bytes)
               if (
-                  web_smoke.get("schema") != "rootlight.installed-web-smoke/1"
+                  web_smoke.get("schema") != "rootlight.installed-web-smoke/2"
                   or web_smoke.get("target") != target
                   or web_smoke.get("candidate_version") != version
                   or web_smoke.get("node_runtime_required") is not False

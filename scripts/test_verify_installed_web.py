@@ -22,6 +22,21 @@ SPEC.loader.exec_module(installed_web)
 
 
 class InstalledWebSmokeTests(unittest.TestCase):
+    def test_release_workflows_consume_current_report_contract(self) -> None:
+        repository = Path(__file__).parent.parent
+        candidate = (
+            repository / ".github/workflows/release-candidate.yml"
+        ).read_text(encoding="utf-8")
+        release = (repository / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        workflows = candidate + release
+
+        self.assertEqual(workflows.count(installed_web.REPORT_SCHEMA), 3)
+        self.assertNotIn("rootlight.installed-web-smoke/1", workflows)
+        self.assertNotIn('"session_bootstrap_observed"', workflows)
+        self.assertIn('"direct_session_observed"', candidate)
+
     def test_smoke_temporary_parent_is_short_and_macos_only(self) -> None:
         self.assertEqual(
             installed_web.smoke_temporary_parent("darwin"),
