@@ -37,19 +37,20 @@ export function AppShell() {
     retry: 2,
     retryDelay: (attempt) => Math.min(500 * 2 ** attempt, 5_000),
   });
+  const daemonReady = isDaemonReady(health.data);
   const connection = connectionState(health.data, health.isError);
 
   useEffect(() => {
-    if (health.isError) {
+    if (health.isError || (health.data !== undefined && !daemonReady)) {
       reconnecting.current = true;
-    } else if (health.data !== undefined && reconnecting.current) {
+    } else if (daemonReady && reconnecting.current) {
       reconnecting.current = false;
       void queryClient.invalidateQueries({
         predicate: (query) => query.queryKey[0] !== "health",
       });
       publishDaemonReconnected();
     }
-  }, [health.data, health.isError, queryClient]);
+  }, [daemonReady, health.data, health.isError, queryClient]);
 
   return (
     <div className="app-frame">
@@ -141,8 +142,12 @@ function connectionState(health: Health | undefined, failed: boolean) {
   if (failed) {
     return { label: "Reconnecting", tone: "warning" } as const;
   }
-  if (health?.webReady === true && health.daemonReady && health.lifecycle === "ready") {
+  if (isDaemonReady(health)) {
     return { label: "Daemon ready", tone: "success" } as const;
   }
   return { label: "Connecting", tone: "neutral" } as const;
+}
+
+function isDaemonReady(health: Health | undefined) {
+  return health?.webReady === true && health.daemonReady && health.lifecycle === "ready";
 }
