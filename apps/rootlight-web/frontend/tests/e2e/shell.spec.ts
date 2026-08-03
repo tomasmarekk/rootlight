@@ -53,7 +53,7 @@ test.afterEach(async ({ page }) => {
 test("opens an accessible dark local workspace", async ({ page }) => {
   await mockApplication(page, []);
 
-  await page.goto(`/#bootstrap=${"a".repeat(43)}`);
+  await page.goto("/");
 
   await expect(page).toHaveURL(/\/projects$/u);
   await expect(page.getByRole("heading", { name: "Projects", level: 1 })).toBeVisible();
@@ -70,7 +70,7 @@ test("opens an accessible dark local workspace", async ({ page }) => {
 
 test("opens an exact generation from an immutable catalog page", async ({ page }) => {
   await mockApplication(page, [projectSummary()]);
-  await page.goto(`/#bootstrap=${"a".repeat(43)}`);
+  await page.goto("/");
 
   await page.getByRole("combobox", { name: "State" }).selectOption("ready");
   await page.getByRole("searchbox", { name: "Search projects" }).fill("root");
@@ -101,7 +101,7 @@ test("opens an exact generation from an immutable catalog page", async ({ page }
 test("admits a capability-bound detached index and opens its publication", async ({ page }) => {
   await mockApplication(page, []);
   const workflow = await mockIndexWorkflow(page, "succeeded");
-  await page.goto(`/#bootstrap=${"a".repeat(43)}`);
+  await page.goto("/");
 
   await page.getByRole("button", { name: "Add project" }).click();
   await page.getByRole("button", { name: "Home" }).click();
@@ -139,7 +139,7 @@ test("admits a capability-bound detached index and opens its publication", async
 test("requires confirmation before cancelling a running index", async ({ page }) => {
   await mockApplication(page, []);
   const workflow = await mockIndexWorkflow(page, "running");
-  await page.goto(`/#bootstrap=${"a".repeat(43)}`);
+  await page.goto("/");
 
   await page.getByRole("button", { name: "Add project" }).click();
   await page.getByRole("button", { name: "Home" }).click();
@@ -163,7 +163,7 @@ test("explores exact-generation evidence through the accessible graph companion"
 }) => {
   await mockApplication(page, [projectSummary()]);
   await mockEvidence(page);
-  await page.goto(`/#bootstrap=${"a".repeat(43)}`);
+  await page.goto("/");
   await page.getByRole("link", { name: /Rootlight/u }).click();
 
   const runNode = page.getByRole("button", { name: /run symbol src\/main\.rs/u });
@@ -193,7 +193,7 @@ test("keeps session-owned operations and local diagnostics usable end to end", a
   await mockApplication(page, []);
   await mockIndexWorkflow(page, "running");
   await mockDiagnostics(page);
-  await page.goto(`/#bootstrap=${"a".repeat(43)}`);
+  await page.goto("/");
 
   await page.getByRole("button", { name: "Add project" }).click();
   await page.getByRole("button", { name: "Home" }).click();
@@ -241,7 +241,7 @@ test("reopens a fallback projection, clears source, and expires the session fail
   });
   const application = await mockApplication(page, [projectSummary()]);
   const evidence = await mockEvidence(page);
-  await page.goto(`/#bootstrap=${"a".repeat(43)}`);
+  await page.goto("/");
   await page.getByRole("link", { name: /Rootlight/u }).click();
 
   await expect(page.getByRole("heading", { name: "Graphical view is unavailable" })).toBeVisible();
@@ -277,7 +277,7 @@ test("completes the critical local path using keyboard input only", async ({ pag
   await mockIndexWorkflow(page, "running");
   await mockEvidence(page);
   await mockDiagnostics(page);
-  await page.goto(`/#bootstrap=${"a".repeat(43)}`);
+  await page.goto("/");
 
   const addProject = page.getByRole("button", { name: "Add project" });
   await activate(addProject);
@@ -328,7 +328,7 @@ test("completes the critical local path using keyboard input only", async ({ pag
 
 async function mockApplication(page: Page, projects: ReturnType<typeof projectSummary>[]) {
   let graphOpenCount = 0;
-  await page.route("**/api/v1/session/bootstrap", async (route) => {
+  await page.route("**/api/v1/session", async (route) => {
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({ csrfToken: "csrf", idleTtlSeconds: 1_800 }),

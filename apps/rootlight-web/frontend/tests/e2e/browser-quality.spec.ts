@@ -9,12 +9,12 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
 import {
-  bootstrapUrl,
   expectPrimaryMarkupQuality,
   historicalGenerationId,
   installQualityApplication,
   monitorBrowserQuality,
   repositoryId,
+  sessionUrl,
 } from "./quality-fixtures";
 
 const distRoot = resolve(import.meta.dirname, "../../dist");
@@ -31,7 +31,7 @@ test("keeps the Projects entry bounded and lazy-loads graph resources", async ({
 }, testInfo) => {
   const quality = monitorBrowserQuality(page);
   await installQualityApplication(page);
-  await page.goto(bootstrapUrl);
+  await page.goto(sessionUrl);
   await expect(page.getByRole("heading", { name: "Projects", level: 1 })).toBeVisible();
   await expectPrimaryMarkupQuality(page);
 
@@ -113,7 +113,7 @@ test("meets maximum supported graph interaction and disposal budgets", async ({
   await installWorkerTracker(page);
   const quality = monitorBrowserQuality(page);
   const application = await installQualityApplication(page);
-  await page.goto(bootstrapUrl);
+  await page.goto(sessionUrl);
   await expect(page.getByRole("heading", { name: "Projects", level: 1 })).toBeVisible();
 
   const firstUsefulMilliseconds: number[] = [];
@@ -232,9 +232,7 @@ test("bounds retained workers and projections across generation and view churn",
   await installWorkerTracker(page);
   const quality = monitorBrowserQuality(page);
   const application = await installQualityApplication(page, { edgeCount: 24, nodeCount: 12 });
-  await page.goto(
-    `/projects/${repositoryId}?generation=${historicalGenerationId}#bootstrap=${"a".repeat(43)}`,
-  );
+  await page.goto(`/projects/${repositoryId}?generation=${historicalGenerationId}`);
   await expect(page.getByRole("heading", { name: "Synthetic Atlas", level: 1 })).toBeVisible();
   await expect(page.getByText("12 of 12 returned nodes")).toBeVisible();
 

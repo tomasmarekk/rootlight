@@ -5,10 +5,10 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
 import {
-  bootstrapUrl,
   expectPrimaryMarkupQuality,
   installQualityApplication,
   monitorBrowserQuality,
+  sessionUrl,
 } from "./quality-fixtures";
 
 test("keeps the keyboard fallback usable at 200% zoom equivalent", async ({ page }) => {
@@ -21,7 +21,7 @@ test("keeps the keyboard fallback usable at 200% zoom equivalent", async ({ page
   });
   const quality = monitorBrowserQuality(page);
   await installQualityApplication(page, { edgeCount: 24, nodeCount: 12 });
-  await page.goto(bootstrapUrl);
+  await page.goto(sessionUrl);
 
   const project = page.getByRole("link", { name: /Synthetic Atlas/u });
   await project.focus();

@@ -8,8 +8,8 @@ export const repositoryId = `repo1_${"a".repeat(32)}`;
 const activeGenerationId = `gen1_${"b".repeat(39)}`;
 /** Historical generation used to exercise exact-generation churn. */
 export const historicalGenerationId = `gen1_${"c".repeat(39)}`;
-/** One-time bootstrap route used by the deterministic local session fixture. */
-export const bootstrapUrl = `/#bootstrap=${"a".repeat(43)}`;
+/** Direct local route used by the deterministic browser-session fixture. */
+export const sessionUrl = "/";
 
 type QualityApplicationOptions = {
   edgeCount?: number;
@@ -95,7 +95,7 @@ export async function installQualityApplication(
   let graphReleaseCount = 0;
   const retainedPages = new Map<string, ReturnType<typeof syntheticGraphPages>>();
 
-  await page.route("**/api/v1/session/bootstrap", async (route) => {
+  await page.route("**/api/v1/session", async (route) => {
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({ csrfToken: "csrf", idleTtlSeconds: 1_800 }),
