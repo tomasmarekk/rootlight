@@ -112,6 +112,21 @@ class InstalledWebSmokeTests(unittest.TestCase):
 
             sleep.assert_called_once()
 
+    @unittest.skipUnless(installed_web.os.name == "nt", "Windows image-lock probe")
+    def test_package_release_probe_restores_the_daemon_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            binary = package / "bin/rootlight-daemon.exe"
+            binary.parent.mkdir()
+            binary.write_bytes(b"daemon")
+
+            installed_web.wait_for_windows_package_release(package)
+
+            self.assertEqual(binary.read_bytes(), b"daemon")
+            self.assertFalse(
+                (package / "bin/.rootlight-daemon.release-probe.exe").exists()
+            )
+
     def test_archive_extraction_and_manifest_identity_are_exact(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

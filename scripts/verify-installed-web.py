@@ -250,6 +250,28 @@ def wait_for_daemon_shutdown(environment: dict[str, str]) -> None:
     raise TimeoutError("installed web command did not stop its owned daemon")
 
 
+def wait_for_windows_package_release(package_root: Path) -> None:
+    if os.name != "nt":
+        return
+    executable = package_root / "bin" / "rootlight-daemon.exe"
+    probe = package_root / "bin" / ".rootlight-daemon.release-probe.exe"
+    deadline = time.monotonic() + STOP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            executable.rename(probe)
+        except PermissionError:
+            time.sleep(0.1)
+            continue
+        while time.monotonic() < deadline:
+            try:
+                probe.rename(executable)
+                return
+            except PermissionError:
+                time.sleep(0.1)
+        raise TimeoutError("installed daemon executable could not be restored")
+    raise TimeoutError("installed web command did not release its daemon executable")
+
+
 def start_web(
     rootlight: Path, environment: dict[str, str]
 ) -> tuple[subprocess.Popen[str], str, str]:
@@ -408,6 +430,7 @@ def main() -> None:
             stop_web(web_process)
             web_process = None
             wait_for_daemon_shutdown(environment)
+            wait_for_windows_package_release(package_root)
         finally:
             if web_process is not None and web_process.poll() is None:
                 web_process.kill()
