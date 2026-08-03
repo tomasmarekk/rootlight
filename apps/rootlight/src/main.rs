@@ -322,11 +322,6 @@ fn stop_sibling_daemon_for_uninstall() -> Result<(), CliError> {
     let current = env::current_exe().map_err(CliError::CurrentExecutable)?;
     let directory = current.parent().ok_or(CliError::InvalidInstalledLayout)?;
     let daemon = directory.join(daemon_executable_name());
-    let daemon = match fs::canonicalize(daemon) {
-        Ok(daemon) => daemon,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(CliError::DaemonUninstallStop(error)),
-    };
     let deadline = Instant::now()
         .checked_add(DAEMON_UNINSTALL_STOP_TIMEOUT)
         .ok_or(CliError::DaemonUninstallStopTimedOut)?;
@@ -338,8 +333,7 @@ fn stop_sibling_daemon_for_uninstall() -> Result<(), CliError> {
         for process in system.processes().values() {
             let matches_daemon = process
                 .exe()
-                .and_then(|executable| fs::canonicalize(executable).ok())
-                .is_some_and(|executable| executable == daemon);
+                .is_some_and(|executable| same_executable_path(executable, &daemon));
             if !matches_daemon {
                 continue;
             }
@@ -358,6 +352,23 @@ fn stop_sibling_daemon_for_uninstall() -> Result<(), CliError> {
             return Err(CliError::DaemonUninstallStopTimedOut);
         }
         std::thread::sleep(DAEMON_UNINSTALL_POLL_INTERVAL);
+    }
+}
+
+fn same_executable_path(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => {
+            #[cfg(windows)]
+            {
+                left.to_string_lossy()
+                    .eq_ignore_ascii_case(&right.to_string_lossy())
+            }
+            #[cfg(not(windows))]
+            {
+                left == right
+            }
+        }
     }
 }
 
@@ -3198,6 +3209,19 @@ mod tests {
             &outside_daemon
         ));
         assert!(!install_owns_daemon_executable(&canonical_root, &unrelated));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn uninstall_matches_renamed_windows_executable_paths_without_reopening_them() {
+        assert!(same_executable_path(
+            Path::new(r"C:\npm\@scope\rootlight\bin\rootlight-daemon.exe"),
+            Path::new(r"c:\NPM\@scope\rootlight\bin\rootlight-daemon.exe"),
+        ));
+        assert!(!same_executable_path(
+            Path::new(r"C:\npm\@scope\rootlight\bin\rootlight-daemon.exe"),
+            Path::new(r"C:\npm\@scope\other\bin\rootlight-daemon.exe"),
+        ));
     }
 
     #[test]
