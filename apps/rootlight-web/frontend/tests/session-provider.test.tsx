@@ -100,6 +100,41 @@ describe("SessionProvider", () => {
       headers: { "x-rootlight-csrf": "csrf-token" },
     });
   });
+
+  it("clears authenticated content when a later API request reports expiry", async () => {
+    const { SessionProvider } = await import("../src/session/session-provider");
+    const { fetchHealth } = await import("../src/api/client");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ csrfToken: "csrf-token", idleTtlSeconds: 1_800 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    function SessionConsumer() {
+      return (
+        <button onClick={() => void fetchHealth().catch(() => undefined)}>Check health</button>
+      );
+    }
+
+    render(
+      <TestProviders>
+        <SessionProvider>
+          <SessionConsumer />
+        </SessionProvider>
+      </TestProviders>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "Check health" }));
+    expect(
+      await screen.findByRole("heading", { name: "This local session has ended" }),
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Check health" })).not.toBeInTheDocument();
+  });
 });
 
 function TestProviders({ children }: { children: ReactNode }) {

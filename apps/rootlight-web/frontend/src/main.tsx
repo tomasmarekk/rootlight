@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 
 import { RootlightRouter } from "./router";
 import { OperationProvider } from "./operations/operation-provider";
+import { ApplicationErrorBoundary } from "./components/application-error-boundary";
 import { SessionProvider } from "./session/session-provider";
 import "./styles/globals.css";
 
@@ -28,11 +29,13 @@ if (root === null) {
 createRoot(root).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <SessionProvider>
-        <OperationProvider>
-          <RootlightRouter />
-        </OperationProvider>
-      </SessionProvider>
+      <ApplicationErrorBoundary>
+        <SessionProvider>
+          <OperationProvider>
+            <RootlightRouter />
+          </OperationProvider>
+        </SessionProvider>
+      </ApplicationErrorBoundary>
     </QueryClientProvider>
   </StrictMode>,
 );

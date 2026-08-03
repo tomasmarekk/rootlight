@@ -43,6 +43,7 @@ const maximumErrorBytes = 16 * 1024;
 const maximumSupportArchiveBytes = 768 * 1024;
 const bootstrapPattern = /^[A-Za-z0-9_-]{43}$/u;
 const publicErrorPattern = /^[a-z][a-z0-9_]{0,63}$/u;
+const sessionExpiredEvent = "rootlight:session-expired";
 
 let csrfToken: string | undefined;
 let initialization: Promise<Session> | undefined;
@@ -62,6 +63,11 @@ export class ApiError extends Error {
 export function initializeSession(): Promise<Session> {
   initialization ??= initializeSessionOnce();
   return initialization;
+}
+
+export function subscribeSessionExpired(listener: () => void): () => void {
+  window.addEventListener(sessionExpiredEvent, listener);
+  return () => window.removeEventListener(sessionExpiredEvent, listener);
 }
 
 export async function fetchHealth(signal?: AbortSignal): Promise<Health> {
@@ -404,6 +410,11 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
     cache: "no-store",
   });
   if (!response.ok) {
+    if (response.status === 401 && csrfToken !== undefined) {
+      csrfToken = undefined;
+      initialization = undefined;
+      window.dispatchEvent(new Event(sessionExpiredEvent));
+    }
     throw new ApiError(response.status, await readErrorCode(response));
   }
   return response;

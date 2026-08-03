@@ -2,8 +2,18 @@
 
 import { Button } from "@heroui/react/button";
 import { Chip } from "@heroui/react/chip";
-import { useQuery } from "@tanstack/react-query";
-import { Activity, Boxes, Command, FolderGit2, LogOut, Search, ShieldCheck } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Activity,
+  Boxes,
+  Command,
+  FolderGit2,
+  LogOut,
+  RotateCcw,
+  Search,
+  ShieldCheck,
+} from "lucide-react";
+import { useEffect, useRef } from "react";
 import { NavLink, Outlet } from "react-router";
 
 import { fetchHealth } from "../api/client";
@@ -18,12 +28,27 @@ const navigation = [
 
 export function AppShell() {
   const { endSession } = useSession();
+  const queryClient = useQueryClient();
+  const reconnecting = useRef(false);
   const health = useQuery({
     queryKey: ["health"],
     queryFn: ({ signal }) => fetchHealth(signal),
     refetchInterval: 5_000,
+    retry: 2,
+    retryDelay: (attempt) => Math.min(500 * 2 ** attempt, 5_000),
   });
   const connection = connectionState(health.data, health.isError);
+
+  useEffect(() => {
+    if (health.isError) {
+      reconnecting.current = true;
+    } else if (health.data !== undefined && reconnecting.current) {
+      reconnecting.current = false;
+      void queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] !== "health",
+      });
+    }
+  }, [health.data, health.isError, queryClient]);
 
   return (
     <div className="app-frame">
@@ -86,10 +111,21 @@ export function AppShell() {
       </header>
 
       {health.isError ? (
-        <div className="connection-banner" role="status">
+        <div className="connection-banner" role="status" aria-live="polite">
           <Boxes size={16} aria-hidden="true" />
-          The daemon is temporarily unreachable. Loaded local data remains visible while Rootlight
-          reconnects.
+          <span>
+            The daemon is temporarily unreachable. Loaded source-free data remains visible while
+            Rootlight reconnects.
+          </span>
+          <Button
+            isDisabled={health.isFetching}
+            size="sm"
+            variant="ghost"
+            onPress={() => void health.refetch()}
+          >
+            <RotateCcw size={13} aria-hidden="true" />
+            Retry now
+          </Button>
         </div>
       ) : null}
 
