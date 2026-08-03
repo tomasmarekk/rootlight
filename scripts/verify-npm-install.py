@@ -65,6 +65,7 @@ def verify_install(
     output_dir: Path,
     evidence_path: Path,
 ) -> None:
+    npm = npm_executable()
     packages_dir = checked_directory(packages_dir, "npm package directory")
     native_package = TARGET_PACKAGES[target]
     native_directory = native_package.rsplit("/", 1)[-1]
@@ -82,8 +83,8 @@ def verify_install(
     tarballs.mkdir()
     environment = npm_environment(prefix, cache)
 
-    root_tarball = pack(root_directory, tarballs, environment)
-    native_tarball = pack(platform_directory, tarballs, environment)
+    root_tarball = pack(root_directory, tarballs, environment, npm)
+    native_tarball = pack(platform_directory, tarballs, environment, npm)
     cli = npm_cli_path(prefix)
     native_cli = native_cli_path(prefix, native_directory)
     initial_pid: int | None = None
@@ -93,7 +94,7 @@ def verify_install(
     try:
         run(
             [
-                "npm",
+                npm,
                 "install",
                 "--global",
                 "--offline",
@@ -143,7 +144,7 @@ def verify_install(
         }
         write_json_new(evidence_path, evidence)
     finally:
-        cleanup(prefix, native_cli, native_package, environment)
+        cleanup(prefix, native_cli, native_package, environment, npm)
 
 
 def checked_directory(path: Path, label: str) -> Path:
@@ -167,10 +168,23 @@ def npm_environment(prefix: Path, cache: Path) -> dict[str, str]:
     return environment
 
 
-def pack(package: Path, tarballs: Path, environment: dict[str, str]) -> Path:
+def npm_executable(platform: str = os.name) -> str:
+    command = "npm.cmd" if platform == "nt" else "npm"
+    executable = shutil.which(command)
+    if executable is None:
+        raise NpmInstallError(f"{command} is not available on PATH")
+    return executable
+
+
+def pack(
+    package: Path,
+    tarballs: Path,
+    environment: dict[str, str],
+    npm: str,
+) -> Path:
     completed = run(
         [
-            "npm",
+            npm,
             "pack",
             str(package),
             "--json",
@@ -365,6 +379,7 @@ def cleanup(
     native_cli: Path,
     native_package: str,
     environment: dict[str, str],
+    npm: str,
 ) -> None:
     if native_cli.is_file():
         run(
@@ -373,7 +388,7 @@ def cleanup(
             check=False,
         )
     run(
-        ["npm", "uninstall", "--global", ROOT_PACKAGE, native_package],
+        [npm, "uninstall", "--global", ROOT_PACKAGE, native_package],
         environment,
         check=False,
     )

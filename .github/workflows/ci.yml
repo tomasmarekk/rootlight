@@ -63,6 +63,7 @@ jobs:
           python scripts/test_prepare_npm_packages.py
           python scripts/test_publish_npm_packages.py
           python scripts/test_verify_installed_web.py
+          python scripts/test_verify_npm_install.py
           node --check packaging/npm/rootlight.mjs
           node --check packaging/npm/rootlight-mcp.mjs
           node --check packaging/npm/run-native.mjs

@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Focused tests for the installed npm package verifier."""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+import unittest
+from unittest import mock
+
+
+MODULE_PATH = Path(__file__).with_name("verify-npm-install.py")
+SPEC = importlib.util.spec_from_file_location("verify_npm_install", MODULE_PATH)
+assert SPEC is not None and SPEC.loader is not None
+verify_npm_install = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(verify_npm_install)
+
+
+class VerifyNpmInstallTests(unittest.TestCase):
+    def test_windows_resolves_the_command_shim(self) -> None:
+        with mock.patch.object(
+            verify_npm_install.shutil,
+            "which",
+            return_value=r"C:\hostedtoolcache\node\npm.cmd",
+        ) as which:
+            executable = verify_npm_install.npm_executable("nt")
+
+        self.assertEqual(executable, r"C:\hostedtoolcache\node\npm.cmd")
+        which.assert_called_once_with("npm.cmd")
+
+    def test_unix_resolves_the_native_command(self) -> None:
+        with mock.patch.object(
+            verify_npm_install.shutil,
+            "which",
+            return_value="/opt/node/bin/npm",
+        ) as which:
+            executable = verify_npm_install.npm_executable("posix")
+
+        self.assertEqual(executable, "/opt/node/bin/npm")
+        which.assert_called_once_with("npm")
+
+    def test_missing_npm_is_actionable(self) -> None:
+        with (
+            mock.patch.object(verify_npm_install.shutil, "which", return_value=None),
+            self.assertRaisesRegex(
+                verify_npm_install.NpmInstallError,
+                "npm.cmd is not available on PATH",
+            ),
+        ):
+            verify_npm_install.npm_executable("nt")
+
+
+if __name__ == "__main__":
+    unittest.main()
