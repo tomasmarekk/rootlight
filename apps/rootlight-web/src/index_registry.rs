@@ -2,14 +2,16 @@
 
 use std::{
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use rootlight_client::{OperationId, RepositoryIndex, RepositoryIndexMode};
 
-use crate::{filesystem_registry::RootAdmission, session::SessionIdentity};
+use crate::{
+    filesystem_registry::RootAdmission,
+    session::{SESSION_ABSOLUTE_TTL, SessionIdentity},
+};
 
-const INDEX_RECORD_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_INDEX_RECORDS_PER_SESSION: usize = 64;
 const MAX_INDEX_RECORDS_GLOBAL: usize = 256;
 
@@ -239,12 +241,17 @@ pub(crate) enum IndexRegistryError {
 fn reap_expired(state: &mut RegistryState, now: Instant) {
     state.records.retain(|record| {
         now.checked_duration_since(record.created_at)
-            .is_some_and(|elapsed| elapsed < INDEX_RECORD_TTL)
+            // Operations are detached and can legitimately outlive the session's
+            // idle window. Exact session cleanup remains the primary ownership
+            // boundary; this absolute limit is only a defensive backstop.
+            .is_some_and(|elapsed| elapsed < SESSION_ABSOLUTE_TTL)
     });
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use rootlight_cancel::Cancellation;
     use rootlight_client::{OperationState, RepositoryId};
     use rootlight_vfs::BrowseDirectory;
@@ -373,7 +380,13 @@ mod tests {
                 .find_operation(identity(2), second.operation(), now)
                 .is_ok()
         );
-        let expired = now + INDEX_RECORD_TTL + Duration::from_millis(1);
+        let still_live = now + Duration::from_secs(16 * 60);
+        assert!(
+            registry
+                .find_operation(identity(2), second.operation(), still_live)
+                .is_ok()
+        );
+        let expired = now + SESSION_ABSOLUTE_TTL + Duration::from_millis(1);
         assert!(matches!(
             registry.find_operation(identity(2), second.operation(), expired),
             Err(IndexRegistryError::NotFound)

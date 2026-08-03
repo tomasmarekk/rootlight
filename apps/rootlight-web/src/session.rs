@@ -15,7 +15,7 @@ pub(crate) const SESSION_COOKIE_NAME: &str = "rootlight_session";
 pub(crate) const CSRF_HEADER_NAME: &str = "x-rootlight-csrf";
 const SECRET_BYTES: usize = 32;
 const SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
-const SESSION_ABSOLUTE_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+pub(crate) const SESSION_ABSOLUTE_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const MAX_SESSIONS: usize = 32;
 
 /// Returns the browser-session idle timeout exposed by the API.
