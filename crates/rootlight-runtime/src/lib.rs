@@ -81,6 +81,10 @@ const ENDPOINT_ID_HEX_BYTES: usize = 32;
 const ENDPOINT_ID_SUFFIX: &str = ".sock";
 #[cfg(windows)]
 const ENDPOINT_ID_SUFFIX: &str = "";
+#[cfg(target_os = "macos")]
+const MACOS_RUNTIME_ROOT: &str = "/private/tmp";
+#[cfg(all(target_os = "macos", test))]
+const MACOS_UNIX_SOCKET_PATH_MAX: usize = 103;
 
 /// Resolved private paths for one user's Rootlight daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +107,9 @@ impl RuntimePaths {
             .state_dir()
             .unwrap_or_else(|| project.data_local_dir())
             .to_path_buf();
+        #[cfg(target_os = "macos")]
+        let runtime_dir = macos_default_runtime_dir(effective_user_id());
+        #[cfg(not(target_os = "macos"))]
         let runtime_dir = project
             .runtime_dir()
             .map_or_else(|| state_dir.join("runtime"), Path::to_path_buf);
@@ -1298,6 +1305,13 @@ fn effective_user_id() -> u32 {
     nix::unistd::geteuid().as_raw()
 }
 
+#[cfg(target_os = "macos")]
+fn macos_default_runtime_dir(user_id: u32) -> PathBuf {
+    // Darwin's AF_UNIX path ceiling cannot represent a socket beneath the
+    // standard Application Support path, so keep only transient artifacts here.
+    Path::new(MACOS_RUNTIME_ROOT).join(format!("rootlight-{user_id}"))
+}
+
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), RuntimeError> {
     File::open(path)
@@ -1426,6 +1440,30 @@ mod tests {
             );
         }
         assert_eq!(CoordinatedStartupSignal::from_byte(b'?'), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn default_macos_runtime_keeps_daemon_socket_representable() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let runtime = macos_default_runtime_dir(u32::MAX);
+        let socket = runtime.join(format!(
+            "{ENDPOINT_ID_PREFIX}{}{ENDPOINT_ID_SUFFIX}",
+            encode_nonce([u8::MAX; 16])
+        ));
+
+        assert_eq!(runtime.parent(), Some(Path::new(MACOS_RUNTIME_ROOT)));
+        assert!(
+            socket.as_os_str().as_bytes().len() <= MACOS_UNIX_SOCKET_PATH_MAX,
+            "default macOS daemon socket exceeds Darwin's AF_UNIX path ceiling"
+        );
+        assert_eq!(
+            RuntimePaths::resolve()
+                .expect("default macOS paths resolve")
+                .runtime_dir(),
+            macos_default_runtime_dir(effective_user_id())
+        );
     }
 
     fn private_tempdir() -> tempfile::TempDir {
