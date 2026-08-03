@@ -228,7 +228,7 @@ test("keeps session-owned operations and local diagnostics usable end to end", a
   await expectNoSeriousAccessibilityViolations(page);
 });
 
-test("reopens a fallback projection, clears source, and expires the session fail closed", async ({
+test("reopens a fallback projection, clears source, and renews the session fail closed", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1_024, height: 800 });
@@ -265,9 +265,13 @@ test("reopens a fallback projection, clears source, and expires the session fail
     ),
   ).toBe(true);
 
+  const sessionInitializationCount = application.sessionInitializationCount();
   evidence.expireSession();
   await page.getByRole("button", { name: "Calculate impact" }).click();
-  await expect(page.getByRole("heading", { name: "This local session has ended" })).toBeVisible();
+  await expect
+    .poll(() => application.sessionInitializationCount(), { timeout: 5_000 })
+    .toBeGreaterThan(sessionInitializationCount);
+  await expect(page.getByRole("heading", { name: "Graphical view is unavailable" })).toBeVisible();
   await expect(page.getByLabel("Explicitly loaded source")).not.toBeVisible();
   await expectNoSeriousAccessibilityViolations(page);
 });
@@ -328,7 +332,9 @@ test("completes the critical local path using keyboard input only", async ({ pag
 
 async function mockApplication(page: Page, projects: ReturnType<typeof projectSummary>[]) {
   let graphOpenCount = 0;
+  let sessionInitializationCount = 0;
   await page.route("**/api/v1/session", async (route) => {
+    sessionInitializationCount += 1;
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({ csrfToken: "csrf", idleTtlSeconds: 1_800 }),
@@ -375,6 +381,7 @@ async function mockApplication(page: Page, projects: ReturnType<typeof projectSu
   });
   return {
     graphOpenCount: () => graphOpenCount,
+    sessionInitializationCount: () => sessionInitializationCount,
   };
 }
 
