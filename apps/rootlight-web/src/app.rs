@@ -7,7 +7,7 @@ use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Extension, Path, Request, State},
     http::{
-        HeaderMap, HeaderValue, StatusCode,
+        HeaderMap, HeaderName, HeaderValue, StatusCode,
         header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, COOKIE, SET_COOKIE},
     },
     middleware::{self, Next},
@@ -18,6 +18,8 @@ use rootlight_client::{
     ClientError, DaemonLifecycle, Health, HealthStatus, RequestTimeout, ResourcePressure,
 };
 use serde::Serialize;
+use subtle::ConstantTimeEq as _;
+use tokio::sync::watch;
 
 use crate::{
     api,
@@ -38,6 +40,34 @@ use crate::{
 const MAX_BROWSER_BODY_BYTES: usize = 16 * 1024;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 const GRAPH_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
+const SERVICE_TOKEN_HEADER: HeaderName = HeaderName::from_static("x-rootlight-service-token");
+
+#[derive(Clone)]
+pub(crate) struct ServiceControl {
+    pid: u32,
+    token: String,
+    shutdown: watch::Sender<bool>,
+}
+
+impl ServiceControl {
+    pub(crate) fn new(pid: u32, token: String, shutdown: watch::Sender<bool>) -> Self {
+        Self {
+            pid,
+            token,
+            shutdown,
+        }
+    }
+
+    fn authorize(&self, headers: &HeaderMap) -> bool {
+        headers
+            .get(&SERVICE_TOKEN_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|candidate| {
+                candidate.len() == self.token.len()
+                    && bool::from(candidate.as_bytes().ct_eq(self.token.as_bytes()))
+            })
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -49,6 +79,7 @@ pub(crate) struct AppState {
     graphs: Arc<GraphRegistry>,
     sources: Arc<SourceCapabilityRegistry>,
     support: Arc<SupportRegistry>,
+    service_control: Option<ServiceControl>,
 }
 
 impl AppState {
@@ -70,7 +101,13 @@ impl AppState {
             graphs,
             sources: Arc::new(SourceCapabilityRegistry::new()),
             support,
+            service_control: None,
         }
+    }
+
+    pub(crate) fn with_service_control(mut self, control: ServiceControl) -> Self {
+        self.service_control = Some(control);
+        self
     }
 
     pub(crate) fn daemon(&self) -> &Arc<dyn DaemonClient> {
@@ -182,6 +219,8 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
             require_session,
         ));
     Router::new()
+        .route("/api/v1/service/status", get(service_status))
+        .route("/api/v1/service/shutdown", post(service_shutdown))
         .route("/api/v1/session", get(session_status_or_create))
         .merge(protected_api)
         .route("/", get(index))
@@ -193,6 +232,44 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
             security::enforce,
         ))
         .with_state(state)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceStatusResponse {
+    ready: bool,
+    pid: u32,
+}
+
+async fn service_status(
+    State(state): State<AppState>,
+) -> Result<Json<ServiceStatusResponse>, ApiError> {
+    let control = state
+        .service_control
+        .as_ref()
+        .ok_or_else(ApiError::service_unavailable)?;
+    Ok(Json(ServiceStatusResponse {
+        ready: true,
+        pid: control.pid,
+    }))
+}
+
+async fn service_shutdown(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let control = state
+        .service_control
+        .as_ref()
+        .ok_or_else(ApiError::service_unavailable)?;
+    if !control.authorize(&headers) {
+        return Err(ApiError::unauthorized());
+    }
+    control
+        .shutdown
+        .send(true)
+        .map_err(|_| ApiError::service_unavailable())?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 async fn require_session(
@@ -258,6 +335,13 @@ impl ApiError {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "session_unavailable",
+        }
+    }
+
+    const fn service_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "service_unavailable",
         }
     }
 
@@ -832,6 +916,8 @@ mod tests {
             .expect("manifest writes");
         let assets = AssetInventory::load(asset_root.path()).expect("assets validate");
         let sessions = Arc::new(SessionRegistry::new());
+        let service_token = "a".repeat(64);
+        let (service_shutdown, service_receiver) = watch::channel(false);
         let state = AppState::new(
             assets,
             Arc::new(FakeDaemon),
@@ -840,7 +926,12 @@ mod tests {
             Arc::new(IndexRegistry::new()),
             Arc::new(GraphRegistry::new()),
             Arc::new(SupportRegistry::new()),
-        );
+        )
+        .with_service_control(ServiceControl::new(
+            std::process::id(),
+            service_token.clone(),
+            service_shutdown,
+        ));
         let app = router(state, SecurityPolicy::loopback(43_127));
 
         let direct_navigation = Request::builder()
@@ -921,6 +1012,56 @@ mod tests {
                 .status(),
             StatusCode::FORBIDDEN
         );
+
+        let service_status_request = Request::builder()
+            .uri("/api/v1/service/status")
+            .header(HOST, "127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::empty())
+            .expect("service status request builds");
+        assert_eq!(
+            app.clone()
+                .oneshot(service_status_request)
+                .await
+                .expect("service status response returns")
+                .status(),
+            StatusCode::OK
+        );
+        let invalid_shutdown = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/service/shutdown")
+            .header(HOST, "127.0.0.1:43127")
+            .header("origin", "http://127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .header(&SERVICE_TOKEN_HEADER, "invalid")
+            .body(Body::empty())
+            .expect("invalid shutdown request builds");
+        assert_eq!(
+            app.clone()
+                .oneshot(invalid_shutdown)
+                .await
+                .expect("invalid shutdown response returns")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let valid_shutdown = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/service/shutdown")
+            .header(HOST, "127.0.0.1:43127")
+            .header("origin", "http://127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .header(&SERVICE_TOKEN_HEADER, &service_token)
+            .body(Body::empty())
+            .expect("valid shutdown request builds");
+        assert_eq!(
+            app.clone()
+                .oneshot(valid_shutdown)
+                .await
+                .expect("valid shutdown response returns")
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        assert!(*service_receiver.borrow());
 
         let unauthenticated_filesystem_mutation = Request::builder()
             .method(Method::POST)

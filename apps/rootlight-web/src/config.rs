@@ -6,16 +6,15 @@ use std::{
     path::PathBuf,
 };
 
-use rootlight_runtime::RuntimePaths;
+use rootlight_runtime::{RuntimePaths, WEB_UI_PORT};
 
 use crate::error::WebError;
-
-pub(crate) const DEFAULT_LISTEN_PORT: u16 = 43_127;
 
 /// Validated process configuration for one loopback web-host instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WebConfig {
     open_browser: bool,
+    service_mode: bool,
     listen_port: u16,
     asset_root: PathBuf,
 }
@@ -32,11 +31,18 @@ impl WebConfig {
     /// incomplete, non-Unicode, or release-forbidden argument.
     pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Self, WebError> {
         let mut open_browser = true;
+        let mut service_mode = false;
         let mut listen_port = None;
         let mut asset_root = None;
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             if argument == OsStr::new("--no-open") {
+                open_browser = false;
+            } else if argument == OsStr::new("--service") {
+                if service_mode {
+                    return Err(WebError::InvalidArguments);
+                }
+                service_mode = true;
                 open_browser = false;
             } else if argument == OsStr::new("--listen-port") {
                 if listen_port.is_some() || !cfg!(debug_assertions) {
@@ -68,9 +74,13 @@ impl WebConfig {
             Some(root) => root,
             None => default_asset_root()?,
         };
+        if service_mode && listen_port.is_some() {
+            return Err(WebError::InvalidArguments);
+        }
         Ok(Self {
             open_browser,
-            listen_port: listen_port.unwrap_or(DEFAULT_LISTEN_PORT),
+            service_mode,
+            listen_port: listen_port.unwrap_or(WEB_UI_PORT),
             asset_root,
         })
     }
@@ -79,6 +89,12 @@ impl WebConfig {
     #[must_use]
     pub(crate) const fn open_browser(&self) -> bool {
         self.open_browser
+    }
+
+    /// Returns whether this process owns the persistent installed service lifecycle.
+    #[must_use]
+    pub(crate) const fn service_mode(&self) -> bool {
+        self.service_mode
     }
 
     /// Returns the validated stable loopback port.
@@ -143,7 +159,13 @@ mod tests {
         let config =
             WebConfig::parse([OsString::from("--no-open")]).expect("no-open config validates");
         assert!(!config.open_browser());
-        assert_eq!(config.listen_port(), DEFAULT_LISTEN_PORT);
+        assert_eq!(config.listen_port(), WEB_UI_PORT);
+
+        let service =
+            WebConfig::parse([OsString::from("--service")]).expect("service config validates");
+        assert!(service.service_mode());
+        assert!(!service.open_browser());
+        assert_eq!(service.listen_port(), WEB_UI_PORT);
 
         if cfg!(debug_assertions) {
             let config = WebConfig::parse([
@@ -162,6 +184,12 @@ mod tests {
             vec![OsString::from("--listen-port"), OsString::from("0")],
             vec![OsString::from("--asset-dir"), OsString::new()],
             vec![OsString::from("--unknown")],
+            vec![OsString::from("--service"), OsString::from("--service")],
+            vec![
+                OsString::from("--service"),
+                OsString::from("--listen-port"),
+                OsString::from("43128"),
+            ],
         ] {
             assert_eq!(WebConfig::parse(arguments), Err(WebError::InvalidArguments));
         }

@@ -17,12 +17,16 @@ use rootlight_ipc::Endpoint;
 use rootlight_protocol::{CURRENT_PROTOCOL_MINOR, MINIMUM_PROTOCOL_MINOR};
 #[cfg(unix)]
 use rootlight_vfs::platform::{PlatformError, PrivateDirectory, PrivateStandaloneFile};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// Maximum serialized discovery record accepted from disk.
 pub const MAX_DISCOVERY_BYTES: u64 = 4 * 1024;
 /// Current discovery-record schema version.
 pub const DISCOVERY_SCHEMA_VERSION: u16 = 2;
+/// Stable loopback port reserved for the installed Rootlight Web UI.
+pub const WEB_UI_PORT: u16 = 43_127;
+/// Current Web UI service-discovery schema version.
+pub const WEB_DISCOVERY_SCHEMA_VERSION: u16 = 1;
 /// Current private daemon protocol major version.
 pub const PROTOCOL_MAJOR: u32 = 1;
 /// Current private daemon protocol minor version.
@@ -255,6 +259,12 @@ impl RuntimePaths {
         self.runtime_dir.join("daemon.json")
     }
 
+    /// Returns the checked Web UI service-discovery path.
+    #[must_use]
+    pub fn web_discovery_path(&self) -> PathBuf {
+        self.runtime_dir.join("web.json")
+    }
+
     /// Derives the strict endpoint identifier for an instance nonce.
     #[must_use]
     pub fn endpoint_id(&self, nonce: [u8; 16]) -> String {
@@ -309,29 +319,7 @@ impl RuntimePaths {
     pub fn publish(&self, record: &DiscoveryRecord) -> Result<(), RuntimeError> {
         self.validate_client()?;
         record.validate(self)?;
-        let bytes = serde_json::to_vec(record).map_err(RuntimeError::SerializeDiscovery)?;
-        if u64::try_from(bytes.len()).map_or(true, |length| length > MAX_DISCOVERY_BYTES) {
-            return Err(RuntimeError::InvalidDiscovery);
-        }
-        let mut temporary = tempfile::Builder::new()
-            .prefix("daemon-")
-            .suffix(".json.new")
-            .tempfile_in(&self.runtime_dir)
-            .map_err(RuntimeError::Io)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            temporary
-                .as_file()
-                .set_permissions(fs::Permissions::from_mode(0o600))
-                .map_err(RuntimeError::Io)?;
-        }
-        temporary.write_all(&bytes).map_err(RuntimeError::Io)?;
-        temporary.as_file().sync_all().map_err(RuntimeError::Io)?;
-        temporary
-            .persist(self.discovery_path())
-            .map_err(|error| RuntimeError::Io(error.error))?;
-        sync_directory(&self.runtime_dir)
+        publish_discovery_json(&self.runtime_dir, &self.discovery_path(), "daemon-", record)
     }
 
     /// Reads and validates the currently published daemon identity.
@@ -344,26 +332,7 @@ impl RuntimePaths {
     /// Returns [`RuntimeError`] for missing, oversized, malformed, or foreign records.
     pub fn discover(&self) -> Result<DiscoveryRecord, RuntimeError> {
         self.validate_client()?;
-        let file = open_discovery_no_follow(&self.discovery_path())?;
-        let metadata = file.metadata().map_err(RuntimeError::Io)?;
-        validate_discovery_metadata(&metadata)?;
-        let maximum = usize::try_from(MAX_DISCOVERY_BYTES)
-            .map_err(|_| RuntimeError::InvalidDiscovery)?
-            .checked_add(1)
-            .ok_or(RuntimeError::InvalidDiscovery)?;
-        let mut bytes = Vec::with_capacity(maximum);
-        file.take(
-            MAX_DISCOVERY_BYTES
-                .checked_add(1)
-                .ok_or(RuntimeError::InvalidDiscovery)?,
-        )
-        .read_to_end(&mut bytes)
-        .map_err(RuntimeError::Io)?;
-        if u64::try_from(bytes.len()).map_or(true, |length| length > MAX_DISCOVERY_BYTES) {
-            return Err(RuntimeError::InvalidDiscovery);
-        }
-        let record: DiscoveryRecord =
-            serde_json::from_slice(&bytes).map_err(RuntimeError::DeserializeDiscovery)?;
+        let record: DiscoveryRecord = discover_json(&self.discovery_path())?;
         record.validate(self)?;
         Ok(record)
     }
@@ -381,6 +350,50 @@ impl RuntimePaths {
             return Ok(());
         }
         fs::remove_file(self.discovery_path()).map_err(RuntimeError::Io)?;
+        sync_directory(&self.runtime_dir)
+    }
+
+    /// Atomically publishes one authenticated Web UI service identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] for validation, serialization, or publication failures.
+    pub fn publish_web(&self, record: &WebDiscoveryRecord) -> Result<(), RuntimeError> {
+        self.validate_client()?;
+        record.validate()?;
+        publish_discovery_json(
+            &self.runtime_dir,
+            &self.web_discovery_path(),
+            "web-",
+            record,
+        )
+    }
+
+    /// Reads and validates the current Web UI service identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] for missing, oversized, malformed, or foreign records.
+    pub fn discover_web(&self) -> Result<WebDiscoveryRecord, RuntimeError> {
+        self.validate_client()?;
+        let record: WebDiscoveryRecord = discover_json(&self.web_discovery_path())?;
+        record.validate()?;
+        Ok(record)
+    }
+
+    /// Removes the Web UI record only when it still names the supplied instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] when a matching record cannot be removed.
+    pub fn remove_web_discovery_if_matches(&self, nonce: [u8; 16]) -> Result<(), RuntimeError> {
+        let Ok(record) = self.discover_web() else {
+            return Ok(());
+        };
+        if record.instance_nonce() != nonce {
+            return Ok(());
+        }
+        fs::remove_file(self.web_discovery_path()).map_err(RuntimeError::Io)?;
         sync_directory(&self.runtime_dir)
     }
 
@@ -705,6 +718,100 @@ impl DiscoveryRecord {
     }
 }
 
+/// Strict owner-private record for one persistent Rootlight Web UI instance.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebDiscoveryRecord {
+    schema_version: u16,
+    pid: u32,
+    port: u16,
+    instance_nonce: String,
+    control_token: String,
+}
+
+impl WebDiscoveryRecord {
+    /// Creates a record for the fixed loopback service and its private control credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::InvalidDiscovery`] for a zero process identifier,
+    /// a non-reserved port, or malformed credentials.
+    pub fn new(
+        pid: u32,
+        port: u16,
+        instance_nonce: [u8; 16],
+        control_token: [u8; 32],
+    ) -> Result<Self, RuntimeError> {
+        let record = Self {
+            schema_version: WEB_DISCOVERY_SCHEMA_VERSION,
+            pid,
+            port,
+            instance_nonce: encode_nonce(instance_nonce),
+            control_token: encode_secret(control_token),
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
+    /// Returns the diagnostic process identifier. It does not independently prove liveness.
+    #[must_use]
+    pub const fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// Returns the reserved loopback Web UI port.
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Returns the decoded service-instance nonce.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if validated private state is mutated without checked construction.
+    #[must_use]
+    pub fn instance_nonce(&self) -> [u8; 16] {
+        let Some(nonce) = decode_nonce(&self.instance_nonce) else {
+            unreachable!("validated Web UI discovery nonce remains hexadecimal");
+        };
+        nonce
+    }
+
+    /// Returns the private shutdown credential for an authenticated local control request.
+    ///
+    /// Callers must not log or expose this value.
+    #[must_use]
+    pub fn control_token(&self) -> &str {
+        &self.control_token
+    }
+
+    fn validate(&self) -> Result<(), RuntimeError> {
+        if self.schema_version != WEB_DISCOVERY_SCHEMA_VERSION
+            || self.pid == 0
+            || self.port != WEB_UI_PORT
+            || decode_nonce(&self.instance_nonce).is_none()
+            || decode_secret(&self.control_token).is_none()
+        {
+            return Err(RuntimeError::InvalidDiscovery);
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for WebDiscoveryRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WebDiscoveryRecord")
+            .field("schema_version", &self.schema_version)
+            .field("pid", &self.pid)
+            .field("port", &self.port)
+            .field("instance_nonce", &"[redacted]")
+            .field("control_token", &"[redacted]")
+            .finish()
+    }
+}
+
 fn validate_directory_path(path: &Path) -> Result<(), RuntimeError> {
     if path.as_os_str().is_empty() || !path.is_absolute() {
         return Err(RuntimeError::InvalidDirectory);
@@ -835,6 +942,59 @@ fn open_discovery_no_follow(path: &Path) -> Result<File, RuntimeError> {
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0);
         options.open(path).map_err(RuntimeError::Io)
     }
+}
+
+fn publish_discovery_json<T: Serialize>(
+    runtime_dir: &Path,
+    path: &Path,
+    prefix: &str,
+    value: &T,
+) -> Result<(), RuntimeError> {
+    let bytes = serde_json::to_vec(value).map_err(RuntimeError::SerializeDiscovery)?;
+    if u64::try_from(bytes.len()).map_or(true, |length| length > MAX_DISCOVERY_BYTES) {
+        return Err(RuntimeError::InvalidDiscovery);
+    }
+    let mut temporary = tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(".json.new")
+        .tempfile_in(runtime_dir)
+        .map_err(RuntimeError::Io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(RuntimeError::Io)?;
+    }
+    temporary.write_all(&bytes).map_err(RuntimeError::Io)?;
+    temporary.as_file().sync_all().map_err(RuntimeError::Io)?;
+    temporary
+        .persist(path)
+        .map_err(|error| RuntimeError::Io(error.error))?;
+    sync_directory(runtime_dir)
+}
+
+fn discover_json<T: DeserializeOwned>(path: &Path) -> Result<T, RuntimeError> {
+    let file = open_discovery_no_follow(path)?;
+    let metadata = file.metadata().map_err(RuntimeError::Io)?;
+    validate_discovery_metadata(&metadata)?;
+    let maximum = usize::try_from(MAX_DISCOVERY_BYTES)
+        .map_err(|_| RuntimeError::InvalidDiscovery)?
+        .checked_add(1)
+        .ok_or(RuntimeError::InvalidDiscovery)?;
+    let mut bytes = Vec::with_capacity(maximum);
+    file.take(
+        MAX_DISCOVERY_BYTES
+            .checked_add(1)
+            .ok_or(RuntimeError::InvalidDiscovery)?,
+    )
+    .read_to_end(&mut bytes)
+    .map_err(RuntimeError::Io)?;
+    if u64::try_from(bytes.len()).map_or(true, |length| length > MAX_DISCOVERY_BYTES) {
+        return Err(RuntimeError::InvalidDiscovery);
+    }
+    serde_json::from_slice(&bytes).map_err(RuntimeError::DeserializeDiscovery)
 }
 
 fn open_private_lock_file(path: &Path, scope: PrivateScope) -> Result<File, RuntimeError> {
@@ -1151,8 +1311,16 @@ fn sync_directory(_path: &Path) -> Result<(), RuntimeError> {
 }
 
 fn encode_nonce(nonce: [u8; 16]) -> String {
-    let mut encoded = String::with_capacity(32);
-    for byte in nonce {
+    encode_hex(nonce)
+}
+
+fn encode_secret(secret: [u8; 32]) -> String {
+    encode_hex(secret)
+}
+
+fn encode_hex<const N: usize>(bytes: [u8; N]) -> String {
+    let mut encoded = String::with_capacity(N.saturating_mul(2));
+    for byte in bytes {
         use std::fmt::Write as _;
         let _ = write!(&mut encoded, "{byte:02x}");
     }
@@ -1160,19 +1328,27 @@ fn encode_nonce(nonce: [u8; 16]) -> String {
 }
 
 fn decode_nonce(value: &str) -> Option<[u8; 16]> {
-    if value.len() != 32
+    decode_hex(value)
+}
+
+fn decode_secret(value: &str) -> Option<[u8; 32]> {
+    decode_hex(value)
+}
+
+fn decode_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
+    if value.len() != N.checked_mul(2)?
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
         return None;
     }
-    let mut nonce = [0_u8; 16];
-    for (index, output) in nonce.iter_mut().enumerate() {
+    let mut decoded = [0_u8; N];
+    for (index, output) in decoded.iter_mut().enumerate() {
         let start = index.checked_mul(2)?;
         *output = u8::from_str_radix(value.get(start..start + 2)?, 16).ok()?;
     }
-    Some(nonce)
+    Some(decoded)
 }
 
 /// Per-user path and discovery failures.
@@ -1375,6 +1551,72 @@ mod tests {
             endpoint
         );
         assert_eq!(record.endpoint_id(), paths.endpoint_id(nonce));
+    }
+
+    #[test]
+    fn web_discovery_round_trip_is_bounded_private_and_instance_exact() {
+        let (_temporary, paths) = paths();
+        let instance_nonce = [7; 16];
+        let control_token = [9; 32];
+        let record = WebDiscoveryRecord::new(
+            std::process::id(),
+            WEB_UI_PORT,
+            instance_nonce,
+            control_token,
+        )
+        .expect("Web UI record validates");
+
+        paths.publish_web(&record).expect("Web UI record publishes");
+        let discovered = paths.discover_web().expect("Web UI record discovers");
+
+        assert_eq!(discovered, record);
+        assert_eq!(discovered.port(), WEB_UI_PORT);
+        assert_eq!(discovered.instance_nonce(), instance_nonce);
+        assert!(!format!("{discovered:?}").contains(discovered.control_token()));
+        paths
+            .remove_web_discovery_if_matches([8; 16])
+            .expect("foreign cleanup is ignored");
+        assert!(paths.web_discovery_path().exists());
+        paths
+            .remove_web_discovery_if_matches(instance_nonce)
+            .expect("matching cleanup succeeds");
+        assert!(!paths.web_discovery_path().exists());
+    }
+
+    #[test]
+    fn web_discovery_rejects_unknown_fields_and_non_reserved_ports() {
+        let (_temporary, paths) = paths();
+        let record = WebDiscoveryRecord::new(std::process::id(), WEB_UI_PORT, [1; 16], [2; 32])
+            .expect("Web UI record validates");
+        paths.publish_web(&record).expect("Web UI record publishes");
+        let mut value =
+            serde_json::to_value(&record).expect("Web UI record serializes for tampering");
+        value
+            .as_object_mut()
+            .expect("record is an object")
+            .insert("extra".to_owned(), serde_json::json!(true));
+        fs::write(
+            paths.web_discovery_path(),
+            serde_json::to_vec(&value).expect("tampered record serializes"),
+        )
+        .expect("tampered record writes");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(
+                paths.web_discovery_path(),
+                fs::Permissions::from_mode(0o600),
+            )
+            .expect("tampered record remains private");
+        }
+        assert!(matches!(
+            paths.discover_web(),
+            Err(RuntimeError::DeserializeDiscovery(_))
+        ));
+        assert!(matches!(
+            WebDiscoveryRecord::new(std::process::id(), WEB_UI_PORT + 1, [1; 16], [2; 32]),
+            Err(RuntimeError::InvalidDiscovery)
+        ));
     }
 
     #[test]

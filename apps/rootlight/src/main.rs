@@ -5,11 +5,13 @@
 
 #![forbid(unsafe_code)]
 
+mod web_service;
+
 use std::{
     env, fs,
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
-    process::{Command, ExitCode},
+    process::ExitCode,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -93,6 +95,7 @@ Repository commands:
 
 Service commands:
   web [--no-open]
+  service <start|status|stop|restart>
   health [--json]
   diagnostics quick
   support-bundle --output <file>
@@ -224,6 +227,9 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<CommandResult, CliError> {
     if command == "update" {
         return execute_update(&trailing);
     }
+    if command == "service" {
+        return execute_web_service(&trailing);
+    }
     if command == "generation-import" {
         return execute_generation_import(&trailing);
     }
@@ -261,20 +267,39 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<CommandResult, CliError> {
     })
 }
 
-// Keep the web server lifecycle in the dedicated sibling process while
-// preserving the user's terminal, signal handling, and closed argument grammar.
 fn execute_web(arguments: &[std::ffi::OsString]) -> Result<ExitCode, CliError> {
+    let open_browser = match arguments {
+        [] => true,
+        [argument] if argument == "--no-open" => false,
+        _ => return Err(CliError::Usage),
+    };
     let current = env::current_exe().map_err(CliError::CurrentExecutable)?;
     let executable = web_executable_for(&current)?;
-    let status = Command::new(executable)
-        .args(arguments)
-        .status()
-        .map_err(CliError::WebLaunch)?;
-    let code = status
-        .code()
-        .and_then(|code| u8::try_from(code).ok())
-        .unwrap_or(ExitFamily::Internal.code());
-    Ok(ExitCode::from(code))
+    let status = web_service::start(&runtime_paths()?, &executable)?;
+    println!("Rootlight Web UI: {}/", status.origin);
+    if open_browser {
+        web_service::open_browser()?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn execute_web_service(arguments: &[std::ffi::OsString]) -> Result<CommandResult, CliError> {
+    let paths = runtime_paths()?;
+    let status = match arguments {
+        [command] if command == "status" => web_service::status(&paths)?,
+        [command] if command == "stop" => web_service::stop(&paths)?,
+        [command] if command == "start" || command == "restart" => {
+            let current = env::current_exe().map_err(CliError::CurrentExecutable)?;
+            let executable = web_executable_for(&current)?;
+            if command == "start" {
+                web_service::start(&paths, &executable)?
+            } else {
+                web_service::restart(&paths, &executable)?
+            }
+        }
+        _ => return Err(CliError::Usage),
+    };
+    Ok(CommandResult::WebService(status))
 }
 
 fn web_executable_for(current: &Path) -> Result<PathBuf, CliError> {
@@ -2147,7 +2172,7 @@ impl CliEnvelope {
 struct CliHelp {
     usage: &'static str,
     repository_commands: [&'static str; 5],
-    service_commands: [&'static str; 6],
+    service_commands: [&'static str; 7],
 }
 
 impl CliHelp {
@@ -2163,6 +2188,7 @@ impl CliHelp {
             ],
             service_commands: [
                 "web [--no-open]",
+                "service <start|status|stop|restart>",
                 "health [--json]",
                 "diagnostics quick",
                 "support-bundle --output <file>",
@@ -2193,6 +2219,7 @@ impl CliVersion {
 enum CommandResult {
     Help(CliHelp),
     Version(CliVersion),
+    WebService(web_service::WebServiceStatus),
     Health(Health),
     DiagnosticsQuick(DiagnosticsQuick),
     SupportBundle(SupportBundleReceipt),
@@ -2380,7 +2407,7 @@ impl ExitFamily {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: rootlight <web|repo index|repo list|repo status|operation status|operation cancel|health|diagnostics|support-bundle|repair|update> [options]"
+        "usage: rootlight <web|service|repo index|repo list|repo status|operation status|operation cancel|health|diagnostics|support-bundle|repair|update> [options]"
     )]
     Usage,
     #[error("daemon path overrides must provide both state and runtime directories")]
@@ -2435,8 +2462,8 @@ enum CliError {
     FilesystemUpdate(#[from] FilesystemUpdateError),
     #[error("current executable is unavailable")]
     CurrentExecutable(#[source] std::io::Error),
-    #[error("web host launch failed")]
-    WebLaunch(#[source] std::io::Error),
+    #[error("local Web UI service failed")]
+    WebService(#[from] web_service::WebServiceError),
     #[error("current executable is outside an installed version")]
     InvalidInstalledLayout,
     #[error("stop the active Rootlight daemon before uninstalling")]
@@ -2552,7 +2579,7 @@ impl CliError {
             | Self::Client(ClientError::DaemonExecutableMissing)
             | Self::Client(ClientError::DaemonLaunchFailed)
             | Self::Client(ClientError::DaemonStartTimedOut)
-            | Self::WebLaunch(_)
+            | Self::WebService(_)
             | Self::DaemonActiveDuringUninstall
             | Self::Operations(
                 rootlight_operations::OperationError::WriterBusy
@@ -2595,8 +2622,10 @@ impl CliError {
             .next_action(NextAction::Retry)
             .build();
         }
-        if matches!(self, Self::WebLaunch(_)) {
-            return PublicError::builder(ErrorCode::NotFound, "web host executable is unavailable")
+        if matches!(self, Self::WebService(_)) {
+            return PublicError::builder(ErrorCode::Busy, "local web service is unavailable")
+                .retryable()
+                .next_action(NextAction::Retry)
                 .build();
         }
         if matches!(
