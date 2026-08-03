@@ -61,7 +61,9 @@ use rootlight_protocol::{
         project_analysis_frame_bytes, project_analysis_input_field_bytes,
         project_analysis_request_payload_bytes,
     },
-    generated::{adapter::v1 as adapter, common::v1 as common, daemon::v1 as daemon},
+    generated::{
+        adapter::v1 as adapter, common::v1 as common, daemon::v1 as daemon, ui::graph::v1 as graph,
+    },
 };
 use rootlight_query::{
     ArchitectureOverviewView, CodeDeadEntryPointPolicy, ExecutionCompletenessState, LocateMode,
@@ -85,6 +87,11 @@ use rootlight_service::{
     },
 };
 use sysinfo::{Pid, ProcessesToUpdate, System};
+
+use crate::graph_projection::{
+    EffectiveGraphBudget, GraphProjectionError, GraphProjectionRegistry, GraphProjectionSource,
+    relation_label,
+};
 
 const FIRST_SLICE_SCHEMA_MAJOR: u32 = 1;
 const FIRST_SLICE_SCHEMA_MINOR: u32 = 0;
@@ -577,12 +584,14 @@ struct PendingSemanticRefinement {
 type SharedFirstSliceService = Arc<RwLock<FirstSliceService>>;
 type IndexSerialization = Arc<Mutex<()>>;
 type SemanticRefinements = Arc<Mutex<BTreeMap<OperationId, PendingSemanticRefinement>>>;
+type GraphProjections = Arc<Mutex<GraphProjectionRegistry>>;
 
 #[derive(Clone)]
 struct FirstSliceServiceLanes {
     service: SharedFirstSliceService,
     index_serialization: IndexSerialization,
     semantic_refinements: SemanticRefinements,
+    graph_projections: GraphProjections,
     refinement: SyncSender<SemanticRefinementCommand>,
     recovery_ready: Arc<AtomicBool>,
     recovery_complete: Arc<AtomicBool>,
@@ -877,6 +886,7 @@ impl FirstSliceDaemon {
         let service = Arc::new(RwLock::new(service));
         let index_serialization = Arc::new(Mutex::new(()));
         let semantic_refinements = Arc::new(Mutex::new(BTreeMap::new()));
+        let graph_projections = Arc::new(Mutex::new(GraphProjectionRegistry::new()));
         let recovery_ready = Arc::new(AtomicBool::new(
             deferred_restore
                 .as_ref()
@@ -891,6 +901,7 @@ impl FirstSliceDaemon {
             service,
             index_serialization,
             semantic_refinements: Arc::clone(&semantic_refinements),
+            graph_projections,
             refinement: refinement.clone(),
             recovery_ready: Arc::clone(&recovery_ready),
             recovery_complete,
@@ -2065,6 +2076,18 @@ fn execute_service_request(
             return repository_index(lanes, resources, request, &context, reply)
                 .map(FirstSliceIpcResponse::RepositoryIndex);
         }
+        FirstSliceIpcRequest::GraphProjectionPage(request) => {
+            return lock_graph_projections(&lanes.graph_projections)?
+                .page(context.client_instance_id, &request)
+                .map(FirstSliceIpcResponse::GraphProjection)
+                .map_err(graph_projection_error);
+        }
+        FirstSliceIpcRequest::GraphProjectionRelease(request) => {
+            return lock_graph_projections(&lanes.graph_projections)?
+                .release(context.client_instance_id, &request)
+                .map(FirstSliceIpcResponse::GraphProjectionRelease)
+                .map_err(graph_projection_error);
+        }
         request => request,
     };
     let service = read_service(&lanes.service)?;
@@ -2128,6 +2151,12 @@ fn execute_service_request(
         FirstSliceIpcRequest::QueryAdvanced(request) => {
             advanced_query(&service, request, &context).map(FirstSliceIpcResponse::QueryAdvanced)
         }
+        FirstSliceIpcRequest::GraphProjectionOpen(request) => {
+            graph_projection_open(&service, &lanes.graph_projections, request, &context)
+                .map(FirstSliceIpcResponse::GraphProjection)
+        }
+        FirstSliceIpcRequest::GraphProjectionPage(_)
+        | FirstSliceIpcRequest::GraphProjectionRelease(_) => Err(internal_error()),
         FirstSliceIpcRequest::RepositoryOperationStatus(_) => Err(internal_error()),
     }
 }
@@ -2142,6 +2171,12 @@ fn write_service(
     service: &RwLock<FirstSliceService>,
 ) -> Result<RwLockWriteGuard<'_, FirstSliceService>, PublicError> {
     service.write().map_err(|_| internal_error())
+}
+
+fn lock_graph_projections(
+    projections: &Mutex<GraphProjectionRegistry>,
+) -> Result<MutexGuard<'_, GraphProjectionRegistry>, PublicError> {
+    projections.lock().map_err(|_| internal_error())
 }
 
 fn lock_publication_until<'a>(
@@ -4686,6 +4721,91 @@ fn architecture_overview(
     })
 }
 
+fn graph_projection_open(
+    service: &FirstSliceService,
+    projections: &Mutex<GraphProjectionRegistry>,
+    request: daemon::GraphProjectionOpenRequest,
+    context: &FirstSliceIpcContext,
+) -> Result<daemon::GraphProjectionResponse, PublicError> {
+    let view = graph::ProjectionView::try_from(request.view).map_err(|_| invalid_argument())?;
+    let budget =
+        EffectiveGraphBudget::from_request(&request, view).map_err(graph_projection_error)?;
+    let filters = request.filters.as_ref().ok_or_else(invalid_argument)?;
+    let generation = request.generation.clone().ok_or_else(invalid_argument)?;
+    let selector = daemon::GenerationSelector {
+        selector: Some(daemon::generation_selector::Selector::Generation(
+            generation,
+        )),
+    };
+    let source = match view {
+        graph::ProjectionView::Architecture | graph::ProjectionView::Files => {
+            let views = if view == graph::ProjectionView::Architecture {
+                vec!["communities".to_owned(), "hotspots".to_owned()]
+            } else {
+                Vec::new()
+            };
+            let response = architecture_overview(
+                service,
+                daemon::ArchitectureOverviewRequest {
+                    schema_version: Some(schema_version()),
+                    repository: request.repository.clone(),
+                    generation: Some(selector),
+                    views,
+                    max_components: Some(budget.aggregate_nodes),
+                    include_edges: Some(true),
+                    min_confidence: Some(filters.min_confidence),
+                },
+                context,
+            )?;
+            GraphProjectionSource::Architecture { response, view }
+        }
+        graph::ProjectionView::Symbols | graph::ProjectionView::Neighborhood => {
+            let symbols = request
+                .scope
+                .as_ref()
+                .and_then(|scope| scope.scope.as_ref())
+                .and_then(|scope| match scope {
+                    daemon::graph_projection_scope::Scope::Symbols(symbols) => Some(symbols),
+                    _ => None,
+                })
+                .ok_or_else(invalid_argument)?;
+            let mut relations = Vec::new();
+            relations
+                .try_reserve_exact(filters.relations.len())
+                .map_err(|_| resource_exhausted())?;
+            for relation in &filters.relations {
+                let relation =
+                    graph::RelationKind::try_from(*relation).map_err(|_| invalid_argument())?;
+                relations.push(
+                    relation_label(relation)
+                        .ok_or_else(invalid_argument)?
+                        .to_owned(),
+                );
+            }
+            let response = symbol_relationships(
+                service,
+                daemon::SymbolRelationshipsRequest {
+                    schema_version: Some(schema_version()),
+                    repository: request.repository.clone(),
+                    generation: Some(selector),
+                    seeds: symbols.symbols.clone(),
+                    relations,
+                    direction: None,
+                    min_confidence: Some(filters.min_confidence),
+                    max_results: Some(budget.aggregate_edges),
+                    page_offset: 0,
+                },
+                context,
+            )?;
+            GraphProjectionSource::Relationships(response)
+        }
+        graph::ProjectionView::Unspecified => return Err(invalid_argument()),
+    };
+    lock_graph_projections(projections)?
+        .open(context.client_instance_id, &request, budget, source)
+        .map_err(graph_projection_error)
+}
+
 fn tests_select(
     service: &FirstSliceService,
     request: daemon::TestsSelectRequest,
@@ -6316,6 +6436,19 @@ fn service_error(error: FirstSliceError) -> PublicError {
     build_service_error(error, None)
 }
 
+fn graph_projection_error(error: GraphProjectionError) -> PublicError {
+    match error {
+        GraphProjectionError::InvalidRequest | GraphProjectionError::InvalidCursor => {
+            invalid_argument()
+        }
+        GraphProjectionError::NotFound => not_found(),
+        GraphProjectionError::ResourceExhausted => resource_exhausted(),
+        GraphProjectionError::RandomUnavailable | GraphProjectionError::InvalidPage => {
+            internal_error()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RepositoryIndexErrorContext {
     operation: OperationId,
@@ -7593,6 +7726,7 @@ mod tests {
             service: Arc::clone(&service),
             index_serialization,
             semantic_refinements,
+            graph_projections: Arc::new(Mutex::new(GraphProjectionRegistry::new())),
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),
@@ -9188,6 +9322,7 @@ mod tests {
             service: Arc::clone(&service),
             index_serialization,
             semantic_refinements,
+            graph_projections: Arc::new(Mutex::new(GraphProjectionRegistry::new())),
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),
@@ -9665,6 +9800,7 @@ mod tests {
             service,
             index_serialization: Arc::new(Mutex::new(())),
             semantic_refinements: Arc::new(Mutex::new(BTreeMap::new())),
+            graph_projections: Arc::new(Mutex::new(GraphProjectionRegistry::new())),
             refinement: _refinement,
             recovery_ready: Arc::new(AtomicBool::new(false)),
             recovery_complete: Arc::new(AtomicBool::new(false)),
@@ -9748,6 +9884,7 @@ mod tests {
             service: Arc::clone(&service),
             index_serialization: Arc::new(Mutex::new(())),
             semantic_refinements: Arc::new(Mutex::new(BTreeMap::new())),
+            graph_projections: Arc::new(Mutex::new(GraphProjectionRegistry::new())),
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),

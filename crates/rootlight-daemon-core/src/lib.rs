@@ -54,8 +54,10 @@ use rootlight_protocol::{
     MAX_FIRST_SLICE_BUDGET_EDGES, MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS,
     MAX_FIRST_SLICE_BUDGET_JSON_BYTES, MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES,
     MAX_FIRST_SLICE_BUDGET_PATHS, MAX_FIRST_SLICE_BUDGET_RESULTS, MAX_FIRST_SLICE_BUDGET_ROWS,
-    MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES, MINIMUM_PROTOCOL_MINOR, PROTOCOL_VERSION,
-    generated::{common::v1 as common, daemon::v1 as daemon},
+    MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES, MAX_GRAPH_PAGE_EDGES, MAX_GRAPH_PAGE_NODES,
+    MINIMUM_PROTOCOL_MINOR, PROTOCOL_VERSION,
+    generated::{common::v1 as common, daemon::v1 as daemon, ui::graph::v1 as graph},
+    validate_graph_page,
 };
 use sha2::{Digest as _, Sha256};
 use unicode_casefold::UnicodeCaseFold as _;
@@ -74,6 +76,7 @@ const CAPABILITIES: &[&str] = &[
     "code.locate.v1",
     "diagnostics.quick",
     "health",
+    "rootlight.ui.graph_projection.v1",
     "operation.cancel",
     "operation.lifecycle.v1",
     "operation.status",
@@ -154,6 +157,8 @@ const MAX_REPOSITORY_CATALOG_LANGUAGES: usize = 64;
 const MAX_REPOSITORY_CATALOG_LANGUAGE_BYTES: usize = 64;
 const MIN_REPOSITORY_CATALOG_SORT_KEY_BYTES: usize = 18;
 const MAX_REPOSITORY_CATALOG_SORT_KEY_BYTES: usize = 1_042;
+const MAX_GRAPH_AGGREGATE_NODES: u32 = 512;
+const MAX_GRAPH_AGGREGATE_EDGES: u32 = 2_048;
 
 /// Boxed future returned by the daemon-owned first-slice IPC implementation.
 pub type FirstSliceIpcFuture =
@@ -198,6 +203,12 @@ pub enum FirstSliceIpcRequest {
     HistoryCompare(daemon::HistoryCompareRequest),
     /// Execute a bounded advanced query over a safe typed AST.
     QueryAdvanced(daemon::AdvancedQueryRequest),
+    /// Open one exact-generation bounded graph projection.
+    GraphProjectionOpen(daemon::GraphProjectionOpenRequest),
+    /// Read the next page from one authenticated graph projection.
+    GraphProjectionPage(daemon::GraphProjectionPageRequest),
+    /// Release one authenticated graph projection.
+    GraphProjectionRelease(daemon::GraphProjectionReleaseRequest),
 }
 
 /// Typed first-slice response returned by the daemon application.
@@ -239,6 +250,10 @@ pub enum FirstSliceIpcResponse {
     HistoryCompare(daemon::HistoryCompareResponse),
     /// Bounded advanced query result over a safe typed AST.
     QueryAdvanced(daemon::AdvancedQueryResponse),
+    /// One exact-generation bounded graph page.
+    GraphProjection(daemon::GraphProjectionResponse),
+    /// Explicit graph projection release result.
+    GraphProjectionRelease(daemon::GraphProjectionReleaseResponse),
 }
 
 impl FirstSliceIpcResponse {
@@ -287,6 +302,12 @@ impl FirstSliceIpcResponse {
             }
             Self::QueryAdvanced(response) => {
                 daemon::response_envelope::Response::AdvancedQuery(response)
+            }
+            Self::GraphProjection(response) => {
+                daemon::response_envelope::Response::GraphProjection(response)
+            }
+            Self::GraphProjectionRelease(response) => {
+                daemon::response_envelope::Response::GraphProjectionRelease(response)
             }
         }
     }
@@ -5793,6 +5814,7 @@ impl ControlService {
                         | "repository.index.v1"
                         | "source.read.v1"
                         | "symbol.explain.v1" => selected_minor >= 5,
+                        "rootlight.ui.graph_projection.v1" => selected_minor >= 10,
                         _ => true,
                     })
                     .map(|value| (*value).to_owned())
@@ -6748,6 +6770,15 @@ fn first_slice_request_from_wire(
         Some(daemon::request_envelope::Request::AdvancedQuery(request)) => {
             Ok(Some(FirstSliceIpcRequest::QueryAdvanced(request)))
         }
+        Some(daemon::request_envelope::Request::GraphProjectionOpen(request)) => {
+            Ok(Some(FirstSliceIpcRequest::GraphProjectionOpen(request)))
+        }
+        Some(daemon::request_envelope::Request::GraphProjectionPage(request)) => {
+            Ok(Some(FirstSliceIpcRequest::GraphProjectionPage(request)))
+        }
+        Some(daemon::request_envelope::Request::GraphProjectionRelease(request)) => {
+            Ok(Some(FirstSliceIpcRequest::GraphProjectionRelease(request)))
+        }
         Some(request) => Err(request),
         None => Ok(None),
     }
@@ -6833,12 +6864,16 @@ async fn dispatch_first_slice(
     context: FirstSliceIpcContext,
 ) -> daemon::response_envelope::Response {
     let required_protocol_minor = match &request {
+        FirstSliceIpcRequest::GraphProjectionOpen(_)
+        | FirstSliceIpcRequest::GraphProjectionPage(_)
+        | FirstSliceIpcRequest::GraphProjectionRelease(_) => 10,
         FirstSliceIpcRequest::CodeLocate(request) if !request.languages.is_empty() => 8,
         FirstSliceIpcRequest::RepositoryCatalogPage(_) => 6,
         _ => 5,
     };
     if context.selected_protocol_minor < required_protocol_minor {
         let message = match required_protocol_minor {
+            10 => "graph projections need protocol minor ten",
             8 => "code locate language filters need protocol minor eight",
             6 => "repository catalog pages need protocol minor six",
             _ => "first-slice requests need protocol minor five",
@@ -7513,6 +7548,26 @@ fn first_slice_response_correlates(
                         && !view.algorithm_version.is_empty()
                         && view.algorithm_version.len() <= 128
                 })
+        }
+        (
+            FirstSliceIpcRequest::GraphProjectionOpen(request),
+            FirstSliceIpcResponse::GraphProjection(response),
+        ) => graph_projection_open_response_correlates(request, response),
+        (
+            FirstSliceIpcRequest::GraphProjectionPage(request),
+            FirstSliceIpcResponse::GraphProjection(response),
+        ) => {
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && response.projection_id == request.projection_id
+                && graph_projection_response_is_bounded(response)
+        }
+        (
+            FirstSliceIpcRequest::GraphProjectionRelease(request),
+            FirstSliceIpcResponse::GraphProjectionRelease(response),
+        ) => {
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && response.projection_id == request.projection_id
+                && response.projection_id.len() == 16
         }
         (
             FirstSliceIpcRequest::TestsSelect(request),
@@ -8448,6 +8503,54 @@ fn wire_ids_form_subsequence<'a>(
     true
 }
 
+fn graph_projection_open_response_correlates(
+    request: &daemon::GraphProjectionOpenRequest,
+    response: &daemon::GraphProjectionResponse,
+) -> bool {
+    let Some(context) = response.context.as_ref() else {
+        return false;
+    };
+    first_slice_schema_matches(response.schema_version.as_ref())
+        && wire_id_equals(
+            context.repository.as_ref().map(|id| &id.value),
+            request.repository.as_ref().map(|id| &id.value),
+        )
+        && wire_id_equals(
+            context.generation.as_ref().map(|id| &id.value),
+            request.generation.as_ref().map(|id| &id.value),
+        )
+        && graph_projection_response_is_bounded(response)
+}
+
+fn graph_projection_response_is_bounded(response: &daemon::GraphProjectionResponse) -> bool {
+    let (Some(budget), Some(page), Some(_context), Some(_completeness)) = (
+        response.effective_budget.as_ref(),
+        response.page.as_ref(),
+        response.context.as_ref(),
+        response.completeness.as_ref(),
+    ) else {
+        return false;
+    };
+    response.projection_id.len() == 16
+        && response
+            .next_cursor
+            .as_ref()
+            .is_none_or(|cursor| cursor.len() == 32)
+        && (1..=u32::try_from(MAX_GRAPH_PAGE_NODES).unwrap_or(u32::MAX))
+            .contains(&budget.page_nodes)
+        && (1..=u32::try_from(MAX_GRAPH_PAGE_EDGES).unwrap_or(u32::MAX))
+            .contains(&budget.page_edges)
+        && (budget.page_nodes..=MAX_GRAPH_AGGREGATE_NODES).contains(&budget.aggregate_nodes)
+        && (budget.page_edges..=MAX_GRAPH_AGGREGATE_EDGES).contains(&budget.aggregate_edges)
+        && page
+            .total_matching_nodes
+            .is_some_and(|total| total <= u64::from(budget.aggregate_nodes))
+        && page
+            .total_matching_edges
+            .is_some_and(|total| total <= u64::from(budget.aggregate_edges))
+        && validate_graph_page(page).is_ok()
+}
+
 fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Box<PublicError>> {
     match request {
         FirstSliceIpcRequest::RepositoryIndex(request) => {
@@ -8820,6 +8923,31 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                 )));
             }
         }
+        FirstSliceIpcRequest::GraphProjectionOpen(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            require_wire_id(
+                request.generation.as_ref().map(|id| id.value.as_slice()),
+                20,
+            )?;
+            if !valid_graph_projection_open(request) {
+                return Err(Box::new(invalid_argument(
+                    "graph projection request is invalid",
+                )));
+            }
+        }
+        FirstSliceIpcRequest::GraphProjectionPage(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(Some(request.projection_id.as_slice()), 16)?;
+            require_wire_id(Some(request.cursor.as_slice()), 32)?;
+        }
+        FirstSliceIpcRequest::GraphProjectionRelease(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(Some(request.projection_id.as_slice()), 16)?;
+        }
         FirstSliceIpcRequest::TestsSelect(request) => {
             require_first_slice_schema(request.schema_version.as_ref())?;
             require_wire_id(
@@ -9035,6 +9163,120 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
     Ok(())
 }
 
+fn valid_graph_projection_open(request: &daemon::GraphProjectionOpenRequest) -> bool {
+    let Ok(view) = graph::ProjectionView::try_from(request.view) else {
+        return false;
+    };
+    let Some(scope) = request
+        .scope
+        .as_ref()
+        .and_then(|scope| scope.scope.as_ref())
+    else {
+        return false;
+    };
+    let scope_valid = match (view, scope) {
+        (
+            graph::ProjectionView::Architecture | graph::ProjectionView::Files,
+            daemon::graph_projection_scope::Scope::WholeRepository(_),
+        ) => true,
+        (
+            graph::ProjectionView::Symbols | graph::ProjectionView::Neighborhood,
+            daemon::graph_projection_scope::Scope::Symbols(symbols),
+        ) => {
+            !symbols.symbols.is_empty()
+                && symbols.symbols.len() <= 64
+                && symbols
+                    .symbols
+                    .iter()
+                    .all(|symbol| symbol.value.len() == 20)
+                && all_distinct(symbols.symbols.iter().map(|symbol| symbol.value.as_slice()))
+        }
+        _ => false,
+    };
+    if !scope_valid {
+        return false;
+    }
+    let Some(filters) = request.filters.as_ref() else {
+        return false;
+    };
+    if filters.node_kinds.len() > 2
+        || filters.relations.len() > 16
+        || !filters.languages.is_empty()
+        || filters.include_inferred.unwrap_or(false)
+        || !filters.include_generated.unwrap_or(true)
+        || filters.community_id.is_some()
+        || filters.hotspot_threshold.is_some()
+        || filters.min_confidence > 1_000
+        || !all_distinct(filters.node_kinds.iter())
+        || !all_distinct(filters.relations.iter())
+    {
+        return false;
+    }
+    let expected_kind = match view {
+        graph::ProjectionView::Architecture | graph::ProjectionView::Files => graph::NodeKind::File,
+        graph::ProjectionView::Symbols | graph::ProjectionView::Neighborhood => {
+            graph::NodeKind::Symbol
+        }
+        graph::ProjectionView::Unspecified => return false,
+    };
+    if filters
+        .node_kinds
+        .iter()
+        .any(|kind| graph::NodeKind::try_from(*kind) != Ok(expected_kind))
+        || filters.relations.iter().any(|relation| {
+            !matches!(
+                graph::RelationKind::try_from(*relation),
+                Ok(graph::RelationKind::Calls
+                    | graph::RelationKind::CalledBy
+                    | graph::RelationKind::References
+                    | graph::RelationKind::Types
+                    | graph::RelationKind::Implements
+                    | graph::RelationKind::Imports
+                    | graph::RelationKind::Tests
+                    | graph::RelationKind::Ownership
+                    | graph::RelationKind::ServiceCall
+                    | graph::RelationKind::CallsRoute
+                    | graph::RelationKind::Messaging
+                    | graph::RelationKind::ReadsTable
+                    | graph::RelationKind::WritesTable
+                    | graph::RelationKind::BuildDependency
+                    | graph::RelationKind::DataFlow
+                    | graph::RelationKind::History)
+            )
+        })
+    {
+        return false;
+    }
+    if matches!(
+        view,
+        graph::ProjectionView::Architecture | graph::ProjectionView::Files
+    ) && !filters.relations.is_empty()
+    {
+        return false;
+    }
+    if matches!(
+        view,
+        graph::ProjectionView::Symbols | graph::ProjectionView::Neighborhood
+    ) && filters.relations.is_empty()
+    {
+        return false;
+    }
+    request.budget.as_ref().is_some_and(|budget| {
+        budget.page_nodes > 0
+            && budget.page_edges > 0
+            && budget.aggregate_nodes >= budget.page_nodes
+            && budget.aggregate_edges >= budget.page_edges
+    })
+}
+
+fn all_distinct<T>(values: impl IntoIterator<Item = T>) -> bool
+where
+    T: Ord,
+{
+    let mut observed = BTreeSet::new();
+    values.into_iter().all(|value| observed.insert(value))
+}
+
 fn valid_code_locate_languages(languages: &[String]) -> bool {
     languages.len() <= MAX_CODE_LOCATE_LANGUAGES
         && languages.windows(2).all(|pair| pair[0] < pair[1])
@@ -9201,6 +9443,11 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
         Some(daemon::request_envelope::Request::PlanChange(_)) => ControlMethod::PlanChange,
         Some(daemon::request_envelope::Request::HistoryCompare(_)) => ControlMethod::HistoryCompare,
         Some(daemon::request_envelope::Request::AdvancedQuery(_)) => ControlMethod::QueryAdvanced,
+        Some(
+            daemon::request_envelope::Request::GraphProjectionOpen(_)
+            | daemon::request_envelope::Request::GraphProjectionPage(_)
+            | daemon::request_envelope::Request::GraphProjectionRelease(_),
+        ) => ControlMethod::Unknown,
         None => ControlMethod::Unknown,
     }
 }
@@ -9688,6 +9935,11 @@ fn request_from_wire(
         Some(daemon::request_envelope::Request::AdvancedQuery(_)) => {
             Err(Box::new(first_slice_unavailable()))
         }
+        Some(
+            daemon::request_envelope::Request::GraphProjectionOpen(_)
+            | daemon::request_envelope::Request::GraphProjectionPage(_)
+            | daemon::request_envelope::Request::GraphProjectionRelease(_),
+        ) => Err(Box::new(first_slice_unavailable())),
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
     }
 }
@@ -11371,7 +11623,10 @@ mod tests {
         let future_range = service.negotiate(&daemon::ClientHello {
             supported_protocols: Some(common::VersionRange {
                 minimum: Some(common::ContractVersion { major: 1, minor: 1 }),
-                maximum: Some(common::ContractVersion { major: 1, minor: 9 }),
+                maximum: Some(common::ContractVersion {
+                    major: 1,
+                    minor: PROTOCOL_MINOR + 1,
+                }),
             }),
             capabilities: vec!["health".to_owned()],
             expected_instance_nonce: vec![7; 16],
@@ -11420,13 +11675,24 @@ mod tests {
                     .expect("supported minor negotiates"),
                 common::ContractVersion { major: 1, minor }
             );
-            let expected = if minor >= 8 {
+            let expected = if minor >= 10 {
                 CAPABILITIES.to_vec()
+            } else if minor >= 8 {
+                CAPABILITIES
+                    .iter()
+                    .copied()
+                    .filter(|capability| *capability != "rootlight.ui.graph_projection.v1")
+                    .collect()
             } else if minor >= 5 {
                 CAPABILITIES
                     .iter()
                     .copied()
-                    .filter(|capability| *capability != "support.bundle.v4")
+                    .filter(|capability| {
+                        !matches!(
+                            *capability,
+                            "rootlight.ui.graph_projection.v1" | "support.bundle.v4"
+                        )
+                    })
                     .collect()
             } else if minor >= 4 {
                 vec![
@@ -11464,6 +11730,13 @@ mod tests {
                     .capabilities
                     .iter()
                     .any(|capability| capability == "operation.lease.renew")
+            );
+            assert_eq!(
+                negotiated
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "rootlight.ui.graph_projection.v1"),
+                minor >= 10
             );
         }
     }

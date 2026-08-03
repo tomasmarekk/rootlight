@@ -46,9 +46,15 @@ use schemars::{JsonSchema, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
 
 const MANIFEST_VERSION: &str = "1.0";
-const PROTO_FILES: [&str; 3] = ["common.proto", "daemon_v1.proto", "adapter_v1.proto"];
-const GENERATED_RUST_FILES: [&str; 3] = [
+const PROTO_FILES: [&str; 4] = [
+    "common.proto",
+    "ui_graph_v1.proto",
+    "daemon_v1.proto",
+    "adapter_v1.proto",
+];
+const GENERATED_RUST_FILES: [&str; 4] = [
     "rootlight.common.v1.rs",
+    "rootlight.ui.graph.v1.rs",
     "rootlight.daemon.v1.rs",
     "rootlight.adapter.v1.rs",
 ];
@@ -82,7 +88,7 @@ const COMPATIBILITY_BASELINES: [&str; 9] = [
     STORAGE_COMPATIBILITY_BASELINES[1],
     STORAGE_COMPATIBILITY_BASELINES[2],
 ];
-const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 8] = [
+const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 9] = [
     ("1.1", "protobuf/1.1/rootlight.desc"),
     ("1.2", "protobuf/1.2/rootlight.desc"),
     ("1.3", "protobuf/1.3/rootlight.desc"),
@@ -91,6 +97,7 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 8] = [
     ("1.6", "protobuf/1.6/rootlight.desc"),
     ("1.7", "protobuf/1.7/rootlight.desc"),
     ("1.8", "protobuf/1.8/rootlight.desc"),
+    ("1.9", "protobuf/1.9/rootlight.desc"),
 ];
 const SCHEMA_PROVENANCE_INPUTS: [&str; 22] = [
     "Cargo.lock",
@@ -276,7 +283,7 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
     validate_storage_compatibility(&workspace_root)?;
     println!("compatibility: frozen configuration 1.0 and current 1.1 fixtures verified");
     println!("compatibility: frozen protobuf descriptor is a compatible subset");
-    println!("compatibility: daemon protocol 1.1 through 1.8 descriptors verified");
+    println!("compatibility: daemon protocol 1.1 through 1.9 descriptors verified");
     println!("compatibility: frozen protobuf wire semantics verified");
     println!("compatibility: frozen IR 1.0 and normalized IR 1.1 documents verified");
     println!("compatibility: frozen rootlight.lexical extension version 1 verified");
@@ -767,6 +774,17 @@ pub mod daemon {
     /// Version 1 daemon negotiation messages.
     pub mod v1 {
         include!("rootlight.daemon.v1.rs");
+    }
+}
+
+/// Source-free compact graph page messages.
+pub mod ui {
+    /// UI graph messages.
+    pub mod graph {
+        /// Version 1 UI graph messages.
+        pub mod v1 {
+            include!("rootlight.ui.graph.v1.rs");
+        }
     }
 }
 

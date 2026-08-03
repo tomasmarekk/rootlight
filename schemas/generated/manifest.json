@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "7a0e8258101da9860332b380aa4d54499de93e036132ff7ec56ea42d164b200e"
+      "blake3": "1a93cc1df44a5b9c949407edb0a9d093ef5608e28d43fae21748c5a209affc34"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
@@ -82,7 +82,11 @@
     },
     {
       "path": "proto/daemon_v1.proto",
-      "blake3": "1f262db610438e81d523e9b67c2a0572c5d81153fc0c52098e814fd7f6fc32d6"
+      "blake3": "e487004a38a8c5a6087e156a6c502219fdcf1f736c623bb994b670b840160a5e"
+    },
+    {
+      "path": "proto/ui_graph_v1.proto",
+      "blake3": "646069a451205c46bbd62f192c57b83f4e5b77781bfe434aba782dcf926fd8c6"
     },
     {
       "path": "tests/fixtures/compatibility/contract-0.1.json",
@@ -157,6 +161,10 @@
       "blake3": "12c1717be9ae8cea24be6923f5f7442bf200a84e447c7e7fa6d2cbd483692fe1"
     },
     {
+      "path": "tests/fixtures/compatibility/protobuf/1.9/rootlight.desc",
+      "blake3": "b51f1adb2a5e5c323182734dfdb559b16dcddaddb6e390bb1beb9e29b7a1d152"
+    },
+    {
       "path": "tests/fixtures/compatibility/storage/1.0/schema-fingerprints.json",
       "blake3": "37aae71b93acea8d49bece736d17d8b8c39646328394edd75c68f4e86c1d2ef1"
     },
@@ -198,13 +206,13 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "b0552f9afc6095f487f2d5c05657b18a61ef9a30775c43bdf918b9fe9b35c8fa"
+      "blake3": "7c56b8a5eec5016fbd591cc5401d4305d47d82fd61c31ff659e4a793fb9b9f6f"
     }
   ],
   "artifacts": [
     {
       "path": "crates/rootlight-protocol/src/generated/mod.rs",
-      "blake3": "658aace089502876d0ffaf8cfb0e1b6246db72a2108184d53045007376e85a96"
+      "blake3": "c868b4b8c744b41c19d32939e0a4d81e59d6f6b40af84f1fd8654af1f0661a06"
     },
     {
       "path": "crates/rootlight-protocol/src/generated/rootlight.adapter.v1.rs",
@@ -216,7 +224,11 @@
     },
     {
       "path": "crates/rootlight-protocol/src/generated/rootlight.daemon.v1.rs",
-      "blake3": "4e8c325e1ae39e78cd5af2363402a8da283d5939e3a214c97a7d0ef32ecc3d49"
+      "blake3": "7e96d282c5183060d10f1f267b492a435866c63df37e719ca69d9a7a2ef586eb"
+    },
+    {
+      "path": "crates/rootlight-protocol/src/generated/rootlight.ui.graph.v1.rs",
+      "blake3": "a37b7cd5b6d22e29a26e809c70342aceb6f6a60979bb231b7c9cd76f526ff8bd"
     },
     {
       "path": "schemas/generated/json/config-1.0.schema.json",
@@ -424,7 +436,7 @@
     },
     {
       "path": "schemas/generated/protobuf/rootlight.desc",
-      "blake3": "b51f1adb2a5e5c323182734dfdb559b16dcddaddb6e390bb1beb9e29b7a1d152"
+      "blake3": "3539ad4157ff43cb68e623b83dbbbaf39fbec6789de5237f1d45ab7d4becdf2f"
     }
   ]
 }

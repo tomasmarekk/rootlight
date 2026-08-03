@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod first_slice;
+mod graph_projection;
 
 use std::{
     env,

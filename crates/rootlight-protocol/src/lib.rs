@@ -6,6 +6,14 @@
 #![forbid(unsafe_code)]
 
 pub mod adapter_contract;
+mod graph;
+
+pub use graph::{
+    GraphPageError, MAX_GRAPH_AGGREGATE_EDGES, MAX_GRAPH_AGGREGATE_NODES,
+    MAX_GRAPH_DICTIONARY_BYTES, MAX_GRAPH_DICTIONARY_ENTRIES, MAX_GRAPH_PAGE_BYTES,
+    MAX_GRAPH_PAGE_EDGES, MAX_GRAPH_PAGE_NODES, MAX_GRAPH_STRING_BYTES, UI_GRAPH_SCHEMA_VERSION,
+    seal_graph_page, validate_graph_page,
+};
 
 /// Generated messages compiled from the checked protocol sources.
 pub mod generated;
@@ -20,9 +28,9 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 /// authenticated operation submission and cannot satisfy the current contract.
 pub const MINIMUM_PROTOCOL_MINOR: u32 = 1;
 /// Latest daemon protocol implemented by the current client and server.
-pub const CURRENT_PROTOCOL_MINOR: u32 = 9;
+pub const CURRENT_PROTOCOL_MINOR: u32 = 10;
 /// Current production protocol contract version.
-pub const PROTOCOL_VERSION: &str = "1.9";
+pub const PROTOCOL_VERSION: &str = "1.10";
 /// Schema version for a complete effective first-slice request budget.
 pub const FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION: u32 = 1;
 /// Hard transport admission maximum for logical rows.
@@ -73,6 +81,7 @@ mod tests {
             packages,
             [
                 "rootlight.common.v1",
+                "rootlight.ui.graph.v1",
                 "rootlight.daemon.v1",
                 "rootlight.adapter.v1",
             ]

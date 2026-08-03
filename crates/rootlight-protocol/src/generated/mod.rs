@@ -17,6 +17,17 @@ pub mod daemon {
     }
 }
 
+/// Source-free compact graph page messages.
+pub mod ui {
+    /// UI graph messages.
+    pub mod graph {
+        /// Version 1 UI graph messages.
+        pub mod v1 {
+            include!("rootlight.ui.graph.v1.rs");
+        }
+    }
+}
+
 /// Isolated adapter capability messages.
 pub mod adapter {
     /// Version 1 adapter capability messages.

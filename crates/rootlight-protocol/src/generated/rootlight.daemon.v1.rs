@@ -52,7 +52,7 @@ pub struct RequestEnvelope {
     pub effective_budget: ::core::option::Option<FirstSliceEffectiveBudget>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -137,6 +137,15 @@ pub mod request_envelope {
         #[prost(message, tag = "47")]
         #[allow(missing_docs)]
         RepositoryCatalogPage(super::RepositoryCatalogPageRequest),
+        #[prost(message, tag = "48")]
+        #[allow(missing_docs)]
+        GraphProjectionOpen(super::GraphProjectionOpenRequest),
+        #[prost(message, tag = "49")]
+        #[allow(missing_docs)]
+        GraphProjectionPage(super::GraphProjectionPageRequest),
+        #[prost(message, tag = "50")]
+        #[allow(missing_docs)]
+        GraphProjectionRelease(super::GraphProjectionReleaseRequest),
     }
 }
 /// Complete validated resource ceilings for one first-slice request.
@@ -184,7 +193,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 50, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -269,10 +278,222 @@ pub mod response_envelope {
         #[prost(message, tag = "47")]
         #[allow(missing_docs)]
         RepositoryCatalogPage(super::RepositoryCatalogPageResponse),
+        #[prost(message, tag = "48")]
+        #[allow(missing_docs)]
+        GraphProjection(super::GraphProjectionResponse),
+        #[prost(message, tag = "50")]
+        #[allow(missing_docs)]
+        GraphProjectionRelease(super::GraphProjectionReleaseResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
     }
+}
+/// Whole-repository marker accepted only by architecture and files views.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GraphProjectionWholeRepository {}
+/// Bounded explicit file scope reserved for storage-supported projections.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GraphProjectionFileScope {
+    #[prost(message, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub files: ::prost::alloc::vec::Vec<super::super::common::v1::FileId>,
+}
+/// Bounded explicit symbol seeds for symbol and direct-neighborhood views.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GraphProjectionSymbolScope {
+    #[prost(message, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub symbols: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+}
+/// Closed projection scope. Unsupported combinations fail rather than sampling.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GraphProjectionScope {
+    #[prost(oneof = "graph_projection_scope::Scope", tags = "1, 2, 3, 4, 5")]
+    #[allow(missing_docs)]
+    pub scope: ::core::option::Option<graph_projection_scope::Scope>,
+}
+/// Nested message and enum types in `GraphProjectionScope`.
+pub mod graph_projection_scope {
+    #[allow(missing_docs)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Scope {
+        #[prost(message, tag = "1")]
+        #[allow(missing_docs)]
+        WholeRepository(super::GraphProjectionWholeRepository),
+        #[prost(string, tag = "2")]
+        #[allow(missing_docs)]
+        ComponentId(::prost::alloc::string::String),
+        #[prost(string, tag = "3")]
+        #[allow(missing_docs)]
+        DirectoryId(::prost::alloc::string::String),
+        #[prost(message, tag = "4")]
+        #[allow(missing_docs)]
+        Files(super::GraphProjectionFileScope),
+        #[prost(message, tag = "5")]
+        #[allow(missing_docs)]
+        Symbols(super::GraphProjectionSymbolScope),
+    }
+}
+/// Closed bounded filters applied before a graph snapshot is created.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GraphProjectionFilters {
+    #[prost(enumeration = "super::super::ui::graph::v1::NodeKind", repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub node_kinds: ::prost::alloc::vec::Vec<i32>,
+    #[prost(
+        enumeration = "super::super::ui::graph::v1::RelationKind",
+        repeated,
+        tag = "2"
+    )]
+    #[allow(missing_docs)]
+    pub relations: ::prost::alloc::vec::Vec<i32>,
+    #[prost(string, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub languages: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, tag = "4")]
+    #[allow(missing_docs)]
+    pub min_confidence: u32,
+    #[prost(bool, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub include_inferred: ::core::option::Option<bool>,
+    #[prost(bool, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub include_generated: ::core::option::Option<bool>,
+    #[prost(string, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub community_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub hotspot_threshold: ::core::option::Option<u32>,
+}
+/// Caller-requested graph page and aggregate limits.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GraphProjectionBudget {
+    #[prost(uint32, tag = "1")]
+    #[allow(missing_docs)]
+    pub page_nodes: u32,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub page_edges: u32,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub aggregate_nodes: u32,
+    #[prost(uint32, tag = "4")]
+    #[allow(missing_docs)]
+    pub aggregate_edges: u32,
+}
+/// Server-clamped graph limits retained by every page.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GraphProjectionEffectiveBudget {
+    #[prost(uint32, tag = "1")]
+    #[allow(missing_docs)]
+    pub page_nodes: u32,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub page_edges: u32,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub aggregate_nodes: u32,
+    #[prost(uint32, tag = "4")]
+    #[allow(missing_docs)]
+    pub aggregate_edges: u32,
+}
+/// Opens one exact-generation source-free graph projection and returns its first page.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GraphProjectionOpenRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<super::super::common::v1::GenerationId>,
+    #[prost(enumeration = "super::super::ui::graph::v1::ProjectionView", tag = "4")]
+    #[allow(missing_docs)]
+    pub view: i32,
+    #[prost(message, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub scope: ::core::option::Option<GraphProjectionScope>,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub filters: ::core::option::Option<GraphProjectionFilters>,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub budget: ::core::option::Option<GraphProjectionBudget>,
+}
+/// Reads the next sequential page from one authenticated projection.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GraphProjectionPageRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(bytes = "vec", tag = "2")]
+    #[allow(missing_docs)]
+    pub projection_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    #[allow(missing_docs)]
+    pub cursor: ::prost::alloc::vec::Vec<u8>,
+}
+/// Explicitly releases one authenticated projection snapshot.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GraphProjectionReleaseRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(bytes = "vec", tag = "2")]
+    #[allow(missing_docs)]
+    pub projection_id: ::prost::alloc::vec::Vec<u8>,
+}
+/// One exact-generation graph page and its authoritative completeness metadata.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GraphProjectionResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(bytes = "vec", tag = "2")]
+    #[allow(missing_docs)]
+    pub projection_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub next_cursor: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(message, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub completeness: ::core::option::Option<FirstSliceCompleteness>,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub effective_budget: ::core::option::Option<GraphProjectionEffectiveBudget>,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub page: ::core::option::Option<super::super::ui::graph::v1::GraphPage>,
+}
+/// Confirms explicit release without disclosing another client's projection state.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GraphProjectionReleaseResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(bytes = "vec", tag = "2")]
+    #[allow(missing_docs)]
+    pub projection_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bool, tag = "3")]
+    #[allow(missing_docs)]
+    pub released: bool,
 }
 /// Source-free daemon health request.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]

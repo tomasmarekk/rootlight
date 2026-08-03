@@ -6,8 +6,15 @@
 
 #![forbid(unsafe_code)]
 
+mod graph_projection;
 mod update;
 
+pub use graph_projection::{
+    GraphEdge, GraphEvidenceClass, GraphNode, GraphNodeIdKind, GraphNodeKind, GraphOverlayRole,
+    GraphProjectionBudget, GraphProjectionContinuation, GraphProjectionEffectiveBudget,
+    GraphProjectionId, GraphProjectionPage, GraphProjectionRequest, GraphProjectionView,
+    GraphRelationKind,
+};
 pub use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 pub use update::{
     ACTIVE_VERSION_FILE, ArtifactMetadata, CandidateHealthCheck, CandidateHealthError,
@@ -78,6 +85,7 @@ const CLIENT_CAPABILITIES: &[&str] = &[
     "code.locate.v1",
     "diagnostics.quick",
     "health",
+    "rootlight.ui.graph_projection.v1",
     "operation.cancel",
     "operation.lifecycle.v1",
     "operation.status",
@@ -5458,6 +5466,7 @@ impl Client {
         let hello = read_server_hello(codec, &mut stream)?;
         let selected_protocol_minor = validate_server_hello(&hello, self.instance_nonce)?;
         ensure_request_supported(&request, selected_protocol_minor)?;
+        ensure_request_capability(&request, &hello.capabilities)?;
         ensure_effective_budget_supported(effective_budget.as_ref(), selected_protocol_minor)?;
         write_request(
             codec,
@@ -5556,6 +5565,7 @@ impl Client {
         let hello = read_server_hello_async(codec, &mut stream).await?;
         let selected_protocol_minor = validate_server_hello(&hello, self.instance_nonce)?;
         ensure_request_supported(&request, selected_protocol_minor)?;
+        ensure_request_capability(&request, &hello.capabilities)?;
         ensure_effective_budget_supported(effective_budget.as_ref(), selected_protocol_minor)?;
         let timeout_ms = remaining_timeout_ms(deadline, TokioInstant::now())?;
         ensure_budget_within_transport_timeout(
@@ -6297,6 +6307,9 @@ fn ensure_request_supported(
     selected_protocol_minor: u32,
 ) -> Result<(), ClientError> {
     let required_minor = match request {
+        daemon::request_envelope::Request::GraphProjectionOpen(_)
+        | daemon::request_envelope::Request::GraphProjectionPage(_)
+        | daemon::request_envelope::Request::GraphProjectionRelease(_) => 10,
         daemon::request_envelope::Request::CodeLocate(request) if !request.languages.is_empty() => {
             8
         }
@@ -6340,6 +6353,24 @@ fn ensure_request_supported(
     } else {
         Ok(())
     }
+}
+
+fn ensure_request_capability(
+    request: &daemon::request_envelope::Request,
+    capabilities: &[String],
+) -> Result<(), ClientError> {
+    if matches!(
+        request,
+        daemon::request_envelope::Request::GraphProjectionOpen(_)
+            | daemon::request_envelope::Request::GraphProjectionPage(_)
+            | daemon::request_envelope::Request::GraphProjectionRelease(_)
+    ) && !capabilities
+        .iter()
+        .any(|capability| capability == "rootlight.ui.graph_projection.v1")
+    {
+        return Err(ClientError::ProtocolFeatureUnavailable);
+    }
+    Ok(())
 }
 
 fn parse_health(
@@ -12516,6 +12547,7 @@ mod tests {
                 "code.locate.v1",
                 "diagnostics.quick",
                 "health",
+                "rootlight.ui.graph_projection.v1",
                 "operation.cancel",
                 "operation.lifecycle.v1",
                 "operation.status",
@@ -12547,6 +12579,23 @@ mod tests {
                 Err(ClientError::ProtocolFeatureUnavailable)
             ));
         }
+
+        let graph = daemon::request_envelope::Request::GraphProjectionOpen(
+            daemon::GraphProjectionOpenRequest::default(),
+        );
+        assert!(matches!(
+            ensure_request_supported(&graph, 9),
+            Err(ClientError::ProtocolFeatureUnavailable)
+        ));
+        assert!(ensure_request_supported(&graph, 10).is_ok());
+        assert!(matches!(
+            ensure_request_capability(&graph, &[]),
+            Err(ClientError::ProtocolFeatureUnavailable)
+        ));
+        assert!(
+            ensure_request_capability(&graph, &["rootlight.ui.graph_projection.v1".to_owned()])
+                .is_ok()
+        );
     }
 
     #[test]

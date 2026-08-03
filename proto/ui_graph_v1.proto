@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+package rootlight.ui.graph.v1;
+
+// Source-free compact graph pages shared by the daemon, native client, and browser decoder.
+// Ordinals are projection-global, so later pages may safely reference nodes returned earlier.
+
+// Closed graph view families implemented by the bounded projection service.
+enum ProjectionView {
+  PROJECTION_VIEW_UNSPECIFIED = 0;
+  PROJECTION_VIEW_ARCHITECTURE = 1;
+  PROJECTION_VIEW_FILES = 2;
+  PROJECTION_VIEW_SYMBOLS = 3;
+  PROJECTION_VIEW_NEIGHBORHOOD = 4;
+}
+
+// Stable identity domains carried by projection nodes.
+enum NodeIdKind {
+  NODE_ID_KIND_UNSPECIFIED = 0;
+  NODE_ID_KIND_FILE = 1;
+  NODE_ID_KIND_SYMBOL = 2;
+}
+
+// Closed node categories exposed by the first graph wire revision.
+enum NodeKind {
+  NODE_KIND_UNSPECIFIED = 0;
+  NODE_KIND_FILE = 1;
+  NODE_KIND_SYMBOL = 2;
+}
+
+// Closed relation families supported by Rootlight query plans.
+enum RelationKind {
+  RELATION_KIND_UNSPECIFIED = 0;
+  RELATION_KIND_CALLS = 1;
+  RELATION_KIND_CALLED_BY = 2;
+  RELATION_KIND_REFERENCES = 3;
+  RELATION_KIND_TYPES = 4;
+  RELATION_KIND_IMPLEMENTS = 5;
+  RELATION_KIND_IMPORTS = 6;
+  RELATION_KIND_TESTS = 7;
+  RELATION_KIND_OWNERSHIP = 8;
+  RELATION_KIND_SERVICE_CALL = 9;
+  RELATION_KIND_CALLS_ROUTE = 10;
+  RELATION_KIND_MESSAGING = 11;
+  RELATION_KIND_READS_TABLE = 12;
+  RELATION_KIND_WRITES_TABLE = 13;
+  RELATION_KIND_BUILD_DEPENDENCY = 14;
+  RELATION_KIND_DATA_FLOW = 15;
+  RELATION_KIND_HISTORY = 16;
+}
+
+// Evidence semantics retained without exposing source text or source ranges.
+enum EvidenceClass {
+  EVIDENCE_CLASS_UNSPECIFIED = 0;
+  EVIDENCE_CLASS_STRUCTURAL = 1;
+  EVIDENCE_CLASS_AGGREGATED = 2;
+  EVIDENCE_CLASS_CANDIDATE = 3;
+}
+
+// Reserved overlay roles for additive graph annotations.
+enum OverlayRole {
+  OVERLAY_ROLE_UNSPECIFIED = 0;
+  OVERLAY_ROLE_NONE = 1;
+}
+
+// One source-free node in a projection-global ordinal space.
+message GraphNode {
+  uint32 ordinal = 1;
+  string stable_id = 2;
+  NodeIdKind id_kind = 3;
+  uint32 label_index = 4;
+  optional uint32 path_index = 5;
+  NodeKind kind = 6;
+  uint32 confidence = 7;
+  optional bool generated = 8;
+  optional uint32 community_index = 9;
+  optional uint32 component_index = 10;
+  optional uint32 symbol_count = 11;
+  optional uint32 fan_in = 12;
+  optional uint32 fan_out = 13;
+  optional uint32 hotspot_score = 14;
+  EvidenceClass evidence = 15;
+}
+
+// One source-free edge whose endpoints are known in the current or an earlier page.
+message GraphEdge {
+  uint32 source_ordinal = 1;
+  uint32 target_ordinal = 2;
+  RelationKind relation = 3;
+  uint32 weight = 4;
+  uint32 confidence = 5;
+  bool exact = 6;
+  bool inferred = 7;
+  uint32 evidence_count = 8;
+  OverlayRole overlay = 9;
+}
+
+// One bounded deterministic graph page.
+//
+// String index zero is always the empty string and represents a missing optional
+// value. Every non-zero index addresses `strings` directly.
+message GraphPage {
+  uint32 schema_version = 1;
+  repeated string strings = 2;
+  repeated GraphNode nodes = 3;
+  repeated GraphEdge edges = 4;
+  uint64 returned_nodes_cumulative = 5;
+  uint64 returned_edges_cumulative = 6;
+  optional uint64 total_matching_nodes = 7;
+  optional uint64 total_matching_edges = 8;
+  optional uint64 total_known_nodes = 9;
+  optional uint64 total_known_edges = 10;
+  uint64 edges_omitted_for_unavailable_endpoints = 11;
+  uint64 skipped_for_coverage = 12;
+  bytes checksum = 13;
+}

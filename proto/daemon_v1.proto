@@ -3,6 +3,7 @@ syntax = "proto3";
 package rootlight.daemon.v1;
 
 import "common.proto";
+import "ui_graph_v1.proto";
 
 // Client-supported protocol range, capabilities, and authenticated session identity.
 message ClientHello {
@@ -52,6 +53,9 @@ message RequestEnvelope {
     HistoryCompareRequest history_compare = 45;
     AdvancedQueryRequest advanced_query = 46;
     RepositoryCatalogPageRequest repository_catalog_page = 47;
+    GraphProjectionOpenRequest graph_projection_open = 48;
+    GraphProjectionPageRequest graph_projection_page = 49;
+    GraphProjectionReleaseRequest graph_projection_release = 50;
   }
 }
 
@@ -99,8 +103,104 @@ message ResponseEnvelope {
     HistoryCompareResponse history_compare = 45;
     AdvancedQueryResponse advanced_query = 46;
     RepositoryCatalogPageResponse repository_catalog_page = 47;
+    GraphProjectionResponse graph_projection = 48;
+    GraphProjectionReleaseResponse graph_projection_release = 50;
     rootlight.common.v1.PublicError error = 20;
   }
+}
+
+// Whole-repository marker accepted only by architecture and files views.
+message GraphProjectionWholeRepository {}
+
+// Bounded explicit file scope reserved for storage-supported projections.
+message GraphProjectionFileScope {
+  repeated rootlight.common.v1.FileId files = 1;
+}
+
+// Bounded explicit symbol seeds for symbol and direct-neighborhood views.
+message GraphProjectionSymbolScope {
+  repeated rootlight.common.v1.SymbolId symbols = 1;
+}
+
+// Closed projection scope. Unsupported combinations fail rather than sampling.
+message GraphProjectionScope {
+  oneof scope {
+    GraphProjectionWholeRepository whole_repository = 1;
+    string component_id = 2;
+    string directory_id = 3;
+    GraphProjectionFileScope files = 4;
+    GraphProjectionSymbolScope symbols = 5;
+  }
+}
+
+// Closed bounded filters applied before a graph snapshot is created.
+message GraphProjectionFilters {
+  repeated rootlight.ui.graph.v1.NodeKind node_kinds = 1;
+  repeated rootlight.ui.graph.v1.RelationKind relations = 2;
+  repeated string languages = 3;
+  uint32 min_confidence = 4;
+  optional bool include_inferred = 5;
+  optional bool include_generated = 6;
+  optional string community_id = 7;
+  optional uint32 hotspot_threshold = 8;
+}
+
+// Caller-requested graph page and aggregate limits.
+message GraphProjectionBudget {
+  uint32 page_nodes = 1;
+  uint32 page_edges = 2;
+  uint32 aggregate_nodes = 3;
+  uint32 aggregate_edges = 4;
+}
+
+// Server-clamped graph limits retained by every page.
+message GraphProjectionEffectiveBudget {
+  uint32 page_nodes = 1;
+  uint32 page_edges = 2;
+  uint32 aggregate_nodes = 3;
+  uint32 aggregate_edges = 4;
+}
+
+// Opens one exact-generation source-free graph projection and returns its first page.
+message GraphProjectionOpenRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  rootlight.common.v1.GenerationId generation = 3;
+  rootlight.ui.graph.v1.ProjectionView view = 4;
+  GraphProjectionScope scope = 5;
+  GraphProjectionFilters filters = 6;
+  GraphProjectionBudget budget = 7;
+}
+
+// Reads the next sequential page from one authenticated projection.
+message GraphProjectionPageRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  bytes projection_id = 2;
+  bytes cursor = 3;
+}
+
+// Explicitly releases one authenticated projection snapshot.
+message GraphProjectionReleaseRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  bytes projection_id = 2;
+}
+
+// One exact-generation graph page and its authoritative completeness metadata.
+message GraphProjectionResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  bytes projection_id = 2;
+  optional bytes next_cursor = 3;
+  FirstSliceQueryContext context = 4;
+  FirstSliceCompleteness completeness = 5;
+  GraphProjectionEffectiveBudget effective_budget = 6;
+  rootlight.ui.graph.v1.GraphPage page = 7;
+}
+
+// Confirms explicit release without disclosing another client's projection state.
+message GraphProjectionReleaseResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  bytes projection_id = 2;
+  bool released = 3;
 }
 
 // Source-free daemon health request.
