@@ -406,6 +406,17 @@ impl std::fmt::Debug for GraphProjectionId {
     }
 }
 
+impl GraphProjectionId {
+    /// Reconstructs an opaque projection identity received through a trusted boundary.
+    ///
+    /// The identifier remains owner-checked by the daemon; callers must not expose
+    /// its bytes as browser state, logs, diagnostics, or URLs.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; GRAPH_PROJECTION_ID_BYTES]) -> Self {
+        Self(bytes)
+    }
+}
+
 /// Server-clamped page and retained-snapshot limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct GraphProjectionEffectiveBudget {

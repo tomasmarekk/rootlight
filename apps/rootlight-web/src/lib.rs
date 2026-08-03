@@ -10,12 +10,19 @@ mod config;
 mod daemon;
 mod error;
 mod filesystem_registry;
+mod graph_registry;
 mod index_registry;
 mod security;
 mod session;
 
-use std::{ffi::OsString, net::Ipv4Addr, sync::Arc, time::Instant};
+use std::{
+    ffi::OsString,
+    net::Ipv4Addr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+use rootlight_client::RequestTimeout;
 use tokio::net::TcpListener;
 
 pub use error::WebError;
@@ -56,6 +63,7 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     let sessions = Arc::new(session::SessionRegistry::new());
     let filesystem = Arc::new(filesystem_registry::FilesystemRegistry::new());
     let indexes = Arc::new(index_registry::IndexRegistry::new());
+    let graphs = Arc::new(graph_registry::GraphRegistry::new());
     let bootstrap = sessions.issue_bootstrap(Instant::now())?;
     let url = format!("{}/#bootstrap={}", policy.origin(), bootstrap.encoded());
     println!("Rootlight Web UI: {url}");
@@ -64,10 +72,11 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     }
     let state = app::AppState::new(
         assets,
-        daemon,
+        Arc::clone(&daemon),
         Arc::clone(&sessions),
         Arc::clone(&filesystem),
         Arc::clone(&indexes),
+        Arc::clone(&graphs),
     );
     let router = app::router(state, policy);
     let result = axum::serve(listener, router)
@@ -77,6 +86,13 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     sessions.clear();
     filesystem.clear();
     indexes.clear();
+    if let Ok(timeout) = RequestTimeout::try_from(Duration::from_secs(2)) {
+        for handle in graphs.clear() {
+            let _ = daemon
+                .graph_projection_release(handle.projection(), timeout)
+                .await;
+        }
+    }
     result
 }
 

@@ -215,6 +215,58 @@ describe("browser API client", () => {
       },
     });
   });
+
+  it("keeps daemon graph cursors behind CSRF-bound browser projection handles", async () => {
+    const repositoryId = `repo1_${"a".repeat(32)}`;
+    const generationId = `gen1_${"b".repeat(39)}`;
+    const projectionToken = "c".repeat(43);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ csrfToken: "csrf", idleTtlSeconds: 1_800 }))
+      .mockResolvedValueOnce(
+        jsonResponse(graphPageFixture(repositoryId, generationId, projectionToken, 0)),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(graphPageFixture(repositoryId, generationId, projectionToken, 1)),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ schema: "rootlight.web-graph-release/1", released: true }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const { fetchNextGraphPage, initializeSession, openGraphProjection, releaseGraphProjection } =
+      await import("../src/api/client");
+    await initializeSession();
+
+    await openGraphProjection({
+      repositoryId,
+      generationId,
+      view: "architecture",
+      minConfidence: 500,
+      budgetProfile: "balanced",
+    });
+    await fetchNextGraphPage(projectionToken, repositoryId, generationId);
+    await releaseGraphProjection(projectionToken);
+
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/v1/graph/projections");
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-rootlight-csrf": "csrf",
+      },
+    });
+    expect(JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string)).toEqual({
+      repositoryId,
+      generationId,
+      view: "architecture",
+      minConfidence: 500,
+      budgetProfile: "balanced",
+    });
+    expect(fetchMock.mock.calls[2]?.[0]).toBe(`/api/v1/graph/projections/${projectionToken}/next`);
+    expect(fetchMock.mock.calls[3]?.[0]).toBe(`/api/v1/graph/projections/${projectionToken}`);
+    expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({ method: "DELETE" });
+    expect(JSON.stringify(fetchMock.mock.calls)).not.toContain("daemon-cursor");
+  });
 });
 
 function jsonResponse(value: unknown): Response {
@@ -271,5 +323,73 @@ function operationFixture(operationId: string) {
     bytesExamined: "5",
     indexStage: "indexing",
     retryAfterMs: 100,
+  };
+}
+
+function graphPageFixture(
+  repositoryId: string,
+  generationId: string,
+  projectionToken: string,
+  pageOrdinal: number,
+) {
+  return {
+    schema: "rootlight.web-graph-page/1",
+    projectionToken,
+    pageOrdinal,
+    context: {
+      repositoryId,
+      generationId,
+      parentGenerationId: null,
+      activeGeneration: true,
+      structuralFreshness: "current",
+      semanticFreshness: "current",
+      tier: "tier_b",
+      coverageStatus: "complete",
+      skippedInputs: "0",
+    },
+    nodes:
+      pageOrdinal === 0
+        ? [
+            {
+              ordinal: 0,
+              stableId: "file:root",
+              idKind: "file",
+              label: "root.rs",
+              path: "src/root.rs",
+              kind: "file",
+              confidence: 1_000,
+              generated: false,
+              community: null,
+              component: null,
+              symbolCount: null,
+              fanIn: null,
+              fanOut: null,
+              hotspotScore: null,
+              evidence: "structural",
+            },
+          ]
+        : [],
+    edges: [],
+    completeness: {
+      state: "complete",
+      limitingResources: [],
+      continuation: "not_applicable",
+      guidance: [],
+    },
+    effectiveBudget: {
+      pageNodes: 127,
+      pageEdges: 300,
+      aggregateNodes: 250,
+      aggregateEdges: 750,
+    },
+    returnedNodesCumulative: "1",
+    returnedEdgesCumulative: "0",
+    totalMatchingNodes: "1",
+    totalMatchingEdges: "0",
+    totalKnownNodes: "1",
+    totalKnownEdges: "0",
+    edgesOmittedForUnavailableEndpoints: "0",
+    skippedForCoverage: "0",
+    hasNextPage: false,
   };
 }

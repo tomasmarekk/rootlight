@@ -504,6 +504,7 @@ mod tests {
         assets::AssetInventory,
         daemon::DaemonClient,
         filesystem_registry::{FilesystemRegistry, RootAdmission},
+        graph_registry::GraphRegistry,
         index_registry::IndexRegistry,
         security::SecurityPolicy,
         session::{CSRF_HEADER_NAME, SESSION_COOKIE_NAME, SessionRegistry},
@@ -715,6 +716,7 @@ mod tests {
                 sessions,
                 filesystem,
                 Arc::new(IndexRegistry::new()),
+                Arc::new(GraphRegistry::new()),
             );
             Self {
                 router: app::router(state, SecurityPolicy::loopback(TEST_PORT)),

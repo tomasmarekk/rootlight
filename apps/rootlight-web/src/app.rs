@@ -12,7 +12,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use rootlight_client::{
     ClientError, DaemonLifecycle, Health, HealthStatus, RequestTimeout, ResourcePressure,
@@ -24,6 +24,7 @@ use crate::{
     assets::{Asset, AssetInventory},
     daemon::DaemonClient,
     filesystem_registry::FilesystemRegistry,
+    graph_registry::GraphRegistry,
     index_registry::IndexRegistry,
     security::{self, SecurityPolicy},
     session::{
@@ -34,6 +35,7 @@ use crate::{
 
 const MAX_BROWSER_BODY_BYTES: usize = 16 * 1024;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
+const GRAPH_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -42,6 +44,7 @@ pub(crate) struct AppState {
     sessions: Arc<SessionRegistry>,
     filesystem: Arc<FilesystemRegistry>,
     indexes: Arc<IndexRegistry>,
+    graphs: Arc<GraphRegistry>,
 }
 
 impl AppState {
@@ -51,6 +54,7 @@ impl AppState {
         sessions: Arc<SessionRegistry>,
         filesystem: Arc<FilesystemRegistry>,
         indexes: Arc<IndexRegistry>,
+        graphs: Arc<GraphRegistry>,
     ) -> Self {
         Self {
             assets,
@@ -58,6 +62,7 @@ impl AppState {
             sessions,
             filesystem,
             indexes,
+            graphs,
         }
     }
 
@@ -73,12 +78,18 @@ impl AppState {
         &self.indexes
     }
 
+    pub(crate) fn graphs(&self) -> &Arc<GraphRegistry> {
+        &self.graphs
+    }
+
     fn reap_expired_session_resources(&self, now: Instant) {
         let expired = self.sessions.expire(now);
         self.filesystem.clear_sessions(&expired);
         self.filesystem.reap(now);
         self.indexes.clear_sessions(&expired);
         self.indexes.reap(now);
+        self.graphs.clear_sessions(&expired);
+        self.graphs.reap(now);
     }
 }
 
@@ -97,6 +108,15 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
         .route(
             "/api/v1/operations/{operation_id}/cancel",
             post(api::indexing::cancel),
+        )
+        .route("/api/v1/graph/projections", post(api::graph::open))
+        .route(
+            "/api/v1/graph/projections/{projection_token}/next",
+            post(api::graph::next),
+        )
+        .route(
+            "/api/v1/graph/projections/{projection_token}",
+            delete(api::graph::release),
         )
         .route_layer(middleware::from_fn(require_mutation_csrf));
     let protected_api = Router::new()
@@ -283,6 +303,34 @@ impl ApiError {
         }
     }
 
+    pub(crate) const fn invalid_graph_request() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_graph_request",
+        }
+    }
+
+    pub(crate) const fn graph_projection_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "graph_projection_not_found",
+        }
+    }
+
+    pub(crate) const fn graph_projection_limit_reached() -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "graph_projection_limit_reached",
+        }
+    }
+
+    pub(crate) const fn graph_projection_conflict() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "graph_projection_conflict",
+        }
+    }
+
     pub(crate) fn from_daemon(error: &ClientError) -> Self {
         match error {
             ClientError::Ipc(_)
@@ -360,6 +408,16 @@ async fn logout_session(
     require_csrf(&session, &headers)?;
     state.filesystem.clear_session(session.identity());
     state.indexes.clear_session(session.identity());
+    if let Ok(handles) = state.graphs.clear_session(session.identity())
+        && let Ok(timeout) = RequestTimeout::try_from(GRAPH_RELEASE_TIMEOUT)
+    {
+        for handle in handles {
+            let _ = state
+                .daemon
+                .graph_projection_release(handle.projection(), timeout)
+                .await;
+        }
+    }
     state.sessions.logout(&session);
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
@@ -621,6 +679,7 @@ mod tests {
             Arc::clone(&sessions),
             Arc::new(FilesystemRegistry::new()),
             Arc::new(IndexRegistry::new()),
+            Arc::new(GraphRegistry::new()),
         );
         let app = router(state, SecurityPolicy::loopback(43_127));
         let bootstrap_body =

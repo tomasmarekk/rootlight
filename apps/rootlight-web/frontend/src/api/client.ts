@@ -26,6 +26,13 @@ import {
   type RepositoryOperation,
   type Session,
 } from "./contracts";
+import {
+  parseBrowserGraphPage,
+  parseBrowserGraphRelease,
+  type BrowserGraphPage,
+  type BrowserGraphRelease,
+  type GraphProjectionOpenRequest,
+} from "../features/graph/model/graph-contracts";
 
 const maximumJsonBytes = 1024 * 1024;
 const maximumErrorBytes = 16 * 1024;
@@ -226,6 +233,49 @@ export function createClientRequestId(): string {
   return `idx_${Array.from(entropy, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
+export async function openGraphProjection(
+  request: GraphProjectionOpenRequest,
+  signal?: AbortSignal,
+): Promise<BrowserGraphPage> {
+  return parseBrowserGraphPage(
+    await mutationJson("/api/v1/graph/projections", request, signal),
+    request.repositoryId,
+    request.generationId,
+  );
+}
+
+export async function fetchNextGraphPage(
+  projectionToken: string,
+  repositoryId: string,
+  generationId: string,
+  signal?: AbortSignal,
+): Promise<BrowserGraphPage> {
+  return parseBrowserGraphPage(
+    await mutationJson(
+      `/api/v1/graph/projections/${encodeURIComponent(projectionToken)}/next`,
+      {},
+      signal,
+    ),
+    repositoryId,
+    generationId,
+    projectionToken,
+  );
+}
+
+export async function releaseGraphProjection(
+  projectionToken: string,
+  signal?: AbortSignal,
+): Promise<BrowserGraphRelease> {
+  return parseBrowserGraphRelease(
+    await mutationJson(
+      `/api/v1/graph/projections/${encodeURIComponent(projectionToken)}`,
+      {},
+      signal,
+      "DELETE",
+    ),
+  );
+}
+
 export async function logout(): Promise<void> {
   await request("/api/v1/session", {
     method: "DELETE",
@@ -235,12 +285,17 @@ export async function logout(): Promise<void> {
   initialization = undefined;
 }
 
-async function mutationJson(path: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
+async function mutationJson(
+  path: string,
+  body: unknown,
+  signal?: AbortSignal,
+  method: "DELETE" | "POST" = "POST",
+): Promise<unknown> {
   if (csrfToken === undefined) {
     throw new ApiError(401, "session_required");
   }
   return requestJson(path, {
-    method: "POST",
+    method,
     headers: {
       "content-type": "application/json",
       "x-rootlight-csrf": csrfToken,

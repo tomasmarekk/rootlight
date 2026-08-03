@@ -710,6 +710,7 @@ mod tests {
         assets::AssetInventory,
         daemon::DaemonClient,
         filesystem_registry::FilesystemRegistry,
+        graph_registry::GraphRegistry,
         index_registry::IndexRegistry,
         security::SecurityPolicy,
         session::{CSRF_HEADER_NAME, SESSION_COOKIE_NAME, SessionIdentity, SessionRegistry},
@@ -972,6 +973,7 @@ mod tests {
                 sessions,
                 Arc::clone(&filesystem),
                 Arc::new(IndexRegistry::new()),
+                Arc::new(GraphRegistry::new()),
             );
             Self {
                 router: app::router(state, SecurityPolicy::loopback(TEST_PORT)),

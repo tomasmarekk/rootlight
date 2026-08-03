@@ -3,7 +3,8 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use rootlight_client::{
-    Client, ClientError, ConnectPolicy, Health, OperationId, RepositoryCatalogPage,
+    Client, ClientError, ConnectPolicy, GraphProjectionContinuation, GraphProjectionId,
+    GraphProjectionPage, GraphProjectionRequest, Health, OperationId, RepositoryCatalogPage,
     RepositoryCatalogPageRequest, RepositoryIndex, RepositoryIndexMode, RepositoryOperationAction,
     RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestTimeout,
 };
@@ -48,6 +49,30 @@ pub(crate) trait DaemonClient: Send + Sync {
         _after_revision: Option<u64>,
         _timeout: RequestTimeout,
     ) -> ClientFuture<'a, RepositoryOperationStatus> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
+
+    fn graph_projection_open<'a>(
+        &'a self,
+        _request: &'a GraphProjectionRequest,
+        _timeout: RequestTimeout,
+    ) -> ClientFuture<'a, GraphProjectionPage> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
+
+    fn graph_projection_page<'a>(
+        &'a self,
+        _continuation: &'a GraphProjectionContinuation,
+        _timeout: RequestTimeout,
+    ) -> ClientFuture<'a, GraphProjectionPage> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
+
+    fn graph_projection_release<'a>(
+        &'a self,
+        _projection: GraphProjectionId,
+        _timeout: RequestTimeout,
+    ) -> ClientFuture<'a, bool> {
         Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
     }
 }
@@ -98,6 +123,30 @@ impl DaemonClient for Client {
             after_revision,
             timeout,
         ))
+    }
+
+    fn graph_projection_open<'a>(
+        &'a self,
+        request: &'a GraphProjectionRequest,
+        timeout: RequestTimeout,
+    ) -> ClientFuture<'a, GraphProjectionPage> {
+        Box::pin(self.graph_projection_open_async(request, timeout))
+    }
+
+    fn graph_projection_page<'a>(
+        &'a self,
+        continuation: &'a GraphProjectionContinuation,
+        timeout: RequestTimeout,
+    ) -> ClientFuture<'a, GraphProjectionPage> {
+        Box::pin(self.graph_projection_page_async(continuation, timeout))
+    }
+
+    fn graph_projection_release<'a>(
+        &'a self,
+        projection: GraphProjectionId,
+        timeout: RequestTimeout,
+    ) -> ClientFuture<'a, bool> {
+        Box::pin(self.graph_projection_release_async(projection, timeout))
     }
 }
 
