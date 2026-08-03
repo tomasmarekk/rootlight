@@ -382,7 +382,9 @@ def main() -> None:
     if output.exists() or output.is_symlink() or not output.parent.is_dir():
         raise ValueError("installed web smoke output must be a new file")
 
-    with tempfile.TemporaryDirectory(prefix="rootlight-web-smoke-") as temporary:
+    with tempfile.TemporaryDirectory(
+        prefix="rootlight-web-smoke-", dir=output.parent
+    ) as temporary:
         root = Path(temporary)
         package_root = root / "package"
         package_root.mkdir()
