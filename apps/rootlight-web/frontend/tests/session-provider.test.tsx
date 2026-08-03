@@ -71,7 +71,7 @@ describe("SessionProvider", () => {
           status: 200,
           headers: { "content-type": "application/json" },
         }),
-    );
+      );
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
 
