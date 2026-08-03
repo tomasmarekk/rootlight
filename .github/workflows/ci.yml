@@ -271,7 +271,7 @@ jobs:
           include-hidden-files: false
 
   web-e2e:
-    name: web-e2e / chromium / linux
+    name: web-e2e / browser quality matrix / linux
     needs: [web-build]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -289,14 +289,25 @@ jobs:
           cache: npm
           cache-dependency-path: apps/rootlight-web/frontend/package-lock.json
           package-manager-cache: false
-      - name: Run browser acceptance, accessibility, and fallback tests
+      - name: Run browser acceptance, accessibility, performance, and fallback tests
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
         run: |
           test "$(node --version)" = "v24.11.1"
           test "$(npm --version)" = "11.6.2"
           npm ci --ignore-scripts
-          npx playwright install --with-deps chromium
-          npm run build
+          npx playwright install --with-deps chromium firefox webkit
           npm run test:e2e
+      - name: Upload source-free browser quality evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-web-browser-quality-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: apps/rootlight-web/frontend/test-results/**/web-*.json
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
 
   msrv:
     name: msrv / 1.90.0 / linux

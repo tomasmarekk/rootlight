@@ -1,9 +1,12 @@
-// Validates the dark authenticated shell and its initial accessibility baseline.
+// Exercises authenticated product flows, accessibility states, and keyboard operation.
+// Strict serving policy checks ensure browser acceptance matches the native local host.
 
 import { createHash } from "node:crypto";
 
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
+
+import { expectPrimaryMarkupQuality, monitorBrowserQuality } from "./quality-fixtures";
 
 const repositoryId = `repo1_${"a".repeat(32)}`;
 const generationId = `gen1_${"b".repeat(39)}`;
@@ -13,6 +16,7 @@ const targetSymbolId = `sym1_${"d".repeat(39)}`;
 const browseToken = "d".repeat(43);
 const rootCapability = "e".repeat(43);
 const projectionToken = "f".repeat(43);
+const qualityMonitors = new WeakMap<Page, ReturnType<typeof monitorBrowserQuality>>();
 
 const health = {
   webReady: true,
@@ -37,6 +41,14 @@ const health = {
   endpointStatus: "healthy",
   resourcePressure: "normal",
 };
+
+test.beforeEach(({ page }) => {
+  qualityMonitors.set(page, monitorBrowserQuality(page));
+});
+
+test.afterEach(async ({ page }) => {
+  await qualityMonitors.get(page)?.assertClean();
+});
 
 test("opens an accessible dark local workspace", async ({ page }) => {
   await mockApplication(page, []);
@@ -257,6 +269,55 @@ test("reopens a fallback projection, clears source, and expires the session fail
   await page.getByRole("button", { name: "Calculate impact" }).click();
   await expect(page.getByRole("heading", { name: "This local session has ended" })).toBeVisible();
   await expect(page.getByLabel("Explicitly loaded source")).not.toBeVisible();
+  await expectNoSeriousAccessibilityViolations(page);
+});
+
+test("completes the critical local path using keyboard input only", async ({ page }) => {
+  await mockApplication(page, [projectSummary()]);
+  await mockIndexWorkflow(page, "running");
+  await mockEvidence(page);
+  await mockDiagnostics(page);
+  await page.goto(`/#bootstrap=${"a".repeat(43)}`);
+
+  await activate(page.getByRole("button", { name: "Add project" }));
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await activate(page.getByRole("button", { name: "Home" }));
+  await expect(page.getByRole("button", { name: "crates" })).toBeVisible();
+  await activate(page.getByRole("radio", { name: /Deep/u }), "Space");
+  await expect(page.getByRole("button", { name: "Select this folder" })).toBeEnabled();
+  await activate(page.getByRole("button", { name: "Select this folder" }));
+  await expect(page.getByRole("heading", { name: "Ready to index" })).toBeVisible();
+  await expectNoSeriousAccessibilityViolations(page);
+  await activate(page.getByRole("button", { name: "Start detached index" }));
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+
+  await activate(page.getByRole("link", { name: /Rootlight/u }));
+  const companionSearch = page.getByRole("searchbox", { name: "Search visible nodes" });
+  await companionSearch.focus();
+  await expect(companionSearch).toBeFocused();
+  await page.keyboard.type("run");
+  const runNode = page.getByRole("button", { name: /run symbol src\/main\.rs/u });
+  await activate(runNode);
+  await expect(page.getByRole("heading", { name: "run", level: 2 })).toBeVisible();
+  await expectNoSeriousAccessibilityViolations(page);
+
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("complementary", { name: "run" })).not.toBeVisible();
+  await activate(page.getByRole("link", { name: "Operations" }));
+  const cancel = page
+    .getByRole("region", { name: "Index operations" })
+    .getByRole("button", { name: "Cancel" });
+  await activate(cancel);
+  const cancelDialog = page.getByRole("dialog", { name: "Cancel index operation?" });
+  await activate(cancelDialog.getByRole("button", { name: "Request cancellation" }));
+  await expect(page.getByText("cancelling", { exact: true })).toBeVisible();
+  await expectNoSeriousAccessibilityViolations(page);
+
+  await activate(page.getByRole("link", { name: "Diagnostics" }));
+  await activate(page.getByRole("button", { name: "Quick diagnostics" }));
+  await expect(page.getByText("Catalog check timed out")).toBeVisible();
+  await activate(page.getByRole("button", { name: "Prepare support bundle" }));
+  await expect(page.getByText("9 bytes")).toBeVisible();
   await expectNoSeriousAccessibilityViolations(page);
 });
 
@@ -491,12 +552,19 @@ async function mockDiagnostics(page: Page) {
 }
 
 async function expectNoSeriousAccessibilityViolations(page: Page) {
+  await expectPrimaryMarkupQuality(page);
   const result = await new AxeBuilder({ page }).analyze();
   expect(
     result.violations.filter(
       (violation) => violation.impact === "serious" || violation.impact === "critical",
     ),
   ).toEqual([]);
+}
+
+async function activate(locator: Locator, key: "Enter" | "Space" = "Enter") {
+  await locator.focus();
+  await expect(locator).toBeFocused();
+  await locator.page().keyboard.press(key);
 }
 
 function indexAdmission() {
