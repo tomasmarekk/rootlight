@@ -426,8 +426,12 @@ impl BrowseDirectory {
         browse_check(cancellation)?;
         let local_path =
             std::path::absolute(path).map_err(|source| BrowseError::OpenRoot { source })?;
+        #[cfg(target_os = "macos")]
+        let capability_path = normalize_macos_system_root_alias(local_path.clone());
+        #[cfg(not(target_os = "macos"))]
+        let capability_path = local_path.clone();
         browse_check(cancellation)?;
-        let directory = open_browse_absolute_directory(&local_path, cancellation)?;
+        let directory = open_browse_absolute_directory(&capability_path, cancellation)?;
         browse_check(cancellation)?;
         Ok(Self {
             local_path,
@@ -2448,8 +2452,11 @@ mod tests {
 
         let root =
             RepositoryRoot::open(repository, &aliased).expect("macOS system alias is accepted");
+        let browse = BrowseDirectory::open(&aliased, &Cancellation::new())
+            .expect("macOS system alias is accepted for browsing");
 
         assert_eq!(root.local_path(), temporary.path());
+        assert_eq!(browse.local_path(), aliased);
         assert_eq!(
             normalize_macos_system_root_alias(PathBuf::from("/var/folders/example")),
             Path::new("/private/var/folders/example")
