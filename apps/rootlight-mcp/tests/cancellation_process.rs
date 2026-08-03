@@ -26,6 +26,7 @@ const CANCELLATION_TIMEOUT: Duration = Duration::from_secs(10);
 const FOLLOW_UP_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const LATE_RESPONSE_WINDOW: Duration = Duration::from_millis(250);
+const MAX_PUBLICATION_POLLS: usize = 120;
 const CYCLES_REQUEST_ID: &str = "cancel-active-cycles";
 const CYCLES_FOLLOW_UP_ID: &str = "status-after-cycles-cancel";
 const ADVANCED_REQUEST_ID: &str = "cancel-active-advanced-query";
@@ -329,7 +330,7 @@ fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str)
     }
     // Publication is setup for the cancellation assertions below. Keep it
     // bounded while allowing loaded CI runners to finish durable finalization.
-    for attempt in 0..60 {
+    for attempt in 0..MAX_PUBLICATION_POLLS {
         let status = mcp.call(
             &format!("operation-{attempt}"),
             "operation.status",
