@@ -652,8 +652,12 @@ fn deadline_aborts_a_parser_bomb_and_releases_the_permit() {
     ));
     let stats = provider.stats();
     assert_eq!(stats.checked_out_parsers, 0);
-    assert_eq!(stats.pooled_parsers, 1);
-    assert_eq!(stats.available_parsers, 1);
+    // A loaded scheduler may expire the deadline before the lazy pool creates
+    // its first parser; either outcome must leave every created parser idle.
+    assert!(matches!(
+        (stats.pooled_parsers, stats.available_parsers),
+        (0, 0) | (1, 1)
+    ));
 }
 
 fn provider(
