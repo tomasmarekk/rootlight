@@ -1,7 +1,6 @@
 // Tracks authoritative daemon revisions for operations admitted by this browser session.
 
 import { Button } from "@heroui/react/button";
-import { Modal } from "@heroui/react/modal";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
@@ -22,6 +21,7 @@ import { Link } from "react-router";
 import { cancelIndexOperation, fetchIndexOperation } from "../api/client";
 import type { OperationState, RepositoryOperation } from "../api/contracts";
 import { useOperations, type SessionOperation } from "../operations/operation-context";
+import { NativeDialog } from "./native-dialog";
 
 const operationWaitMs = 15_000;
 const terminalStates = new Set<OperationState>(["succeeded", "failed", "interrupted", "cancelled"]);
@@ -377,37 +377,39 @@ function CancelOperationDialog({
 }) {
   const headingId = useId();
   return (
-    <Modal isOpen={isOpen} onOpenChange={(open) => !open && !submitting && onCancel()}>
-      <Modal.Backdrop isDismissable={!submitting} variant="blur">
-        <Modal.Container className="cancel-operation-modal" size="sm">
-          <Modal.Dialog aria-labelledby={headingId}>
-            <Modal.Header>
-              <Modal.Heading id={headingId}>Cancel index operation?</Modal.Heading>
-            </Modal.Header>
-            <Modal.Body>
-              <p>
-                Rootlight will request cancellation for <strong>{label}</strong>. The daemon may
-                still publish a generation if the operation finishes first.
-              </p>
-              <code>{operationId}</code>
-              {error ? (
-                <div className="operation-notice operation-notice--error" role="alert">
-                  The cancellation request failed. The operation remains unchanged.
-                </div>
-              ) : null}
-            </Modal.Body>
-            <Modal.Footer>
-              <Button isDisabled={submitting} variant="ghost" onPress={onCancel}>
-                Keep running
-              </Button>
-              <Button isDisabled={submitting} variant="primary" onPress={onConfirm}>
-                {submitting ? "Requesting cancellation" : "Request cancellation"}
-              </Button>
-            </Modal.Footer>
-          </Modal.Dialog>
-        </Modal.Container>
-      </Modal.Backdrop>
-    </Modal>
+    <NativeDialog
+      ariaLabelledBy={headingId}
+      className="cancel-operation-modal"
+      isDismissable={!submitting}
+      isOpen={isOpen}
+      onDismiss={onCancel}
+    >
+      <header data-slot="modal-header">
+        <h2 id={headingId} data-slot="modal-heading">
+          Cancel index operation?
+        </h2>
+      </header>
+      <div data-slot="modal-body">
+        <p>
+          Rootlight will request cancellation for <strong>{label}</strong>. The daemon may still
+          publish a generation if the operation finishes first.
+        </p>
+        <code>{operationId}</code>
+        {error ? (
+          <div className="operation-notice operation-notice--error" role="alert">
+            The cancellation request failed. The operation remains unchanged.
+          </div>
+        ) : null}
+      </div>
+      <footer data-slot="modal-footer">
+        <Button isDisabled={submitting} variant="ghost" onPress={onCancel}>
+          Keep running
+        </Button>
+        <Button isDisabled={submitting} variant="primary" onPress={onConfirm}>
+          {submitting ? "Requesting cancellation" : "Request cancellation"}
+        </Button>
+      </footer>
+    </NativeDialog>
   );
 }
 

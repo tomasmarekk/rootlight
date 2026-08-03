@@ -1,7 +1,6 @@
 // Keeps local directory selection behind short-lived server capabilities.
 
 import { Button } from "@heroui/react/button";
-import { Modal } from "@heroui/react/modal";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   ArrowLeft,
@@ -13,6 +12,7 @@ import {
   Search,
   ShieldCheck,
   TriangleAlert,
+  X,
 } from "lucide-react";
 import { useRef, useState, type KeyboardEvent } from "react";
 
@@ -28,6 +28,7 @@ import type {
   IndexMode,
   IndexPreflight,
 } from "../api/contracts";
+import { NativeDialog } from "./native-dialog";
 
 const browserPageSize = 64;
 const maximumVisibleDirectories = 256;
@@ -173,149 +174,160 @@ export function AddProjectDialog({
     setSubmitting(false);
   }
 
+  const headingId = "add-project-dialog-heading";
   return (
-    <Modal isOpen={isOpen} onOpenChange={changeOpen}>
-      <Modal.Backdrop isDismissable={!submitting} variant="blur">
-        <Modal.Container className="add-project-modal" scroll="inside" size="lg">
-          <Modal.Dialog>
-            <Modal.Header>
-              <div>
-                <p className="eyebrow">Local repository onboarding</p>
-                <Modal.Heading>Add a project</Modal.Heading>
-                <p className="add-project-modal__subtitle">
-                  Select an existing local folder. Rootlight never uploads its source.
-                </p>
-              </div>
-              {submitting ? null : <Modal.CloseTrigger aria-label="Close add project dialog" />}
-            </Modal.Header>
+    <NativeDialog
+      ariaLabelledBy={headingId}
+      className="add-project-modal"
+      isDismissable={!submitting}
+      isOpen={isOpen}
+      onDismiss={() => changeOpen(false)}
+    >
+      <header data-slot="modal-header">
+        <div>
+          <p className="eyebrow">Local repository onboarding</p>
+          <h2 id={headingId} data-slot="modal-heading">
+            Add a project
+          </h2>
+          <p className="add-project-modal__subtitle">
+            Select an existing local folder. Rootlight never uploads its source.
+          </p>
+        </div>
+        {submitting ? null : (
+          <button
+            aria-label="Close add project dialog"
+            className="native-dialog__close"
+            type="button"
+            onClick={() => changeOpen(false)}
+          >
+            <X size={18} aria-hidden="true" />
+          </button>
+        )}
+      </header>
 
-            <Modal.Body>
-              {preflight === undefined ? (
-                <DirectoryBrowser
-                  directPath={directPath}
-                  filter={filter}
-                  loading={loading}
-                  page={page}
-                  roots={roots.data?.roots ?? []}
-                  rootsLoading={roots.isPending}
-                  selectedMode={mode}
-                  onDirectPathChange={setDirectPath}
-                  onFilterChange={setFilter}
-                  onModeChange={setMode}
-                  onOpenDirectPath={() => runRequest(openDirectPath())}
-                  onOpenRoot={(token) => runRequest(loadDirectory(token, { type: "current" }))}
-                  onNavigate={(token) => {
-                    setFilter("");
-                    runRequest(loadDirectory(token, { type: "current" }));
-                  }}
-                  onOpenChild={(name) => {
-                    if (page !== undefined) {
-                      setFilter("");
-                      runRequest(loadDirectory(page.browseToken, { type: "child", name }));
-                    }
-                  }}
-                  onApplyFilter={() => {
-                    if (page !== undefined) {
-                      runRequest(
-                        loadDirectory(
-                          page.browseToken,
-                          { type: "current" },
-                          {
-                            appliedFilter: filter.trim() || undefined,
-                          },
-                        ),
-                      );
-                    }
-                  }}
-                  onLoadMore={() => {
-                    if (page?.nextCursor !== null && page?.nextCursor !== undefined) {
-                      runRequest(
-                        loadDirectory(
-                          page.browseToken,
-                          { type: "current" },
-                          {
-                            append: true,
-                            cursor: page.nextCursor,
-                            appliedFilter: filter.trim() || undefined,
-                          },
-                        ),
-                      );
-                    }
-                  }}
-                />
-              ) : (
-                <PreflightReview preflight={preflight} />
-              )}
+      <div data-slot="modal-body">
+        {preflight === undefined ? (
+          <DirectoryBrowser
+            directPath={directPath}
+            filter={filter}
+            loading={loading}
+            page={page}
+            roots={roots.data?.roots ?? []}
+            rootsLoading={roots.isPending}
+            selectedMode={mode}
+            onDirectPathChange={setDirectPath}
+            onFilterChange={setFilter}
+            onModeChange={setMode}
+            onOpenDirectPath={() => runRequest(openDirectPath())}
+            onOpenRoot={(token) => runRequest(loadDirectory(token, { type: "current" }))}
+            onNavigate={(token) => {
+              setFilter("");
+              runRequest(loadDirectory(token, { type: "current" }));
+            }}
+            onOpenChild={(name) => {
+              if (page !== undefined) {
+                setFilter("");
+                runRequest(loadDirectory(page.browseToken, { type: "child", name }));
+              }
+            }}
+            onApplyFilter={() => {
+              if (page !== undefined) {
+                runRequest(
+                  loadDirectory(
+                    page.browseToken,
+                    { type: "current" },
+                    {
+                      appliedFilter: filter.trim() || undefined,
+                    },
+                  ),
+                );
+              }
+            }}
+            onLoadMore={() => {
+              if (page?.nextCursor !== null && page?.nextCursor !== undefined) {
+                runRequest(
+                  loadDirectory(
+                    page.browseToken,
+                    { type: "current" },
+                    {
+                      append: true,
+                      cursor: page.nextCursor,
+                      appliedFilter: filter.trim() || undefined,
+                    },
+                  ),
+                );
+              }
+            }}
+          />
+        ) : (
+          <PreflightReview preflight={preflight} />
+        )}
 
-              {requestFailed ? (
-                <div className="add-project-error" role="alert">
-                  <TriangleAlert size={16} aria-hidden="true" />
-                  The local folder request could not be completed. Check the selection and try
-                  again.
-                </div>
-              ) : null}
-              {submitError ? (
-                <div className="add-project-error" role="alert">
-                  <TriangleAlert size={16} aria-hidden="true" />
-                  Rootlight could not admit this index operation. The folder capability may have
-                  expired; reopen the selection and retry.
-                </div>
-              ) : null}
-              <div className="local-security-note">
-                <ShieldCheck size={17} aria-hidden="true" />
-                <div>
-                  <strong>Local, capability-bound access</strong>
-                  <span>
-                    Rootlight reads only the selected root on this machine. Source is not uploaded,
-                    and symlinks or paths outside the root are not followed implicitly.
-                  </span>
-                </div>
-              </div>
-            </Modal.Body>
+        {requestFailed ? (
+          <div className="add-project-error" role="alert">
+            <TriangleAlert size={16} aria-hidden="true" />
+            The local folder request could not be completed. Check the selection and try again.
+          </div>
+        ) : null}
+        {submitError ? (
+          <div className="add-project-error" role="alert">
+            <TriangleAlert size={16} aria-hidden="true" />
+            Rootlight could not admit this index operation. The folder capability may have expired;
+            reopen the selection and retry.
+          </div>
+        ) : null}
+        <div className="local-security-note">
+          <ShieldCheck size={17} aria-hidden="true" />
+          <div>
+            <strong>Local, capability-bound access</strong>
+            <span>
+              Rootlight reads only the selected root on this machine. Source is not uploaded, and
+              symlinks or paths outside the root are not followed implicitly.
+            </span>
+          </div>
+        </div>
+      </div>
 
-            <Modal.Footer>
-              {preflight === undefined ? (
-                <>
-                  <Button isDisabled={loading} variant="ghost" onPress={() => changeOpen(false)}>
-                    Cancel
-                  </Button>
-                  <Button
-                    isDisabled={page === undefined || loading}
-                    variant="primary"
-                    onPress={() => runRequest(reviewSelection())}
-                  >
-                    {preflightRoot.isPending ? "Checking folder" : "Select this folder"}
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <Button
-                    isDisabled={submitting}
-                    variant="ghost"
-                    onPress={() => {
-                      setPreflight(undefined);
-                      setSubmitError(false);
-                    }}
-                  >
-                    <ArrowLeft size={14} aria-hidden="true" />
-                    Change selection
-                  </Button>
-                  <Button
-                    isDisabled={
-                      submitting || !preflight.selectable || !preflight.daemonAcceptingOperations
-                    }
-                    variant="primary"
-                    onPress={() => void submitSelection()}
-                  >
-                    {submitting ? "Starting index" : "Start detached index"}
-                  </Button>
-                </>
-              )}
-            </Modal.Footer>
-          </Modal.Dialog>
-        </Modal.Container>
-      </Modal.Backdrop>
-    </Modal>
+      <footer data-slot="modal-footer">
+        {preflight === undefined ? (
+          <>
+            <Button isDisabled={loading} variant="ghost" onPress={() => changeOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              isDisabled={page === undefined || loading}
+              variant="primary"
+              onPress={() => runRequest(reviewSelection())}
+            >
+              {preflightRoot.isPending ? "Checking folder" : "Select this folder"}
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button
+              isDisabled={submitting}
+              variant="ghost"
+              onPress={() => {
+                setPreflight(undefined);
+                setSubmitError(false);
+              }}
+            >
+              <ArrowLeft size={14} aria-hidden="true" />
+              Change selection
+            </Button>
+            <Button
+              isDisabled={
+                submitting || !preflight.selectable || !preflight.daemonAcceptingOperations
+              }
+              variant="primary"
+              onPress={() => void submitSelection()}
+            >
+              {submitting ? "Starting index" : "Start detached index"}
+            </Button>
+          </>
+        )}
+      </footer>
+    </NativeDialog>
   );
 }
 

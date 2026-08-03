@@ -2391,6 +2391,72 @@
   animation: spin 1s linear infinite;
 }
 
+.native-dialog {
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--rl-foreground);
+}
+
+.native-dialog::backdrop {
+  background: rgb(3 5 10 / 72%);
+  backdrop-filter: blur(8px);
+}
+
+body:has(.native-dialog[open]) {
+  overflow: hidden;
+}
+
+.native-dialog [data-slot="modal-dialog"] {
+  display: flex;
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+  border-radius: 14px;
+  flex-direction: column;
+}
+
+.native-dialog [data-slot="modal-header"],
+.native-dialog [data-slot="modal-footer"] {
+  display: flex;
+  padding: 16px 20px;
+}
+
+.native-dialog [data-slot="modal-body"] {
+  display: flex;
+  min-height: 0;
+  padding: 16px 20px;
+  overflow-y: auto;
+  flex-direction: column;
+}
+
+.native-dialog [data-slot="modal-footer"] {
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.native-dialog__close {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--rl-foreground-muted);
+  cursor: pointer;
+  place-items: center;
+}
+
+.native-dialog__close:hover,
+.native-dialog__close:focus-visible {
+  border-color: var(--rl-border);
+  background: var(--rl-surface-hover);
+  color: var(--rl-foreground);
+}
+
 .add-project-modal {
   width: min(960px, calc(100vw - 32px));
   max-width: 960px;
@@ -3176,6 +3242,10 @@
 .cancel-operation-modal [data-slot="modal-dialog"] {
   border: 1px solid var(--rl-border-strong);
   background: var(--rl-surface-raised);
+}
+
+.cancel-operation-modal {
+  width: min(440px, calc(100vw - 32px));
 }
 
 .cancel-operation-modal [data-slot="modal-body"] p {
