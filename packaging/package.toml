@@ -2,7 +2,7 @@
 # Every installed path is relative to an installer-selected root, while
 # platform autostart resources remain disabled unless the user opts in.
 
-schema = "rootlight.package-spec/1"
+schema = "rootlight.package-spec/2"
 autostart_default = "disabled"
 user_data_policy = "preserve"
 ownership_manifest = "state/install-manifest.json"
@@ -35,6 +35,23 @@ unix_mode = 493
 [[binaries]]
 name = "rootlight-semantic-host"
 unix_mode = 493
+
+[[binaries]]
+name = "rootlight-web"
+unix_mode = 493
+
+[[asset_trees]]
+name = "rootlight-web-ui"
+destination = "share/rootlight/web"
+manifest = "asset-manifest.json"
+maximum_files = 1025
+maximum_total_bytes = 68157440
+maximum_file_bytes = 16777216
+
+[[generated_notices]]
+name = "rootlight-web-third-party"
+destination = "licenses/rootlight-web-third-party-notices.txt"
+maximum_bytes = 8388608
 
 [[platforms]]
 target = "aarch64-apple-darwin"

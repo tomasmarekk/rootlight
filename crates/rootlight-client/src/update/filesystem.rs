@@ -49,6 +49,7 @@ const INSTALL_MANIFEST_SCHEMA_V1: &str = "rootlight.install-ownership/1";
 const INSTALL_MANIFEST_SCHEMA_V2: &str = "rootlight.install-ownership/2";
 const PACKAGE_MANIFEST_SCHEMA_V1: &str = "rootlight.package-manifest/1";
 const PACKAGE_MANIFEST_SCHEMA_V2: &str = "rootlight.package-manifest/2";
+const PACKAGE_MANIFEST_SCHEMA_V3: &str = "rootlight.package-manifest/3";
 const PACKAGE_MANIFEST_NAME: &str = "package-manifest.json";
 #[cfg(windows)]
 const DEFERRED_UNINSTALL_SCHEMA: &str = "rootlight.deferred-uninstall/1";
@@ -64,8 +65,8 @@ const BOOTSTRAP_ARTIFACT_COPY_NAME: &str = ".bootstrap-artifact.copy";
 const MAX_POLICY_BYTES: u64 = 64 * 1024;
 const MAX_STATE_BYTES: u64 = 1024 * 1024;
 const MAX_PACKAGE_MANIFEST_BYTES: u64 = 1024 * 1024;
-const MAX_PACKAGE_ENTRIES: usize = 64;
-const MAX_OWNED_PATHS: usize = 256;
+const MAX_PACKAGE_ENTRIES: usize = 2_048;
+const MAX_OWNED_PATHS: usize = 4_096;
 const MAX_PATH_BYTES: usize = 512;
 const MAX_LABEL_BYTES: usize = 128;
 const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
@@ -75,13 +76,24 @@ const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_HEALTH_PROBE_STATE_ENTRIES: usize = 65_536;
 const MAX_HEALTH_PROBE_STATE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_HEALTH_PROBE_STATE_DEPTH: usize = 128;
-const EXPECTED_BINARIES: [&str; 5] = [
+const LEGACY_EXPECTED_BINARIES: [&str; 5] = [
     "rootlight",
     "rootlight-adapter-host",
     "rootlight-daemon",
     "rootlight-mcp",
     "rootlight-semantic-host",
 ];
+const EXPECTED_BINARIES: [&str; 6] = [
+    "rootlight",
+    "rootlight-adapter-host",
+    "rootlight-daemon",
+    "rootlight-mcp",
+    "rootlight-semantic-host",
+    "rootlight-web",
+];
+const WEB_ASSET_PREFIX: &str = "share/rootlight/web/";
+const WEB_ASSET_MANIFEST: &str = "share/rootlight/web/asset-manifest.json";
+const WEB_ASSET_ENTRYPOINT: &str = "share/rootlight/web/index.html";
 
 /// Exact filesystem paths for one signed offline update input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -531,7 +543,8 @@ pub fn install_package_with_policy(
             .installed_paths(&version)
             .ok_or(FilesystemUpdateError::InvalidArchive)?;
         owned_paths.extend(
-            EXPECTED_BINARIES
+            package
+                .expected_binaries()
                 .iter()
                 .map(|binary| format!("current/bin/{}", platform_executable_name(binary))),
         );
@@ -632,7 +645,7 @@ pub fn uninstall_package(
     }
     let root = Dir::open_ambient_dir(install_root, ambient_authority())
         .map_err(FilesystemUpdateError::Io)?;
-    remove_owned_current(&root)?;
+    remove_owned_current(&root, &manifest)?;
     for name in [
         UPDATE_POLICY_FILE,
         ACTIVE_VERSION_FILE,
@@ -1630,6 +1643,7 @@ impl PackageManifest {
         let launcher_schema_is_valid = match self.schema.as_str() {
             PACKAGE_MANIFEST_SCHEMA_V1 => self.mcp_launcher_binary.is_none(),
             PACKAGE_MANIFEST_SCHEMA_V2 => self.mcp_launcher_binary.as_ref() == Some(&mcp_launcher),
+            PACKAGE_MANIFEST_SCHEMA_V3 => self.mcp_launcher_binary.as_ref() == Some(&mcp_launcher),
             _ => false,
         };
         if !launcher_schema_is_valid
@@ -1660,6 +1674,7 @@ impl PackageManifest {
         let mut previous = None;
         let mut binaries = BTreeSet::new();
         let mut launchers = BTreeSet::new();
+        let mut web_assets = BTreeSet::new();
         for entry in &self.entries {
             entry.validate()?;
             if previous.is_some_and(|value| value >= entry.path.as_str()) {
@@ -1672,8 +1687,12 @@ impl PackageManifest {
             if matches!(entry.kind.as_str(), "launcher" | "mcp_launcher") {
                 launchers.insert((entry.path.clone(), entry.kind.clone()));
             }
+            if entry.kind == "web_asset" {
+                web_assets.insert(entry.path.clone());
+            }
         }
-        let expected = EXPECTED_BINARIES
+        let expected = self
+            .expected_binaries()
             .iter()
             .map(|binary| format!("bin/{}", platform_executable_name(binary)))
             .collect::<BTreeSet<_>>();
@@ -1682,10 +1701,27 @@ impl PackageManifest {
         if let Some(path) = &self.mcp_launcher_binary {
             expected_launchers.insert((path.clone(), "mcp_launcher".to_owned()));
         }
-        if binaries != expected || launchers != expected_launchers {
+        let web_assets_are_valid = if self.schema == PACKAGE_MANIFEST_SCHEMA_V3 {
+            web_assets.contains(WEB_ASSET_MANIFEST)
+                && web_assets.contains(WEB_ASSET_ENTRYPOINT)
+                && web_assets
+                    .iter()
+                    .all(|path| path.starts_with(WEB_ASSET_PREFIX))
+        } else {
+            web_assets.is_empty()
+        };
+        if binaries != expected || launchers != expected_launchers || !web_assets_are_valid {
             return Err(FilesystemUpdateError::InvalidArchive);
         }
         Ok(())
+    }
+
+    fn expected_binaries(&self) -> &'static [&'static str] {
+        if self.schema == PACKAGE_MANIFEST_SCHEMA_V3 {
+            &EXPECTED_BINARIES
+        } else {
+            &LEGACY_EXPECTED_BINARIES
+        }
     }
 
     fn installed_paths(&self, version: &str) -> Option<Vec<String>> {
@@ -1729,6 +1765,7 @@ impl PackageManifestEntry {
                     | "license"
                     | "notice"
                     | "third_party_license"
+                    | "web_asset"
             )
             || self.bytes == 0
             || self.bytes > MAX_ENTRY_BYTES
@@ -1789,9 +1826,10 @@ fn install_launchers(
     install_root: &Path,
 ) -> Result<(), FilesystemUpdateError> {
     let mut archive = ZipArchive::new(file).map_err(FilesystemUpdateError::Zip)?;
+    let expected_binaries = manifest.expected_binaries();
     #[cfg(windows)]
     {
-        let primary_name = platform_executable_name(EXPECTED_BINARIES[0]);
+        let primary_name = platform_executable_name(expected_binaries[0]);
         write_launcher(
             &mut archive,
             manifest,
@@ -1801,7 +1839,7 @@ fn install_launchers(
             "launcher",
         )?;
         let primary = install_root.join(LAUNCHER_DIRECTORY).join(primary_name);
-        for binary in EXPECTED_BINARIES
+        for binary in expected_binaries
             .iter()
             .skip(1)
             .filter(|binary| manifest.mcp_launcher_binary.is_none() || **binary != "rootlight-mcp")
@@ -1829,7 +1867,7 @@ fn install_launchers(
     #[cfg(not(windows))]
     {
         let _ = install_root;
-        for binary in EXPECTED_BINARIES {
+        for binary in expected_binaries {
             let (launcher, kind) = if binary == "rootlight-mcp" {
                 manifest
                     .mcp_launcher_binary
@@ -2411,19 +2449,31 @@ fn cleanup_failed_bootstrap(path: &Path) -> Result<(), FilesystemUpdateError> {
     Ok(())
 }
 
-fn remove_owned_current(root: &Dir) -> Result<(), FilesystemUpdateError> {
+fn remove_owned_current(
+    root: &Dir,
+    manifest: &InstallManifest,
+) -> Result<(), FilesystemUpdateError> {
     let current = PrivateDirectory::open(root, OsStr::new("current"))
         .map_err(FilesystemUpdateError::PrivateTree)?;
     let bin = PrivateDirectory::open(current.capability(), OsStr::new("bin"))
         .map_err(FilesystemUpdateError::PrivateTree)?;
-    for binary in EXPECTED_BINARIES {
-        let name = platform_executable_name(binary);
-        validate_cap_regular(bin.capability(), &name)?;
+    let names = manifest
+        .owned_paths
+        .iter()
+        .filter_map(|path| path.strip_prefix("current/bin/"))
+        .collect::<BTreeSet<_>>();
+    if names.is_empty() || names.len() > EXPECTED_BINARIES.len() {
+        return Err(FilesystemUpdateError::InvalidInstall);
     }
-    for binary in EXPECTED_BINARIES {
-        let name = platform_executable_name(binary);
+    for name in &names {
+        if name.contains('/') {
+            return Err(FilesystemUpdateError::InvalidInstall);
+        }
+        validate_cap_regular(bin.capability(), name)?;
+    }
+    for name in names {
         bin.capability()
-            .remove_file(&name)
+            .remove_file(name)
             .map_err(FilesystemUpdateError::Io)?;
     }
     bin.sync_all().map_err(FilesystemUpdateError::PrivateTree)?;
@@ -2829,16 +2879,28 @@ mod tests {
     }
 
     fn package_bytes_with_revision(version: &str, source_revision: &str) -> Vec<u8> {
-        package_bytes_with_options(version, source_revision, true)
+        package_bytes_with_schema(version, source_revision, TestPackageSchema::V3)
     }
 
-    fn package_bytes_with_options(
+    #[derive(Clone, Copy)]
+    enum TestPackageSchema {
+        V1,
+        V2,
+        V3,
+    }
+
+    fn package_bytes_with_schema(
         version: &str,
         source_revision: &str,
-        include_mcp_launcher: bool,
+        schema: TestPackageSchema,
     ) -> Vec<u8> {
         let suffix = if cfg!(windows) { ".exe" } else { "" };
-        let mut entries = EXPECTED_BINARIES
+        let binaries: &[&str] = if matches!(schema, TestPackageSchema::V3) {
+            &EXPECTED_BINARIES
+        } else {
+            &LEGACY_EXPECTED_BINARIES
+        };
+        let mut entries = binaries
             .iter()
             .map(|binary| {
                 (
@@ -2855,13 +2917,29 @@ mod tests {
             0o755,
             b"launcher".to_vec(),
         ));
-        if include_mcp_launcher {
+        if !matches!(schema, TestPackageSchema::V1) {
             entries.push((
                 format!("launcher/rootlight-mcp-launcher{suffix}"),
                 "mcp_launcher",
                 0o755,
                 b"mcp-launcher".to_vec(),
             ));
+        }
+        if matches!(schema, TestPackageSchema::V3) {
+            entries.extend([
+                (
+                    WEB_ASSET_MANIFEST.to_owned(),
+                    "web_asset",
+                    0o644,
+                    br#"{"schema_version":1,"assets":[]}"#.to_vec(),
+                ),
+                (
+                    WEB_ASSET_ENTRYPOINT.to_owned(),
+                    "web_asset",
+                    0o644,
+                    b"<!doctype html>".to_vec(),
+                ),
+            ]);
         }
         entries.sort_by(|left, right| left.0.cmp(&right.0));
         let manifest_entries = entries
@@ -2877,10 +2955,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut manifest = serde_json::json!({
-            "schema": if include_mcp_launcher {
-                PACKAGE_MANIFEST_SCHEMA_V2
-            } else {
-                PACKAGE_MANIFEST_SCHEMA_V1
+            "schema": match schema {
+                TestPackageSchema::V1 => PACKAGE_MANIFEST_SCHEMA_V1,
+                TestPackageSchema::V2 => PACKAGE_MANIFEST_SCHEMA_V2,
+                TestPackageSchema::V3 => PACKAGE_MANIFEST_SCHEMA_V3,
             },
             "target": current_target().expect("test platform is supported"),
             "version": version,
@@ -2911,7 +2989,7 @@ mod tests {
             "retained_versions": 2,
             "entries": manifest_entries
         });
-        if include_mcp_launcher {
+        if !matches!(schema, TestPackageSchema::V1) {
             manifest
                 .as_object_mut()
                 .expect("package manifest is an object")
@@ -3389,7 +3467,7 @@ mod tests {
         let temporary = tempfile::tempdir().expect("temporary directory is available");
         let root = temporary.path().join("install");
         let archive = temporary.path().join("package.zip");
-        let bytes = package_bytes_with_options("1.0.0", &"a".repeat(40), false);
+        let bytes = package_bytes_with_schema("1.0.0", &"a".repeat(40), TestPackageSchema::V1);
         fs::write(&archive, &bytes).expect("package writes");
         let digest = hex_sha256(Sha256::digest(&bytes).into());
         let key_pair = test_key_pair();
@@ -3409,6 +3487,40 @@ mod tests {
             )
             .expect("legacy MCP launcher reads"),
             b"launcher"
+        );
+    }
+
+    #[test]
+    fn bootstrap_accepts_previous_package_schema_with_dedicated_mcp_launcher() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let root = temporary.path().join("install");
+        let archive = temporary.path().join("package.zip");
+        let bytes = package_bytes_with_schema("1.0.0", &"a".repeat(40), TestPackageSchema::V2);
+        fs::write(&archive, &bytes).expect("package writes");
+        let digest = hex_sha256(Sha256::digest(&bytes).into());
+        let key_pair = test_key_pair();
+
+        install_package_with_policy(
+            &root,
+            &archive,
+            &digest,
+            &policy(UpdatePublicKey(*key_pair.pk)),
+        )
+        .expect("previous package schema installs");
+
+        assert_eq!(
+            fs::read(
+                root.join("current/bin")
+                    .join(platform_executable_name("rootlight-mcp"))
+            )
+            .expect("dedicated MCP launcher reads"),
+            b"mcp-launcher"
+        );
+        assert!(
+            !root
+                .join("versions/1.0.0/bin")
+                .join(platform_executable_name("rootlight-web"))
+                .exists()
         );
     }
 

@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import stat
 import sys
@@ -17,11 +16,11 @@ from pathlib import Path, PurePosixPath
 PACKAGE_SCOPE = "@tomasmarekk"
 ROOT_PACKAGE = f"{PACKAGE_SCOPE}/rootlight"
 PACKAGE_LICENSE = "AGPL-3.0-only"
-PACKAGE_MANIFEST_SCHEMA = "rootlight.package-manifest/2"
+PACKAGE_MANIFEST_SCHEMA = "rootlight.package-manifest/3"
 BOOTSTRAP_VERSION = "0.0.0-security-bootstrap.0"
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
-MAX_ARCHIVE_ENTRIES = 128
+MAX_ARCHIVE_ENTRIES = 2048
 MAX_PATH_BYTES = 240
 REPOSITORY_URL = "git+https://github.com/tomasmarekk/rootlight.git"
 SEMVER_PATTERN = re.compile(
@@ -35,6 +34,14 @@ RELEASE_VERSION_PATTERN = re.compile(
 )
 SOURCE_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 PUBLIC_EXECUTABLES = ("rootlight", "rootlight-mcp")
+NATIVE_EXECUTABLES = (
+    "rootlight",
+    "rootlight-adapter-host",
+    "rootlight-daemon",
+    "rootlight-mcp",
+    "rootlight-semantic-host",
+    "rootlight-web",
+)
 NPM_RUNTIME_FILES = (
     "packaging/npm/rootlight.mjs",
     "packaging/npm/rootlight-mcp.mjs",
@@ -65,9 +72,7 @@ TARGETS = (
         "aarch64-unknown-linux-gnu", "linux-arm64-gnu", "linux", "arm64", "glibc"
     ),
     NativeTarget("x86_64-apple-darwin", "darwin-x64", "darwin", "x64"),
-    NativeTarget(
-        "x86_64-unknown-linux-gnu", "linux-x64-gnu", "linux", "x64", "glibc"
-    ),
+    NativeTarget("x86_64-unknown-linux-gnu", "linux-x64-gnu", "linux", "x64", "glibc"),
     NativeTarget("x86_64-pc-windows-msvc", "win32-x64-msvc", "win32", "x64"),
 )
 
@@ -184,7 +189,9 @@ def validate_workspace(path: Path) -> Path:
     for relative in ("LICENSE", "packaging/npm/README.md", *NPM_RUNTIME_FILES):
         candidate = resolved / relative
         if not candidate.is_file() or candidate.is_symlink():
-            raise PackagePreparationError("workspace npm packaging inputs are incomplete")
+            raise PackagePreparationError(
+                "workspace npm packaging inputs are incomplete"
+            )
     return resolved
 
 
@@ -244,12 +251,23 @@ def extract_candidate(
         executable_suffix = ".exe" if target.os_name == "win32" else ""
         if any(
             f"bin/{executable}{executable_suffix}" not in names
-            for executable in PUBLIC_EXECUTABLES
+            for executable in NATIVE_EXECUTABLES
         ):
-            raise PackagePreparationError("native candidate public executable is missing")
+            raise PackagePreparationError(
+                "native candidate executable inventory is incomplete"
+            )
+        if not {
+            "share/rootlight/web/asset-manifest.json",
+            "share/rootlight/web/index.html",
+        } <= set(names):
+            raise PackagePreparationError(
+                "native candidate web asset inventory is incomplete"
+            )
         total = sum(info.file_size for info in infos)
         if total > MAX_EXTRACTED_BYTES:
-            raise PackagePreparationError("native candidate expands beyond the package limit")
+            raise PackagePreparationError(
+                "native candidate expands beyond the package limit"
+            )
 
         manifest_info = infos[names.index("package-manifest.json")]
         manifest = json.loads(read_bounded(bundle, manifest_info, 1024 * 1024))
@@ -296,9 +314,7 @@ def validate_archive_entry(info: zipfile.ZipInfo) -> str:
     return name
 
 
-def read_bounded(
-    bundle: zipfile.ZipFile, info: zipfile.ZipInfo, maximum: int
-) -> bytes:
+def read_bounded(bundle: zipfile.ZipFile, info: zipfile.ZipInfo, maximum: int) -> bytes:
     if info.file_size > maximum:
         raise PackagePreparationError("native candidate entry is too large")
     with bundle.open(info) as source:
@@ -326,6 +342,7 @@ def platform_package_json(
         "bin",
         "launcher",
         "licenses",
+        "share",
         "LICENSE",
         "NOTICE",
         "package-manifest.json",

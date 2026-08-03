@@ -7,7 +7,7 @@
 
 mod installed;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::{
     fs::{self, File},
     io::{Cursor, Read as _, Write as _},
@@ -32,9 +32,9 @@ use tempfile::NamedTempFile;
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 const SPEC_PATH: &str = "packaging/package.toml";
-const SPEC_SCHEMA: &str = "rootlight.package-spec/1";
-const ARCHIVE_SCHEMA: &str = "rootlight.package-manifest/2";
-const LIFECYCLE_SCHEMA: &str = "rootlight.package-lifecycle/4";
+const SPEC_SCHEMA: &str = "rootlight.package-spec/2";
+const ARCHIVE_SCHEMA: &str = "rootlight.package-manifest/3";
+const LIFECYCLE_SCHEMA: &str = "rootlight.package-lifecycle/5";
 const MAX_SPEC_BYTES: u64 = 256 * 1024;
 const MAX_TEMPLATE_BYTES: u64 = 1024 * 1024;
 const MAX_LICENSE_BYTES: u64 = 1024 * 1024;
@@ -45,12 +45,13 @@ const MAX_ARCHIVE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const EXPECTED_LAUNCHER: &str = "rootlight-launcher";
 const EXPECTED_MCP_LAUNCHER: &str = "rootlight-mcp-launcher";
-const EXPECTED_BINARIES: [&str; 5] = [
+const EXPECTED_BINARIES: [&str; 6] = [
     "rootlight",
     "rootlight-adapter-host",
     "rootlight-daemon",
     "rootlight-mcp",
     "rootlight-semantic-host",
+    "rootlight-web",
 ];
 const EXPECTED_TARGETS: [&str; 5] = [
     "aarch64-apple-darwin",
@@ -65,6 +66,12 @@ const DISTRIBUTION_LICENSES: [&str; 4] = [
     "tree-sitter-kotlin-ng-1.1.0-LICENSE",
     "tree-sitter-typescript-0.23.2-LICENSE",
 ];
+const EXPECTED_WEB_ASSET_TREE: &str = "rootlight-web-ui";
+const EXPECTED_WEB_ASSET_DESTINATION: &str = "share/rootlight/web";
+const EXPECTED_WEB_ASSET_MANIFEST: &str = "asset-manifest.json";
+const WEB_ASSET_MANIFEST_SCHEMA: u32 = 1;
+const EXPECTED_WEB_NOTICE: &str = "rootlight-web-third-party";
+const EXPECTED_WEB_NOTICE_DESTINATION: &str = "licenses/rootlight-web-third-party-notices.txt";
 
 #[derive(Debug)]
 pub(crate) struct BuildOptions {
@@ -72,6 +79,8 @@ pub(crate) struct BuildOptions {
     version: String,
     source_revision: String,
     bin_dir: PathBuf,
+    web_assets_dir: PathBuf,
+    web_notices: PathBuf,
     output_dir: PathBuf,
 }
 
@@ -81,6 +90,8 @@ impl BuildOptions {
         let mut version = None;
         let mut source_revision = None;
         let mut bin_dir = None;
+        let mut web_assets_dir = None;
+        let mut web_notices = None;
         let mut output_dir = None;
 
         while let Some(flag) = args.next() {
@@ -94,6 +105,16 @@ impl BuildOptions {
                     assign_once(&mut source_revision, value, "--source-revision")?;
                 }
                 "--bin-dir" => assign_once(&mut bin_dir, PathBuf::from(value), "--bin-dir")?,
+                "--web-assets-dir" => {
+                    assign_once(
+                        &mut web_assets_dir,
+                        PathBuf::from(value),
+                        "--web-assets-dir",
+                    )?;
+                }
+                "--web-notices" => {
+                    assign_once(&mut web_notices, PathBuf::from(value), "--web-notices")?;
+                }
                 "--output-dir" => {
                     assign_once(&mut output_dir, PathBuf::from(value), "--output-dir")?;
                 }
@@ -107,6 +128,9 @@ impl BuildOptions {
             source_revision: source_revision
                 .ok_or(PackageError::MissingRequiredFlag("--source-revision"))?,
             bin_dir: bin_dir.ok_or(PackageError::MissingRequiredFlag("--bin-dir"))?,
+            web_assets_dir: web_assets_dir
+                .ok_or(PackageError::MissingRequiredFlag("--web-assets-dir"))?,
+            web_notices: web_notices.ok_or(PackageError::MissingRequiredFlag("--web-notices"))?,
             output_dir: output_dir.ok_or(PackageError::MissingRequiredFlag("--output-dir"))?,
         })
     }
@@ -199,11 +223,15 @@ pub(crate) fn build(options: &BuildOptions) -> Result<(), PackageError> {
     let outcome = build_archive(
         &workspace,
         &spec,
-        platform,
-        &version,
-        &options.source_revision,
-        &options.bin_dir,
-        &options.output_dir,
+        ArchiveBuild {
+            platform,
+            version: &version,
+            source_revision: &options.source_revision,
+            bin_dir: &options.bin_dir,
+            web_assets_dir: &options.web_assets_dir,
+            web_notices: &options.web_notices,
+            output_dir: &options.output_dir,
+        },
     )?;
     println!(
         "built {} ({} bytes, sha256 {}, blake3 {})",
@@ -402,6 +430,35 @@ fn validate_spec(workspace: &Path, spec: &PackageSpec) -> Result<(), PackageErro
     if !(1024..=u64::from(u32::MAX)).contains(&spec.maximum_binary_bytes) {
         return invalid_spec("maximum binary size is outside the supported range");
     }
+    if spec.asset_trees.len() != 1 {
+        return invalid_spec("package must declare exactly one web asset tree");
+    }
+    let asset_tree = &spec.asset_trees[0];
+    validate_resource_id(&asset_tree.name)?;
+    validate_relative_path(&asset_tree.destination)?;
+    validate_resource_id(&asset_tree.manifest)?;
+    if asset_tree.name != EXPECTED_WEB_ASSET_TREE
+        || asset_tree.destination != EXPECTED_WEB_ASSET_DESTINATION
+        || asset_tree.manifest != EXPECTED_WEB_ASSET_MANIFEST
+        || !(2..=2_048).contains(&asset_tree.maximum_files)
+        || !(1024..=128 * 1024 * 1024).contains(&asset_tree.maximum_total_bytes)
+        || !(1024..=16 * 1024 * 1024).contains(&asset_tree.maximum_file_bytes)
+        || asset_tree.maximum_file_bytes > asset_tree.maximum_total_bytes
+    {
+        return invalid_spec("web asset tree identity or bounds differ from the release contract");
+    }
+    if spec.generated_notices.len() != 1 {
+        return invalid_spec("package must declare exactly one generated web notice");
+    }
+    let notice = &spec.generated_notices[0];
+    validate_resource_id(&notice.name)?;
+    validate_relative_path(&notice.destination)?;
+    if notice.name != EXPECTED_WEB_NOTICE
+        || notice.destination != EXPECTED_WEB_NOTICE_DESTINATION
+        || !(1024..=8 * 1024 * 1024).contains(&notice.maximum_bytes)
+    {
+        return invalid_spec("generated web notice identity or bounds differ");
+    }
 
     let binary_names = spec
         .binaries
@@ -484,20 +541,29 @@ fn parse_version(value: &str) -> Result<Version, PackageError> {
     Ok(version)
 }
 
+struct ArchiveBuild<'a> {
+    platform: &'a PlatformSpec,
+    version: &'a Version,
+    source_revision: &'a str,
+    bin_dir: &'a Path,
+    web_assets_dir: &'a Path,
+    web_notices: &'a Path,
+    output_dir: &'a Path,
+}
+
 fn build_archive(
     workspace: &Path,
     spec: &PackageSpec,
-    platform: &PlatformSpec,
-    version: &Version,
-    source_revision: &str,
-    bin_dir: &Path,
-    output_dir: &Path,
+    build: ArchiveBuild<'_>,
 ) -> Result<BuildOutcome, PackageError> {
-    prepare_output_dir(output_dir)?;
-    let mut entries = Vec::with_capacity(spec.binaries.len() + DISTRIBUTION_LICENSES.len() + 6);
+    prepare_output_dir(build.output_dir)?;
+    let web_assets = collect_web_assets(build.web_assets_dir, &spec.asset_trees[0])?;
+    let mut entries = Vec::with_capacity(
+        spec.binaries.len() + DISTRIBUTION_LICENSES.len() + web_assets.len() + 6,
+    );
     for binary in &spec.binaries {
-        let filename = format!("{}{}", binary.name, platform.executable_suffix);
-        let source = bin_dir.join(&filename);
+        let filename = format!("{}{}", binary.name, build.platform.executable_suffix);
+        let source = build.bin_dir.join(&filename);
         let bytes = read_regular_bounded(&source, spec.maximum_binary_bytes)?;
         entries.push(ArchiveEntry::new(
             format!("bin/{filename}"),
@@ -506,27 +572,35 @@ fn build_archive(
             bytes,
         )?);
     }
-    let launcher_filename = format!("{}{}", spec.launcher_binary, platform.executable_suffix);
+    let launcher_filename = format!(
+        "{}{}",
+        spec.launcher_binary, build.platform.executable_suffix
+    );
     let launcher_path = format!("launcher/{launcher_filename}");
     entries.push(ArchiveEntry::new(
         launcher_path.clone(),
         "launcher",
         0o755,
-        read_regular_bounded(&bin_dir.join(&launcher_filename), spec.maximum_binary_bytes)?,
+        read_regular_bounded(
+            &build.bin_dir.join(&launcher_filename),
+            spec.maximum_binary_bytes,
+        )?,
     )?);
-    let mcp_launcher_filename =
-        format!("{}{}", spec.mcp_launcher_binary, platform.executable_suffix);
+    let mcp_launcher_filename = format!(
+        "{}{}",
+        spec.mcp_launcher_binary, build.platform.executable_suffix
+    );
     let mcp_launcher_path = format!("launcher/{mcp_launcher_filename}");
     entries.push(ArchiveEntry::new(
         mcp_launcher_path.clone(),
         "mcp_launcher",
         0o755,
         read_regular_bounded(
-            &bin_dir.join(&mcp_launcher_filename),
+            &build.bin_dir.join(&mcp_launcher_filename),
             spec.maximum_binary_bytes,
         )?,
     )?);
-    let template_name = Path::new(&platform.autostart_source)
+    let template_name = Path::new(&build.platform.autostart_source)
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
@@ -537,7 +611,7 @@ fn build_archive(
         "autostart_template",
         0o644,
         read_regular_bounded(
-            &workspace.join(&platform.autostart_source),
+            &workspace.join(&build.platform.autostart_source),
             MAX_TEMPLATE_BYTES,
         )?,
     )?);
@@ -564,16 +638,31 @@ fn build_archive(
             )?,
         )?);
     }
+    let web_notice = &spec.generated_notices[0];
+    let web_notice_bytes = read_regular_bounded(build.web_notices, web_notice.maximum_bytes)?;
+    if web_notice_bytes.is_empty() {
+        return Err(PackageError::InvalidInput {
+            path: build.web_notices.to_path_buf(),
+            detail: "generated web notice must not be empty".to_owned(),
+        });
+    }
+    entries.push(ArchiveEntry::new(
+        web_notice.destination.clone(),
+        "third_party_license",
+        0o644,
+        web_notice_bytes,
+    )?);
+    entries.extend(web_assets);
     entries.sort_by(|left, right| left.path.cmp(&right.path));
 
     let manifest = ArchiveManifest {
         schema: ARCHIVE_SCHEMA,
-        target: &platform.target,
-        version: &version.to_string(),
-        source_revision,
+        target: &build.platform.target,
+        version: &build.version.to_string(),
+        source_revision: build.source_revision,
         autostart_default: &spec.autostart_default,
-        autostart_kind: &platform.autostart_kind,
-        autostart_resource: &platform.autostart_resource,
+        autostart_kind: &build.platform.autostart_kind,
+        autostart_resource: &build.platform.autostart_resource,
         user_data_policy: &spec.user_data_policy,
         ownership_manifest: &spec.ownership_manifest,
         active_version_file: &spec.active_version_file,
@@ -602,11 +691,11 @@ fn build_archive(
     let archive_bytes = encode_zip(&entries)?;
     let sha256 = sha256(&archive_bytes);
     let blake3 = blake3_hex(&archive_bytes);
-    let archive_name = format!("rootlight-{version}-{}.zip", platform.target);
-    let archive_path = output_dir.join(&archive_name);
+    let archive_name = format!("rootlight-{}-{}.zip", build.version, build.platform.target);
+    let archive_path = build.output_dir.join(&archive_name);
     persist_new_file(&archive_path, &archive_bytes)?;
-    persist_checksum_sidecar(output_dir, &archive_name, "sha256", &sha256)?;
-    persist_checksum_sidecar(output_dir, &archive_name, "blake3", &blake3)?;
+    persist_checksum_sidecar(build.output_dir, &archive_name, "sha256", &sha256)?;
+    persist_checksum_sidecar(build.output_dir, &archive_name, "blake3", &blake3)?;
 
     Ok(BuildOutcome {
         archive: archive_path,
@@ -614,6 +703,220 @@ fn build_archive(
         sha256,
         blake3,
     })
+}
+
+fn collect_web_assets(
+    root: &Path,
+    spec: &AssetTreeSpec,
+) -> Result<Vec<ArchiveEntry>, PackageError> {
+    let root_metadata = fs::symlink_metadata(root).map_err(|error| PackageError::InputIo {
+        path: root.to_path_buf(),
+        error,
+    })?;
+    if !root_metadata.is_dir() || is_link_or_reparse(&root_metadata) {
+        return Err(PackageError::InvalidInput {
+            path: root.to_path_buf(),
+            detail: "web asset root must be a non-link directory".to_owned(),
+        });
+    }
+
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = BTreeMap::new();
+    let mut total_bytes = 0_u64;
+    while let Some(directory) = pending.pop() {
+        let mut children = fs::read_dir(&directory)
+            .map_err(|error| PackageError::InputIo {
+                path: directory.clone(),
+                error,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| PackageError::InputIo {
+                path: directory.clone(),
+                error,
+            })?;
+        children.sort_by_key(fs::DirEntry::file_name);
+        for child in children.into_iter().rev() {
+            let path = child.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| PackageError::InputIo {
+                path: path.clone(),
+                error,
+            })?;
+            if is_link_or_reparse(&metadata) {
+                return Err(PackageError::InvalidInput {
+                    path,
+                    detail: "web asset tree contains a link or reparse point".to_owned(),
+                });
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                return Err(PackageError::InvalidInput {
+                    path,
+                    detail: "web asset tree contains an unsupported file type".to_owned(),
+                });
+            }
+            if files.len() >= spec.maximum_files {
+                return Err(PackageError::InvalidInput {
+                    path: root.to_path_buf(),
+                    detail: "web asset tree exceeds its file-count limit".to_owned(),
+                });
+            }
+            if metadata.len() == 0 || metadata.len() > spec.maximum_file_bytes {
+                return Err(PackageError::InvalidInput {
+                    path,
+                    detail: "web asset file is empty or oversized".to_owned(),
+                });
+            }
+            total_bytes = total_bytes
+                .checked_add(metadata.len())
+                .filter(|bytes| *bytes <= spec.maximum_total_bytes)
+                .ok_or_else(|| PackageError::InvalidInput {
+                    path: root.to_path_buf(),
+                    detail: "web asset tree exceeds its total-byte limit".to_owned(),
+                })?;
+            let relative = web_asset_relative_path(root, &path)?;
+            let bytes = read_regular_bounded(&path, spec.maximum_file_bytes)?;
+            if files.insert(relative, bytes).is_some() {
+                return Err(PackageError::InvalidInput {
+                    path,
+                    detail: "web asset tree contains a duplicate path".to_owned(),
+                });
+            }
+        }
+    }
+
+    let manifest_bytes =
+        files
+            .remove(&spec.manifest)
+            .ok_or_else(|| PackageError::InvalidInput {
+                path: root.to_path_buf(),
+                detail: "web asset manifest is missing".to_owned(),
+            })?;
+    let manifest: WebAssetManifest =
+        serde_json::from_slice(&manifest_bytes).map_err(|_| PackageError::InvalidInput {
+            path: root.join(&spec.manifest),
+            detail: "web asset manifest is invalid".to_owned(),
+        })?;
+    if manifest.schema_version != WEB_ASSET_MANIFEST_SCHEMA
+        || manifest.assets.is_empty()
+        || manifest.assets.len().saturating_add(1) > spec.maximum_files
+    {
+        return Err(PackageError::InvalidInput {
+            path: root.join(&spec.manifest),
+            detail: "web asset manifest identity or count is invalid".to_owned(),
+        });
+    }
+
+    let mut declared = BTreeSet::new();
+    let mut previous = None;
+    for record in &manifest.assets {
+        validate_web_asset_path(&record.path)?;
+        if previous.is_some_and(|path| path >= record.path.as_str())
+            || !declared.insert(record.path.as_str())
+        {
+            return Err(PackageError::InvalidInput {
+                path: root.join(&spec.manifest),
+                detail: "web asset manifest paths must be unique and sorted".to_owned(),
+            });
+        }
+        previous = Some(record.path.as_str());
+        let bytes = files
+            .get(&record.path)
+            .ok_or_else(|| PackageError::InvalidInput {
+                path: root.join(&record.path),
+                detail: "web asset manifest references a missing file".to_owned(),
+            })?;
+        if record.bytes != u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+            || record.sha256 != sha256(bytes)
+        {
+            return Err(PackageError::InvalidInput {
+                path: root.join(&record.path),
+                detail: "web asset manifest size or digest differs".to_owned(),
+            });
+        }
+    }
+    if files.keys().map(String::as_str).collect::<BTreeSet<_>>() != declared {
+        return Err(PackageError::InvalidInput {
+            path: root.to_path_buf(),
+            detail: "web asset tree contains files outside its manifest".to_owned(),
+        });
+    }
+
+    let mut entries = Vec::with_capacity(files.len().saturating_add(1));
+    entries.push(ArchiveEntry::new(
+        format!("{}/{}", spec.destination, spec.manifest),
+        "web_asset",
+        0o644,
+        manifest_bytes,
+    )?);
+    for (path, bytes) in files {
+        entries.push(ArchiveEntry::new(
+            format!("{}/{path}", spec.destination),
+            "web_asset",
+            0o644,
+            bytes,
+        )?);
+    }
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(entries)
+}
+
+fn web_asset_relative_path(root: &Path, path: &Path) -> Result<String, PackageError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| PackageError::InvalidInput {
+            path: path.to_path_buf(),
+            detail: "web asset escaped its root".to_owned(),
+        })?;
+    let mut components = Vec::new();
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            return Err(PackageError::InvalidInput {
+                path: path.to_path_buf(),
+                detail: "web asset path is not normalized".to_owned(),
+            });
+        };
+        components.push(
+            component
+                .to_str()
+                .ok_or_else(|| PackageError::InvalidInput {
+                    path: path.to_path_buf(),
+                    detail: "web asset path is not UTF-8".to_owned(),
+                })?
+                .to_owned(),
+        );
+    }
+    let relative = components.join("/");
+    validate_relative_path(&relative)?;
+    Ok(relative)
+}
+
+fn validate_web_asset_path(path: &str) -> Result<(), PackageError> {
+    validate_relative_path(path)?;
+    if path.ends_with(".map") {
+        return invalid_spec("production web assets must not contain source maps");
+    }
+    if path == "index.html" {
+        return Ok(());
+    }
+    let file_name = path
+        .strip_prefix("assets/")
+        .filter(|name| !name.contains('/'))
+        .ok_or_else(|| {
+            PackageError::InvalidSpec(
+                "web assets must be index.html or flat content-named assets".to_owned(),
+            )
+        })?;
+    let stem = file_name
+        .rsplit_once('.')
+        .map_or(file_name, |(stem, _extension)| stem);
+    let hash = stem.rsplit_once('-').map_or(stem, |(_name, hash)| hash);
+    if hash.len() < 8 || !hash.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return invalid_spec("web assets must use content-named filenames");
+    }
+    Ok(())
 }
 
 fn persist_checksum_sidecar(
@@ -783,6 +1086,7 @@ fn exercise_install_lifecycle(
     {
         return invalid_install("bootstrap outcome does not match the baseline archive");
     }
+    verify_installed_web_payload(&install_root, &baseline_manifest)?;
     let mut health = ProcessCandidateHealthCheck;
     let catalog_state = sandbox.path().join("catalog-state");
     fs::create_dir(&catalog_state).map_err(|error| PackageError::InputIo {
@@ -810,6 +1114,8 @@ fn exercise_install_lifecycle(
     {
         return invalid_install("committed update state is inconsistent");
     }
+    verify_installed_web_payload(&install_root, &baseline_manifest)?;
+    verify_installed_web_payload(&install_root, &candidate_manifest)?;
     probe_launcher(&install_root, Duration::from_secs(30))?;
     let installed_release = installed::exercise(&install_root, &candidate_manifest.version)?;
     let recovered_status = recover_update(&install_root)?;
@@ -878,6 +1184,7 @@ fn exercise_install_lifecycle(
     {
         return invalid_install("failed candidate health did not fully roll back");
     }
+    verify_installed_web_payload(&rollback_root, &baseline_manifest)?;
     let rollback_recovery = recover_update(&rollback_root)?;
     if rollback_recovery != rollback_status {
         return invalid_install("post-rollback recovery changed installation state");
@@ -900,6 +1207,10 @@ fn exercise_install_lifecycle(
         committed_last_good_version: active_status.last_good_version,
         rollback_active_version: rollback_status.active_version,
         uninstall_removed_versions: uninstalled.removed_versions,
+        web_payload_owned: true,
+        web_payload_version_bound: true,
+        web_payload_rollback_observed: true,
+        web_payload_uninstall_observed: true,
         installed_release,
         installed_command_uninstall_observed: true,
         launcher_probe_observed: true,
@@ -909,6 +1220,41 @@ fn exercise_install_lifecycle(
         user_data_preserved: true,
         unowned_data_preserved: true,
     })
+}
+
+fn verify_installed_web_payload(
+    install_root: &Path,
+    manifest: &LifecyclePackageManifest,
+) -> Result<(), PackageError> {
+    for archive_path in [
+        format!(
+            "bin/rootlight-web{}",
+            if manifest.target.contains("windows") {
+                ".exe"
+            } else {
+                ""
+            }
+        ),
+        format!("{EXPECTED_WEB_ASSET_DESTINATION}/{EXPECTED_WEB_ASSET_MANIFEST}"),
+        format!("{EXPECTED_WEB_ASSET_DESTINATION}/index.html"),
+    ] {
+        let entry = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.path == archive_path)
+            .ok_or_else(|| {
+                PackageError::InvalidInstall("package web payload entry is missing".to_owned())
+            })?;
+        let installed = install_root
+            .join("versions")
+            .join(&manifest.version)
+            .join(&entry.path);
+        let bytes = read_regular_bounded(&installed, 512 * 1024 * 1024)?;
+        if sha256(&bytes) != entry.sha256 {
+            return invalid_install("installed web payload digest differs from its package");
+        }
+    }
+    Ok(())
 }
 
 fn read_lifecycle_manifest(path: &Path) -> Result<LifecyclePackageManifest, PackageError> {
@@ -1327,10 +1673,10 @@ fn read_regular_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, PackageErr
         path: path.to_path_buf(),
         error,
     })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if is_link_or_reparse(&metadata) || !metadata.is_file() {
         return Err(PackageError::InvalidInput {
             path: path.to_path_buf(),
-            detail: "input must be a regular non-symlink file".to_owned(),
+            detail: "input must be a regular non-link file".to_owned(),
         });
     }
     if metadata.len() > maximum {
@@ -1357,6 +1703,21 @@ fn read_regular_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, PackageErr
         });
     }
     Ok(bytes)
+}
+
+#[cfg(windows)]
+fn is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 fn validate_relative_path(value: &str) -> Result<(), PackageError> {
@@ -1453,6 +1814,8 @@ struct PackageSpec {
     retained_versions: u8,
     maximum_binary_bytes: u64,
     binaries: Vec<BinarySpec>,
+    asset_trees: Vec<AssetTreeSpec>,
+    generated_notices: Vec<GeneratedNoticeSpec>,
     platforms: Vec<PlatformSpec>,
 }
 
@@ -1465,12 +1828,46 @@ struct BinarySpec {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AssetTreeSpec {
+    name: String,
+    destination: String,
+    manifest: String,
+    maximum_files: usize,
+    maximum_total_bytes: u64,
+    maximum_file_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeneratedNoticeSpec {
+    name: String,
+    destination: String,
+    maximum_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PlatformSpec {
     target: String,
     executable_suffix: String,
     autostart_kind: String,
     autostart_resource: String,
     autostart_source: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebAssetManifest {
+    schema_version: u32,
+    assets: Vec<WebAssetRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebAssetRecord {
+    path: String,
+    bytes: u64,
+    sha256: String,
 }
 
 #[derive(Debug)]
@@ -1556,6 +1953,13 @@ struct LifecyclePackageManifest {
     target: String,
     version: String,
     source_revision: String,
+    entries: Vec<LifecyclePackageManifestEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LifecyclePackageManifestEntry {
+    path: String,
+    sha256: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1574,6 +1978,10 @@ struct PackageLifecycleReport {
     committed_last_good_version: String,
     rollback_active_version: String,
     uninstall_removed_versions: usize,
+    web_payload_owned: bool,
+    web_payload_version_bound: bool,
+    web_payload_rollback_observed: bool,
+    web_payload_uninstall_observed: bool,
     installed_release: installed::InstalledReleaseEvidence,
     installed_command_uninstall_observed: bool,
     launcher_probe_observed: bool,
@@ -1725,9 +2133,13 @@ mod tests {
         let platform = platform_for(&spec, "x86_64-unknown-linux-gnu").expect("platform exists");
         let sandbox = tempdir().expect("sandbox");
         let binaries = sandbox.path().join("bin");
+        let web_assets = sandbox.path().join("web-assets");
+        let web_notices = sandbox.path().join("web-notices.txt");
         let first_output = sandbox.path().join("first");
         let second_output = sandbox.path().join("second");
         fs::create_dir(&binaries).expect("binary directory");
+        write_web_asset_fixture(&web_assets);
+        fs::write(&web_notices, b"fixture third-party notices").expect("web notice fixture writes");
         for binary in &spec.binaries {
             fs::write(
                 binaries.join(&binary.name),
@@ -1750,21 +2162,29 @@ mod tests {
         let first = build_archive(
             &workspace,
             &spec,
-            platform,
-            &version,
-            "1111111111111111111111111111111111111111",
-            &binaries,
-            &first_output,
+            ArchiveBuild {
+                platform,
+                version: &version,
+                source_revision: "1111111111111111111111111111111111111111",
+                bin_dir: &binaries,
+                web_assets_dir: &web_assets,
+                web_notices: &web_notices,
+                output_dir: &first_output,
+            },
         )
         .expect("first package");
         let second = build_archive(
             &workspace,
             &spec,
-            platform,
-            &version,
-            "1111111111111111111111111111111111111111",
-            &binaries,
-            &second_output,
+            ArchiveBuild {
+                platform,
+                version: &version,
+                source_revision: "1111111111111111111111111111111111111111",
+                bin_dir: &binaries,
+                web_assets_dir: &web_assets,
+                web_notices: &web_notices,
+                output_dir: &second_output,
+            },
         )
         .expect("second package");
         let first_bytes = fs::read(&first.archive).expect("first bytes");
@@ -1822,6 +2242,11 @@ mod tests {
         assert!(manifest.contains("\"user_data_policy\": \"preserve\""));
         assert!(manifest.contains("\"mcp_launcher_binary\": \"launcher/rootlight-mcp-launcher\""));
         assert!(names.contains(&"launcher/rootlight-mcp-launcher".to_owned()));
+        assert!(names.contains(&"bin/rootlight-web".to_owned()));
+        assert!(names.contains(&"share/rootlight/web/asset-manifest.json".to_owned()));
+        assert!(names.contains(&"share/rootlight/web/index.html".to_owned()));
+        assert!(names.contains(&"share/rootlight/web/assets/app-a1b2c3d4.js".to_owned()));
+        assert!(names.contains(&EXPECTED_WEB_NOTICE_DESTINATION.to_owned()));
         assert!(names.contains(&"NOTICE".to_owned()));
         for filename in DISTRIBUTION_LICENSES {
             assert!(names.contains(&format!("licenses/{filename}")));
@@ -1830,6 +2255,23 @@ mod tests {
             archive: first.archive.clone(),
         })
         .expect("checksum sidecars verify");
+    }
+
+    #[test]
+    fn web_asset_tree_rejects_unlisted_and_tampered_files() {
+        let workspace = workspace_root().expect("workspace root");
+        let spec = load_spec(&workspace).expect("spec parses");
+        let sandbox = tempdir().expect("sandbox");
+        let assets = sandbox.path().join("assets");
+        write_web_asset_fixture(&assets);
+        fs::write(assets.join("assets/unlisted-a1b2c3d4.js"), b"foreign")
+            .expect("unlisted fixture writes");
+        assert!(collect_web_assets(&assets, &spec.asset_trees[0]).is_err());
+
+        fs::remove_file(assets.join("assets/unlisted-a1b2c3d4.js"))
+            .expect("unlisted fixture removes");
+        fs::write(assets.join("index.html"), b"tampered").expect("tampered fixture writes");
+        assert!(collect_web_assets(&assets, &spec.asset_trees[0]).is_err());
     }
 
     #[test]
@@ -1878,5 +2320,37 @@ mod tests {
             .into_iter()
             .map(str::to_owned);
         assert!(VerifyOptions::parse(&mut trailing).is_err());
+    }
+
+    fn write_web_asset_fixture(root: &Path) {
+        let index =
+            b"<!doctype html><html><script src=\"/assets/app-a1b2c3d4.js\"></script></html>";
+        let script = b"export {};";
+        fs::create_dir_all(root.join("assets")).expect("asset fixture directory");
+        fs::write(root.join("index.html"), index).expect("index fixture writes");
+        fs::write(root.join("assets/app-a1b2c3d4.js"), script).expect("script fixture writes");
+        let manifest = serde_json::json!({
+            "schema_version": WEB_ASSET_MANIFEST_SCHEMA,
+            "assets": [
+                {
+                    "path": "assets/app-a1b2c3d4.js",
+                    "bytes": script.len(),
+                    "sha256": sha256(script)
+                },
+                {
+                    "path": "index.html",
+                    "bytes": index.len(),
+                    "sha256": sha256(index)
+                }
+            ]
+        });
+        fs::write(
+            root.join(EXPECTED_WEB_ASSET_MANIFEST),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&manifest).expect("manifest serializes")
+            ),
+        )
+        .expect("asset manifest writes");
     }
 }

@@ -19,14 +19,19 @@ cargo run --locked --package xtask -- package-build \
   --version 0.1.0 \
   --source-revision 0123456789abcdef0123456789abcdef01234567 \
   --bin-dir target/release \
+  --web-assets-dir apps/rootlight-web/frontend/dist \
+  --web-notices artifacts/web/rootlight-web-third-party-notices.txt \
   --output-dir artifacts/packages
 ```
 
 The command writes one immutable archive and a matching `.sha256` file. The
 archive contains `package-manifest.json`, the license, all required binaries,
-the stable launcher, and an inert autostart template. Verify the detached
-digests before opening the archive, then independently compare every entry
-against the embedded manifest.
+the stable launcher, an inert autostart template, and the exact bounded
+`share/rootlight/web` asset inventory. The web asset directory must already
+come from the pinned deterministic front-end build; Node.js is not copied into
+or required by the native package. Verify the detached digests before opening
+the archive, then independently compare every entry against the embedded
+manifest.
 
 Exercise the exact candidate lifecycle with an older archive built from the
 same source revision:

@@ -63,18 +63,19 @@ const MCP_INTERNAL_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_ACTIVE_VERSION_BYTES: u64 = 128;
 const MAX_INSTALL_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_UPDATE_TRANSACTION_BYTES: u64 = 1024 * 1024;
-const MAX_OWNED_PATHS: usize = 256;
+const MAX_OWNED_PATHS: usize = 4_096;
 const MAX_PATH_BYTES: usize = 512;
 #[cfg(windows)]
 const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(windows)]
 const UNINSTALL_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const EXPECTED_BINARIES: [&str; 5] = [
+const EXPECTED_BINARIES: [&str; 6] = [
     "rootlight",
     "rootlight-adapter-host",
     "rootlight-daemon",
     "rootlight-mcp",
     "rootlight-semantic-host",
+    "rootlight-web",
 ];
 
 /// Runs the launcher for the public command name used to invoke this process.
@@ -828,8 +829,8 @@ fn cleanup_deferred_installation(
     fs::remove_dir(root.join("versions")).map_err(LauncherError::UninstallCleanup)?;
 
     let current_bin = root.join("current/bin");
-    for binary in EXPECTED_BINARIES {
-        remove_owned_file(&current_bin.join(format!("{binary}.exe")))?;
+    for binary in manifest.current_binary_names()? {
+        remove_owned_file(&current_bin.join(binary))?;
     }
     fs::remove_dir(&current_bin).map_err(LauncherError::UninstallCleanup)?;
     fs::remove_dir(root.join("current")).map_err(LauncherError::UninstallCleanup)?;
@@ -1284,6 +1285,22 @@ impl InstallManifest {
     }
 
     #[cfg(windows)]
+    fn current_binary_names(&self) -> Result<Vec<&str>, LauncherError> {
+        let names = self
+            .owned_paths
+            .iter()
+            .filter_map(|path| path.strip_prefix("current/bin/"))
+            .collect::<Vec<_>>();
+        if names.is_empty()
+            || names.len() > EXPECTED_BINARIES.len()
+            || names.iter().any(|name| name.contains('/'))
+        {
+            return Err(LauncherError::InvalidState);
+        }
+        Ok(names)
+    }
+
+    #[cfg(windows)]
     fn installed_versions(&self) -> Result<Vec<String>, LauncherError> {
         let mut versions = BTreeSet::new();
         for path in &self.owned_paths {
@@ -1653,9 +1670,11 @@ mod tests {
             }
         }
         for binary in EXPECTED_BINARIES {
-            let path = root.join("current/bin").join(format!("{binary}.exe"));
+            let relative = format!("current/bin/{binary}.exe");
+            let path = root.join(&relative);
             write_private(&path, b"launcher");
             apply_private_windows_dacl(&path, false).expect("launcher becomes private");
+            owned_paths.push(relative);
         }
         owned_paths.sort();
         let manifest = serde_json::json!({

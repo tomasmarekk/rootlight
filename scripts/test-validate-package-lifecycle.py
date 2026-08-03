@@ -64,7 +64,7 @@ def _document(target: str) -> dict[str, object]:
             "post_cleanup_active_processes": 0,
         }
     return {
-        "schema": "rootlight.package-lifecycle/4",
+        "schema": "rootlight.package-lifecycle/5",
         "source_revision": REVISION,
         "candidate_target": target,
         "candidate_version": VERSION,
@@ -78,6 +78,10 @@ def _document(target: str) -> dict[str, object]:
         "committed_last_good_version": "0.0.0",
         "rollback_active_version": "0.0.0",
         "uninstall_removed_versions": 2,
+        "web_payload_owned": True,
+        "web_payload_version_bound": True,
+        "web_payload_rollback_observed": True,
+        "web_payload_uninstall_observed": True,
         "installed_release": {
             "windows_first_health": health,
             "mcp_initialize": _mcp(0 if windows else None),
@@ -129,9 +133,7 @@ class PackageLifecycleValidatorTests(unittest.TestCase):
     def test_rejects_missing_measurements(self) -> None:
         target = "x86_64-unknown-linux-gnu"
         document = _document(target)
-        document["installed_release"]["mcp_initialize"][
-            "measured_samples_micros"
-        ].pop()
+        document["installed_release"]["mcp_initialize"]["measured_samples_micros"].pop()
         with self.assertRaises(VALIDATOR.LifecycleValidationError):
             _validate(document, target)
 
@@ -166,6 +168,20 @@ class PackageLifecycleValidatorTests(unittest.TestCase):
         ] = False
         with self.assertRaises(VALIDATOR.LifecycleValidationError):
             _validate(document, target)
+
+    def test_rejects_unobserved_web_payload_lifecycle(self) -> None:
+        target = "x86_64-unknown-linux-gnu"
+        for field in (
+            "web_payload_owned",
+            "web_payload_version_bound",
+            "web_payload_rollback_observed",
+            "web_payload_uninstall_observed",
+        ):
+            with self.subTest(field=field):
+                document = _document(target)
+                document[field] = False
+                with self.assertRaises(VALIDATOR.LifecycleValidationError):
+                    _validate(document, target)
 
     def test_rejects_boolean_numeric_evidence(self) -> None:
         target = "x86_64-unknown-linux-gnu"

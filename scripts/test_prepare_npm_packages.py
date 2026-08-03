@@ -64,6 +64,15 @@ class PackagePreparationTests(unittest.TestCase):
                     self.assertTrue(
                         (package_dir / "bin" / f"{executable}{suffix}").is_file()
                     )
+                self.assertTrue(
+                    (package_dir / "bin" / f"rootlight-web{suffix}").is_file()
+                )
+                self.assertTrue(
+                    (package_dir / "share/rootlight/web/asset-manifest.json").is_file()
+                )
+                self.assertTrue(
+                    (package_dir / "share/rootlight/web/index.html").is_file()
+                )
 
     def test_archive_digest_and_paths_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -89,9 +98,7 @@ class PackagePreparationTests(unittest.TestCase):
             candidates.mkdir()
             for index, target in enumerate(npm_packages.TARGETS):
                 executables = (
-                    ("rootlight",)
-                    if index == 0
-                    else npm_packages.PUBLIC_EXECUTABLES
+                    ("rootlight",) if index == 0 else npm_packages.PUBLIC_EXECUTABLES
                 )
                 write_candidate(
                     candidates,
@@ -149,7 +156,7 @@ def write_candidate(
     version: str,
     source_revision: str,
     *,
-    public_executables: tuple[str, ...] = npm_packages.PUBLIC_EXECUTABLES,
+    public_executables: tuple[str, ...] = npm_packages.NATIVE_EXECUTABLES,
     manifest_schema: str = npm_packages.PACKAGE_MANIFEST_SCHEMA,
 ) -> None:
     archive = directory / f"rootlight-{version}-{target.triple}.zip"
@@ -169,6 +176,19 @@ def write_candidate(
             executable.create_system = 3
             executable.external_attr = 0o100755 << 16
             bundle.writestr(executable, b"native")
+        web_manifest = zipfile.ZipInfo("share/rootlight/web/asset-manifest.json")
+        web_manifest.create_system = 3
+        web_manifest.external_attr = 0o100644 << 16
+        bundle.writestr(
+            web_manifest,
+            b'{"schema_version":1,"assets":[{"path":"index.html","bytes":15,"sha256":"'
+            + b"0" * 64
+            + b'"}]}',
+        )
+        web_index = zipfile.ZipInfo("share/rootlight/web/index.html")
+        web_index.create_system = 3
+        web_index.external_attr = 0o100644 << 16
+        bundle.writestr(web_index, b"<!doctype html>")
         bundle.writestr(manifest_info, json.dumps(manifest).encode("utf-8"))
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_name(f"{archive.name}.sha256").write_text(
