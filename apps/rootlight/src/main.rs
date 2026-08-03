@@ -9,7 +9,7 @@ use std::{
     env, fs,
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{Command, ExitCode},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -92,6 +92,7 @@ Repository commands:
   Repository indexing is detached by default. Use --attached to wait for completion.
 
 Service commands:
+  web [--no-open]
   health [--json]
   diagnostics quick
   support-bundle --output <file>
@@ -105,6 +106,12 @@ Discovery:
 
 fn main() -> ExitCode {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "web") {
+        return match execute_web(&arguments[1..]) {
+            Ok(exit) => exit,
+            Err(error) => render_failure(error),
+        };
+    }
     match discovery_output(&arguments) {
         Some(DiscoveryOutput::Human(output)) => {
             print!("{output}");
@@ -220,6 +227,9 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<CommandResult, CliError> {
     if command == "generation-import" {
         return execute_generation_import(&trailing);
     }
+    if command == "web" {
+        return Err(CliError::Usage);
+    }
     if (command == "generation-export" || command == "runtime-trace-import") && !standalone {
         return Err(CliError::Usage);
     }
@@ -249,6 +259,30 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<CommandResult, CliError> {
             execute_client(&client, command.to_string_lossy().as_ref(), &trailing)
         }
     })
+}
+
+// Keep the web server lifecycle in the dedicated sibling process while
+// preserving the user's terminal, signal handling, and closed argument grammar.
+fn execute_web(arguments: &[std::ffi::OsString]) -> Result<ExitCode, CliError> {
+    let current = env::current_exe().map_err(CliError::CurrentExecutable)?;
+    let executable = web_executable_for(&current)?;
+    let status = Command::new(executable)
+        .args(arguments)
+        .status()
+        .map_err(CliError::WebLaunch)?;
+    let code = status
+        .code()
+        .and_then(|code| u8::try_from(code).ok())
+        .unwrap_or(ExitFamily::Internal.code());
+    Ok(ExitCode::from(code))
+}
+
+fn web_executable_for(current: &Path) -> Result<PathBuf, CliError> {
+    let parent = current.parent().ok_or(CliError::InvalidInstalledLayout)?;
+    if current.file_stem().is_none_or(|stem| stem != "rootlight") {
+        return Err(CliError::InvalidInstalledLayout);
+    }
+    Ok(parent.join(format!("rootlight-web{}", env::consts::EXE_SUFFIX)))
 }
 
 fn render_json(value: &CliEnvelope) -> Result<String, ()> {
@@ -2099,7 +2133,7 @@ impl CliEnvelope {
 struct CliHelp {
     usage: &'static str,
     repository_commands: [&'static str; 5],
-    service_commands: [&'static str; 5],
+    service_commands: [&'static str; 6],
 }
 
 impl CliHelp {
@@ -2114,6 +2148,7 @@ impl CliHelp {
                 "operation cancel <operation-id>",
             ],
             service_commands: [
+                "web [--no-open]",
                 "health [--json]",
                 "diagnostics quick",
                 "support-bundle --output <file>",
@@ -2331,7 +2366,7 @@ impl ExitFamily {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: rootlight <repo index|repo list|repo status|operation status|operation cancel|health|diagnostics|support-bundle|repair|update> [options]"
+        "usage: rootlight <web|repo index|repo list|repo status|operation status|operation cancel|health|diagnostics|support-bundle|repair|update> [options]"
     )]
     Usage,
     #[error("daemon path overrides must provide both state and runtime directories")]
@@ -2386,6 +2421,8 @@ enum CliError {
     FilesystemUpdate(#[from] FilesystemUpdateError),
     #[error("current executable is unavailable")]
     CurrentExecutable(#[source] std::io::Error),
+    #[error("web host launch failed")]
+    WebLaunch(#[source] std::io::Error),
     #[error("current executable is outside an installed version")]
     InvalidInstalledLayout,
     #[error("stop the active Rootlight daemon before uninstalling")]
@@ -2501,6 +2538,7 @@ impl CliError {
             | Self::Client(ClientError::DaemonExecutableMissing)
             | Self::Client(ClientError::DaemonLaunchFailed)
             | Self::Client(ClientError::DaemonStartTimedOut)
+            | Self::WebLaunch(_)
             | Self::DaemonActiveDuringUninstall
             | Self::Operations(
                 rootlight_operations::OperationError::WriterBusy
@@ -2542,6 +2580,10 @@ impl CliError {
             .retryable()
             .next_action(NextAction::Retry)
             .build();
+        }
+        if matches!(self, Self::WebLaunch(_)) {
+            return PublicError::builder(ErrorCode::NotFound, "web host executable is unavailable")
+                .build();
         }
         if matches!(
             self,
@@ -2701,6 +2743,26 @@ mod tests {
                 .iter()
                 .any(|command| command.starts_with("repo index"))
         );
+        assert!(help.service_commands.contains(&"web [--no-open]"));
+    }
+
+    #[test]
+    fn web_command_resolves_only_the_sibling_host_process() {
+        let cli = PathBuf::from("target").join(format!("rootlight{}", env::consts::EXE_SUFFIX));
+        let expected =
+            PathBuf::from("target").join(format!("rootlight-web{}", env::consts::EXE_SUFFIX));
+        assert_eq!(
+            web_executable_for(&cli).expect("canonical CLI name resolves"),
+            expected
+        );
+        assert!(matches!(
+            web_executable_for(&PathBuf::from("target").join("foreign")),
+            Err(CliError::InvalidInstalledLayout)
+        ));
+        assert!(matches!(
+            run(arguments(&["web", "--no-open"])),
+            Err(CliError::Usage)
+        ));
     }
 
     #[test]
