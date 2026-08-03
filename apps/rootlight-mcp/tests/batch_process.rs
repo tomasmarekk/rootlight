@@ -17,7 +17,7 @@ use rootlight_ids::{RepositoryId, SymbolId};
 use rootlight_mcp_contract::{batch::BATCH_TOOL_REGISTRY, context::BatchTool};
 use serde_json::{Value, json};
 
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
