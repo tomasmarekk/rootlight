@@ -317,6 +317,44 @@ async fn shutdown_signal(mode: DaemonMode) {
 }
 
 async fn supervised_shutdown() {
+    // Group interrupts belong to the supervising CLI tree; retained stdin
+    // remains the exact authority that lets this daemon clean up discovery.
+    let mut command = Box::pin(supervised_shutdown_command());
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let Ok(mut interrupt) = signal(SignalKind::interrupt()) else {
+            command.await;
+            return;
+        };
+        loop {
+            tokio::select! {
+                () = &mut command => return,
+                received = interrupt.recv() => {
+                    if received.is_none() {
+                        command.await;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let mut ctrl_c = tokio::signal::windows::ctrl_c().ok();
+        let mut ctrl_break = tokio::signal::windows::ctrl_break().ok();
+        loop {
+            tokio::select! {
+                () = &mut command => return,
+                () = receive_supervised_ctrl_c(&mut ctrl_c) => {}
+                () = receive_supervised_ctrl_break(&mut ctrl_break) => {}
+            }
+        }
+    }
+}
+
+async fn supervised_shutdown_command() {
     use tokio::io::AsyncReadExt as _;
 
     let mut input = tokio::io::stdin();
@@ -334,6 +372,26 @@ async fn supervised_shutdown() {
             Ok(_) if command.len() < 16 => command.push(byte[0]),
             Ok(_) => command.clear(),
         }
+    }
+}
+
+#[cfg(windows)]
+async fn receive_supervised_ctrl_c(signal: &mut Option<tokio::signal::windows::CtrlC>) {
+    let Some(signal) = signal else {
+        std::future::pending().await
+    };
+    if signal.recv().await.is_none() {
+        std::future::pending().await
+    }
+}
+
+#[cfg(windows)]
+async fn receive_supervised_ctrl_break(signal: &mut Option<tokio::signal::windows::CtrlBreak>) {
+    let Some(signal) = signal else {
+        std::future::pending().await
+    };
+    if signal.recv().await.is_none() {
+        std::future::pending().await
     }
 }
 
