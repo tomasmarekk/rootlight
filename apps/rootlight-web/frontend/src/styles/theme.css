@@ -476,8 +476,8 @@
 }
 
 .project-card {
+  position: relative;
   display: block;
-  padding: 16px;
   border: 1px solid var(--rl-border);
   border-radius: var(--rl-radius-md);
   background: rgb(255 255 255 / 1.3%);
@@ -488,13 +488,21 @@
     transform 120ms ease;
 }
 
-a.project-card:hover {
+.project-card__link,
+.project-card__body {
+  display: block;
+  padding: 16px;
+  color: inherit;
+}
+
+.project-card:not(.project-card--disabled):hover {
   border-color: rgb(124 131 255 / 42%);
   background: rgb(124 131 255 / 4%);
   transform: translateY(-1px);
 }
 
-a.project-card:focus-visible {
+.project-card__link:focus-visible {
+  border-radius: var(--rl-radius-md);
   outline: 2px solid var(--rl-focus);
   outline-offset: 2px;
 }
@@ -505,6 +513,7 @@ a.project-card:focus-visible {
 
 .project-card--skeleton {
   min-height: 112px;
+  padding: 16px;
   animation: skeleton-pulse 1.4s ease-in-out infinite;
   background: linear-gradient(
     100deg,
@@ -621,8 +630,36 @@ a.project-card:focus-visible {
 .project-card__coverage {
   justify-content: space-between;
   margin: 6px 0 0 47px;
+  padding-right: 30px;
   color: var(--rl-foreground-subtle);
   font-size: 9px;
+}
+
+.project-card__copy {
+  position: absolute;
+  right: 11px;
+  bottom: 9px;
+  z-index: 1;
+  display: grid;
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--rl-border);
+  border-radius: 7px;
+  background: var(--rl-surface);
+  color: var(--rl-foreground-muted);
+  cursor: pointer;
+}
+
+.project-card__copy:hover {
+  border-color: var(--rl-border-strong);
+  color: var(--rl-foreground);
+}
+
+.project-card__copy:focus-visible {
+  outline: 2px solid var(--rl-focus);
+  outline-offset: 2px;
 }
 
 .catalog-pagination {

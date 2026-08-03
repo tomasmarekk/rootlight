@@ -7,37 +7,51 @@ import {
   Archive,
   ArrowLeft,
   ArrowRight,
+  Check,
   CircleCheck,
+  Copy,
   FolderGit2,
   FolderPlus,
   RefreshCw,
   Search,
   TriangleAlert,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation } from "react-router";
 
 import { fetchProjects } from "../api/client";
 import type { ProjectCatalogPage, ProjectLifecycleFilter, ProjectSummary } from "../api/contracts";
 import { PageHeading } from "../components/page-heading";
 import { StatusCard } from "../components/status-card";
+import {
+  createCatalogLocationState,
+  parseCatalogLocationState,
+  type CatalogCursorState,
+  type CatalogLocationState,
+} from "../routing/catalog-location-state";
 
 const pageSize = 50;
 
-type CatalogCursor = {
-  snapshot: string;
-  after: string;
-  sortVersion: number;
-};
-
 export function ProjectsPage() {
-  const [searchInput, setSearchInput] = useState("");
-  const [query, setQuery] = useState("");
-  const [stateFilter, setStateFilter] = useState<ProjectLifecycleFilter | "all">("all");
-  const [history, setHistory] = useState<CatalogCursor[]>([]);
+  const location = useLocation();
+  const [restored] = useState(() => parseCatalogLocationState(location.state)?.catalog);
+  const [searchInput, setSearchInput] = useState(restored?.searchInput ?? "");
+  const [query, setQuery] = useState(restored?.query ?? "");
+  const [stateFilter, setStateFilter] = useState<ProjectLifecycleFilter | "all">(
+    restored?.stateFilter ?? "all",
+  );
+  const [history, setHistory] = useState<CatalogCursorState[]>(restored?.history ?? []);
   const cursor = history.at(-1);
+  const isInitialSearchEffect = useRef(true);
+  const hasPendingInitialSearch = useRef(searchInput.trim() !== query);
 
   useEffect(() => {
+    if (isInitialSearchEffect.current) {
+      isInitialSearchEffect.current = false;
+      if (!hasPendingInitialSearch.current) {
+        return;
+      }
+    }
     const timer = window.setTimeout(() => {
       setQuery(searchInput.trim());
       setHistory([]);
@@ -72,6 +86,12 @@ export function ProjectsPage() {
 
   const summary = useMemo(() => summarize(catalog.data?.projects ?? []), [catalog.data?.projects]);
   const hasFilter = query.length > 0 || stateFilter !== "all";
+  const catalogLocationState = createCatalogLocationState({
+    searchInput,
+    query,
+    stateFilter,
+    history,
+  });
 
   return (
     <div className="content-container">
@@ -170,6 +190,18 @@ export function ProjectsPage() {
                 placeholder="Search projects or repository ID"
                 value={searchInput}
                 onChange={(event) => setSearchInput(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    setQuery(event.currentTarget.value.trim());
+                    setHistory([]);
+                  } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    setSearchInput("");
+                    setQuery("");
+                    setHistory([]);
+                  }
+                }}
               />
               <kbd aria-hidden="true">/</kbd>
             </label>
@@ -179,6 +211,7 @@ export function ProjectsPage() {
         <CatalogContent
           catalog={catalog}
           hasFilter={hasFilter}
+          locationState={catalogLocationState}
           onClearFilters={() => {
             setSearchInput("");
             setQuery("");
@@ -231,10 +264,12 @@ export function ProjectsPage() {
 function CatalogContent({
   catalog,
   hasFilter,
+  locationState,
   onClearFilters,
 }: {
   catalog: UseQueryResult<ProjectCatalogPage>;
   hasFilter: boolean;
+  locationState: CatalogLocationState;
   onClearFilters: () => void;
 }) {
   if (catalog.isPending) {
@@ -320,14 +355,20 @@ function CatalogContent({
       {staleNotice}
       <div className="project-list" aria-live="polite">
         {catalog.data.projects.map((project) => (
-          <ProjectCard key={project.repositoryId} project={project} />
+          <ProjectCard key={project.repositoryId} locationState={locationState} project={project} />
         ))}
       </div>
     </>
   );
 }
 
-function ProjectCard({ project }: { project: ProjectSummary }) {
+function ProjectCard({
+  locationState,
+  project,
+}: {
+  locationState: CatalogLocationState;
+  project: ProjectSummary;
+}) {
   const coverage = aggregateCoverage(project);
   const details = (
     <>
@@ -370,17 +411,45 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
   if (project.activeGenerationId === null) {
     return (
       <article className="project-card project-card--disabled" aria-label={project.displayName}>
-        {details}
+        <div className="project-card__body">{details}</div>
+        <CopyRepositoryId repositoryId={project.repositoryId} />
       </article>
     );
   }
   return (
-    <Link
-      className="project-card"
-      to={`/projects/${encodeURIComponent(project.repositoryId)}?generation=${encodeURIComponent(project.activeGenerationId)}`}
+    <article className="project-card">
+      <Link
+        className="project-card__link"
+        state={locationState}
+        to={`/projects/${encodeURIComponent(project.repositoryId)}?generation=${encodeURIComponent(project.activeGenerationId)}`}
+      >
+        {details}
+      </Link>
+      <CopyRepositoryId repositoryId={project.repositoryId} />
+    </article>
+  );
+}
+
+function CopyRepositoryId({ repositoryId }: { repositoryId: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="project-card__copy"
+      type="button"
+      aria-label={copied ? "Repository ID copied" : "Copy repository ID"}
+      onClick={() => {
+        try {
+          void navigator.clipboard.writeText(repositoryId).then(
+            () => setCopied(true),
+            () => setCopied(false),
+          );
+        } catch {
+          setCopied(false);
+        }
+      }}
     >
-      {details}
-    </Link>
+      {copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
+    </button>
   );
 }
 

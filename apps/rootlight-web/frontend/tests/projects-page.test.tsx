@@ -1,13 +1,14 @@
 // Verifies catalog rendering, filtering, paging, and immutable project navigation.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fetchProjects } from "../src/api/client";
 import type { ProjectCatalogPage, ProjectSummary } from "../src/api/contracts";
+import { createCatalogLocationState } from "../src/routing/catalog-location-state";
 import { ProjectsPage } from "../src/views/projects-page";
 
 vi.mock("../src/api/client", () => ({
@@ -131,6 +132,80 @@ describe("ProjectsPage", () => {
         expect.any(AbortSignal),
       );
     });
+  });
+
+  it("applies search immediately on Enter and clears it on Escape", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Rootlight" });
+    const search = screen.getByRole("searchbox", { name: "Search projects" });
+
+    fireEvent.change(search, { target: { value: "  immediate  " } });
+    fireEvent.keyDown(search, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(vi.mocked(fetchProjects)).toHaveBeenLastCalledWith(
+        expect.objectContaining({ query: "immediate" }),
+        expect.any(AbortSignal),
+      );
+    });
+
+    fireEvent.keyDown(search, { key: "Escape" });
+    expect(search).toHaveValue("");
+    await waitFor(() => {
+      expect(vi.mocked(fetchProjects)).toHaveBeenLastCalledWith(
+        expect.objectContaining({ query: undefined }),
+        expect.any(AbortSignal),
+      );
+    });
+  });
+
+  it("restores bounded catalog filters and the immutable cursor without resetting them", async () => {
+    const restoredCatalog = catalogPage([project]);
+    vi.mocked(fetchProjects).mockResolvedValue(restoredCatalog);
+    renderPage(
+      createCatalogLocationState({
+        searchInput: "root",
+        query: "root",
+        stateFilter: "ready",
+        history: [{ snapshot: "snapshot", after: "cursor_2", sortVersion: 1 }],
+      }),
+    );
+
+    expect(await screen.findByRole("heading", { name: "Rootlight" })).toBeVisible();
+    expect(screen.getByRole("searchbox", { name: "Search projects" })).toHaveValue("root");
+    expect(screen.getByRole("combobox", { name: "State" })).toHaveValue("ready");
+    expect(screen.getByText("Page 2")).toBeVisible();
+    expect(vi.mocked(fetchProjects)).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        query: "root",
+        states: ["ready"],
+        snapshot: "snapshot",
+        after: "cursor_2",
+        sortVersion: 1,
+      }),
+      expect.any(AbortSignal),
+    );
+
+    await new Promise((resolve) => window.setTimeout(resolve, 300));
+    expect(screen.getByText("Page 2")).toBeVisible();
+    expect(vi.mocked(fetchProjects)).toHaveBeenCalledTimes(1);
+  });
+
+  it("copies the exact canonical repository ID without nesting controls", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    renderPage();
+    await screen.findByRole("heading", { name: "Rootlight" });
+
+    const copy = screen.getByRole("button", { name: "Copy repository ID" });
+    await userEvent.click(copy);
+
+    expect(writeText).toHaveBeenCalledWith(repositoryId);
+    expect(await screen.findByRole("button", { name: "Repository ID copied" })).toBeVisible();
+    expect(copy.closest("a")).toBeNull();
   });
 
   it("keeps next and previous pages on the same immutable snapshot", async () => {
@@ -280,13 +355,13 @@ function catalogPage(
   };
 }
 
-function renderPage() {
+function renderPage(locationState?: unknown) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[{ pathname: "/projects", state: locationState }]}>
         <ProjectsPage />
       </MemoryRouter>
     </QueryClientProvider>,

@@ -11,12 +11,15 @@ import {
   RotateCcw,
   TriangleAlert,
 } from "lucide-react";
-import { Link, useParams, useSearchParams } from "react-router";
+import { Link, useLocation, useParams, useSearchParams } from "react-router";
 
-import { fetchProjectDetail } from "../api/client";
+import { ApiError, fetchProjectDetail } from "../api/client";
+import { parseCatalogLocationState } from "../routing/catalog-location-state";
 
 export function ProjectWorkspacePage() {
   const { repositoryId } = useParams();
+  const location = useLocation();
+  const catalogLocationState = parseCatalogLocationState(location.state);
   const [searchParameters, setSearchParameters] = useSearchParams();
   const generation = searchParameters.get("generation") ?? "active";
   const project = useQuery({
@@ -39,15 +42,24 @@ export function ProjectWorkspacePage() {
     );
   }
   if (project.isError) {
+    const invalidIdentifier = project.error instanceof ApiError && project.error.status === 400;
     return (
       <div className="workspace-error" role="alert">
         <TriangleAlert size={28} aria-hidden="true" />
-        <h1>Project generation is unavailable</h1>
-        <p>The daemon did not return a correlated immutable project status.</p>
+        <h1>
+          {invalidIdentifier
+            ? "Project identifier is invalid"
+            : "Project generation is unavailable"}
+        </h1>
+        <p>
+          {invalidIdentifier
+            ? "The route does not contain a canonical Rootlight repository identifier."
+            : "The daemon did not return a correlated immutable project status."}
+        </p>
         <Button size="sm" variant="primary" onPress={() => void project.refetch()}>
           Retry
         </Button>
-        <Link className="back-link" to="/projects">
+        <Link className="back-link" state={catalogLocationState} to="/projects">
           Return to projects
         </Link>
       </div>
@@ -59,7 +71,7 @@ export function ProjectWorkspacePage() {
     <div className="workspace-frame">
       <header className="project-header">
         <div>
-          <Link className="back-link" to="/projects">
+          <Link className="back-link" state={catalogLocationState} to="/projects">
             <ArrowLeft size={14} aria-hidden="true" />
             Projects
           </Link>

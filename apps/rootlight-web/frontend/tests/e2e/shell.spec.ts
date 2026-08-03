@@ -46,6 +46,9 @@ test("opens an exact generation from an immutable catalog page", async ({ page }
   await mockApplication(page, [projectSummary()]);
   await page.goto(`/#bootstrap=${"a".repeat(43)}`);
 
+  await page.getByRole("combobox", { name: "State" }).selectOption("ready");
+  await page.getByRole("searchbox", { name: "Search projects" }).fill("root");
+  await page.getByRole("searchbox", { name: "Search projects" }).press("Enter");
   await page.getByRole("link", { name: /Rootlight/u }).click();
 
   await expect(page).toHaveURL(
@@ -57,6 +60,9 @@ test("opens an exact generation from an immutable catalog page", async ({ page }
   await expect(page.getByText("9 / 10 files")).toBeVisible();
   await expect(page.getByText("repository index")).toBeVisible();
   await expect(page.getByText("2 / 4 units")).toBeVisible();
+  await page.locator("#main-content").getByRole("link", { name: "Projects" }).click();
+  await expect(page.getByRole("combobox", { name: "State" })).toHaveValue("ready");
+  await expect(page.getByRole("searchbox", { name: "Search projects" })).toHaveValue("root");
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations).toEqual([]);
 });
