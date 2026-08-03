@@ -8,6 +8,9 @@ export default defineConfig({
   forbidOnly: true,
   retries: 0,
   timeout: 30_000,
+  // Keep the CI performance lane free from another browser worker competing for
+  // the same CPU. Local acceptance runs may still use Playwright's default parallelism.
+  workers: process.env.CI === "true" ? 1 : undefined,
   use: {
     baseURL: "http://127.0.0.1:4173",
     colorScheme: "dark",
