@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import orchestrate_release
@@ -124,6 +125,24 @@ class OrchestrationTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(orchestrate_release.ReleaseGateError):
                     orchestrate_release.validated_run_id(value)
+
+    def test_release_attestation_reads_predicate_from_file(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "release-candidate.yml"
+        ).read_text(encoding="utf-8")
+        predicate_path = (
+            "predicate-path: "
+            "artifacts/release-provenance/rootlight-release-build.json"
+        )
+
+        self.assertIn(predicate_path, workflow)
+        self.assertNotIn(
+            "predicate: artifacts/release-provenance/rootlight-release-build.json",
+            workflow,
+        )
 
 
 if __name__ == "__main__":

@@ -1091,7 +1091,7 @@ jobs:
         with:
           subject-path: artifacts/release-candidates/*.zip
           predicate-type: https://rootlight.dev/attestations/release-build/v1
-          predicate: artifacts/release-provenance/rootlight-release-build.json
+          predicate-path: artifacts/release-provenance/rootlight-release-build.json
       - name: Attest aarch64 Linux SBOM
         id: sbom_aarch64_linux
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.2.0
