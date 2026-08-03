@@ -22,6 +22,14 @@ SPEC.loader.exec_module(installed_web)
 
 
 class InstalledWebSmokeTests(unittest.TestCase):
+    def test_smoke_temporary_parent_is_short_and_macos_only(self) -> None:
+        self.assertEqual(
+            installed_web.smoke_temporary_parent("darwin"),
+            Path("/private/tmp"),
+        )
+        self.assertIsNone(installed_web.smoke_temporary_parent("linux"))
+        self.assertIsNone(installed_web.smoke_temporary_parent("win32"))
+
     def test_readiness_probe_waits_for_spawned_daemon_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary)

@@ -14,6 +14,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -196,6 +197,13 @@ def process_environment(root: Path) -> dict[str, str]:
     environment["ROOTLIGHT_STATE_DIR"] = str(root / "state")
     environment["ROOTLIGHT_RUNTIME_DIR"] = str(root / "runtime")
     return environment
+
+
+def smoke_temporary_parent(platform: str) -> Path | None:
+    if platform != "darwin":
+        return None
+    # A short physical path avoids both macOS's /var alias and its AF_UNIX limit.
+    return Path("/private/tmp")
 
 
 def wait_for_daemon(
@@ -383,7 +391,8 @@ def main() -> None:
         raise ValueError("installed web smoke output must be a new file")
 
     with tempfile.TemporaryDirectory(
-        prefix="rootlight-web-smoke-", dir=output.parent
+        prefix="rootlight-web-smoke-",
+        dir=smoke_temporary_parent(sys.platform),
     ) as temporary:
         root = Path(temporary)
         package_root = root / "package"
