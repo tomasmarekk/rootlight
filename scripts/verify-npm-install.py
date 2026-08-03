@@ -126,10 +126,13 @@ def verify_install(
         verify_http_session()
 
         run([str(cli), "uninstall"], environment)
-        if cli.exists() or root_package_path(prefix).exists():
-            raise NpmInstallError("rootlight uninstall retained the root npm package")
-        final = service_status(native_cli, environment)
-        require_service_state(final, registered=False, running=False)
+        if (
+            cli.exists()
+            or root_package_path(prefix).exists()
+            or native_cli.exists()
+            or native_cli.parent.parent.exists()
+        ):
+            raise NpmInstallError("rootlight uninstall retained an npm package")
         wait_for_port(closed=True)
 
         evidence = {
@@ -140,6 +143,7 @@ def verify_install(
             "restarted_pid": restarted_pid,
             "schema": "rootlight.npm-install-smoke/1",
             "target": target,
+            "uninstall_removed_native_package": True,
             "uninstall_removed_root_package": True,
         }
         write_json_new(evidence_path, evidence)

@@ -48,16 +48,26 @@ function uninstallRootlight() {
   if (cleanup.error !== undefined || cleanup.status !== 0) {
     exitFor(cleanup);
   }
+  const nativePackage = nativePackageForCurrentPlatform();
   const result =
     process.platform === "win32"
       ? spawnSync(
           process.env.ComSpec ?? "cmd.exe",
-          ["/d", "/s", "/c", `npm.cmd uninstall --global ${rootPackageName}`],
+          [
+            "/d",
+            "/s",
+            "/c",
+            `npm.cmd uninstall --global ${rootPackageName} ${nativePackage}`,
+          ],
           { stdio: "inherit" },
         )
-      : spawnSync("npm", ["uninstall", "--global", rootPackageName], {
-          stdio: "inherit",
-        });
+      : spawnSync(
+          "npm",
+          ["uninstall", "--global", rootPackageName, nativePackage],
+          {
+            stdio: "inherit",
+          },
+        );
   exitFor(result);
 }
 
@@ -67,12 +77,7 @@ function spawnNative(executable, arguments_, stdio = "inherit") {
 }
 
 function resolveNativeExecutable(executable) {
-  const platformKey = `${process.platform}-${process.arch}`;
-  const nativePackage = nativePackages.get(platformKey);
-  if (nativePackage === undefined) {
-    fail(`rootlight: unsupported npm platform ${process.platform}/${process.arch}`);
-  }
-
+  const nativePackage = nativePackageForCurrentPlatform();
   const require = createRequire(import.meta.url);
   let packageJsonPath;
   try {
@@ -96,6 +101,15 @@ function resolveNativeExecutable(executable) {
 
   const suffix = process.platform === "win32" ? ".exe" : "";
   return join(dirname(packageJsonPath), "bin", `${executable}${suffix}`);
+}
+
+function nativePackageForCurrentPlatform() {
+  const platformKey = `${process.platform}-${process.arch}`;
+  const nativePackage = nativePackages.get(platformKey);
+  if (nativePackage === undefined) {
+    fail(`rootlight: unsupported npm platform ${process.platform}/${process.arch}`);
+  }
+  return nativePackage;
 }
 
 function readPackageJson(path) {
