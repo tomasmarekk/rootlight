@@ -64,8 +64,14 @@ describe("AddProjectDialog", () => {
     const crates = await screen.findByRole("button", { name: "crates" });
     const docs = screen.getByRole("button", { name: "docs" });
     crates.focus();
+    fireEvent.keyDown(crates, { key: "PageDown" });
+    expect(crates).toHaveFocus();
     fireEvent.keyDown(crates, { key: "ArrowDown" });
     expect(docs).toHaveFocus();
+    fireEvent.keyDown(docs, { key: "ArrowUp" });
+    expect(crates).toHaveFocus();
+    fireEvent.keyDown(crates, { key: "ArrowUp" });
+    expect(crates).toHaveFocus();
 
     await userEvent.click(crates);
     expect(await screen.findByText("src")).toBeVisible();
@@ -173,6 +179,71 @@ describe("AddProjectDialog", () => {
     renderDialog(vi.fn(), vi.fn());
     await userEvent.click(await screen.findByRole("button", { name: "Home" }));
     expect(await screen.findByText("This folder has no visible child directories.")).toBeVisible();
+  });
+
+  it("keeps unavailable roots inert and closes without issuing a blank direct-path request", async () => {
+    vi.mocked(fetchFilesystemRoots).mockResolvedValue({
+      schema: "rootlight.web-filesystem-roots/1",
+      roots: [{ label: "Unavailable", browseToken: rootToken, readable: false, selectable: false }],
+    });
+    const onOpenChange = vi.fn();
+    renderDialog(vi.fn(), onOpenChange);
+
+    const root = await screen.findByRole("button", { name: "Unavailable" });
+    expect(root).toBeDisabled();
+    fireEvent.keyDown(screen.getByLabelText("Direct absolute path"), { key: "Enter" });
+    expect(openFilesystemPath).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Close add project dialog" }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("reports browse failures without exposing the rejected error", async () => {
+    vi.mocked(browseFilesystem).mockRejectedValue(new Error("C:\\private\\repository"));
+    renderDialog(vi.fn(), vi.fn());
+
+    await userEvent.click(await screen.findByRole("button", { name: "Home" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The local folder request could not be completed",
+    );
+    expect(screen.queryByText(/private.*repository/u)).not.toBeInTheDocument();
+  });
+
+  it("renders a non-admissible preflight and keeps unsafe directory rows disabled", async () => {
+    vi.mocked(browseFilesystem).mockResolvedValue({
+      ...rootPage(),
+      directories: [
+        { name: "unreadable", kind: "directory", readable: false, selectable: true },
+        { name: "unselectable", kind: "directory", readable: true, selectable: false },
+      ],
+    });
+    vi.mocked(preflightFilesystemIndex).mockResolvedValue({
+      schema: "rootlight.web-index-preflight/1",
+      selectable: false,
+      normalizedDisplayLabel: "blocked",
+      daemonAcceptingOperations: false,
+      selectedMode: "auto",
+      supportedModes: ["auto"],
+      adapterIsolation: "unavailable",
+      estimatedLimitations: ["adapter_unavailable"],
+      warnings: [],
+      rootCapability: capability,
+      rootCapabilityExpiresInSeconds: 30,
+    });
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    renderDialog(onSubmit, vi.fn());
+
+    await userEvent.click(await screen.findByRole("button", { name: "Home" }));
+    expect(await screen.findByRole("button", { name: "unreadable" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "unselectable" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Select this folder" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Index admission unavailable" }),
+    ).toBeVisible();
+    expect(screen.getByText("paused")).toBeVisible();
+    expect(screen.queryByRole("list")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start detached index" })).toBeDisabled();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });
 

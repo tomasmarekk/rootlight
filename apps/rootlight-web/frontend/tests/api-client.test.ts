@@ -351,12 +351,118 @@ describe("browser API client", () => {
     expect(createObjectUrl).toHaveBeenCalledOnce();
     expect(revokeObjectUrl).toHaveBeenCalledWith("blob:rootlight-support");
   });
+
+  it("rejects malformed or oversized support archives before creating a download", async () => {
+    const receipt = "s".repeat(43);
+    const expectedArchive = new TextEncoder().encode("PK-support");
+    const expectedSha256 = "fee6455d2bd1080e637683af146b094978794c7e770b99d74227071706101057";
+    const bundle = {
+      schema: "rootlight.web-support-bundle/1" as const,
+      receipt,
+      downloadPath: `/api/v1/diagnostics/support-bundles/${receipt}`,
+      archiveBytes: String(expectedArchive.byteLength),
+      sha256: expectedSha256,
+      containsSource: false as const,
+      expiresInSeconds: 120,
+    };
+    const oversizedBytes = 768 * 1024 + 1;
+    const oversizedBundle = {
+      ...bundle,
+      archiveBytes: String(oversizedBytes - 1),
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(expectedArchive, { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(expectedArchive, {
+          status: 200,
+          headers: { "content-type": "application/zip" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        supportArchiveResponse(expectedArchive, expectedSha256, expectedArchive.byteLength - 1),
+      )
+      .mockResolvedValueOnce(
+        supportArchiveResponse(expectedArchive, "0".repeat(64), expectedArchive.byteLength),
+      )
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 200,
+          headers: {
+            "content-type": "application/zip",
+            "content-length": String(expectedArchive.byteLength),
+            "x-rootlight-sha256": expectedSha256,
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        supportArchiveResponse(
+          expectedArchive.slice(0, -1),
+          expectedSha256,
+          expectedArchive.byteLength,
+        ),
+      )
+      .mockResolvedValueOnce(
+        supportArchiveResponse(
+          new TextEncoder().encode("PK-unknown"),
+          expectedSha256,
+          expectedArchive.byteLength,
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(oversizedBytes));
+              controller.close();
+            },
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/zip",
+              "content-length": oversizedBundle.archiveBytes,
+              "x-rootlight-sha256": expectedSha256,
+            },
+          },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const { downloadSupportBundle } = await import("../src/api/client");
+
+    for (let index = 0; index < 7; index += 1) {
+      await expect(downloadSupportBundle(bundle)).rejects.toMatchObject({
+        code: "invalid_support_bundle",
+      });
+    }
+    await expect(downloadSupportBundle(oversizedBundle)).rejects.toMatchObject({
+      code: "invalid_support_bundle",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(8);
+  });
 });
 
 function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), {
     status: 200,
     headers: { "content-type": "application/json" },
+  });
+}
+
+function supportArchiveResponse(
+  archive: Uint8Array,
+  sha256: string,
+  contentLength: number,
+): Response {
+  const body = new ArrayBuffer(archive.byteLength);
+  new Uint8Array(body).set(archive);
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "content-type": "application/zip",
+      "content-length": String(contentLength),
+      "x-rootlight-sha256": sha256,
+    },
   });
 }
 

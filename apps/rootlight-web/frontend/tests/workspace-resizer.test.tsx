@@ -30,4 +30,34 @@ describe("WorkspaceResizer", () => {
     expect(onWidthChange).toHaveBeenNthCalledWith(3, 264);
     expect(onWidthChange).toHaveBeenNthCalledWith(4, 460);
   });
+
+  it("tracks only the captured pointer and clears drag state on release or cancellation", () => {
+    const onWidthChange = vi.fn();
+    render(<WorkspaceResizer width={320} onWidthChange={onWidthChange} />);
+    const separator = screen.getByRole("separator", {
+      name: "Resize project information panel",
+    });
+    const setPointerCapture = vi.fn();
+    const releasePointerCapture = vi.fn();
+    Object.assign(separator, { releasePointerCapture, setPointerCapture });
+
+    fireEvent.pointerMove(separator, { clientX: 90, pointerId: 7 });
+    fireEvent.pointerDown(separator, { clientX: 100, pointerId: 7 });
+    fireEvent.pointerMove(separator, { clientX: 124, pointerId: 8 });
+    fireEvent.pointerMove(separator, { clientX: 124, pointerId: 7 });
+    fireEvent.pointerUp(separator, { pointerId: 8 });
+    fireEvent.pointerUp(separator, { pointerId: 7 });
+    fireEvent.pointerMove(separator, { clientX: 140, pointerId: 7 });
+
+    expect(setPointerCapture).toHaveBeenCalledWith(7);
+    expect(releasePointerCapture).toHaveBeenCalledWith(7);
+    expect(onWidthChange).toHaveBeenCalledOnce();
+    expect(onWidthChange).toHaveBeenCalledWith(344);
+
+    fireEvent.pointerDown(separator, { clientX: 200, pointerId: 9 });
+    fireEvent.pointerCancel(separator, { pointerId: 9 });
+    fireEvent.pointerMove(separator, { clientX: 250, pointerId: 9 });
+    fireEvent.keyDown(separator, { key: "PageDown" });
+    expect(onWidthChange).toHaveBeenCalledOnce();
+  });
 });
