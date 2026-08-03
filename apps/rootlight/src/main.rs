@@ -858,10 +858,7 @@ fn execute_first_slice_demo(arguments: &[std::ffi::OsString]) -> Result<CommandR
         return Err(CliError::Usage);
     }
     let started = Instant::now();
-    let fixture = tempfile::Builder::new()
-        .prefix("rootlight-first-slice-")
-        .tempdir()
-        .map_err(CliError::DemoIo)?;
+    let fixture = first_slice_demo_tempdir()?;
     let source_directory = fixture.path().join("src");
     fs::create_dir(&source_directory).map_err(CliError::DemoIo)?;
     let source_path = source_directory.join("lib.rs");
@@ -951,6 +948,23 @@ fn execute_first_slice_demo(arguments: &[std::ffi::OsString]) -> Result<CommandR
             measurements,
         },
     )))
+}
+
+fn first_slice_demo_tempdir() -> Result<tempfile::TempDir, CliError> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("rootlight-first-slice-");
+    #[cfg(target_os = "macos")]
+    {
+        // The default macOS temporary path starts with the `/var` alias. Use its
+        // canonical root so the demo exercises the same no-follow policy as a repository.
+        builder
+            .tempdir_in(Path::new("/private/tmp"))
+            .map_err(CliError::DemoIo)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder.tempdir().map_err(CliError::DemoIo)
+    }
 }
 
 fn execute_client(
