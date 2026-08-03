@@ -46,6 +46,16 @@ class PackagePreparationTests(unittest.TestCase):
                 },
             )
             self.assertEqual(len(root_package["optionalDependencies"]), 5)
+            readme = (output / "rootlight/README.md").read_text(encoding="utf-8")
+            self.assertIn("rootlight web", readme)
+            self.assertIn(
+                "npm update --global @tomasmarekk/rootlight",
+                readme,
+            )
+            self.assertIn(
+                "npm uninstall --global @tomasmarekk/rootlight",
+                readme,
+            )
             for runtime_file in (
                 "rootlight.mjs",
                 "rootlight-mcp.mjs",
