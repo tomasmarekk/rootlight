@@ -13,7 +13,9 @@ use std::{
 };
 
 #[cfg(windows)]
-use rootlight_client::{DetachedProcess, DetachedProcessError, spawn_detached_null_stdio_process};
+use rootlight_client::{
+    DetachedProcess, DetachedProcessError, spawn_detached_null_stdio_process_in,
+};
 use rootlight_runtime::{RuntimeError, RuntimePaths, WEB_UI_PORT, WebDiscoveryRecord};
 use serde::{Deserialize, Serialize};
 
@@ -108,7 +110,8 @@ pub(crate) fn start(
     if registration_exists() && start_registered() {
         return wait_until_started(paths, None);
     }
-    let mut child = spawn_detached(executable)?;
+    paths.prepare_owner()?;
+    let mut child = spawn_detached(executable, paths.state_dir())?;
     wait_until_started(paths, Some(&mut child))
 }
 
@@ -219,16 +222,23 @@ fn discovered_record(paths: &RuntimePaths) -> Result<Option<WebDiscoveryRecord>,
 }
 
 #[cfg(windows)]
-fn spawn_detached(executable: &Path) -> Result<DetachedChild, WebServiceError> {
-    spawn_detached_null_stdio_process(executable, &["--service"])
+fn spawn_detached(
+    executable: &Path,
+    current_directory: &Path,
+) -> Result<DetachedChild, WebServiceError> {
+    spawn_detached_null_stdio_process_in(executable, &["--service"], Some(current_directory))
         .map_err(WebServiceError::WindowsLaunch)
 }
 
 #[cfg(not(windows))]
-fn spawn_detached(executable: &Path) -> Result<DetachedChild, WebServiceError> {
+fn spawn_detached(
+    executable: &Path,
+    current_directory: &Path,
+) -> Result<DetachedChild, WebServiceError> {
     let mut command = Command::new(executable);
     command
         .arg("--service")
+        .current_dir(current_directory)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

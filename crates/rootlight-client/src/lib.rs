@@ -2348,10 +2348,27 @@ pub fn spawn_detached_null_stdio_process(
     executable: &std::path::Path,
     arguments: &[&str],
 ) -> Result<DetachedProcess, DetachedProcessError> {
+    spawn_detached_null_stdio_process_in(executable, arguments, None)
+}
+
+/// Launches a Windows child with null standard streams and an explicit working directory.
+///
+/// # Errors
+///
+/// Returns an error when command validation or operating-system process creation fails.
+#[cfg(windows)]
+pub fn spawn_detached_null_stdio_process_in(
+    executable: &std::path::Path,
+    arguments: &[&str],
+    current_directory: Option<&std::path::Path>,
+) -> Result<DetachedProcess, DetachedProcessError> {
     let mut command = ProcessCommand::new(executable)
         .stdin(StdioMode::Null)
         .stdout(StdioMode::Null)
         .stderr(StdioMode::Null);
+    if let Some(current_directory) = current_directory {
+        command = command.current_dir(current_directory);
+    }
     for argument in arguments {
         command = command.arg(argument);
     }
