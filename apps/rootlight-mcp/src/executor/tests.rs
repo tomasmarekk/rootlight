@@ -3390,6 +3390,30 @@ async fn maps_code_locate_with_trust_generation_and_deterministic_output() {
 }
 
 #[tokio::test]
+async fn maps_external_symbols_returned_by_semantic_locate() {
+    let mut response = locate_response();
+    response.result.hits[0].kind = "external_symbol".to_owned();
+    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(response)));
+    let output: CodeLocateOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::CodeLocate,
+            json!({
+                "repository": {"repository_id": repository()},
+                "query": "Publisher"
+            }),
+        )
+        .await
+        .expect("external semantic symbols map"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("successful mapping is expected");
+    };
+
+    assert_eq!(output.data.matches[0].kind, EntityKind::ExternalSymbol);
+}
+
+#[tokio::test]
 async fn query_batch_composes_locate_subtools_under_one_pinned_generation() {
     let harness = batch_harness();
     let arguments = json!({

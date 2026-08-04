@@ -203,6 +203,11 @@
           "description": "Configuration record.",
           "type": "string",
           "const": "configuration"
+        },
+        {
+          "description": "A symbol whose definition is outside the indexed repository.",
+          "type": "string",
+          "const": "external_symbol"
         }
       ]
     },

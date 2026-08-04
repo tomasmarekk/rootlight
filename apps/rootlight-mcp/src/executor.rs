@@ -7441,6 +7441,7 @@ fn entity_kind(kind: &str) -> Result<EntityKind, ToolExecutionError> {
         "constant" => EntityKind::Constant,
         "variable" | "parameter" => EntityKind::Variable,
         "configuration_key" => EntityKind::Configuration,
+        "external_symbol" => EntityKind::ExternalSymbol,
         _ => return Err(internal(ToolExecutionFailure::InvalidResponse)),
     };
     Ok(kind)

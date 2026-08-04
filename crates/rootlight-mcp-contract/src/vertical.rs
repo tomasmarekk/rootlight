@@ -989,6 +989,8 @@ pub enum EntityKind {
     Variable,
     /// Configuration record.
     Configuration,
+    /// A symbol whose definition is outside the indexed repository.
+    ExternalSymbol,
 }
 
 /// Locate retrieval mode.
