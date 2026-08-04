@@ -681,11 +681,8 @@ fn analysis_limits(
         .max()
         .unwrap_or(0)
         .max(1);
-    let max_syntax_nodes = max_source_bytes
-        .checked_mul(2)
-        .and_then(|value| value.checked_add(1))
-        .unwrap_or(MAX_SYNTAX_NODES)
-        .clamp(1, MAX_SYNTAX_NODES);
+    let max_syntax_nodes =
+        project_syntax_node_limit(inputs.iter().map(|input| input.snapshot.content().len()))?;
     let max_syntax_depth = max_source_bytes
         .saturating_add(1)
         .clamp(1, MAX_SYNTAX_DEPTH);
@@ -776,11 +773,8 @@ fn parser_config(
         .max()
         .unwrap_or(0)
         .max(1);
-    let max_syntax_nodes = max_source_bytes
-        .checked_mul(2)
-        .and_then(|value| value.checked_add(1))
-        .unwrap_or(MAX_SYNTAX_NODES)
-        .clamp(1, MAX_SYNTAX_NODES);
+    let max_syntax_nodes =
+        project_syntax_node_limit(inputs.iter().map(|input| input.snapshot.content().len()))?;
     let max_syntax_depth = max_source_bytes
         .saturating_add(1)
         .clamp(1, MAX_SYNTAX_DEPTH);
@@ -802,6 +796,24 @@ fn parser_config(
         settings,
     )
     .map_err(|_| AdapterHostError::Limit)
+}
+
+fn project_syntax_node_limit(
+    source_lengths: impl IntoIterator<Item = usize>,
+) -> Result<usize, AdapterHostError> {
+    // Project reports aggregate syntax nodes across every input, while source
+    // and depth ceilings remain per-file. Size this limit from the partition
+    // total so a valid multi-file report is not rejected after analysis.
+    let total_source_bytes = source_lengths
+        .into_iter()
+        .try_fold(0_usize, |total, bytes| {
+            total.checked_add(bytes).ok_or(AdapterHostError::Limit)
+        })?;
+    Ok(total_source_bytes
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .unwrap_or(MAX_SYNTAX_NODES)
+        .clamp(1, MAX_SYNTAX_NODES))
 }
 
 fn validate_nonce(value: &[u8]) -> Result<(), AdapterHostError> {
@@ -1145,6 +1157,20 @@ mod tests {
         assert!(extensions.iter().all(|extension| {
             extension.version == Some(ContractVersion { major: 1, minor: 0 }) && !extension.critical
         }));
+    }
+
+    #[test]
+    fn project_syntax_node_limit_accounts_for_every_partition_input() {
+        assert_eq!(
+            project_syntax_node_limit([8_usize, 13]).expect("partition bytes are representable"),
+            43
+        );
+        assert_eq!(
+            project_syntax_node_limit([MAX_SYNTAX_NODES])
+                .expect("large partitions clamp to the hard ceiling"),
+            MAX_SYNTAX_NODES
+        );
+        assert!(project_syntax_node_limit([usize::MAX, 1]).is_err());
     }
 
     #[test]
