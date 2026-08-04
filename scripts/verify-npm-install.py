@@ -75,42 +75,98 @@ def verify_install(
     checked_directory(platform_directory, "platform npm package")
 
     output_dir.mkdir(parents=True, exist_ok=False)
-    prefix = (output_dir / "prefix").resolve()
-    cache = (output_dir / "cache").resolve()
+    pack_prefix = (output_dir / "pack-prefix").resolve()
+    cache = (output_dir / "pack-cache").resolve()
     tarballs = (output_dir / "tarballs").resolve()
-    prefix.mkdir()
+    pack_prefix.mkdir()
     cache.mkdir()
     tarballs.mkdir()
-    environment = npm_environment(prefix, cache)
+    pack_environment = npm_environment(
+        pack_prefix,
+        cache,
+        output_dir / "pack-state",
+        output_dir / "pack-runtime",
+    )
 
-    root_tarball = pack(root_directory, tarballs, environment, npm)
-    native_tarball = pack(platform_directory, tarballs, environment, npm)
+    root_tarball = pack(root_directory, tarballs, pack_environment, npm)
+    native_tarball = pack(platform_directory, tarballs, pack_environment, npm)
+    modes = [
+        verify_install_mode(
+            mode,
+            output_dir,
+            root_tarball,
+            native_tarball,
+            native_directory,
+            native_package,
+            npm,
+        )
+        for mode in ("local", "global")
+    ]
+    evidence = {
+        "modes": modes,
+        "native_package": native_package,
+        "origin": f"http://{ORIGIN_HOST}:{ORIGIN_PORT}",
+        "schema": "rootlight.npm-install-smoke/2",
+        "target": target,
+    }
+    write_json_new(evidence_path, evidence)
+
+
+def verify_install_mode(
+    mode: str,
+    output_dir: Path,
+    root_tarball: Path,
+    native_tarball: Path,
+    native_directory: str,
+    native_package: str,
+    npm: str,
+) -> dict[str, object]:
+    root = (output_dir / mode).resolve()
+    prefix = root / "prefix"
+    cache = root / "cache"
+    state = root / "state"
+    runtime = root / "runtime"
+    project = root / "project"
+    root.mkdir()
+    prefix.mkdir()
+    cache.mkdir()
+    if mode == "local":
+        project.mkdir()
+        write_json_new(project / "package.json", {"private": True})
+    environment = npm_environment(prefix, cache, state, runtime)
     cli = npm_cli_path(prefix)
-    native_cli = native_cli_path(prefix, native_directory)
-    initial_pid: int | None = None
-    restarted_pid: int | None = None
+    package_root = installed_package_path(mode, prefix, project)
+    native_cli = native_cli_path(package_root, native_directory)
+    install = [
+        npm,
+        "install",
+        "--offline",
+        "--no-audit",
+        "--no-fund",
+        "--no-update-notifier",
+        str(root_tarball),
+        str(native_tarball),
+    ]
+    if mode == "global":
+        install.insert(2, "--global")
+    else:
+        install[2:2] = ["--prefix", str(project)]
     started = time.monotonic()
 
     try:
-        run(
-            [
-                npm,
-                "install",
-                "--global",
-                "--offline",
-                "--no-audit",
-                "--no-fund",
-                "--no-update-notifier",
-                str(root_tarball),
-                str(native_tarball),
-            ],
-            environment,
-        )
+        run(install, environment, stage=f"{mode} npm install")
         install_seconds = time.monotonic() - started
         if not cli.is_file():
-            raise NpmInstallError("npm did not create the Rootlight command shim")
+            raise NpmInstallError(
+                f"{mode} npm install did not create the Rootlight command shim"
+            )
+        command = shutil.which("rootlight", path=environment["PATH"])
+        if command is None or Path(command).resolve() != cli.resolve():
+            raise NpmInstallError(
+                f"{mode} npm install did not expose bare rootlight on PATH"
+            )
 
-        initial = service_status(cli, environment, "postinstall service status")
+        initial = service_status(cli, environment, f"{mode} postinstall service status")
         require_service_state(initial, registered=True, running=True)
         initial_pid = require_pid(initial)
         verify_http_session()
@@ -118,7 +174,7 @@ def verify_install(
         stopped = run_json(
             [str(cli), "service", "stop"],
             environment,
-            stage="service stop",
+            stage=f"{mode} service stop",
         )
         require_service_state(service_data(stopped), registered=True, running=False)
         wait_for_port(closed=True)
@@ -126,37 +182,45 @@ def verify_install(
         restarted = run_json(
             [str(cli), "service", "restart"],
             environment,
-            stage="service restart",
+            stage=f"{mode} service restart",
         )
         restarted_data = service_data(restarted)
         require_service_state(restarted_data, registered=True, running=True)
         restarted_pid = require_pid(restarted_data)
         verify_http_session()
+        sentinel = state / "uninstall-sentinel"
+        sentinel.write_bytes(b"owned state")
 
-        run([str(cli), "uninstall"], environment, stage="rootlight uninstall")
+        run([str(cli), "uninstall"], environment, stage=f"{mode} rootlight uninstall")
         if (
             cli.exists()
-            or root_package_path(prefix).exists()
+            or package_root.exists()
             or native_cli.exists()
             or native_cli.parent.parent.exists()
         ):
-            raise NpmInstallError("rootlight uninstall retained an npm package")
+            raise NpmInstallError(f"{mode} uninstall retained an npm package")
+        if state.exists() or runtime.exists():
+            raise NpmInstallError(f"{mode} uninstall retained Rootlight-owned data")
         wait_for_port(closed=True)
-
-        evidence = {
+        return {
             "install_seconds": round(install_seconds, 3),
             "initial_pid": initial_pid,
-            "native_package": native_package,
-            "origin": f"http://{ORIGIN_HOST}:{ORIGIN_PORT}",
+            "mode": mode,
             "restarted_pid": restarted_pid,
-            "schema": "rootlight.npm-install-smoke/1",
-            "target": target,
+            "uninstall_removed_data": True,
             "uninstall_removed_native_package": True,
             "uninstall_removed_root_package": True,
         }
-        write_json_new(evidence_path, evidence)
     finally:
-        cleanup(prefix, native_cli, native_package, environment, npm)
+        cleanup(
+            mode,
+            prefix,
+            project,
+            native_cli,
+            native_package,
+            environment,
+            npm,
+        )
 
 
 def checked_directory(path: Path, label: str) -> Path:
@@ -166,8 +230,14 @@ def checked_directory(path: Path, label: str) -> Path:
     return resolved
 
 
-def npm_environment(prefix: Path, cache: Path) -> dict[str, str]:
+def npm_environment(
+    prefix: Path,
+    cache: Path,
+    state: Path,
+    runtime: Path,
+) -> dict[str, str]:
     environment = os.environ.copy()
+    command_directory = prefix if os.name == "nt" else prefix / "bin"
     environment.update(
         {
             "NPM_CONFIG_AUDIT": "false",
@@ -175,6 +245,11 @@ def npm_environment(prefix: Path, cache: Path) -> dict[str, str]:
             "NPM_CONFIG_FUND": "false",
             "NPM_CONFIG_PREFIX": str(prefix),
             "NPM_CONFIG_UPDATE_NOTIFIER": "false",
+            "PATH": os.pathsep.join(
+                (str(command_directory), environment.get("PATH", ""))
+            ),
+            "ROOTLIGHT_RUNTIME_DIR": str(runtime.resolve()),
+            "ROOTLIGHT_STATE_DIR": str(state.resolve()),
         }
     )
     return environment
@@ -390,20 +465,28 @@ def npm_cli_path(prefix: Path) -> Path:
     return prefix / "bin" / "rootlight"
 
 
-def root_package_path(prefix: Path) -> Path:
+def global_root_package_path(prefix: Path) -> Path:
     if os.name == "nt":
         return prefix / "node_modules" / "@tomasmarekk" / "rootlight"
     return prefix / "lib" / "node_modules" / "@tomasmarekk" / "rootlight"
 
 
-def native_cli_path(prefix: Path, native_directory: str) -> Path:
-    package_root = root_package_path(prefix).parent / native_directory
+def installed_package_path(mode: str, prefix: Path, project: Path) -> Path:
+    if mode == "local":
+        return project / "node_modules" / "@tomasmarekk" / "rootlight"
+    return global_root_package_path(prefix)
+
+
+def native_cli_path(package_root: Path, native_directory: str) -> Path:
+    native_root = package_root.parent / native_directory
     suffix = ".exe" if os.name == "nt" else ""
-    return package_root / "bin" / f"rootlight{suffix}"
+    return native_root / "bin" / f"rootlight{suffix}"
 
 
 def cleanup(
+    mode: str,
     prefix: Path,
+    project: Path,
     native_cli: Path,
     native_package: str,
     environment: dict[str, str],
@@ -415,13 +498,16 @@ def cleanup(
             environment,
             check=False,
         )
-    run(
-        [npm, "uninstall", "--global", ROOT_PACKAGE, native_package],
-        environment,
-        check=False,
-    )
+    uninstall = [npm, "uninstall", ROOT_PACKAGE, native_package]
+    if mode == "global":
+        uninstall.insert(2, "--global")
+    else:
+        uninstall[2:2] = ["--prefix", str(project)]
+    run(uninstall, environment, check=False)
     if prefix.exists():
         shutil.rmtree(prefix)
+    if project.exists():
+        shutil.rmtree(project)
 
 
 def write_json_new(path: Path, value: object) -> None:
