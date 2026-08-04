@@ -734,6 +734,23 @@ mod tests {
 
     const CORPUS: &[u8] = include_bytes!("../../../benchmarks/cold-index-repositories.json");
 
+    #[test]
+    fn twenty_samples_measure_p95_without_promoting_one_outlier() {
+        let mut twenty = vec![1_u64; 19];
+        twenty.push(u64::MAX);
+        assert_eq!(
+            nearest_rank_p95(&twenty).expect("twenty positive samples are valid"),
+            1
+        );
+
+        let mut ten = vec![1_u64; 9];
+        ten.push(u64::MAX);
+        assert_eq!(
+            nearest_rank_p95(&ten).expect("ten positive samples are valid"),
+            u64::MAX
+        );
+    }
+
     fn evidence() -> (ColdIndexCorpus, String, ColdIndexEvidence) {
         let corpus = decode_cold_index_corpus(CORPUS).expect("checked-in corpus validates");
         let corpus_sha256 = cold_index_corpus_sha256(CORPUS);

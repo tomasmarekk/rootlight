@@ -25,6 +25,7 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const RECOVERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(40);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -132,6 +133,8 @@ fn real_repository_cold_index_is_release_bounded() {
     let mut daemon = DaemonProcess::spawn(&environment.daemon_binary, &state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
     let mut mcp = McpProcess::spawn(&environment.mcp_binary, &state_dir, &runtime_dir);
+    // IPC readiness precedes rebuilding retained search indexes, so large
+    // repositories need a separate bounded recovery window.
     let status = mcp.call_until_not_busy(
         "cold-index-restart-status",
         "repo.status",
@@ -143,7 +146,7 @@ fn real_repository_cold_index_is_release_bounded() {
             "require_freshness": "semantic",
             "response_profile": "compact"
         }),
-        Instant::now() + STARTUP_TIMEOUT,
+        Instant::now() + RECOVERY_TIMEOUT,
     );
     assert_success(&status, "repo.status");
     let status_data = data(&status);
@@ -230,14 +233,15 @@ fn real_repository_cold_index_is_release_bounded() {
         workflow_latency_ns,
         repository_content_executed: false,
     };
-    verify_cold_index_evidence(
+    if let Err(error) = verify_cold_index_evidence(
         &corpus,
         &corpus_sha256,
         &evidence,
         &evidence.source_revision,
         &evidence.candidate_archive_sha256,
-    )
-    .expect("cold-index evidence satisfies checked release policy");
+    ) {
+        panic!("cold-index evidence violates checked release policy ({error:?}): {evidence:#?}");
+    }
     let encoded = encode_cold_index_evidence(&evidence).expect("cold-index evidence encodes");
     fs::write(&environment.evidence, encoded).expect("cold-index evidence writes");
 
@@ -662,6 +666,7 @@ fn locate_complete(
 ) -> (Value, usize) {
     let mut cursor = None;
     let mut selected = None;
+    let mut observed_paths = BTreeMap::<String, usize>::new();
     let mut pages = 0_usize;
     loop {
         assert!(pages < 128, "code.locate pagination must remain bounded");
@@ -675,6 +680,9 @@ fn locate_complete(
             .as_array()
             .expect("code.locate matches are an array")
         {
+            if let Some(path) = item["path"].as_str() {
+                *observed_paths.entry(path.to_owned()).or_default() += 1;
+            }
             if item["path"] == expected_path && item["symbol_id"].is_string() {
                 selected = Some(item.clone());
             }
@@ -689,7 +697,9 @@ fn locate_complete(
     }
     (
         selected.unwrap_or_else(|| {
-            panic!("code.locate did not return preregistered path {expected_path}")
+            panic!(
+                "code.locate did not return preregistered path {expected_path}; observed paths: {observed_paths:#?}"
+            )
         }),
         pages,
     )
