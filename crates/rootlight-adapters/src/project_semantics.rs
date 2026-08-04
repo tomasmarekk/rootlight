@@ -43,7 +43,9 @@ const DYNAMIC_CALL_CONFIDENCE: u16 = 650;
 const FALLBACK_REFERENCE_CONFIDENCE: u16 = 550;
 // One syntax fact can expand into several related IR records. Bound the input
 // set before that expansion so the isolated transaction can always be framed.
-const MAX_PROJECT_SYNTAX_FACTS: usize = 256;
+const BASE_PROJECT_SYNTAX_FACTS: usize = 256;
+const PROJECT_SYNTAX_FACTS_PER_INPUT: usize = 16;
+const MAX_PROJECT_SYNTAX_FACTS: usize = 8_192;
 
 const ALL_DOMAINS: [FactDomain; 8] = [
     FactDomain::Files,
@@ -342,18 +344,19 @@ impl SemanticProjectAnalyzer {
 }
 
 fn bound_project_syntax_facts(parsed: &mut [ParsedInput<'_, '_>]) -> Result<(), AdapterError> {
+    let maximum_facts = project_syntax_fact_limit(parsed.len())?;
     let total_facts = parsed.iter().try_fold(0_usize, |total, input| {
         total
             .checked_add(input.facts.len())
             .ok_or_else(|| provider_failure("project-fact-accounting"))
     })?;
-    if total_facts <= MAX_PROJECT_SYNTAX_FACTS {
+    if total_facts <= maximum_facts {
         return Ok(());
     }
 
     let code = DiagnosticCode::new("project-syntax-fact-limit")
         .map_err(|_| provider_failure("project-diagnostic-code"))?;
-    let mut remaining_facts = MAX_PROJECT_SYNTAX_FACTS;
+    let mut remaining_facts = maximum_facts;
     let mut remaining_inputs = parsed.len();
     for input in parsed {
         let allowance = remaining_facts
@@ -378,6 +381,17 @@ fn bound_project_syntax_facts(parsed: &mut [ParsedInput<'_, '_>]) -> Result<(), 
             .ok_or_else(|| provider_failure("project-fact-accounting"))?;
     }
     Ok(())
+}
+
+fn project_syntax_fact_limit(input_count: usize) -> Result<usize, AdapterError> {
+    // Adapter-host partitions independently bound file count and source bytes.
+    // A small per-input floor prevents large partitions from spending the
+    // entire semantic budget on ancestry, while the aggregate ceiling still
+    // bounds normalized output independently of repository size.
+    let scaled = input_count
+        .checked_mul(PROJECT_SYNTAX_FACTS_PER_INPUT)
+        .ok_or_else(|| provider_failure("project-fact-accounting"))?;
+    Ok(BASE_PROJECT_SYNTAX_FACTS.max(scaled.min(MAX_PROJECT_SYNTAX_FACTS)))
 }
 
 fn retain_project_syntax_facts(facts: &mut Vec<SyntaxFact>, allowance: usize) {
@@ -3174,10 +3188,28 @@ mod tests {
     use rootlight_ir::{CoverageStatus, EntityVisibility, OccurrenceTarget};
 
     use super::{
-        ImportBinding, ParsedOccurrenceName, ResolutionCandidates, ResolutionKind,
+        BASE_PROJECT_SYNTAX_FACTS, ImportBinding, MAX_PROJECT_SYNTAX_FACTS,
+        PROJECT_SYNTAX_FACTS_PER_INPUT, ParsedOccurrenceName, ResolutionCandidates, ResolutionKind,
         SemanticProjectLanguage, infer_visibility, occurrence_name, occurrence_target,
-        parse_import,
+        parse_import, project_syntax_fact_limit,
     };
+
+    #[test]
+    fn project_syntax_fact_limit_scales_with_partition_inputs() {
+        assert_eq!(
+            project_syntax_fact_limit(1).expect("single-input limit is representable"),
+            BASE_PROJECT_SYNTAX_FACTS
+        );
+        assert_eq!(
+            project_syntax_fact_limit(512).expect("partition limit is representable"),
+            512 * PROJECT_SYNTAX_FACTS_PER_INPUT
+        );
+        assert_eq!(
+            project_syntax_fact_limit(1_024).expect("large partition limit is representable"),
+            MAX_PROJECT_SYNTAX_FACTS
+        );
+        assert!(project_syntax_fact_limit(usize::MAX).is_err());
+    }
 
     #[test]
     fn qualified_call_names_retain_the_receiver_and_terminal_identifier() {
