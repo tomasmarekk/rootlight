@@ -432,6 +432,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     repository_id: repository(),
                     display_name: "fixture".to_owned(),
                     alias: None,
+                    root_path: None,
                     active_generation: Some(generation()),
                     generation_count: 1,
                     state: RepositoryCatalogState::Ready,

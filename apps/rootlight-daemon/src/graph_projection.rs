@@ -151,6 +151,23 @@ impl GraphProjectionRegistry {
         }
     }
 
+    pub(crate) fn remove_repository(&mut self, repository: &[u8]) {
+        let mut removed_bytes = 0_usize;
+        self.entries.retain(|_, projection| {
+            let matches = projection
+                .context
+                .repository
+                .as_ref()
+                .is_some_and(|candidate| candidate.value.as_slice() == repository);
+            if matches {
+                removed_bytes =
+                    removed_bytes.saturating_add(projection.retained_bytes().unwrap_or(0));
+            }
+            !matches
+        });
+        self.retained_bytes = self.retained_bytes.saturating_sub(removed_bytes);
+    }
+
     pub(crate) fn open(
         &mut self,
         owner: ClientInstanceId,

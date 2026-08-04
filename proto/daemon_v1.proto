@@ -56,6 +56,7 @@ message RequestEnvelope {
     GraphProjectionOpenRequest graph_projection_open = 48;
     GraphProjectionPageRequest graph_projection_page = 49;
     GraphProjectionReleaseRequest graph_projection_release = 50;
+    RepositoryCatalogMutationRequest repository_catalog_mutation = 51;
   }
 }
 
@@ -105,6 +106,7 @@ message ResponseEnvelope {
     RepositoryCatalogPageResponse repository_catalog_page = 47;
     GraphProjectionResponse graph_projection = 48;
     GraphProjectionReleaseResponse graph_projection_release = 50;
+    RepositoryCatalogMutationResponse repository_catalog_mutation = 51;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -807,6 +809,26 @@ message RepositoryCatalogEntry {
   string structural_freshness = 8;
   string semantic_freshness = 9;
   repeated RepositoryCoverageEntry coverage = 10;
+  optional string root_path = 11;
+}
+
+// Closed delete command for a repository catalog mutation.
+message RepositoryCatalogDelete {}
+
+// Renames one repository or deletes its Rootlight-owned index and metadata.
+message RepositoryCatalogMutationRequest {
+  rootlight.common.v1.RepositoryId repository = 1;
+  oneof mutation {
+    string alias = 2;
+    RepositoryCatalogDelete delete = 3;
+  }
+}
+
+// Confirms the authoritative result of one repository catalog mutation.
+message RepositoryCatalogMutationResponse {
+  rootlight.common.v1.RepositoryId repository = 1;
+  optional string alias = 2;
+  bool deleted = 3;
 }
 
 // Returns one correlated bounded page from an immutable repository catalog.

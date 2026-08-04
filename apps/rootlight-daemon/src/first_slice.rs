@@ -1054,7 +1054,8 @@ impl FirstSliceDaemon {
 
     fn sender(&self, request: &FirstSliceIpcRequest) -> &SyncSender<WorkerCommand> {
         match request {
-            FirstSliceIpcRequest::RepositoryIndex(_) => &self.work,
+            FirstSliceIpcRequest::RepositoryIndex(_)
+            | FirstSliceIpcRequest::RepositoryCatalogMutation(_) => &self.work,
             FirstSliceIpcRequest::RepositoryOperationStatus(_) => &self.control,
             _ => &self.read,
         }
@@ -1662,6 +1663,17 @@ impl OperationMetadataSet {
         operations.truncate(100);
         operations
     }
+
+    fn has_active_repository_operation(&self, repository: RepositoryId) -> bool {
+        self.records
+            .values()
+            .any(|metadata| metadata.repository == Some(repository) && !metadata.terminal)
+    }
+
+    fn remove_repository(&mut self, repository: RepositoryId) {
+        self.records
+            .retain(|_, metadata| metadata.repository != Some(repository));
+    }
 }
 
 struct ProcessRssSampler {
@@ -2076,6 +2088,10 @@ fn execute_service_request(
             return repository_index(lanes, resources, request, &context, reply)
                 .map(FirstSliceIpcResponse::RepositoryIndex);
         }
+        FirstSliceIpcRequest::RepositoryCatalogMutation(request) => {
+            return repository_catalog_mutation(lanes, resources, request, &context)
+                .map(FirstSliceIpcResponse::RepositoryCatalogMutation);
+        }
         FirstSliceIpcRequest::GraphProjectionPage(request) => {
             return lock_graph_projections(&lanes.graph_projections)?
                 .page(context.client_instance_id, &request)
@@ -2109,6 +2125,7 @@ fn execute_service_request(
             repository_catalog_page(&service, request, resources.catalog_epoch)
                 .map(FirstSliceIpcResponse::RepositoryCatalogPage)
         }
+        FirstSliceIpcRequest::RepositoryCatalogMutation(_) => Err(internal_error()),
         FirstSliceIpcRequest::RepositoryStatus(request) => repository_status(
             &service,
             resources.journal,
@@ -5648,7 +5665,72 @@ fn catalog_record_to_wire(
         structural_freshness: record.structural_freshness().as_str().to_owned(),
         semantic_freshness: record.semantic_freshness().as_str().to_owned(),
         coverage,
+        root_path: record.root_path().map(str::to_owned),
     })
+}
+
+fn repository_catalog_mutation(
+    lanes: &FirstSliceServiceLanes,
+    resources: ServiceRequestResources<'_>,
+    request: daemon::RepositoryCatalogMutationRequest,
+    context: &FirstSliceIpcContext,
+) -> Result<daemon::RepositoryCatalogMutationResponse, PublicError> {
+    let repository = parse_repository(request.repository.as_ref())?;
+    let mutation = request.mutation.ok_or_else(invalid_argument)?;
+    let (_serialization, mut service) = lock_publication_until(
+        &lanes.index_serialization,
+        &lanes.service,
+        &context.cancellation,
+        context.deadline,
+    )?;
+
+    match mutation {
+        daemon::repository_catalog_mutation_request::Mutation::Alias(alias) => {
+            service
+                .rename_repository(repository, alias.clone())
+                .map_err(|error| repository_mutation_error(error, repository))?;
+            Ok(daemon::RepositoryCatalogMutationResponse {
+                repository: Some(repository_to_wire(repository)),
+                alias: Some(alias),
+                deleted: false,
+            })
+        }
+        daemon::repository_catalog_mutation_request::Mutation::Delete(_) => {
+            let active_operation =
+                lock_metadata(resources.metadata)?.has_active_repository_operation(repository);
+            let active_refinement = lanes
+                .semantic_refinements
+                .lock()
+                .map_err(|_| internal_error())?
+                .values()
+                .any(|refinement| refinement.repository == repository);
+            if active_operation || active_refinement {
+                return Err(operation_in_progress());
+            }
+            journal_lifecycle_call(
+                resources.runtime,
+                resources
+                    .journal
+                    .delete_repository_history_until(repository, context.deadline),
+            )?;
+            service
+                .delete_repository(repository)
+                .map_err(|error| repository_mutation_error(error, repository))?;
+            lock_metadata(resources.metadata)?.remove_repository(repository);
+            lock_graph_projections(&lanes.graph_projections)?
+                .remove_repository(repository.as_bytes());
+            if let Some(state) = lanes.support_state.as_deref() {
+                state.remove_repository_index_contexts(repository);
+            }
+            drop(service);
+            refresh_index_support_inventory(&lanes.service, lanes.support_state.as_deref());
+            Ok(daemon::RepositoryCatalogMutationResponse {
+                repository: Some(repository_to_wire(repository)),
+                alias: None,
+                deleted: true,
+            })
+        }
+    }
 }
 
 fn catalog_tier_label(tier: AnalysisTier) -> Result<&'static str, PublicError> {
@@ -7006,12 +7088,28 @@ fn repository_status_error(
         .unwrap_or_else(|_| unreachable!("repository status errors are statically bounded"))
 }
 
+fn repository_mutation_error(error: FirstSliceError, repository: RepositoryId) -> PublicError {
+    match error {
+        FirstSliceError::RepositoryNotFound => {
+            PublicError::builder(ErrorCode::NotFound, "repository was not found")
+                .repository(repository)
+                .build()
+                .unwrap_or_else(|_| {
+                    unreachable!("repository mutation errors are statically bounded")
+                })
+        }
+        FirstSliceError::Catalog => invalid_argument(),
+        error => service_error(error),
+    }
+}
+
 fn operation_error(error: &OperationError, operation: Option<OperationId>) -> PublicError {
     let (code, message, retryable) = match error {
         OperationError::NotFound => (ErrorCode::NotFound, "operation was not found", false),
-        OperationError::Busy | OperationError::WriterBusy | OperationError::ConcurrentUpdate => {
-            (ErrorCode::Busy, "operation state is busy", true)
-        }
+        OperationError::Busy
+        | OperationError::WriterBusy
+        | OperationError::ConcurrentUpdate
+        | OperationError::RepositoryBusy => (ErrorCode::Busy, "operation state is busy", true),
         OperationError::InvalidSubmission
         | OperationError::InvalidClientInstanceId
         | OperationError::InvalidProgress
@@ -9973,6 +10071,128 @@ mod tests {
         assert_eq!(error.next_actions(), &[NextAction::Retry]);
 
         drop(refinement_receiver);
+        actor.join().expect("journal actor joins");
+    }
+
+    #[test]
+    fn repository_catalog_mutations_rename_and_delete_only_rootlight_state() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        let source = fixture.path().join("src/lib.rs");
+        fs::write(&source, "pub fn mutation_probe() -> u32 { 42 }\n")
+            .expect("fixture source writes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut service =
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("fixture publishes");
+        let service = Arc::new(RwLock::new(service));
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("journal actor starts");
+        let handle = actor.handle();
+        let metadata = Mutex::new(OperationMetadataSet::new(4));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let (refinement, refinement_receiver) = mpsc::sync_channel(1);
+        let lanes = FirstSliceServiceLanes {
+            service: Arc::clone(&service),
+            index_serialization: Arc::new(Mutex::new(())),
+            semantic_refinements: Arc::new(Mutex::new(BTreeMap::new())),
+            graph_projections: Arc::new(Mutex::new(GraphProjectionRegistry::new())),
+            refinement,
+            recovery_ready: Arc::new(AtomicBool::new(true)),
+            recovery_complete: Arc::new(AtomicBool::new(true)),
+            support_state: None,
+        };
+        let resources = ServiceRequestResources {
+            journal: &handle,
+            metadata: &metadata,
+            runtime: &runtime,
+            catalog_epoch: Instant::now(),
+            publication_hook: None,
+        };
+        let context = || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::from_bytes([94; 16]),
+                selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+                cancellation: Cancellation::with_deadline(deadline),
+                deadline,
+                effective_budget: None,
+                index_admission: None,
+            }
+        };
+        let mut reply = None;
+
+        let renamed = execute_service_request(
+            &lanes,
+            resources,
+            FirstSliceIpcRequest::RepositoryCatalogMutation(
+                daemon::RepositoryCatalogMutationRequest {
+                    repository: Some(repository_to_wire(receipt.repository)),
+                    mutation: Some(
+                        daemon::repository_catalog_mutation_request::Mutation::Alias(
+                            "Renamed project".to_owned(),
+                        ),
+                    ),
+                },
+            ),
+            context(),
+            &mut reply,
+        )
+        .expect("repository rename succeeds");
+        assert!(matches!(
+            renamed,
+            FirstSliceIpcResponse::RepositoryCatalogMutation(ref response)
+                if response.alias.as_deref() == Some("Renamed project") && !response.deleted
+        ));
+        assert_eq!(
+            service
+                .read()
+                .expect("service reads")
+                .repository_status(receipt.repository, None)
+                .expect("repository status loads")
+                .alias
+                .as_deref(),
+            Some("Renamed project")
+        );
+
+        let deleted = execute_service_request(
+            &lanes,
+            resources,
+            FirstSliceIpcRequest::RepositoryCatalogMutation(
+                daemon::RepositoryCatalogMutationRequest {
+                    repository: Some(repository_to_wire(receipt.repository)),
+                    mutation: Some(
+                        daemon::repository_catalog_mutation_request::Mutation::Delete(
+                            daemon::RepositoryCatalogDelete {},
+                        ),
+                    ),
+                },
+            ),
+            context(),
+            &mut reply,
+        )
+        .expect("repository delete succeeds");
+        assert!(matches!(
+            deleted,
+            FirstSliceIpcResponse::RepositoryCatalogMutation(ref response)
+                if response.deleted && response.alias.is_none()
+        ));
+        assert!(
+            service
+                .read()
+                .expect("service reads")
+                .list_repositories()
+                .is_empty()
+        );
+        assert!(source.exists(), "source repository must remain untouched");
+
+        drop(refinement_receiver);
+        drop(handle);
         actor.join().expect("journal actor joins");
     }
 

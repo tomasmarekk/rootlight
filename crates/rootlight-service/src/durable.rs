@@ -43,7 +43,9 @@ const MANIFEST_FILENAME: &str = "manifest.json";
 const RECOVERY_SNAPSHOT_FILENAME: &str = "recovery.json";
 const RECOVERY_MANIFEST_FILENAME: &str = "recovery-manifest.json";
 const ACTIVATION_MANIFEST_FILENAME: &str = "activation.json";
+const REPOSITORY_METADATA_FILENAME: &str = "metadata.json";
 const GENERATION_MANIFEST_VERSION: u16 = 1;
+pub(super) const REPOSITORY_METADATA_VERSION: u16 = 1;
 const RECOVERY_SNAPSHOT_VERSION: u16 = 1;
 const LEGACY_ACTIVATION_MANIFEST_VERSION: u16 = 1;
 const ACTIVATION_MANIFEST_VERSION: u16 = 2;
@@ -57,6 +59,7 @@ const MAX_RESTORED_OPERATIONS: usize = 256;
 const MAX_QUARANTINED_GENERATIONS: usize = 256;
 const STAGING_PREFIX: &str = "stage-";
 const ACTIVATION_PREFIX: &str = "activation-";
+const METADATA_PREFIX: &str = "metadata-";
 const QUARANTINE_PREFIX: &str = "generation-";
 
 pub(super) struct DurableCatalog {
@@ -85,6 +88,9 @@ pub(super) struct DurablePublishedGeneration {
 pub(super) struct RestoredGeneration {
     pub(super) root_identity: ContentHash,
     pub(super) display_name: String,
+    pub(super) root_path: Option<String>,
+    pub(super) alias: Option<String>,
+    pub(super) metadata_sequence: u64,
     pub(super) receipt: FirstSliceIndexReceipt,
     pub(super) activation_sequence: u64,
     pub(super) global_activation_sequence: Option<u64>,
@@ -107,7 +113,19 @@ struct DurableGenerationManifest {
     version: u16,
     root_identity: ContentHash,
     display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root_path: Option<String>,
     receipt: FirstSliceIndexReceipt,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DurableRepositoryMetadata {
+    pub(super) version: u16,
+    pub(super) sequence: u64,
+    pub(super) repository: RepositoryId,
+    pub(super) root_path: Option<String>,
+    pub(super) alias: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -453,6 +471,65 @@ impl DurableCatalog {
         )
     }
 
+    pub(super) fn write_repository_metadata(
+        &self,
+        metadata: DurableRepositoryMetadata,
+    ) -> Result<u64, FirstSliceError> {
+        if metadata.version != REPOSITORY_METADATA_VERSION
+            || metadata.sequence == 0
+            || !valid_repository_metadata(&metadata)
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let repository = PrivateDirectory::open(
+            self.repositories.capability(),
+            OsStr::new(&metadata.repository.to_string()),
+        )
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let staging_name = random_metadata_staging_name(metadata.sequence)?;
+        let staging = PrivateDirectory::create(repository.capability(), OsStr::new(&staging_name))
+            .map_err(|_| FirstSliceError::Catalog)?;
+        let bytes = serde_json::to_vec(&metadata).map_err(|_| FirstSliceError::Catalog)?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_MANIFEST_BYTES {
+            return Err(FirstSliceError::Limits);
+        }
+        {
+            let mut file = staging
+                .create_file(OsStr::new(REPOSITORY_METADATA_FILENAME))
+                .map_err(|_| FirstSliceError::Catalog)?;
+            file.write_all(&bytes)
+                .map_err(|_| FirstSliceError::Catalog)?;
+            file.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+        }
+        staging.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+        let name = metadata_name(metadata.sequence);
+        match staging.publish_noreplace(repository.capability(), OsStr::new(&name)) {
+            Ok(published) => published.sync_all().map_err(|_| FirstSliceError::Catalog)?,
+            Err(PublishError::CommittedButDurabilityUnknown { directory, .. }) => {
+                directory.remove().map_err(|_| FirstSliceError::Catalog)?;
+                return Err(FirstSliceError::Catalog);
+            }
+            Err(_) => return Err(FirstSliceError::Catalog),
+        }
+        compact_repository_metadata(&repository, metadata.sequence)?;
+        u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)
+    }
+
+    pub(super) fn remove_repository(
+        &self,
+        repository: RepositoryId,
+    ) -> Result<(), FirstSliceError> {
+        let directory = PrivateDirectory::open(
+            self.repositories.capability(),
+            OsStr::new(&repository.to_string()),
+        )
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        directory.remove().map_err(|_| FirstSliceError::Catalog)?;
+        self.repositories
+            .sync_all()
+            .map_err(|_| FirstSliceError::Catalog)
+    }
+
     fn restore_repository(
         &self,
         repository_id: RepositoryId,
@@ -463,6 +540,7 @@ impl DurableCatalog {
     ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
         let names = private_entry_names(repository)?;
         let mut markers = BTreeMap::<u64, ActivationMarker>::new();
+        let mut metadata_names = BTreeMap::<u64, OsString>::new();
         let mut generation_names = BTreeSet::new();
         let mut staging_names = Vec::new();
         for name in names {
@@ -473,6 +551,10 @@ impl DurableCatalog {
             } else if let Some((sequence, generation)) = parse_activation_name(text) {
                 let marker = read_activation_marker(repository, name, sequence, generation)?;
                 if markers.insert(sequence, marker).is_some() {
+                    return Err(FirstSliceError::CatalogCorrupt);
+                }
+            } else if let Some(sequence) = parse_metadata_name(text) {
+                if metadata_names.insert(sequence, name).is_some() {
                     return Err(FirstSliceError::CatalogCorrupt);
                 }
             } else if let Ok(generation) = GenerationId::from_str(text) {
@@ -491,8 +573,16 @@ impl DurableCatalog {
 
         if markers.is_empty() {
             remove_generation_directories(repository, &generation_names)?;
+            remove_repository_metadata_directories(repository, metadata_names.values())?;
             return Ok(Vec::new());
         }
+
+        let metadata = metadata_names
+            .last_key_value()
+            .map(|(sequence, name)| {
+                read_repository_metadata(repository_id, repository, name, *sequence)
+            })
+            .transpose()?;
 
         for marker in markers.values() {
             if !generation_names.contains(&marker.manifest.generation) {
@@ -582,6 +672,11 @@ impl DurableCatalog {
         retained.extend(excluded_retained);
         let retained_marker_names = retained_activation_marker_names(&markers, &retained);
         for restored_generation in &mut restored {
+            if let Some(metadata) = &metadata {
+                restored_generation.root_path = metadata.root_path.clone();
+                restored_generation.alias = metadata.alias.clone();
+                restored_generation.metadata_sequence = metadata.sequence;
+            }
             let generation = restored_generation.receipt.generation;
             restored_generation.operations = markers
                 .values()
@@ -602,6 +697,9 @@ impl DurableCatalog {
                 &retained,
                 &retained_marker_names,
             )?;
+            if let Some(metadata) = &metadata {
+                compact_repository_metadata(repository, metadata.sequence)?;
+            }
         }
         if let Some(published_generation_count) = published_generation_count
             && let Some(latest_valid) = restored
@@ -706,6 +804,8 @@ impl DurableCatalog {
                 if markers.insert(sequence, marker).is_some() {
                     return Err(FirstSliceError::CatalogCorrupt);
                 }
+            } else if parse_metadata_name(text).is_some() {
+                continue;
             } else if let Ok(generation) = GenerationId::from_str(text) {
                 generation_names.insert(generation);
             } else {
@@ -834,15 +934,18 @@ impl DurablePreparedGeneration {
         &self,
         root_identity: ContentHash,
         display_name: &str,
+        root_path: &str,
         receipt: FirstSliceIndexReceipt,
     ) -> Result<u64, FirstSliceError> {
-        if receipt.generation != self.generation || display_name.is_empty() {
+        if receipt.generation != self.generation || display_name.is_empty() || root_path.is_empty()
+        {
             return Err(FirstSliceError::CatalogCorrupt);
         }
         let manifest = DurableGenerationManifest {
             version: GENERATION_MANIFEST_VERSION,
             root_identity,
             display_name: display_name.to_owned(),
+            root_path: Some(root_path.to_owned()),
             receipt,
         };
         let bytes = serde_json::to_vec(&manifest).map_err(|_| FirstSliceError::Catalog)?;
@@ -1058,6 +1161,48 @@ fn read_activation_marker(
     })
 }
 
+fn read_repository_metadata(
+    repository_id: RepositoryId,
+    repository: &PrivateDirectory<'_>,
+    name: &OsStr,
+    sequence: u64,
+) -> Result<DurableRepositoryMetadata, FirstSliceError> {
+    let directory = PrivateDirectory::open(repository.capability(), name)
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    let bytes = directory
+        .read_file_bounded(OsStr::new(REPOSITORY_METADATA_FILENAME), MAX_MANIFEST_BYTES)
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    let metadata: DurableRepositoryMetadata =
+        serde_json::from_slice(&bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    if metadata.version != REPOSITORY_METADATA_VERSION
+        || metadata.sequence != sequence
+        || metadata.repository != repository_id
+        || !valid_repository_metadata(&metadata)
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(metadata)
+}
+
+fn valid_repository_metadata(metadata: &DurableRepositoryMetadata) -> bool {
+    valid_repository_root_path(metadata.root_path.as_deref())
+        && metadata.alias.as_deref().is_none_or(|alias| {
+            !alias.is_empty()
+                && alias.len() <= super::catalog::CATALOG_MAX_LABEL_BYTES
+                && !alias
+                    .chars()
+                    .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+        })
+}
+
+fn valid_repository_root_path(root_path: Option<&str>) -> bool {
+    root_path.is_none_or(|path| {
+        !path.is_empty()
+            && path.len() <= super::catalog::CATALOG_MAX_ROOT_PATH_BYTES
+            && !path.chars().any(char::is_control)
+    })
+}
+
 fn retained_activation_marker_names(
     markers: &BTreeMap<u64, ActivationMarker>,
     retained_generations: &BTreeSet<GenerationId>,
@@ -1112,6 +1257,36 @@ fn compact_repository_entries(
     repository.sync_all().map_err(|_| FirstSliceError::Catalog)
 }
 
+fn compact_repository_metadata(
+    repository: &PrivateDirectory<'_>,
+    retained_sequence: u64,
+) -> Result<(), FirstSliceError> {
+    let names = private_entry_names(repository)?;
+    for name in names {
+        let text = name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
+        if parse_metadata_name(text).is_some_and(|sequence| sequence != retained_sequence) {
+            PrivateDirectory::open(repository.capability(), &name)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?
+                .remove()
+                .map_err(|_| FirstSliceError::Catalog)?;
+        }
+    }
+    repository.sync_all().map_err(|_| FirstSliceError::Catalog)
+}
+
+fn remove_repository_metadata_directories<'a>(
+    repository: &PrivateDirectory<'_>,
+    names: impl IntoIterator<Item = &'a OsString>,
+) -> Result<(), FirstSliceError> {
+    for name in names {
+        PrivateDirectory::open(repository.capability(), name)
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?
+            .remove()
+            .map_err(|_| FirstSliceError::Catalog)?;
+    }
+    repository.sync_all().map_err(|_| FirstSliceError::Catalog)
+}
+
 fn remove_generation_directories(
     repository: &PrivateDirectory<'_>,
     generations: &BTreeSet<GenerationId>,
@@ -1139,6 +1314,8 @@ fn compact_activation_markers(repository: &PrivateDirectory<'_>) -> Result<(), F
             if markers.insert(sequence, marker).is_some() {
                 return Err(FirstSliceError::CatalogCorrupt);
             }
+        } else if parse_metadata_name(text).is_some() {
+            continue;
         } else if let Ok(generation) = GenerationId::from_str(text) {
             generations.insert(generation);
         } else {
@@ -1190,6 +1367,7 @@ fn restore_generation(
     if manifest.version != GENERATION_MANIFEST_VERSION
         || manifest.receipt.repository != repository
         || manifest.receipt.generation != generation
+        || !valid_repository_root_path(manifest.root_path.as_deref())
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
@@ -1254,6 +1432,9 @@ fn restore_generation(
     Ok(RestoredGeneration {
         root_identity: manifest.root_identity,
         display_name: manifest.display_name,
+        root_path: manifest.root_path,
+        alias: None,
+        metadata_sequence: 0,
         receipt: manifest.receipt,
         activation_sequence,
         global_activation_sequence,
@@ -1493,6 +1674,15 @@ fn random_activation_staging_name(generation: GenerationId) -> Result<String, Fi
     ))
 }
 
+fn random_metadata_staging_name(sequence: u64) -> Result<String, FirstSliceError> {
+    let mut nonce = [0_u8; 8];
+    getrandom::fill(&mut nonce).map_err(|_| FirstSliceError::RandomUnavailable)?;
+    Ok(format!(
+        "{STAGING_PREFIX}metadata-{sequence:020}-{}",
+        lower_hex(&nonce)
+    ))
+}
+
 fn random_quarantine_name(
     repository: RepositoryId,
     generation: GenerationId,
@@ -1518,6 +1708,19 @@ fn lower_hex(bytes: &[u8]) -> String {
 
 fn activation_name(sequence: u64, generation: GenerationId) -> String {
     format!("{ACTIVATION_PREFIX}{sequence:020}-{generation}")
+}
+
+fn metadata_name(sequence: u64) -> String {
+    format!("{METADATA_PREFIX}{sequence:020}")
+}
+
+fn parse_metadata_name(name: &str) -> Option<u64> {
+    let sequence = name.strip_prefix(METADATA_PREFIX)?;
+    if sequence.len() != 20 || !sequence.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let sequence = sequence.parse().ok()?;
+    (sequence > 0).then_some(sequence)
 }
 
 fn parse_activation_name(name: &str) -> Option<(u64, GenerationId)> {

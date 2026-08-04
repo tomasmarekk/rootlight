@@ -34,6 +34,23 @@ pub(crate) trait DaemonClient: Send + Sync {
         timeout: RequestTimeout,
     ) -> ClientFuture<'a, RepositoryCatalogPage>;
 
+    fn rename_repository<'a>(
+        &'a self,
+        _repository: RepositoryId,
+        _alias: &'a str,
+        _timeout: RequestTimeout,
+    ) -> ClientFuture<'a, ()> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
+
+    fn delete_repository<'a>(
+        &'a self,
+        _repository: RepositoryId,
+        _timeout: RequestTimeout,
+    ) -> ClientFuture<'a, ()> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
+
     fn repository_status<'a>(
         &'a self,
         request: RepositoryStatusRequest,
@@ -166,6 +183,23 @@ impl DaemonClient for Client {
         timeout: RequestTimeout,
     ) -> ClientFuture<'a, RepositoryCatalogPage> {
         Box::pin(self.repository_catalog_page_async(request, timeout))
+    }
+
+    fn rename_repository<'a>(
+        &'a self,
+        repository: RepositoryId,
+        alias: &'a str,
+        timeout: RequestTimeout,
+    ) -> ClientFuture<'a, ()> {
+        Box::pin(self.rename_repository_async(repository, alias, timeout))
+    }
+
+    fn delete_repository<'a>(
+        &'a self,
+        repository: RepositoryId,
+        timeout: RequestTimeout,
+    ) -> ClientFuture<'a, ()> {
+        Box::pin(self.delete_repository_async(repository, timeout))
     }
 
     fn repository_status<'a>(
@@ -393,6 +427,33 @@ impl DaemonClient for ResilientDaemonClient {
             self.current()
                 .await
                 .repository_catalog_page(request, timeout)
+                .await
+        })
+    }
+
+    fn rename_repository<'a>(
+        &'a self,
+        repository: RepositoryId,
+        alias: &'a str,
+        timeout: RequestTimeout,
+    ) -> ClientFuture<'a, ()> {
+        Box::pin(async move {
+            self.current()
+                .await
+                .rename_repository(repository, alias, timeout)
+                .await
+        })
+    }
+
+    fn delete_repository<'a>(
+        &'a self,
+        repository: RepositoryId,
+        timeout: RequestTimeout,
+    ) -> ClientFuture<'a, ()> {
+        Box::pin(async move {
+            self.current()
+                .await
+                .delete_repository(repository, timeout)
                 .await
         })
     }

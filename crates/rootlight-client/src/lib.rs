@@ -117,6 +117,7 @@ const MAX_REPOSITORY_CATALOG_QUERY_CHARS: usize = 256;
 const MAX_REPOSITORY_CATALOG_QUERY_BYTES: usize = 1_024;
 const MAX_REPOSITORY_CATALOG_STATES: usize = 8;
 const MAX_REPOSITORY_CATALOG_LABEL_BYTES: usize = 256;
+const MAX_REPOSITORY_CATALOG_ROOT_PATH_BYTES: usize = 32 * 1_024;
 const MAX_REPOSITORY_CATALOG_LANGUAGES: usize = 64;
 const MAX_REPOSITORY_CATALOG_LANGUAGE_BYTES: usize = 64;
 const MIN_REPOSITORY_CATALOG_SORT_KEY_BYTES: usize = 18;
@@ -1257,6 +1258,8 @@ pub struct RepositoryCatalogEntry {
     pub display_name: String,
     /// Optional sanitized registered alias.
     pub alias: Option<String>,
+    /// Sanitized canonical source directory retained as repository metadata.
+    pub root_path: Option<String>,
     /// Active immutable generation, when one is published.
     pub active_generation: Option<GenerationId>,
     /// Number of retained published generations.
@@ -3688,6 +3691,98 @@ impl Client {
         {
             daemon::response_envelope::Response::RepositoryCatalogPage(response) => {
                 parse_repository_catalog_page(response, request)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Changes the authoritative user-facing name of one repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the alias is invalid, protocol support is
+    /// unavailable, transport fails, or the daemon rejects the mutation.
+    pub fn rename_repository(
+        &self,
+        repository: RepositoryId,
+        alias: &str,
+    ) -> Result<(), ClientError> {
+        let request = build_repository_rename_request(repository, alias)?;
+        match self.request(request)? {
+            daemon::response_envelope::Response::RepositoryCatalogMutation(response) => {
+                parse_repository_catalog_mutation(response, repository, Some(alias), false)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously changes the authoritative user-facing repository name.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] under the same conditions as
+    /// [`Self::rename_repository`], plus request timeout.
+    pub async fn rename_repository_async(
+        &self,
+        repository: RepositoryId,
+        alias: &str,
+        timeout: RequestTimeout,
+    ) -> Result<(), ClientError> {
+        let request = build_repository_rename_request(repository, alias)?;
+        match self.request_async(request, timeout).await? {
+            daemon::response_envelope::Response::RepositoryCatalogMutation(response) => {
+                parse_repository_catalog_mutation(response, repository, Some(alias), false)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Removes one repository's Rootlight-owned index and metadata.
+    ///
+    /// The source repository is not opened or changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for unavailable protocol support, transport
+    /// failure, a busy repository, or a rejected mutation.
+    pub fn delete_repository(&self, repository: RepositoryId) -> Result<(), ClientError> {
+        match self.request(build_repository_delete_request(repository))? {
+            daemon::response_envelope::Response::RepositoryCatalogMutation(response) => {
+                parse_repository_catalog_mutation(response, repository, None, true)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously removes Rootlight-owned state for one repository.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] under the same conditions as
+    /// [`Self::delete_repository`], plus request timeout.
+    pub async fn delete_repository_async(
+        &self,
+        repository: RepositoryId,
+        timeout: RequestTimeout,
+    ) -> Result<(), ClientError> {
+        match self
+            .request_async(build_repository_delete_request(repository), timeout)
+            .await?
+        {
+            daemon::response_envelope::Response::RepositoryCatalogMutation(response) => {
+                parse_repository_catalog_mutation(response, repository, None, true)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -6378,6 +6473,7 @@ fn ensure_request_supported(
         daemon::request_envelope::Request::GraphProjectionOpen(_)
         | daemon::request_envelope::Request::GraphProjectionPage(_)
         | daemon::request_envelope::Request::GraphProjectionRelease(_) => 10,
+        daemon::request_envelope::Request::RepositoryCatalogMutation(_) => 11,
         daemon::request_envelope::Request::CodeLocate(request) if !request.languages.is_empty() => {
             8
         }
@@ -7319,6 +7415,38 @@ fn build_repository_catalog_page_request(
     })
 }
 
+fn build_repository_rename_request(
+    repository: RepositoryId,
+    alias: &str,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if !repository_catalog_label_is_safe(alias, false) {
+        return Err(ClientError::InvalidRepositoryCatalogRequest);
+    }
+    Ok(
+        daemon::request_envelope::Request::RepositoryCatalogMutation(
+            daemon::RepositoryCatalogMutationRequest {
+                repository: Some(repository_to_wire(repository)),
+                mutation: Some(
+                    daemon::repository_catalog_mutation_request::Mutation::Alias(alias.to_owned()),
+                ),
+            },
+        ),
+    )
+}
+
+fn build_repository_delete_request(repository: RepositoryId) -> daemon::request_envelope::Request {
+    daemon::request_envelope::Request::RepositoryCatalogMutation(
+        daemon::RepositoryCatalogMutationRequest {
+            repository: Some(repository_to_wire(repository)),
+            mutation: Some(
+                daemon::repository_catalog_mutation_request::Mutation::Delete(
+                    daemon::RepositoryCatalogDelete {},
+                ),
+            ),
+        },
+    )
+}
+
 fn build_repository_status_request(
     request: RepositoryStatusRequest,
 ) -> daemon::request_envelope::Request {
@@ -7811,6 +7939,14 @@ fn repository_catalog_entry_matches_request(
             normalize_repository_catalog_display_name(alias)
                 .is_ok_and(|alias| alias.contains(query))
         })
+        || entry.root_path.as_deref().is_some_and(|root_path| {
+            root_path
+                .nfd()
+                .case_fold()
+                .nfc()
+                .collect::<String>()
+                .contains(query)
+        })
         || entry.repository_id.to_string().contains(query)
 }
 
@@ -7834,6 +7970,11 @@ fn parse_repository_catalog_entry(
             .alias
             .as_deref()
             .is_some_and(|alias| !repository_catalog_label_is_safe(alias, false))
+        || entry.root_path.as_deref().is_some_and(|root_path| {
+            root_path.is_empty()
+                || root_path.len() > MAX_REPOSITORY_CATALOG_ROOT_PATH_BYTES
+                || root_path.chars().any(char::is_control)
+        })
         || (active_generation.is_some() && entry.generation_count == 0)
         || entry.languages.len() > MAX_REPOSITORY_CATALOG_LANGUAGES
         || entry.coverage.len() > MAX_REPOSITORY_CATALOG_LANGUAGES
@@ -7898,6 +8039,7 @@ fn parse_repository_catalog_entry(
         repository_id,
         display_name: entry.display_name,
         alias: entry.alias,
+        root_path: entry.root_path,
         active_generation,
         generation_count: entry.generation_count,
         state,
@@ -7906,6 +8048,26 @@ fn parse_repository_catalog_entry(
         semantic_freshness,
         coverage,
     })
+}
+
+fn parse_repository_catalog_mutation(
+    response: daemon::RepositoryCatalogMutationResponse,
+    expected_repository: RepositoryId,
+    expected_alias: Option<&str>,
+    expected_deleted: bool,
+) -> Result<(), ClientError> {
+    let repository = parse_repository(
+        response
+            .repository
+            .ok_or(ClientError::InvalidResponseCorrelation)?,
+    )?;
+    if repository != expected_repository
+        || response.deleted != expected_deleted
+        || response.alias.as_deref() != expected_alias
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(())
 }
 
 fn parse_repository_catalog_state(value: &str) -> Result<RepositoryCatalogState, ClientError> {
@@ -11209,6 +11371,7 @@ mod tests {
             active_generation: active_generation.map(generation_to_wire),
             display_name: display_name.to_owned(),
             alias: None,
+            root_path: Some("C:\\work\\rootlight".to_owned()),
             generation_count: u64::from(active_generation.is_some()),
             state: "ready".to_owned(),
             languages: vec!["rust".to_owned()],
@@ -12798,6 +12961,12 @@ mod tests {
             Err(ClientError::ProtocolFeatureUnavailable)
         ));
         assert!(ensure_request_supported(&catalog, 6).is_ok());
+        let mutation = build_repository_delete_request(test_repository());
+        assert!(matches!(
+            ensure_request_supported(&mutation, 10),
+            Err(ClientError::ProtocolFeatureUnavailable)
+        ));
+        assert!(ensure_request_supported(&mutation, 11).is_ok());
     }
 
     #[test]
@@ -12934,6 +13103,56 @@ mod tests {
     }
 
     #[test]
+    fn repository_catalog_mutations_validate_aliases_and_correlate_responses() {
+        let repository = test_repository();
+        let daemon::request_envelope::Request::RepositoryCatalogMutation(rename) =
+            build_repository_rename_request(repository, "Renamed project")
+                .expect("valid alias builds")
+        else {
+            panic!("rename request builds its dedicated wire variant");
+        };
+        assert_eq!(
+            rename.mutation,
+            Some(
+                daemon::repository_catalog_mutation_request::Mutation::Alias(
+                    "Renamed project".to_owned()
+                )
+            )
+        );
+        for alias in ["", "bad/name", "bad\\name", "bad\nname"] {
+            assert!(matches!(
+                build_repository_rename_request(repository, alias),
+                Err(ClientError::InvalidRepositoryCatalogRequest)
+            ));
+        }
+
+        let renamed = daemon::RepositoryCatalogMutationResponse {
+            repository: Some(repository_to_wire(repository)),
+            alias: Some("Renamed project".to_owned()),
+            deleted: false,
+        };
+        parse_repository_catalog_mutation(
+            renamed.clone(),
+            repository,
+            Some("Renamed project"),
+            false,
+        )
+        .expect("rename response correlates");
+        assert!(matches!(
+            parse_repository_catalog_mutation(renamed, repository, None, true),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+
+        let deleted = daemon::RepositoryCatalogMutationResponse {
+            repository: Some(repository_to_wire(repository)),
+            alias: None,
+            deleted: true,
+        };
+        parse_repository_catalog_mutation(deleted, repository, None, true)
+            .expect("delete response correlates");
+    }
+
+    #[test]
     fn repository_catalog_page_accepts_nullable_authoritative_fields() {
         let request = RepositoryCatalogPageRequest::new(2, None, None, None, None)
             .expect("catalog request validates");
@@ -12966,6 +13185,10 @@ mod tests {
         assert_eq!(page.repositories[0].repository_id, repository);
         assert!(page.repositories[0].active_generation.is_none());
         assert!(page.repositories[0].alias.is_none());
+        assert_eq!(
+            page.repositories[0].root_path.as_deref(),
+            Some("C:\\work\\rootlight")
+        );
         assert_eq!(page.repositories[0].generation_count, 0);
     }
 

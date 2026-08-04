@@ -17,12 +17,13 @@ use std::{
 };
 
 use catalog::{
-    CATALOG_MAX_LABEL_BYTES, CatalogFreshness, CatalogInstant, CatalogLanguageCoverage,
-    CatalogPage, CatalogPageRequest, CatalogRepositoryRecord, CatalogRepositoryState,
-    CatalogSnapshotStore,
+    CATALOG_MAX_LABEL_BYTES, CATALOG_MAX_ROOT_PATH_BYTES, CatalogFreshness, CatalogInstant,
+    CatalogLanguageCoverage, CatalogPage, CatalogPageRequest, CatalogRepositoryRecord,
+    CatalogRepositoryState, CatalogSnapshotStore,
 };
 use durable::{
-    DurableCatalog, DurablePreparedGeneration, DurablePublishedGeneration, RestoredGeneration,
+    DurableCatalog, DurablePreparedGeneration, DurablePublishedGeneration,
+    DurableRepositoryMetadata, REPOSITORY_METADATA_VERSION, RestoredGeneration,
 };
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, AnalysisRequest, BatchThresholds, EncodingId,
@@ -1042,7 +1043,12 @@ const fn coverage_status_label(status: rootlight_ir::CoverageStatus) -> &'static
 #[allow(clippy::large_enum_variant)]
 pub enum FirstSliceIndexPreparation {
     /// An identical retained generation only needs reactivation.
-    Retained(FirstSliceIndexReceipt),
+    Retained {
+        /// Existing immutable generation that will become active.
+        receipt: FirstSliceIndexReceipt,
+        /// Current display-only canonical repository root.
+        root_path: String,
+    },
     /// Newly built immutable state that has not entered the queryable set.
     Pending(PreparedFirstSliceIndex),
 }
@@ -1052,7 +1058,7 @@ impl FirstSliceIndexPreparation {
     #[must_use]
     pub fn receipt(&self) -> FirstSliceIndexReceipt {
         match self {
-            Self::Retained(receipt) => receipt.clone(),
+            Self::Retained { receipt, .. } => receipt.clone(),
             Self::Pending(prepared) => prepared.receipt.clone(),
         }
     }
@@ -1068,6 +1074,7 @@ pub struct PreparedFirstSliceIndex {
     receipt: FirstSliceIndexReceipt,
     root_identity: ContentHash,
     display_name: String,
+    root_path: String,
     register_repository: bool,
     durable: Option<DurablePreparedGeneration>,
     written_bytes: u64,
@@ -1102,10 +1109,13 @@ impl FirstSliceStagedIndex {
 // have already changed and would otherwise require transactional rollback.
 #[allow(clippy::large_enum_variant)]
 enum FirstSlicePublication {
-    Retained,
+    Retained {
+        root_path: String,
+    },
     Pending {
         root_identity: ContentHash,
         display_name: String,
+        root_path: String,
         register_repository: bool,
         language_coverage: Vec<LanguageCoverageSummary>,
         incremental: PreparedIncrementalState,
@@ -2339,6 +2349,8 @@ pub trait FirstSliceProjectAnalyzer: Send + Sync {
     }
 }
 
+type PendingRepositoryRegistration = (RepositoryId, String, Option<String>);
+
 /// Transport-independent owner of bounded repository generations.
 ///
 /// The service retains at most the caller-selected hard-bounded generation
@@ -2356,8 +2368,11 @@ pub struct FirstSliceService {
     // persists the random repository UUID instead of deriving public identity
     // from a local path.
     repositories: BTreeMap<ContentHash, RepositoryId>,
-    pending_repository_registrations: Mutex<BTreeMap<ContentHash, (RepositoryId, String)>>,
+    pending_repository_registrations: Mutex<BTreeMap<ContentHash, PendingRepositoryRegistration>>,
     repository_display_names: BTreeMap<RepositoryId, String>,
+    repository_root_paths: BTreeMap<RepositoryId, String>,
+    repository_aliases: BTreeMap<RepositoryId, String>,
+    repository_metadata_sequences: BTreeMap<RepositoryId, u64>,
     published_generation_counts: BTreeMap<RepositoryId, u64>,
     active_by_repository: BTreeMap<RepositoryId, GenerationId>,
     generations: GenerationSet<LexicalIndex>,
@@ -2550,6 +2565,15 @@ impl FirstSliceService {
                     .repository_display_names
                     .get(&receipt.repository)
                     .is_none_or(|display_name| display_name != &generation.display_name)
+                || self.repository_root_paths.get(&receipt.repository)
+                    != generation.root_path.as_ref()
+                || self.repository_aliases.get(&receipt.repository) != generation.alias.as_ref()
+                || self
+                    .repository_metadata_sequences
+                    .get(&receipt.repository)
+                    .copied()
+                    .unwrap_or(0)
+                    != generation.metadata_sequence
             {
                 return Err(FirstSliceError::CatalogCorrupt);
             }
@@ -2582,7 +2606,7 @@ impl FirstSliceService {
             .map(|pending| {
                 pending
                     .get(&root_identity)
-                    .map(|(repository, _)| *repository)
+                    .map(|(repository, _, _)| *repository)
             })
     }
 
@@ -2607,6 +2631,7 @@ impl FirstSliceService {
         check_cancellation(cancellation)?;
         let canonical = canonical_repository_root(path, cancellation)?;
         let root_identity = repository_path_hash(&canonical)?;
+        let root_path = sanitized_repository_root_path(&canonical)?;
         let mut pending = self
             .pending_repository_registrations
             .lock()
@@ -2614,8 +2639,11 @@ impl FirstSliceService {
         let (repository, reservation_inserted) =
             if let Some(repository) = self.repositories.get(&root_identity).copied() {
                 (repository, false)
-            } else if let Some((repository, display_name)) = pending.get_mut(&root_identity) {
+            } else if let Some((repository, display_name, pending_root_path)) =
+                pending.get_mut(&root_identity)
+            {
                 *display_name = sanitized_repository_display_name(&canonical, *repository)?;
+                *pending_root_path = Some(root_path.clone());
                 (*repository, false)
             } else {
                 let retained_repositories = self
@@ -2632,7 +2660,7 @@ impl FirstSliceService {
                 // directory before the operation is acknowledged to the caller.
                 let _root = RepositoryRoot::open(repository, path)
                     .map_err(|_| FirstSliceError::Repository)?;
-                pending.insert(root_identity, (repository, display_name));
+                pending.insert(root_identity, (repository, display_name, Some(root_path)));
                 (repository, true)
             };
         drop(pending);
@@ -2690,7 +2718,7 @@ impl FirstSliceService {
             return;
         }
         if let Ok(mut pending) = self.pending_repository_registrations.lock() {
-            pending.retain(|_, (candidate, _)| *candidate != admission.repository);
+            pending.retain(|_, (candidate, _, _)| *candidate != admission.repository);
         }
     }
 
@@ -2722,12 +2750,12 @@ impl FirstSliceService {
             .pending_repository_registrations
             .lock()
             .map_err(|_| FirstSliceError::Retention)?;
-        if let Some((existing, _)) = pending.get(&root_identity) {
+        if let Some((existing, _, _)) = pending.get(&root_identity) {
             return (*existing == repository)
                 .then_some(())
                 .ok_or(FirstSliceError::CatalogCorrupt);
         }
-        if pending.iter().any(|(candidate_root, (candidate, _))| {
+        if pending.iter().any(|(candidate_root, (candidate, _, _))| {
             *candidate == repository && *candidate_root != root_identity
         }) {
             return Err(FirstSliceError::CatalogCorrupt);
@@ -2741,7 +2769,7 @@ impl FirstSliceService {
         {
             return Err(FirstSliceError::Retention);
         }
-        pending.insert(root_identity, (repository, repository.to_string()));
+        pending.insert(root_identity, (repository, repository.to_string(), None));
         Ok(())
     }
 
@@ -2840,6 +2868,9 @@ impl FirstSliceService {
             repositories: BTreeMap::new(),
             pending_repository_registrations: Mutex::new(BTreeMap::new()),
             repository_display_names: BTreeMap::new(),
+            repository_root_paths: BTreeMap::new(),
+            repository_aliases: BTreeMap::new(),
+            repository_metadata_sequences: BTreeMap::new(),
             published_generation_counts: BTreeMap::new(),
             active_by_repository: BTreeMap::new(),
             generations,
@@ -2944,6 +2975,18 @@ impl FirstSliceService {
                     .repository_display_names
                     .get(&receipt.repository)
                     .is_some_and(|display_name| *display_name != restored.display_name)
+                || self
+                    .repository_root_paths
+                    .get(&receipt.repository)
+                    .is_some_and(|root_path| Some(root_path) != restored.root_path.as_ref())
+                || self
+                    .repository_aliases
+                    .get(&receipt.repository)
+                    .is_some_and(|alias| Some(alias) != restored.alias.as_ref())
+                || self
+                    .repository_metadata_sequences
+                    .get(&receipt.repository)
+                    .is_some_and(|sequence| *sequence != restored.metadata_sequence)
                 || self.repositories.iter().any(|(root_identity, repository)| {
                     *repository == receipt.repository && *root_identity != restored.root_identity
                 })
@@ -2962,12 +3005,23 @@ impl FirstSliceService {
                 .insert(restored.root_identity, receipt.repository);
             self.repository_display_names
                 .insert(receipt.repository, restored.display_name);
+            if let Some(root_path) = restored.root_path {
+                self.repository_root_paths
+                    .insert(receipt.repository, root_path);
+            }
+            if let Some(alias) = restored.alias {
+                self.repository_aliases.insert(receipt.repository, alias);
+            }
+            if restored.metadata_sequence > 0 {
+                self.repository_metadata_sequences
+                    .insert(receipt.repository, restored.metadata_sequence);
+            }
             if self
                 .pending_repository_registrations
                 .get_mut()
                 .map_err(|_| FirstSliceError::Retention)?
                 .remove(&restored.root_identity)
-                .is_some_and(|(repository, _)| repository != receipt.repository)
+                .is_some_and(|(repository, _, _)| repository != receipt.repository)
             {
                 return Err(FirstSliceError::CatalogCorrupt);
             }
@@ -3232,6 +3286,7 @@ impl FirstSliceService {
             .map_err(|cancelled| FirstSliceError::Cancelled(cancelled.reason()))?;
         let canonical = canonical_repository_root(path, cancellation)?;
         let root_identity = repository_path_hash(&canonical)?;
+        let root_path = sanitized_repository_root_path(&canonical)?;
         let existing_repository = self.repositories.get(&root_identity).copied();
         let pending = self
             .pending_repository_registrations
@@ -3253,13 +3308,13 @@ impl FirstSliceService {
             Some(repository) => repository,
             None => reserved_repository.map_or_else(
                 || random_repository_id_with_pending(&self.repositories, &pending),
-                |(repository, _)| Ok(*repository),
+                |(repository, _, _)| Ok(*repository),
             )?,
         };
         check_cancellation(cancellation)?;
         let repository = repository_result;
         let display_name = match reserved_repository {
-            Some((_, display_name)) => fallible_copy_string(display_name)?,
+            Some((_, display_name, _)) => fallible_copy_string(display_name)?,
             None => sanitized_repository_display_name(&canonical, repository)?,
         };
         drop(pending);
@@ -3323,7 +3378,7 @@ impl FirstSliceService {
                 && let Some(receipt) = self.receipts.get(&active).cloned()
             {
                 check_cancellation(cancellation)?;
-                return Ok(FirstSliceIndexPreparation::Retained(receipt));
+                return Ok(FirstSliceIndexPreparation::Retained { receipt, root_path });
             }
         }
         let cached_snapshots = incremental.take_hashed_snapshots();
@@ -3454,7 +3509,7 @@ impl FirstSliceService {
                 && let Some(receipt) = self.receipts.get(&active).cloned()
             {
                 check_cancellation(cancellation)?;
-                return Ok(FirstSliceIndexPreparation::Retained(receipt));
+                return Ok(FirstSliceIndexPreparation::Retained { receipt, root_path });
             }
         }
         let parent = active;
@@ -3469,7 +3524,7 @@ impl FirstSliceService {
         .id();
         if let Some(receipt) = self.receipts.get(&generation).cloned() {
             check_cancellation(cancellation)?;
-            return Ok(FirstSliceIndexPreparation::Retained(receipt));
+            return Ok(FirstSliceIndexPreparation::Retained { receipt, root_path });
         }
         let parent_structural_artifacts = active
             .and_then(|generation| self.structural_artifacts.generation(generation))
@@ -3850,7 +3905,7 @@ impl FirstSliceService {
         };
         if let Some(durable) = &durable {
             let manifest_written_bytes =
-                durable.finish(root_identity, &display_name, receipt.clone())?;
+                durable.finish(root_identity, &display_name, &root_path, receipt.clone())?;
             written_bytes = written_bytes
                 .checked_add(manifest_written_bytes)
                 .ok_or(FirstSliceError::Limits)?;
@@ -3866,6 +3921,7 @@ impl FirstSliceService {
                 receipt,
                 root_identity,
                 display_name,
+                root_path,
                 register_repository: existing_repository.is_none(),
                 durable,
                 written_bytes,
@@ -4309,11 +4365,13 @@ impl FirstSliceService {
     ) -> Result<FirstSliceStagedIndex, FirstSliceError> {
         check_cancellation(cancellation)?;
         match prepared {
-            FirstSliceIndexPreparation::Retained(receipt) => Ok(FirstSliceStagedIndex {
-                receipt,
-                publication: FirstSlicePublication::Retained,
-                written_bytes: 0,
-            }),
+            FirstSliceIndexPreparation::Retained { receipt, root_path } => {
+                Ok(FirstSliceStagedIndex {
+                    receipt,
+                    publication: FirstSlicePublication::Retained { root_path },
+                    written_bytes: 0,
+                })
+            }
             FirstSliceIndexPreparation::Pending(prepared) => {
                 let PreparedFirstSliceIndex {
                     verified,
@@ -4324,6 +4382,7 @@ impl FirstSliceService {
                     receipt,
                     root_identity,
                     display_name,
+                    root_path,
                     register_repository,
                     durable,
                     written_bytes,
@@ -4383,6 +4442,7 @@ impl FirstSliceService {
                     publication: FirstSlicePublication::Pending {
                         root_identity,
                         display_name,
+                        root_path,
                         register_repository,
                         language_coverage,
                         incremental,
@@ -4471,7 +4531,7 @@ impl FirstSliceService {
             self.validate_durable_operation(operation, &receipt)?;
         }
         match staged.publication {
-            FirstSlicePublication::Retained => {
+            FirstSlicePublication::Retained { root_path } => {
                 if let Some(durable) = &self.durable {
                     let published_generation_count = self
                         .published_generation_counts
@@ -4496,10 +4556,13 @@ impl FirstSliceService {
                 self.generations
                     .activate(receipt.generation)
                     .map_err(|_| FirstSliceError::Retention)?;
+                self.repository_root_paths
+                    .insert(receipt.repository, root_path);
             }
             FirstSlicePublication::Pending {
                 root_identity,
                 display_name,
+                root_path,
                 register_repository,
                 language_coverage,
                 incremental,
@@ -4605,6 +4668,8 @@ impl FirstSliceService {
                         .map_err(|_| FirstSliceError::Retention)?
                         .remove(&root_identity);
                 }
+                self.repository_root_paths
+                    .insert(receipt.repository, root_path);
                 if let Some(durable) = durable {
                     durable.disarm();
                 }
@@ -6458,6 +6523,8 @@ impl FirstSliceService {
                 generation_count,
                 CatalogRepositoryState::Ready,
             )?
+            .with_alias(self.repository_aliases.get(repository).cloned())?
+            .with_root_path(self.repository_root_paths.get(repository).cloned())?
             .with_freshness(
                 catalog_freshness(freshness.structural),
                 catalog_freshness(freshness.semantic),
@@ -6465,19 +6532,144 @@ impl FirstSliceService {
             .with_coverage(coverage)?;
             records.push(record);
         }
-        for (repository, display_name) in pending.values() {
+        for (repository, display_name, root_path) in pending.values() {
             if self.active_by_repository.contains_key(repository) {
                 continue;
             }
-            records.push(CatalogRepositoryRecord::new(
-                *repository,
-                display_name.clone(),
-                None,
-                0,
-                CatalogRepositoryState::Indexing,
-            )?);
+            records.push(
+                CatalogRepositoryRecord::new(
+                    *repository,
+                    display_name.clone(),
+                    None,
+                    0,
+                    CatalogRepositoryState::Indexing,
+                )?
+                .with_root_path(root_path.clone())?,
+            );
         }
         Ok(records)
+    }
+
+    /// Changes the authoritative user-facing repository name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::RepositoryNotFound`] for an unknown
+    /// repository, [`FirstSliceError::Catalog`] for an invalid alias, or a
+    /// durable catalog failure when the mutation cannot be persisted.
+    pub fn rename_repository(
+        &mut self,
+        repository: RepositoryId,
+        alias: String,
+    ) -> Result<(), FirstSliceError> {
+        catalog::validate_label(&alias).map_err(|_| FirstSliceError::Catalog)?;
+        if !self.active_by_repository.contains_key(&repository) {
+            return Err(FirstSliceError::RepositoryNotFound);
+        }
+        let sequence = self
+            .repository_metadata_sequences
+            .get(&repository)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(FirstSliceError::Retention)?;
+        if let Some(durable) = &self.durable {
+            durable.write_repository_metadata(DurableRepositoryMetadata {
+                version: REPOSITORY_METADATA_VERSION,
+                sequence,
+                repository,
+                root_path: self.repository_root_paths.get(&repository).cloned(),
+                alias: Some(alias.clone()),
+            })?;
+        }
+        self.repository_aliases.insert(repository, alias);
+        self.repository_metadata_sequences
+            .insert(repository, sequence);
+        Ok(())
+    }
+
+    /// Deletes one repository's Rootlight-owned generations and catalog state.
+    ///
+    /// The source repository is never opened or mutated by this operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::RepositoryNotFound`] for an unknown
+    /// repository, or a durable/in-memory integrity failure when complete
+    /// removal cannot be established.
+    pub fn delete_repository(&mut self, repository: RepositoryId) -> Result<(), FirstSliceError> {
+        if !self.active_by_repository.contains_key(&repository) {
+            return Err(FirstSliceError::RepositoryNotFound);
+        }
+        let generations = self
+            .receipts
+            .values()
+            .filter_map(|receipt| (receipt.repository == repository).then_some(receipt.generation))
+            .collect::<BTreeSet<_>>();
+        if generations.is_empty()
+            || generations.iter().any(|generation| {
+                !self.generations.contains(*generation)
+                    || !self.source_snapshots.contains_committed(*generation)
+                    || !self
+                        .language_coverage_by_generation
+                        .contains_key(generation)
+            })
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let replacement_active = self
+            .activation_order_by_generation
+            .iter()
+            .filter(|(generation, _)| !generations.contains(generation))
+            .max_by_key(|(_, sequence)| **sequence)
+            .map(|(generation, _)| *generation);
+        if let Some(durable) = &self.durable {
+            durable.remove_repository(repository)?;
+        }
+        for generation in &generations {
+            self.source_snapshots.remove_committed(*generation)?;
+            if self.structural_artifacts.contains_committed(*generation) {
+                self.structural_artifacts.remove_committed(*generation)?;
+            }
+        }
+        self.generations
+            .remove_many(&generations, replacement_active)
+            .map_err(|_| FirstSliceError::Retention)?;
+        self.receipts
+            .retain(|generation, _| !generations.contains(generation));
+        self.language_coverage_by_generation
+            .retain(|generation, _| !generations.contains(generation));
+        self.incremental_baselines
+            .retain(|generation, _| !generations.contains(generation));
+        self.incremental_inputs
+            .retain(|generation, _| !generations.contains(generation));
+        self.incremental_evidence
+            .retain(|generation, _| !generations.contains(generation));
+        self.activation_order_by_generation
+            .retain(|generation, _| !generations.contains(generation));
+        self.durable_operations
+            .retain(|_, operation| !generations.contains(&operation.receipt.generation));
+        self.active_by_repository.remove(&repository);
+        self.repository_display_names.remove(&repository);
+        self.repository_root_paths.remove(&repository);
+        self.repository_aliases.remove(&repository);
+        self.repository_metadata_sequences.remove(&repository);
+        self.published_generation_counts.remove(&repository);
+        self.activation_sequences.remove(&repository);
+        self.pending_durable_compactions.remove(&repository);
+        self.repositories
+            .retain(|_, candidate| *candidate != repository);
+        self.pending_repository_registrations
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?
+            .retain(|_, (candidate, _, _)| *candidate != repository);
+        self.most_recent_activation = replacement_active.and_then(|generation| {
+            self.activation_order_by_generation
+                .get(&generation)
+                .copied()
+                .map(|sequence| (sequence, generation))
+        });
+        Ok(())
     }
 
     /// Returns one repository's active or exact generation status.
@@ -6502,7 +6694,7 @@ impl FirstSliceService {
                 .lock()
                 .map_err(|_| FirstSliceError::Retention)?
                 .values()
-                .any(|(candidate, _)| *candidate == repository)
+                .any(|(candidate, _, _)| *candidate == repository)
         {
             return Err(FirstSliceError::GenerationNotFound);
         }
@@ -6524,7 +6716,7 @@ impl FirstSliceService {
         Ok(RepositoryStatusDto {
             repository: context.repository,
             display_name,
-            alias: None,
+            alias: self.repository_aliases.get(&repository).cloned(),
             resolved_generation: context.generation,
             active_generation: context.active_generation,
             parent_generation: context.parent,
@@ -9485,9 +9677,42 @@ fn canonical_repository_root(
     Ok(canonical)
 }
 
+fn sanitized_repository_root_path(canonical_root: &Path) -> Result<String, FirstSliceError> {
+    let lossy = canonical_root.to_string_lossy();
+    #[cfg(windows)]
+    let visible = lossy
+        .strip_prefix(r"\\?\UNC\")
+        .map(|path| format!(r"\\{path}"))
+        .unwrap_or_else(|| {
+            lossy
+                .strip_prefix(r"\\?\")
+                .map_or_else(|| lossy.to_string(), str::to_owned)
+        });
+    #[cfg(not(windows))]
+    let visible = lossy.into_owned();
+    if visible.is_empty() || visible.len() > CATALOG_MAX_ROOT_PATH_BYTES {
+        return Err(FirstSliceError::Limits);
+    }
+    let mut sanitized = String::new();
+    sanitized
+        .try_reserve_exact(visible.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    sanitized.extend(visible.chars().map(|character| {
+        if character.is_control() {
+            '\u{fffd}'
+        } else {
+            character
+        }
+    }));
+    if sanitized.len() > CATALOG_MAX_ROOT_PATH_BYTES {
+        return Err(FirstSliceError::Limits);
+    }
+    Ok(sanitized)
+}
+
 fn random_repository_id_with_pending(
     repositories: &BTreeMap<ContentHash, RepositoryId>,
-    pending: &BTreeMap<ContentHash, (RepositoryId, String)>,
+    pending: &BTreeMap<ContentHash, PendingRepositoryRegistration>,
 ) -> Result<RepositoryId, FirstSliceError> {
     random_repository_id_where(|candidate| {
         repositories
@@ -9495,7 +9720,7 @@ fn random_repository_id_with_pending(
             .any(|repository| *repository == candidate)
             || pending
                 .values()
-                .any(|(repository, _)| *repository == candidate)
+                .any(|(repository, _, _)| *repository == candidate)
     })
 }
 
@@ -11758,6 +11983,89 @@ mod tests {
             )
             .expect("catalog page succeeds");
         assert_eq!(page.items()[0].generation_count(), 3);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn durable_repository_metadata_rename_and_delete_survive_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        let source = fixture.path().join("src/lib.rs");
+        fs::write(&source, "pub fn durable_metadata_probe() -> u32 { 42 }\n")
+            .expect("fixture source writes");
+        let cancellation = deadline();
+
+        let receipt = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            let receipt = service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("fixture publishes");
+            service
+                .rename_repository(receipt.repository, "Renamed project".to_owned())
+                .expect("repository alias persists");
+            receipt
+        };
+
+        let mut restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("renamed repository restores");
+        let page = restored
+            .repository_catalog_page(
+                CatalogPageRequest::new(
+                    None,
+                    None,
+                    catalog::CatalogListFilter::new(None, None, None).expect("filter is valid"),
+                    catalog::CatalogPageSize::new(20).expect("page size is valid"),
+                )
+                .expect("request is valid"),
+                CatalogInstant::from_millis(1_000),
+            )
+            .expect("catalog page succeeds");
+        assert_eq!(page.items().len(), 1);
+        assert_eq!(page.items()[0].alias(), Some("Renamed project"));
+        assert!(page.items()[0].root_path().is_some_and(|root| {
+            fixture
+                .path()
+                .file_name()
+                .is_some_and(|name| root.ends_with(&name.to_string_lossy().to_string()))
+        }));
+
+        restored
+            .delete_repository(receipt.repository)
+            .expect("Rootlight-owned repository state deletes");
+        assert!(source.exists(), "source repository must remain untouched");
+        assert!(
+            !paths
+                .state_dir()
+                .join("first-slice")
+                .join("repositories")
+                .join(receipt.repository.to_string())
+                .exists()
+        );
+        drop(restored);
+
+        let reopened = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("deleted repository state stays absent");
+        let page = reopened
+            .repository_catalog_page(
+                CatalogPageRequest::new(
+                    None,
+                    None,
+                    catalog::CatalogListFilter::new(None, None, None).expect("filter is valid"),
+                    catalog::CatalogPageSize::new(20).expect("page size is valid"),
+                )
+                .expect("request is valid"),
+                CatalogInstant::from_millis(1_000),
+            )
+            .expect("empty catalog page succeeds");
+        assert!(page.items().is_empty());
+        assert!(source.exists(), "source repository must survive restart");
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]

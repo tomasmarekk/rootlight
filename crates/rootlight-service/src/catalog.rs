@@ -17,6 +17,8 @@ use unicode_normalization::UnicodeNormalization as _;
 pub const CATALOG_SORT_VERSION: u16 = 1;
 /// Maximum public repository display-name or alias size in UTF-8 bytes.
 pub const CATALOG_MAX_LABEL_BYTES: usize = 256;
+/// Maximum UTF-8 byte length of one display-only canonical repository path.
+pub const CATALOG_MAX_ROOT_PATH_BYTES: usize = 32 * 1024;
 /// Maximum normalized query or sort-name size in UTF-8 bytes.
 pub const CATALOG_MAX_NORMALIZED_TEXT_BYTES: usize = 1_024;
 /// Maximum encoded byte length of one version-1 sort key.
@@ -293,12 +295,13 @@ impl CatalogLanguageCoverage {
     }
 }
 
-/// Authoritative, source-free repository metadata frozen into list snapshots.
+/// Authoritative repository metadata frozen into list snapshots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogRepositoryRecord {
     repository: RepositoryId,
     display_name: String,
     alias: Option<String>,
+    root_path: Option<String>,
     active_generation: Option<GenerationId>,
     generation_count: u64,
     state: CatalogRepositoryState,
@@ -330,6 +333,7 @@ impl CatalogRepositoryRecord {
             repository,
             display_name,
             alias: None,
+            root_path: None,
             active_generation,
             generation_count,
             state,
@@ -350,6 +354,24 @@ impl CatalogRepositoryRecord {
             validate_label(alias)?;
         }
         self.alias = alias;
+        Ok(self)
+    }
+
+    /// Attaches the display-only canonical repository root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::InvalidLabel`] when the path is empty,
+    /// oversized, or contains control characters.
+    pub fn with_root_path(mut self, root_path: Option<String>) -> Result<Self, CatalogError> {
+        if root_path.as_deref().is_some_and(|path| {
+            path.is_empty()
+                || path.len() > CATALOG_MAX_ROOT_PATH_BYTES
+                || path.chars().any(char::is_control)
+        }) {
+            return Err(CatalogError::InvalidLabel);
+        }
+        self.root_path = root_path;
         Ok(self)
     }
 
@@ -405,6 +427,12 @@ impl CatalogRepositoryRecord {
     #[must_use]
     pub fn alias(&self) -> Option<&str> {
         self.alias.as_deref()
+    }
+
+    /// Returns the display-only canonical repository root, when retained.
+    #[must_use]
+    pub fn root_path(&self) -> Option<&str> {
+        self.root_path.as_deref()
     }
 
     /// Returns the active immutable generation, when published.
@@ -1152,7 +1180,7 @@ fn canonical_text(value: &str) -> String {
     value.nfd().case_fold().nfc().collect()
 }
 
-fn validate_label(label: &str) -> Result<(), CatalogError> {
+pub(super) fn validate_label(label: &str) -> Result<(), CatalogError> {
     if label.is_empty()
         || label.len() > CATALOG_MAX_LABEL_BYTES
         || label
@@ -1184,6 +1212,7 @@ fn record_logical_bytes(record: &FrozenRecord) -> usize {
         .display_name
         .len()
         .saturating_add(record.record.alias.as_ref().map_or(0, String::len))
+        .saturating_add(record.record.root_path.as_ref().map_or(0, String::len))
         .saturating_add(record.sort_key.normalized_display_name.len());
     record
         .record

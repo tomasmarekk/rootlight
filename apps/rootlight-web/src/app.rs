@@ -12,7 +12,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use rootlight_client::{
     ClientError, DaemonLifecycle, Health, HealthStatus, RequestTimeout, ResourcePressure,
@@ -161,6 +161,10 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
             post(api::filesystem::preflight_index),
         )
         .route("/api/v1/projects/index", post(api::indexing::submit))
+        .route(
+            "/api/v1/projects/{repository_id}",
+            patch(api::projects::rename).delete(api::projects::delete),
+        )
         .route(
             "/api/v1/operations/{operation_id}/cancel",
             post(api::indexing::cancel),
@@ -1180,6 +1184,49 @@ mod tests {
             .expect("project detail response returns");
         assert_eq!(detail_response.status(), StatusCode::OK);
 
+        let rename_request = Request::builder()
+            .method(Method::PATCH)
+            .uri(format!("/api/v1/projects/{}", test_repository()))
+            .header(HOST, "127.0.0.1:43127")
+            .header("origin", "http://127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .header(CONTENT_TYPE, "application/json")
+            .header(COOKIE, &cookie)
+            .header(CSRF_HEADER_NAME, &csrf)
+            .body(Body::from(r#"{"alias":"Renamed Rootlight"}"#))
+            .expect("project rename request builds");
+        let rename_response = app
+            .clone()
+            .oneshot(rename_request)
+            .await
+            .expect("project rename response returns");
+        assert_eq!(rename_response.status(), StatusCode::OK);
+        let rename_body = to_bytes(rename_response.into_body(), MAX_BROWSER_BODY_BYTES)
+            .await
+            .expect("project rename response body reads");
+        let rename_json: serde_json::Value =
+            serde_json::from_slice(&rename_body).expect("project rename response parses");
+        assert_eq!(rename_json["alias"], "Renamed Rootlight");
+
+        let delete_request = Request::builder()
+            .method(Method::DELETE)
+            .uri(format!("/api/v1/projects/{}", test_repository()))
+            .header(HOST, "127.0.0.1:43127")
+            .header("origin", "http://127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .header(COOKIE, &cookie)
+            .header(CSRF_HEADER_NAME, &csrf)
+            .body(Body::empty())
+            .expect("project delete request builds");
+        assert_eq!(
+            app.clone()
+                .oneshot(delete_request)
+                .await
+                .expect("project delete response returns")
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+
         let cross_origin_health = Request::builder()
             .uri("/api/v1/health")
             .header(HOST, "127.0.0.1:43127")
@@ -1256,6 +1303,7 @@ mod tests {
                         repository_id: test_repository(),
                         display_name: "Rootlight".to_owned(),
                         alias: None,
+                        root_path: Some("C:\\work\\rootlight".to_owned()),
                         active_generation: Some(test_generation()),
                         generation_count: 1,
                         state: RepositoryCatalogState::Ready,
@@ -1270,6 +1318,30 @@ mod tests {
                     truncated: false,
                     sort_version: rootlight_client::REPOSITORY_CATALOG_SORT_VERSION,
                 })
+            })
+        }
+
+        fn rename_repository<'a>(
+            &'a self,
+            repository: RepositoryId,
+            alias: &'a str,
+            _timeout: RequestTimeout,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + 'a>> {
+            Box::pin(async move {
+                assert_eq!(repository, test_repository());
+                assert_eq!(alias, "Renamed Rootlight");
+                Ok(())
+            })
+        }
+
+        fn delete_repository<'a>(
+            &'a self,
+            repository: RepositoryId,
+            _timeout: RequestTimeout,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send + 'a>> {
+            Box::pin(async move {
+                assert_eq!(repository, test_repository());
+                Ok(())
             })
         }
 

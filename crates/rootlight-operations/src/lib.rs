@@ -2189,6 +2189,77 @@ impl OperationJournal {
         load_repository_operation_contexts(&connection)
     }
 
+    /// Deletes terminal operation history owned by one repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::RepositoryBusy`] while matching work is
+    /// nonterminal, or a typed corruption/storage failure.
+    pub fn delete_repository_history(
+        &self,
+        repository: RepositoryId,
+    ) -> Result<u32, OperationError> {
+        let removed = {
+            let mut connection = self.lock_connection()?;
+            let transaction = connection.transaction().map_err(map_sqlite_error)?;
+            let contexts = load_repository_operation_contexts(&transaction)?;
+            let operations = contexts
+                .into_iter()
+                .filter_map(|context| {
+                    (context.repository == repository).then_some(context.operation)
+                })
+                .collect::<Vec<_>>();
+            for operation in &operations {
+                let record =
+                    load_record(&transaction, *operation)?.ok_or(OperationError::CorruptState)?;
+                if !record.state.is_terminal() {
+                    return Err(OperationError::RepositoryBusy);
+                }
+            }
+            for operation in &operations {
+                transaction
+                    .execute(
+                        "DELETE FROM application_meta
+                         WHERE key IN (
+                             ?1 || lower(hex(?3)),
+                             ?2 || lower(hex(?3))
+                         )",
+                        params![
+                            RELATIVE_TIMEOUT_META_PREFIX,
+                            REPOSITORY_OPERATION_META_PREFIX,
+                            operation.as_bytes().as_slice()
+                        ],
+                    )
+                    .map_err(map_sqlite_error)?;
+                if transaction
+                    .execute(
+                        "DELETE FROM operations WHERE operation = ?1",
+                        [operation.as_bytes().as_slice()],
+                    )
+                    .map_err(map_sqlite_error)?
+                    != 1
+                {
+                    return Err(OperationError::CorruptState);
+                }
+            }
+            transaction.commit().map_err(map_sqlite_error)?;
+            operations
+        };
+        {
+            let mut errors = self.lock_errors()?;
+            for operation in &removed {
+                errors.remove(operation);
+            }
+        }
+        {
+            let mut cancellations = self.lock_cancellations()?;
+            for operation in &removed {
+                cancellations.remove(operation);
+            }
+        }
+        u32::try_from(removed.len()).map_err(|_| OperationError::CatalogRowLimitExceeded)
+    }
+
     /// Persists monotonic source-file and source-byte observations.
     ///
     /// Stale observations are idempotent. A changed observation advances the
@@ -4867,6 +4938,9 @@ pub enum OperationError {
     /// A queued lifecycle mutation was abandoned before actor execution.
     #[error("operation journal lifecycle mutation timed out")]
     MutationTimedOut,
+    /// Repository history cannot be removed while matching work is active.
+    #[error("repository has an active operation")]
+    RepositoryBusy,
     /// Durable worker ownership could not be established before its monotonic deadline.
     #[error("operation start deadline elapsed")]
     StartDeadlineElapsed,
@@ -7333,6 +7407,64 @@ mod tests {
             journal.status(operation(20)).expect("active remains").state,
             OperationState::Queued
         );
+    }
+
+    #[test]
+    fn repository_history_delete_is_scoped_and_rejects_active_work() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let repository = RepositoryId::from_bytes([41; 16]);
+        let other_repository = RepositoryId::from_bytes([42; 16]);
+        let removed_operation = operation(41);
+        let retained_operation = operation(42);
+
+        for (operation, repository) in [
+            (removed_operation, repository),
+            (retained_operation, other_repository),
+        ] {
+            journal
+                .submit(repository_submission(
+                    operation,
+                    repository,
+                    1_700_000_000_000,
+                ))
+                .expect("repository operation submits");
+            journal
+                .interrupt_deadline(operation)
+                .expect("repository operation becomes terminal");
+        }
+
+        assert_eq!(
+            journal
+                .delete_repository_history(repository)
+                .expect("terminal repository history deletes"),
+            1
+        );
+        assert!(matches!(
+            journal.status(removed_operation),
+            Err(OperationError::NotFound)
+        ));
+        assert!(journal.status(retained_operation).is_ok());
+        assert!(
+            journal
+                .repository_operation_contexts()
+                .expect("repository contexts load")
+                .iter()
+                .all(|context| context.repository != repository)
+        );
+
+        let active_operation = operation(43);
+        journal
+            .submit(repository_submission(
+                active_operation,
+                repository,
+                1_700_000_000_001,
+            ))
+            .expect("active repository operation submits");
+        assert!(matches!(
+            journal.delete_repository_history(repository),
+            Err(OperationError::RepositoryBusy)
+        ));
+        assert!(journal.status(active_operation).is_ok());
     }
 
     #[test]

@@ -5,6 +5,7 @@ use std::{str::FromStr as _, time::Duration};
 use axum::{
     Json,
     extract::{Path, RawQuery, State},
+    http::StatusCode,
 };
 use data_encoding::BASE64URL_NOPAD;
 use rootlight_client::{
@@ -15,7 +16,7 @@ use rootlight_client::{
     RepositoryStatusCoverageDetail, RepositoryStatusFreshnessRequirement,
     RepositoryStatusOperation, RepositoryStatusRequest, RequestTimeout,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::app::{ApiError, AppState};
 
@@ -49,12 +50,26 @@ struct ProjectSummary {
     active_generation_id: Option<String>,
     display_name: String,
     alias: Option<String>,
+    root_path: Option<String>,
     generation_count: String,
     lifecycle_state: &'static str,
     languages: Vec<String>,
     structural_freshness: &'static str,
     semantic_freshness: &'static str,
     coverage: Vec<CoverageEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProjectRenameRequest {
+    alias: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectRenameResponse {
+    schema: &'static str,
+    alias: String,
 }
 
 #[derive(Serialize)]
@@ -146,6 +161,38 @@ pub(crate) async fn detail(
         .await
         .map_err(|error| ApiError::from_daemon(&error))?;
     Ok(Json(map_project_detail(status)))
+}
+
+pub(crate) async fn rename(
+    State(state): State<AppState>,
+    Path(repository_id): Path<String>,
+    Json(request): Json<ProjectRenameRequest>,
+) -> Result<Json<ProjectRenameResponse>, ApiError> {
+    let repository = RepositoryId::from_str(&repository_id).map_err(|_| ApiError::bad_request())?;
+    let timeout = project_timeout()?;
+    state
+        .daemon()
+        .rename_repository(repository, &request.alias, timeout)
+        .await
+        .map_err(|error| ApiError::from_daemon(&error))?;
+    Ok(Json(ProjectRenameResponse {
+        schema: "rootlight.web-project-rename/1",
+        alias: request.alias,
+    }))
+}
+
+pub(crate) async fn delete(
+    State(state): State<AppState>,
+    Path(repository_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let repository = RepositoryId::from_str(&repository_id).map_err(|_| ApiError::bad_request())?;
+    let timeout = project_timeout()?;
+    state
+        .daemon()
+        .delete_repository(repository, timeout)
+        .await
+        .map_err(|error| ApiError::from_daemon(&error))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 struct CatalogQuery {
@@ -360,6 +407,22 @@ fn map_catalog_page(page: rootlight_client::RepositoryCatalogPage) -> ProjectCat
 }
 
 fn map_project_summary(project: RepositoryCatalogEntry) -> ProjectSummary {
+    let mut coverage = project.coverage;
+    coverage.sort_by(|left, right| {
+        right
+            .discovered_files
+            .cmp(&left.discovered_files)
+            .then_with(|| right.indexed_files.cmp(&left.indexed_files))
+            .then_with(|| left.language.cmp(&right.language))
+    });
+    let languages = if coverage.is_empty() {
+        project.languages
+    } else {
+        coverage
+            .iter()
+            .map(|entry| entry.language.clone())
+            .collect()
+    };
     ProjectSummary {
         repository_id: project.repository_id.to_string(),
         active_generation_id: project
@@ -367,12 +430,13 @@ fn map_project_summary(project: RepositoryCatalogEntry) -> ProjectSummary {
             .map(|generation| generation.to_string()),
         display_name: project.display_name,
         alias: project.alias,
+        root_path: project.root_path,
         generation_count: project.generation_count.to_string(),
         lifecycle_state: catalog_state_label(project.state),
-        languages: project.languages,
+        languages,
         structural_freshness: catalog_freshness_label(project.structural_freshness),
         semantic_freshness: catalog_freshness_label(project.semantic_freshness),
-        coverage: project.coverage.into_iter().map(map_coverage).collect(),
+        coverage: coverage.into_iter().map(map_coverage).collect(),
     }
 }
 
@@ -537,19 +601,29 @@ mod tests {
                 repository_id: repository,
                 display_name: "rootlight".to_owned(),
                 alias: None,
+                root_path: Some("C:\\work\\rootlight".to_owned()),
                 active_generation: Some(generation),
                 generation_count: u64::MAX,
                 state: RepositoryCatalogState::Ready,
-                languages: vec!["rust".to_owned()],
+                languages: vec!["javascript".to_owned(), "rust".to_owned()],
                 structural_freshness: RepositoryCatalogFreshness::Current,
                 semantic_freshness: RepositoryCatalogFreshness::Stale,
-                coverage: vec![RepositoryCoverageEntry {
-                    language: "rust".to_owned(),
-                    tier: "tier_b".to_owned(),
-                    status: "bounded".to_owned(),
-                    discovered_files: u64::MAX,
-                    indexed_files: 1,
-                }],
+                coverage: vec![
+                    RepositoryCoverageEntry {
+                        language: "javascript".to_owned(),
+                        tier: "tier_b".to_owned(),
+                        status: "bounded".to_owned(),
+                        discovered_files: 20,
+                        indexed_files: 20,
+                    },
+                    RepositoryCoverageEntry {
+                        language: "rust".to_owned(),
+                        tier: "tier_b".to_owned(),
+                        status: "bounded".to_owned(),
+                        discovered_files: u64::MAX,
+                        indexed_files: 1,
+                    },
+                ],
             }],
             snapshot_id: RepositoryCatalogSnapshotId::from_bytes([5; 32]),
             next_after: None,
@@ -567,6 +641,10 @@ mod tests {
         assert_eq!(
             json["projects"][0]["coverage"][0]["discoveredFiles"],
             u64::MAX.to_string()
+        );
+        assert_eq!(
+            json["projects"][0]["languages"],
+            serde_json::json!(["rust", "javascript"])
         );
         assert_eq!(json["totalCount"], u64::MAX.to_string());
     }

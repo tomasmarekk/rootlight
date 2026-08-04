@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rootlight_ids::GenerationId;
 use rootlight_search::LexicalSearch;
@@ -228,6 +228,43 @@ where
             .remove(&generation)
             .map(|_| ())
             .ok_or(QueryError::GenerationNotFound)
+    }
+
+    /// Removes a checked set of committed generations and selects a replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError::GenerationNotFound`] when any removed or
+    /// replacement generation is absent, or [`QueryError::InvalidGenerationSet`]
+    /// when the replacement is itself removed or does not preserve an
+    /// unaffected active selection.
+    pub fn remove_many(
+        &mut self,
+        removed: &BTreeSet<GenerationId>,
+        replacement_active: Option<GenerationId>,
+    ) -> Result<(), QueryError> {
+        if removed
+            .iter()
+            .any(|generation| !self.generations.contains_key(generation))
+            || replacement_active
+                .is_some_and(|generation| !self.generations.contains_key(&generation))
+        {
+            return Err(QueryError::GenerationNotFound);
+        }
+        if replacement_active.is_some_and(|generation| removed.contains(&generation))
+            || self.active.is_some_and(|active| !removed.contains(&active))
+                && replacement_active != self.active
+            || self.active.is_some_and(|active| removed.contains(&active))
+                && replacement_active.is_none()
+                && self.generations.len() != removed.len()
+        {
+            return Err(QueryError::InvalidGenerationSet);
+        }
+        for generation in removed {
+            self.generations.remove(generation);
+        }
+        self.active = replacement_active;
+        Ok(())
     }
 
     /// Returns whether one committed generation is retained.

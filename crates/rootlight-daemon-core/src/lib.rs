@@ -153,6 +153,7 @@ const MAX_REPOSITORY_CATALOG_PAGE_SIZE: u32 = 200;
 const MAX_REPOSITORY_CATALOG_QUERY_BYTES: usize = 1_024;
 const MAX_REPOSITORY_CATALOG_STATES: usize = 8;
 const MAX_REPOSITORY_CATALOG_LABEL_BYTES: usize = 256;
+const MAX_REPOSITORY_CATALOG_ROOT_PATH_BYTES: usize = 32 * 1_024;
 const MAX_REPOSITORY_CATALOG_LANGUAGES: usize = 64;
 const MAX_REPOSITORY_CATALOG_LANGUAGE_BYTES: usize = 64;
 const MIN_REPOSITORY_CATALOG_SORT_KEY_BYTES: usize = 18;
@@ -181,6 +182,8 @@ pub enum FirstSliceIpcRequest {
     RepositoryList(daemon::RepositoryListRequest),
     /// Read one page from a daemon-owned immutable repository catalog snapshot.
     RepositoryCatalogPage(daemon::RepositoryCatalogPageRequest),
+    /// Rename one repository or remove its Rootlight-owned catalog state.
+    RepositoryCatalogMutation(daemon::RepositoryCatalogMutationRequest),
     /// Read one repository's active generation status.
     RepositoryStatus(daemon::RepositoryStatusRequest),
     /// Expand typed relation neighborhoods for stable symbols.
@@ -228,6 +231,8 @@ pub enum FirstSliceIpcResponse {
     RepositoryList(daemon::RepositoryListResponse),
     /// One bounded immutable repository catalog page.
     RepositoryCatalogPage(daemon::RepositoryCatalogPageResponse),
+    /// Authoritative result of one repository catalog mutation.
+    RepositoryCatalogMutation(daemon::RepositoryCatalogMutationResponse),
     /// One repository status.
     RepositoryStatus(daemon::RepositoryStatusResponse),
     /// Bounded typed relation neighborhoods.
@@ -275,6 +280,9 @@ impl FirstSliceIpcResponse {
             }
             Self::RepositoryCatalogPage(response) => {
                 daemon::response_envelope::Response::RepositoryCatalogPage(response)
+            }
+            Self::RepositoryCatalogMutation(response) => {
+                daemon::response_envelope::Response::RepositoryCatalogMutation(response)
             }
             Self::RepositoryStatus(response) => {
                 daemon::response_envelope::Response::RepositoryStatus(response)
@@ -1154,6 +1162,14 @@ impl DaemonState {
         );
     }
 
+    /// Removes retained support contexts for a deleted repository.
+    pub fn remove_repository_index_contexts(&self, repository: RepositoryId) {
+        self.repository_index_contexts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, context| context.repository != repository);
+    }
+
     fn repository_index_contexts(&self) -> BTreeMap<OperationId, RepositoryIndexSupportContext> {
         self.repository_index_contexts
             .lock()
@@ -1306,6 +1322,11 @@ enum JournalCommand {
     RepositoryOperationContexts {
         reply:
             tokio::sync::oneshot::Sender<Result<Vec<RepositoryOperationContext>, OperationError>>,
+    },
+    DeleteRepositoryHistory {
+        repository: RepositoryId,
+        claim: MutationClaim,
+        reply: tokio::sync::oneshot::Sender<Result<u32, OperationError>>,
     },
     UpdateRepositoryObservation {
         operation: OperationId,
@@ -1778,6 +1799,30 @@ impl JournalActorHandle {
             .await
             .map_err(|_| ServiceError::ChannelClosed)?
             .map_err(ServiceError::Operations)
+    }
+
+    /// Deletes terminal operation history for one repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, active-operation, actor, or journal
+    /// failure.
+    pub async fn delete_repository_history_until(
+        &self,
+        repository: RepositoryId,
+        deadline: Instant,
+    ) -> Result<u32, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::DeleteRepositoryHistory {
+                repository,
+                claim: claim.clone(),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
     }
 
     /// Persists repository source observations before an absolute deadline.
@@ -2632,6 +2677,15 @@ fn execute_journal_command(
         }
         JournalCommand::RepositoryOperationContexts { reply } => {
             let _ = reply.send(journal.repository_operation_contexts());
+        }
+        JournalCommand::DeleteRepositoryHistory {
+            repository,
+            claim,
+            reply,
+        } => {
+            let _ = reply.send(execute_claimed(Some(&claim), || {
+                journal.delete_repository_history(repository)
+            }));
         }
         JournalCommand::UpdateRepositoryObservation {
             operation,
@@ -6737,6 +6791,9 @@ fn first_slice_request_from_wire(
         Some(daemon::request_envelope::Request::RepositoryCatalogPage(request)) => {
             Ok(Some(FirstSliceIpcRequest::RepositoryCatalogPage(request)))
         }
+        Some(daemon::request_envelope::Request::RepositoryCatalogMutation(request)) => Ok(Some(
+            FirstSliceIpcRequest::RepositoryCatalogMutation(request),
+        )),
         Some(daemon::request_envelope::Request::RepositoryStatus(request)) => {
             Ok(Some(FirstSliceIpcRequest::RepositoryStatus(request)))
         }
@@ -6867,12 +6924,14 @@ async fn dispatch_first_slice(
         FirstSliceIpcRequest::GraphProjectionOpen(_)
         | FirstSliceIpcRequest::GraphProjectionPage(_)
         | FirstSliceIpcRequest::GraphProjectionRelease(_) => 10,
+        FirstSliceIpcRequest::RepositoryCatalogMutation(_) => 11,
         FirstSliceIpcRequest::CodeLocate(request) if !request.languages.is_empty() => 8,
         FirstSliceIpcRequest::RepositoryCatalogPage(_) => 6,
         _ => 5,
     };
     if context.selected_protocol_minor < required_protocol_minor {
         let message = match required_protocol_minor {
+            11 => "repository catalog mutations need protocol minor eleven",
             10 => "graph projections need protocol minor ten",
             8 => "code locate language filters need protocol minor eight",
             6 => "repository catalog pages need protocol minor six",
@@ -7242,6 +7301,23 @@ fn first_slice_response_correlates(
             FirstSliceIpcRequest::RepositoryCatalogPage(request),
             FirstSliceIpcResponse::RepositoryCatalogPage(response),
         ) => repository_catalog_page_correlates(request, response),
+        (
+            FirstSliceIpcRequest::RepositoryCatalogMutation(request),
+            FirstSliceIpcResponse::RepositoryCatalogMutation(response),
+        ) => {
+            wire_id_equals(
+                response.repository.as_ref().map(|id| &id.value),
+                request.repository.as_ref().map(|id| &id.value),
+            ) && match request.mutation.as_ref() {
+                Some(daemon::repository_catalog_mutation_request::Mutation::Alias(alias)) => {
+                    !response.deleted && response.alias.as_deref() == Some(alias.as_str())
+                }
+                Some(daemon::repository_catalog_mutation_request::Mutation::Delete(_)) => {
+                    response.deleted && response.alias.is_none()
+                }
+                None => false,
+            }
+        }
         (
             FirstSliceIpcRequest::RepositoryStatus(request),
             FirstSliceIpcResponse::RepositoryStatus(response),
@@ -8075,7 +8151,15 @@ fn repository_catalog_entry_matches_request(
         .and_then(|repository| <[u8; 16]>::try_from(repository.value.as_slice()).ok())
         .map(RepositoryId::from_bytes)
         .is_some_and(|repository| repository.to_string().contains(query));
-    display_matches || alias_matches || repository_matches
+    let root_path_matches = entry.root_path.as_deref().is_some_and(|root_path| {
+        root_path
+            .nfd()
+            .case_fold()
+            .nfc()
+            .collect::<String>()
+            .contains(query)
+    });
+    display_matches || alias_matches || repository_matches || root_path_matches
 }
 
 fn valid_repository_catalog_entry(entry: &daemon::RepositoryCatalogEntry) -> bool {
@@ -8086,6 +8170,11 @@ fn valid_repository_catalog_entry(entry: &daemon::RepositoryCatalogEntry) -> boo
             .alias
             .as_deref()
             .is_none_or(repository_catalog_label_is_safe)
+        && entry.root_path.as_deref().is_none_or(|root_path| {
+            !root_path.is_empty()
+                && root_path.len() <= MAX_REPOSITORY_CATALOG_ROOT_PATH_BYTES
+                && !root_path.chars().any(char::is_control)
+        })
         && (entry.active_generation.is_none() || entry.generation_count > 0)
         && valid_repository_catalog_state(&entry.state)
         && valid_repository_catalog_freshness(&entry.structural_freshness)
@@ -8719,6 +8808,22 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                 return Err(Box::new(invalid_argument(
                     "repository catalog page request is invalid",
                 )));
+            }
+        }
+        FirstSliceIpcRequest::RepositoryCatalogMutation(request) => {
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            match request.mutation.as_ref() {
+                Some(daemon::repository_catalog_mutation_request::Mutation::Alias(alias))
+                    if repository_catalog_label_is_safe(alias) => {}
+                Some(daemon::repository_catalog_mutation_request::Mutation::Delete(_)) => {}
+                Some(daemon::repository_catalog_mutation_request::Mutation::Alias(_)) | None => {
+                    return Err(Box::new(invalid_argument(
+                        "repository catalog mutation is invalid",
+                    )));
+                }
             }
         }
         FirstSliceIpcRequest::RepositoryStatus(request) => {
@@ -9424,6 +9529,9 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
         Some(daemon::request_envelope::Request::RepositoryCatalogPage(_)) => {
             ControlMethod::RepositoryList
         }
+        Some(daemon::request_envelope::Request::RepositoryCatalogMutation(_)) => {
+            ControlMethod::Unknown
+        }
         Some(daemon::request_envelope::Request::RepositoryStatus(_)) => {
             ControlMethod::RepositoryStatus
         }
@@ -9909,6 +10017,7 @@ fn request_from_wire(
         Some(
             daemon::request_envelope::Request::RepositoryList(_)
             | daemon::request_envelope::Request::RepositoryCatalogPage(_)
+            | daemon::request_envelope::Request::RepositoryCatalogMutation(_)
             | daemon::request_envelope::Request::RepositoryStatus(_)
             | daemon::request_envelope::Request::SymbolRelationships(_)
             | daemon::request_envelope::Request::FlowTrace(_)
@@ -10286,9 +10395,10 @@ fn operation_error_to_public(
             "operation submission is invalid",
             false,
         ),
-        OperationError::WriterBusy | OperationError::ConcurrentUpdate | OperationError::Busy => {
-            (ErrorCode::Busy, "operation state is busy", true)
-        }
+        OperationError::WriterBusy
+        | OperationError::ConcurrentUpdate
+        | OperationError::Busy
+        | OperationError::RepositoryBusy => (ErrorCode::Busy, "operation state is busy", true),
         OperationError::DiagnosticTimedOut => {
             (ErrorCode::Busy, "operation diagnostic timed out", true)
         }
@@ -10374,7 +10484,8 @@ impl ServiceError {
                 | OperationError::WriterBusy
                 | OperationError::DiagnosticTimedOut
                 | OperationError::MutationTimedOut
-                | OperationError::StartDeadlineElapsed,
+                | OperationError::StartDeadlineElapsed
+                | OperationError::RepositoryBusy,
             ) => false,
             Self::Ipc(_)
             | Self::InvalidNegotiatedClient
@@ -16660,6 +16771,7 @@ mod tests {
                 active_generation: None,
                 display_name: display_name.to_owned(),
                 alias: None,
+                root_path: Some("/work/sample".to_owned()),
                 generation_count: 0,
                 state: "ready".to_owned(),
                 languages: vec!["rust".to_owned()],
@@ -16750,6 +16862,95 @@ mod tests {
     }
 
     #[test]
+    fn repository_catalog_mutations_validate_and_correlate() {
+        let repository = common::RepositoryId { value: vec![9; 16] };
+        let rename = FirstSliceIpcRequest::RepositoryCatalogMutation(
+            daemon::RepositoryCatalogMutationRequest {
+                repository: Some(repository.clone()),
+                mutation: Some(
+                    daemon::repository_catalog_mutation_request::Mutation::Alias(
+                        "renamed repository".to_owned(),
+                    ),
+                ),
+            },
+        );
+        assert!(validate_first_slice_request(&rename).is_ok());
+        assert!(first_slice_response_correlates(
+            &rename,
+            &FirstSliceIpcResponse::RepositoryCatalogMutation(
+                daemon::RepositoryCatalogMutationResponse {
+                    repository: Some(repository.clone()),
+                    alias: Some("renamed repository".to_owned()),
+                    deleted: false,
+                }
+            )
+        ));
+
+        let delete = FirstSliceIpcRequest::RepositoryCatalogMutation(
+            daemon::RepositoryCatalogMutationRequest {
+                repository: Some(repository.clone()),
+                mutation: Some(
+                    daemon::repository_catalog_mutation_request::Mutation::Delete(
+                        daemon::RepositoryCatalogDelete {},
+                    ),
+                ),
+            },
+        );
+        assert!(validate_first_slice_request(&delete).is_ok());
+        assert!(first_slice_response_correlates(
+            &delete,
+            &FirstSliceIpcResponse::RepositoryCatalogMutation(
+                daemon::RepositoryCatalogMutationResponse {
+                    repository: Some(repository.clone()),
+                    alias: None,
+                    deleted: true,
+                }
+            )
+        ));
+
+        for request in [
+            FirstSliceIpcRequest::RepositoryCatalogMutation(
+                daemon::RepositoryCatalogMutationRequest {
+                    repository: Some(repository.clone()),
+                    mutation: None,
+                },
+            ),
+            FirstSliceIpcRequest::RepositoryCatalogMutation(
+                daemon::RepositoryCatalogMutationRequest {
+                    repository: Some(repository.clone()),
+                    mutation: Some(
+                        daemon::repository_catalog_mutation_request::Mutation::Alias(
+                            "nested/name".to_owned(),
+                        ),
+                    ),
+                },
+            ),
+            FirstSliceIpcRequest::RepositoryCatalogMutation(
+                daemon::RepositoryCatalogMutationRequest {
+                    repository: Some(common::RepositoryId { value: vec![0; 15] }),
+                    mutation: Some(
+                        daemon::repository_catalog_mutation_request::Mutation::Delete(
+                            daemon::RepositoryCatalogDelete {},
+                        ),
+                    ),
+                },
+            ),
+        ] {
+            assert!(validate_first_slice_request(&request).is_err());
+        }
+
+        let wrong_response = FirstSliceIpcResponse::RepositoryCatalogMutation(
+            daemon::RepositoryCatalogMutationResponse {
+                repository: Some(repository),
+                alias: None,
+                deleted: false,
+            },
+        );
+        assert!(!first_slice_response_correlates(&rename, &wrong_response));
+        assert!(!first_slice_response_correlates(&delete, &wrong_response));
+    }
+
+    #[test]
     fn code_locate_language_filter_validation_is_canonical_and_bounded() {
         let request = |languages| {
             FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
@@ -16802,6 +17003,61 @@ mod tests {
             FirstSliceIpcContext {
                 client_instance_id: ClientInstanceId::SYSTEM,
                 selected_protocol_minor: 6,
+                cancellation: Cancellation::new(),
+                deadline,
+                effective_budget: None,
+                index_admission: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            legacy,
+            daemon::response_envelope::Response::Error(common::PublicError {
+                code,
+                ..
+            }) if code == common::ErrorCode::ProtocolMismatch as i32
+        ));
+        assert!(matches!(
+            current,
+            daemon::response_envelope::Response::Error(common::PublicError {
+                code,
+                ..
+            }) if code == common::ErrorCode::UnsupportedCapability as i32
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn repository_catalog_mutation_requires_negotiated_minor_eleven() {
+        let request = FirstSliceIpcRequest::RepositoryCatalogMutation(
+            daemon::RepositoryCatalogMutationRequest {
+                repository: Some(common::RepositoryId { value: vec![1; 16] }),
+                mutation: Some(
+                    daemon::repository_catalog_mutation_request::Mutation::Delete(
+                        daemon::RepositoryCatalogDelete {},
+                    ),
+                ),
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let legacy = dispatch_first_slice(
+            &UnavailableFirstSliceIpcHandler,
+            request.clone(),
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::SYSTEM,
+                selected_protocol_minor: 10,
+                cancellation: Cancellation::new(),
+                deadline,
+                effective_budget: None,
+                index_admission: None,
+            },
+        )
+        .await;
+        let current = dispatch_first_slice(
+            &UnavailableFirstSliceIpcHandler,
+            request,
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::SYSTEM,
+                selected_protocol_minor: 11,
                 cancellation: Cancellation::new(),
                 deadline,
                 effective_budget: None,

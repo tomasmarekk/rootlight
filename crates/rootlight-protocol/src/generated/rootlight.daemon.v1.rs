@@ -52,7 +52,7 @@ pub struct RequestEnvelope {
     pub effective_budget: ::core::option::Option<FirstSliceEffectiveBudget>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -146,6 +146,9 @@ pub mod request_envelope {
         #[prost(message, tag = "50")]
         #[allow(missing_docs)]
         GraphProjectionRelease(super::GraphProjectionReleaseRequest),
+        #[prost(message, tag = "51")]
+        #[allow(missing_docs)]
+        RepositoryCatalogMutation(super::RepositoryCatalogMutationRequest),
     }
 }
 /// Complete validated resource ceilings for one first-slice request.
@@ -193,7 +196,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 50, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 50, 51, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -284,6 +287,9 @@ pub mod response_envelope {
         #[prost(message, tag = "50")]
         #[allow(missing_docs)]
         GraphProjectionRelease(super::GraphProjectionReleaseResponse),
+        #[prost(message, tag = "51")]
+        #[allow(missing_docs)]
+        RepositoryCatalogMutation(super::RepositoryCatalogMutationResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -1451,6 +1457,48 @@ pub struct RepositoryCatalogEntry {
     #[prost(message, repeated, tag = "10")]
     #[allow(missing_docs)]
     pub coverage: ::prost::alloc::vec::Vec<RepositoryCoverageEntry>,
+    #[prost(string, optional, tag = "11")]
+    #[allow(missing_docs)]
+    pub root_path: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Closed delete command for a repository catalog mutation.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryCatalogDelete {}
+/// Renames one repository or deletes its Rootlight-owned index and metadata.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryCatalogMutationRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(oneof = "repository_catalog_mutation_request::Mutation", tags = "2, 3")]
+    #[allow(missing_docs)]
+    pub mutation: ::core::option::Option<repository_catalog_mutation_request::Mutation>,
+}
+/// Nested message and enum types in `RepositoryCatalogMutationRequest`.
+pub mod repository_catalog_mutation_request {
+    #[allow(missing_docs)]
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Mutation {
+        #[prost(string, tag = "2")]
+        #[allow(missing_docs)]
+        Alias(::prost::alloc::string::String),
+        #[prost(message, tag = "3")]
+        #[allow(missing_docs)]
+        Delete(super::RepositoryCatalogDelete),
+    }
+}
+/// Confirms the authoritative result of one repository catalog mutation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryCatalogMutationResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(string, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub alias: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, tag = "3")]
+    #[allow(missing_docs)]
+    pub deleted: bool,
 }
 /// Returns one correlated bounded page from an immutable repository catalog.
 #[derive(Clone, PartialEq, ::prost::Message)]
