@@ -132,7 +132,7 @@ fn real_repository_cold_index_is_release_bounded() {
     let mut daemon = DaemonProcess::spawn(&environment.daemon_binary, &state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
     let mut mcp = McpProcess::spawn(&environment.mcp_binary, &state_dir, &runtime_dir);
-    let status = mcp.call_success(
+    let status = mcp.call_until_not_busy(
         "cold-index-restart-status",
         "repo.status",
         json!({
@@ -143,6 +143,7 @@ fn real_repository_cold_index_is_release_bounded() {
             "require_freshness": "semantic",
             "response_profile": "compact"
         }),
+        Instant::now() + STARTUP_TIMEOUT,
     );
     assert_success(&status, "repo.status");
     let status_data = data(&status);
@@ -1136,6 +1137,34 @@ impl McpProcess {
         process_support::retry_transient_busy(id, |attempt| {
             self.call(attempt, tool, arguments.clone())
         })
+    }
+
+    fn call_until_not_busy(
+        &mut self,
+        id: &str,
+        tool: &str,
+        arguments: Value,
+        deadline: Instant,
+    ) -> Value {
+        let mut attempt = 1_u64;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "{tool} remained busy beyond its recovery deadline"
+            );
+            let response = self.call(&format!("{id}-attempt-{attempt}"), tool, arguments.clone());
+            let error = &response["result"]["structuredContent"]["error"];
+            if error["code"] != "BUSY" || error["retryable"] != true {
+                return response;
+            }
+            let retry_after = Duration::from_millis(
+                error["retry_after_ms"]
+                    .as_u64()
+                    .unwrap_or(u64::try_from(POLL_INTERVAL.as_millis()).unwrap_or(100)),
+            );
+            thread::sleep(retry_after.min(deadline.saturating_duration_since(Instant::now())));
+            attempt = attempt.saturating_add(1);
+        }
     }
 
     fn write(&mut self, message: &Value) {
