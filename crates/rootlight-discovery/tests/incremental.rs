@@ -13,7 +13,7 @@ use rootlight_config::ConfigSnapshot;
 use rootlight_discovery::{
     DiscoveryError, DiscoveryLimits, DiscoveryPolicy, IncrementalDiscoveryContext,
     IncrementalDiscoveryOptions, correlate_incremental_manifest, discover, discover_incremental,
-    discover_incremental_with_progress,
+    discover_incremental_with_progress, discover_with_snapshots,
 };
 use rootlight_ids::{FactId, RepositoryId, content_hash, derive_repository};
 use rootlight_incremental::{ChangeClass, FileChangeKind, ReconcileMode};
@@ -376,6 +376,98 @@ fn clean_manifest_must_match_the_incremental_observation() {
             &drifted,
             limits(),
             &Cancellation::new(),
+        ),
+        Err(DiscoveryError::IncrementalDrift)
+    ));
+}
+
+#[test]
+fn cached_snapshot_revalidates_metadata_only_changes() {
+    let temporary = local_tempdir();
+    let source_path = temporary.path().join("lib.rs");
+    fs::write(&source_path, b"pub fn value() {}\n").expect("fixture source is written");
+    let root = root(&temporary, b"incremental-cached-metadata");
+    let config = ConfigSnapshot::resolve(&[]).expect("default config resolves");
+    let policy = policy();
+    let context = IncrementalDiscoveryContext::new(
+        config.hash(),
+        FactId::from_bytes([7; 20]),
+        content_hash(b"provider-v1"),
+    );
+    let cancellation = Cancellation::new();
+    let mut observed = discover_incremental(
+        &root,
+        None,
+        context,
+        &policy,
+        ReconcileMode::Normal,
+        limits(),
+        &cancellation,
+    )
+    .expect("incremental observation succeeds");
+    let cached_snapshots = observed.take_hashed_snapshots();
+    let file = OpenOptions::new()
+        .write(true)
+        .open(&source_path)
+        .expect("fixture opens for metadata update");
+    file.set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2)))
+        .expect("fixture modification time changes");
+
+    let discovery = discover_with_snapshots(
+        &root,
+        &config,
+        &policy,
+        limits(),
+        cached_snapshots,
+        &cancellation,
+    )
+    .expect("unchanged content survives metadata revalidation");
+    let (manifest, snapshots) = discovery.into_parts();
+    assert_eq!(manifest.inputs.len(), 1);
+    assert_eq!(snapshots.len(), 1);
+}
+
+#[test]
+fn cached_snapshot_revalidation_rejects_same_length_rewrites() {
+    let temporary = local_tempdir();
+    let source_path = temporary.path().join("lib.rs");
+    fs::write(&source_path, b"aaaa").expect("fixture source is written");
+    let root = root(&temporary, b"incremental-cached-content");
+    let config = ConfigSnapshot::resolve(&[]).expect("default config resolves");
+    let policy = policy();
+    let context = IncrementalDiscoveryContext::new(
+        config.hash(),
+        FactId::from_bytes([7; 20]),
+        content_hash(b"provider-v1"),
+    );
+    let cancellation = Cancellation::new();
+    let mut observed = discover_incremental(
+        &root,
+        None,
+        context,
+        &policy,
+        ReconcileMode::Normal,
+        limits(),
+        &cancellation,
+    )
+    .expect("incremental observation succeeds");
+    let cached_snapshots = observed.take_hashed_snapshots();
+    fs::write(&source_path, b"bbbb").expect("same-length rewrite succeeds");
+    let file = OpenOptions::new()
+        .write(true)
+        .open(&source_path)
+        .expect("rewritten fixture opens");
+    file.set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(3)))
+        .expect("rewrite modification time changes");
+
+    assert!(matches!(
+        discover_with_snapshots(
+            &root,
+            &config,
+            &policy,
+            limits(),
+            cached_snapshots,
+            &cancellation,
         ),
         Err(DiscoveryError::IncrementalDrift)
     ));

@@ -834,13 +834,31 @@ impl<'a> DiscoveryState<'a> {
     ) -> Result<SourceSnapshot, DiscoveryError> {
         let file = self.root.file_id(path);
         if let Some(snapshot) = self.cached_snapshots.remove(&file) {
-            if snapshot.file() != file
-                || snapshot.path() != path
-                || snapshot.metadata() != observed_metadata
+            if snapshot.file() != file || snapshot.path() != path {
+                return Err(DiscoveryError::IncrementalDrift);
+            }
+            if snapshot.metadata() == observed_metadata && observed_metadata.supports_hash_reuse() {
+                return Ok(snapshot);
+            }
+            if snapshot.metadata().length != observed_metadata.length {
+                return Err(DiscoveryError::IncrementalDrift);
+            }
+            let cached_hash = snapshot.content_hash();
+            drop(snapshot);
+            // Windows lacks a safe change token, and a directory-entry handle
+            // can temporarily expose weaker metadata under file sharing.
+            // Reopen and hash before accepting the cached content.
+            let capture_limit = observed_metadata.length.max(1);
+            let refreshed =
+                self.root
+                    .snapshot_with_cancellation(path, capture_limit, self.cancellation)?;
+            if refreshed.file() != file
+                || refreshed.path() != path
+                || refreshed.content_hash() != cached_hash
             {
                 return Err(DiscoveryError::IncrementalDrift);
             }
-            return Ok(snapshot);
+            return Ok(refreshed);
         }
         if observed_metadata.length > self.limits.max_file_bytes {
             return Err(DiscoveryError::Vfs(VfsError::FileTooLarge {
