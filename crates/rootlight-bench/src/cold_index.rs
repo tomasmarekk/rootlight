@@ -931,7 +931,7 @@ mod tests {
         short_path.restart.projected_journal_utf16_units = 260;
         cases.push(short_path);
         let mut slow = valid.clone();
-        slow.locate.latency_ns[0] = u64::MAX;
+        slow.locate.latency_ns[..2].fill(u64::MAX);
         cases.push(slow);
 
         for invalid in cases {
