@@ -984,27 +984,23 @@ fn submit_guard_operations(
         return Err(LifecycleError::InvalidWorkerConfiguration);
     }
 
-    let mut submission_count = 0_usize;
     for (_, operations) in guards {
         if operations.is_empty() {
             return Err(LifecycleError::InvalidWorkerConfiguration);
         }
-        submission_count = submission_count
-            .checked_add(operations.len())
-            .ok_or(LifecycleError::InvalidWorkerConfiguration)?;
     }
 
-    // Release every guard client in one burst. Sequential per-client batches can
-    // let the first finite probes finish before slower hosts submit the last batch.
-    let barrier = Arc::new(Barrier::new(submission_count));
-    let mut submissions = Vec::with_capacity(submission_count);
+    // One ordered stream per identity keeps the control lane reachable on
+    // constrained CI hosts while all guard clients still begin together.
+    let barrier = Arc::new(Barrier::new(guards.len()));
+    let mut submissions = Vec::with_capacity(guards.len());
     for (client, operations) in guards {
-        for operation in operations {
-            let client = Arc::clone(client);
-            let barrier = Arc::clone(&barrier);
-            let operation = *operation;
-            submissions.push(thread::spawn(move || {
-                barrier.wait();
+        let client = Arc::clone(client);
+        let barrier = Arc::clone(&barrier);
+        let operations = operations.clone();
+        submissions.push(thread::spawn(move || {
+            barrier.wait();
+            for operation in operations {
                 let status = submit_quota_operation_until(&client, operation, deadline)?;
                 if !matches!(
                     status.state,
@@ -1012,9 +1008,9 @@ fn submit_guard_operations(
                 ) {
                     return Err(LifecycleError::UnexpectedQuotaOperationState(status.state));
                 }
-                Ok(())
-            }));
-        }
+            }
+            Ok(())
+        }));
     }
 
     for submission in submissions {
