@@ -3782,7 +3782,11 @@ fn repository_operation_status(
     } else {
         None
     };
-    let (peak_rss_bytes, written_bytes) = public_operation_resources(&record, &metadata);
+    // `persist_visible_operation_resources` committed the returned record.
+    // The sampler can advance the process-local atomic immediately afterward;
+    // expose only this durable snapshot so an immediate restart cannot make a
+    // value already returned to the client regress.
+    let (peak_rss_bytes, written_bytes) = (record.peak_rss_bytes, record.written_bytes);
     let semantic_operation = if record.state == OperationState::Succeeded {
         let repository_context = match journal_call(
             runtime,
