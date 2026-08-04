@@ -34,13 +34,25 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const EXPECTED_CLIENT_CONNECTION_LIMIT: u32 = 8;
 const EXPECTED_CLIENT_OPERATION_LIMIT: u32 = 32;
+const EXPECTED_OPERATION_QUEUE_LIMIT: u32 = 256;
 const EXPECTED_OPERATION_WORKERS: usize = 4;
 const QUOTA_GUARD_IDENTITIES: [u8; 8] = [72, 73, 74, 75, 76, 77, 78, 79];
+const QUOTA_GUARD_OPERATIONS_PER_CLIENT: u32 = 16;
 const QUOTA_GUARD_MIN_QUEUED: u32 = 48;
 const QUOTA_WINDOW_TIMEOUT: Duration = Duration::from_secs(15);
 const QUOTA_EXIT_CONFIRM_TIMEOUT: Duration = Duration::from_millis(500);
 const REFERENCE_CONTROL_P95_TARGET: Duration = Duration::from_millis(50);
 const MAX_DAEMON_STDERR_BYTES: usize = 1024 * 1024;
+
+const _: () = {
+    assert!(QUOTA_GUARD_IDENTITIES.len() == 8);
+    let guard_operations = 8 * QUOTA_GUARD_OPERATIONS_PER_CLIENT;
+    assert!(QUOTA_GUARD_OPERATIONS_PER_CLIENT < EXPECTED_CLIENT_OPERATION_LIMIT);
+    assert!(guard_operations - 4 >= QUOTA_GUARD_MIN_QUEUED);
+    assert!(
+        guard_operations + EXPECTED_CLIENT_OPERATION_LIMIT + 1 < EXPECTED_OPERATION_QUEUE_LIMIT
+    );
+};
 
 pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     let rootlight = binary_path(bin_dir, "rootlight")?;
@@ -723,7 +735,9 @@ fn exercise_operation_quota_isolation(paths: &RuntimePaths) -> Result<(), Lifecy
             [identity; 16],
             setup_deadline,
         )?);
-        let operations = (0..EXPECTED_CLIENT_CONNECTION_LIMIT)
+        // Half the per-client operation allowance keeps the finite guard backlog
+        // alive across slow CI IPC without approaching the global admission cap.
+        let operations = (0..QUOTA_GUARD_OPERATIONS_PER_CLIENT)
             .map(|ordinal| quota_operation(identity, ordinal))
             .collect::<Result<Vec<_>, _>>()?;
         guards.push((guard, operations));
@@ -1278,7 +1292,7 @@ fn worker_operations() -> Result<[OperationId; EXPECTED_OPERATION_WORKERS], Life
 fn require_expected_default_limits(health: &Health) -> Result<(), LifecycleError> {
     let workers = default_worker_slots()?;
     if health.connection_limit == 128
-        && health.operation_queue_limit == 256
+        && health.operation_queue_limit == EXPECTED_OPERATION_QUEUE_LIMIT
         && workers == 4
         && EXPECTED_CLIENT_CONNECTION_LIMIT <= health.connection_limit
         && EXPECTED_CLIENT_OPERATION_LIMIT <= health.operation_queue_limit
