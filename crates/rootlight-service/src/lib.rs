@@ -12291,9 +12291,13 @@ mod tests {
             )
             .expect("extension-heavy source writes");
         }
+        // Hosted Intel macOS runners need extra headroom to materialize and
+        // merge the full 10,000-extension boundary. This deadline guards
+        // against hangs; the test does not define a performance SLO.
+        let deadline_seconds = if cfg!(target_os = "macos") { 300 } else { 120 };
         let cancellation = Cancellation::with_deadline(
             Instant::now()
-                .checked_add(Duration::from_secs(120))
+                .checked_add(Duration::from_secs(deadline_seconds))
                 .expect("test deadline is representable"),
         );
         let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
