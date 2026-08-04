@@ -5135,7 +5135,7 @@
             "explainSupported": true,
             "fallbackSummary": "bounded exact-identifier or indexed lexical-text matching",
             "generation": "selects_generation",
-            "inputShapeHash": "bdd2589fdad0697156bc225ccf4ebdb9257ccc8f95234c35dd9ae3c52d06fdad",
+            "inputShapeHash": "b91668688cc5139eae13e51d3720319d8167440666155447251d2e29c208a811",
             "limitations": [
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -5317,6 +5317,11 @@
                 {
                   "const": "configuration",
                   "description": "Configuration record.",
+                  "type": "string"
+                },
+                {
+                  "const": "external_symbol",
+                  "description": "A symbol whose definition is outside the indexed repository.",
                   "type": "string"
                 }
               ]
@@ -6038,6 +6043,11 @@
                 {
                   "const": "configuration",
                   "description": "Configuration record.",
+                  "type": "string"
+                },
+                {
+                  "const": "external_symbol",
+                  "description": "A symbol whose definition is outside the indexed repository.",
                   "type": "string"
                 }
               ]
@@ -8061,6 +8071,11 @@
                 {
                   "const": "configuration",
                   "description": "Configuration record.",
+                  "type": "string"
+                },
+                {
+                  "const": "external_symbol",
+                  "description": "A symbol whose definition is outside the indexed repository.",
                   "type": "string"
                 }
               ]
@@ -33226,7 +33241,7 @@
             "explainSupported": true,
             "fallbackSummary": "bounded safe-ast query with typed value parameters, authenticated continuation, and enforced cost, row, and depth limits",
             "generation": "selects_generation",
-            "inputShapeHash": "2e8e0b28deda82821ecc8cacd45b424929303bb5ccca057e89cabfc1552aaa3b",
+            "inputShapeHash": "a05697bd45a30db206a189f177a08f60da5644d897a0eb18390fff58b4a92aa3",
             "limitations": [
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -33402,6 +33417,11 @@
                 {
                   "const": "configuration",
                   "description": "Configuration record.",
+                  "type": "string"
+                },
+                {
+                  "const": "external_symbol",
+                  "description": "A symbol whose definition is outside the indexed repository.",
                   "type": "string"
                 }
               ]
