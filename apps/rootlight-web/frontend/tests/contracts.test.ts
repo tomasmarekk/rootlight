@@ -395,6 +395,7 @@ function catalogFixture() {
         activeGenerationId: generationId,
         displayName: "Rootlight",
         alias: null,
+        rootPath: "C:\\work\\rootlight",
         generationCount: "18446744073709551615",
         lifecycleState: "ready",
         languages: ["rust"],

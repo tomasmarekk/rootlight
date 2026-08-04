@@ -6,7 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fetchProjects } from "../src/api/client";
+import { deleteProject, fetchProjects, renameProject } from "../src/api/client";
 import type { ProjectCatalogPage, ProjectSummary } from "../src/api/contracts";
 import { OperationProvider } from "../src/operations/operation-provider";
 import { createCatalogLocationState } from "../src/routing/catalog-location-state";
@@ -14,7 +14,9 @@ import { ProjectsPage } from "../src/views/projects-page";
 
 vi.mock("../src/api/client", () => ({
   createClientRequestId: vi.fn(() => "idx_test-request"),
+  deleteProject: vi.fn(),
   fetchProjects: vi.fn(),
+  renameProject: vi.fn(),
   submitProjectIndex: vi.fn(),
 }));
 
@@ -25,6 +27,7 @@ const project: ProjectSummary = {
   activeGenerationId: generationId,
   displayName: "Rootlight",
   alias: null,
+  rootPath: "C:\\work\\rootlight",
   generationCount: "3",
   lifecycleState: "ready",
   languages: ["rust"],
@@ -45,6 +48,13 @@ const catalog = catalogPage([project]);
 beforeEach(() => {
   vi.mocked(fetchProjects).mockReset();
   vi.mocked(fetchProjects).mockResolvedValue(catalog);
+  vi.mocked(renameProject).mockReset();
+  vi.mocked(renameProject).mockResolvedValue({
+    schema: "rootlight.web-project-rename/1",
+    alias: "Renamed project",
+  });
+  vi.mocked(deleteProject).mockReset();
+  vi.mocked(deleteProject).mockResolvedValue();
 });
 
 describe("ProjectsPage", () => {
@@ -54,10 +64,11 @@ describe("ProjectsPage", () => {
     expect(await screen.findByRole("heading", { name: "Rootlight" })).toBeVisible();
     expect(screen.getByText("90% indexed coverage")).toBeVisible();
     expect(screen.getByText(`Active gen1_${"b".repeat(8)}…bbbb`)).toBeVisible();
-    expect(screen.getByRole("link", { name: /Rootlight/u })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Open project" })).toHaveAttribute(
       "href",
       `/projects/${repositoryId}?generation=${generationId}`,
     );
+    expect(screen.getByText("C:\\work\\rootlight")).toBeVisible();
     expect(screen.getAllByText("Current page only")[0]?.previousSibling).toHaveTextContent("1");
   });
 
@@ -194,21 +205,43 @@ describe("ProjectsPage", () => {
     expect(vi.mocked(fetchProjects)).toHaveBeenCalledTimes(1);
   });
 
-  it("copies the exact canonical repository ID without nesting controls", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { writeText },
-    });
+  it("keeps the internal repository identity out of the visible project card", async () => {
     renderPage();
     await screen.findByRole("heading", { name: "Rootlight" });
 
-    const copy = screen.getByRole("button", { name: "Copy repository ID" });
-    await userEvent.click(copy);
+    expect(screen.queryByText(repositoryId)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /repository ID/iu })).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Search projects or paths")).toBeVisible();
+  });
 
-    expect(writeText).toHaveBeenCalledWith(repositoryId);
-    expect(await screen.findByRole("button", { name: "Repository ID copied" })).toBeVisible();
-    expect(copy.closest("a")).toBeNull();
+  it("renames the effective project name from its clickable heading", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Rootlight" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Rename Rootlight" }));
+    const name = screen.getByRole("textbox", { name: "Project name" });
+    await userEvent.clear(name);
+    await userEvent.type(name, "Renamed project");
+    await userEvent.click(screen.getByRole("button", { name: "Save name" }));
+
+    await waitFor(() =>
+      expect(renameProject).toHaveBeenCalledWith(repositoryId, "Renamed project"),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("requires confirmation before deleting only Rootlight-owned project data", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Rootlight" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(
+      screen.getByText(/The source directory at C:\\work\\rootlight will not be changed/u),
+    ).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Delete Rootlight data" }));
+
+    await waitFor(() => expect(deleteProject).toHaveBeenCalledWith(repositoryId));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("keeps next and previous pages on the same immutable snapshot", async () => {

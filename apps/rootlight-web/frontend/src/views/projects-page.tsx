@@ -2,26 +2,34 @@
 
 import { Button } from "@heroui/react/button";
 import { Card } from "@heroui/react/card";
-import { useQuery, type UseQueryResult } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import {
   Archive,
   ArrowLeft,
   ArrowRight,
-  Check,
   CircleCheck,
-  Copy,
   FolderGit2,
   FolderPlus,
+  Pencil,
   RefreshCw,
   Search,
+  Trash2,
   TriangleAlert,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router";
 
-import { createClientRequestId, fetchProjects, submitProjectIndex } from "../api/client";
+import {
+  createClientRequestId,
+  deleteProject,
+  fetchProjects,
+  renameProject,
+  submitProjectIndex,
+} from "../api/client";
 import type { ProjectCatalogPage, ProjectLifecycleFilter, ProjectSummary } from "../api/contracts";
 import { AddProjectDialog, type ProjectIndexSelection } from "../components/add-project-dialog";
+import { NativeDialog } from "../components/native-dialog";
 import { PageHeading } from "../components/page-heading";
 import { SessionOperationList } from "../components/session-operation-list";
 import { StatusCard } from "../components/status-card";
@@ -35,8 +43,19 @@ import {
 
 const pageSize = 50;
 
+function hasUnsafeAliasCharacter(alias: string) {
+  for (const character of alias) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint <= 0x1f || codePoint === 0x7f || character === "/" || character === "\\") {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function ProjectsPage() {
   const location = useLocation();
+  const queryClient = useQueryClient();
   const { register } = useOperations();
   const [restored] = useState(() => parseCatalogLocationState(location.state)?.catalog);
   const [searchInput, setSearchInput] = useState(restored?.searchInput ?? "");
@@ -108,6 +127,11 @@ export function ProjectsPage() {
     });
     register(admission, requestId);
     setFocusOperationId(admission.operationId);
+  }
+
+  async function refreshAfterMutation() {
+    setHistory([]);
+    await queryClient.invalidateQueries({ queryKey: ["projects"] });
   }
 
   return (
@@ -205,7 +229,7 @@ export function ProjectsPage() {
                 type="search"
                 aria-label="Search projects"
                 maxLength={256}
-                placeholder="Search projects or repository ID"
+                placeholder="Search projects or paths"
                 value={searchInput}
                 onChange={(event) => setSearchInput(event.currentTarget.value)}
                 onKeyDown={(event) => {
@@ -230,6 +254,7 @@ export function ProjectsPage() {
           catalog={catalog}
           hasFilter={hasFilter}
           locationState={catalogLocationState}
+          onChanged={refreshAfterMutation}
           onAddProject={() => setAddProjectOpen(true)}
           onClearFilters={() => {
             setSearchInput("");
@@ -291,12 +316,14 @@ function CatalogContent({
   hasFilter,
   locationState,
   onAddProject,
+  onChanged,
   onClearFilters,
 }: {
   catalog: UseQueryResult<ProjectCatalogPage>;
   hasFilter: boolean;
   locationState: CatalogLocationState;
   onAddProject: () => void;
+  onChanged: () => Promise<void>;
   onClearFilters: () => void;
 }) {
   if (catalog.isPending) {
@@ -372,7 +399,12 @@ function CatalogContent({
       {staleNotice}
       <div className="project-list" aria-live="polite">
         {catalog.data.projects.map((project) => (
-          <ProjectCard key={project.repositoryId} locationState={locationState} project={project} />
+          <ProjectCard
+            key={project.repositoryId}
+            locationState={locationState}
+            project={project}
+            onChanged={onChanged}
+          />
         ))}
       </div>
     </>
@@ -381,95 +413,256 @@ function CatalogContent({
 
 function ProjectCard({
   locationState,
+  onChanged,
   project,
 }: {
   locationState: CatalogLocationState;
+  onChanged: () => Promise<void>;
   project: ProjectSummary;
 }) {
+  const [dialog, setDialog] = useState<"delete" | "rename" | null>(null);
+  const effectiveName = project.alias ?? project.displayName;
+  const [alias, setAlias] = useState(effectiveName);
+  const rename = useMutation({
+    mutationFn: (nextAlias: string) => renameProject(project.repositoryId, nextAlias),
+  });
+  const remove = useMutation({
+    mutationFn: () => deleteProject(project.repositoryId),
+  });
   const coverage = aggregateCoverage(project);
-  const details = (
-    <>
-      <div className="project-card__identity">
-        <div className="project-card__icon" aria-hidden="true">
-          <FolderGit2 size={19} />
-        </div>
-        <div>
-          <h3>{project.displayName}</h3>
-          <code title={project.repositoryId}>{project.repositoryId}</code>
-        </div>
-        <span className={`state-badge state-badge--${project.lifecycleState}`}>
-          {humanize(project.lifecycleState)}
-        </span>
-      </div>
-      <div className="project-card__metadata">
-        {project.alias === null ? null : <span>Alias {project.alias}</span>}
-        <span>
-          {project.languages.length === 0 ? "No language data" : project.languages.join(", ")}
-        </span>
-        <span>{project.generationCount} generations</span>
-        <span title={project.activeGenerationId ?? undefined}>
-          {project.activeGenerationId === null
-            ? "No active generation"
-            : `Active ${shortId(project.activeGenerationId)}`}
-        </span>
-        <span>Structural {humanize(project.structuralFreshness)}</span>
-        <span>Semantic {humanize(project.semanticFreshness)}</span>
-      </div>
-      <progress
-        aria-label={coverage.label}
-        className="coverage-track"
-        max={100}
-        value={coverage.percent}
-      />
-      <div className="project-card__coverage">
-        <span>{coverage.label}</span>
-        <span>{project.coverage.length} coverage groups</span>
-      </div>
-    </>
-  );
+  const mutationPending = rename.isPending || remove.isPending;
+  const normalizedAlias = alias.trim();
+  const aliasInvalid =
+    normalizedAlias.length === 0 ||
+    normalizedAlias.length > 256 ||
+    hasUnsafeAliasCharacter(normalizedAlias);
 
-  if (project.activeGenerationId === null) {
-    return (
-      <article className="project-card project-card--disabled" aria-label={project.displayName}>
-        <div className="project-card__body">{details}</div>
-        <CopyRepositoryId repositoryId={project.repositoryId} />
-      </article>
-    );
+  function openDialog(nextDialog: "delete" | "rename") {
+    rename.reset();
+    remove.reset();
+    setAlias(effectiveName);
+    setDialog(nextDialog);
   }
+
+  async function submitRename() {
+    if (aliasInvalid) {
+      return;
+    }
+    await rename.mutateAsync(normalizedAlias);
+    setDialog(null);
+    await onChanged();
+  }
+
+  async function submitDelete() {
+    await remove.mutateAsync();
+    setDialog(null);
+    await onChanged();
+  }
+
   return (
-    <article className="project-card">
-      <Link
-        className="project-card__link"
-        state={locationState}
-        to={`/projects/${encodeURIComponent(project.repositoryId)}?generation=${encodeURIComponent(project.activeGenerationId)}`}
-      >
-        {details}
-      </Link>
-      <CopyRepositoryId repositoryId={project.repositoryId} />
+    <article
+      className={`project-card${project.activeGenerationId === null ? " project-card--disabled" : ""}`}
+      aria-label={effectiveName}
+    >
+      <div className="project-card__body">
+        <div className="project-card__identity">
+          <div className="project-card__icon" aria-hidden="true">
+            <FolderGit2 size={19} />
+          </div>
+          <div>
+            <h3>
+              <button
+                className="project-card__name"
+                type="button"
+                aria-label={`Rename ${effectiveName}`}
+                title="Rename project"
+                onClick={() => openDialog("rename")}
+              >
+                {effectiveName}
+                <Pencil size={12} aria-hidden="true" />
+              </button>
+            </h3>
+            <p className="project-card__path" title={project.rootPath ?? undefined}>
+              {project.rootPath ?? "Source path unavailable for this legacy index"}
+            </p>
+          </div>
+          <span className={`state-badge state-badge--${project.lifecycleState}`}>
+            {humanize(project.lifecycleState)}
+          </span>
+        </div>
+        <div className="project-card__metadata">
+          <span>
+            {project.languages.length === 0 ? "No language data" : project.languages.join(", ")}
+          </span>
+          <span>{project.generationCount} generations</span>
+          <span title={project.activeGenerationId ?? undefined}>
+            {project.activeGenerationId === null
+              ? "No active generation"
+              : `Active ${shortId(project.activeGenerationId)}`}
+          </span>
+          <span>Structural {humanize(project.structuralFreshness)}</span>
+          <span>Semantic {humanize(project.semanticFreshness)}</span>
+        </div>
+        <progress
+          aria-label={coverage.label}
+          className="coverage-track"
+          max={100}
+          value={coverage.percent}
+        />
+        <div className="project-card__coverage">
+          <span>{coverage.label}</span>
+          <span>{project.coverage.length} coverage groups</span>
+        </div>
+      </div>
+      <div className="project-card__actions">
+        <button className="project-card__delete" type="button" onClick={() => openDialog("delete")}>
+          <Trash2 size={13} aria-hidden="true" />
+          Delete
+        </button>
+        {project.activeGenerationId === null ? null : (
+          <Link
+            className="project-card__open"
+            state={locationState}
+            to={`/projects/${encodeURIComponent(project.repositoryId)}?generation=${encodeURIComponent(project.activeGenerationId)}`}
+          >
+            Open project
+            <ArrowRight size={13} aria-hidden="true" />
+          </Link>
+        )}
+      </div>
+      <ProjectMutationDialog
+        alias={alias}
+        aliasInvalid={aliasInvalid}
+        effectiveName={effectiveName}
+        error={rename.isError || remove.isError}
+        isOpen={dialog !== null}
+        mode={dialog ?? "rename"}
+        pending={mutationPending}
+        rootPath={project.rootPath}
+        onAliasChange={setAlias}
+        onDismiss={() => {
+          if (!mutationPending) {
+            setDialog(null);
+          }
+        }}
+        onSubmit={() => {
+          const submission = dialog === "delete" ? submitDelete() : submitRename();
+          void submission.catch(() => undefined);
+        }}
+      />
     </article>
   );
 }
 
-function CopyRepositoryId({ repositoryId }: { repositoryId: string }) {
-  const [copied, setCopied] = useState(false);
+function ProjectMutationDialog({
+  alias,
+  aliasInvalid,
+  effectiveName,
+  error,
+  isOpen,
+  mode,
+  pending,
+  rootPath,
+  onAliasChange,
+  onDismiss,
+  onSubmit,
+}: {
+  alias: string;
+  aliasInvalid: boolean;
+  effectiveName: string;
+  error: boolean;
+  isOpen: boolean;
+  mode: "delete" | "rename";
+  pending: boolean;
+  rootPath: string | null;
+  onAliasChange: (alias: string) => void;
+  onDismiss: () => void;
+  onSubmit: () => void;
+}) {
+  const headingId = mode === "rename" ? "rename-project-heading" : "delete-project-heading";
   return (
-    <button
-      className="project-card__copy"
-      type="button"
-      aria-label={copied ? "Repository ID copied" : "Copy repository ID"}
-      onClick={() => {
-        try {
-          void navigator.clipboard.writeText(repositoryId).then(
-            () => setCopied(true),
-            () => setCopied(false),
-          );
-        } catch {
-          setCopied(false);
-        }
-      }}
+    <NativeDialog
+      ariaLabelledBy={headingId}
+      className="project-mutation-modal"
+      isDismissable={!pending}
+      isOpen={isOpen}
+      onDismiss={onDismiss}
     >
-      {copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
-    </button>
+      <header data-slot="modal-header">
+        <div>
+          <p className="eyebrow">{mode === "rename" ? "Project identity" : "Remove local index"}</p>
+          <h2 id={headingId}>{mode === "rename" ? "Rename project" : "Delete project"}</h2>
+        </div>
+        {pending ? null : (
+          <button
+            aria-label={`Close ${mode} project dialog`}
+            className="native-dialog__close"
+            type="button"
+            onClick={onDismiss}
+          >
+            <X size={18} aria-hidden="true" />
+          </button>
+        )}
+      </header>
+      <div data-slot="modal-body">
+        {mode === "rename" ? (
+          <div className="project-mutation-field">
+            <label htmlFor="project-name">Project name</label>
+            <input
+              autoFocus
+              id="project-name"
+              maxLength={256}
+              name="project-name"
+              value={alias}
+              onChange={(event) => onAliasChange(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !aliasInvalid && !pending) {
+                  event.preventDefault();
+                  onSubmit();
+                }
+              }}
+            />
+            <small>The source folder name and contents stay unchanged.</small>
+          </div>
+        ) : (
+          <div className="project-delete-warning">
+            <TriangleAlert size={20} aria-hidden="true" />
+            <div>
+              <strong>Delete “{effectiveName}” from Rootlight?</strong>
+              <p>
+                Its local index, generations, and Rootlight metadata will be removed. The source
+                directory{rootPath === null ? "" : ` at ${rootPath}`} will not be changed.
+              </p>
+            </div>
+          </div>
+        )}
+        {error ? (
+          <div className="project-mutation-error" role="alert">
+            Rootlight could not complete this change. The project may be busy; try again after its
+            current operation finishes.
+          </div>
+        ) : null}
+      </div>
+      <footer data-slot="modal-footer">
+        <Button isDisabled={pending} variant="ghost" onPress={onDismiss}>
+          Cancel
+        </Button>
+        <Button
+          className={mode === "delete" ? "project-delete-confirm" : undefined}
+          isDisabled={pending || (mode === "rename" && aliasInvalid)}
+          variant="primary"
+          onPress={onSubmit}
+        >
+          {pending
+            ? mode === "rename"
+              ? "Saving"
+              : "Deleting"
+            : mode === "rename"
+              ? "Save name"
+              : "Delete Rootlight data"}
+        </Button>
+      </footer>
+    </NativeDialog>
   );
 }
 

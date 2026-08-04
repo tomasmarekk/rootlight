@@ -9,6 +9,7 @@ import {
   parseOperationCancel,
   parseProjectCatalogPage,
   parseProjectDetail,
+  parseProjectRenameResponse,
   parseProjectIndexAdmission,
   parseQuickDiagnostics,
   parseRepositoryOperation,
@@ -25,6 +26,7 @@ import {
   type ProjectDetail,
   type ProjectIndexAdmission,
   type ProjectLifecycleFilter,
+  type ProjectRenameResponse,
   type QuickDiagnostics,
   type RepositoryOperation,
   type Session,
@@ -191,6 +193,33 @@ export async function fetchProjectDetail(
     repositoryId,
     generation,
   );
+}
+
+export async function renameProject(
+  repositoryId: string,
+  alias: string,
+  signal?: AbortSignal,
+): Promise<ProjectRenameResponse> {
+  return parseProjectRenameResponse(
+    await mutationJson(
+      `/api/v1/projects/${encodeURIComponent(repositoryId)}`,
+      { alias },
+      signal,
+      "PATCH",
+    ),
+    alias,
+  );
+}
+
+export async function deleteProject(repositoryId: string, signal?: AbortSignal): Promise<void> {
+  if (csrfToken === undefined) {
+    throw new ApiError(401, "session_required");
+  }
+  await request(`/api/v1/projects/${encodeURIComponent(repositoryId)}`, {
+    method: "DELETE",
+    headers: { "x-rootlight-csrf": csrfToken },
+    signal,
+  });
 }
 
 export async function fetchFilesystemRoots(signal?: AbortSignal): Promise<FilesystemRoots> {
@@ -477,7 +506,7 @@ async function mutationJson(
   path: string,
   body: unknown,
   signal?: AbortSignal,
-  method: "DELETE" | "POST" = "POST",
+  method: "DELETE" | "PATCH" | "POST" = "POST",
 ): Promise<unknown> {
   if (csrfToken === undefined) {
     throw new ApiError(401, "session_required");

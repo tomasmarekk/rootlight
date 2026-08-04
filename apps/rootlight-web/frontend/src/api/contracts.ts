@@ -104,12 +104,18 @@ export type ProjectSummary = {
   activeGenerationId: string | null;
   displayName: string;
   alias: string | null;
+  rootPath: string | null;
   generationCount: string;
   lifecycleState: ProjectLifecycle;
   languages: string[];
   structuralFreshness: ProjectFreshness;
   semanticFreshness: ProjectFreshness;
   coverage: CoverageEntry[];
+};
+
+export type ProjectRenameResponse = {
+  schema: "rootlight.web-project-rename/1";
+  alias: string;
 };
 
 export type ProjectCatalogPage = {
@@ -428,6 +434,21 @@ export function parseProjectCatalogPage(value: unknown): ProjectCatalogPage {
   };
 }
 
+export function parseProjectRenameResponse(
+  value: unknown,
+  expectedAlias: string,
+): ProjectRenameResponse {
+  const record = asRecord(value);
+  const alias = asBoundedString(record.alias, 256);
+  if (alias !== expectedAlias) {
+    throw new Error("API response has an uncorrelated project alias");
+  }
+  return {
+    schema: asLiteral(record.schema, "rootlight.web-project-rename/1"),
+    alias,
+  };
+}
+
 export function parseProjectDetail(
   value: unknown,
   expectedRepositoryId: string,
@@ -632,6 +653,7 @@ function parseProjectSummary(value: unknown): ProjectSummary {
     activeGenerationId: asOptionalStableId(record.activeGenerationId, "gen1_"),
     displayName: asBoundedString(record.displayName, 256),
     alias: asOptionalBoundedString(record.alias, 256),
+    rootPath: asOptionalBoundedString(record.rootPath, 32 * 1_024),
     generationCount: asDecimalString(record.generationCount),
     lifecycleState: asEnumOrUnknown(record.lifecycleState, projectLifecycleValues),
     languages: asBoundedArray(record.languages, 64).map((language) =>

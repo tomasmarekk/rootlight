@@ -135,6 +135,43 @@ describe("browser API client", () => {
     );
   });
 
+  it("renames and deletes projects only through CSRF-bound mutations", async () => {
+    const repositoryId = `repo1_${"a".repeat(32)}`;
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ csrfToken: "csrf", idleTtlSeconds: 1_800 }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          schema: "rootlight.web-project-rename/1",
+          alias: "Renamed project",
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { deleteProject, initializeSession, renameProject } = await import("../src/api/client");
+    await initializeSession();
+
+    await renameProject(repositoryId, "Renamed project");
+    await deleteProject(repositoryId);
+
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(`/api/v1/projects/${repositoryId}`);
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+        "x-rootlight-csrf": "csrf",
+      },
+    });
+    expect(JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string)).toEqual({
+      alias: "Renamed project",
+    });
+    expect(fetchMock.mock.calls[2]?.[0]).toBe(`/api/v1/projects/${repositoryId}`);
+    expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({
+      method: "DELETE",
+      headers: { "x-rootlight-csrf": "csrf" },
+    });
+  });
+
   it("sends filesystem capabilities only through authenticated CSRF mutations", async () => {
     const token = "a".repeat(43);
     const fetchMock = vi
