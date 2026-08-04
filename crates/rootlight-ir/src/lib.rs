@@ -49,7 +49,8 @@ pub use normalized::{
     OccurrenceTarget, ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
     RelationRecord, SkippedRegion, SkippedRegionReason, SourceMappingKind, SourceMappingRecord,
     decode_diagnostic_record_with_checkpoint, decode_extension_envelope,
-    decode_extension_envelope_with_checkpoint, decode_ir_document, decode_legacy_ir_document,
+    decode_extension_envelope_with_checkpoint, decode_ir_document,
+    decode_ir_document_with_checkpoint, decode_legacy_ir_document,
     decode_skipped_region_with_checkpoint, decode_source_mapping_record_with_checkpoint,
 };
 pub use validation::{

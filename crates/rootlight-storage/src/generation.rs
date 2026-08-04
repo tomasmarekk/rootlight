@@ -11,14 +11,14 @@ use std::{
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{
-    ContentHash, GenerationId, GenerationIdentity, RepositoryId, content_hash, derive_generation,
+    ContentHash, GenerationId, GenerationIdentity, RepositoryId, derive_generation,
 };
 use rootlight_ir::{
     ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim,
-    IdentityClaimError, IrDocument, IrDocumentValidationError, IrLimits, IrVersion,
-    LEXICAL_EXTENSION_NAMESPACE, NORMALIZED_IR_VERSION, NormalizedIrDocument, OccurrenceTarget,
-    SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef, canonicalize_ir_document,
-    decode_file_identity_claim_envelope_with_checkpoint, decode_ir_document,
+    IdentityClaimError, IrDocument, IrDocumentDecodeError, IrDocumentValidationError, IrLimits,
+    IrVersion, LEXICAL_EXTENSION_NAMESPACE, NORMALIZED_IR_VERSION, NormalizedIrDocument,
+    OccurrenceTarget, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef, canonicalize_ir_document,
+    decode_file_identity_claim_envelope_with_checkpoint, decode_ir_document_with_checkpoint,
     decode_symbol_identity_claim_envelope_with_checkpoint,
     derive_coverage_record_id_with_checkpoint, derive_diagnostic_record_id_with_checkpoint,
     derive_occurrence_record_id_with_checkpoint, derive_provenance_record_id_with_checkpoint,
@@ -822,14 +822,31 @@ impl IdentityVerifiedGeneration {
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        if content_hash(encoded) != expected_digest {
+        let mut digest = IdentityRecipeHashWriter::new(Some(*context))?;
+        if digest.write_all(encoded).is_err() {
+            return digest
+                .control
+                .map_or(Err(IdentityVerificationError::InvalidGeneration), |error| {
+                    Err(IdentityVerificationError::Control(error))
+                });
+        }
+        if digest.finish()? != expected_digest {
             return Err(IdentityVerificationError::InvalidGeneration);
         }
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        let IrDocument::NormalizedV1_1(document) = decode_ir_document(encoded, limits, extensions)
-            .map_err(|_| IdentityVerificationError::InvalidGeneration)?
+        let IrDocument::NormalizedV1_1(document) =
+            decode_ir_document_with_checkpoint(encoded, limits, extensions, || {
+                context.check().is_ok()
+            })
+            .map_err(|error| match error {
+                IrDocumentDecodeError::Interrupted => context.check().err().map_or(
+                    IdentityVerificationError::InvalidGeneration,
+                    IdentityVerificationError::Control,
+                ),
+                _ => IdentityVerificationError::InvalidGeneration,
+            })?
         else {
             return Err(IdentityVerificationError::InvalidGeneration);
         };

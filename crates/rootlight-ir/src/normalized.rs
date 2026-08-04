@@ -1157,6 +1157,9 @@ pub enum IrDocumentDecodeError {
     /// A normalized 1.1 document failed quota or semantic validation.
     #[error("normalized IR document is invalid")]
     InvalidNormalizedDocument,
+    /// A caller-supplied cooperative checkpoint stopped document decoding.
+    #[error("IR document decoding was interrupted")]
+    Interrupted,
 }
 
 /// Decodes a byte-bounded frozen legacy IR envelope.
@@ -1505,6 +1508,25 @@ pub fn decode_ir_document(
     limits: &IrLimits,
     extensions: &ExtensionSupport,
 ) -> Result<IrDocument, IrDocumentDecodeError> {
+    decode_ir_document_with_checkpoint(encoded, limits, extensions, || true)
+}
+
+/// Decodes one bounded IR document with cooperative byte checkpoints.
+///
+/// The callback runs before decoding, after each 4 KiB of JSON input, and
+/// around domain conversion and canonical validation. It must return `false`
+/// to stop before additional work is performed.
+///
+/// # Errors
+///
+/// Returns the same failures as [`decode_ir_document`], plus
+/// [`IrDocumentDecodeError::Interrupted`] when `checkpoint` stops work.
+pub fn decode_ir_document_with_checkpoint(
+    encoded: &[u8],
+    limits: &IrLimits,
+    extensions: &ExtensionSupport,
+    mut checkpoint: impl FnMut() -> bool,
+) -> Result<IrDocument, IrDocumentDecodeError> {
     let observed = encoded.len();
     if observed > limits.max_document_bytes {
         return Err(IrDocumentDecodeError::EncodedDocumentTooLarge {
@@ -1515,8 +1537,8 @@ pub fn decode_ir_document(
 
     // Serde skips all unrecognized fields during this pass, so an unsupported
     // version does not materialize attacker-controlled document collections.
-    let version = serde_json::from_slice::<VersionProbe>(encoded)
-        .map_err(|_| IrDocumentDecodeError::MalformedDocument)?
+    let version = decode_checkpointed::<VersionProbe>(encoded, &mut checkpoint)
+        .map_err(map_document_probe_error)?
         .version;
     if version != IR_VERSION && version != NORMALIZED_IR_VERSION {
         return Err(IrDocumentDecodeError::UnsupportedVersion {
@@ -1527,26 +1549,56 @@ pub fn decode_ir_document(
 
     match version {
         IR_VERSION => {
-            let wire = serde_json::from_slice::<LegacyWireDocument>(encoded)
-                .map_err(classify_wire_error)?;
+            let wire = decode_checkpointed::<LegacyWireDocument>(encoded, &mut checkpoint)
+                .map_err(map_document_wire_error)?;
+            if !checkpoint() {
+                return Err(IrDocumentDecodeError::Interrupted);
+            }
             wire.into_domain()
                 .map(IrDocument::LegacyV1_0)
                 .map_err(|_| IrDocumentDecodeError::InvalidDocumentShape)
         }
         NORMALIZED_IR_VERSION => {
-            let wire = serde_json::from_slice::<NormalizedWireDocument>(encoded)
-                .map_err(classify_wire_error)?;
+            let wire = decode_checkpointed::<NormalizedWireDocument>(encoded, &mut checkpoint)
+                .map_err(map_document_wire_error)?;
+            if !checkpoint() {
+                return Err(IrDocumentDecodeError::Interrupted);
+            }
             let document = wire
                 .into_domain()
                 .map_err(|()| IrDocumentDecodeError::InvalidDocumentShape)?;
-            canonicalize_ir_document(document, limits, extensions)
+            if !checkpoint() {
+                return Err(IrDocumentDecodeError::Interrupted);
+            }
+            let document = canonicalize_ir_document(document, limits, extensions)
                 .map(IrDocument::NormalizedV1_1)
-                .map_err(|_| IrDocumentDecodeError::InvalidNormalizedDocument)
+                .map_err(|_| IrDocumentDecodeError::InvalidNormalizedDocument)?;
+            if !checkpoint() {
+                return Err(IrDocumentDecodeError::Interrupted);
+            }
+            Ok(document)
         }
         version => Err(IrDocumentDecodeError::UnsupportedVersion {
             major: version.major(),
             minor: version.minor(),
         }),
+    }
+}
+
+const fn map_document_probe_error(error: CheckpointDecodeError) -> IrDocumentDecodeError {
+    match error {
+        CheckpointDecodeError::Malformed | CheckpointDecodeError::InvalidShape => {
+            IrDocumentDecodeError::MalformedDocument
+        }
+        CheckpointDecodeError::Interrupted => IrDocumentDecodeError::Interrupted,
+    }
+}
+
+const fn map_document_wire_error(error: CheckpointDecodeError) -> IrDocumentDecodeError {
+    match error {
+        CheckpointDecodeError::Malformed => IrDocumentDecodeError::MalformedDocument,
+        CheckpointDecodeError::InvalidShape => IrDocumentDecodeError::InvalidDocumentShape,
+        CheckpointDecodeError::Interrupted => IrDocumentDecodeError::Interrupted,
     }
 }
 
@@ -2259,14 +2311,6 @@ fn classify_legacy_wire_error(error: serde_json::Error) -> LegacyIrDocumentDecod
     }
 }
 
-fn classify_wire_error(error: serde_json::Error) -> IrDocumentDecodeError {
-    if error.is_data() {
-        IrDocumentDecodeError::InvalidDocumentShape
-    } else {
-        IrDocumentDecodeError::MalformedDocument
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use rootlight_ids::FactId;
@@ -2309,6 +2353,28 @@ mod tests {
             .expect_err("the second checkpoint stops decoding");
 
         assert_eq!(error, ExtensionEnvelopeDecodeError::Interrupted);
+        assert_eq!(checkpoints, 2);
+    }
+
+    #[test]
+    fn document_decoder_stops_at_a_mid_payload_checkpoint() {
+        let mut value = normalized_value();
+        value["unrecognized"] = serde_json::json!("x".repeat(16 * 1024));
+        let encoded = encode_test_value(&value);
+        let mut checkpoints = 0_u8;
+
+        let error = decode_ir_document_with_checkpoint(
+            &encoded,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || {
+                checkpoints = checkpoints.saturating_add(1);
+                checkpoints < 2
+            },
+        )
+        .expect_err("the second checkpoint stops document decoding");
+
+        assert_eq!(error, IrDocumentDecodeError::Interrupted);
         assert_eq!(checkpoints, 2);
     }
 

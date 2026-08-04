@@ -21,6 +21,8 @@ use cap_std::fs::Dir;
 
 use super::{PlatformError, PlatformFileIdentity, PrivateName};
 
+pub(super) const PRIVATE_FILE_READ_CHUNK_BYTES: usize = 64 * 1024;
+
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
 
@@ -201,6 +203,16 @@ pub(crate) fn read_file_bounded(
     name: &PrivateName,
     maximum_bytes: u64,
 ) -> Result<Vec<u8>, PlatformError> {
+    read_file_bounded_with_check(parent, name, maximum_bytes, || Ok(()))
+}
+
+pub(super) fn read_file_bounded_with_check(
+    parent: &Directory,
+    name: &PrivateName,
+    maximum_bytes: u64,
+    mut check: impl FnMut() -> Result<(), PlatformError>,
+) -> Result<Vec<u8>, PlatformError> {
+    check()?;
     require_support()?;
     #[cfg(any(unix, windows))]
     {
@@ -238,10 +250,21 @@ pub(crate) fn read_file_bounded(
         bytes
             .try_reserve_exact(reserve)
             .map_err(|_| PlatformError::ResourceLimit)?;
-        (&mut file)
-            .take(maximum_bytes.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|source| platform_io("read_file", source))?;
+        {
+            let mut bounded = (&mut file).take(maximum_bytes.saturating_add(1));
+            let mut buffer = [0_u8; PRIVATE_FILE_READ_CHUNK_BYTES];
+            loop {
+                check()?;
+                let read = bounded
+                    .read(&mut buffer)
+                    .map_err(|source| platform_io("read_file", source))?;
+                if read == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..read]);
+            }
+        }
+        check()?;
         if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum_bytes {
             return Err(PlatformError::ResourceLimit);
         }
@@ -258,7 +281,7 @@ pub(crate) fn read_file_bounded(
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (parent, name, maximum_bytes);
+        let _ = (parent, name, maximum_bytes, check);
         Err(PlatformError::UnsupportedPlatform)
     }
 }
@@ -1222,6 +1245,10 @@ fn platform_error_to_io(error: PlatformError) -> io::Error {
         PlatformError::ResourceLimit => io::Error::new(
             io::ErrorKind::InvalidData,
             "private-tree resource limit was exceeded",
+        ),
+        PlatformError::Cancelled(_) => io::Error::new(
+            io::ErrorKind::Interrupted,
+            "private-tree operation was cancelled",
         ),
     }
 }

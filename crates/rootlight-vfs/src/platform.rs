@@ -14,6 +14,7 @@ use std::{
 };
 
 use cap_std::fs::Dir;
+use rootlight_cancel::{Cancellation, CancellationReason};
 
 mod os;
 
@@ -188,6 +189,28 @@ impl<'parent> PrivateDirectory<'parent> {
     ) -> Result<Vec<u8>, PlatformError> {
         let name = PrivateName::parse(name)?;
         os::read_file_bounded(self.inner(), &name, maximum_bytes)
+    }
+
+    /// Reads one existing private file with cooperative cancellation.
+    ///
+    /// The same identity, ownership, link-count, stable-length, and size
+    /// checks as [`Self::read_file_bounded`] remain enforced.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed name, policy, size-bound, cancellation, or I/O error.
+    pub fn read_file_bounded_cancellable(
+        &self,
+        name: &OsStr,
+        maximum_bytes: u64,
+        cancellation: &Cancellation,
+    ) -> Result<Vec<u8>, PlatformError> {
+        let name = PrivateName::parse(name)?;
+        os::read_file_bounded_with_check(self.inner(), &name, maximum_bytes, || {
+            cancellation
+                .check()
+                .map_err(|cancelled| PlatformError::Cancelled(cancelled.reason()))
+        })
     }
 
     /// Returns the exact identity captured from the retained directory handle.
@@ -479,6 +502,9 @@ pub enum PlatformError {
     /// A bounded private-tree operation exceeded its configured resource limit.
     #[error("private-tree resource limit was exceeded")]
     ResourceLimit,
+    /// Cooperative cancellation stopped a bounded private-tree operation.
+    #[error("private-tree operation was cancelled: {0:?}")]
+    Cancelled(CancellationReason),
     /// The native platform boundary has no enabled implementation.
     #[error("private-tree platform boundary is unsupported")]
     UnsupportedPlatform,
@@ -752,6 +778,45 @@ mod tests {
             directory.read_file_bounded(OsStr::new("payload"), 6),
             Err(PlatformError::ResourceLimit)
         ));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn private_file_read_checks_control_between_chunks() {
+        let (_temporary, parent) = private_parent();
+        let directory =
+            PrivateDirectory::create(&parent, OsStr::new("staging")).expect("staging is private");
+        let payload = vec![7_u8; os::PRIVATE_FILE_READ_CHUNK_BYTES * 2];
+        {
+            let mut file = directory
+                .create_file(OsStr::new("payload"))
+                .expect("private file is created");
+            file.write_all(&payload).expect("payload writes");
+            file.sync_all().expect("payload synchronizes");
+        }
+        let name = PrivateName::parse(OsStr::new("payload")).expect("private name is valid");
+        let mut checkpoints = 0_u8;
+
+        let error = os::read_file_bounded_with_check(
+            directory.inner(),
+            &name,
+            u64::try_from(payload.len()).expect("payload length fits u64"),
+            || {
+                checkpoints = checkpoints.saturating_add(1);
+                if checkpoints < 3 {
+                    Ok(())
+                } else {
+                    Err(PlatformError::Cancelled(CancellationReason::ClientRequest))
+                }
+            },
+        )
+        .expect_err("the third checkpoint stops the read");
+
+        assert!(matches!(
+            error,
+            PlatformError::Cancelled(CancellationReason::ClientRequest)
+        ));
+        assert_eq!(checkpoints, 3);
     }
 
     #[cfg(target_os = "macos")]

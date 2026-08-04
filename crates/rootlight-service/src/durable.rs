@@ -25,7 +25,7 @@ use rootlight_storage::{
 };
 use rootlight_vfs::{
     MAX_SNAPSHOT_BYTES, RelativePath, SourceSnapshot,
-    platform::{PrivateDirectory, PublishError, PublishedPrivateDirectory},
+    platform::{PlatformError, PrivateDirectory, PublishError, PublishedPrivateDirectory},
 };
 use serde::{Deserialize, Serialize};
 
@@ -1298,8 +1298,12 @@ fn restore_recovery_generation(
         return Err(FirstSliceError::CatalogCorrupt);
     }
     let encoded = generation_directory
-        .read_file_bounded(OsStr::new(RECOVERY_SNAPSHOT_FILENAME), recovery.bytes)
-        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        .read_file_bounded_cancellable(
+            OsStr::new(RECOVERY_SNAPSHOT_FILENAME),
+            recovery.bytes,
+            cancellation,
+        )
+        .map_err(map_private_read_error)?;
     if u64::try_from(encoded.len()).ok() != Some(recovery.bytes) {
         return Err(FirstSliceError::CatalogCorrupt);
     }
@@ -1389,13 +1393,24 @@ fn read_persisted_source(
     )
     .map_err(|_| FirstSliceError::CatalogCorrupt)?;
     let bytes = sources
-        .read_file_bounded(OsStr::new(&file.id.to_string()), file.byte_length)
-        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        .read_file_bounded_cancellable(
+            OsStr::new(&file.id.to_string()),
+            file.byte_length,
+            cancellation,
+        )
+        .map_err(map_private_read_error)?;
     if u64::try_from(bytes.len()).ok() != Some(file.byte_length) {
         return Err(FirstSliceError::CatalogCorrupt);
     }
     SourceSnapshot::from_persisted(repository, path, file.id, file.content_hash, bytes)
         .map_err(|error| generation_data_error(map_vfs_error(error, cancellation)))
+}
+
+fn map_private_read_error(error: PlatformError) -> FirstSliceError {
+    match error {
+        PlatformError::Cancelled(reason) => FirstSliceError::Cancelled(reason),
+        _ => FirstSliceError::CatalogCorrupt,
+    }
 }
 
 fn generation_data_error(error: FirstSliceError) -> FirstSliceError {
