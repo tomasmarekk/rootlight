@@ -377,7 +377,7 @@ jobs:
   platform:
     name: platform / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
