@@ -149,12 +149,15 @@ def verify_install_mode(
     ]
     if mode == "global":
         install.insert(2, "--global")
-    else:
-        install[2:2] = ["--prefix", str(project)]
     started = time.monotonic()
 
     try:
-        run(install, environment, stage=f"{mode} npm install")
+        run(
+            install,
+            environment,
+            cwd=project if mode == "local" else None,
+            stage=f"{mode} npm install",
+        )
         install_seconds = time.monotonic() - started
         if not cli.is_file():
             raise NpmInstallError(
@@ -303,12 +306,13 @@ def run(
     environment: dict[str, str],
     *,
     check: bool = True,
+    cwd: Path | None = None,
     stage: str = "command",
 ) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         command,
         check=False,
-        cwd=Path.cwd(),
+        cwd=Path.cwd() if cwd is None else cwd,
         env=environment,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,

@@ -73,6 +73,23 @@ class VerifyNpmInstallTests(unittest.TestCase):
                 stage="service restart",
             )
 
+    def test_run_uses_the_explicit_local_install_directory(self) -> None:
+        completed = verify_npm_install.subprocess.CompletedProcess(
+            args=["npm", "install"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        project = Path("/private/project")
+        with mock.patch.object(
+            verify_npm_install.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            verify_npm_install.run(completed.args, {}, cwd=project)
+
+        self.assertEqual(run.call_args.kwargs["cwd"], project)
+
 
 if __name__ == "__main__":
     unittest.main()
