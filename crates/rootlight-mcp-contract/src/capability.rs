@@ -1677,7 +1677,7 @@ const fn input_shape_hash(tool: McpTool) -> &'static str {
         McpTool::OperationStatus => {
             "9703820cfd7dba86a224059c47287e73e06876df4d3245375fef88489f2554f3"
         }
-        McpTool::CodeLocate => "bdd2589fdad0697156bc225ccf4ebdb9257ccc8f95234c35dd9ae3c52d06fdad",
+        McpTool::CodeLocate => "b91668688cc5139eae13e51d3720319d8167440666155447251d2e29c208a811",
         McpTool::SymbolExplain => {
             "698666081b80d3b8a031dcc103b74f5281dd0caa073d42ff3ee1679c21cf41a7"
         }
@@ -1701,7 +1701,7 @@ const fn input_shape_hash(tool: McpTool) -> &'static str {
         McpTool::ContextPack => "bcefc3fce03c389f26078725694aabdd2878e315e31e213c0ef8fb961b197142",
         McpTool::SourceRead => "df1472b995ed8d489d9abafb8adc95ab0b5da699beb3ed29dcc16b7293de32f8",
         McpTool::QueryAdvanced => {
-            "2e8e0b28deda82821ecc8cacd45b424929303bb5ccca057e89cabfc1552aaa3b"
+            "a05697bd45a30db206a189f177a08f60da5644d897a0eb18390fff58b4a92aa3"
         }
         McpTool::QueryBatch => "7a9e82cf00569c6df57b9cf733703517e918ce5fbc0143c88c61514ef82fb927",
     }
