@@ -752,7 +752,7 @@ fn exercise_operation_quota_isolation(paths: &RuntimePaths) -> Result<(), Lifecy
     // Observe the bounded burst while it is still crossing IPC. Joining first
     // lets finite probes drain before a slower host can sample the backlog.
     let expected_running = default_worker_slots()?;
-    let guard_ready_deadline = quota_deadline(COMMAND_TIMEOUT)?;
+    let guard_ready_deadline = guard_deadline;
     let guard_health = wait_for_health_until(
         &peer,
         |health| {
