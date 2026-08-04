@@ -174,6 +174,12 @@ const PROJECT_ADAPTER_SUPPORT_LANGUAGES: [SemanticProjectLanguage; 5] = [
     SemanticProjectLanguage::Go,
 ];
 
+fn project_adapter_supports_language(language: &str) -> bool {
+    PROJECT_ADAPTER_SUPPORT_LANGUAGES
+        .into_iter()
+        .any(|supported| supported.as_str() == language)
+}
+
 /// Maximum number of distinct source-free diagnostics retained in an index receipt.
 pub const MAX_FIRST_SLICE_INDEX_DIAGNOSTICS: usize = 100;
 
@@ -3987,6 +3993,7 @@ impl FirstSliceService {
                 && self.project_analyzer.is_none())
             .then_some(FirstSliceProjectAnalysisError::Identity);
             if mode == FirstSliceIndexMode::Deep
+                && project_adapter_supports_language(&language)
                 && let Some(project_analyzer) = &self.project_analyzer
             {
                 let context_manifest = project_context_manifest(&language, self.config.hash())?;
@@ -10283,6 +10290,42 @@ mod tests {
                 && coverage.status == "complete"
         }));
         assert_eq!(status.semantic_freshness, "pending_refinement");
+    }
+
+    #[test]
+    fn unsupported_project_language_keeps_structural_coverage() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[("src/value.c", "int c_value(void) { return 1; }\n")],
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer = Arc::new(FailingProjectAnalyzer {
+            identity: content_hash(b"unsupported-language-project-adapter"),
+            error: FirstSliceProjectAnalysisError::Analysis,
+            calls: Arc::clone(&calls),
+        });
+        let mut service =
+            FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("service initializes with a project adapter");
+
+        let receipt = service
+            .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
+            .expect("unsupported project languages retain structural output");
+        let status = service
+            .repository_status(receipt.repository, None)
+            .expect("structural generation status resolves");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(
+            !receipt
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.starts_with("project-adapter-"))
+        );
+        assert!(status.coverage.iter().any(|coverage| {
+            coverage.language == "c" && coverage.tier == "tier_d" && coverage.status == "complete"
+        }));
     }
 
     #[test]
