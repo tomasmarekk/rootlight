@@ -428,11 +428,7 @@ fn wait_for_terminal_operation(
         let response = mcp.call_success(
             &format!("cold-index-operation-{attempt}"),
             "operation.status",
-            json!({
-                "operation_id": operation_id,
-                "wait_ms": revision.map_or(0, |_| 5_000),
-                "after_revision": revision
-            }),
+            operation_status_arguments(operation_id, revision),
         );
         assert_success(&response, "operation.status");
         let operation_data = data(&response);
@@ -454,6 +450,33 @@ fn wait_for_terminal_operation(
         }
         attempt = attempt.saturating_add(1);
     }
+}
+
+fn operation_status_arguments(operation_id: &str, revision: Option<u64>) -> Value {
+    let mut arguments = json!({
+        "operation_id": operation_id,
+        "wait_ms": revision.map_or(0, |_| 5_000)
+    });
+    if let Some(after_revision) = revision {
+        arguments["after_revision"] = json!(after_revision);
+    }
+    arguments
+}
+
+#[test]
+fn initial_operation_status_poll_omits_after_revision() {
+    assert_eq!(
+        operation_status_arguments("op1_fixture", None),
+        json!({"operation_id": "op1_fixture", "wait_ms": 0})
+    );
+    assert_eq!(
+        operation_status_arguments("op1_fixture", Some(7)),
+        json!({
+            "operation_id": "op1_fixture",
+            "wait_ms": 5_000,
+            "after_revision": 7
+        })
+    );
 }
 
 fn terminal_operation(
