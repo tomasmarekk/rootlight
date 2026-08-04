@@ -79,6 +79,7 @@ fn real_repository_cold_index_is_release_bounded() {
     let interrupted_after = read_interrupted_operation(&mut mcp, &interrupted_id);
 
     let indexing_started = Instant::now();
+    let indexing_deadline = indexing_started + Duration::from_millis(spec.maximum_elapsed_ms);
     let admitted = mcp.call_success(
         "cold-index-readmit",
         "repo.index",
@@ -97,20 +98,14 @@ fn real_repository_cold_index_is_release_bounded() {
     let repository_id = required_string(&index_data["repository_id"], "repository identity");
     let structural_id = required_string(&index_data["operation_id"], "structural operation");
     assert_ne!(structural_id, interrupted_id);
-    let structural = wait_for_terminal_operation(
+    let structural = wait_for_terminal_operation(&mut mcp, &structural_id, indexing_deadline);
+    let semantic_id = wait_for_semantic_operation(
         &mut mcp,
         &structural_id,
-        indexing_started + Duration::from_millis(spec.maximum_elapsed_ms),
+        structural.semantic_operation_id.clone(),
+        indexing_deadline,
     );
-    let semantic_id = structural
-        .semantic_operation_id
-        .clone()
-        .expect("auto index exposes a separately owned semantic operation");
-    let semantic = wait_for_terminal_operation(
-        &mut mcp,
-        &semantic_id,
-        indexing_started + Duration::from_millis(spec.maximum_elapsed_ms),
-    );
+    let semantic = wait_for_terminal_operation(&mut mcp, &semantic_id, indexing_deadline);
     let generation = semantic
         .published_generation
         .clone()
@@ -452,6 +447,41 @@ fn wait_for_terminal_operation(
     }
 }
 
+fn wait_for_semantic_operation(
+    mcp: &mut McpProcess,
+    structural_operation_id: &str,
+    initial: Option<String>,
+    indexing_deadline: Instant,
+) -> String {
+    if let Some(operation_id) = initial {
+        return operation_id;
+    }
+    let admission_deadline = indexing_deadline.min(Instant::now() + STARTUP_TIMEOUT);
+    let mut attempt = 0_u64;
+    loop {
+        assert!(
+            Instant::now() < admission_deadline,
+            "auto index did not durably register its semantic operation"
+        );
+        let response = mcp.call_success(
+            &format!("cold-index-semantic-admission-{attempt}"),
+            "operation.status",
+            json!({"operation_id": structural_operation_id, "wait_ms": 0}),
+        );
+        assert_success(&response, "operation.status");
+        let operation_data = data(&response);
+        if let Some(operation_id) = operation_data["semantic_operation_id"].as_str() {
+            return operation_id.to_owned();
+        }
+        assert_eq!(
+            operation_data["operation"]["state"], "published",
+            "structural operation changed state while awaiting semantic admission"
+        );
+        attempt = attempt.saturating_add(1);
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
 fn operation_status_arguments(operation_id: &str, revision: Option<u64>) -> Value {
     let mut arguments = json!({
         "operation_id": operation_id,
@@ -637,15 +667,7 @@ fn locate_complete(
         let response = mcp.call_success(
             &format!("cold-index-locate-{sample}-{pages}"),
             "code.locate",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "generation": generation,
-                "query": query,
-                "search_modes": ["exact"],
-                "max_results": 200,
-                "cursor": cursor,
-                "response_profile": "compact"
-            }),
+            locate_arguments(repository_id, generation, query, cursor.as_deref()),
         );
         assert_read_success(&response, "code.locate", generation);
         for item in data(&response)["matches"]
@@ -670,6 +692,50 @@ fn locate_complete(
         }),
         pages,
     )
+}
+
+fn locate_arguments(
+    repository_id: &str,
+    generation: &str,
+    query: &str,
+    cursor: Option<&str>,
+) -> Value {
+    let mut arguments = json!({
+        "repository": {"repository_id": repository_id},
+        "generation": generation,
+        "query": query,
+        "search_modes": ["exact"],
+        "max_results": 200,
+        "response_profile": "compact"
+    });
+    if let Some(cursor) = cursor {
+        arguments["cursor"] = json!(cursor);
+    }
+    arguments
+}
+
+#[test]
+fn initial_locate_page_omits_cursor() {
+    assert_eq!(
+        locate_arguments("repo1_fixture", "gen1_fixture", "Symbol", None),
+        json!({
+            "repository": {"repository_id": "repo1_fixture"},
+            "generation": "gen1_fixture",
+            "query": "Symbol",
+            "search_modes": ["exact"],
+            "max_results": 200,
+            "response_profile": "compact"
+        })
+    );
+    assert_eq!(
+        locate_arguments(
+            "repo1_fixture",
+            "gen1_fixture",
+            "Symbol",
+            Some("cursor1_fixture")
+        )["cursor"],
+        "cursor1_fixture"
+    );
 }
 
 fn measure_workflows(
