@@ -551,13 +551,9 @@ fn register_autostart(executable: &Path) -> Result<(), WebServiceError> {
 
 #[cfg(target_os = "linux")]
 fn start_registered() -> bool {
-    let mut command = Command::new("systemctl");
-    command
-        .args(["--user", "start", LINUX_UNIT_NAME])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    command.status().is_ok_and(|status| status.success())
+    // A systemd user manager does not inherit per-install state/runtime
+    // overrides. Start this session directly and keep the unit for login.
+    false
 }
 
 #[cfg(target_os = "linux")]
