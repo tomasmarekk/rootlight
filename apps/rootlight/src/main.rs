@@ -293,6 +293,7 @@ fn execute_web_service(arguments: &[std::ffi::OsString]) -> Result<CommandResult
         [command] if command == "uninstall" => {
             let status = web_service::uninstall(&paths)?;
             stop_sibling_daemon_for_uninstall()?;
+            paths.purge_owner()?;
             status
         }
         [command] if command == "install" || command == "start" || command == "restart" => {

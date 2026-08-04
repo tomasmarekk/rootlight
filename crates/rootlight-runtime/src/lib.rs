@@ -216,6 +216,39 @@ impl RuntimePaths {
         }
     }
 
+    /// Removes every Rootlight-owned state and runtime artifact for this user.
+    ///
+    /// Both existing roots are fully validated before either is removed. This
+    /// keeps a hostile replacement at one path from causing partial cleanup at
+    /// the other, while `remove_dir_all` removes links themselves rather than
+    /// following them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] when an existing root is not an owner-private
+    /// directory or when complete removal cannot be confirmed.
+    pub fn purge_owner(&self) -> Result<(), RuntimeError> {
+        let state_exists = self.state_dir.try_exists().map_err(RuntimeError::Io)?;
+        let runtime_exists = self.runtime_dir.try_exists().map_err(RuntimeError::Io)?;
+        if state_exists {
+            validate_private_directory(&self.state_dir, PrivateScope::Account)?;
+        }
+        if runtime_exists {
+            validate_private_directory(&self.runtime_dir, PrivateScope::Session)?;
+        }
+
+        if self.runtime_dir.starts_with(&self.state_dir) {
+            remove_private_tree_if_present(&self.state_dir)?;
+        } else if self.state_dir.starts_with(&self.runtime_dir) {
+            remove_private_tree_if_present(&self.runtime_dir)?;
+        } else {
+            remove_private_tree_if_present(&self.runtime_dir)?;
+            remove_private_tree_if_present(&self.state_dir)?;
+        }
+        remove_empty_rootlight_parent(&self.state_dir)?;
+        remove_empty_rootlight_parent(&self.runtime_dir)
+    }
+
     /// Returns the durable per-user state directory.
     #[must_use]
     pub fn state_dir(&self) -> &Path {
@@ -920,6 +953,39 @@ fn validate_private_directory(path: &Path, scope: PrivateScope) -> Result<(), Ru
         verify_private_windows_dacl(path, scope)?;
     }
     Ok(())
+}
+
+fn remove_private_tree_if_present(path: &Path) -> Result<(), RuntimeError> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(RuntimeError::Io(source)),
+    }
+}
+
+fn remove_empty_rootlight_parent(path: &Path) -> Result<(), RuntimeError> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    let is_rootlight_directory = parent
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| name.eq_ignore_ascii_case("rootlight"));
+    if !is_rootlight_directory {
+        return Ok(());
+    }
+    match fs::remove_dir(parent) {
+        Ok(()) => Ok(()),
+        Err(source)
+            if matches!(
+                source.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(source) => Err(RuntimeError::Io(source)),
+    }
 }
 
 fn open_discovery_no_follow(path: &Path) -> Result<File, RuntimeError> {
@@ -1670,6 +1736,64 @@ mod tests {
         assert!(matches!(paths.validate_client(), Err(RuntimeError::Io(_))));
         assert!(!paths.state_dir().exists());
         assert!(!paths.runtime_dir().exists());
+    }
+
+    #[test]
+    fn owner_purge_removes_nested_runtime_and_empty_application_root() {
+        let temporary = private_tempdir();
+        let vendor = temporary.path().join("vendor");
+        let application = vendor.join("rootlight");
+        let state = application.join("data");
+        let runtime = state.join("runtime");
+        fs::create_dir_all(&application).expect("application parent creates");
+        let paths = RuntimePaths::new(state, runtime).expect("paths are valid");
+        paths.prepare_owner().expect("private directories prepare");
+        fs::write(paths.state_dir().join("catalog.db"), b"catalog").expect("owned state writes");
+        fs::write(paths.runtime_dir().join("daemon.json"), b"runtime")
+            .expect("owned runtime writes");
+
+        paths.purge_owner().expect("owner data purges");
+
+        assert!(!application.exists());
+        assert!(vendor.is_dir());
+    }
+
+    #[test]
+    fn owner_purge_removes_separate_private_roots() {
+        let temporary = private_tempdir();
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("session").join("rootlight"),
+        )
+        .expect("paths are valid");
+        paths.prepare_owner().expect("private directories prepare");
+        fs::write(paths.state_dir().join("catalog.db"), b"catalog").expect("owned state writes");
+        fs::write(paths.runtime_dir().join("daemon.json"), b"runtime")
+            .expect("owned runtime writes");
+
+        paths.purge_owner().expect("owner data purges");
+
+        assert!(!paths.state_dir().exists());
+        assert!(!paths.runtime_dir().exists());
+    }
+
+    #[test]
+    fn owner_purge_rejects_a_hostile_root_before_partial_cleanup() {
+        let temporary = private_tempdir();
+        let state = temporary.path().join("state");
+        let runtime = temporary.path().join("runtime");
+        fs::write(&state, b"foreign").expect("hostile state writes");
+        prepare_private_directory(&runtime, PrivateScope::Session)
+            .expect("runtime directory prepares");
+        fs::write(runtime.join("sentinel"), b"preserve").expect("runtime sentinel writes");
+        let paths = RuntimePaths::new(state.clone(), runtime.clone()).expect("paths are valid");
+
+        assert!(matches!(
+            paths.purge_owner(),
+            Err(RuntimeError::InsecureDirectory)
+        ));
+        assert!(state.is_file());
+        assert!(runtime.join("sentinel").is_file());
     }
 
     #[test]
