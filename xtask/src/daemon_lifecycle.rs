@@ -742,12 +742,15 @@ fn exercise_operation_quota_isolation(paths: &RuntimePaths) -> Result<(), Lifecy
             .collect::<Result<Vec<_>, _>>()?;
         guards.push((guard, operations));
     }
-    let guard_deadline = quota_deadline(COMMAND_TIMEOUT)?;
-    submit_guard_operations(&guards, guard_deadline).map_err(|error| match error {
-        LifecycleError::QuotaGuardWindowExpired => LifecycleError::QuotaGuardBacklogUnavailable,
-        other => other,
-    })?;
+    let guard_deadline = quota_deadline(START_TIMEOUT)?;
+    let guard_submissions =
+        start_guard_operations(&guards, guard_deadline).map_err(|error| match error {
+            LifecycleError::QuotaGuardWindowExpired => LifecycleError::QuotaGuardBacklogUnavailable,
+            other => other,
+        })?;
 
+    // Observe the bounded burst while it is still crossing IPC. Joining first
+    // lets finite probes drain before a slower host can sample the backlog.
     let expected_running = default_worker_slots()?;
     let guard_ready_deadline = quota_deadline(COMMAND_TIMEOUT)?;
     let guard_health = wait_for_health_until(
@@ -815,6 +818,10 @@ fn exercise_operation_quota_isolation(paths: &RuntimePaths) -> Result<(), Lifecy
             peer_status.state,
         ));
     }
+    join_guard_operations(guard_submissions).map_err(|error| match error {
+        LifecycleError::QuotaGuardWindowExpired => LifecycleError::QuotaGuardBacklogUnavailable,
+        other => other,
+    })?;
 
     for operation in noisy_operations {
         cancel_and_wait(&noisy, operation)?;
@@ -976,10 +983,10 @@ fn quota_operation(identity: u8, ordinal: u32) -> Result<OperationId, LifecycleE
     Ok(OperationId::from_bytes(bytes))
 }
 
-fn submit_guard_operations(
+fn start_guard_operations(
     guards: &[(Arc<Client>, Vec<OperationId>)],
     deadline: Instant,
-) -> Result<(), LifecycleError> {
+) -> Result<Vec<JoinHandle<Result<(), LifecycleError>>>, LifecycleError> {
     if guards.is_empty() {
         return Err(LifecycleError::InvalidWorkerConfiguration);
     }
@@ -1013,6 +1020,12 @@ fn submit_guard_operations(
         }));
     }
 
+    Ok(submissions)
+}
+
+fn join_guard_operations(
+    submissions: Vec<JoinHandle<Result<(), LifecycleError>>>,
+) -> Result<(), LifecycleError> {
     for submission in submissions {
         submission
             .join()
