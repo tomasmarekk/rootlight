@@ -3740,6 +3740,8 @@ fn repository_operation_status(
             OperationMetadata::from_durable_context(durable_context, &record)
         }
     };
+    let record =
+        persist_visible_operation_resources(journal, runtime, context.deadline, record, &metadata)?;
     if metadata.publication == PublicationState::FailedClosed {
         // Journal success closes the cancellation race before the process-local
         // generation commit. A later commit failure cannot rewrite that durable
@@ -3858,6 +3860,28 @@ fn public_operation_resources(
             .peak_rss_bytes
             .max(metadata.peak_rss_bytes.load(Ordering::Relaxed)),
         record.written_bytes.max(metadata.written_bytes),
+    )
+}
+
+fn persist_visible_operation_resources(
+    journal: &JournalActorHandle,
+    runtime: &tokio::runtime::Runtime,
+    deadline: Instant,
+    record: OperationRecord,
+    metadata: &OperationMetadata,
+) -> Result<OperationRecord, PublicError> {
+    if record.state.is_terminal() {
+        return Ok(record);
+    }
+    let (peak_rss_bytes, written_bytes) = public_operation_resources(&record, metadata);
+    if peak_rss_bytes == record.peak_rss_bytes && written_bytes == record.written_bytes {
+        return Ok(record);
+    }
+    // Commit every nonterminal resource snapshot before exposing it so an
+    // immediate process restart cannot make an already observed value regress.
+    journal_lifecycle_call(
+        runtime,
+        journal.update_resources_until(record.operation, peak_rss_bytes, written_bytes, deadline),
     )
 }
 
@@ -9146,6 +9170,86 @@ mod tests {
         );
         drop(handle);
         actor.join().expect("empty journal actor joins");
+    }
+
+    #[test]
+    fn operation_status_persists_visible_resources_before_restart() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let operation = OperationId::from_bytes([76; 16]);
+        let repository = RepositoryId::from_bytes([76; 16]);
+        let peak_rss_bytes = 64 * 1024 * 1024;
+        let written_bytes = 8 * 1024;
+        let journal = Arc::new(
+            OperationJournal::open(&paths.operation_journal_path())
+                .expect("persistent journal opens"),
+        );
+        journal
+            .submit(repository_submission(operation, 76))
+            .expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let mut metadata = OperationMetadataSet::new(4);
+        metadata
+            .reserve(operation, 76, Some(repository))
+            .expect("metadata reserves");
+        let operation_metadata = metadata
+            .records
+            .get_mut(&operation)
+            .expect("metadata exists");
+        operation_metadata
+            .peak_rss_bytes
+            .store(peak_rss_bytes, AtomicOrdering::Relaxed);
+        operation_metadata.written_bytes = written_bytes;
+        let metadata = Mutex::new(metadata);
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("journal actor starts");
+        let handle = actor.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::from_bytes([76; 16]),
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation: Cancellation::with_deadline(deadline),
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+
+        let response = repository_operation_status(
+            &handle,
+            &metadata,
+            &runtime,
+            daemon::RepositoryOperationStatusRequest {
+                schema_version: Some(schema_version()),
+                operation: Some(operation_to_wire(operation)),
+                action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                wait_ms: None,
+                after_revision: None,
+            },
+            &context,
+        )
+        .expect("running operation reports status");
+
+        assert_eq!(response.peak_rss_bytes, peak_rss_bytes);
+        assert_eq!(response.written_bytes, written_bytes);
+        drop(handle);
+        actor.join().expect("journal actor joins");
+        drop(journal);
+
+        let reopened = OperationJournal::open(&paths.operation_journal_path())
+            .expect("persistent journal reopens");
+        let recovered = reopened.status(operation).expect("recovered status loads");
+        assert_eq!(recovered.state, OperationState::Interrupted);
+        assert_eq!(recovered.peak_rss_bytes, peak_rss_bytes);
+        assert_eq!(recovered.written_bytes, written_bytes);
     }
 
     #[test]
