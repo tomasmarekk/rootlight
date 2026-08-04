@@ -784,12 +784,13 @@ impl<'a> DiscoveryState<'a> {
             return Ok(());
         }
         let snapshot_result = match cached_snapshot {
-            Some(snapshot) => {
-                if snapshot.metadata() != observed_metadata {
-                    return Err(DiscoveryError::IncrementalDrift);
-                }
-                Ok(snapshot)
-            }
+            Some(snapshot) => revalidate_cached_snapshot(
+                self.root,
+                &path,
+                observed_metadata,
+                snapshot,
+                self.cancellation,
+            ),
             None => self.snapshot_for_path(&path, observed_metadata),
         };
         let snapshot = match snapshot_result {
@@ -834,31 +835,13 @@ impl<'a> DiscoveryState<'a> {
     ) -> Result<SourceSnapshot, DiscoveryError> {
         let file = self.root.file_id(path);
         if let Some(snapshot) = self.cached_snapshots.remove(&file) {
-            if snapshot.file() != file || snapshot.path() != path {
-                return Err(DiscoveryError::IncrementalDrift);
-            }
-            if snapshot.metadata() == observed_metadata && observed_metadata.supports_hash_reuse() {
-                return Ok(snapshot);
-            }
-            if snapshot.metadata().length != observed_metadata.length {
-                return Err(DiscoveryError::IncrementalDrift);
-            }
-            let cached_hash = snapshot.content_hash();
-            drop(snapshot);
-            // Windows lacks a safe change token, and a directory-entry handle
-            // can temporarily expose weaker metadata under file sharing.
-            // Reopen and hash before accepting the cached content.
-            let capture_limit = observed_metadata.length.max(1);
-            let refreshed =
-                self.root
-                    .snapshot_with_cancellation(path, capture_limit, self.cancellation)?;
-            if refreshed.file() != file
-                || refreshed.path() != path
-                || refreshed.content_hash() != cached_hash
-            {
-                return Err(DiscoveryError::IncrementalDrift);
-            }
-            return Ok(refreshed);
+            return revalidate_cached_snapshot(
+                self.root,
+                path,
+                observed_metadata,
+                snapshot,
+                self.cancellation,
+            );
         }
         if observed_metadata.length > self.limits.max_file_bytes {
             return Err(DiscoveryError::Vfs(VfsError::FileTooLarge {
@@ -930,6 +913,40 @@ impl<'a> DiscoveryState<'a> {
             snapshots: self.snapshots,
         }
     }
+}
+
+fn revalidate_cached_snapshot(
+    root: &RepositoryRoot,
+    path: &RelativePath,
+    observed_metadata: rootlight_vfs::SnapshotMetadata,
+    snapshot: SourceSnapshot,
+    cancellation: &Cancellation,
+) -> Result<SourceSnapshot, DiscoveryError> {
+    let file = root.file_id(path);
+    if snapshot.file() != file || snapshot.path() != path {
+        return Err(DiscoveryError::IncrementalDrift);
+    }
+    if snapshot.metadata() == observed_metadata && observed_metadata.supports_hash_reuse() {
+        return Ok(snapshot);
+    }
+    if snapshot.metadata().length != observed_metadata.length {
+        return Err(DiscoveryError::IncrementalDrift);
+    }
+    let cached_hash = snapshot.content_hash();
+    drop(snapshot);
+    // Windows lacks a safe change token, and a directory-entry handle can
+    // temporarily expose weaker metadata while another process shares it.
+    // Reopen and hash before accepting any cached content, including ignore
+    // files that were already opened to construct scoped policy.
+    let capture_limit = observed_metadata.length.max(1);
+    let refreshed = root.snapshot_with_cancellation(path, capture_limit, cancellation)?;
+    if refreshed.file() != file
+        || refreshed.path() != path
+        || refreshed.content_hash() != cached_hash
+    {
+        return Err(DiscoveryError::IncrementalDrift);
+    }
+    Ok(refreshed)
 }
 
 fn child_path(
@@ -1213,6 +1230,33 @@ mod tests {
                 observed: 6,
                 maximum: 5
             })
+        ));
+    }
+
+    #[test]
+    fn cached_snapshot_revalidation_handles_weak_directory_metadata() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, ".gitignore", b"target/\n");
+        let root = fixture_root(&temporary, b"weak-directory-metadata");
+        let path = RelativePath::parse(Path::new(".gitignore")).expect("fixture path is valid");
+        let cancellation = Cancellation::new();
+        let snapshot = root
+            .snapshot_with_cancellation(&path, 8, &cancellation)
+            .expect("fixture snapshot succeeds");
+        let mut weak_metadata = snapshot.metadata();
+        weak_metadata.volume = None;
+        weak_metadata.file_index = None;
+
+        let refreshed =
+            revalidate_cached_snapshot(&root, &path, weak_metadata, snapshot, &cancellation)
+                .expect("weak metadata revalidates from file content");
+        assert_eq!(refreshed.content(), b"target/\n");
+
+        fs::write(temporary.path().join(".gitignore"), b"vendor/\n")
+            .expect("same-length rewrite succeeds");
+        assert!(matches!(
+            revalidate_cached_snapshot(&root, &path, weak_metadata, refreshed, &cancellation,),
+            Err(DiscoveryError::IncrementalDrift)
         ));
     }
 
