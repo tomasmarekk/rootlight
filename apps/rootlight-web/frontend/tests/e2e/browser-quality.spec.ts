@@ -55,7 +55,10 @@ test("keeps the Projects entry bounded and lazy-loads graph resources", async ({
   expect(publicSourceMaps).toEqual([]);
   expect(embeddedSourceMaps).toEqual([]);
 
-  await page.getByRole("link", { name: /Synthetic Atlas/u }).click();
+  await page
+    .getByRole("article", { name: "Synthetic Atlas" })
+    .getByRole("link", { name: "Open project" })
+    .click();
   await expect(page.locator(".graph-viewport__canvas[data-lifecycle='ready'] canvas")).toBeVisible({
     timeout: 15_000,
   });
@@ -126,7 +129,10 @@ test("meets maximum supported graph interaction and disposal budgets", async ({
   for (let iteration = 0; iteration < graphPerformanceIterations; iteration += 1) {
     const priorFirstUseful = await markCount(page, "rootlight.graph.first-useful");
     const priorSettle = await markCount(page, "rootlight.graph.controller.settle");
-    await page.getByRole("link", { name: /Synthetic Atlas/u }).click();
+    await page
+      .getByRole("article", { name: "Synthetic Atlas" })
+      .getByRole("link", { name: "Open project" })
+      .click();
     await expect(
       page.locator(".graph-viewport__canvas[data-lifecycle='ready'] canvas"),
     ).toBeVisible({

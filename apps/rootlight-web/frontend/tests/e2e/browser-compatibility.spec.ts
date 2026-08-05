@@ -23,7 +23,9 @@ test("keeps the keyboard fallback usable at 200% zoom equivalent", async ({ page
   await installQualityApplication(page, { edgeCount: 24, nodeCount: 12 });
   await page.goto(sessionUrl);
 
-  const project = page.getByRole("link", { name: /Synthetic Atlas/u });
+  const project = page
+    .getByRole("article", { name: "Synthetic Atlas" })
+    .getByRole("link", { name: "Open project" });
   await project.focus();
   await expect(project).toBeFocused();
   await page.keyboard.press("Enter");

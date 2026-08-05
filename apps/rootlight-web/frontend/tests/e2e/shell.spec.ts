@@ -75,7 +75,10 @@ test("opens an exact generation from an immutable catalog page", async ({ page }
   await page.getByRole("combobox", { name: "State" }).selectOption("ready");
   await page.getByRole("searchbox", { name: "Search projects" }).fill("root");
   await page.getByRole("searchbox", { name: "Search projects" }).press("Enter");
-  await page.getByRole("link", { name: /Rootlight/u }).click();
+  await page
+    .getByRole("article", { name: "Rootlight" })
+    .getByRole("link", { name: "Open project" })
+    .click();
 
   await expect(page).toHaveURL((url) => {
     return (
@@ -164,7 +167,10 @@ test("explores exact-generation evidence through the accessible graph companion"
   await mockApplication(page, [projectSummary()]);
   await mockEvidence(page);
   await page.goto("/");
-  await page.getByRole("link", { name: /Rootlight/u }).click();
+  await page
+    .getByRole("article", { name: "Rootlight" })
+    .getByRole("link", { name: "Open project" })
+    .click();
 
   const runNode = page.getByRole("button", { name: /run symbol src\/main\.rs/u });
   await expect(runNode).toBeVisible();
@@ -242,7 +248,10 @@ test("reopens a fallback projection, clears source, and renews the session fail 
   const application = await mockApplication(page, [projectSummary()]);
   const evidence = await mockEvidence(page);
   await page.goto("/");
-  await page.getByRole("link", { name: /Rootlight/u }).click();
+  await page
+    .getByRole("article", { name: "Rootlight" })
+    .getByRole("link", { name: "Open project" })
+    .click();
 
   await expect(page.getByRole("heading", { name: "Graphical view is unavailable" })).toBeVisible();
   await page.getByRole("button", { name: /run symbol src\/main\.rs/u }).click();
@@ -300,7 +309,9 @@ test("completes the critical local path using keyboard input only", async ({ pag
   await activate(page.getByRole("button", { name: "Start detached index" }));
   await expect(page.getByRole("dialog")).toHaveCount(0);
 
-  await activate(page.getByRole("link", { name: /Rootlight/u }));
+  await activate(
+    page.getByRole("article", { name: "Rootlight" }).getByRole("link", { name: "Open project" }),
+  );
   const companionSearch = page.getByRole("searchbox", { name: "Search visible nodes" });
   await companionSearch.focus();
   await expect(companionSearch).toBeFocused();
@@ -636,6 +647,7 @@ function projectSummary() {
     activeGenerationId: generationId,
     displayName: "Rootlight",
     alias: null,
+    rootPath: "/work/rootlight",
     generationCount: "2",
     lifecycleState: "ready",
     languages: ["rust"],

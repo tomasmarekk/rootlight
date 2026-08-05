@@ -259,6 +259,7 @@ function projectSummary() {
     activeGenerationId,
     displayName: "Synthetic Atlas",
     alias: null,
+    rootPath: "/work/synthetic-atlas",
     generationCount: "2",
     lifecycleState: "ready",
     languages: ["synthetic"],
