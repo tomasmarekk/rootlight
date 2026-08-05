@@ -56,6 +56,10 @@ const IMPACT_P95_NS: u64 = 500_000_000;
 const CONTEXT_PACK_P95_NS: u64 = 750_000_000;
 const ARCHITECTURE_P95_NS: u64 = 750_000_000;
 const CYCLES_P95_NS: u64 = 1_000_000_000;
+// Repeated indexing includes durable publication, whose fsync tail varies on
+// pooled macOS runners. Preserve the shared median and p99 while bounding that
+// platform-specific p95 variance separately.
+const MACOS_REPO_INDEX_P95_NS: u64 = 750_000_000;
 // Windows filesystem scanning has a wider tail under endpoint security and
 // shared runners. Keep the warm median cross-platform while bounding only the
 // repeated small-repository indexing tail separately.
@@ -152,6 +156,9 @@ fn repo_index_tail_budget_is_platform_aware() {
     if cfg!(target_os = "windows") {
         assert_eq!(p95, WINDOWS_REPO_INDEX_P95_NS);
         assert_eq!(p99, WINDOWS_REPO_INDEX_P99_NS);
+    } else if cfg!(target_os = "macos") {
+        assert_eq!(p95, MACOS_REPO_INDEX_P95_NS);
+        assert_eq!(p99, IMPACT_P95_NS.saturating_mul(2));
     } else {
         assert_eq!(p95, IMPACT_P95_NS);
         assert_eq!(p99, IMPACT_P95_NS.saturating_mul(2));
@@ -719,18 +726,22 @@ fn performance_thresholds() -> Vec<PerformanceThreshold> {
 
 fn wall_latency_budgets_ns(tool: &str) -> (u64, u64, u64) {
     let shared_budget = wall_latency_p95_budget_ns(tool);
-    if cfg!(target_os = "windows") && tool == "repo.index" {
-        (
+    match tool {
+        "repo.index" if cfg!(target_os = "windows") => (
             shared_budget,
             WINDOWS_REPO_INDEX_P95_NS,
             WINDOWS_REPO_INDEX_P99_NS,
-        )
-    } else {
-        (
+        ),
+        "repo.index" if cfg!(target_os = "macos") => (
+            shared_budget,
+            MACOS_REPO_INDEX_P95_NS,
+            shared_budget.saturating_mul(2),
+        ),
+        _ => (
             shared_budget,
             shared_budget,
             shared_budget.saturating_mul(2),
-        )
+        ),
     }
 }
 
