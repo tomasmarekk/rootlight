@@ -114,6 +114,13 @@ class VerifyNpmInstallTests(unittest.TestCase):
 
                 self.assertEqual(environment[variable], str(login.resolve()))
 
+    def test_macos_runtime_uses_the_short_physical_temporary_root(self) -> None:
+        self.assertEqual(
+            verify_npm_install.runtime_temporary_parent("darwin"),
+            Path("/private/tmp"),
+        )
+        self.assertIsNone(verify_npm_install.runtime_temporary_parent("linux"))
+
 
 if __name__ == "__main__":
     unittest.main()

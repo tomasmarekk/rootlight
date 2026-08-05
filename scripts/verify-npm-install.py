@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -91,18 +92,24 @@ def verify_install(
 
     root_tarball = pack(root_directory, tarballs, pack_environment, npm)
     native_tarball = pack(platform_directory, tarballs, pack_environment, npm)
-    modes = [
-        verify_install_mode(
-            mode,
-            output_dir,
-            root_tarball,
-            native_tarball,
-            native_directory,
-            native_package,
-            npm,
-        )
-        for mode in ("local", "global")
-    ]
+    with tempfile.TemporaryDirectory(
+        prefix="rootlight-npm-smoke-",
+        dir=runtime_temporary_parent(sys.platform),
+    ) as temporary_runtime:
+        runtime_root = Path(temporary_runtime)
+        modes = [
+            verify_install_mode(
+                mode,
+                output_dir,
+                runtime_root / mode,
+                root_tarball,
+                native_tarball,
+                native_directory,
+                native_package,
+                npm,
+            )
+            for mode in ("local", "global")
+        ]
     evidence = {
         "modes": modes,
         "native_package": native_package,
@@ -116,6 +123,7 @@ def verify_install(
 def verify_install_mode(
     mode: str,
     output_dir: Path,
+    runtime: Path,
     root_tarball: Path,
     native_tarball: Path,
     native_directory: str,
@@ -126,7 +134,6 @@ def verify_install_mode(
     prefix = root / "prefix"
     cache = root / "cache"
     state = root / "state"
-    runtime = root / "runtime"
     project = root / "project"
     root.mkdir()
     prefix.mkdir()
@@ -277,6 +284,14 @@ def npm_executable(platform: str = os.name) -> str:
     if executable is None:
         raise NpmInstallError(f"{command} is not available on PATH")
     return executable
+
+
+def runtime_temporary_parent(platform: str) -> Path | None:
+    if platform != "darwin":
+        return None
+    # macOS AF_UNIX paths are shorter than Linux paths, and /var is an alias
+    # whose expansion can make an otherwise short temporary path invalid.
+    return Path("/private/tmp")
 
 
 def pack(
