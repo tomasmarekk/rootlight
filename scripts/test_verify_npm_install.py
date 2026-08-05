@@ -90,6 +90,30 @@ class VerifyNpmInstallTests(unittest.TestCase):
 
         self.assertEqual(run.call_args.kwargs["cwd"], project)
 
+    def test_login_registration_uses_the_disposable_user_boundary(self) -> None:
+        prefix = Path("/private/prefix")
+        cache = Path("/private/cache")
+        state = Path("/private/state")
+        runtime = Path("/private/runtime")
+        login = Path("/private/login")
+
+        for platform, variable in (
+            ("linux", "XDG_CONFIG_HOME"),
+            ("darwin", "HOME"),
+            ("win32", "APPDATA"),
+        ):
+            with self.subTest(platform=platform):
+                environment = verify_npm_install.npm_environment(
+                    prefix,
+                    cache,
+                    state,
+                    runtime,
+                    login,
+                    platform=platform,
+                )
+
+                self.assertEqual(environment[variable], str(login.resolve()))
+
 
 if __name__ == "__main__":
     unittest.main()

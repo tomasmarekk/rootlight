@@ -86,6 +86,7 @@ def verify_install(
         cache,
         output_dir / "pack-state",
         output_dir / "pack-runtime",
+        output_dir / "pack-login",
     )
 
     root_tarball = pack(root_directory, tarballs, pack_environment, npm)
@@ -133,7 +134,7 @@ def verify_install_mode(
     if mode == "local":
         project.mkdir()
         write_json_new(project / "package.json", {"private": True})
-    environment = npm_environment(prefix, cache, state, runtime)
+    environment = npm_environment(prefix, cache, state, runtime, root / "login")
     cli = npm_cli_path(prefix)
     package_root = installed_package_path(mode, prefix, project)
     native_cli = native_cli_path(package_root, native_directory)
@@ -238,6 +239,9 @@ def npm_environment(
     cache: Path,
     state: Path,
     runtime: Path,
+    login: Path,
+    *,
+    platform: str = sys.platform,
 ) -> dict[str, str]:
     environment = os.environ.copy()
     command_directory = prefix if os.name == "nt" else prefix / "bin"
@@ -255,6 +259,15 @@ def npm_environment(
             "ROOTLIGHT_STATE_DIR": str(state.resolve()),
         }
     )
+    # Login registration is part of the install contract and must stay inside
+    # the same disposable user boundary as package and runtime state.
+    login = login.resolve()
+    if platform == "win32":
+        environment["APPDATA"] = str(login)
+    elif platform == "darwin":
+        environment["HOME"] = str(login)
+    elif platform.startswith("linux"):
+        environment["XDG_CONFIG_HOME"] = str(login)
     return environment
 
 
