@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -25,6 +25,8 @@ const cliBridgeSchema = "rootlight.npm-cli-bridge/1";
 const cliBridgeMarker = "rootlight npm cli bridge";
 const cliBridgeManifest = ".rootlight-cli-bridge.json";
 const cliBridgeRuntime = ".rootlight-cli-bridge.mjs";
+const cliBridgeCleanupRuntime = ".rootlight-cli-cleanup.mjs";
+const managedUninstallEnvironment = "ROOTLIGHT_NPM_MANAGED_UNINSTALL";
 const maximumBridgeFileBytes = 64 * 1024;
 const nativePackages = new Map([
   ["darwin-arm64", "@tomasmarekk/rootlight-darwin-arm64"],
@@ -76,7 +78,10 @@ export function runLifecycle(action) {
     }
     fail(`rootlight: failed to ${action} the local service`);
   }
-  if (action === "uninstall") {
+  if (
+    action === "uninstall" &&
+    process.env[managedUninstallEnvironment] !== "1"
+  ) {
     try {
       removeCliBridge();
     } catch (error) {
@@ -107,10 +112,17 @@ function uninstallRootlight() {
           rootPackageName,
           nativePackageForCurrentPlatform(),
         ];
-  const result = spawnNpm(arguments_, "inherit");
+  const result = spawnNpm(arguments_, "inherit", {
+    ...process.env,
+    [managedUninstallEnvironment]: "1",
+  });
   if (result.error === undefined && result.status === 0) {
     try {
-      removeCliBridge();
+      if (process.platform === "win32") {
+        scheduleCliBridgeRemoval();
+      } else {
+        removeCliBridge();
+      }
     } catch (error) {
       fail(`rootlight: failed to remove CLI access: ${errorMessage(error)}`);
     }
@@ -193,6 +205,13 @@ function installCliBridge() {
       "",
     ].join("\n"),
   );
+  writeBridgeFile(
+    join(context.binDirectory, cliBridgeCleanupRuntime),
+    readFileSync(
+      fileURLToPath(new URL("./remove-cli-bridge.mjs", import.meta.url)),
+      "utf8",
+    ),
+  );
   for (const executable of publicExecutables) {
     writeExecutableShims(context.binDirectory, executable);
   }
@@ -220,26 +239,62 @@ function removeCliBridgeAfterFailedInstall() {
 }
 
 function removeCliBridge() {
+  const removal = validatedCliBridgeRemoval();
+  if (removal === undefined) {
+    return;
+  }
+  for (const name of bridgeFileNames()) {
+    rmSync(join(removal.binDirectory, name), { force: true });
+  }
+  rmSync(removal.manifestPath, { force: true });
+}
+
+function scheduleCliBridgeRemoval() {
+  const removal = validatedCliBridgeRemoval();
+  if (removal === undefined) {
+    return;
+  }
+  // A Windows command processor may still be reading the active .cmd shim.
+  // Delegate its removal so `rootlight uninstall` can return the real exit code.
+  const cleanup = spawn(
+    process.execPath,
+    [
+      join(removal.binDirectory, cliBridgeCleanupRuntime),
+      packageRoot(),
+      removal.installPrefix,
+      removal.binDirectory,
+    ],
+    {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    },
+  );
+  cleanup.unref();
+}
+
+function validatedCliBridgeRemoval() {
   const context = packageInstallContext();
   const manifestPath = join(context.binDirectory, cliBridgeManifest);
   const manifest = readBridgeManifest(manifestPath);
   if (
     manifest === undefined ||
-    !samePath(manifest.packageRoot, packageRoot())
+    !samePath(manifest.packageRoot, packageRoot()) ||
+    !samePath(manifest.installPrefix, context.prefix)
   ) {
-    return;
+    return undefined;
   }
   for (const name of bridgeFileNames()) {
     const path = join(context.binDirectory, name);
-    if (!existsSync(path)) {
-      continue;
+    if (existsSync(path)) {
+      validateOwnedBridgeFile(path);
     }
-    validateOwnedBridgeFile(path);
   }
-  for (const name of bridgeFileNames()) {
-    rmSync(join(context.binDirectory, name), { force: true });
-  }
-  rmSync(manifestPath, { force: true });
+  return {
+    binDirectory: context.binDirectory,
+    installPrefix: context.prefix,
+    manifestPath,
+  };
 }
 
 function removeSupersededLocalBridge(binDirectory) {
@@ -248,10 +303,12 @@ function removeSupersededLocalBridge(binDirectory) {
   if (manifest === undefined) {
     return;
   }
-  const runtimePath = join(binDirectory, cliBridgeRuntime);
-  if (existsSync(runtimePath)) {
-    validateOwnedBridgeFile(runtimePath);
-    rmSync(runtimePath);
+  for (const name of [cliBridgeRuntime, cliBridgeCleanupRuntime]) {
+    const runtimePath = join(binDirectory, name);
+    if (existsSync(runtimePath)) {
+      validateOwnedBridgeFile(runtimePath);
+      rmSync(runtimePath);
+    }
   }
   rmSync(manifestPath);
 }
@@ -337,7 +394,7 @@ function readBridgeManifest(path) {
 }
 
 function bridgeFileNames() {
-  const names = [cliBridgeRuntime];
+  const names = [cliBridgeRuntime, cliBridgeCleanupRuntime];
   for (const executable of publicExecutables) {
     names.push(executable);
     if (process.platform === "win32") {
@@ -400,11 +457,12 @@ function npmGlobalPrefix() {
   return resolve(prefix);
 }
 
-function spawnNpm(arguments_, stdio) {
+function spawnNpm(arguments_, stdio, environment = process.env) {
   // Execute npm's JavaScript entry point so Windows never needs a shell to
   // dispatch npm.cmd, including from a bare `rootlight uninstall`.
   return spawnSync(process.execPath, [resolveNpmCli(), ...arguments_], {
     encoding: stdio === "pipe" ? "utf8" : undefined,
+    env: environment,
     stdio,
   });
 }

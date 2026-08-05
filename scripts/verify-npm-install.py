@@ -203,6 +203,14 @@ def verify_install_mode(
         sentinel.write_bytes(b"owned state")
 
         run([str(cli), "uninstall"], environment, stage=f"{mode} rootlight uninstall")
+        wait_for_paths_removed(
+            (
+                cli,
+                package_root,
+                native_cli,
+                native_cli.parent.parent,
+            )
+        )
         if (
             cli.exists()
             or package_root.exists()
@@ -489,6 +497,15 @@ def wait_for_port(*, closed: bool) -> None:
         time.sleep(0.1)
     expected = "close" if closed else "open"
     raise NpmInstallError(f"Rootlight Web UI port did not {expected}")
+
+
+def wait_for_paths_removed(paths: tuple[Path, ...]) -> None:
+    deadline = time.monotonic() + STOP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if not any(path.exists() for path in paths):
+            return
+        time.sleep(0.05)
+    raise NpmInstallError("Rootlight uninstall retained an npm package")
 
 
 def npm_cli_path(prefix: Path) -> Path:

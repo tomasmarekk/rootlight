@@ -46,6 +46,7 @@ NPM_RUNTIME_FILES = (
     "packaging/npm/rootlight.mjs",
     "packaging/npm/rootlight-mcp.mjs",
     "packaging/npm/run-native.mjs",
+    "packaging/npm/remove-cli-bridge.mjs",
     "packaging/npm/postinstall.mjs",
     "packaging/npm/preuninstall.mjs",
 )

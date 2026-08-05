@@ -22,9 +22,7 @@ const nativePackages = new Map([
   ["win32-x64", "@tomasmarekk/rootlight-win32-x64-msvc"],
 ]);
 
-const nativePackage = nativePackages.get(
-  `${process.platform}-${process.arch}`,
-);
+const nativePackage = nativePackages.get(`${process.platform}-${process.arch}`);
 assert.notEqual(nativePackage, undefined, "test host must be supported");
 
 const sourceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -48,10 +46,14 @@ try {
     "rootlight.mjs",
     "rootlight-mcp.mjs",
     "run-native.mjs",
+    "remove-cli-bridge.mjs",
     "postinstall.mjs",
     "preuninstall.mjs",
   ]) {
-    copyFileSync(join(sourceRoot, "packaging", "npm", file), join(rootBin, file));
+    copyFileSync(
+      join(sourceRoot, "packaging", "npm", file),
+      join(rootBin, file),
+    );
   }
   writeFileSync(
     join(nativeRoot, "package.json"),
@@ -131,13 +133,55 @@ try {
   for (const name of [
     ".rootlight-cli-bridge.json",
     ".rootlight-cli-bridge.mjs",
+    ".rootlight-cli-cleanup.mjs",
     "rootlight",
     "rootlight-mcp",
     ...(process.platform === "win32"
-      ? ["rootlight.cmd", "rootlight.ps1", "rootlight-mcp.cmd", "rootlight-mcp.ps1"]
+      ? [
+          "rootlight.cmd",
+          "rootlight.ps1",
+          "rootlight-mcp.cmd",
+          "rootlight-mcp.ps1",
+        ]
       : []),
   ]) {
     assert.equal(existsSync(join(globalBin, name)), false, `${name} remained`);
+  }
+
+  if (process.platform === "win32") {
+    const reinstall = spawnSync(
+      process.execPath,
+      [join(rootBin, "postinstall.mjs")],
+      {
+        cwd: temporary,
+        encoding: "utf8",
+        env: lifecycleEnvironment,
+      },
+    );
+    assert.equal(reinstall.status, 0, reinstall.stderr);
+    const managedPreuninstall = spawnSync(
+      process.execPath,
+      [join(rootBin, "preuninstall.mjs")],
+      {
+        cwd: temporary,
+        encoding: "utf8",
+        env: {
+          ...lifecycleEnvironment,
+          ROOTLIGHT_NPM_MANAGED_UNINSTALL: "1",
+        },
+      },
+    );
+    assert.equal(managedPreuninstall.status, 0, managedPreuninstall.stderr);
+    const cleanupRuntime = join(globalBin, ".rootlight-cli-cleanup.mjs");
+    assert.equal(existsSync(cleanupRuntime), true);
+    const deferredCleanup = spawnSync(
+      process.execPath,
+      [cleanupRuntime, join(scope, "rootlight"), temporary, globalBin],
+      { encoding: "utf8", env: lifecycleEnvironment },
+    );
+    assert.equal(deferredCleanup.status, 0, deferredCleanup.stderr);
+    assert.equal(existsSync(cleanupRuntime), false);
+    assert.equal(existsSync(join(globalBin, "rootlight.cmd")), false);
   }
 
   mkdirSync(globalBin, { recursive: true });

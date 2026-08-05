@@ -67,6 +67,7 @@ jobs:
           node --check packaging/npm/rootlight.mjs
           node --check packaging/npm/rootlight-mcp.mjs
           node --check packaging/npm/run-native.mjs
+          node --check packaging/npm/remove-cli-bridge.mjs
           node scripts/test_npm_wrappers.mjs
           cargo run --locked --quiet --package xtask -- id-vectors > target/id-vectors.actual.json
           cmp tests/fixtures/id-vectors.json target/id-vectors.actual.json

@@ -68,6 +68,7 @@ class PackagePreparationTests(unittest.TestCase):
                 "rootlight.mjs",
                 "rootlight-mcp.mjs",
                 "run-native.mjs",
+                "remove-cli-bridge.mjs",
                 "postinstall.mjs",
                 "preuninstall.mjs",
             ):
