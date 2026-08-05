@@ -10,7 +10,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
+import {
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  normalize,
+  resolve,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootPackageName = "@tomasmarekk/rootlight";
@@ -59,7 +66,9 @@ export function runLifecycle(action) {
     if (action === "install") {
       removeCliBridgeAfterFailedInstall();
     }
-    fail(`rootlight: failed to start the native executable: ${result.error.message}`);
+    fail(
+      `rootlight: failed to start the native executable: ${result.error.message}`,
+    );
   }
   if (result.status !== 0) {
     if (action === "install") {
@@ -85,7 +94,12 @@ function uninstallRootlight() {
   const context = packageInstallContext();
   const arguments_ =
     context.mode === "global"
-      ? ["uninstall", "--global", rootPackageName, nativePackageForCurrentPlatform()]
+      ? [
+          "uninstall",
+          "--global",
+          rootPackageName,
+          nativePackageForCurrentPlatform(),
+        ]
       : [
           "uninstall",
           "--prefix",
@@ -209,7 +223,10 @@ function removeCliBridge() {
   const context = packageInstallContext();
   const manifestPath = join(context.binDirectory, cliBridgeManifest);
   const manifest = readBridgeManifest(manifestPath);
-  if (manifest === undefined || !samePath(manifest.packageRoot, packageRoot())) {
+  if (
+    manifest === undefined ||
+    !samePath(manifest.packageRoot, packageRoot())
+  ) {
     return;
   }
   for (const name of bridgeFileNames()) {
@@ -362,7 +379,11 @@ function packageRoot() {
 function npmGlobalPrefix() {
   const configured =
     process.env.npm_config_prefix ?? process.env.NPM_CONFIG_PREFIX;
-  if (configured !== undefined && configured.length > 0 && isAbsolute(configured)) {
+  if (
+    configured !== undefined &&
+    configured.length > 0 &&
+    isAbsolute(configured)
+  ) {
     return resolve(configured);
   }
   const result = spawnNpm(["prefix", "--global"], "pipe");
@@ -380,11 +401,52 @@ function npmGlobalPrefix() {
 }
 
 function spawnNpm(arguments_, stdio) {
-  const executable = process.platform === "win32" ? "npm.cmd" : "npm";
-  return spawnSync(executable, arguments_, {
+  // Execute npm's JavaScript entry point so Windows never needs a shell to
+  // dispatch npm.cmd, including from a bare `rootlight uninstall`.
+  return spawnSync(process.execPath, [resolveNpmCli(), ...arguments_], {
     encoding: stdio === "pipe" ? "utf8" : undefined,
     stdio,
   });
+}
+
+function resolveNpmCli() {
+  const executableDirectory = dirname(process.execPath);
+  const candidates = [
+    process.env.npm_execpath,
+    join(executableDirectory, "node_modules", "npm", "bin", "npm-cli.js"),
+    resolve(
+      executableDirectory,
+      "..",
+      "lib",
+      "node_modules",
+      "npm",
+      "bin",
+      "npm-cli.js",
+    ),
+  ];
+  for (const entry of (process.env.PATH ?? "").split(delimiter)) {
+    if (entry.length > 0 && isAbsolute(entry)) {
+      candidates.push(
+        join(entry, "node_modules", "npm", "bin", "npm-cli.js"),
+        resolve(entry, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+      );
+    }
+  }
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || !isAbsolute(candidate)) {
+      continue;
+    }
+    try {
+      const resolved = realpathSync.native(candidate);
+      const metadata = lstatSync(resolved);
+      if (metadata.isFile() && metadata.size <= maximumBridgeFileBytes) {
+        return resolved;
+      }
+    } catch {
+      // Candidate discovery continues through the bounded trusted path set.
+    }
+  }
+  throw new Error("npm CLI is unavailable");
 }
 
 function ensureBinDirectoryOnPath(binDirectory) {
@@ -416,7 +478,9 @@ function nativePackageForCurrentPlatform() {
   const platformKey = `${process.platform}-${process.arch}`;
   const nativePackage = nativePackages.get(platformKey);
   if (nativePackage === undefined) {
-    fail(`rootlight: unsupported npm platform ${process.platform}/${process.arch}`);
+    fail(
+      `rootlight: unsupported npm platform ${process.platform}/${process.arch}`,
+    );
   }
   return nativePackage;
 }
@@ -435,7 +499,9 @@ function readPackageJson(path) {
 
 function exitFor(result) {
   if (result.error !== undefined) {
-    fail(`rootlight: failed to start the native executable: ${result.error.message}`);
+    fail(
+      `rootlight: failed to start the native executable: ${result.error.message}`,
+    );
   }
   process.exit(result.status ?? 1);
 }
