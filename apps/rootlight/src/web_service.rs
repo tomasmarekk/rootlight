@@ -185,8 +185,17 @@ pub(crate) fn install(
     paths: &RuntimePaths,
     executable: &Path,
 ) -> Result<WebServiceStatus, WebServiceError> {
-    register_autostart(executable)?;
-    start(paths, executable)
+    // Unix login managers may activate a new registration immediately without
+    // this process's runtime overrides, so establish the current session first.
+    let was_running = status(paths)?.running;
+    start(paths, executable)?;
+    if let Err(error) = register_autostart(executable) {
+        if !was_running {
+            let _ = stop(paths);
+        }
+        return Err(error);
+    }
+    status(paths)
 }
 
 pub(crate) fn uninstall(paths: &RuntimePaths) -> Result<WebServiceStatus, WebServiceError> {

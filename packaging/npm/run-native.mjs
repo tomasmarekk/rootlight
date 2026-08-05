@@ -380,7 +380,8 @@ function npmGlobalPrefix() {
 }
 
 function spawnNpm(arguments_, stdio) {
-  return spawnSync("npm", arguments_, {
+  const executable = process.platform === "win32" ? "npm.cmd" : "npm";
+  return spawnSync(executable, arguments_, {
     encoding: stdio === "pipe" ? "utf8" : undefined,
     stdio,
   });
