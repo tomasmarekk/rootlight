@@ -794,7 +794,13 @@ struct DeferredRecoveryWork {
     installed_generations: BTreeSet<GenerationId>,
     restore_active: bool,
     targets: Vec<FirstSliceRecoveryTarget>,
+    #[cfg(test)]
+    after_start: Option<RecoveryWorkerStartHook>,
 }
+
+#[cfg(test)]
+type RecoveryWorkerStartHook =
+    Box<dyn FnOnce(&Cancellation, &AtomicBool) -> Result<(), FirstSliceHostError> + Send + 'static>;
 
 struct PublicationBoundaryHook {
     boundary: PublicationBoundary,
@@ -924,6 +930,8 @@ impl FirstSliceDaemon {
                 installed_generations: BTreeSet::new(),
                 restore_active: true,
                 targets: recovery_targets,
+                #[cfg(test)]
+                after_start: None,
             }),
         )
     }
@@ -2104,6 +2112,7 @@ struct RecoveryOperationGuard<'a> {
     journal: &'a JournalActorHandle,
     target: FirstSliceRecoveryTarget,
     recovery: RecoveryOperation,
+    worker_cancellation: Cancellation,
     terminalized: bool,
 }
 
@@ -2113,8 +2122,9 @@ impl<'a> RecoveryOperationGuard<'a> {
         journal: &'a JournalActorHandle,
         runtime: &tokio::runtime::Runtime,
         target: FirstSliceRecoveryTarget,
+        worker_cancellation: &Cancellation,
     ) -> Result<Self, FirstSliceHostError> {
-        Self::start_batch(journal, runtime, vec![target])?
+        Self::start_batch(journal, runtime, vec![target], worker_cancellation)?
             .pop()
             .ok_or(FirstSliceHostError::Service(FirstSliceError::Retention))
     }
@@ -2123,22 +2133,25 @@ impl<'a> RecoveryOperationGuard<'a> {
         journal: &'a JournalActorHandle,
         runtime: &tokio::runtime::Runtime,
         targets: Vec<FirstSliceRecoveryTarget>,
+        worker_cancellation: &Cancellation,
     ) -> Result<Vec<Self>, FirstSliceHostError> {
-        start_recovery_operations(journal, runtime, &targets).map(|recoveries| {
-            targets
-                .into_iter()
-                .zip(recoveries)
-                .map(|(target, recovery)| Self {
-                    journal,
-                    target,
-                    recovery,
-                    terminalized: false,
-                })
-                .collect()
-        })
+        start_recovery_operations(journal, runtime, &targets, worker_cancellation).map(
+            |recoveries| {
+                targets
+                    .into_iter()
+                    .zip(recoveries)
+                    .map(|(target, recovery)| Self {
+                        journal,
+                        target,
+                        recovery,
+                        worker_cancellation: worker_cancellation.clone(),
+                        terminalized: false,
+                    })
+                    .collect()
+            },
+        )
     }
 
-    #[cfg(test)]
     fn operation(&self) -> OperationId {
         self.recovery.operation
     }
@@ -2168,7 +2181,40 @@ impl<'a> RecoveryOperationGuard<'a> {
         runtime: &tokio::runtime::Runtime,
         error: FirstSliceError,
     ) -> Result<(), FirstSliceHostError> {
+        if let Some(reason) = self
+            .recovery
+            .cancellation
+            .reason()
+            .or_else(|| self.worker_cancellation.reason())
+        {
+            return self.cancel(runtime, reason);
+        }
         fail_recovery_operation(self.journal, runtime, &self.recovery, self.target, error)?;
+        self.terminalized = true;
+        Ok(())
+    }
+
+    fn finalize_unowned(
+        &mut self,
+        reason: Option<CancellationReason>,
+    ) -> Result<(), FirstSliceHostError> {
+        if self.terminalized {
+            return Ok(());
+        }
+        let error = reason.map_or_else(
+            || recovery_worker_error(self.recovery.operation, self.target.repository()),
+            |reason| recovery_cancelled_error(self.recovery.operation, reason),
+        );
+        let record = self
+            .journal
+            .compensate_unowned_operation(self.recovery.operation, error, reason)
+            .map_err(ServiceError::Operations)
+            .map_err(FirstSliceHostError::Journal)?;
+        if !record.state.is_terminal() {
+            return Err(FirstSliceHostError::Service(
+                FirstSliceError::CatalogCorrupt,
+            ));
+        }
         self.terminalized = true;
         Ok(())
     }
@@ -2179,16 +2225,14 @@ impl Drop for RecoveryOperationGuard<'_> {
         if self.terminalized {
             return;
         }
-        // Every fallible worker edge must leave an inspectable terminal record,
-        // including lock poisoning or journal reconciliation failures.
-        let reason = self.recovery.cancellation.reason();
-        let error = reason.map_or_else(
-            || recovery_lifecycle_error(self.recovery.operation, self.target.repository()),
-            |reason| recovery_cancelled_error(self.recovery.operation, reason),
-        );
-        let _ = self
-            .journal
-            .compensate_unowned_operation(self.recovery.operation, error, reason);
+        // This direct journal path remains available when actor-backed
+        // finalization is unavailable during panic unwinding.
+        let reason = self
+            .recovery
+            .cancellation
+            .reason()
+            .or_else(|| self.worker_cancellation.reason());
+        let _ = self.finalize_unowned(reason);
     }
 }
 
@@ -2196,6 +2240,7 @@ fn start_recovery_operations(
     journal: &JournalActorHandle,
     runtime: &tokio::runtime::Runtime,
     targets: &[FirstSliceRecoveryTarget],
+    worker_cancellation: &Cancellation,
 ) -> Result<Vec<RecoveryOperation>, FirstSliceHostError> {
     if targets.is_empty() {
         return Ok(Vec::new());
@@ -2236,17 +2281,29 @@ fn start_recovery_operations(
             Ok((target, operation, submission))
         })
         .collect::<Result<Vec<_>, FirstSliceHostError>>()?;
-    let activated = runtime
-        .block_on(
-            journal.activate_recovery_batch_until(
+    let activated = match runtime.block_on(
+        journal.activate_recovery_batch_until(
+            prepared
+                .iter()
+                .map(|(_, _, submission)| *submission)
+                .collect(),
+            deadline,
+        ),
+    ) {
+        Ok(activated) => activated,
+        Err(error) => {
+            finalize_pre_guard_recovery_batch(
+                journal,
                 prepared
                     .iter()
-                    .map(|(_, _, submission)| *submission)
-                    .collect(),
-                deadline,
-            ),
-        )
-        .map_err(FirstSliceHostError::Journal)?;
+                    .map(|(target, operation, _)| (target.repository(), *operation)),
+                &[],
+                worker_cancellation,
+                None,
+            )?;
+            return Err(FirstSliceHostError::Journal(error));
+        }
+    };
     let valid_batch = activated.len() == prepared.len()
         && prepared
             .iter()
@@ -2258,16 +2315,15 @@ fn start_recovery_operations(
                     && record.progress.total == 1
             });
     if !valid_batch {
-        for ((target, operation, _), _) in prepared.iter().zip(&activated) {
-            journal
-                .compensate_unowned_operation(
-                    *operation,
-                    recovery_lifecycle_error(*operation, target.repository()),
-                    None,
-                )
-                .map_err(ServiceError::Operations)
-                .map_err(FirstSliceHostError::Journal)?;
-        }
+        finalize_pre_guard_recovery_batch(
+            journal,
+            prepared
+                .iter()
+                .map(|(target, operation, _)| (target.repository(), *operation)),
+            &activated,
+            worker_cancellation,
+            None,
+        )?;
         return Err(FirstSliceHostError::Service(
             FirstSliceError::CatalogCorrupt,
         ));
@@ -2279,16 +2335,15 @@ fn start_recovery_operations(
                 .unwrap_or(CancellationReason::DeadlineExceeded)
         })
     }) {
-        for ((_, operation, _), _) in prepared.iter().zip(&activated) {
-            journal
-                .compensate_unowned_operation(
-                    *operation,
-                    recovery_cancelled_error(*operation, reason),
-                    Some(reason),
-                )
-                .map_err(ServiceError::Operations)
-                .map_err(FirstSliceHostError::Journal)?;
-        }
+        finalize_pre_guard_recovery_batch(
+            journal,
+            prepared
+                .iter()
+                .map(|(target, operation, _)| (target.repository(), *operation)),
+            &activated,
+            worker_cancellation,
+            Some(reason),
+        )?;
         return Err(FirstSliceHostError::Service(FirstSliceError::Cancelled(
             reason,
         )));
@@ -2303,6 +2358,71 @@ fn start_recovery_operations(
         });
     }
     Ok(recoveries)
+}
+
+fn finalize_pre_guard_recovery_batch(
+    journal: &JournalActorHandle,
+    prepared: impl IntoIterator<Item = (RepositoryId, OperationId)>,
+    activated: &[(OperationRecord, Cancellation)],
+    worker_cancellation: &Cancellation,
+    fallback_reason: Option<CancellationReason>,
+) -> Result<(), FirstSliceHostError> {
+    let mut operations = prepared
+        .into_iter()
+        .map(|(repository, operation)| (operation, (Some(repository), None)))
+        .collect::<BTreeMap<_, _>>();
+    for (record, cancellation) in activated {
+        operations
+            .entry(record.operation)
+            .and_modify(|(_, known_cancellation)| {
+                *known_cancellation = Some(cancellation.clone());
+            })
+            .or_insert((None, Some(cancellation.clone())));
+    }
+    let mut first_error = None;
+    for (operation, (repository, cancellation)) in operations {
+        let reason = cancellation
+            .as_ref()
+            .and_then(Cancellation::reason)
+            .or_else(|| worker_cancellation.reason())
+            .or(fallback_reason);
+        let error = reason.map_or_else(
+            || {
+                repository.map_or_else(
+                    || recovery_batch_error(operation),
+                    |repository| recovery_lifecycle_error(operation, repository),
+                )
+            },
+            |reason| recovery_cancelled_error(operation, reason),
+        );
+        let result = journal
+            .compensate_unowned_operation(operation, error, reason)
+            .map(|record| record.state.is_terminal())
+            .map_err(ServiceError::Operations)
+            .map_err(FirstSliceHostError::Journal)
+            .and_then(|terminal| {
+                if terminal {
+                    Ok(())
+                } else {
+                    Err(FirstSliceHostError::Service(
+                        FirstSliceError::CatalogCorrupt,
+                    ))
+                }
+            });
+        match result {
+            Ok(()) => {}
+            Err(FirstSliceHostError::Journal(ServiceError::Operations(
+                OperationError::NotFound,
+            ))) => {
+                // An unclaimed actor mutation is abandoned before returning,
+                // while a claimed mutation is awaited through its response.
+                // A missing prepared ID therefore cannot appear after cleanup.
+            }
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Err(_) => {}
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 fn complete_recovery_operation(
@@ -2431,6 +2551,28 @@ fn recovery_lifecycle_error(operation: OperationId, repository: RepositoryId) ->
     .unwrap_or_else(|_| unreachable!("closed recovery error is statically bounded"))
 }
 
+fn recovery_worker_error(operation: OperationId, repository: RepositoryId) -> PublicError {
+    PublicError::builder(ErrorCode::Internal, "durable repository recovery failed")
+        .operation(operation)
+        .repository(repository)
+        .next_action(NextAction::InspectOperation)
+        .next_action(NextAction::Retry)
+        .build()
+        .unwrap_or_else(|_| unreachable!("closed recovery error is statically bounded"))
+}
+
+fn recovery_batch_error(operation: OperationId) -> PublicError {
+    PublicError::builder(
+        ErrorCode::Internal,
+        "durable repository recovery batch could not initialize",
+    )
+    .operation(operation)
+    .next_action(NextAction::InspectOperation)
+    .next_action(NextAction::Retry)
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed recovery error is statically bounded"))
+}
+
 fn recovery_cancelled_error(operation: OperationId, reason: CancellationReason) -> PublicError {
     let (code, message, retryable) = match reason {
         CancellationReason::DeadlineExceeded | CancellationReason::Shutdown => (
@@ -2477,37 +2619,141 @@ fn durable_recovery_worker(
     cancellation: Cancellation,
 ) -> Result<(), FirstSliceHostError> {
     let mut degraded = false;
-    let mut recovered_targets = Vec::new();
-    if deferred.restore_active {
-        let active_recoveries = RecoveryOperationGuard::start_batch(
+    let mut recovered_targets = BTreeSet::new();
+    let mut active_recoveries = if deferred.restore_active {
+        RecoveryOperationGuard::start_batch(
             &journal,
             &runtime,
             std::mem::take(&mut deferred.targets),
-        )?;
-        for mut recovery in active_recoveries {
-            let target = recovery.target;
-            if let Some(reason) = cancellation.reason() {
-                let _ = recovery.cancellation().cancel(reason);
+            &cancellation,
+        )?
+    } else {
+        Vec::new()
+    };
+    let work_result: Result<(), FirstSliceHostError> = (|| {
+        #[cfg(test)]
+        if let Some(after_start) = deferred.after_start.take() {
+            after_start(&cancellation, &stopping)?;
+        }
+        if stopping.load(Ordering::Acquire) {
+            let _ = cancellation.cancel(CancellationReason::Shutdown);
+            return Ok(());
+        }
+        if deferred.restore_active {
+            for recovery in &mut active_recoveries {
+                let target = recovery.target;
+                if let Some(reason) = cancellation.reason() {
+                    let _ = recovery.cancellation().cancel(reason);
+                }
+                let active = match deferred
+                    .restore
+                    .restore_active_repository(target.repository(), recovery.cancellation())
+                {
+                    Ok(restored) => restored,
+                    Err(FirstSliceError::Cancelled(reason)) => {
+                        recovery.cancel(&runtime, reason)?;
+                        deferred.installed_generations.insert(target.generation());
+                        remove_recovering_repository(&lanes, target.repository())?;
+                        if stopping.load(Ordering::Acquire)
+                            || reason == CancellationReason::Shutdown
+                        {
+                            return Ok(());
+                        }
+                        degraded = true;
+                        continue;
+                    }
+                    Err(error) => {
+                        recovery.fail(&runtime, error)?;
+                        deferred.installed_generations.insert(target.generation());
+                        remove_recovering_repository(&lanes, target.repository())?;
+                        if let Some(state) = lanes.support_state.as_deref() {
+                            state.set_generation_status(HealthStatus::Degraded);
+                        }
+                        degraded = true;
+                        continue;
+                    }
+                };
+                if stopping.load(Ordering::Acquire) {
+                    recovery.cancel(&runtime, CancellationReason::Shutdown)?;
+                    return Ok(());
+                }
+                let installed = active.generation_ids();
+                if let Err(error) = lanes
+                    .service
+                    .write()
+                    .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+                    .install_progressive_deferred_restore(active, recovery.cancellation())
+                {
+                    match error {
+                        FirstSliceError::Cancelled(reason) => {
+                            recovery.cancel(&runtime, reason)?;
+                        }
+                        error => {
+                            recovery.fail(&runtime, error)?;
+                        }
+                    }
+                    deferred.installed_generations.insert(target.generation());
+                    remove_recovering_repository(&lanes, target.repository())?;
+                    if stopping.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    if let Some(state) = lanes.support_state.as_deref() {
+                        state.set_generation_status(HealthStatus::Degraded);
+                    }
+                    degraded = true;
+                    continue;
+                }
+                deferred
+                    .installed_generations
+                    .extend(installed.iter().copied());
+                if let Err(error) = reconcile_restored_publications(
+                    &lanes,
+                    &journal,
+                    metadata.as_ref(),
+                    &stopping,
+                    &runtime,
+                    &installed,
+                ) {
+                    recovery.fail(&runtime, FirstSliceError::Catalog)?;
+                    return Err(error);
+                }
+                remove_recovering_repository(&lanes, target.repository())?;
+                recovered_targets.insert(recovery.operation());
             }
-            let active = match deferred
-                .restore
-                .restore_active_repository(target.repository(), recovery.cancellation())
-            {
+            if let Err(error) = complete_durable_recovery(&lanes, degraded) {
+                for recovery in &mut active_recoveries {
+                    if recovered_targets.contains(&recovery.operation()) {
+                        recovery.fail(&runtime, FirstSliceError::Catalog)?;
+                    }
+                }
+                return Err(error);
+            }
+        }
+        for recovery in &mut active_recoveries {
+            if !recovered_targets.contains(&recovery.operation()) {
+                continue;
+            }
+            let target = recovery.target;
+            if stopping.load(Ordering::Acquire) {
+                recovery.cancel(&runtime, CancellationReason::Shutdown)?;
+                continue;
+            }
+            let remaining = match deferred.restore.restore_retained_repository(
+                target.repository(),
+                &deferred.installed_generations,
+                recovery.cancellation(),
+            ) {
                 Ok(restored) => restored,
                 Err(FirstSliceError::Cancelled(reason)) => {
                     recovery.cancel(&runtime, reason)?;
-                    deferred.installed_generations.insert(target.generation());
-                    remove_recovering_repository(&lanes, target.repository())?;
                     if stopping.load(Ordering::Acquire) || reason == CancellationReason::Shutdown {
-                        return Ok(());
+                        continue;
                     }
                     degraded = true;
                     continue;
                 }
                 Err(error) => {
                     recovery.fail(&runtime, error)?;
-                    deferred.installed_generations.insert(target.generation());
-                    remove_recovering_repository(&lanes, target.repository())?;
                     if let Some(state) = lanes.support_state.as_deref() {
                         state.set_generation_status(HealthStatus::Degraded);
                     }
@@ -2517,14 +2763,15 @@ fn durable_recovery_worker(
             };
             if stopping.load(Ordering::Acquire) {
                 recovery.cancel(&runtime, CancellationReason::Shutdown)?;
-                return Ok(());
+                continue;
             }
-            let installed = active.generation_ids();
-            if let Err(error) = lanes
-                .service
-                .write()
-                .map_err(|_| FirstSliceHostError::ThreadPanicked)?
-                .install_progressive_deferred_restore(active, recovery.cancellation())
+            let remaining_generations = remaining.generation_ids();
+            if !remaining_generations.is_empty()
+                && let Err(error) = lanes
+                    .service
+                    .write()
+                    .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+                    .install_additional_deferred_restore(remaining, recovery.cancellation())
             {
                 match error {
                     FirstSliceError::Cancelled(reason) => {
@@ -2534,10 +2781,8 @@ fn durable_recovery_worker(
                         recovery.fail(&runtime, error)?;
                     }
                 }
-                deferred.installed_generations.insert(target.generation());
-                remove_recovering_repository(&lanes, target.repository())?;
                 if stopping.load(Ordering::Acquire) {
-                    return Ok(());
+                    continue;
                 }
                 if let Some(state) = lanes.support_state.as_deref() {
                     state.set_generation_status(HealthStatus::Degraded);
@@ -2545,102 +2790,50 @@ fn durable_recovery_worker(
                 degraded = true;
                 continue;
             }
-            deferred
-                .installed_generations
-                .extend(installed.iter().copied());
-            if let Err(error) = reconcile_restored_publications(
+            reconcile_restored_publications(
                 &lanes,
                 &journal,
                 metadata.as_ref(),
                 &stopping,
                 &runtime,
-                &installed,
-            ) {
-                recovery.fail(&runtime, FirstSliceError::Catalog)?;
-                return Err(error);
-            }
-            remove_recovering_repository(&lanes, target.repository())?;
-            recovered_targets.push((target, recovery));
-        }
-        if let Err(error) = complete_durable_recovery(&lanes, degraded) {
-            for (_, recovery) in &mut recovered_targets {
-                recovery.fail(&runtime, FirstSliceError::Catalog)?;
-            }
-            return Err(error);
-        }
-    }
-    for (target, mut recovery) in recovered_targets {
-        if stopping.load(Ordering::Acquire) {
-            recovery.cancel(&runtime, CancellationReason::Shutdown)?;
-            continue;
-        }
-        let remaining = match deferred.restore.restore_retained_repository(
-            target.repository(),
-            &deferred.installed_generations,
-            recovery.cancellation(),
-        ) {
-            Ok(restored) => restored,
-            Err(FirstSliceError::Cancelled(reason)) => {
-                recovery.cancel(&runtime, reason)?;
-                if stopping.load(Ordering::Acquire) || reason == CancellationReason::Shutdown {
-                    continue;
-                }
-                degraded = true;
-                continue;
-            }
-            Err(error) => {
-                recovery.fail(&runtime, error)?;
-                if let Some(state) = lanes.support_state.as_deref() {
-                    state.set_generation_status(HealthStatus::Degraded);
-                }
-                degraded = true;
-                continue;
-            }
-        };
-        if stopping.load(Ordering::Acquire) {
-            recovery.cancel(&runtime, CancellationReason::Shutdown)?;
-            continue;
-        }
-        let remaining_generations = remaining.generation_ids();
-        if !remaining_generations.is_empty()
-            && let Err(error) = lanes
-                .service
-                .write()
-                .map_err(|_| FirstSliceHostError::ThreadPanicked)?
-                .install_additional_deferred_restore(remaining, recovery.cancellation())
-        {
-            match error {
-                FirstSliceError::Cancelled(reason) => {
-                    recovery.cancel(&runtime, reason)?;
-                }
-                error => {
-                    recovery.fail(&runtime, error)?;
-                }
-            }
-            if stopping.load(Ordering::Acquire) {
-                continue;
-            }
-            if let Some(state) = lanes.support_state.as_deref() {
+                &remaining_generations,
+            )?;
+            recovery.complete(&runtime)?;
+            refresh_recovery_support_inventory(&lanes)?;
+            if degraded && let Some(state) = lanes.support_state.as_deref() {
                 state.set_generation_status(HealthStatus::Degraded);
             }
-            degraded = true;
-            continue;
         }
-        reconcile_restored_publications(
-            &lanes,
-            &journal,
-            metadata.as_ref(),
-            &stopping,
-            &runtime,
-            &remaining_generations,
-        )?;
-        recovery.complete(&runtime)?;
-        refresh_recovery_support_inventory(&lanes)?;
-        if degraded && let Some(state) = lanes.support_state.as_deref() {
-            state.set_generation_status(HealthStatus::Degraded);
+        Ok(())
+    })();
+    let finalization_result =
+        finalize_incomplete_recoveries(&mut active_recoveries, stopping.as_ref(), &cancellation);
+    match (work_result, finalization_result) {
+        (_, Err(error)) | (Err(error), Ok(())) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+fn finalize_incomplete_recoveries(
+    recoveries: &mut [RecoveryOperationGuard<'_>],
+    stopping: &AtomicBool,
+    worker_cancellation: &Cancellation,
+) -> Result<(), FirstSliceHostError> {
+    let worker_reason = worker_cancellation.reason().or_else(|| {
+        stopping
+            .load(Ordering::Acquire)
+            .then_some(CancellationReason::Shutdown)
+    });
+    let mut first_error = None;
+    for recovery in recoveries {
+        let reason = recovery.cancellation().reason().or(worker_reason);
+        if let Err(error) = recovery.finalize_unowned(reason)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
         }
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 fn reconcile_restored_publications(
@@ -8930,7 +9123,10 @@ mod tests {
     use rootlight_runtime::RuntimePaths;
     use std::{
         fs,
-        sync::atomic::{AtomicU8, AtomicUsize, Ordering as AtomicOrdering},
+        sync::{
+            Barrier,
+            atomic::{AtomicU8, AtomicUsize, Ordering as AtomicOrdering},
+        },
         time::Duration,
     };
     use tempfile::TempDir;
@@ -12255,7 +12451,7 @@ mod tests {
             .build()
             .expect("runtime builds");
 
-        let recovery = RecoveryOperationGuard::start(&handle, &runtime, target)
+        let recovery = RecoveryOperationGuard::start(&handle, &runtime, target, &cancellation)
             .expect("recovery operation starts");
         let operation = recovery.operation();
 
@@ -12285,6 +12481,335 @@ mod tests {
 
         drop(handle);
         actor.join().expect("journal actor joins");
+    }
+
+    #[test]
+    fn pre_guard_cleanup_terminalizes_prepared_and_activated_recoveries() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let repositories = [
+            RepositoryId::from_bytes([81; 16]),
+            RepositoryId::from_bytes([82; 16]),
+        ];
+        let generations = [
+            GenerationId::from_bytes([91; 20]),
+            GenerationId::from_bytes([92; 20]),
+        ];
+        let operations = [
+            OperationId::from_bytes([101; 16]),
+            OperationId::from_bytes([102; 16]),
+        ];
+        for ((repository, generation), operation) in
+            repositories.into_iter().zip(generations).zip(operations)
+        {
+            let context = RepositoryOperationSubmission::new(
+                repository,
+                Some(generation),
+                1,
+                0,
+                RepositoryOperationMode::Structural,
+            )
+            .expect("recovery context is valid");
+            let submission = OperationSubmission::new(
+                operation,
+                OperationKind::Recovery,
+                PlanHash::from_bytes([operation.as_bytes()[0]; 32]),
+                ClientInstanceId::SYSTEM,
+                true,
+                None,
+                None,
+            )
+            .and_then(|submission| submission.with_repository_context(context))
+            .expect("recovery submission is valid");
+            journal.submit(submission).expect("recovery submits");
+            journal
+                .start_execution(operation)
+                .expect("recovery activates");
+        }
+        let activated = operations
+            .iter()
+            .map(|operation| {
+                (
+                    journal.status(*operation).expect("recovery is queryable"),
+                    journal
+                        .cancellation_token(*operation)
+                        .expect("recovery cancellation is queryable"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("journal actor starts");
+        let handle = actor.handle();
+        let worker_cancellation =
+            Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+
+        finalize_pre_guard_recovery_batch(
+            &handle,
+            [(repositories[0], operations[0])],
+            &activated,
+            &worker_cancellation,
+            None,
+        )
+        .expect("the complete pre-guard batch terminalizes");
+
+        assert!(operations.iter().all(|operation| {
+            journal
+                .status(*operation)
+                .is_ok_and(|record| record.state == OperationState::Failed)
+        }));
+        drop(handle);
+        actor.join().expect("journal actor joins");
+    }
+
+    #[test]
+    fn pre_guard_cleanup_preserves_worker_shutdown() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let repository = RepositoryId::from_bytes([83; 16]);
+        let generation = GenerationId::from_bytes([93; 20]);
+        let operation = OperationId::from_bytes([103; 16]);
+        let context = RepositoryOperationSubmission::new(
+            repository,
+            Some(generation),
+            1,
+            0,
+            RepositoryOperationMode::Structural,
+        )
+        .expect("recovery context is valid");
+        let submission = OperationSubmission::new(
+            operation,
+            OperationKind::Recovery,
+            PlanHash::from_bytes([103; 32]),
+            ClientInstanceId::SYSTEM,
+            true,
+            None,
+            None,
+        )
+        .and_then(|submission| submission.with_repository_context(context))
+        .expect("recovery submission is valid");
+        journal.submit(submission).expect("recovery submits");
+        journal
+            .start_execution(operation)
+            .expect("recovery activates");
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("journal actor starts");
+        let handle = actor.handle();
+        let worker_cancellation =
+            Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        assert!(worker_cancellation.cancel(CancellationReason::Shutdown));
+
+        finalize_pre_guard_recovery_batch(
+            &handle,
+            [(repository, operation)],
+            &[],
+            &worker_cancellation,
+            None,
+        )
+        .expect("worker shutdown terminalizes the prepared recovery");
+
+        let record = journal
+            .status(operation)
+            .expect("recovery operation remains queryable");
+        assert_eq!(record.state, OperationState::Cancelled);
+        assert_eq!(
+            record.cancellation_reason,
+            Some(CancellationReason::Shutdown)
+        );
+        drop(handle);
+        actor.join().expect("journal actor joins");
+    }
+
+    #[test]
+    fn worker_shutdown_wins_synchronized_failure_race() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn recovery_race() -> bool { true }\n",
+        )
+        .expect("source writes");
+        let setup_cancellation =
+            Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &setup_cancellation)
+            .expect("durable service initializes");
+        service
+            .index_rust_fixture(fixture.path(), &setup_cancellation)
+            .expect("active generation publishes");
+        drop(service);
+        let (_, deferred) = FirstSliceService::open_durable_deferred(2, paths.state_dir())
+            .expect("deferred recovery opens");
+        let targets = deferred
+            .active_targets()
+            .expect("active recovery targets load");
+        let [target] = targets.as_slice() else {
+            panic!("one active recovery target expected");
+        };
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("journal actor starts");
+        let handle = actor.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let worker_cancellation =
+            Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut recovery =
+            RecoveryOperationGuard::start(&handle, &runtime, *target, &worker_cancellation)
+                .expect("recovery operation starts");
+        let operation = recovery.operation();
+        let barrier = Arc::new(Barrier::new(2));
+        let cancellation_barrier = Arc::clone(&barrier);
+        let concurrent_cancellation = worker_cancellation.clone();
+        let shutdown = thread::spawn(move || {
+            cancellation_barrier.wait();
+            concurrent_cancellation.cancel(CancellationReason::Shutdown)
+        });
+
+        barrier.wait();
+        assert!(shutdown.join().expect("shutdown thread joins"));
+        recovery
+            .fail(&runtime, FirstSliceError::Catalog)
+            .expect("shutdown wins over worker failure");
+
+        let record = journal
+            .status(operation)
+            .expect("recovery operation remains queryable");
+        assert_eq!(record.state, OperationState::Cancelled);
+        assert_eq!(
+            record.cancellation_reason,
+            Some(CancellationReason::Shutdown)
+        );
+        drop(recovery);
+        drop(handle);
+        actor.join().expect("journal actor joins");
+    }
+
+    fn run_recovery_worker_with_start_hook(
+        repository_count: usize,
+        after_start: RecoveryWorkerStartHook,
+    ) -> (Result<(), FirstSliceHostError>, Vec<OperationRecord>) {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        let setup_cancellation =
+            Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &setup_cancellation)
+            .expect("durable service initializes");
+        for index in 0..repository_count {
+            let repository = fixture.path().join(format!("repository-{index}"));
+            fs::create_dir_all(repository.join("src")).expect("source directory exists");
+            fs::write(
+                repository.join("src/lib.rs"),
+                format!("pub fn recovery_terminalization_{index}() -> bool {{ true }}\n"),
+            )
+            .expect("source writes");
+            service
+                .index_rust_fixture(&repository, &setup_cancellation)
+                .expect("active generation publishes");
+        }
+        drop(service);
+        let (service, restore) = FirstSliceService::open_durable_deferred(2, paths.state_dir())
+            .expect("deferred recovery opens");
+        let targets = restore
+            .active_targets()
+            .expect("active recovery targets load");
+        assert_eq!(targets.len(), repository_count);
+        let recovering_repositories = targets.iter().map(|target| target.repository()).collect();
+        let (refinement, _refinement_receiver) = mpsc::sync_channel(1);
+        let lanes = FirstSliceServiceLanes {
+            service: Arc::new(RwLock::new(service)),
+            index_serialization: Arc::new(Mutex::new(())),
+            semantic_refinements: Arc::new(Mutex::new(BTreeMap::new())),
+            graph_projections: Arc::new(Mutex::new(GraphProjectionRegistry::new())),
+            refinement,
+            recovery_ready: Arc::new(AtomicBool::new(false)),
+            recovery_complete: Arc::new(AtomicBool::new(false)),
+            recovering_repositories: Arc::new(RwLock::new(recovering_repositories)),
+            support_state: None,
+        };
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("journal actor starts");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let result = durable_recovery_worker(
+            DeferredRecoveryWork {
+                restore,
+                installed_generations: BTreeSet::new(),
+                restore_active: true,
+                targets,
+                after_start: Some(after_start),
+            },
+            lanes,
+            actor.handle(),
+            Arc::new(Mutex::new(OperationMetadataSet::new(4))),
+            Arc::new(AtomicBool::new(false)),
+            runtime,
+            Cancellation::with_deadline(Instant::now() + Duration::from_secs(30)),
+        );
+        let contexts = journal
+            .repository_operation_contexts()
+            .expect("recovery contexts remain queryable");
+        assert_eq!(contexts.len(), repository_count);
+        let records = contexts
+            .into_iter()
+            .map(|context| {
+                journal
+                    .status(context.operation)
+                    .expect("recovery operation remains queryable")
+            })
+            .collect();
+        actor.join().expect("journal actor joins");
+        (result, records)
+    }
+
+    #[test]
+    fn worker_failure_terminalizes_started_recovery() {
+        let (result, records) = run_recovery_worker_with_start_hook(
+            1,
+            Box::new(|_, _| Err(FirstSliceHostError::ThreadPanicked)),
+        );
+        let [record] = records.as_slice() else {
+            panic!("one recovery operation expected");
+        };
+
+        assert!(matches!(result, Err(FirstSliceHostError::ThreadPanicked)));
+        assert_eq!(record.kind, OperationKind::Recovery);
+        assert_eq!(record.state, OperationState::Failed);
+        assert_eq!(
+            record
+                .error
+                .as_ref()
+                .expect("worker failure persists")
+                .code(),
+            ErrorCode::Internal
+        );
+    }
+
+    #[test]
+    fn shutdown_terminalizes_started_recovery_as_cancelled() {
+        let (result, records) = run_recovery_worker_with_start_hook(
+            2,
+            Box::new(|cancellation, stopping| {
+                stopping.store(true, Ordering::Release);
+                let _ = cancellation.cancel(CancellationReason::Shutdown);
+                Ok(())
+            }),
+        );
+
+        result.expect("shutdown drains recovery worker");
+        assert!(records.iter().all(|record| {
+            record.kind == OperationKind::Recovery
+                && record.state == OperationState::Cancelled
+                && record.cancellation_reason == Some(CancellationReason::Shutdown)
+        }));
     }
 
     #[test]

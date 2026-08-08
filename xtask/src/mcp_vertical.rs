@@ -1918,6 +1918,7 @@ fn query_snapshot(
     expected_value: u32,
     excluded_value: u32,
 ) -> Result<SnapshotEvidence, VerticalError> {
+    let requested_active = generation_selector.as_str() == Some("active");
     let locate = call_tool(
         &format!("{label}.code-locate"),
         process,
@@ -1936,24 +1937,53 @@ fn query_snapshot(
     require_tool_success(&locate, "code.locate")?;
     require_trust_labels(&locate.structured)?;
     assert_control_value_omits_sentinels(&locate.structured)?;
-    assert_read_correlation(&locate.structured, repository, expected_generation)?;
     assert_complete_tier_b_rust_coverage(&locate.structured)?;
-    let matches =
-        locate.structured["data"]["matches"]
-            .as_array()
-            .ok_or(VerticalError::Invariant(
-                "code.locate matches were not an array",
-            ))?;
-    if matches.len() != 1
-        || matches[0]["display_name"] != "answer"
-        || matches[0]["path"] != "src/lib.rs"
-    {
+    expected_answer_match(&locate.structured)?;
+    let located_generation = required_string(
+        &locate.structured["generation"]["generation_id"],
+        "code.locate generation",
+    )?;
+    assert_read_correlation(&locate.structured, repository, &located_generation)?;
+    if requested_active {
+        assert_active_generation_lineage(
+            &locate.structured,
+            expected_generation,
+            &located_generation,
+        )?;
+    } else if located_generation != expected_generation {
         return Err(VerticalError::Invariant(
-            "code.locate did not return the one expected answer declaration",
+            "pinned code.locate resolved an unexpected generation",
         ));
     }
-    let symbol = required_string(&matches[0]["symbol_id"], "located symbol ID")?;
-    let source_ref = matches[0]["source_ref"].clone();
+    let locate = if located_generation == expected_generation {
+        locate
+    } else {
+        let pinned = call_tool(
+            &format!("{label}.code-locate-pinned"),
+            process,
+            catalog,
+            transcript,
+            "code.locate",
+            json!({
+                "repository": {"repository_id": repository},
+                "generation": expected_generation,
+                "query": "answer",
+                "search_modes": ["exact"],
+                "max_results": 10,
+                "response_profile": "compact"
+            }),
+        )?;
+        require_tool_success(&pinned, "code.locate")?;
+        require_trust_labels(&pinned.structured)?;
+        assert_control_value_omits_sentinels(&pinned.structured)?;
+        assert_read_correlation(&pinned.structured, repository, expected_generation)?;
+        assert_complete_tier_b_rust_coverage(&pinned.structured)?;
+        expected_answer_match(&pinned.structured)?;
+        pinned
+    };
+    let located_match = expected_answer_match(&locate.structured)?;
+    let symbol = required_string(&located_match["symbol_id"], "located symbol ID")?;
+    let source_ref = located_match["source_ref"].clone();
     if !source_ref.is_object() {
         return Err(VerticalError::Invariant(
             "code.locate omitted its source reference",
@@ -1967,7 +1997,7 @@ fn query_snapshot(
         "code.locate",
         json!({
             "repository": {"repository_id": repository},
-            "generation": generation_selector,
+            "generation": expected_generation,
             "query": "answer",
             "search_modes": ["lexical"],
             "max_results": 10,
@@ -3597,6 +3627,45 @@ fn assert_read_correlation(
     } else {
         Err(VerticalError::Invariant(
             "read response did not preserve repository, generation, and trust correlation",
+        ))
+    }
+}
+
+fn assert_active_generation_lineage(
+    structured: &Value,
+    expected_generation: &str,
+    active_generation: &str,
+) -> Result<(), VerticalError> {
+    if active_generation == expected_generation {
+        return Ok(());
+    }
+    let generation = &structured["generation"];
+    if generation["parent_generation"] == expected_generation
+        && generation["structural_freshness"] == "current"
+        && generation["semantic_freshness"] == "current"
+    {
+        Ok(())
+    } else {
+        Err(VerticalError::Invariant(
+            "active generation was not the expected snapshot or its current direct refinement",
+        ))
+    }
+}
+
+fn expected_answer_match(structured: &Value) -> Result<&Value, VerticalError> {
+    let matches = structured["data"]["matches"]
+        .as_array()
+        .ok_or(VerticalError::Invariant(
+            "code.locate matches were not an array",
+        ))?;
+    if matches.len() == 1
+        && matches[0]["display_name"] == "answer"
+        && matches[0]["path"] == "src/lib.rs"
+    {
+        Ok(&matches[0])
+    } else {
+        Err(VerticalError::Invariant(
+            "code.locate did not return the one expected answer declaration",
         ))
     }
 }
@@ -6514,12 +6583,12 @@ impl VerticalError {
 mod tests {
     use super::{
         CANCELLATION_FIXTURE_FILES, EXPECTED_TOOLS, MATRIX_STATES, Options, ToolMatrixCell,
-        ToolOutcome, VerticalError, assert_bounded_tier_b_rust_coverage,
-        assert_complete_tier_b_rust_coverage, canonicalize_known_identities,
-        diagnostic_code_is_present, estimated_tokens, matrix_not_applicable_reason,
-        modify_fixture_to_v2, nearest_rank, normalize_read_response, observe_rust_coverage,
-        prepare_cancellation_repository, redact_request_for_evidence, retryable_busy_delay,
-        shrink_cancellation_repository, source_tokenizer_input,
+        ToolOutcome, VerticalError, assert_active_generation_lineage,
+        assert_bounded_tier_b_rust_coverage, assert_complete_tier_b_rust_coverage,
+        canonicalize_known_identities, diagnostic_code_is_present, estimated_tokens,
+        matrix_not_applicable_reason, modify_fixture_to_v2, nearest_rank, normalize_read_response,
+        observe_rust_coverage, prepare_cancellation_repository, redact_request_for_evidence,
+        retryable_busy_delay, shrink_cancellation_repository, source_tokenizer_input,
         validate_architecture_community_data, validate_tool_matrix_cells,
     };
     use serde_json::json;
@@ -6590,6 +6659,63 @@ mod tests {
         ] {
             assert!(retryable_busy_delay(&outcome).is_none());
         }
+    }
+
+    #[test]
+    fn active_generation_accepts_only_current_direct_refinements() {
+        let structural = json!({
+            "generation": {
+                "generation_id": "structural",
+                "parent_generation": null,
+                "semantic_freshness": "stale",
+                "structural_freshness": "current"
+            }
+        });
+        assert_active_generation_lineage(&structural, "structural", "structural")
+            .expect("the requested structural generation remains active");
+
+        let semantic = json!({
+            "generation": {
+                "generation_id": "semantic",
+                "parent_generation": "structural",
+                "semantic_freshness": "current",
+                "structural_freshness": "current"
+            }
+        });
+        assert_active_generation_lineage(&semantic, "structural", "semantic")
+            .expect("the current semantic refinement may replace the structural generation");
+
+        let watcher_structural = json!({
+            "generation": {
+                "generation_id": "watcher",
+                "parent_generation": "structural",
+                "semantic_freshness": "stale",
+                "structural_freshness": "current"
+            }
+        });
+        assert!(
+            assert_active_generation_lineage(&watcher_structural, "structural", "watcher").is_err()
+        );
+
+        let unrelated = json!({
+            "generation": {
+                "generation_id": "unrelated",
+                "parent_generation": "other",
+                "semantic_freshness": "current",
+                "structural_freshness": "current"
+            }
+        });
+        assert!(assert_active_generation_lineage(&unrelated, "structural", "unrelated").is_err());
+
+        let superseded = json!({
+            "generation": {
+                "generation_id": "semantic",
+                "parent_generation": "structural",
+                "semantic_freshness": "superseded",
+                "structural_freshness": "superseded"
+            }
+        });
+        assert!(assert_active_generation_lineage(&superseded, "structural", "semantic").is_err());
     }
 
     #[test]

@@ -21,6 +21,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 // The suite runs several full process trees concurrently. This bound still
 // catches shutdown deadlocks without conflating runner contention with failure.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+const SUPERVISED_SHUTDOWN_COMMAND: &[u8] = b"shutdown\n";
 
 #[test]
 fn every_advertised_batch_subtool_reaches_its_production_adapter() {
@@ -1033,11 +1034,16 @@ impl DaemonProcess {
     }
 
     fn finish(&mut self) {
-        self.input.take();
+        let mut input = self.input.take().expect("daemon stdin is retained");
+        input
+            .write_all(SUPERVISED_SHUTDOWN_COMMAND)
+            .and_then(|()| input.flush())
+            .expect("supervised daemon shutdown request is delivered");
         let status = wait_for_exit(
             self.child.as_mut().expect("daemon child is retained"),
             SHUTDOWN_TIMEOUT,
         );
+        drop(input);
         assert!(status.success(), "daemon process exits successfully");
         self.child.take();
     }
