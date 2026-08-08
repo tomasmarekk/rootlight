@@ -18,6 +18,9 @@ use rootlight_mcp_contract::{batch::BATCH_TOOL_REGISTRY, context::BatchTool};
 use serde_json::{Value, json};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+// Deep fixture indexing can outlive one RPC deadline on contended CI runners;
+// the durable operation remains the authoritative completion boundary.
+const PUBLICATION_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 // The suite runs several full process trees concurrently. This bound still
 // catches shutdown deadlocks without conflating runner contention with failure.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -515,6 +518,7 @@ fn ordered_runtime_outcomes_match_the_public_process_golden() {
         "outcome-index",
         &repository_root,
         "deep",
+        true,
     );
     assert_success(&index, "repo.index");
     let repository_id = index["result"]["structuredContent"]["data"]["repository_id"]
@@ -790,7 +794,8 @@ fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str)
     if initial_state == Some("published") {
         return;
     }
-    for attempt in 0..30 {
+    let deadline = Instant::now() + PUBLICATION_TIMEOUT;
+    for attempt in 0_u64.. {
         let status = mcp.call(
             &format!("operation-{attempt}"),
             "operation.status",
@@ -805,12 +810,15 @@ fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str)
             }
             _ => {}
         }
+        if Instant::now() >= deadline {
+            break;
+        }
     }
     panic!("fixture indexing did not publish within the bounded wait");
 }
 
 fn index_repository_retrying_busy(mcp: &mut McpProcess, request_id: &str, root: &Path) -> Value {
-    index_repository_retrying_busy_with_mode(mcp, request_id, root, "structural")
+    index_repository_retrying_busy_with_mode(mcp, request_id, root, "structural", false)
 }
 
 fn index_repository_retrying_busy_with_mode(
@@ -818,11 +826,12 @@ fn index_repository_retrying_busy_with_mode(
     request_id: &str,
     root: &Path,
     mode: &str,
+    detached: bool,
 ) -> Value {
     let arguments = json!({
         "root": root,
         "mode": mode,
-        "detached": false
+        "detached": detached
     });
     process_support::retry_transient_busy(request_id, |attempt_id| {
         mcp.call(attempt_id, "repo.index", arguments.clone())
