@@ -3370,10 +3370,10 @@ fn semantic_refinement_worker(
             {
                 return;
             }
-            let _ = command.admitted.try_send(Err(error));
             if remove_semantic_refinement(&lanes.semantic_refinements, command.operation).is_err() {
                 return;
             }
+            let _ = command.admitted.try_send(Err(error));
             continue;
         }
         let resources = ServiceRequestResources {
@@ -3395,11 +3395,11 @@ fn semantic_refinement_worker(
             },
             Some(&command.admitted),
         );
-        if let Err(error) = result {
-            let _ = command.admitted.try_send(Err(error));
-        }
         if remove_semantic_refinement(&lanes.semantic_refinements, command.operation).is_err() {
             return;
+        }
+        if let Err(error) = result {
+            let _ = command.admitted.try_send(Err(error));
         }
     }
 }
