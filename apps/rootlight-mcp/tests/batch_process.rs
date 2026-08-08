@@ -510,7 +510,12 @@ fn ordered_runtime_outcomes_match_the_public_process_golden() {
     daemon.wait_until_ready(&runtime_dir);
     let mut mcp = McpProcess::spawn(false, &state_dir, &runtime_dir, "developer");
 
-    let index = index_repository_retrying_busy(&mut mcp, "outcome-index", &repository_root);
+    let index = index_repository_retrying_busy_with_mode(
+        &mut mcp,
+        "outcome-index",
+        &repository_root,
+        "deep",
+    );
     assert_success(&index, "repo.index");
     let repository_id = index["result"]["structuredContent"]["data"]["repository_id"]
         .as_str()
@@ -805,9 +810,18 @@ fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str)
 }
 
 fn index_repository_retrying_busy(mcp: &mut McpProcess, request_id: &str, root: &Path) -> Value {
+    index_repository_retrying_busy_with_mode(mcp, request_id, root, "structural")
+}
+
+fn index_repository_retrying_busy_with_mode(
+    mcp: &mut McpProcess,
+    request_id: &str,
+    root: &Path,
+    mode: &str,
+) -> Value {
     let arguments = json!({
         "root": root,
-        "mode": "structural",
+        "mode": mode,
         "detached": false
     });
     process_support::retry_transient_busy(request_id, |attempt_id| {

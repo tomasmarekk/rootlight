@@ -92,6 +92,9 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const SETUP_RETRY_ATTEMPTS: u8 = 3;
+// Match the daemon's retained-generation window so lineage proof cannot turn
+// watcher churn into an unbounded sequence of public reads.
+const ACTIVE_GENERATION_LINEAGE_LIMIT: usize = 8;
 const CANCELLATION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(4);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const TRANSPORT_SAMPLES: usize = 20;
@@ -1949,6 +1952,29 @@ fn query_snapshot(
             &locate.structured,
             expected_generation,
             &located_generation,
+            |generation, depth| {
+                let ancestor = call_tool(
+                    &format!("{label}.active-lineage-{depth}"),
+                    process,
+                    catalog,
+                    transcript,
+                    "code.locate",
+                    json!({
+                        "repository": {"repository_id": repository},
+                        "generation": generation,
+                        "query": "answer",
+                        "search_modes": ["exact"],
+                        "max_results": 10,
+                        "response_profile": "compact"
+                    }),
+                )?;
+                require_tool_success(&ancestor, "code.locate")?;
+                require_trust_labels(&ancestor.structured)?;
+                assert_control_value_omits_sentinels(&ancestor.structured)?;
+                assert_read_correlation(&ancestor.structured, repository, generation)?;
+                expected_answer_match(&ancestor.structured)?;
+                Ok(ancestor.structured)
+            },
         )?;
     } else if located_generation != expected_generation {
         return Err(VerticalError::Invariant(
@@ -3631,23 +3657,61 @@ fn assert_read_correlation(
     }
 }
 
-fn assert_active_generation_lineage(
+fn assert_active_generation_lineage<F>(
     structured: &Value,
     expected_generation: &str,
     active_generation: &str,
-) -> Result<(), VerticalError> {
+    mut load_generation: F,
+) -> Result<(), VerticalError>
+where
+    F: FnMut(&str, usize) -> Result<Value, VerticalError>,
+{
     if active_generation == expected_generation {
         return Ok(());
     }
     let generation = &structured["generation"];
-    if generation["parent_generation"] == expected_generation
-        && generation["structural_freshness"] == "current"
-        && generation["semantic_freshness"] == "current"
+    if generation["structural_freshness"] != "current"
+        || generation["semantic_freshness"] != "current"
     {
+        return Err(VerticalError::Invariant(
+            "active generation was not a current descendant of the expected snapshot",
+        ));
+    }
+    let mut ancestor =
+        optional_string(&generation["parent_generation"])?.ok_or(VerticalError::Invariant(
+            "active generation was not a current descendant of the expected snapshot",
+        ))?;
+    let mut visited = BTreeSet::from([active_generation.to_owned()]);
+    for depth in 0..ACTIVE_GENERATION_LINEAGE_LIMIT {
+        if ancestor == expected_generation {
+            return Ok(());
+        }
+        if !visited.insert(ancestor.clone()) {
+            return Err(VerticalError::Invariant(
+                "active generation lineage contained a cycle",
+            ));
+        }
+        let generation = load_generation(&ancestor, depth)?;
+        let observed = required_string(
+            &generation["generation"]["generation_id"],
+            "active generation ancestor",
+        )?;
+        if observed != ancestor {
+            return Err(VerticalError::Invariant(
+                "active generation lineage resolved an unexpected ancestor",
+            ));
+        }
+        ancestor = optional_string(&generation["generation"]["parent_generation"])?.ok_or(
+            VerticalError::Invariant(
+                "active generation was not a current descendant of the expected snapshot",
+            ),
+        )?;
+    }
+    if ancestor == expected_generation {
         Ok(())
     } else {
         Err(VerticalError::Invariant(
-            "active generation was not the expected snapshot or its current direct refinement",
+            "active generation lineage exceeded the retained traversal bound",
         ))
     }
 }
@@ -6662,7 +6726,7 @@ mod tests {
     }
 
     #[test]
-    fn active_generation_accepts_only_current_direct_refinements() {
+    fn active_generation_accepts_only_current_descendants() {
         let structural = json!({
             "generation": {
                 "generation_id": "structural",
@@ -6671,8 +6735,10 @@ mod tests {
                 "structural_freshness": "current"
             }
         });
-        assert_active_generation_lineage(&structural, "structural", "structural")
-            .expect("the requested structural generation remains active");
+        assert_active_generation_lineage(&structural, "structural", "structural", |_, _| {
+            unreachable!("the exact active generation needs no ancestry lookup")
+        })
+        .expect("the requested structural generation remains active");
 
         let semantic = json!({
             "generation": {
@@ -6682,8 +6748,36 @@ mod tests {
                 "structural_freshness": "current"
             }
         });
-        assert_active_generation_lineage(&semantic, "structural", "semantic")
-            .expect("the current semantic refinement may replace the structural generation");
+        assert_active_generation_lineage(&semantic, "structural", "semantic", |_, _| {
+            unreachable!("a direct semantic refinement needs no ancestry lookup")
+        })
+        .expect("the current semantic refinement may replace the structural generation");
+
+        let watcher_semantic = json!({
+            "generation": {
+                "generation_id": "watcher-semantic",
+                "parent_generation": "watcher-structural",
+                "semantic_freshness": "current",
+                "structural_freshness": "current"
+            }
+        });
+        assert_active_generation_lineage(
+            &watcher_semantic,
+            "structural",
+            "watcher-semantic",
+            |generation, _| {
+                assert_eq!(generation, "watcher-structural");
+                Ok(json!({
+                    "generation": {
+                        "generation_id": "watcher-structural",
+                        "parent_generation": "structural",
+                        "semantic_freshness": "stale",
+                        "structural_freshness": "superseded"
+                    }
+                }))
+            },
+        )
+        .expect("the current semantic result may follow a watcher structural generation");
 
         let watcher_structural = json!({
             "generation": {
@@ -6694,7 +6788,13 @@ mod tests {
             }
         });
         assert!(
-            assert_active_generation_lineage(&watcher_structural, "structural", "watcher").is_err()
+            assert_active_generation_lineage(
+                &watcher_structural,
+                "structural",
+                "watcher",
+                |_, _| unreachable!("a stale active generation is rejected before ancestry lookup")
+            )
+            .is_err()
         );
 
         let unrelated = json!({
@@ -6705,7 +6805,23 @@ mod tests {
                 "structural_freshness": "current"
             }
         });
-        assert!(assert_active_generation_lineage(&unrelated, "structural", "unrelated").is_err());
+        assert!(
+            assert_active_generation_lineage(
+                &unrelated,
+                "structural",
+                "unrelated",
+                |generation, _| {
+                    assert_eq!(generation, "other");
+                    Ok(json!({
+                        "generation": {
+                            "generation_id": "other",
+                            "parent_generation": null
+                        }
+                    }))
+                }
+            )
+            .is_err()
+        );
 
         let superseded = json!({
             "generation": {
@@ -6715,7 +6831,17 @@ mod tests {
                 "structural_freshness": "superseded"
             }
         });
-        assert!(assert_active_generation_lineage(&superseded, "structural", "semantic").is_err());
+        assert!(
+            assert_active_generation_lineage(
+                &superseded,
+                "structural",
+                "semantic",
+                |_, _| unreachable!(
+                    "a superseded active generation is rejected before ancestry lookup"
+                )
+            )
+            .is_err()
+        );
     }
 
     #[test]
