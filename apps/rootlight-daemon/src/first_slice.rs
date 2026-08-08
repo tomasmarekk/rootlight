@@ -722,6 +722,7 @@ struct WatcherTarget {
 struct WatchedRepository {
     fingerprint: ContentHash,
     dirty: bool,
+    content_change_pending: bool,
     next_attempt: Instant,
     last_authoritative_reconcile: Instant,
 }
@@ -731,6 +732,7 @@ impl WatchedRepository {
         Self {
             fingerprint,
             dirty: false,
+            content_change_pending: false,
             next_attempt: now,
             last_authoritative_reconcile: now,
         }
@@ -746,6 +748,7 @@ impl WatchedRepository {
         if self.fingerprint != fingerprint {
             self.fingerprint = fingerprint;
             self.dirty = true;
+            self.content_change_pending = true;
             self.next_attempt = watcher_deadline(now, debounce);
         } else if !self.dirty
             && now
@@ -753,6 +756,7 @@ impl WatchedRepository {
                 .is_some_and(|elapsed| elapsed >= authoritative_interval)
         {
             self.dirty = true;
+            self.content_change_pending = false;
             self.next_attempt = now;
         }
     }
@@ -762,8 +766,20 @@ impl WatchedRepository {
         self.next_attempt = watcher_deadline(now, retry_interval);
     }
 
+    fn deferred_by_busy_index(&mut self, now: Instant, retry_interval: Duration) {
+        if self.content_change_pending {
+            self.retry_after(now, retry_interval);
+        } else {
+            // A concurrent user index already performs the authoritative scan
+            // needed by a periodic-only checkpoint. Avoid immediately
+            // replacing its publication with a redundant watcher generation.
+            self.reconciled(now);
+        }
+    }
+
     fn reconciled(&mut self, now: Instant) {
         self.dirty = false;
+        self.content_change_pending = false;
         self.next_attempt = now;
         self.last_authoritative_reconcile = now;
     }
@@ -3038,6 +3054,9 @@ fn watcher_worker(
                 WatcherReconcileOutcome::Removed => {
                     watched.remove(&target.repository);
                 }
+                WatcherReconcileOutcome::Busy => {
+                    repository.deferred_by_busy_index(Instant::now(), config.retry_interval);
+                }
                 WatcherReconcileOutcome::Retry => {
                     repository.retry_after(Instant::now(), config.retry_interval);
                 }
@@ -3061,6 +3080,7 @@ fn watcher_worker(
 enum WatcherReconcileOutcome {
     Reconciled,
     Removed,
+    Busy,
     Retry,
     Degraded,
 }
@@ -3076,7 +3096,7 @@ fn watcher_reconcile_target(
     if semantic_refinement_active(&lanes.semantic_refinements, target.repository)
         .map_err(|_| FirstSliceHostError::ThreadPanicked)?
     {
-        return Ok(WatcherReconcileOutcome::Retry);
+        return Ok(WatcherReconcileOutcome::Busy);
     }
     let deadline = Instant::now()
         .checked_add(DETACHED_INDEX_TIMEOUT)
@@ -3131,7 +3151,7 @@ fn watcher_reconcile_target(
         None,
     ) {
         Ok(_) => Ok(WatcherReconcileOutcome::Reconciled),
-        Err(error) if error.code() == ErrorCode::Busy => Ok(WatcherReconcileOutcome::Retry),
+        Err(error) if error.code() == ErrorCode::Busy => Ok(WatcherReconcileOutcome::Busy),
         Err(error) if error.code() == ErrorCode::Cancelled => Ok(WatcherReconcileOutcome::Retry),
         Err(error) if error.code() == ErrorCode::Internal => {
             Err(FirstSliceHostError::Service(FirstSliceError::Catalog))
@@ -9213,6 +9233,7 @@ mod tests {
         let mut watched = WatchedRepository::discovered(first, started);
         let first_due = watched.next_attempt;
         assert!(!watched.dirty);
+        assert!(!watched.content_change_pending);
         assert_eq!(first_due, started);
 
         watched.observe(
@@ -9222,6 +9243,7 @@ mod tests {
             Duration::from_secs(30),
         );
         assert!(watched.dirty);
+        assert!(watched.content_change_pending);
         assert!(watched.next_attempt > first_due);
 
         let retry_started = watcher_deadline(started, Duration::from_millis(200));
@@ -9235,7 +9257,37 @@ mod tests {
         let reconciled = watcher_deadline(started, Duration::from_millis(300));
         watched.reconciled(reconciled);
         assert!(!watched.dirty);
+        assert!(!watched.content_change_pending);
         assert_eq!(watched.last_authoritative_reconcile, reconciled);
+
+        let periodic = watcher_deadline(reconciled, Duration::from_secs(30));
+        watched.observe(
+            second,
+            periodic,
+            Duration::from_millis(100),
+            Duration::from_secs(30),
+        );
+        assert!(watched.dirty);
+        assert!(!watched.content_change_pending);
+        watched.deferred_by_busy_index(periodic, Duration::from_millis(75));
+        assert!(!watched.dirty);
+        assert_eq!(watched.last_authoritative_reconcile, periodic);
+
+        let changed = watcher_deadline(periodic, Duration::from_millis(50));
+        watched.observe(
+            first,
+            changed,
+            Duration::from_millis(100),
+            Duration::from_secs(30),
+        );
+        assert!(watched.content_change_pending);
+        watched.deferred_by_busy_index(changed, Duration::from_millis(75));
+        assert!(watched.dirty);
+        assert!(watched.content_change_pending);
+        assert_eq!(
+            watched.next_attempt,
+            watcher_deadline(changed, Duration::from_millis(75))
+        );
     }
 
     #[test]

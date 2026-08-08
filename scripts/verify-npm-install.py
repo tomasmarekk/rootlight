@@ -190,7 +190,7 @@ def verify_install_mode(
         require_service_state(service_data(stopped), registered=True, running=False)
         wait_for_port(closed=True)
 
-        restarted = run_json(
+        restarted = run_json_retrying_busy(
             [str(cli), "service", "restart"],
             environment,
             stage=f"{mode} service restart",
@@ -378,8 +378,58 @@ def run_json(
     stage: str = "Rootlight command",
 ) -> dict[str, Any]:
     completed = run(command, environment, stage=stage)
+    return parse_successful_json(completed.stdout)
+
+
+def run_json_retrying_busy(
+    command: list[str],
+    environment: dict[str, str],
+    *,
+    stage: str,
+    timeout_seconds: float = STOP_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        completed = run(command, environment, check=False, stage=stage)
+        if completed.returncode == 0:
+            return parse_successful_json(completed.stdout)
+
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        try:
+            document = json.loads(detail)
+        except json.JSONDecodeError:
+            document = None
+        error = document.get("error") if isinstance(document, dict) else None
+        retryable_busy = (
+            isinstance(error, dict)
+            and error.get("code") == "BUSY"
+            and error.get("retryable") is True
+        )
+        now = time.monotonic()
+        if not retryable_busy or now >= deadline:
+            raise NpmInstallError(
+                f"{stage} failed with exit code {completed.returncode}: {detail[:2000]}"
+            )
+
+        retry_after_ms = error.get("retry_after_ms")
+        if (
+            not isinstance(retry_after_ms, int)
+            or isinstance(retry_after_ms, bool)
+            or retry_after_ms <= 0
+        ):
+            retry_after_ms = 100
+        delay = min(retry_after_ms, 1_000) / 1_000
+        remaining = deadline - now
+        if delay >= remaining:
+            raise NpmInstallError(
+                f"{stage} failed with exit code {completed.returncode}: {detail[:2000]}"
+            )
+        time.sleep(delay)
+
+
+def parse_successful_json(payload: str) -> dict[str, Any]:
     try:
-        document = json.loads(completed.stdout)
+        document = json.loads(payload)
     except json.JSONDecodeError as error:
         raise NpmInstallError("Rootlight returned invalid JSON") from error
     if not isinstance(document, dict) or document.get("ok") is not True:

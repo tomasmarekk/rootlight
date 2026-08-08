@@ -73,6 +73,68 @@ class VerifyNpmInstallTests(unittest.TestCase):
                 stage="service restart",
             )
 
+    def test_retryable_busy_service_command_is_replayed(self) -> None:
+        command = ["/private/install/rootlight", "service", "restart"]
+        busy = verify_npm_install.subprocess.CompletedProcess(
+            args=command,
+            returncode=3,
+            stdout="",
+            stderr=(
+                '{"error":{"code":"BUSY","retryable":true,'
+                '"retry_after_ms":1}}'
+            ),
+        )
+        succeeded = verify_npm_install.subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='{"ok":true}',
+            stderr="",
+        )
+        with (
+            mock.patch.object(
+                verify_npm_install.subprocess,
+                "run",
+                side_effect=(busy, succeeded),
+            ) as run,
+            mock.patch.object(verify_npm_install.time, "sleep") as sleep,
+        ):
+            response = verify_npm_install.run_json_retrying_busy(
+                command,
+                {},
+                stage="service restart",
+            )
+
+        self.assertEqual(response, {"ok": True})
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(0.001)
+
+    def test_nonretryable_service_failure_is_not_replayed(self) -> None:
+        command = ["/private/install/rootlight", "service", "restart"]
+        failed = verify_npm_install.subprocess.CompletedProcess(
+            args=command,
+            returncode=3,
+            stdout="",
+            stderr='{"error":{"code":"BUSY","retryable":false}}',
+        )
+        with (
+            mock.patch.object(
+                verify_npm_install.subprocess,
+                "run",
+                return_value=failed,
+            ) as run,
+            self.assertRaisesRegex(
+                verify_npm_install.NpmInstallError,
+                r"^service restart failed with exit code 3:",
+            ),
+        ):
+            verify_npm_install.run_json_retrying_busy(
+                command,
+                {},
+                stage="service restart",
+            )
+
+        run.assert_called_once()
+
     def test_run_uses_the_explicit_local_install_directory(self) -> None:
         completed = verify_npm_install.subprocess.CompletedProcess(
             args=["npm", "install"],

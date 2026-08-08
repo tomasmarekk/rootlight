@@ -493,6 +493,7 @@ fn process_preflight_rejects_non_subtools_and_profile_hidden_members() {
 fn ordered_runtime_outcomes_match_the_public_process_golden() {
     let _guard = process_test_guard();
     let fixture = process_fixture();
+    let hook_binary = build_batch_hook_mcp();
     let repository_root = fixture.path().join("repository");
     fs::create_dir_all(repository_root.join("src")).expect("fixture source directory is created");
     fs::write(
@@ -617,7 +618,6 @@ fn ordered_runtime_outcomes_match_the_public_process_golden() {
     }
 
     mcp.finish();
-    let hook_binary = build_batch_hook_mcp();
     let mut cancellation_mcp = McpProcess::spawn_with_binary(
         &hook_binary,
         false,
@@ -801,6 +801,21 @@ fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str)
             "operation.status",
             json!({"operation_id": operation_id, "wait_ms": 1_000}),
         );
+        let error = &status["result"]["structuredContent"]["error"];
+        if error["code"] == "BUSY" && error["retryable"] == true {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let retry_after = Duration::from_millis(
+                error["retry_after_ms"]
+                    .as_u64()
+                    .unwrap_or(25)
+                    .clamp(1, 1_000),
+            );
+            std::thread::sleep(retry_after.min(deadline.saturating_duration_since(now)));
+            continue;
+        }
         assert_success(&status, "operation.status");
         let data = &status["result"]["structuredContent"]["data"];
         match data["operation"]["state"].as_str() {
