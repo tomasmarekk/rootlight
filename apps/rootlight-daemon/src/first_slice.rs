@@ -3824,7 +3824,16 @@ fn repository_index_with_intent(
     {
         cancel_semantic_refinements(semantic_refinements, repository)?;
     }
-    let started_unix_ms = unix_time_ms()?;
+    let started_unix_ms = if resume_pre_submitted_semantic {
+        // Queue admission owns the durable start time. Reusing it keeps the
+        // later activation marker identical to the journal projection.
+        submission
+            .repository_context
+            .map(|repository| repository.started_unix_ms)
+            .ok_or_else(internal_error)?
+    } else {
+        unix_time_ms()?
+    };
     let service_guard = read_service(service)?;
     let admission = match service_guard.admit_rust_fixture(&root, &context.cancellation) {
         Ok(admission) => admission,
@@ -9872,6 +9881,16 @@ mod tests {
             .expect("semantic operation observations remain queryable");
         assert!(semantic_context.files_examined > 0);
         assert!(semantic_context.bytes_examined > 0);
+        assert_eq!(
+            metadata
+                .lock()
+                .expect("operation metadata locks")
+                .records
+                .get(&semantic_operation)
+                .expect("semantic metadata remains queryable")
+                .started_unix_ms,
+            semantic_context.started_unix_ms
+        );
         let status = repository_operation_status(
             &handle,
             &metadata,

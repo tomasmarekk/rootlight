@@ -18,7 +18,9 @@ use rootlight_mcp_contract::{batch::BATCH_TOOL_REGISTRY, context::BatchTool};
 use serde_json::{Value, json};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+// The suite runs several full process trees concurrently. This bound still
+// catches shutdown deadlocks without conflating runner contention with failure.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[test]
 fn every_advertised_batch_subtool_reaches_its_production_adapter() {
