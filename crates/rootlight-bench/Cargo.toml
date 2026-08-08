@@ -16,6 +16,7 @@ rootlight-adapters = { path = "../rootlight-adapters" }
 rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
+rootlight-query = { path = "../rootlight-query" }
 rootlight-resolve = { path = "../rootlight-resolve" }
 rootlight-runtime = { path = "../rootlight-runtime" }
 rootlight-service = { path = "../rootlight-service" }

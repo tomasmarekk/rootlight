@@ -10,16 +10,19 @@ use rootlight_cancel::Cancellation;
 use rootlight_ids::content_hash;
 use rootlight_protocol::{
     adapter_contract::{
-        AdapterFrameDecoder, MAX_ADAPTER_FRAME_BYTES, encode_length_delimited_adapter_frame,
+        AdapterFrameDecoder, MAX_ADAPTER_FRAME_BYTES, MAX_ADAPTER_PROJECT_OUTPUT_BYTES,
+        encode_length_delimited_adapter_frame,
     },
     generated::adapter::v1::{
-        AdapterFrame, ProjectAnalysisRequest, ProjectAnalysisResult, adapter_frame,
+        AdapterFrame, ProjectAnalysisRequest, ProjectAnalysisResult, ProjectAnalysisResultChunk,
+        ProjectAnalysisResultEnd, adapter_frame,
     },
 };
 
 use crate::AdapterHostError;
 
 const PIPE_CHUNK_BYTES: usize = 16 * 1024;
+const RESULT_CHUNK_BYTES: usize = MAX_ADAPTER_FRAME_BYTES - 1024;
 
 /// Serves one exact bounded project frame on an isolated child pipe.
 ///
@@ -56,13 +59,74 @@ where
     let result = handler(request.clone(), cancellation)?;
     cancellation.check()?;
     validate_handler_result(&request, &result)?;
-    let packet = encode_length_delimited_adapter_frame(&AdapterFrame {
+    write_project_result(writer, result)
+}
+
+fn write_project_result(
+    writer: &mut impl Write,
+    result: ProjectAnalysisResult,
+) -> Result<(), AdapterHostError> {
+    let fits_single_frame = result.normalized_ir.len() <= RESULT_CHUNK_BYTES;
+    let mut frame = AdapterFrame {
         message: Some(adapter_frame::Message::ProjectAnalysisResult(result)),
-    })?;
+    };
+    if fits_single_frame {
+        let packet = encode_length_delimited_adapter_frame(&frame)?;
+        writer
+            .write_all(&packet)
+            .and_then(|()| writer.flush())
+            .map_err(|_| AdapterHostError::ProcessIo)?;
+        return Ok(());
+    }
+    let Some(adapter_frame::Message::ProjectAnalysisResult(result)) = frame.message.take() else {
+        return Err(AdapterHostError::UnexpectedFrame);
+    };
+
+    let total_output_bytes =
+        u64::try_from(result.normalized_ir.len()).map_err(|_| AdapterHostError::Limit)?;
+    let chunk_count = result.normalized_ir.len().div_ceil(RESULT_CHUNK_BYTES);
+    let chunk_count = u32::try_from(chunk_count).map_err(|_| AdapterHostError::Limit)?;
+    if chunk_count < 2 {
+        return Err(AdapterHostError::ProjectOutputLimit);
+    }
+    for (chunk_index, normalized_ir_chunk) in
+        result.normalized_ir.chunks(RESULT_CHUNK_BYTES).enumerate()
+    {
+        let chunk_digest = content_hash(normalized_ir_chunk);
+        let frame = AdapterFrame {
+            message: Some(adapter_frame::Message::ProjectAnalysisResultChunk(
+                ProjectAnalysisResultChunk {
+                    session_id: result.session_id.clone(),
+                    request_id: result.request_id.clone(),
+                    chunk_index: u32::try_from(chunk_index).map_err(|_| AdapterHostError::Limit)?,
+                    normalized_ir_chunk: normalized_ir_chunk.to_vec(),
+                    chunk_digest: Some(rootlight_protocol::generated::common::v1::ContentHash {
+                        value: chunk_digest.as_bytes().to_vec(),
+                    }),
+                },
+            )),
+        };
+        let packet = encode_length_delimited_adapter_frame(&frame)?;
+        writer
+            .write_all(&packet)
+            .map_err(|_| AdapterHostError::ProcessIo)?;
+    }
+    let end = AdapterFrame {
+        message: Some(adapter_frame::Message::ProjectAnalysisResultEnd(
+            ProjectAnalysisResultEnd {
+                session_id: result.session_id,
+                request_id: result.request_id,
+                chunk_count,
+                total_output_bytes,
+                output_digest: result.output_digest,
+            },
+        )),
+    };
+    let packet = encode_length_delimited_adapter_frame(&end)?;
     writer
         .write_all(&packet)
-        .and_then(|()| writer.flush())
-        .map_err(|_| AdapterHostError::ProcessIo)
+        .map_err(|_| AdapterHostError::ProcessIo)?;
+    writer.flush().map_err(|_| AdapterHostError::ProcessIo)
 }
 
 fn read_exact_frame(
@@ -106,7 +170,7 @@ fn validate_handler_result(
         return Err(AdapterHostError::RequestMismatch);
     }
     if result.normalized_ir.is_empty()
-        || result.normalized_ir.len() > MAX_ADAPTER_FRAME_BYTES
+        || result.normalized_ir.len() > MAX_ADAPTER_PROJECT_OUTPUT_BYTES
         || result.output_digest.as_ref().is_none_or(|digest| {
             digest.value.as_slice() != content_hash(&result.normalized_ir).as_bytes()
         })
@@ -162,6 +226,88 @@ mod tests {
             frame.and_then(|frame| frame.message),
             Some(adapter_frame::Message::ProjectAnalysisResult(_))
         ));
+    }
+
+    #[test]
+    fn oversized_project_result_is_emitted_as_ordered_authenticated_chunks() {
+        let request = request();
+        let input = encode_length_delimited_adapter_frame(&AdapterFrame {
+            message: Some(adapter_frame::Message::ProjectAnalysisRequest(
+                request.clone(),
+            )),
+        })
+        .expect("request frame encodes");
+        let normalized_ir = vec![7; RESULT_CHUNK_BYTES + 1];
+        let expected_digest = content_hash(&normalized_ir);
+        let mut output = Vec::new();
+
+        serve_project_session(
+            &mut Cursor::new(input),
+            &mut output,
+            &Cancellation::new(),
+            |observed, _| {
+                Ok(ProjectAnalysisResult {
+                    session_id: observed.session_id,
+                    request_id: observed.request_id,
+                    output_digest: Some(ContentHash {
+                        value: expected_digest.as_bytes().to_vec(),
+                    }),
+                    normalized_ir,
+                })
+            },
+        )
+        .expect("chunked session is served");
+
+        let mut decoder = AdapterFrameDecoder::new();
+        let mut offset = 0usize;
+        let mut chunks = Vec::new();
+        while offset < output.len() {
+            let (consumed, frame) = decoder.push(&output[offset..]).expect("chunk decodes");
+            offset += consumed;
+            if let Some(AdapterFrame {
+                message: Some(adapter_frame::Message::ProjectAnalysisResultChunk(chunk)),
+            }) = frame
+            {
+                chunks.push(chunk);
+            }
+        }
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].chunk_index, 0);
+        assert_eq!(chunks[1].chunk_index, 1);
+        assert!(chunks.iter().all(|chunk| {
+            chunk.chunk_digest.as_ref().is_some_and(|digest| {
+                digest.value.as_slice() == content_hash(&chunk.normalized_ir_chunk).as_bytes()
+            })
+        }));
+        let reassembled: Vec<_> = chunks
+            .iter()
+            .flat_map(|chunk| chunk.normalized_ir_chunk.iter().copied())
+            .collect();
+        assert_eq!(reassembled.len(), RESULT_CHUNK_BYTES + 1);
+        assert_eq!(content_hash(&reassembled), expected_digest);
+        let mut decoder = AdapterFrameDecoder::new();
+        let mut offset = 0usize;
+        let mut end = None;
+        while offset < output.len() {
+            let (consumed, frame) = decoder.push(&output[offset..]).expect("frame decodes");
+            offset += consumed;
+            if let Some(AdapterFrame {
+                message: Some(adapter_frame::Message::ProjectAnalysisResultEnd(observed)),
+            }) = frame
+            {
+                end = Some(observed);
+            }
+        }
+        let end = end.expect("chunk stream has an authenticated commit marker");
+        assert_eq!(end.chunk_count, 2);
+        assert_eq!(
+            end.total_output_bytes,
+            u64::try_from(RESULT_CHUNK_BYTES + 1).expect("fixture size is representable")
+        );
+        assert_eq!(
+            end.output_digest.expect("result digest exists").value,
+            expected_digest.as_bytes()
+        );
     }
 
     #[test]

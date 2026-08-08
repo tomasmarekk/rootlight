@@ -11,6 +11,7 @@ workspace_members = [
   "rootlight-adapters",
   "rootlight-agent",
   "rootlight-bench",
+  "rootlight-build",
   "rootlight-cancel",
   "rootlight-catalog",
   "rootlight-client",
@@ -62,6 +63,7 @@ allow_build_script = false
 [[crates]]
 name = "rootlight"
 allowed_internal_dependencies = [
+  "rootlight-build",
   "rootlight-client",
   "rootlight-daemon-core",
   "rootlight-error",
@@ -77,13 +79,14 @@ allow_build_script = false
 
 [[crates]]
 name = "rootlight-launcher"
-allowed_internal_dependencies = []
+allowed_internal_dependencies = ["rootlight-build"]
 allow_build_script = false
 
 [[crates]]
 name = "rootlight-mcp"
 allowed_internal_dependencies = [
   "rootlight-agent",
+  "rootlight-build",
   "rootlight-client",
   "rootlight-ids",
   "rootlight-ir",
@@ -160,6 +163,7 @@ allowed_internal_dependencies = [
   "rootlight-cancel",
   "rootlight-ids",
   "rootlight-ir",
+  "rootlight-query",
   "rootlight-resolve",
   "rootlight-runtime",
   "rootlight-service",
@@ -167,6 +171,11 @@ allowed_internal_dependencies = [
   "rootlight-workspace",
 ]
 allow_build_script = true
+
+[[crates]]
+name = "rootlight-build"
+allowed_internal_dependencies = []
+allow_build_script = false
 
 [[crates]]
 name = "rootlight-cancel"
@@ -185,6 +194,7 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-client"
 allowed_internal_dependencies = [
+  "rootlight-build",
   "rootlight-error",
   "rootlight-ids",
   "rootlight-ipc",
@@ -227,6 +237,7 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-daemon-core"
 allowed_internal_dependencies = [
+  "rootlight-build",
   "rootlight-error",
   "rootlight-ids",
   "rootlight-ipc",

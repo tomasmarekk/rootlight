@@ -951,6 +951,46 @@ pub struct RepositoryOperationStatusResponse {
     pub semantic_operation: ::core::option::Option<
         super::super::common::v1::OperationId,
     >,
+    #[prost(enumeration = "RepositoryBuildStrategy", tag = "12")]
+    #[allow(missing_docs)]
+    pub build_strategy: i32,
+    #[prost(enumeration = "RepositoryFallbackReason", optional, tag = "13")]
+    #[allow(missing_docs)]
+    pub fallback_reason: ::core::option::Option<i32>,
+    #[prost(uint64, tag = "14")]
+    #[allow(missing_docs)]
+    pub invalidated_units: u64,
+    #[prost(uint64, tag = "15")]
+    #[allow(missing_docs)]
+    pub changed_inputs: u64,
+    #[prost(uint64, tag = "16")]
+    #[allow(missing_docs)]
+    pub changed_files: u64,
+    #[prost(uint64, tag = "17")]
+    #[allow(missing_docs)]
+    pub reused_files: u64,
+    #[prost(uint64, tag = "18")]
+    #[allow(missing_docs)]
+    pub rebuilt_files: u64,
+    #[prost(uint64, tag = "19")]
+    #[allow(missing_docs)]
+    pub reused_facts: u64,
+    #[prost(uint64, tag = "20")]
+    #[allow(missing_docs)]
+    pub rebuilt_facts: u64,
+    #[prost(uint64, tag = "21")]
+    #[allow(missing_docs)]
+    pub referenced_bytes: u64,
+    #[prost(uint64, tag = "22")]
+    #[allow(missing_docs)]
+    pub newly_written_bytes: u64,
+    /// Generation-owned accounting is separate from process-wide peak RSS.
+    #[prost(uint64, tag = "23")]
+    #[allow(missing_docs)]
+    pub reserved_memory_bytes: u64,
+    #[prost(uint64, tag = "24")]
+    #[allow(missing_docs)]
+    pub owned_memory_bytes: u64,
 }
 /// Bounded measured usage for one first-slice query.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1562,7 +1602,7 @@ pub struct RepositoryCoverageEntry {
     #[allow(missing_docs)]
     pub indexed_files: u64,
 }
-/// One bounded source-free repository-index operation summary.
+/// One bounded source-free repository operation summary.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RepositoryStatusOperation {
     #[prost(message, optional, tag = "1")]
@@ -3132,6 +3172,8 @@ pub enum OperationKind {
     ControlProbe = 1,
     #[allow(missing_docs)]
     RepositoryIndex = 2,
+    #[allow(missing_docs)]
+    Recovery = 3,
 }
 impl OperationKind {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -3143,6 +3185,7 @@ impl OperationKind {
             Self::Unspecified => "OPERATION_KIND_UNSPECIFIED",
             Self::ControlProbe => "CONTROL_PROBE",
             Self::RepositoryIndex => "REPOSITORY_INDEX",
+            Self::Recovery => "RECOVERY",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -3151,6 +3194,7 @@ impl OperationKind {
             "OPERATION_KIND_UNSPECIFIED" => Some(Self::Unspecified),
             "CONTROL_PROBE" => Some(Self::ControlProbe),
             "REPOSITORY_INDEX" => Some(Self::RepositoryIndex),
+            "RECOVERY" => Some(Self::Recovery),
             _ => None,
         }
     }
@@ -3303,6 +3347,102 @@ impl RepositoryOperationAction {
             "REPOSITORY_OPERATION_ACTION_UNSPECIFIED" => Some(Self::Unspecified),
             "REPOSITORY_OPERATION_GET" => Some(Self::RepositoryOperationGet),
             "REPOSITORY_OPERATION_CANCEL" => Some(Self::RepositoryOperationCancel),
+            _ => None,
+        }
+    }
+}
+/// Operation-local construction strategy retained with the durable receipt.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RepositoryBuildStrategy {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    RepositoryBuildInitial = 1,
+    #[allow(missing_docs)]
+    RepositoryBuildDependencyDirected = 2,
+    #[allow(missing_docs)]
+    RepositoryBuildConservativeRepositoryRebuild = 3,
+    #[allow(missing_docs)]
+    RepositoryBuildRetainedGeneration = 4,
+}
+impl RepositoryBuildStrategy {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REPOSITORY_BUILD_STRATEGY_UNSPECIFIED",
+            Self::RepositoryBuildInitial => "REPOSITORY_BUILD_INITIAL",
+            Self::RepositoryBuildDependencyDirected => {
+                "REPOSITORY_BUILD_DEPENDENCY_DIRECTED"
+            }
+            Self::RepositoryBuildConservativeRepositoryRebuild => {
+                "REPOSITORY_BUILD_CONSERVATIVE_REPOSITORY_REBUILD"
+            }
+            Self::RepositoryBuildRetainedGeneration => {
+                "REPOSITORY_BUILD_RETAINED_GENERATION"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REPOSITORY_BUILD_STRATEGY_UNSPECIFIED" => Some(Self::Unspecified),
+            "REPOSITORY_BUILD_INITIAL" => Some(Self::RepositoryBuildInitial),
+            "REPOSITORY_BUILD_DEPENDENCY_DIRECTED" => {
+                Some(Self::RepositoryBuildDependencyDirected)
+            }
+            "REPOSITORY_BUILD_CONSERVATIVE_REPOSITORY_REBUILD" => {
+                Some(Self::RepositoryBuildConservativeRepositoryRebuild)
+            }
+            "REPOSITORY_BUILD_RETAINED_GENERATION" => {
+                Some(Self::RepositoryBuildRetainedGeneration)
+            }
+            _ => None,
+        }
+    }
+}
+/// Source-free reason fine-grained invalidation expanded to a full rebuild.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RepositoryFallbackReason {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    RepositoryFallbackMissingDependencyDeclaration = 1,
+    #[allow(missing_docs)]
+    RepositoryFallbackClosureWorkExceeded = 2,
+}
+impl RepositoryFallbackReason {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REPOSITORY_FALLBACK_REASON_UNSPECIFIED",
+            Self::RepositoryFallbackMissingDependencyDeclaration => {
+                "REPOSITORY_FALLBACK_MISSING_DEPENDENCY_DECLARATION"
+            }
+            Self::RepositoryFallbackClosureWorkExceeded => {
+                "REPOSITORY_FALLBACK_CLOSURE_WORK_EXCEEDED"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REPOSITORY_FALLBACK_REASON_UNSPECIFIED" => Some(Self::Unspecified),
+            "REPOSITORY_FALLBACK_MISSING_DEPENDENCY_DECLARATION" => {
+                Some(Self::RepositoryFallbackMissingDependencyDeclaration)
+            }
+            "REPOSITORY_FALLBACK_CLOSURE_WORK_EXCEEDED" => {
+                Some(Self::RepositoryFallbackClosureWorkExceeded)
+            }
             _ => None,
         }
     }

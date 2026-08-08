@@ -250,6 +250,31 @@
         }
       ]
     },
+    "OperationBuildStrategy": {
+      "description": "Construction strategy retained with a successful repository operation.",
+      "oneOf": [
+        {
+          "description": "No committed parent generation was available.",
+          "type": "string",
+          "const": "initial"
+        },
+        {
+          "description": "Declared dependencies selected bounded artifact reuse.",
+          "type": "string",
+          "const": "dependency_directed"
+        },
+        {
+          "description": "Missing dependency evidence required a repository-wide rebuild.",
+          "type": "string",
+          "const": "conservative_repository_rebuild"
+        },
+        {
+          "description": "An identical retained generation was reactivated without rebuilding it.",
+          "type": "string",
+          "const": "retained_generation"
+        }
+      ]
+    },
     "OperationDetailV1_1": {
       "description": "One operation journal view.",
       "type": "object",
@@ -322,9 +347,99 @@
         "error"
       ]
     },
+    "OperationFallbackReason": {
+      "description": "Source-free reason fine-grained invalidation expanded to a full rebuild.",
+      "oneOf": [
+        {
+          "description": "A changed input had no declared dependent edge.",
+          "type": "string",
+          "const": "missing_dependency_declaration"
+        },
+        {
+          "description": "Fixed-point dependency traversal reached its configured work ceiling.",
+          "type": "string",
+          "const": "closure_work_exceeded"
+        }
+      ]
+    },
     "OperationId": {
       "type": "string",
       "pattern": "^op1_[a-z2-7]{32}$"
+    },
+    "OperationIncrementalEvidenceV1_1": {
+      "description": "Durable source-free invalidation, reuse, and rebuild evidence.",
+      "type": "object",
+      "properties": {
+        "build_strategy": {
+          "description": "Construction strategy used by this operation.",
+          "$ref": "#/$defs/OperationBuildStrategy"
+        },
+        "changed_files": {
+          "description": "Authoritative file transitions observed by reconciliation.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "changed_inputs": {
+          "description": "Typed generation inputs changed from the parent snapshot.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "fallback_reason": {
+          "description": "Explicit reason dependency-directed reuse was abandoned, when applicable.",
+          "$ref": "#/$defs/RequiredNullable3"
+        },
+        "invalidated_units": {
+          "description": "Analysis units selected by the invalidation closure.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "rebuilt_facts": {
+          "description": "Normalized facts rebuilt for the published generation.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "rebuilt_files": {
+          "description": "Source files lowered into fresh generation-bound facts.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "reused_facts": {
+          "description": "Generation-bound normalized facts reused without rewriting.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "reused_files": {
+          "description": "Source files whose immutable artifacts were reused.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "build_strategy",
+        "fallback_reason",
+        "invalidated_units",
+        "changed_inputs",
+        "changed_files",
+        "reused_files",
+        "rebuilt_files",
+        "reused_facts",
+        "rebuilt_facts"
+      ]
     },
     "OperationProgress": {
       "description": "Progress units reported by an operation.",
@@ -369,8 +484,36 @@
           "maximum": 18446744073709551615,
           "minimum": 0
         },
+        "newly_written_bytes": {
+          "description": "Bytes confirmed by operation-owned durable writer boundaries.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "owned_memory_bytes": {
+          "description": "Retained generation-memory charge, separate from process RSS.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
         "peak_rss_bytes": {
           "description": "Peak resident bytes observed so far.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "referenced_bytes": {
+          "description": "Existing artifact or generation bytes referenced by this operation.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "reserved_memory_bytes": {
+          "description": "Conservative generation-memory reservation, separate from process RSS.",
           "type": "integer",
           "format": "uint64",
           "maximum": 18446744073709551615,
@@ -388,7 +531,11 @@
       "required": [
         "peak_rss_bytes",
         "written_bytes",
-        "files_examined"
+        "files_examined",
+        "referenced_bytes",
+        "newly_written_bytes",
+        "reserved_memory_bytes",
+        "owned_memory_bytes"
       ]
     },
     "OperationSchemaVersion": {
@@ -442,7 +589,18 @@
       "properties": {
         "error": {
           "description": "Terminal public error, if any.",
-          "$ref": "#/$defs/RequiredNullable3"
+          "$ref": "#/$defs/RequiredNullable4"
+        },
+        "incremental": {
+          "description": "Final invalidation, reuse, and rebuild evidence, when published.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationIncrementalEvidenceV1_1"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "index_stage": {
           "description": "Current source-free repository-index stage.",
@@ -463,7 +621,7 @@
         },
         "retry_after_ms": {
           "description": "Recommended delay before polling again.",
-          "$ref": "#/$defs/RequiredNullable4"
+          "$ref": "#/$defs/RequiredNullable5"
         },
         "semantic_operation_id": {
           "description": "Separately journaled semantic refinement created by a successful Auto operation.",
@@ -747,7 +905,7 @@
       "description": "A property that must be present and may contain JSON `null`.",
       "anyOf": [
         {
-          "$ref": "#/$defs/PublicError"
+          "$ref": "#/$defs/OperationFallbackReason"
         },
         {
           "type": "null"
@@ -755,6 +913,17 @@
       ]
     },
     "RequiredNullable4": {
+      "description": "A property that must be present and may contain JSON `null`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PublicError"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "RequiredNullable5": {
       "description": "A property that must be present and may contain JSON `null`.",
       "type": [
         "integer",

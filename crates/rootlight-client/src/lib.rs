@@ -284,6 +284,8 @@ pub enum OperationKind {
     ControlProbe,
     /// Repository indexing that may publish an immutable generation.
     RepositoryIndex,
+    /// Durable restoration of repository generations into query-serving state.
+    Recovery,
 }
 
 /// Monotonic stage within the current operation kind.
@@ -749,7 +751,62 @@ pub struct RepositoryIndex {
     pub diagnostics: Vec<RepositoryIndexDiagnostic>,
 }
 
-/// Durable repository-index operation state and process-local evidence.
+/// Construction strategy retained with one successful repository operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryBuildStrategy {
+    /// No committed parent generation was available.
+    Initial,
+    /// Declared dependencies selected bounded artifact reuse.
+    DependencyDirected,
+    /// Missing dependency evidence required a repository-wide rebuild.
+    ConservativeRepositoryRebuild,
+    /// An identical retained generation was reactivated without rebuilding it.
+    RetainedGeneration,
+}
+
+/// Source-free reason fine-grained invalidation expanded to a full rebuild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryFallbackReason {
+    /// A changed input had no declared dependent edge.
+    MissingDependencyDeclaration,
+    /// Fixed-point dependency traversal reached its configured work ceiling.
+    ClosureWorkExceeded,
+}
+
+/// Durable source-free incremental and generation-resource evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryOperationEvidence {
+    /// Construction strategy used by this operation.
+    pub build_strategy: RepositoryBuildStrategy,
+    /// Explicit reason dependency-directed reuse was abandoned, when applicable.
+    pub fallback_reason: Option<RepositoryFallbackReason>,
+    /// Analysis units selected by the invalidation closure.
+    pub invalidated_units: u64,
+    /// Typed generation inputs changed from the parent snapshot.
+    pub changed_inputs: u64,
+    /// Authoritative file transitions observed by reconciliation.
+    pub changed_files: u64,
+    /// Source files whose immutable artifacts were reused.
+    pub reused_files: u64,
+    /// Source files lowered into fresh generation-bound facts.
+    pub rebuilt_files: u64,
+    /// Generation-bound normalized facts reused without rewriting.
+    pub reused_facts: u64,
+    /// Normalized facts rebuilt for the published generation.
+    pub rebuilt_facts: u64,
+    /// Existing artifact or generation bytes referenced by this operation.
+    pub referenced_bytes: u64,
+    /// Bytes confirmed by operation-owned durable writer boundaries.
+    pub newly_written_bytes: u64,
+    /// Conservative generation-memory reservation admitted for this operation.
+    pub reserved_memory_bytes: u64,
+    /// Retained generation-memory charge owned after successful publication.
+    pub owned_memory_bytes: u64,
+}
+
+/// Durable repository-index operation state and bounded evidence.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RepositoryOperationStatus {
     /// Durable operation state.
@@ -772,6 +829,8 @@ pub struct RepositoryOperationStatus {
     pub index_stage: String,
     /// Bounded polling delay for a nonterminal operation.
     pub retry_after_ms: Option<u32>,
+    /// Final incremental and generation-resource evidence, when published.
+    pub evidence: Option<RepositoryOperationEvidence>,
 }
 
 /// One generation-pinned lexical result.
@@ -7054,6 +7113,7 @@ fn parse_operation_status(
     {
         daemon::OperationKind::ControlProbe => OperationKind::ControlProbe,
         daemon::OperationKind::RepositoryIndex => OperationKind::RepositoryIndex,
+        daemon::OperationKind::Recovery => OperationKind::Recovery,
         daemon::OperationKind::Unspecified => return Err(ClientError::InvalidOperationKind),
     };
     let stage = match daemon::OperationStage::try_from(status.stage)
@@ -7723,8 +7783,12 @@ fn parse_repository_operation_status(
     expected_operation: OperationId,
 ) -> Result<RepositoryOperationStatus, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
+    let evidence_wire = RepositoryOperationEvidenceWire::from(&response);
     let operation = parse_expected_operation_status(response.operation, expected_operation)?;
-    if operation.kind != OperationKind::RepositoryIndex {
+    if !matches!(
+        operation.kind,
+        OperationKind::RepositoryIndex | OperationKind::Recovery
+    ) {
         return Err(ClientError::InvalidResponseCorrelation);
     }
     let published_generation = response
@@ -7735,25 +7799,61 @@ fn parse_repository_operation_status(
         .semantic_operation
         .map(|operation| parse_operation(Some(operation)))
         .transpose()?;
+    let evidence =
+        parse_repository_operation_evidence(operation.kind, operation.state, evidence_wire)?;
     let index_stage =
         parse_repository_index_stage(response.index_stage, operation.state, operation.stage)?;
-    let coherent = match operation.state {
-        OperationState::Queued | OperationState::Running | OperationState::Cancelling => {
+    let coherent = match (operation.kind, operation.state) {
+        (
+            OperationKind::RepositoryIndex,
+            OperationState::Queued | OperationState::Running | OperationState::Cancelling,
+        ) => {
             published_generation.is_none()
                 && semantic_operation.is_none()
+                && evidence.is_none()
                 && index_stage != "complete"
         }
-        OperationState::Succeeded => {
+        (OperationKind::RepositoryIndex, OperationState::Succeeded) => {
             published_generation.is_some()
                 && semantic_operation != Some(expected_operation)
                 && response.retry_after_ms.is_none()
                 && index_stage == "complete"
         }
-        OperationState::Failed | OperationState::Interrupted | OperationState::Cancelled => {
+        (
+            OperationKind::RepositoryIndex,
+            OperationState::Failed | OperationState::Interrupted | OperationState::Cancelled,
+        ) => {
             published_generation.is_none()
                 && semantic_operation.is_none()
+                && evidence.is_none()
                 && response.retry_after_ms.is_none()
         }
+        (
+            OperationKind::Recovery,
+            OperationState::Queued | OperationState::Running | OperationState::Cancelling,
+        ) => {
+            published_generation.is_none()
+                && semantic_operation.is_none()
+                && evidence.is_none()
+                && index_stage != "complete"
+        }
+        (OperationKind::Recovery, OperationState::Succeeded) => {
+            published_generation.is_none()
+                && semantic_operation.is_none()
+                && evidence.is_none()
+                && response.retry_after_ms.is_none()
+                && index_stage == "complete"
+        }
+        (
+            OperationKind::Recovery,
+            OperationState::Failed | OperationState::Interrupted | OperationState::Cancelled,
+        ) => {
+            published_generation.is_none()
+                && semantic_operation.is_none()
+                && evidence.is_none()
+                && response.retry_after_ms.is_none()
+        }
+        (OperationKind::ControlProbe, _) => false,
     };
     if !coherent {
         return Err(ClientError::InvalidResponseCorrelation);
@@ -7769,7 +7869,135 @@ fn parse_repository_operation_status(
         bytes_examined: response.bytes_examined,
         index_stage,
         retry_after_ms: response.retry_after_ms,
+        evidence,
     })
+}
+
+#[derive(Clone, Copy)]
+struct RepositoryOperationEvidenceWire {
+    build_strategy: i32,
+    fallback_reason: Option<i32>,
+    invalidated_units: u64,
+    changed_inputs: u64,
+    changed_files: u64,
+    reused_files: u64,
+    rebuilt_files: u64,
+    reused_facts: u64,
+    rebuilt_facts: u64,
+    referenced_bytes: u64,
+    newly_written_bytes: u64,
+    reserved_memory_bytes: u64,
+    owned_memory_bytes: u64,
+}
+
+impl From<&daemon::RepositoryOperationStatusResponse> for RepositoryOperationEvidenceWire {
+    fn from(response: &daemon::RepositoryOperationStatusResponse) -> Self {
+        Self {
+            build_strategy: response.build_strategy,
+            fallback_reason: response.fallback_reason,
+            invalidated_units: response.invalidated_units,
+            changed_inputs: response.changed_inputs,
+            changed_files: response.changed_files,
+            reused_files: response.reused_files,
+            rebuilt_files: response.rebuilt_files,
+            reused_facts: response.reused_facts,
+            rebuilt_facts: response.rebuilt_facts,
+            referenced_bytes: response.referenced_bytes,
+            newly_written_bytes: response.newly_written_bytes,
+            reserved_memory_bytes: response.reserved_memory_bytes,
+            owned_memory_bytes: response.owned_memory_bytes,
+        }
+    }
+}
+
+fn parse_repository_operation_evidence(
+    kind: OperationKind,
+    state: OperationState,
+    response: RepositoryOperationEvidenceWire,
+) -> Result<Option<RepositoryOperationEvidence>, ClientError> {
+    let counters = [
+        response.invalidated_units,
+        response.changed_inputs,
+        response.changed_files,
+        response.reused_files,
+        response.rebuilt_files,
+        response.reused_facts,
+        response.rebuilt_facts,
+        response.referenced_bytes,
+        response.newly_written_bytes,
+        response.reserved_memory_bytes,
+        response.owned_memory_bytes,
+    ];
+    if response.build_strategy == daemon::RepositoryBuildStrategy::Unspecified as i32 {
+        return if response.fallback_reason.is_none() && counters.iter().all(|counter| *counter == 0)
+        {
+            Ok(None)
+        } else {
+            Err(ClientError::InvalidResponseCorrelation)
+        };
+    }
+    if kind != OperationKind::RepositoryIndex || state != OperationState::Succeeded {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let build_strategy = match daemon::RepositoryBuildStrategy::try_from(response.build_strategy)
+        .map_err(|_| ClientError::InvalidResponseCorrelation)?
+    {
+        daemon::RepositoryBuildStrategy::RepositoryBuildInitial => RepositoryBuildStrategy::Initial,
+        daemon::RepositoryBuildStrategy::RepositoryBuildDependencyDirected => {
+            RepositoryBuildStrategy::DependencyDirected
+        }
+        daemon::RepositoryBuildStrategy::RepositoryBuildConservativeRepositoryRebuild => {
+            RepositoryBuildStrategy::ConservativeRepositoryRebuild
+        }
+        daemon::RepositoryBuildStrategy::RepositoryBuildRetainedGeneration => {
+            RepositoryBuildStrategy::RetainedGeneration
+        }
+        daemon::RepositoryBuildStrategy::Unspecified => {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+    };
+    let fallback_reason = response
+        .fallback_reason
+        .map(|reason| {
+            match daemon::RepositoryFallbackReason::try_from(reason)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?
+            {
+                daemon::RepositoryFallbackReason::RepositoryFallbackMissingDependencyDeclaration => {
+                    Ok(RepositoryFallbackReason::MissingDependencyDeclaration)
+                }
+                daemon::RepositoryFallbackReason::RepositoryFallbackClosureWorkExceeded => {
+                    Ok(RepositoryFallbackReason::ClosureWorkExceeded)
+                }
+                daemon::RepositoryFallbackReason::Unspecified => {
+                    Err(ClientError::InvalidResponseCorrelation)
+                }
+            }
+        })
+        .transpose()?;
+    if (build_strategy == RepositoryBuildStrategy::ConservativeRepositoryRebuild)
+        != fallback_reason.is_some()
+        || build_strategy == RepositoryBuildStrategy::RetainedGeneration
+            && (response.rebuilt_files != 0
+                || response.rebuilt_facts != 0
+                || response.owned_memory_bytes != 0)
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(Some(RepositoryOperationEvidence {
+        build_strategy,
+        fallback_reason,
+        invalidated_units: response.invalidated_units,
+        changed_inputs: response.changed_inputs,
+        changed_files: response.changed_files,
+        reused_files: response.reused_files,
+        rebuilt_files: response.rebuilt_files,
+        reused_facts: response.reused_facts,
+        rebuilt_facts: response.rebuilt_facts,
+        referenced_bytes: response.referenced_bytes,
+        newly_written_bytes: response.newly_written_bytes,
+        reserved_memory_bytes: response.reserved_memory_bytes,
+        owned_memory_bytes: response.owned_memory_bytes,
+    }))
 }
 
 fn parse_repository_index_stage(
@@ -8227,6 +8455,7 @@ fn parse_repository_status(
                 .map_err(|_| ClientError::InvalidOperationKind)?
             {
                 daemon::OperationKind::RepositoryIndex => OperationKind::RepositoryIndex,
+                daemon::OperationKind::Recovery => OperationKind::Recovery,
                 daemon::OperationKind::ControlProbe | daemon::OperationKind::Unspecified => {
                     return Err(ClientError::InvalidResponseCorrelation);
                 }
@@ -11132,6 +11361,27 @@ mod tests {
         assert_eq!(active_status.resolved_generation, active);
         assert_eq!(active_status.active_generation, active);
 
+        let recovery_operation = OperationId::from_bytes([4; 16]);
+        let mut recovery_response = wire_repository_status_response(Some(active), active);
+        recovery_response
+            .operations
+            .push(daemon::RepositoryStatusOperation {
+                operation: Some(operation_to_wire(recovery_operation)),
+                kind: daemon::OperationKind::Recovery as i32,
+                state: daemon::OperationState::Running as i32,
+                completed_units: 2,
+                total_units: 4,
+                owned_by_client: false,
+                started_unix_ms: 1,
+            });
+        let recovery_status = parse_repository_status(
+            recovery_response,
+            RepositoryStatusRequest::new(test_repository(), GenerationSelector::Active)
+                .with_operations(true),
+        )
+        .expect("repository recovery is visible in status");
+        assert_eq!(recovery_status.operations[0].kind, OperationKind::Recovery);
+
         let exact_status = parse_repository_status(
             wire_repository_status_response(Some(exact), active),
             RepositoryStatusRequest::new(test_repository(), GenerationSelector::Generation(exact)),
@@ -11345,6 +11595,7 @@ mod tests {
             bytes_examined: 16,
             index_stage: "complete".to_owned(),
             semantic_operation: None,
+            ..Default::default()
         }
     }
 
@@ -13430,6 +13681,14 @@ mod tests {
             parse_expected_operation_status(Some(unsafe_failure), operation),
             Err(ClientError::InvalidPublicError)
         ));
+        let mut recovery_operation = wire_operation(operation);
+        recovery_operation.kind = daemon::OperationKind::Recovery as i32;
+        assert_eq!(
+            parse_expected_operation_status(Some(recovery_operation), operation)
+                .expect("recovery status decodes")
+                .kind,
+            OperationKind::Recovery
+        );
 
         let index = daemon::RepositoryIndexResponse {
             schema_version: Some(first_slice_schema()),
@@ -13517,8 +13776,42 @@ mod tests {
             bytes_examined: 80,
             index_stage: "complete".to_owned(),
             semantic_operation: None,
+            ..Default::default()
         };
         assert!(parse_repository_operation_status(status.clone(), operation).is_ok());
+        let mut incremental_status = status.clone();
+        incremental_status.build_strategy =
+            daemon::RepositoryBuildStrategy::RepositoryBuildDependencyDirected as i32;
+        incremental_status.invalidated_units = 2;
+        incremental_status.changed_inputs = 1;
+        incremental_status.changed_files = 1;
+        incremental_status.reused_files = 4;
+        incremental_status.rebuilt_files = 1;
+        incremental_status.rebuilt_facts = 17;
+        incremental_status.referenced_bytes = 1_024;
+        incremental_status.newly_written_bytes = 2_048;
+        incremental_status.reserved_memory_bytes = 4_096;
+        incremental_status.owned_memory_bytes = 3_072;
+        let incremental = parse_repository_operation_status(incremental_status, operation)
+            .expect("durable incremental evidence decodes");
+        assert_eq!(
+            incremental
+                .evidence
+                .expect("incremental evidence is retained")
+                .build_strategy,
+            RepositoryBuildStrategy::DependencyDirected
+        );
+        let mut recovery_status = status.clone();
+        recovery_status
+            .operation
+            .as_mut()
+            .expect("operation exists")
+            .kind = daemon::OperationKind::Recovery as i32;
+        recovery_status.published_generation = None;
+        let parsed_recovery = parse_repository_operation_status(recovery_status, operation)
+            .expect("successful recovery status decodes without publication");
+        assert_eq!(parsed_recovery.operation.kind, OperationKind::Recovery);
+        assert_eq!(parsed_recovery.published_generation, None);
         let mut legacy_status = status.clone();
         legacy_status.bytes_examined = 0;
         legacy_status.index_stage.clear();

@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr as _,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -16,7 +16,12 @@ use cap_std::{ambient_authority, fs::Dir};
 use rootlight_cancel::Cancellation;
 use rootlight_catalog::OracleReader;
 use rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES;
+use rootlight_discovery::IncrementalDiscoveryBaseline;
 use rootlight_ids::{ContentHash, GenerationId, RepositoryId};
+use rootlight_incremental::{
+    BaselineFile, FileDescriptor, FileMetadata, InputFingerprint, InputKey, InputSnapshot,
+    MetadataBaseline, MetadataReliability, PlanningLimits, PlatformFileIdentity, ReconcileLimits,
+};
 use rootlight_ir::{ExtensionSupport, FileRecord, IrLimits};
 use rootlight_search::{BuildBudget, LexicalIndex};
 use rootlight_storage::{
@@ -30,31 +35,43 @@ use rootlight_vfs::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    FirstSliceError, FirstSliceIndexReceipt, FirstSliceOperationContext, RustSourceInput,
-    check_cancellation, map_catalog_error, map_identity_error, map_query_error, map_search_error,
-    map_vfs_error, project_lexical_documents,
+    FirstSliceError, FirstSliceIncrementalEvidence, FirstSliceIndexReceipt,
+    FirstSliceOperationContext, FirstSliceRecoveryTarget, PreparedIncrementalState,
+    RustSourceInput, check_cancellation, map_catalog_error, map_identity_error,
+    map_incremental_error, map_query_error, map_search_error, map_vfs_error,
+    project_lexical_documents,
 };
 
 const DURABLE_DIRECTORY: &str = "first-slice";
 const REPOSITORIES_DIRECTORY: &str = "repositories";
 const QUARANTINE_DIRECTORY: &str = "quarantine";
 const SOURCES_DIRECTORY: &str = "sources";
+const SOURCE_BLOBS_DIRECTORY: &str = "source-blobs";
+const SOURCE_BLOB_PAYLOAD_FILENAME: &str = "content";
+const SOURCE_POINTER_MAGIC: &[u8] = b"rootlight.source-pointer/1\n";
 const MANIFEST_FILENAME: &str = "manifest.json";
 const RECOVERY_SNAPSHOT_FILENAME: &str = "recovery.json";
 const RECOVERY_MANIFEST_FILENAME: &str = "recovery-manifest.json";
+const INCREMENTAL_STATE_FILENAME: &str = "incremental.json";
 const ACTIVATION_MANIFEST_FILENAME: &str = "activation.json";
 const REPOSITORY_METADATA_FILENAME: &str = "metadata.json";
-const GENERATION_MANIFEST_VERSION: u16 = 1;
+const LEGACY_GENERATION_MANIFEST_VERSION: u16 = 1;
+const GENERATION_MANIFEST_VERSION: u16 = 2;
 pub(super) const REPOSITORY_METADATA_VERSION: u16 = 1;
+const SOURCE_STORAGE_VERSION: u16 = 1;
 const RECOVERY_SNAPSHOT_VERSION: u16 = 1;
+const INCREMENTAL_STATE_VERSION: u16 = 1;
 const LEGACY_ACTIVATION_MANIFEST_VERSION: u16 = 1;
 const ACTIVATION_MANIFEST_VERSION: u16 = 2;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_ACTIVATION_MANIFEST_BYTES: u64 = 4 * 1024;
 const MAX_RECOVERY_MANIFEST_BYTES: u64 = 4 * 1024;
 const MAX_RECOVERY_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_INCREMENTAL_STATE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_SOURCE_POINTER_BYTES: u64 = 256;
 const RECOVERY_WRITE_BUFFER_BYTES: usize = 1024 * 1024;
 const MAX_DURABLE_ENTRIES: usize = 65_536;
+const MAX_SOURCE_BLOB_ENTRIES: usize = 1_000_000;
 const MAX_RESTORED_OPERATIONS: usize = 256;
 const MAX_QUARANTINED_GENERATIONS: usize = 256;
 const STAGING_PREFIX: &str = "stage-";
@@ -77,6 +94,8 @@ pub(super) struct DurablePreparedGeneration {
     generation: GenerationId,
     staging_bytes: Arc<AtomicU64>,
     accounted_bytes: AtomicU64,
+    incremental_state: Mutex<Option<DurableSidecarDescriptor>>,
+    source_storage: Mutex<Option<DurableSourceStorage>>,
 }
 
 pub(super) struct DurablePublishedGeneration {
@@ -98,6 +117,7 @@ pub(super) struct RestoredGeneration {
     pub(super) verified: IdentityVerifiedGeneration,
     pub(super) search: LexicalIndex,
     pub(super) sources: Vec<RustSourceInput>,
+    pub(super) incremental: Option<PreparedIncrementalState>,
     pub(super) operations: Vec<FirstSliceOperationContext>,
 }
 
@@ -105,6 +125,7 @@ struct RestorePolicy<'a> {
     maximum_generations: usize,
     excluded: &'a BTreeSet<GenerationId>,
     compact: bool,
+    repair: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -116,6 +137,70 @@ struct DurableGenerationManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     root_path: Option<String>,
     receipt: FirstSliceIndexReceipt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    incremental_state: Option<DurableSidecarDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_storage: Option<DurableSourceStorage>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableSourceStorage {
+    version: u16,
+}
+
+pub(super) struct DurableSourceWrite {
+    pub(super) newly_written_bytes: u64,
+    pub(super) referenced_bytes: u64,
+}
+
+struct SourcePointer {
+    digest: ContentHash,
+    bytes: u64,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableSidecarDescriptor {
+    bytes: u64,
+    digest: ContentHash,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableIncrementalState {
+    version: u16,
+    baseline_files: Vec<DurableBaselineFile>,
+    baseline_inputs: Vec<DurableInputFingerprint>,
+    analysis_inputs: Vec<DurableInputFingerprint>,
+    evidence: FirstSliceIncrementalEvidence,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableBaselineFile {
+    file: rootlight_ids::FileId,
+    path_hash: ContentHash,
+    content_hash: ContentHash,
+    length: u64,
+    modified_ns: Option<u128>,
+    change_token: Option<u128>,
+    identity: Option<DurablePlatformFileIdentity>,
+    reliability: MetadataReliability,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurablePlatformFileIdentity {
+    volume: u64,
+    file_index: u64,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableInputFingerprint {
+    key: InputKey,
+    value: ContentHash,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -215,6 +300,10 @@ fn buffered_recovery_writer<W: std::io::Write>(inner: W) -> RecoverySnapshotWrit
     RecoverySnapshotWriter::new(BufWriter::with_capacity(RECOVERY_WRITE_BUFFER_BYTES, inner))
 }
 
+fn content_hash_bytes(bytes: &[u8]) -> ContentHash {
+    ContentHash::from_bytes(*blake3::hash(bytes).as_bytes())
+}
+
 impl<W: std::io::Write> std::io::Write for RecoverySnapshotWriter<W> {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         let written = self.inner.write(buffer)?;
@@ -231,6 +320,171 @@ impl<W: std::io::Write> std::io::Write for RecoverySnapshotWriter<W> {
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
     }
+}
+
+impl DurableIncrementalState {
+    fn from_prepared(state: &PreparedIncrementalState) -> Result<Self, FirstSliceError> {
+        let baseline_files = state
+            .baseline
+            .metadata()
+            .files()
+            .map(|file| {
+                let descriptor = file.descriptor();
+                let metadata = descriptor.metadata();
+                DurableBaselineFile {
+                    file: descriptor.file(),
+                    path_hash: descriptor.path_hash(),
+                    content_hash: file.content_hash(),
+                    length: metadata.length(),
+                    modified_ns: metadata.modified_ns(),
+                    change_token: metadata.change_token(),
+                    identity: metadata
+                        .identity()
+                        .map(|identity| DurablePlatformFileIdentity {
+                            volume: identity.volume(),
+                            file_index: identity.file_index(),
+                        }),
+                    reliability: metadata.reliability(),
+                }
+            })
+            .collect();
+        let baseline_inputs = durable_input_fingerprints(state.baseline.inputs());
+        let analysis_inputs = durable_input_fingerprints(&state.inputs);
+        validate_incremental_evidence(&state.evidence)?;
+        Ok(Self {
+            version: INCREMENTAL_STATE_VERSION,
+            baseline_files,
+            baseline_inputs,
+            analysis_inputs,
+            evidence: state.evidence.clone(),
+        })
+    }
+
+    fn into_prepared(
+        self,
+        cancellation: &Cancellation,
+    ) -> Result<PreparedIncrementalState, FirstSliceError> {
+        if self.version != INCREMENTAL_STATE_VERSION {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let reconcile_limits = ReconcileLimits::new(self.baseline_files.len().max(1))
+            .map_err(|error| map_incremental_error(error, cancellation))?;
+        let mut baseline_files = Vec::new();
+        baseline_files
+            .try_reserve_exact(self.baseline_files.len())
+            .map_err(|_| FirstSliceError::Retention)?;
+        for file in self.baseline_files {
+            check_cancellation(cancellation)?;
+            let identity = file
+                .identity
+                .map(|identity| PlatformFileIdentity::new(identity.volume, identity.file_index));
+            let metadata = match file.reliability {
+                MetadataReliability::Trusted => FileMetadata::trusted_with_change_token(
+                    file.length,
+                    file.modified_ns.ok_or(FirstSliceError::CatalogCorrupt)?,
+                    file.change_token.ok_or(FirstSliceError::CatalogCorrupt)?,
+                    identity.ok_or(FirstSliceError::CatalogCorrupt)?,
+                ),
+                MetadataReliability::Untrusted => FileMetadata::untrusted_with_change_token(
+                    file.length,
+                    file.modified_ns,
+                    file.change_token,
+                    identity,
+                ),
+            };
+            baseline_files.push(BaselineFile::new(
+                FileDescriptor::new(file.file, file.path_hash, metadata),
+                file.content_hash,
+            ));
+        }
+        let metadata = MetadataBaseline::new(baseline_files, reconcile_limits, cancellation)
+            .map_err(|error| map_incremental_error(error, cancellation))?;
+        let baseline_inputs = restore_input_snapshot(self.baseline_inputs, cancellation)?;
+        let analysis_inputs = restore_input_snapshot(self.analysis_inputs, cancellation)?;
+        validate_incremental_evidence(&self.evidence)?;
+        Ok(PreparedIncrementalState {
+            baseline: IncrementalDiscoveryBaseline::from_validated_parts(metadata, baseline_inputs),
+            inputs: analysis_inputs,
+            evidence: self.evidence,
+        })
+    }
+}
+
+fn durable_input_fingerprints(snapshot: &InputSnapshot) -> Vec<DurableInputFingerprint> {
+    snapshot
+        .iter()
+        .map(|input| DurableInputFingerprint {
+            key: input.key(),
+            value: input.value(),
+        })
+        .collect()
+}
+
+fn restore_input_snapshot(
+    inputs: Vec<DurableInputFingerprint>,
+    cancellation: &Cancellation,
+) -> Result<InputSnapshot, FirstSliceError> {
+    let limits = PlanningLimits::new(inputs.len().max(1), 1, 1, 1)
+        .map_err(|error| map_incremental_error(error, cancellation))?;
+    InputSnapshot::new(
+        inputs
+            .into_iter()
+            .map(|input| InputFingerprint::new(input.key, input.value)),
+        limits,
+        cancellation,
+    )
+    .map_err(|error| map_incremental_error(error, cancellation))
+}
+
+fn validate_incremental_evidence(
+    evidence: &FirstSliceIncrementalEvidence,
+) -> Result<(), FirstSliceError> {
+    if evidence.input_changes.len() > 9
+        || evidence.file_changes.len() > 6
+        || evidence.invalidated_domains.len() > 9
+        || evidence
+            .parsed_files
+            .checked_add(evidence.reused_parser_artifacts)
+            .is_none_or(|total| total > evidence.lowered_files)
+        || evidence.reused_parser_artifacts == 0 && evidence.reused_parser_artifact_bytes != 0
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let input_classes = evidence
+        .input_changes
+        .iter()
+        .map(|change| change.class)
+        .collect::<BTreeSet<_>>();
+    let file_kinds = evidence
+        .file_changes
+        .iter()
+        .map(|change| change.kind)
+        .collect::<BTreeSet<_>>();
+    let domains = evidence
+        .invalidated_domains
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let fallback_matches_strategy = match evidence.strategy {
+        super::FirstSliceBuildStrategy::Initial
+        | super::FirstSliceBuildStrategy::DependencyDirected => evidence.fallback_reason.is_none(),
+        super::FirstSliceBuildStrategy::ConservativeRepositoryRebuild => {
+            evidence.fallback_reason.is_some()
+        }
+    };
+    if input_classes.len() != evidence.input_changes.len()
+        || file_kinds.len() != evidence.file_changes.len()
+        || domains.len() != evidence.invalidated_domains.len()
+        || evidence
+            .input_changes
+            .iter()
+            .any(|change| change.inputs == 0)
+        || evidence.file_changes.iter().any(|change| change.files == 0)
+        || !fallback_matches_strategy
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(())
 }
 
 impl DurableCatalog {
@@ -281,6 +535,8 @@ impl DurableCatalog {
             generation,
             staging_bytes: Arc::clone(&self.staging_bytes),
             accounted_bytes: AtomicU64::new(0),
+            incremental_state: Mutex::new(None),
+            source_storage: Mutex::new(None),
         })
     }
 
@@ -323,7 +579,29 @@ impl DurableCatalog {
         let generation =
             PrivateDirectory::open(repository.capability(), OsStr::new(&generation.to_string()))
                 .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        read_persisted_source(&generation, file.repository, file, cancellation)
+        let manifest = generation
+            .read_file_bounded(OsStr::new(MANIFEST_FILENAME), MAX_MANIFEST_BYTES)
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let manifest: DurableGenerationManifest =
+            serde_json::from_slice(&manifest).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let uses_source_blobs = match (manifest.version, manifest.source_storage) {
+            (LEGACY_GENERATION_MANIFEST_VERSION, None) => false,
+            (
+                GENERATION_MANIFEST_VERSION,
+                Some(DurableSourceStorage {
+                    version: SOURCE_STORAGE_VERSION,
+                }),
+            ) => true,
+            _ => return Err(FirstSliceError::CatalogCorrupt),
+        };
+        read_persisted_source(
+            &repository,
+            &generation,
+            file.repository,
+            file,
+            uses_source_blobs,
+            cancellation,
+        )
     }
 
     pub(super) fn restore(
@@ -334,6 +612,7 @@ impl DurableCatalog {
             self.maximum_generations_per_repository,
             &BTreeSet::new(),
             true,
+            true,
             cancellation,
         )
     }
@@ -342,7 +621,7 @@ impl DurableCatalog {
         &self,
         cancellation: &Cancellation,
     ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
-        self.restore_with_policy(1, &BTreeSet::new(), false, cancellation)
+        self.restore_with_policy(1, &BTreeSet::new(), false, true, cancellation)
     }
 
     pub(super) fn has_active_restore_work(&self) -> Result<bool, FirstSliceError> {
@@ -368,6 +647,110 @@ impl DurableCatalog {
         Ok(false)
     }
 
+    pub(super) fn active_restore_targets(
+        &self,
+    ) -> Result<Vec<FirstSliceRecoveryTarget>, FirstSliceError> {
+        let repository_names = private_entry_names(&self.repositories)?;
+        if repository_names.len() > super::MAX_FIRST_SLICE_REPOSITORIES {
+            return Err(FirstSliceError::Retention);
+        }
+        let mut targets = Vec::new();
+        for repository_name in repository_names {
+            let repository_text = repository_name
+                .to_str()
+                .ok_or(FirstSliceError::CatalogCorrupt)?;
+            let repository_id = RepositoryId::from_str(repository_text)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let repository =
+                PrivateDirectory::open(self.repositories.capability(), &repository_name)
+                    .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let mut newest = None;
+            for entry_name in private_entry_names(&repository)? {
+                let entry_text = entry_name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
+                let Some((sequence, generation)) = parse_activation_name(entry_text) else {
+                    continue;
+                };
+                let marker = read_activation_marker(&repository, entry_name, sequence, generation)?;
+                let ordering = marker
+                    .manifest
+                    .global_activation_sequence
+                    .unwrap_or(marker.sequence);
+                if newest.is_none_or(|(current, _, _)| ordering > current) {
+                    newest = Some((ordering, marker.sequence, generation));
+                }
+            }
+            if let Some((ordering, sequence, generation)) = newest {
+                targets.push((
+                    ordering,
+                    sequence,
+                    FirstSliceRecoveryTarget {
+                        repository: repository_id,
+                        generation,
+                    },
+                ));
+            }
+        }
+        targets.sort_unstable_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| left.2.repository.cmp(&right.2.repository))
+        });
+        Ok(targets.into_iter().map(|(_, _, target)| target).collect())
+    }
+
+    pub(super) fn restore_active_repository(
+        &self,
+        repository_id: RepositoryId,
+        cancellation: &Cancellation,
+    ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let repository_name = repository_id.to_string();
+        let repository =
+            PrivateDirectory::open(self.repositories.capability(), OsStr::new(&repository_name))
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let repository_path = self.repositories_path.join(&repository_name);
+        self.restore_repository(
+            repository_id,
+            &repository,
+            &repository_path,
+            &RestorePolicy {
+                maximum_generations: 1,
+                excluded: &BTreeSet::new(),
+                compact: false,
+                repair: true,
+            },
+            cancellation,
+        )
+    }
+
+    pub(super) fn restore_retained_repository(
+        &self,
+        repository_id: RepositoryId,
+        excluded: &BTreeSet<GenerationId>,
+        cancellation: &Cancellation,
+    ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let repository_name = repository_id.to_string();
+        let repository =
+            PrivateDirectory::open(self.repositories.capability(), OsStr::new(&repository_name))
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let repository_path = self.repositories_path.join(&repository_name);
+        self.restore_repository(
+            repository_id,
+            &repository,
+            &repository_path,
+            &RestorePolicy {
+                maximum_generations: self.maximum_generations_per_repository,
+                excluded,
+                compact: false,
+                repair: false,
+            },
+            cancellation,
+        )
+    }
+
     pub(super) fn restore_excluding(
         &self,
         excluded: &BTreeSet<GenerationId>,
@@ -376,6 +759,7 @@ impl DurableCatalog {
         self.restore_with_policy(
             self.maximum_generations_per_repository,
             excluded,
+            true,
             true,
             cancellation,
         )
@@ -386,12 +770,14 @@ impl DurableCatalog {
         maximum_generations_per_repository: usize,
         excluded: &BTreeSet<GenerationId>,
         compact: bool,
+        repair: bool,
         cancellation: &Cancellation,
     ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
         let policy = RestorePolicy {
             maximum_generations: maximum_generations_per_repository,
             excluded,
             compact,
+            repair,
         };
         check_cancellation(cancellation)?;
         let repository_names = private_entry_names(&self.repositories)?;
@@ -557,6 +943,8 @@ impl DurableCatalog {
                 if metadata_names.insert(sequence, name).is_some() {
                     return Err(FirstSliceError::CatalogCorrupt);
                 }
+            } else if text == SOURCE_BLOBS_DIRECTORY {
+                continue;
             } else if let Ok(generation) = GenerationId::from_str(text) {
                 generation_names.insert(generation);
             } else {
@@ -564,16 +952,21 @@ impl DurableCatalog {
             }
         }
 
-        for staging_name in staging_names {
-            PrivateDirectory::open(repository.capability(), &staging_name)
-                .map_err(|_| FirstSliceError::CatalogCorrupt)?
-                .remove()
-                .map_err(|_| FirstSliceError::Catalog)?;
+        if policy.repair {
+            for staging_name in staging_names {
+                PrivateDirectory::open(repository.capability(), &staging_name)
+                    .map_err(|_| FirstSliceError::CatalogCorrupt)?
+                    .remove()
+                    .map_err(|_| FirstSliceError::Catalog)?;
+            }
         }
 
         if markers.is_empty() {
-            remove_generation_directories(repository, &generation_names)?;
-            remove_repository_metadata_directories(repository, metadata_names.values())?;
+            if policy.repair {
+                remove_generation_directories(repository, &generation_names)?;
+                remove_repository_metadata_directories(repository, metadata_names.values())?;
+                compact_source_blobs(repository, &BTreeSet::new())?;
+            }
             return Ok(Vec::new());
         }
 
@@ -653,17 +1046,19 @@ impl DurableCatalog {
             };
             restored.push(restored_generation);
         }
-        for (activation_sequence, generation) in corrupted {
-            self.quarantine_generation(
-                repository_id,
-                repository,
-                generation,
-                activation_sequence,
-                &markers,
-            )?;
-            generation_names.remove(&generation);
-            latest_by_generation.remove(&generation);
-            markers.retain(|_, marker| marker.manifest.generation != generation);
+        if policy.repair {
+            for (activation_sequence, generation) in corrupted {
+                self.quarantine_generation(
+                    repository_id,
+                    repository,
+                    generation,
+                    activation_sequence,
+                    &markers,
+                )?;
+                generation_names.remove(&generation);
+                latest_by_generation.remove(&generation);
+                markers.retain(|_, marker| marker.manifest.generation != generation);
+            }
         }
         let mut retained: BTreeSet<_> = restored
             .iter()
@@ -804,7 +1199,7 @@ impl DurableCatalog {
                 if markers.insert(sequence, marker).is_some() {
                     return Err(FirstSliceError::CatalogCorrupt);
                 }
-            } else if parse_metadata_name(text).is_some() {
+            } else if parse_metadata_name(text).is_some() || text == SOURCE_BLOBS_DIRECTORY {
                 continue;
             } else if let Ok(generation) = GenerationId::from_str(text) {
                 generation_names.insert(generation);
@@ -845,30 +1240,72 @@ impl DurablePreparedGeneration {
     pub(super) fn write_sources(
         &self,
         sources: &[RustSourceInput],
-    ) -> Result<u64, FirstSliceError> {
+    ) -> Result<DurableSourceWrite, FirstSliceError> {
         let staging = self.staging();
         let sources_directory = staging
             .create_directory(OsStr::new(SOURCES_DIRECTORY))
             .map_err(|_| FirstSliceError::Catalog)?;
-        let mut written_bytes = 0_u64;
+        let blobs = ensure_private_directory(
+            self.repository().capability(),
+            OsStr::new(SOURCE_BLOBS_DIRECTORY),
+        )?;
+        let mut created = BTreeSet::new();
+        let mut newly_written_bytes = 0_u64;
+        let mut referenced_bytes = 0_u64;
         for source in sources {
+            let content = source.snapshot.content();
+            let digest = source.snapshot.content_hash();
+            let content_bytes =
+                u64::try_from(content.len()).map_err(|_| FirstSliceError::Limits)?;
+            let newly_written = if created.contains(&digest) {
+                false
+            } else {
+                persist_source_blob(&blobs, digest, content)?
+            };
+            if newly_written {
+                created.insert(digest);
+                newly_written_bytes = newly_written_bytes
+                    .checked_add(content_bytes)
+                    .ok_or(FirstSliceError::Limits)?;
+            } else if !created.contains(&digest) {
+                referenced_bytes = referenced_bytes
+                    .checked_add(content_bytes)
+                    .ok_or(FirstSliceError::Limits)?;
+            }
+            let pointer = encode_source_pointer(digest, content_bytes)?;
             let mut file = sources_directory
                 .create_file(OsStr::new(&source.snapshot.file().to_string()))
                 .map_err(|_| FirstSliceError::Catalog)?;
-            file.write_all(source.snapshot.content())
+            file.write_all(&pointer)
                 .map_err(|_| FirstSliceError::Catalog)?;
             file.sync_all().map_err(|_| FirstSliceError::Catalog)?;
-            let source_bytes = u64::try_from(source.snapshot.content().len())
-                .map_err(|_| FirstSliceError::Limits)?;
-            self.account_staging_bytes(source_bytes)?;
-            written_bytes = written_bytes
-                .checked_add(source_bytes)
+            let pointer_bytes =
+                u64::try_from(pointer.len()).map_err(|_| FirstSliceError::Limits)?;
+            newly_written_bytes = newly_written_bytes
+                .checked_add(pointer_bytes)
                 .ok_or(FirstSliceError::Limits)?;
         }
         sources_directory
             .sync_all()
             .map_err(|_| FirstSliceError::Catalog)?;
-        Ok(written_bytes)
+        blobs.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+        self.account_staging_bytes(newly_written_bytes)?;
+        let mut storage = self
+            .source_storage
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        if storage
+            .replace(DurableSourceStorage {
+                version: SOURCE_STORAGE_VERSION,
+            })
+            .is_some()
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        Ok(DurableSourceWrite {
+            newly_written_bytes,
+            referenced_bytes,
+        })
     }
 
     pub(super) fn write_recovery_snapshot(
@@ -930,6 +1367,41 @@ impl DurablePreparedGeneration {
             .ok_or(FirstSliceError::Limits)
     }
 
+    pub(super) fn write_incremental_state(
+        &self,
+        state: &PreparedIncrementalState,
+    ) -> Result<u64, FirstSliceError> {
+        let durable = DurableIncrementalState::from_prepared(state)?;
+        let staging = self.staging();
+        let file = staging
+            .create_file(OsStr::new(INCREMENTAL_STATE_FILENAME))
+            .map_err(|_| FirstSliceError::Catalog)?;
+        let mut writer = buffered_recovery_writer(file);
+        serde_json::to_writer(&mut writer, &durable).map_err(|_| FirstSliceError::Catalog)?;
+        writer.flush().map_err(|_| FirstSliceError::Catalog)?;
+        if writer.bytes > MAX_INCREMENTAL_STATE_BYTES {
+            return Err(FirstSliceError::Limits);
+        }
+        writer
+            .inner
+            .get_ref()
+            .sync_all()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        self.account_staging_bytes(writer.bytes)?;
+        let descriptor = DurableSidecarDescriptor {
+            bytes: writer.bytes,
+            digest: ContentHash::from_bytes(*writer.hasher.finalize().as_bytes()),
+        };
+        let mut slot = self
+            .incremental_state
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        if slot.replace(descriptor).is_some() {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        Ok(writer.bytes)
+    }
+
     pub(super) fn finish(
         &self,
         root_identity: ContentHash,
@@ -947,6 +1419,14 @@ impl DurablePreparedGeneration {
             display_name: display_name.to_owned(),
             root_path: Some(root_path.to_owned()),
             receipt,
+            incremental_state: *self
+                .incremental_state
+                .lock()
+                .map_err(|_| FirstSliceError::Catalog)?,
+            source_storage: *self
+                .source_storage
+                .lock()
+                .map_err(|_| FirstSliceError::Catalog)?,
         };
         let bytes = serde_json::to_vec(&manifest).map_err(|_| FirstSliceError::Catalog)?;
         if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_MANIFEST_BYTES {
@@ -1095,6 +1575,122 @@ fn ensure_private_directory(
         }
         Err(_) => Err(FirstSliceError::Catalog),
     }
+}
+
+fn persist_source_blob(
+    blobs: &PrivateDirectory<'_>,
+    digest: ContentHash,
+    content: &[u8],
+) -> Result<bool, FirstSliceError> {
+    if content_hash_bytes(content) != digest {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let name = digest.to_string();
+    match blobs.capability().symlink_metadata(Path::new(&name)) {
+        Ok(metadata) => {
+            if !metadata.is_dir() {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+            validate_source_blob(blobs, digest, content)?;
+            return Ok(false);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(FirstSliceError::Catalog),
+    }
+    let staging_name = random_source_blob_staging_name(digest)?;
+    let staging = PrivateDirectory::create(blobs.capability(), OsStr::new(&staging_name))
+        .map_err(|_| FirstSliceError::Catalog)?;
+    {
+        let mut payload = staging
+            .create_file(OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME))
+            .map_err(|_| FirstSliceError::Catalog)?;
+        payload
+            .write_all(content)
+            .map_err(|_| FirstSliceError::Catalog)?;
+        payload.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+    }
+    staging.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+    match staging.publish_noreplace(blobs.capability(), OsStr::new(&name)) {
+        Ok(published) => {
+            published.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+            Ok(true)
+        }
+        Err(PublishError::CommittedButDurabilityUnknown { directory, .. }) => {
+            directory.remove().map_err(|_| FirstSliceError::Catalog)?;
+            Err(FirstSliceError::Catalog)
+        }
+        Err(PublishError::NotCommitted { source }) if source.is_already_exists() => {
+            validate_source_blob(blobs, digest, content)?;
+            Ok(false)
+        }
+        Err(_) => Err(FirstSliceError::Catalog),
+    }
+}
+
+fn validate_source_blob(
+    blobs: &PrivateDirectory<'_>,
+    digest: ContentHash,
+    expected: &[u8],
+) -> Result<(), FirstSliceError> {
+    let directory = PrivateDirectory::open(blobs.capability(), OsStr::new(&digest.to_string()))
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    let maximum = u64::try_from(expected.len()).map_err(|_| FirstSliceError::Limits)?;
+    let actual = directory
+        .read_file_bounded(OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME), maximum)
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    if actual != expected || content_hash_bytes(&actual) != digest {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(())
+}
+
+fn encode_source_pointer(digest: ContentHash, bytes: u64) -> Result<Vec<u8>, FirstSliceError> {
+    let mut encoded = Vec::new();
+    encoded
+        .try_reserve_exact(
+            SOURCE_POINTER_MAGIC
+                .len()
+                .checked_add(digest.to_string().len())
+                .and_then(|length| length.checked_add(1 + 20 + 1))
+                .ok_or(FirstSliceError::Limits)?,
+        )
+        .map_err(|_| FirstSliceError::Retention)?;
+    encoded.extend_from_slice(SOURCE_POINTER_MAGIC);
+    encoded.extend_from_slice(digest.to_string().as_bytes());
+    encoded.push(b'\n');
+    encoded.extend_from_slice(bytes.to_string().as_bytes());
+    encoded.push(b'\n');
+    if u64::try_from(encoded.len()).map_err(|_| FirstSliceError::Limits)? > MAX_SOURCE_POINTER_BYTES
+    {
+        return Err(FirstSliceError::Limits);
+    }
+    Ok(encoded)
+}
+
+fn decode_source_pointer(encoded: &[u8]) -> Result<SourcePointer, FirstSliceError> {
+    if u64::try_from(encoded.len()).unwrap_or(u64::MAX) > MAX_SOURCE_POINTER_BYTES {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let payload = encoded
+        .strip_prefix(SOURCE_POINTER_MAGIC)
+        .ok_or(FirstSliceError::CatalogCorrupt)?;
+    let payload = std::str::from_utf8(payload).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    let mut fields = payload.split('\n');
+    let digest = fields
+        .next()
+        .ok_or(FirstSliceError::CatalogCorrupt)
+        .and_then(|value| {
+            ContentHash::from_str(value).map_err(|_| FirstSliceError::CatalogCorrupt)
+        })?;
+    let bytes = fields
+        .next()
+        .ok_or(FirstSliceError::CatalogCorrupt)?
+        .parse::<u64>()
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    if fields.next() != Some("") || fields.next().is_some() {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(SourcePointer { digest, bytes })
 }
 
 fn private_entry_names(directory: &PrivateDirectory<'_>) -> Result<Vec<OsString>, FirstSliceError> {
@@ -1254,7 +1850,104 @@ fn compact_repository_entries(
         .copied()
         .collect();
     remove_generation_directories(repository, &obsolete_generations)?;
+    let referenced = retained_source_blobs(repository, retained_generations)?;
+    compact_source_blobs(repository, &referenced)?;
     repository.sync_all().map_err(|_| FirstSliceError::Catalog)
+}
+
+fn retained_source_blobs(
+    repository: &PrivateDirectory<'_>,
+    retained_generations: &BTreeSet<GenerationId>,
+) -> Result<BTreeSet<ContentHash>, FirstSliceError> {
+    let mut referenced = BTreeSet::new();
+    for generation in retained_generations {
+        let generation =
+            PrivateDirectory::open(repository.capability(), OsStr::new(&generation.to_string()))
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let manifest = generation
+            .read_file_bounded(OsStr::new(MANIFEST_FILENAME), MAX_MANIFEST_BYTES)
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let manifest: DurableGenerationManifest =
+            serde_json::from_slice(&manifest).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        match (manifest.version, manifest.source_storage) {
+            (LEGACY_GENERATION_MANIFEST_VERSION, None) => continue,
+            (
+                GENERATION_MANIFEST_VERSION,
+                Some(DurableSourceStorage {
+                    version: SOURCE_STORAGE_VERSION,
+                }),
+            ) => {}
+            _ => return Err(FirstSliceError::CatalogCorrupt),
+        }
+        let sources =
+            PrivateDirectory::open(generation.capability(), OsStr::new(SOURCES_DIRECTORY))
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        for name in private_entry_names(&sources)? {
+            let pointer = sources
+                .read_file_bounded(&name, MAX_SOURCE_POINTER_BYTES)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            referenced.insert(decode_source_pointer(&pointer)?.digest);
+        }
+    }
+    Ok(referenced)
+}
+
+fn compact_source_blobs(
+    repository: &PrivateDirectory<'_>,
+    referenced: &BTreeSet<ContentHash>,
+) -> Result<(), FirstSliceError> {
+    let metadata = match repository
+        .capability()
+        .symlink_metadata(Path::new(SOURCE_BLOBS_DIRECTORY))
+    {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return if referenced.is_empty() {
+                Ok(())
+            } else {
+                Err(FirstSliceError::CatalogCorrupt)
+            };
+        }
+        Err(_) => return Err(FirstSliceError::Catalog),
+    };
+    if !metadata.is_dir() {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let blobs = PrivateDirectory::open(repository.capability(), OsStr::new(SOURCE_BLOBS_DIRECTORY))
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    let entries = blobs
+        .capability()
+        .entries()
+        .map_err(|_| FirstSliceError::Catalog)?;
+    let mut visited = 0_usize;
+    let mut observed = BTreeSet::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| FirstSliceError::Catalog)?;
+        visited = visited.checked_add(1).ok_or(FirstSliceError::Limits)?;
+        if visited > MAX_SOURCE_BLOB_ENTRIES {
+            return Err(FirstSliceError::Retention);
+        }
+        let name = entry.file_name();
+        let text = name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
+        let remove = if text.starts_with(STAGING_PREFIX) {
+            true
+        } else {
+            let digest =
+                ContentHash::from_str(text).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            observed.insert(digest);
+            !referenced.contains(&digest)
+        };
+        if remove {
+            PrivateDirectory::open(blobs.capability(), &name)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?
+                .remove()
+                .map_err(|_| FirstSliceError::Catalog)?;
+        }
+    }
+    if !referenced.is_subset(&observed) {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    blobs.sync_all().map_err(|_| FirstSliceError::Catalog)
 }
 
 fn compact_repository_metadata(
@@ -1314,7 +2007,7 @@ fn compact_activation_markers(repository: &PrivateDirectory<'_>) -> Result<(), F
             if markers.insert(sequence, marker).is_some() {
                 return Err(FirstSliceError::CatalogCorrupt);
             }
-        } else if parse_metadata_name(text).is_some() {
+        } else if parse_metadata_name(text).is_some() || text == SOURCE_BLOBS_DIRECTORY {
             continue;
         } else if let Ok(generation) = GenerationId::from_str(text) {
             generations.insert(generation);
@@ -1364,13 +2057,31 @@ fn restore_generation(
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
     let manifest: DurableGenerationManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
-    if manifest.version != GENERATION_MANIFEST_VERSION
-        || manifest.receipt.repository != repository
+    let uses_source_blobs = match (manifest.version, manifest.source_storage) {
+        (LEGACY_GENERATION_MANIFEST_VERSION, None) => false,
+        (
+            GENERATION_MANIFEST_VERSION,
+            Some(DurableSourceStorage {
+                version: SOURCE_STORAGE_VERSION,
+            }),
+        ) => true,
+        _ => return Err(FirstSliceError::CatalogCorrupt),
+    };
+    if manifest.receipt.repository != repository
         || manifest.receipt.generation != generation
         || !valid_repository_root_path(manifest.root_path.as_deref())
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
+    let incremental = match restore_incremental_state(
+        &generation_directory,
+        manifest.incremental_state,
+        cancellation,
+    ) {
+        Ok(incremental) => incremental,
+        Err(FirstSliceError::CatalogCorrupt) => None,
+        Err(error) => return Err(error),
+    };
 
     let context = GenerationContext::new(cancellation, GenerationBudget::default());
     let generation_path = repository_path.join(&generation_name);
@@ -1419,9 +2130,11 @@ fn restore_generation(
         for file in &verified.document().files {
             sources.push(RustSourceInput {
                 snapshot: read_persisted_source(
+                    repository_directory,
                     &generation_directory,
                     repository,
                     file,
+                    uses_source_blobs,
                     cancellation,
                 )?,
                 generated: file.generated,
@@ -1442,8 +2155,34 @@ fn restore_generation(
         verified,
         search,
         sources,
+        incremental,
         operations: Vec::new(),
     })
+}
+
+fn restore_incremental_state(
+    generation_directory: &PrivateDirectory<'_>,
+    descriptor: Option<DurableSidecarDescriptor>,
+    cancellation: &Cancellation,
+) -> Result<Option<PreparedIncrementalState>, FirstSliceError> {
+    let Some(descriptor) = descriptor else {
+        return Ok(None);
+    };
+    if descriptor.bytes == 0 || descriptor.bytes > MAX_INCREMENTAL_STATE_BYTES {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    check_cancellation(cancellation)?;
+    let bytes = generation_directory
+        .read_file_bounded(OsStr::new(INCREMENTAL_STATE_FILENAME), descriptor.bytes)
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    if u64::try_from(bytes.len()).ok() != Some(descriptor.bytes)
+        || content_hash_bytes(&bytes) != descriptor.digest
+    {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let durable: DurableIncrementalState =
+        serde_json::from_slice(&bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    durable.into_prepared(cancellation).map(Some)
 }
 
 fn restore_recovery_generation(
@@ -1550,9 +2289,11 @@ fn restore_oracle_generation(
 }
 
 fn read_persisted_source(
+    repository_directory: &PrivateDirectory<'_>,
     generation_directory: &PrivateDirectory<'_>,
     repository: RepositoryId,
     file: &FileRecord,
+    uses_source_blobs: bool,
     cancellation: &Cancellation,
 ) -> Result<SourceSnapshot, FirstSliceError> {
     check_cancellation(cancellation)?;
@@ -1573,13 +2314,36 @@ fn read_persisted_source(
         OsStr::new(SOURCES_DIRECTORY),
     )
     .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-    let bytes = sources
-        .read_file_bounded_cancellable(
-            OsStr::new(&file.id.to_string()),
-            file.byte_length,
+    let maximum = if uses_source_blobs {
+        MAX_SOURCE_POINTER_BYTES
+    } else {
+        file.byte_length
+    };
+    let persisted = sources
+        .read_file_bounded_cancellable(OsStr::new(&file.id.to_string()), maximum, cancellation)
+        .map_err(map_private_read_error)?;
+    let bytes = if uses_source_blobs {
+        let pointer = decode_source_pointer(&persisted)?;
+        if pointer.digest != file.content_hash || pointer.bytes != file.byte_length {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let blobs = PrivateDirectory::open(
+            repository_directory.capability(),
+            OsStr::new(SOURCE_BLOBS_DIRECTORY),
+        )
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let blob =
+            PrivateDirectory::open(blobs.capability(), OsStr::new(&pointer.digest.to_string()))
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        blob.read_file_bounded_cancellable(
+            OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME),
+            pointer.bytes,
             cancellation,
         )
-        .map_err(map_private_read_error)?;
+        .map_err(map_private_read_error)?
+    } else {
+        persisted
+    };
     if u64::try_from(bytes.len()).ok() != Some(file.byte_length) {
         return Err(FirstSliceError::CatalogCorrupt);
     }
@@ -1679,6 +2443,15 @@ fn random_metadata_staging_name(sequence: u64) -> Result<String, FirstSliceError
     getrandom::fill(&mut nonce).map_err(|_| FirstSliceError::RandomUnavailable)?;
     Ok(format!(
         "{STAGING_PREFIX}metadata-{sequence:020}-{}",
+        lower_hex(&nonce)
+    ))
+}
+
+fn random_source_blob_staging_name(digest: ContentHash) -> Result<String, FirstSliceError> {
+    let mut nonce = [0_u8; 8];
+    getrandom::fill(&mut nonce).map_err(|_| FirstSliceError::RandomUnavailable)?;
+    Ok(format!(
+        "{STAGING_PREFIX}source-{digest}-{}",
         lower_hex(&nonce)
     ))
 }

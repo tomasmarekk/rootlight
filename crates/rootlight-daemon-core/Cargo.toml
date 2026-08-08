@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rootlight-build = { path = "../rootlight-build" }
 rootlight-error = { path = "../rootlight-error" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ipc = { path = "../rootlight-ipc" }

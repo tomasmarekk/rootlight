@@ -14,7 +14,8 @@ use crate::generated::{
     adapter::v1::{
         AdapterFrame, AdapterIdentity, AdapterTrustLevel, AnalysisRequest, AnalysisResult,
         CancelRequest, CapabilityAdvertisement, ProjectAnalysisRequest, ProjectAnalysisResult,
-        ProjectInput, RequestedAnalysisTier, ResourceLimits, SessionRequirements, adapter_frame,
+        ProjectAnalysisResultChunk, ProjectAnalysisResultEnd, ProjectInput, RequestedAnalysisTier,
+        ResourceLimits, SessionRequirements, adapter_frame,
     },
     common::v1::{ContractVersion, ExtensionDescriptor, VersionRange},
 };
@@ -24,9 +25,13 @@ pub const ADAPTER_PROTOCOL_MAJOR: u32 = 1;
 /// Earliest adapter protocol minor supported by this host.
 pub const MINIMUM_ADAPTER_PROTOCOL_MINOR: u32 = 1;
 /// Latest adapter protocol minor supported by this host.
-pub const CURRENT_ADAPTER_PROTOCOL_MINOR: u32 = 2;
+pub const CURRENT_ADAPTER_PROTOCOL_MINOR: u32 = 3;
 /// Maximum encoded adapter frame accepted from a child process.
 pub const MAX_ADAPTER_FRAME_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum complete project output reconstructed from correlated result chunks.
+pub const MAX_ADAPTER_PROJECT_OUTPUT_BYTES: usize = 128 * 1024 * 1024;
+/// Maximum number of frames accepted for one chunked project result.
+pub const MAX_ADAPTER_PROJECT_RESULT_CHUNKS: u32 = 64;
 /// Width of the big-endian payload-length prefix used on adapter pipes.
 pub const ADAPTER_FRAME_PREFIX_BYTES: usize = 4;
 /// Maximum advertised capabilities or extensions.
@@ -44,7 +49,7 @@ const MAX_WALL_TIME_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_CPU_TIME_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_MEMORY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_OUTPUT_BYTES: u64 = MAX_ADAPTER_PROJECT_OUTPUT_BYTES as u64;
 const MAX_FILES: u32 = 65_536;
 const MAX_PROCESSES: u32 = 256;
 const MAX_HANDLES: u32 = 65_536;
@@ -470,11 +475,34 @@ impl NegotiatedSession {
         &self,
         result: &ProjectAnalysisResult,
     ) -> Result<(), AdapterContractError> {
-        if self.protocol.minor < 2 || !self.has_capability(PROJECT_NORMALIZED_IR_CAPABILITY) {
-            return Err(AdapterContractError::CapabilityMismatch);
-        }
         if result.encoded_len() > MAX_ADAPTER_FRAME_BYTES {
             return Err(AdapterContractError::FrameSize);
+        }
+        self.validate_project_analysis_result_payload(result, 2)
+    }
+
+    /// Validates a project result reassembled from individually checked chunks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterContractError`] when chunking was not negotiated or the
+    /// complete identity, digest, or output quota is invalid.
+    pub fn validate_reassembled_project_analysis_result(
+        &self,
+        result: &ProjectAnalysisResult,
+    ) -> Result<(), AdapterContractError> {
+        self.validate_project_analysis_result_payload(result, 3)
+    }
+
+    fn validate_project_analysis_result_payload(
+        &self,
+        result: &ProjectAnalysisResult,
+        minimum_minor: u32,
+    ) -> Result<(), AdapterContractError> {
+        if self.protocol.minor < minimum_minor
+            || !self.has_capability(PROJECT_NORMALIZED_IR_CAPABILITY)
+        {
+            return Err(AdapterContractError::CapabilityMismatch);
         }
         self.validate_message_identity(&result.session_id, &result.request_id)?;
         validate_digest(
@@ -488,6 +516,75 @@ impl NegotiatedSession {
         if u64::try_from(result.normalized_ir.len())
             .map_err(|_| AdapterContractError::QuotaMismatch)?
             > self.limits.output_bytes
+        {
+            return Err(AdapterContractError::QuotaMismatch);
+        }
+        Ok(())
+    }
+
+    /// Validates one frame of a chunked project result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterContractError`] when chunking was not negotiated or
+    /// when identity, ordering metadata, digest, or bounded sizes are invalid.
+    pub fn validate_project_analysis_result_chunk(
+        &self,
+        chunk: &ProjectAnalysisResultChunk,
+    ) -> Result<(), AdapterContractError> {
+        if self.protocol.minor < 3 || !self.has_capability(PROJECT_NORMALIZED_IR_CAPABILITY) {
+            return Err(AdapterContractError::CapabilityMismatch);
+        }
+        if chunk.encoded_len() > MAX_ADAPTER_FRAME_BYTES {
+            return Err(AdapterContractError::FrameSize);
+        }
+        self.validate_message_identity(&chunk.session_id, &chunk.request_id)?;
+        validate_digest(
+            chunk
+                .chunk_digest
+                .as_ref()
+                .ok_or(AdapterContractError::MissingField)?
+                .value
+                .as_slice(),
+        )?;
+        if chunk.chunk_index >= MAX_ADAPTER_PROJECT_RESULT_CHUNKS
+            || chunk.normalized_ir_chunk.is_empty()
+            || chunk.chunk_digest.as_ref().is_none_or(|digest| {
+                digest.value.as_slice() != blake3::hash(&chunk.normalized_ir_chunk).as_bytes()
+            })
+        {
+            return Err(AdapterContractError::QuotaMismatch);
+        }
+        Ok(())
+    }
+
+    /// Validates the commit marker for one staged chunked project result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterContractError`] when chunking was not negotiated or the
+    /// identity, chunk count, digest, or total output quota is invalid.
+    pub fn validate_project_analysis_result_end(
+        &self,
+        end: &ProjectAnalysisResultEnd,
+    ) -> Result<(), AdapterContractError> {
+        if self.protocol.minor < 3 || !self.has_capability(PROJECT_NORMALIZED_IR_CAPABILITY) {
+            return Err(AdapterContractError::CapabilityMismatch);
+        }
+        if end.encoded_len() > MAX_ADAPTER_FRAME_BYTES {
+            return Err(AdapterContractError::FrameSize);
+        }
+        self.validate_message_identity(&end.session_id, &end.request_id)?;
+        validate_digest(
+            end.output_digest
+                .as_ref()
+                .ok_or(AdapterContractError::MissingField)?
+                .value
+                .as_slice(),
+        )?;
+        if !(2..=MAX_ADAPTER_PROJECT_RESULT_CHUNKS).contains(&end.chunk_count)
+            || end.total_output_bytes == 0
+            || end.total_output_bytes > self.limits.output_bytes
         {
             return Err(AdapterContractError::QuotaMismatch);
         }
@@ -725,6 +822,10 @@ pub const fn frame_kind(frame: &AdapterFrame) -> &'static str {
         Some(adapter_frame::Message::AnalysisResult(_)) => "analysis_result",
         Some(adapter_frame::Message::ProjectAnalysisRequest(_)) => "project_analysis_request",
         Some(adapter_frame::Message::ProjectAnalysisResult(_)) => "project_analysis_result",
+        Some(adapter_frame::Message::ProjectAnalysisResultChunk(_)) => {
+            "project_analysis_result_chunk"
+        }
+        Some(adapter_frame::Message::ProjectAnalysisResultEnd(_)) => "project_analysis_result_end",
         Some(adapter_frame::Message::Cancel(_)) => "cancel",
         Some(adapter_frame::Message::Error(_)) => "error",
         None => "missing",

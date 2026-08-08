@@ -92,9 +92,11 @@ use rootlight_mcp_contract::{
         ActiveGeneration, AnalysisTier, CacheStatus, CodeLocateData, CodeLocateInput,
         ContinuationCursor, CoverageSummary, DetailHandle, Diagnostic, EntityKind, Freshness,
         GenerationSummary, IndexMode, IndexPlanScope, IndexPlanSummary, LanguageCoverage,
-        LocateReason, LocatedItem, OperationAction, OperationDetailV1_1 as OperationDetail,
-        OperationProgress, OperationResourcesV1_1 as OperationResources, OperationSchemaVersion,
-        OperationState, OperationStatusDataV1_1 as OperationStatusData, OperationStatusInput,
+        LocateReason, LocatedItem, OperationAction, OperationBuildStrategy,
+        OperationDetailV1_1 as OperationDetail, OperationFallbackReason,
+        OperationIncrementalEvidenceV1_1 as OperationIncrementalEvidence, OperationProgress,
+        OperationResourcesV1_1 as OperationResources, OperationSchemaVersion, OperationState,
+        OperationStatusDataV1_1 as OperationStatusData, OperationStatusInput,
         OperationStatusSuccessV1_1 as OperationStatusSuccess, ProvenanceLevel, ProvenanceSummary,
         QueryInterpretation, ReadEnvelope, RepoIndexDataV1_1 as RepoIndexData,
         RepoIndexSuccessV1_1 as RepoIndexSuccess, RequiredNullable, ResolvedRepository,
@@ -3593,18 +3595,20 @@ where
     let operations = status
         .operations
         .iter()
-        .map(|operation| OperationSummary {
-            operation_id: operation.operation,
-            kind: "repository_index".to_owned(),
-            state: operation_state(operation.state),
-            progress_permille: operation_progress_permille(
-                operation.state,
-                operation.completed_units,
-                operation.total_units,
-            ),
-            owned_by_session: operation.owned_by_client,
+        .map(|operation| {
+            Ok(OperationSummary {
+                operation_id: operation.operation,
+                kind: repository_operation_kind(operation.kind)?.to_owned(),
+                state: operation_state(operation.state),
+                progress_permille: operation_progress_permille(
+                    operation.state,
+                    operation.completed_units,
+                    operation.total_units,
+                ),
+                owned_by_session: operation.owned_by_client,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, ToolExecutionError>>()?;
     let publication_state = match status.publication_state.as_str() {
         "published" => GenerationPublicationState::Published,
         "retained" => GenerationPublicationState::Retained,
@@ -6669,11 +6673,16 @@ fn map_operation_status(
     expected_operation: OperationId,
 ) -> Result<OperationStatusSuccess, ToolExecutionError> {
     let operation = response.operation;
-    if operation.operation != expected_operation
-        || operation.kind != client::OperationKind::RepositoryIndex
-        || response.published_generation.is_some()
-            != (operation.state == client::OperationState::Succeeded)
-    {
+    let kind = repository_operation_kind(operation.kind)?;
+    let valid_publication = match operation.kind {
+        client::OperationKind::RepositoryIndex => {
+            response.published_generation.is_some()
+                == (operation.state == client::OperationState::Succeeded)
+        }
+        client::OperationKind::Recovery => response.published_generation.is_none(),
+        client::OperationKind::ControlProbe => false,
+    };
+    if operation.operation != expected_operation || !valid_publication {
         return Err(internal(ToolExecutionFailure::InvalidResponse));
     }
     let error = operation_status_error(&operation)?;
@@ -6682,7 +6691,7 @@ fn map_operation_status(
         schema_version: OperationSchemaVersion::V1_1,
         data: OperationStatusData {
             operation: OperationDetail {
-                kind: "repository_index".to_owned(),
+                kind: kind.to_owned(),
                 state: operation_state(operation.state),
                 stage: operation_stage(operation.stage).to_owned(),
                 progress: OperationProgress {
@@ -6696,15 +6705,73 @@ fn map_operation_status(
                     written_bytes: response.written_bytes,
                     files_examined: response.files_examined,
                     bytes_examined: Some(response.bytes_examined),
+                    referenced_bytes: response
+                        .evidence
+                        .map_or(0, |evidence| evidence.referenced_bytes),
+                    newly_written_bytes: response
+                        .evidence
+                        .map_or(0, |evidence| evidence.newly_written_bytes),
+                    reserved_memory_bytes: response
+                        .evidence
+                        .map_or(0, |evidence| evidence.reserved_memory_bytes),
+                    owned_memory_bytes: response
+                        .evidence
+                        .map_or(0, |evidence| evidence.owned_memory_bytes),
                 },
             },
             published_generation: RequiredNullable(response.published_generation),
             semantic_operation_id: response.semantic_operation,
-            index_stage: Some(response.index_stage),
+            index_stage: (operation.kind == client::OperationKind::RepositoryIndex)
+                .then_some(response.index_stage),
+            incremental: response.evidence.map(map_operation_incremental_evidence),
             error: RequiredNullable(error),
             retry_after_ms: RequiredNullable(response.retry_after_ms),
         },
     })
+}
+
+fn map_operation_incremental_evidence(
+    evidence: client::RepositoryOperationEvidence,
+) -> OperationIncrementalEvidence {
+    OperationIncrementalEvidence {
+        build_strategy: match evidence.build_strategy {
+            client::RepositoryBuildStrategy::Initial => OperationBuildStrategy::Initial,
+            client::RepositoryBuildStrategy::DependencyDirected => {
+                OperationBuildStrategy::DependencyDirected
+            }
+            client::RepositoryBuildStrategy::ConservativeRepositoryRebuild => {
+                OperationBuildStrategy::ConservativeRepositoryRebuild
+            }
+            client::RepositoryBuildStrategy::RetainedGeneration => {
+                OperationBuildStrategy::RetainedGeneration
+            }
+        },
+        fallback_reason: RequiredNullable(evidence.fallback_reason.map(|reason| match reason {
+            client::RepositoryFallbackReason::MissingDependencyDeclaration => {
+                OperationFallbackReason::MissingDependencyDeclaration
+            }
+            client::RepositoryFallbackReason::ClosureWorkExceeded => {
+                OperationFallbackReason::ClosureWorkExceeded
+            }
+        })),
+        invalidated_units: evidence.invalidated_units,
+        changed_inputs: evidence.changed_inputs,
+        changed_files: evidence.changed_files,
+        reused_files: evidence.reused_files,
+        rebuilt_files: evidence.rebuilt_files,
+        reused_facts: evidence.reused_facts,
+        rebuilt_facts: evidence.rebuilt_facts,
+    }
+}
+
+fn repository_operation_kind(
+    kind: client::OperationKind,
+) -> Result<&'static str, ToolExecutionError> {
+    match kind {
+        client::OperationKind::RepositoryIndex => Ok("repository_index"),
+        client::OperationKind::Recovery => Ok("recovery"),
+        client::OperationKind::ControlProbe => Err(internal(ToolExecutionFailure::InvalidResponse)),
+    }
 }
 
 fn operation_status_error(

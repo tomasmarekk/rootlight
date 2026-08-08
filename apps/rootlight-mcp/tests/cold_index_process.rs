@@ -1,9 +1,12 @@
-//! Candidate-binary cold-index evidence over one pinned real repository.
+//! Candidate-binary cold-index and semantic query-truth release evidence.
+//!
+//! Both gates cross the real MCP, daemon, and isolated project-adapter processes.
 
 mod process_support;
 
 use std::{
     collections::BTreeMap,
+    ffi::OsStr,
     fmt::Write as _,
     fs,
     io::{BufRead as _, BufReader, Read as _, Write as _},
@@ -30,6 +33,498 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(40);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_PROGRESS_SAMPLES: usize = 64;
+
+const TERMINAL_SEMANTIC_LANGUAGES: [&str; 5] = ["go", "javascript", "python", "rust", "typescript"];
+
+#[test]
+#[ignore = "runs the installed-process semantic completion and query-truth release gate"]
+fn installed_process_semantics_and_query_truth_are_release_ready() {
+    let fixture = process_support::private_process_tempdir("rl-semantic-truth-");
+    let repositories_root = fixture.path().join("repositories");
+    write_semantic_truth_repositories(&repositories_root);
+    let state_dir = fixture.path().join("state");
+    let runtime_dir = fixture.path().join("runtime");
+    let (daemon_binary, mcp_binary) = semantic_process_binaries();
+    let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
+    daemon.wait_until_ready(&runtime_dir);
+    let mut mcp = McpProcess::spawn(&mcp_binary, &state_dir, &runtime_dir);
+
+    let mut indexes = BTreeMap::new();
+    for language in TERMINAL_SEMANTIC_LANGUAGES {
+        let index = index_terminal_semantics(&mut mcp, &repositories_root.join(language), language);
+        indexes.insert(language, index);
+    }
+    for workflow in semantic_truth_workflows() {
+        let index = indexes
+            .get(workflow.language)
+            .expect("every truth workflow has terminal language evidence");
+        assert_semantic_truth_workflow(&mut mcp, index, workflow);
+    }
+
+    mcp.finish();
+    daemon.finish();
+}
+
+struct SemanticIndex {
+    repository_id: String,
+    generation: String,
+}
+
+fn index_terminal_semantics(
+    mcp: &mut McpProcess,
+    repository_root: &Path,
+    language: &str,
+) -> SemanticIndex {
+    let admission = mcp.call_success(
+        &format!("semantic-truth-{language}-index"),
+        "repo.index",
+        json!({
+            "root": repository_root,
+            "mode": "auto",
+            "detached": true
+        }),
+    );
+    assert_success(&admission, "repo.index");
+    let admission_data = data(&admission);
+    let repository_id = required_string(&admission_data["repository_id"], "repository identity");
+    let structural_id = required_string(
+        &admission_data["operation_id"],
+        "structural operation identity",
+    );
+    let deadline = Instant::now() + Duration::from_secs(2 * 60);
+    let structural = wait_for_terminal_operation(mcp, &structural_id, deadline);
+    let semantic_id = wait_for_semantic_operation(
+        mcp,
+        &structural_id,
+        structural.semantic_operation_id.clone(),
+        deadline,
+    );
+    assert_ne!(
+        structural_id, semantic_id,
+        "{language} semantic refinement must have its own durable operation identity"
+    );
+    let semantic =
+        wait_for_release_semantic_operation(mcp, &repository_id, language, &semantic_id, deadline);
+    assert_eq!(semantic.operation.state, "published");
+    assert_eq!(semantic.operation.stage, "complete");
+    assert!(
+        semantic.operation.resources.files_examined >= 2,
+        "{language} semantic refinement must retain visible work accounting"
+    );
+    let generation = semantic
+        .published_generation
+        .expect("semantic refinement publishes its generation");
+
+    let durable = mcp.call_success(
+        &format!("semantic-truth-{language}-durable-operation"),
+        "operation.status",
+        json!({"operation_id": semantic_id, "wait_ms": 0}),
+    );
+    assert_success(&durable, "operation.status");
+    assert_eq!(data(&durable)["operation"]["state"], "published");
+    assert_eq!(data(&durable)["published_generation"], generation);
+    assert_eq!(data(&durable)["index_stage"], "complete");
+
+    let status = mcp.call_until_not_busy(
+        &format!("semantic-truth-{language}-status"),
+        "repo.status",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "generation": generation,
+            "coverage_detail": "language",
+            "include_operations": true,
+            "require_freshness": "semantic",
+            "response_profile": "compact"
+        }),
+        deadline,
+    );
+    assert_read_success(&status, "repo.status", &generation);
+    assert_terminal_language(data(&status), language);
+    assert!(
+        data(&status)["operations"]
+            .as_array()
+            .expect("repo.status returns durable operations")
+            .iter()
+            .any(|operation| {
+                operation["operation_id"] == semantic_id && operation["state"] == "published"
+            }),
+        "{language} repo.status must expose the terminal semantic refinement operation"
+    );
+    SemanticIndex {
+        repository_id,
+        generation,
+    }
+}
+
+struct SemanticTruthWorkflow {
+    label: &'static str,
+    language: &'static str,
+    definition: &'static str,
+    definition_path: &'static str,
+    caller: &'static str,
+    caller_path: &'static str,
+    test: &'static str,
+    test_path: &'static str,
+}
+
+fn semantic_truth_workflows() -> [SemanticTruthWorkflow; 4] {
+    [
+        SemanticTruthWorkflow {
+            label: "typescript-component-parser",
+            language: "typescript",
+            definition: "parseComponent",
+            definition_path: "src/compiler.ts",
+            caller: "compileTemplate",
+            caller_path: "src/build.ts",
+            test: "parseComponentRegression",
+            test_path: "tests/compiler.test.ts",
+        },
+        SemanticTruthWorkflow {
+            label: "python-recursive-tree-builder",
+            language: "python",
+            definition: "build_kdtree",
+            definition_path: "kdtree.py",
+            caller: "nearest_tree",
+            caller_path: "kdtree.py",
+            test: "test_build_kdtree_recursion",
+            test_path: "test_kdtree.py",
+        },
+        SemanticTruthWorkflow {
+            label: "go-handler-registration",
+            language: "go",
+            definition: "GenerateHandler",
+            definition_path: "server/handlers.go",
+            caller: "RegisterRoutes",
+            caller_path: "server/handlers.go",
+            test: "TestGenerateHandler",
+            test_path: "server/handlers_test.go",
+        },
+        SemanticTruthWorkflow {
+            label: "rust-command-consumer",
+            language: "rust",
+            definition: "DenoSubcommand",
+            definition_path: "src/commands.rs",
+            caller: "run_subcommand",
+            caller_path: "src/commands.rs",
+            test: "deno_subcommand_routes_run",
+            test_path: "tests/commands.rs",
+        },
+    ]
+}
+
+fn assert_semantic_truth_workflow(
+    mcp: &mut McpProcess,
+    index: &SemanticIndex,
+    workflow: SemanticTruthWorkflow,
+) {
+    let definition = locate_truth_symbol(
+        mcp,
+        &index.repository_id,
+        &index.generation,
+        workflow.definition,
+        workflow.definition_path,
+        &format!("{}-definition", workflow.label),
+    );
+    let caller = locate_truth_symbol(
+        mcp,
+        &index.repository_id,
+        &index.generation,
+        workflow.caller,
+        workflow.caller_path,
+        &format!("{}-caller", workflow.label),
+    );
+    let test = locate_truth_symbol(
+        mcp,
+        &index.repository_id,
+        &index.generation,
+        workflow.test,
+        workflow.test_path,
+        &format!("{}-test", workflow.label),
+    );
+    let definition_id = required_string(&definition["symbol_id"], "definition identity");
+    let caller_id = required_string(&caller["symbol_id"], "caller identity");
+    let test_id = required_string(&test["symbol_id"], "test identity");
+
+    let relationships = mcp.call_success(
+        &format!("{}-relationships", workflow.label),
+        "symbol.relationships",
+        json!({
+            "repository": {"repository_id": index.repository_id},
+            "generation": index.generation,
+            "symbol_ids": [definition_id],
+            "relations": ["calls", "references", "types"],
+            "direction": "both",
+            "min_confidence": 0,
+            "max_results": 200,
+            "response_profile": "evidence"
+        }),
+    );
+    assert_read_success(&relationships, "symbol.relationships", &index.generation);
+    assert!(
+        relationship_items(data(&relationships)).iter().any(|item| {
+            item["symbol_id"] == caller_id
+                && item["source_refs"]
+                    .as_array()
+                    .is_some_and(|references| !references.is_empty())
+        }),
+        "{} omitted the known caller/consumer evidence: {relationships:#}",
+        workflow.label
+    );
+
+    let selected = mcp.call_success(
+        &format!("{}-tests", workflow.label),
+        "tests.select",
+        json!({
+            "repository": {"repository_id": index.repository_id},
+            "generation": index.generation,
+            "seeds": {"symbols": [definition_id]},
+            "test_kinds": ["unit"],
+            "max_tests": 50,
+            "include_commands": true,
+            "profile": "evidence"
+        }),
+    );
+    assert_read_success(&selected, "tests.select", &index.generation);
+    assert!(
+        data(&selected)["tests"]
+            .as_array()
+            .expect("tests.select returns ranked tests")
+            .iter()
+            .any(|candidate| {
+                candidate["test_id"] == test_id
+                    && candidate["path"] == workflow.test_path
+                    && candidate["why"]
+                        .as_array()
+                        .is_some_and(|reasons| !reasons.is_empty())
+            }),
+        "{} omitted its focused test evidence: {selected:#}",
+        workflow.label
+    );
+}
+
+fn locate_truth_symbol(
+    mcp: &mut McpProcess,
+    repository_id: &str,
+    generation: &str,
+    query: &str,
+    path: &str,
+    sample: &str,
+) -> Value {
+    let (located, _) = locate_complete(mcp, repository_id, generation, query, path, sample);
+    assert!(
+        located["source_ref"].is_object(),
+        "{sample} must retain generation-pinned source evidence"
+    );
+    located
+}
+
+fn relationship_items(output: &Value) -> Vec<&Value> {
+    output["groups"]
+        .as_array()
+        .expect("symbol.relationships returns groups")
+        .iter()
+        .flat_map(|group| {
+            group["items"]
+                .as_array()
+                .expect("a relationship group returns items")
+        })
+        .collect()
+}
+
+fn assert_terminal_language(status: &Value, expected: &str) {
+    let languages = status["coverage"]["languages"]
+        .as_array()
+        .expect("repo.status returns language coverage");
+    let observed = languages
+        .iter()
+        .find(|entry| entry["language"] == expected)
+        .unwrap_or_else(|| panic!("repo.status omitted semantic language {expected}: {status:#}"));
+    assert_eq!(observed["tier"], "B", "{expected} must terminate at Tier B");
+    assert!(
+        observed["files_indexed"]
+            .as_u64()
+            .is_some_and(|files| files > 0),
+        "{expected} must publish indexed semantic files"
+    );
+}
+
+fn write_semantic_truth_repositories(root: &Path) {
+    for path in [
+        "rust/src",
+        "rust/tests",
+        "typescript/src",
+        "typescript/tests",
+        "javascript/src",
+        "javascript/tests",
+        "python",
+        "go/server",
+    ] {
+        fs::create_dir_all(root.join(path)).expect("semantic fixture directory is created");
+    }
+    for (path, source) in [
+        ("rust/src/lib.rs", "pub mod commands;\n"),
+        (
+            "rust/src/commands.rs",
+            concat!(
+                "#[derive(Clone, Copy)]\n",
+                "pub enum DenoSubcommand { Run, Check }\n",
+                "pub fn run_subcommand(command: DenoSubcommand) -> bool {\n",
+                "    matches!(command, DenoSubcommand::Run)\n",
+                "}\n",
+            ),
+        ),
+        (
+            "rust/tests/commands.rs",
+            concat!(
+                "use crate::commands::DenoSubcommand;\n",
+                "#[test]\n",
+                "fn deno_subcommand_routes_run() {\n",
+                "    assert!(matches!(DenoSubcommand::Run, DenoSubcommand::Run));\n",
+                "}\n",
+            ),
+        ),
+        (
+            "typescript/src/compiler.ts",
+            concat!(
+                "export interface ComponentDescriptor { source: string }\n",
+                "export function parseComponent(source: string): ComponentDescriptor {\n",
+                "  return { source };\n",
+                "}\n",
+            ),
+        ),
+        (
+            "typescript/src/build.ts",
+            concat!(
+                "import { parseComponent, type ComponentDescriptor } from \"./compiler\";\n",
+                "export function compileTemplate(source: string): ComponentDescriptor {\n",
+                "  return parseComponent(source);\n",
+                "}\n",
+            ),
+        ),
+        (
+            "typescript/tests/compiler.test.ts",
+            concat!(
+                "import { parseComponent } from \"../src/compiler\";\n",
+                "export function parseComponentRegression() {\n",
+                "  return parseComponent(\"<template />\");\n",
+                "}\n",
+            ),
+        ),
+        (
+            "javascript/src/runtime.js",
+            concat!(
+                "export function normalizeOptions(options) { return options; }\n",
+                "export function createRuntime(options) { return normalizeOptions(options); }\n",
+            ),
+        ),
+        (
+            "javascript/tests/runtime.test.js",
+            concat!(
+                "import { normalizeOptions } from \"../src/runtime.js\";\n",
+                "export function normalizeOptionsRegression() {\n",
+                "  return normalizeOptions({ mode: \"strict\" });\n",
+                "}\n",
+            ),
+        ),
+        (
+            "python/kdtree.py",
+            concat!(
+                "def build_kdtree(points):\n",
+                "    if len(points) <= 1:\n",
+                "        return points\n",
+                "    return build_kdtree(points[:-1])\n",
+                "\n",
+                "def nearest_tree(points):\n",
+                "    return build_kdtree(points)\n",
+            ),
+        ),
+        (
+            "python/test_kdtree.py",
+            concat!(
+                "from kdtree import build_kdtree\n",
+                "\n",
+                "def test_build_kdtree_recursion():\n",
+                "    return build_kdtree([3, 2, 1])\n",
+            ),
+        ),
+        (
+            "go/server/handlers.go",
+            concat!(
+                "package server\n",
+                "import \"net/http\"\n",
+                "func GenerateHandler(w http.ResponseWriter, r *http.Request) {}\n",
+                "func RegisterRoutes(router *http.ServeMux) {\n",
+                "    router.HandleFunc(\"/generate\", GenerateHandler)\n",
+                "}\n",
+            ),
+        ),
+        (
+            "go/server/handlers_test.go",
+            concat!(
+                "package server\n",
+                "import (\n",
+                "    \"net/http/httptest\"\n",
+                "    \"testing\"\n",
+                ")\n",
+                "func TestGenerateHandler(t *testing.T) {\n",
+                "    request := httptest.NewRequest(\"GET\", \"/generate\", nil)\n",
+                "    GenerateHandler(httptest.NewRecorder(), request)\n",
+                "}\n",
+            ),
+        ),
+    ] {
+        fs::write(root.join(path), source).expect("semantic fixture source is written");
+    }
+}
+
+fn semantic_process_binaries() -> (PathBuf, PathBuf) {
+    let mcp = PathBuf::from(env!("CARGO_BIN_EXE_rootlight-mcp"));
+    let profile_dir = mcp
+        .parent()
+        .expect("MCP binary has a Cargo profile directory");
+    let daemon = profile_dir.join(format!("rootlight-daemon{}", std::env::consts::EXE_SUFFIX));
+    let adapter = profile_dir.join(format!(
+        "rootlight-adapter-host{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    if daemon.is_file() && adapter.is_file() {
+        return (daemon, mcp);
+    }
+
+    let target_dir = profile_dir
+        .parent()
+        .expect("Cargo profile belongs to a target directory");
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut command = Command::new(cargo);
+    command.current_dir(workspace).args([
+        OsStr::new("build"),
+        OsStr::new("--locked"),
+        OsStr::new("--package"),
+        OsStr::new("rootlight-daemon"),
+        OsStr::new("--package"),
+        OsStr::new("rootlight-adapter-host"),
+        OsStr::new("--target-dir"),
+    ]);
+    command.arg(target_dir);
+    if profile_dir.file_name() == Some(OsStr::new("release")) {
+        command.arg("--release");
+    }
+    let output = command
+        .output()
+        .expect("test-only semantic process build starts");
+    assert!(
+        output.status.success(),
+        "test-only semantic process build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(daemon.is_file(), "daemon build did not produce {daemon:?}");
+    assert!(
+        adapter.is_file(),
+        "adapter build did not produce {adapter:?}"
+    );
+    (daemon, mcp)
+}
 
 #[test]
 #[ignore = "runs one pinned real-repository cold-index release gate"]
@@ -417,6 +912,30 @@ fn wait_for_terminal_operation(
     operation_id: &str,
     deadline: Instant,
 ) -> TerminalOperation {
+    wait_for_terminal_operation_with_diagnostics(mcp, operation_id, deadline, None)
+}
+
+fn wait_for_release_semantic_operation(
+    mcp: &mut McpProcess,
+    repository_id: &str,
+    language: &str,
+    operation_id: &str,
+    deadline: Instant,
+) -> TerminalOperation {
+    wait_for_terminal_operation_with_diagnostics(
+        mcp,
+        operation_id,
+        deadline,
+        Some((repository_id, language)),
+    )
+}
+
+fn wait_for_terminal_operation_with_diagnostics(
+    mcp: &mut McpProcess,
+    operation_id: &str,
+    deadline: Instant,
+    diagnostic_repository: Option<(&str, &str)>,
+) -> TerminalOperation {
     let mut revision = None;
     let mut attempt = 0_u64;
     let mut progress_samples = Vec::new();
@@ -439,7 +958,37 @@ fn wait_for_terminal_operation(
                 return terminal_operation(operation_id, operation_data, progress_samples);
             }
             Some("failed" | "cancelled" | "waiting_for_context") => {
-                panic!("operation terminated without publication: {response:#}")
+                if let Some((repository_id, language)) = diagnostic_repository {
+                    let state =
+                        required_string(&operation["state"], "terminal semantic operation state");
+                    let completed_units = required_u64(
+                        &operation["progress"]["completed_units"],
+                        "terminal semantic completed units",
+                    );
+                    let total_units = required_u64(
+                        &operation["progress"]["total_units"],
+                        "terminal semantic total units",
+                    );
+                    let status = mcp.call_until_not_busy(
+                        &format!("semantic-truth-{language}-terminal-status"),
+                        "repo.status",
+                        json!({
+                            "repository": {"repository_id": repository_id},
+                            "generation": "active",
+                            "coverage_detail": "language",
+                            "include_operations": true,
+                            "require_freshness": "none",
+                            "response_profile": "compact"
+                        }),
+                        Instant::now() + STARTUP_TIMEOUT,
+                    );
+                    panic!(
+                        "{language} semantic operation {operation_id} terminated in state \
+                         {state} at {completed_units}/{total_units} units without publication:\n\
+                         operation.status = {response:#}\nrepo.status = {status:#}"
+                    );
+                }
+                panic!("operation {operation_id} terminated without publication: {response:#}")
             }
             Some("queued" | "running") => {
                 if let Some(sample) = operation_progress_sample(operation) {

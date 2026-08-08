@@ -19,6 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rootlight_build::PRODUCT_VERSION;
 use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
 use rootlight_ids::{GenerationId, OperationId, RepositoryId};
 use rootlight_ipc::{
@@ -43,9 +44,10 @@ use rootlight_observability::{
 use rootlight_operations::{
     Cancellation, CancellationAuthority, CancellationDisposition, CancellationOutcome,
     CancellationReason, ClientInstanceId, DeadlineRetry, InternalCancellationAuthority,
-    MAX_RECENT_TERMINAL_OPERATIONS, OperationError, OperationJournal, OperationKind,
-    OperationRecord, OperationStage, OperationState, OperationSubmission, PlanHash, Progress,
-    RecoveryClass, RepositoryOperationContext, SubmissionOutcome,
+    MAX_RECENT_TERMINAL_OPERATIONS, OperationCounts as DurableOperationCounts, OperationError,
+    OperationJournal, OperationKind, OperationRecord, OperationStage, OperationState,
+    OperationSubmission, PlanHash, Progress, RecoveryClass, RepositoryOperationContext,
+    RepositoryOperationEvidence, SubmissionOutcome,
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
@@ -980,6 +982,10 @@ pub struct DaemonState {
     running_operations: AtomicU32,
     cancelling_operations: AtomicU32,
     persisting_operations: AtomicU32,
+    durable_counts_bound: AtomicBool,
+    durable_queued_operations: AtomicU32,
+    durable_running_operations: AtomicU32,
+    durable_cancelling_operations: AtomicU32,
     journal_healthy: AtomicBool,
     catalog_status: AtomicU8,
     generation_status: AtomicU8,
@@ -1012,6 +1018,10 @@ impl DaemonState {
             running_operations: AtomicU32::new(0),
             cancelling_operations: AtomicU32::new(0),
             persisting_operations: AtomicU32::new(0),
+            durable_counts_bound: AtomicBool::new(false),
+            durable_queued_operations: AtomicU32::new(0),
+            durable_running_operations: AtomicU32::new(0),
+            durable_cancelling_operations: AtomicU32::new(0),
             journal_healthy: AtomicBool::new(true),
             catalog_status: AtomicU8::new(HealthStatus::Unavailable.as_u8()),
             generation_status: AtomicU8::new(HealthStatus::NotConfigured.as_u8()),
@@ -1194,6 +1204,32 @@ impl DaemonState {
         }
     }
 
+    fn set_durable_operation_counts(&self, counts: DurableOperationCounts) {
+        self.durable_queued_operations
+            .store(counts.queued, Ordering::Release);
+        self.durable_running_operations
+            .store(counts.running, Ordering::Release);
+        self.durable_cancelling_operations
+            .store(counts.cancelling, Ordering::Release);
+        self.durable_counts_bound.store(true, Ordering::Release);
+    }
+
+    fn health_operation_counts(&self) -> DurableOperationCounts {
+        if self.durable_counts_bound.load(Ordering::Acquire) {
+            DurableOperationCounts {
+                queued: self.durable_queued_operations.load(Ordering::Acquire),
+                running: self.durable_running_operations.load(Ordering::Acquire),
+                cancelling: self.durable_cancelling_operations.load(Ordering::Acquire),
+            }
+        } else {
+            DurableOperationCounts {
+                queued: self.queued_operations.load(Ordering::Acquire),
+                running: self.running_operations.load(Ordering::Acquire),
+                cancelling: self.cancelling_operations.load(Ordering::Acquire),
+            }
+        }
+    }
+
     /// Returns the current active connection count.
     #[must_use]
     pub fn active_connections(&self) -> u32 {
@@ -1302,6 +1338,14 @@ enum JournalCommand {
             Result<(OperationRecord, rootlight_operations::Cancellation), OperationError>,
         >,
     },
+    ActivateRecoveryBatch {
+        submissions: Vec<OperationSubmission>,
+        deadline: Instant,
+        claim: MutationClaim,
+        reply: tokio::sync::oneshot::Sender<
+            Result<Vec<(OperationRecord, rootlight_operations::Cancellation)>, OperationError>,
+        >,
+    },
     UpdateProgress {
         operation: OperationId,
         progress: Progress,
@@ -1323,6 +1367,10 @@ enum JournalCommand {
         reply:
             tokio::sync::oneshot::Sender<Result<Vec<RepositoryOperationContext>, OperationError>>,
     },
+    RepositoryIndexOperationContexts {
+        reply:
+            tokio::sync::oneshot::Sender<Result<Vec<RepositoryOperationContext>, OperationError>>,
+    },
     DeleteRepositoryHistory {
         repository: RepositoryId,
         claim: MutationClaim,
@@ -1338,6 +1386,12 @@ enum JournalCommand {
     RecordRepositoryPublication {
         operation: OperationId,
         generation: GenerationId,
+        claim: MutationClaim,
+        reply: tokio::sync::oneshot::Sender<Result<RepositoryOperationContext, OperationError>>,
+    },
+    RecordRepositoryEvidence {
+        operation: OperationId,
+        evidence: RepositoryOperationEvidence,
         claim: MutationClaim,
         reply: tokio::sync::oneshot::Sender<Result<RepositoryOperationContext, OperationError>>,
     },
@@ -1427,6 +1481,7 @@ pub struct JournalActorHandle {
     state: Arc<Mutex<JournalActorState>>,
     journal: Arc<OperationJournal>,
     telemetry: Arc<Telemetry>,
+    operation_state: Option<Arc<DaemonState>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1710,6 +1765,30 @@ impl JournalActorHandle {
         await_claimed_mutation(receiver, claim).await
     }
 
+    /// Atomically admits and activates bounded per-repository startup recovery work.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, validation, actor, or journal failure.
+    pub async fn activate_recovery_batch_until(
+        &self,
+        submissions: Vec<OperationSubmission>,
+        deadline: Instant,
+    ) -> Result<Vec<(OperationRecord, rootlight_operations::Cancellation)>, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::ActivateRecoveryBatch {
+                submissions,
+                deadline,
+                claim: claim.clone(),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
+    }
+
     /// Persists monotonic operation progress before an absolute lifecycle deadline.
     ///
     /// # Errors
@@ -1801,6 +1880,25 @@ impl JournalActorHandle {
             .map_err(ServiceError::Operations)
     }
 
+    /// Loads only durable repository-index contexts for startup reconstruction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, actor, or journal failure.
+    pub async fn repository_index_operation_contexts(
+        &self,
+    ) -> Result<Vec<RepositoryOperationContext>, ServiceError> {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Control,
+            JournalCommand::RepositoryIndexOperationContexts { reply },
+        )?;
+        receiver
+            .await
+            .map_err(|_| ServiceError::ChannelClosed)?
+            .map_err(ServiceError::Operations)
+    }
+
     /// Deletes terminal operation history for one repository.
     ///
     /// # Errors
@@ -1870,6 +1968,32 @@ impl JournalActorHandle {
             JournalCommand::RecordRepositoryPublication {
                 operation,
                 generation,
+                claim: claim.clone(),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
+    }
+
+    /// Persists final source-free repository evidence before an absolute deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, actor, lifecycle, conflict, corruption,
+    /// or journal failure.
+    pub async fn record_repository_evidence_until(
+        &self,
+        operation: OperationId,
+        evidence: RepositoryOperationEvidence,
+        deadline: Instant,
+    ) -> Result<RepositoryOperationContext, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::RecordRepositoryEvidence {
+                operation,
+                evidence,
                 claim: claim.clone(),
                 reply,
             },
@@ -2134,13 +2258,19 @@ impl JournalActorHandle {
         error: PublicError,
         cancellation_reason: Option<rootlight_operations::CancellationReason>,
     ) -> Result<OperationRecord, OperationError> {
-        compensate_unowned_operation(
+        let record = compensate_unowned_operation(
             &self.journal,
             &self.telemetry,
             operation,
             &error,
             cancellation_reason,
-        )
+        )?;
+        self.refresh_durable_operation_counts()?;
+        Ok(record)
+    }
+
+    fn refresh_durable_operation_counts(&self) -> Result<(), OperationError> {
+        refresh_durable_operation_counts(&self.journal, self.operation_state.as_deref())
     }
 
     fn finish_operation_receiver(
@@ -2370,6 +2500,39 @@ impl JournalActor {
         normal_capacity: usize,
         telemetry: Arc<Telemetry>,
     ) -> Result<Self, ServiceError> {
+        Self::start_inner(journal, control_capacity, normal_capacity, telemetry, None)
+    }
+
+    /// Starts one journal thread that projects durable operation counts into host health.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::InvalidLimits`] for invalid queue capacities,
+    /// [`ServiceError::Operations`] when the initial count snapshot fails, or
+    /// [`ServiceError::ThreadSpawn`] when the journal thread cannot start.
+    pub fn start_with_state(
+        journal: Arc<OperationJournal>,
+        control_capacity: usize,
+        normal_capacity: usize,
+        state: Arc<DaemonState>,
+    ) -> Result<Self, ServiceError> {
+        let telemetry = state.telemetry();
+        Self::start_inner(
+            journal,
+            control_capacity,
+            normal_capacity,
+            telemetry,
+            Some(state),
+        )
+    }
+
+    fn start_inner(
+        journal: Arc<OperationJournal>,
+        control_capacity: usize,
+        normal_capacity: usize,
+        telemetry: Arc<Telemetry>,
+        operation_state: Option<Arc<DaemonState>>,
+    ) -> Result<Self, ServiceError> {
         if control_capacity == 0
             || control_capacity > MAX_CONTROL_QUEUE_LIMIT
             || normal_capacity == 0
@@ -2377,13 +2540,18 @@ impl JournalActor {
         {
             return Err(ServiceError::InvalidLimits);
         }
+        refresh_durable_operation_counts(&journal, operation_state.as_deref())
+            .map_err(ServiceError::Operations)?;
         let (control_tx, control_rx) = mpsc::sync_channel(control_capacity);
         let (normal_tx, normal_rx) = mpsc::sync_channel(normal_capacity);
         let handle_journal = Arc::clone(&journal);
         let handle_telemetry = Arc::clone(&telemetry);
+        let handle_operation_state = operation_state.as_ref().map(Arc::clone);
         let thread = thread::Builder::new()
             .name("rootlight-journal".to_owned())
-            .spawn(move || journal_actor_loop(journal, control_rx, normal_rx, telemetry))
+            .spawn(move || {
+                journal_actor_loop(journal, control_rx, normal_rx, telemetry, operation_state);
+            })
             .map_err(ServiceError::ThreadSpawn)?;
         Ok(Self {
             handle: JournalActorHandle {
@@ -2393,6 +2561,7 @@ impl JournalActor {
                 }))),
                 journal: handle_journal,
                 telemetry: handle_telemetry,
+                operation_state: handle_operation_state,
             },
             join: Some(thread),
         })
@@ -2460,6 +2629,7 @@ fn journal_actor_loop(
     control: Receiver<JournalCommand>,
     normal: Receiver<JournalCommand>,
     telemetry: Arc<Telemetry>,
+    operation_state: Option<Arc<DaemonState>>,
 ) {
     const CONTROL_BURST: usize = 16;
     let mut control_open = true;
@@ -2473,7 +2643,14 @@ fn journal_actor_loop(
             match control.try_recv() {
                 Ok(command) => {
                     handled = true;
-                    if execute_journal_command(&journal, &telemetry, command).is_err() {
+                    if execute_journal_command_and_refresh(
+                        &journal,
+                        &telemetry,
+                        operation_state.as_deref(),
+                        command,
+                    )
+                    .is_err()
+                    {
                         return;
                     }
                 }
@@ -2488,7 +2665,14 @@ fn journal_actor_loop(
             match normal.try_recv() {
                 Ok(command) => {
                     handled = true;
-                    if execute_journal_command(&journal, &telemetry, command).is_err() {
+                    if execute_journal_command_and_refresh(
+                        &journal,
+                        &telemetry,
+                        operation_state.as_deref(),
+                        command,
+                    )
+                    .is_err()
+                    {
                         return;
                     }
                 }
@@ -2505,7 +2689,14 @@ fn journal_actor_loop(
         if control_open {
             match control.recv_timeout(Duration::from_millis(10)) {
                 Ok(command) => {
-                    if execute_journal_command(&journal, &telemetry, command).is_err() {
+                    if execute_journal_command_and_refresh(
+                        &journal,
+                        &telemetry,
+                        operation_state.as_deref(),
+                        command,
+                    )
+                    .is_err()
+                    {
                         return;
                     }
                 }
@@ -2515,7 +2706,14 @@ fn journal_actor_loop(
         } else if normal_open {
             match normal.recv_timeout(Duration::from_millis(10)) {
                 Ok(command) => {
-                    if execute_journal_command(&journal, &telemetry, command).is_err() {
+                    if execute_journal_command_and_refresh(
+                        &journal,
+                        &telemetry,
+                        operation_state.as_deref(),
+                        command,
+                    )
+                    .is_err()
+                    {
                         return;
                     }
                 }
@@ -2524,6 +2722,26 @@ fn journal_actor_loop(
             }
         }
     }
+}
+
+fn execute_journal_command_and_refresh(
+    journal: &OperationJournal,
+    telemetry: &Telemetry,
+    operation_state: Option<&DaemonState>,
+    command: JournalCommand,
+) -> Result<(), OperationError> {
+    execute_journal_command(journal, telemetry, command)?;
+    refresh_durable_operation_counts(journal, operation_state)
+}
+
+fn refresh_durable_operation_counts(
+    journal: &OperationJournal,
+    operation_state: Option<&DaemonState>,
+) -> Result<(), OperationError> {
+    if let Some(state) = operation_state {
+        state.set_durable_operation_counts(journal.counts()?);
+    }
+    Ok(())
 }
 
 fn start_operation_before(
@@ -2651,6 +2869,16 @@ fn execute_journal_command(
             });
             let _ = reply.send(result);
         }
+        JournalCommand::ActivateRecoveryBatch {
+            submissions,
+            deadline,
+            claim,
+            reply,
+        } => {
+            let _ = reply.send(execute_claimed(Some(&claim), || {
+                journal.start_recovery_batch_before(&submissions, deadline)
+            }));
+        }
         JournalCommand::UpdateProgress {
             operation,
             progress,
@@ -2677,6 +2905,9 @@ fn execute_journal_command(
         }
         JournalCommand::RepositoryOperationContexts { reply } => {
             let _ = reply.send(journal.repository_operation_contexts());
+        }
+        JournalCommand::RepositoryIndexOperationContexts { reply } => {
+            let _ = reply.send(journal.repository_index_operation_contexts());
         }
         JournalCommand::DeleteRepositoryHistory {
             repository,
@@ -2706,6 +2937,16 @@ fn execute_journal_command(
         } => {
             let _ = reply.send(execute_claimed(Some(&claim), || {
                 journal.record_repository_publication(operation, generation)
+            }));
+        }
+        JournalCommand::RecordRepositoryEvidence {
+            operation,
+            evidence,
+            claim,
+            reply,
+        } => {
+            let _ = reply.send(execute_claimed(Some(&claim), || {
+                journal.record_repository_evidence(operation, evidence)
             }));
         }
         JournalCommand::CompletePublication {
@@ -5488,7 +5729,7 @@ fn support_inventory(
         .unwrap_or(1);
     Ok(SupportInventory {
         runtime: SupportRuntimeInventory {
-            product_version: env!("CARGO_PKG_VERSION").to_owned(),
+            product_version: PRODUCT_VERSION.to_owned(),
             binary_name: "rootlight-daemon".to_owned(),
             binary_sha256: running_binary_sha256(),
             feature_profile: vec!["local-only".to_owned(), "standard".to_owned()],
@@ -5579,6 +5820,7 @@ fn support_terminal_operation(
         kind: match record.kind {
             OperationKind::ControlProbe => SupportOperationKind::ControlProbe,
             OperationKind::RepositoryIndex => SupportOperationKind::RepositoryIndex,
+            OperationKind::Recovery => SupportOperationKind::Recovery,
         },
         state: match record.state {
             OperationState::Succeeded => SupportOperationState::Succeeded,
@@ -5885,9 +6127,10 @@ impl ControlService {
     #[must_use]
     pub fn health(&self) -> Health {
         let lifecycle = self.state.lifecycle();
-        let admitted_operations = self.state.admitted_operations.load(Ordering::Acquire);
-        let queued_operations = self.state.queued_operations.load(Ordering::Acquire);
-        let running_operations = self.state.running_operations.load(Ordering::Acquire);
+        let operation_counts = self.state.health_operation_counts();
+        let admitted_operations = operation_counts.active();
+        let queued_operations = operation_counts.queued;
+        let running_operations = operation_counts.running;
         let journal_healthy = self.state.journal_healthy.load(Ordering::Acquire);
         let catalog_status =
             HealthStatus::from_u8(self.state.catalog_status.load(Ordering::Acquire));
@@ -5903,6 +6146,11 @@ impl ControlService {
             generation_status,
             HealthStatus::Healthy | HealthStatus::Degraded | HealthStatus::NotConfigured
         );
+        let accepting_operations = self.state.accepting_operations.load(Ordering::Acquire)
+            && journal_healthy
+            && catalog_status == HealthStatus::Healthy
+            && generation_ready
+            && endpoint_ready;
         Health {
             ready: lifecycle == DaemonLifecycle::Ready
                 && journal_healthy
@@ -5913,7 +6161,7 @@ impl ControlService {
             admitted_operations,
             protocol_version: PROTOCOL_VERSION,
             lifecycle,
-            accepting_operations: self.state.accepting_operations.load(Ordering::Acquire),
+            accepting_operations,
             active_connections: self.state.active_connections.load(Ordering::Acquire),
             connection_limit: self.limits.connection_limit(),
             queued_operations,
@@ -10333,6 +10581,7 @@ const fn operation_kind_to_wire(kind: OperationKind) -> daemon::OperationKind {
     match kind {
         OperationKind::ControlProbe => daemon::OperationKind::ControlProbe,
         OperationKind::RepositoryIndex => daemon::OperationKind::RepositoryIndex,
+        OperationKind::Recovery => daemon::OperationKind::Recovery,
     }
 }
 
@@ -10895,6 +11144,7 @@ mod tests {
             }))),
             journal,
             telemetry: Arc::new(Telemetry::default()),
+            operation_state: None,
         }
     }
 
@@ -12712,6 +12962,11 @@ mod tests {
         state.set_lifecycle(DaemonLifecycle::Ready);
         state.set_endpoint_status(HealthStatus::Unavailable);
         assert!(!service.health().ready);
+        assert!(!service.health().accepting_operations);
+        state.set_endpoint_status(HealthStatus::NotConfigured);
+        state.set_generation_status(HealthStatus::Unavailable);
+        assert!(!service.health().ready);
+        assert!(!service.health().accepting_operations);
         state.connection_finished();
         state.set_lifecycle(DaemonLifecycle::Draining);
         assert!(!service.health().accepting_operations);
@@ -12733,6 +12988,66 @@ mod tests {
         assert!(first.inserted);
         assert!(!second.inserted);
         assert_eq!(first.operation, second.operation);
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test]
+    async fn health_projects_authoritative_durable_operation_counts() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let state = Arc::new(DaemonState::starting());
+        state.set_catalog_status(HealthStatus::Healthy);
+        state.set_endpoint_status(HealthStatus::NotConfigured);
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let service = ControlService::with_state(
+            Arc::clone(&journal),
+            [7; 16],
+            Arc::clone(&state),
+            DaemonLimits::default(),
+        );
+        let actor = JournalActor::start_with_state(Arc::clone(&journal), 4, 4, Arc::clone(&state))
+            .expect("actor starts");
+        let handle = actor.handle();
+        let operation = OperationId::from_bytes([52; 16]);
+
+        handle
+            .submit(OperationSubmission::control_probe(operation))
+            .await
+            .expect("submission succeeds");
+        handle
+            .control(ControlRequest::Health)
+            .await
+            .expect("control barrier completes");
+        let queued = service.health();
+        assert_eq!(queued.active_operations, 1);
+        assert_eq!(queued.queued_operations, 1);
+        assert_eq!(queued.running_operations, 0);
+
+        handle
+            .activate_operation_until(operation, Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("operation activates");
+        handle
+            .control(ControlRequest::Health)
+            .await
+            .expect("control barrier completes");
+        let running = service.health();
+        assert_eq!(running.active_operations, 1);
+        assert_eq!(running.queued_operations, 0);
+        assert_eq!(running.running_operations, 1);
+
+        handle
+            .fail_operation(operation, internal_error())
+            .await
+            .expect("operation terminalizes");
+        handle
+            .control(ControlRequest::Health)
+            .await
+            .expect("control barrier completes");
+        let terminal = service.health();
+        assert_eq!(terminal.active_operations, 0);
+        assert_eq!(terminal.queued_operations, 0);
+        assert_eq!(terminal.running_operations, 0);
+
         actor.join().expect("actor joins");
     }
 
@@ -13665,6 +13980,7 @@ mod tests {
             state: Arc::new(Mutex::new(JournalActorState::Draining)),
             journal: Arc::new(OperationJournal::open_in_memory().expect("journal opens")),
             telemetry: Arc::new(Telemetry::default()),
+            operation_state: None,
         };
         let mut pool = SyntheticWorkerPool::start(1, 1).expect("worker pool starts");
         let permit = SchedulerPermit::reserve(
@@ -17510,6 +17826,7 @@ mod tests {
             bytes_examined: 0,
             index_stage: "discovery".to_owned(),
             semantic_operation: None,
+            ..Default::default()
         };
         assert!(first_slice_response_correlates(
             &status_request,

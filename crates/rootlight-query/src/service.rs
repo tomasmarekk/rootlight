@@ -453,7 +453,7 @@ where
                     break;
                 }
                 tracker.add_rows(1)?;
-                if occurrence_matches(occurrence, plan.symbol) {
+                if occurrence_targets_symbol(occurrence, plan.symbol) {
                     if !tracker.can_add(QueryResource::Results, 1) {
                         record_limit(&mut limiting_resources, QueryResource::Results)?;
                         break;
@@ -7253,10 +7253,10 @@ fn emit_dead_candidate(
     Ok(())
 }
 
-fn occurrence_matches(occurrence: &rootlight_ir::OccurrenceRecord, symbol: SymbolId) -> bool {
-    if occurrence.enclosing == Some(symbol) {
-        return true;
-    }
+fn occurrence_targets_symbol(
+    occurrence: &rootlight_ir::OccurrenceRecord,
+    symbol: SymbolId,
+) -> bool {
     match &occurrence.target {
         OccurrenceTarget::Resolved { symbol: target } => *target == symbol,
         OccurrenceTarget::Candidates { symbols, .. } => symbols.binary_search(&symbol).is_ok(),

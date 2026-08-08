@@ -9,7 +9,7 @@ use std::{
 };
 
 use rootlight_cancel::Cancellation;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     AnalysisUnitId, ArtifactId, ChangeClass, ChangeSet, DependencyGraph, DependencySource,
@@ -18,7 +18,7 @@ use crate::{
 };
 
 /// Why fine-grained invalidation escalated to a repository rebuild.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FallbackReason {
     /// A changed key had no declared dependent edge.

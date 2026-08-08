@@ -31,8 +31,8 @@ use crate::{
 };
 
 const FORMAT_PREFIX: &str = "rootlight.lexical";
-const FORMAT_VERSION: &str = "2";
-const STORED_HIT_VERSION: u8 = 1;
+const FORMAT_VERSION: &str = "3";
+const STORED_HIT_VERSION: u8 = 2;
 const MIN_WRITER_HEAP_BYTES: usize = 15_000_000;
 const MAX_IDENTIFIER_BYTES: usize = 512;
 const MAX_QUALIFIED_BYTES: usize = 2_048;
@@ -393,7 +393,8 @@ impl LexicalIndex {
                     return Err(SearchError::ReturnedTextBudgetExceeded);
                 }
                 hits.push(RankedHit {
-                    rank: lexical_rank(request.mode, &normalized_query, &hit),
+                    lexical_rank: lexical_rank(request.mode, &normalized_query, &hit),
+                    definition_rank: definition_rank(&hit),
                     hit,
                 });
                 document_id = scorer.advance();
@@ -403,8 +404,9 @@ impl LexicalIndex {
         sort_with_checkpoints(
             &mut hits,
             |left, right| {
-                left.rank
-                    .cmp(&right.rank)
+                left.lexical_rank
+                    .cmp(&right.lexical_rank)
+                    .then_with(|| left.definition_rank.cmp(&right.definition_rank))
                     .then_with(|| {
                         right
                             .hit
@@ -1018,6 +1020,8 @@ fn encode_stored_hit(source: &LexicalDocument) -> Result<Vec<u8>, SearchError> {
     encoded.extend_from_slice(source.symbol_id.as_bytes());
     encoded.extend_from_slice(source.file_id.as_bytes());
     encoded.push(u8::from(source.generated));
+    encoded.push(u8::from(source.test));
+    encoded.push(u8::from(source.declaration_only));
     for text in [
         source.identifier.as_str(),
         source.qualified_name.as_str(),
@@ -1043,6 +1047,16 @@ fn decode_stored_hit(bytes: &[u8], score: f32) -> Result<(SearchHit, usize), Sea
     let symbol_id = SymbolId::from_bytes(decoder.read_array()?);
     let file_id = FileId::from_bytes(decoder.read_array()?);
     let generated = match decoder.read_u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(SearchError::IncompatibleIndex),
+    };
+    let test = match decoder.read_u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(SearchError::IncompatibleIndex),
+    };
+    let declaration_only = match decoder.read_u8()? {
         0 => false,
         1 => true,
         _ => return Err(SearchError::IncompatibleIndex),
@@ -1078,6 +1092,8 @@ fn decode_stored_hit(bytes: &[u8], score: f32) -> Result<(SearchHit, usize), Sea
             language,
             tier,
             generated,
+            test,
+            declaration_only,
             relevance_score: score,
         },
         text_bytes,
@@ -1169,7 +1185,8 @@ impl<'a> StoredHitDecoder<'a> {
 }
 
 struct RankedHit {
-    rank: u8,
+    lexical_rank: u8,
+    definition_rank: u8,
     hit: SearchHit,
 }
 
@@ -1899,6 +1916,12 @@ fn lexical_rank(mode: SearchMode, normalized_query: &str, hit: &SearchHit) -> u8
     }
 }
 
+fn definition_rank(hit: &SearchHit) -> u8 {
+    let declaration_penalty = u8::from(hit.declaration_only);
+    let non_production_penalty = if hit.test || hit.generated { 2 } else { 0 };
+    declaration_penalty + non_production_penalty
+}
+
 fn format_payload(generation: GenerationId, documents: u64) -> String {
     format!(
         "{FORMAT_PREFIX};version={FORMAT_VERSION};generation={generation};documents={documents}"
@@ -1969,6 +1992,8 @@ mod tests {
             type_names: vec!["QueryBudget".to_owned()],
             documentation: Some("Runs bounded deterministic lexical search.".to_owned()),
             generated: false,
+            test: false,
+            declaration_only: false,
         }
     }
 
@@ -2220,6 +2245,31 @@ mod tests {
                 .expect_err("unsafe glob is rejected");
             assert!(matches!(error, SearchError::InvalidQuery(_)));
         }
+    }
+
+    #[test]
+    fn production_implementations_rank_before_declarations_and_tests() {
+        let mut declaration = document(1, "parseComponent", "src/contracts.ts");
+        declaration.kind = "method".to_owned();
+        declaration.declaration_only = true;
+        let mut test = document(2, "parseComponent", "tests/parser.spec.ts");
+        test.test = true;
+        let implementation = document(3, "parseComponent", "src/parseComponent.ts");
+        let (_directory, _manifest, index) = build(vec![declaration, test, implementation]);
+
+        let symbols = search(&index, "parseComponent", SearchMode::Exact)
+            .into_iter()
+            .map(|hit| hit.symbol_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            symbols,
+            [
+                SymbolId::from_bytes([3; 20]),
+                SymbolId::from_bytes([1; 20]),
+                SymbolId::from_bytes([2; 20]),
+            ]
+        );
     }
 
     #[test]

@@ -818,6 +818,62 @@ pub struct OperationResourcesV1_1 {
     /// Source bytes examined so far.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes_examined: Option<u64>,
+    /// Existing artifact or generation bytes referenced by this operation.
+    pub referenced_bytes: u64,
+    /// Bytes confirmed by operation-owned durable writer boundaries.
+    pub newly_written_bytes: u64,
+    /// Conservative generation-memory reservation, separate from process RSS.
+    pub reserved_memory_bytes: u64,
+    /// Retained generation-memory charge, separate from process RSS.
+    pub owned_memory_bytes: u64,
+}
+
+/// Construction strategy retained with a successful repository operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationBuildStrategy {
+    /// No committed parent generation was available.
+    Initial,
+    /// Declared dependencies selected bounded artifact reuse.
+    DependencyDirected,
+    /// Missing dependency evidence required a repository-wide rebuild.
+    ConservativeRepositoryRebuild,
+    /// An identical retained generation was reactivated without rebuilding it.
+    RetainedGeneration,
+}
+
+/// Source-free reason fine-grained invalidation expanded to a full rebuild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationFallbackReason {
+    /// A changed input had no declared dependent edge.
+    MissingDependencyDeclaration,
+    /// Fixed-point dependency traversal reached its configured work ceiling.
+    ClosureWorkExceeded,
+}
+
+/// Durable source-free invalidation, reuse, and rebuild evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationIncrementalEvidenceV1_1 {
+    /// Construction strategy used by this operation.
+    pub build_strategy: OperationBuildStrategy,
+    /// Explicit reason dependency-directed reuse was abandoned, when applicable.
+    pub fallback_reason: RequiredNullable<OperationFallbackReason>,
+    /// Analysis units selected by the invalidation closure.
+    pub invalidated_units: u64,
+    /// Typed generation inputs changed from the parent snapshot.
+    pub changed_inputs: u64,
+    /// Authoritative file transitions observed by reconciliation.
+    pub changed_files: u64,
+    /// Source files whose immutable artifacts were reused.
+    pub reused_files: u64,
+    /// Source files lowered into fresh generation-bound facts.
+    pub rebuilt_files: u64,
+    /// Generation-bound normalized facts reused without rewriting.
+    pub reused_facts: u64,
+    /// Normalized facts rebuilt for the published generation.
+    pub rebuilt_facts: u64,
 }
 
 /// One operation journal view.
@@ -858,6 +914,9 @@ pub struct OperationStatusDataV1_1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 128))]
     pub index_stage: Option<String>,
+    /// Final invalidation, reuse, and rebuild evidence, when published.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incremental: Option<OperationIncrementalEvidenceV1_1>,
     /// Terminal public error, if any.
     pub error: RequiredNullable<PublicError>,
     /// Recommended delay before polling again.

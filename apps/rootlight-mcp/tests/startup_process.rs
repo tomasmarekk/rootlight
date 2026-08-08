@@ -4,15 +4,15 @@ mod process_support;
 
 use std::{
     fs,
-    io::{BufRead as _, BufReader, Write as _},
+    io::{BufRead as _, BufReader, Read as _, Write as _},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
-use rootlight_client::{Client, ConnectPolicy};
-use rootlight_ids::OperationId;
+use rootlight_client::{Client, ConnectPolicy, GenerationSelector, RepositoryIndexMode};
+use rootlight_ids::{GenerationId, OperationId, RepositoryId};
 use rootlight_runtime::RuntimePaths;
 use serde_json::Value;
 
@@ -25,8 +25,10 @@ const DAEMON_P50_TARGET_US: u64 = 500_000;
 const DAEMON_P95_TARGET_US: u64 = 1_500_000;
 const DAEMON_P99_TARGET_US: u64 = 3_000_000;
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(10);
+const STARTUP_REPOSITORIES: usize = 24;
 const EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const FAILURE_STDERR_LIMIT: u64 = 16 * 1024;
 
 #[test]
 #[ignore = "runs 105 fresh release MCP processes and enforces startup percentiles"]
@@ -71,8 +73,8 @@ fn daemon_reaches_ready_within_release_startup_slo() {
     let isolated = process_support::private_process_tempdir("rl-startup-daemon-");
     let state_dir = isolated.path().join("state");
     let runtime_dir = isolated.path().join("runtime");
-    let repository = isolated.path().join("repository");
-    prepare_valid_catalog(&state_dir, &runtime_dir, &repository);
+    let repositories_root = isolated.path().join("repositories");
+    let repositories = prepare_valid_catalog(&state_dir, &runtime_dir, &repositories_root);
 
     for _ in 0..WARMUP_SAMPLES {
         let _elapsed = start_ready_daemon(&state_dir, &runtime_dir);
@@ -95,6 +97,38 @@ fn daemon_reaches_ready_within_release_startup_slo() {
         samples[0],
         samples[samples.len() - 1],
     );
+
+    // Keep endpoint checks outside the latency samples so the percentiles
+    // continue to represent daemon readiness rather than fixture cardinality.
+    let (mut daemon, input, _elapsed, control) = start_healthy_daemon(&state_dir, &runtime_dir);
+    let health = control
+        .health()
+        .expect("health remains readable after multi-repository recovery");
+    assert!(health.ready);
+    assert!(
+        health.accepting_operations,
+        "ready health must agree with write admission"
+    );
+    for repository in &repositories {
+        let status = control
+            .repository_status(
+                repository.repository,
+                GenerationSelector::Generation(repository.generation),
+            )
+            .expect("every recovered last-good generation is readable");
+        assert_eq!(status.resolved_generation, repository.generation);
+    }
+    assert_mcp_reads_active_generation(&state_dir, &runtime_dir, &repositories[0]);
+    let refreshed = control
+        .repository_index_with_mode(
+            &repositories[0].root.to_string_lossy(),
+            startup_operation_id(STARTUP_REPOSITORIES, 0x53),
+            false,
+            RepositoryIndexMode::Structural,
+        )
+        .expect("ready health admits a repository write");
+    assert_eq!(refreshed.repository, repositories[0].repository);
+    stop_daemon(input, &mut daemon);
 }
 
 fn initialize_process(state_dir: &Path, runtime_dir: &Path) -> u64 {
@@ -142,7 +176,7 @@ fn initialize_process(state_dir: &Path, runtime_dir: &Path) -> u64 {
     assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
 
     drop(stdin);
-    finish_process(&mut child);
+    finish_process(&mut child, "MCP");
     elapsed
 }
 
@@ -164,7 +198,7 @@ fn start_healthy_daemon(state_dir: &Path, runtime_dir: &Path) -> (Child, ChildSt
         .env("ROOTLIGHT_RUNTIME_DIR", runtime_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("daemon process starts");
     let input = child.stdin.take().expect("daemon stdin is piped");
@@ -194,38 +228,184 @@ fn start_healthy_daemon(state_dir: &Path, runtime_dir: &Path) -> (Child, ChildSt
     panic!("daemon did not reach ready within the startup timeout");
 }
 
-fn prepare_valid_catalog(state_dir: &Path, runtime_dir: &Path, repository: &Path) {
-    fs::create_dir_all(repository.join("src")).expect("fixture source directory is created");
-    fs::write(
-        repository.join("Cargo.toml"),
-        "[package]\nname = \"startup_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-    )
-    .expect("fixture manifest is written");
-    fs::write(
-        repository.join("src").join("lib.rs"),
-        "pub fn startup_fixture() -> bool { true }\n",
-    )
-    .expect("fixture source is written");
-
+fn prepare_valid_catalog(
+    state_dir: &Path,
+    runtime_dir: &Path,
+    repositories_root: &Path,
+) -> Vec<PreparedRepository> {
+    fs::create_dir_all(repositories_root).expect("fixture repository root is created");
     let (mut daemon, input, _startup, control) = start_healthy_daemon(state_dir, runtime_dir);
-    let indexed = control
-        .repository_index(
-            &repository.to_string_lossy(),
-            OperationId::from_bytes([0x52; 16]),
-            false,
+    let mut prepared = Vec::with_capacity(STARTUP_REPOSITORIES);
+    for index in 0..STARTUP_REPOSITORIES {
+        let repository = repositories_root.join(format!("repository-{index:03}"));
+        let symbol = format!("startup_fixture_{index:03}");
+        fs::create_dir_all(repository.join("src")).expect("fixture source directory is created");
+        fs::write(
+            repository.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"startup_fixture_{index:03}\"\n\
+                 version = \"0.1.0\"\nedition = \"2024\"\n"
+            ),
         )
-        .expect("fixture repository creates a durable catalog generation");
-    assert_eq!(
-        indexed.operation,
-        OperationId::from_bytes([0x52; 16]),
-        "catalog preparation returns the requested operation"
-    );
+        .expect("fixture manifest is written");
+        fs::write(
+            repository.join("src").join("lib.rs"),
+            format!("pub fn {symbol}() -> bool {{ true }}\n"),
+        )
+        .expect("fixture source is written");
+
+        let operation = startup_operation_id(index, 0x52);
+        let indexed = control
+            .repository_index_with_mode(
+                &repository.to_string_lossy(),
+                operation,
+                false,
+                RepositoryIndexMode::Structural,
+            )
+            .expect("fixture repository creates a durable catalog generation");
+        assert_eq!(
+            indexed.operation, operation,
+            "catalog preparation returns the requested operation"
+        );
+        prepared.push(PreparedRepository {
+            root: repository,
+            repository: indexed.repository,
+            generation: indexed
+                .published_generation
+                .expect("structural fixture publishes a generation"),
+            symbol,
+        });
+    }
     stop_daemon(input, &mut daemon);
+    prepared
+}
+
+fn assert_mcp_reads_active_generation(
+    state_dir: &Path,
+    runtime_dir: &Path,
+    repository: &PreparedRepository,
+) {
+    let mcp_binary = std::env::var_os("ROOTLIGHT_TEST_MCP_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_rootlight-mcp")));
+    let mut child = Command::new(mcp_binary)
+        .env("ROOTLIGHT_STATE_DIR", state_dir)
+        .env("ROOTLIGHT_RUNTIME_DIR", runtime_dir)
+        .env("ROOTLIGHT_MCP_PROFILE", "developer")
+        .env("ROOTLIGHT_MCP_PROFILE_CEILING", "developer")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("MCP process starts");
+    let mut input = child.stdin.take().expect("MCP stdin is piped");
+    let output = child.stdout.take().expect("MCP stdout is piped");
+    let mut output = BufReader::new(output);
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "initialize",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "rootlight-startup-recovery",
+                    "version": "1.0"
+                },
+                "initializationOptions": {
+                    "rootlight_exposure_profile": "developer"
+                }
+            }
+        })
+    )
+    .expect("initialize request writes");
+    input.flush().expect("initialize request flushes");
+    let initialized = read_json_line(&mut output, "initialize");
+    assert_eq!(initialized["id"], "initialize");
+
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+    )
+    .expect("initialized notification writes");
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "recovered-read",
+            "method": "tools/call",
+            "params": {
+                "name": "code.locate",
+                "arguments": {
+                    "repository": {
+                        "repository_id": repository.repository.to_string()
+                    },
+                    "generation": "active",
+                    "query": repository.symbol,
+                    "search_modes": ["exact"],
+                    "max_results": 8,
+                    "response_profile": "compact"
+                }
+            }
+        })
+    )
+    .expect("MCP read request writes");
+    input.flush().expect("MCP read request flushes");
+    let response = read_json_line(&mut output, "recovered read");
+    assert_eq!(response["id"], "recovered-read");
+    assert_ne!(
+        response["result"]["isError"], true,
+        "ready health must agree with MCP read admission: {response:#}"
+    );
+    let matches = response["result"]["structuredContent"]["data"]["matches"]
+        .as_array()
+        .expect("code.locate returns matches");
+    assert!(
+        matches
+            .iter()
+            .any(|candidate| candidate["display_name"] == repository.symbol),
+        "MCP reads the recovered active generation: {response:#}"
+    );
+
+    drop(input);
+    finish_process(&mut child, "MCP");
+}
+
+fn read_json_line(output: &mut BufReader<impl std::io::Read>, label: &str) -> Value {
+    let mut line = String::new();
+    output
+        .read_line(&mut line)
+        .unwrap_or_else(|error| panic!("{label} response reads: {error}"));
+    serde_json::from_str(&line).unwrap_or_else(|error| panic!("{label} response is JSON: {error}"))
+}
+
+fn startup_operation_id(index: usize, discriminator: u8) -> OperationId {
+    let ordinal = u16::try_from(index).expect("fixture ordinal fits u16");
+    let mut bytes = [0_u8; 16];
+    bytes[0] = discriminator;
+    bytes[14..].copy_from_slice(&ordinal.to_be_bytes());
+    OperationId::from_bytes(bytes)
+}
+
+struct PreparedRepository {
+    root: PathBuf,
+    repository: RepositoryId,
+    generation: GenerationId,
+    symbol: String,
 }
 
 fn stop_daemon(input: ChildStdin, child: &mut Child) {
     drop(input);
-    finish_process(child);
+    finish_process(child, "daemon");
 }
 
 fn daemon_binary() -> PathBuf {
@@ -238,11 +418,21 @@ fn daemon_binary() -> PathBuf {
     binary
 }
 
-fn finish_process(child: &mut Child) {
+fn finish_process(child: &mut Child, process_name: &str) {
     let deadline = Instant::now() + EXIT_TIMEOUT;
     loop {
         if let Some(status) = child.try_wait().expect("MCP process status reads") {
-            assert!(status.success(), "MCP process exits successfully");
+            if !status.success() {
+                let mut diagnostic = String::new();
+                if let Some(stderr) = child.stderr.take() {
+                    let _read_result = stderr
+                        .take(FAILURE_STDERR_LIMIT)
+                        .read_to_string(&mut diagnostic);
+                }
+                panic!(
+                    "{process_name} process exits successfully: status={status}, stderr={diagnostic}"
+                );
+            }
             return;
         }
         if Instant::now() >= deadline {

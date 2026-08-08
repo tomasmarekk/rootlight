@@ -17,6 +17,7 @@ use std::{
 use std::fs::OpenOptions;
 
 use cap_std::{ambient_authority, fs::Dir};
+use rootlight_build::PRODUCT_VERSION;
 use rootlight_vfs::platform::{PlatformError, PrivateDirectory, PublishError};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -1182,7 +1183,7 @@ impl InstallLayout {
             return Err(FilesystemUpdateError::InvalidInstall);
         }
         let transaction = self.read_transaction()?;
-        let binary_version = env!("CARGO_PKG_VERSION").to_owned();
+        let binary_version = PRODUCT_VERSION.to_owned();
         Ok(UpdateRuntimeStatus {
             active_version: active.clone(),
             package_matches_binary: active == binary_version,

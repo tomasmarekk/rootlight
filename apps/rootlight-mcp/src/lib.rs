@@ -20,6 +20,7 @@ use std::{
 };
 
 use json::{JsonIssue, JsonLimits, ParseFailure, parse_bounded};
+use rootlight_build::PRODUCT_VERSION;
 use rootlight_mcp_contract::initialize::{
     BootstrapLimits, encode_initialize_response, negotiate_initialize_profile,
 };
@@ -69,12 +70,7 @@ const INVALID_PARAMS: i32 = -32_602;
 const SERVER_BUSY: i32 = -32_000;
 const SERVER_NOT_INITIALIZED: i32 = -32_002;
 const REQUEST_CANCELLED: i32 = -32_800;
-// Release builds carry product SemVer independently of internal workspace
-// crate versions, while ordinary development builds retain Cargo's version.
-const ROOTLIGHT_RELEASE_VERSION: &str = match option_env!("ROOTLIGHT_RELEASE_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
-};
+const ROOTLIGHT_RELEASE_VERSION: &str = PRODUCT_VERSION;
 
 /// Maximum configured JSON depth supported by the bounded recursive visitor.
 pub const MAX_SUPPORTED_JSON_DEPTH: usize = 64;

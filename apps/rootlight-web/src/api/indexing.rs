@@ -874,6 +874,7 @@ mod tests {
                     bytes_examined: 5,
                     index_stage: "indexing".to_owned(),
                     retry_after_ms: Some(100),
+                    evidence: None,
                 })
             })
         }

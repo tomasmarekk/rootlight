@@ -324,6 +324,7 @@ enum OperationKind {
   OPERATION_KIND_UNSPECIFIED = 0;
   CONTROL_PROBE = 1;
   REPOSITORY_INDEX = 2;
+  RECOVERY = 3;
 }
 
 // Monotonic infrastructure stages for the bounded control probe.
@@ -502,6 +503,36 @@ message RepositoryOperationStatusResponse {
   string index_stage = 10;
   // Separately journaled semantic refinement created by a successful Auto operation.
   optional rootlight.common.v1.OperationId semantic_operation = 11;
+  RepositoryBuildStrategy build_strategy = 12;
+  optional RepositoryFallbackReason fallback_reason = 13;
+  uint64 invalidated_units = 14;
+  uint64 changed_inputs = 15;
+  uint64 changed_files = 16;
+  uint64 reused_files = 17;
+  uint64 rebuilt_files = 18;
+  uint64 reused_facts = 19;
+  uint64 rebuilt_facts = 20;
+  uint64 referenced_bytes = 21;
+  uint64 newly_written_bytes = 22;
+  // Generation-owned accounting is separate from process-wide peak RSS.
+  uint64 reserved_memory_bytes = 23;
+  uint64 owned_memory_bytes = 24;
+}
+
+// Operation-local construction strategy retained with the durable receipt.
+enum RepositoryBuildStrategy {
+  REPOSITORY_BUILD_STRATEGY_UNSPECIFIED = 0;
+  REPOSITORY_BUILD_INITIAL = 1;
+  REPOSITORY_BUILD_DEPENDENCY_DIRECTED = 2;
+  REPOSITORY_BUILD_CONSERVATIVE_REPOSITORY_REBUILD = 3;
+  REPOSITORY_BUILD_RETAINED_GENERATION = 4;
+}
+
+// Source-free reason fine-grained invalidation expanded to a full rebuild.
+enum RepositoryFallbackReason {
+  REPOSITORY_FALLBACK_REASON_UNSPECIFIED = 0;
+  REPOSITORY_FALLBACK_MISSING_DEPENDENCY_DECLARATION = 1;
+  REPOSITORY_FALLBACK_CLOSURE_WORK_EXCEEDED = 2;
 }
 
 // First-slice lexical locate mode.
@@ -861,7 +892,7 @@ message RepositoryCoverageEntry {
   uint64 indexed_files = 5;
 }
 
-// One bounded source-free repository-index operation summary.
+// One bounded source-free repository operation summary.
 message RepositoryStatusOperation {
   rootlight.common.v1.OperationId operation = 1;
   OperationKind kind = 2;

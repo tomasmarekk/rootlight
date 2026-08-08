@@ -23,8 +23,8 @@ use rootlight_protocol::{
     adapter_contract::{AdapterContractError, NegotiatedSession, decode_adapter_frame},
     generated::{
         adapter::v1::{
-            AnalysisRequest, AnalysisResult, ProjectAnalysisRequest, RequestedAnalysisTier,
-            adapter_frame,
+            AnalysisRequest, AnalysisResult, ProjectAnalysisRequest, ProjectAnalysisResult,
+            RequestedAnalysisTier, adapter_frame,
         },
         common::v1::{ContractVersion, ExtensionDescriptor},
     },
@@ -684,7 +684,46 @@ pub fn validate_project_analysis_result(
         Some(adapter_frame::Message::ProjectAnalysisResult(result)) => result,
         _ => return Err(AdapterHostError::UnexpectedFrame),
     };
-    session.validate_project_analysis_result(&result)?;
+    validate_project_analysis_payload(
+        session,
+        pending,
+        result,
+        false,
+        supported_extensions,
+        cancellation,
+    )
+}
+
+fn validate_reassembled_project_analysis_result(
+    session: &NegotiatedSession,
+    pending: PendingProjectAnalysis,
+    result: ProjectAnalysisResult,
+    supported_extensions: &ExtensionSupport,
+    cancellation: &Cancellation,
+) -> Result<NormalizedIrDocument, AdapterHostError> {
+    validate_project_analysis_payload(
+        session,
+        pending,
+        result,
+        true,
+        supported_extensions,
+        cancellation,
+    )
+}
+
+fn validate_project_analysis_payload(
+    session: &NegotiatedSession,
+    pending: PendingProjectAnalysis,
+    result: ProjectAnalysisResult,
+    reassembled: bool,
+    supported_extensions: &ExtensionSupport,
+    cancellation: &Cancellation,
+) -> Result<NormalizedIrDocument, AdapterHostError> {
+    if reassembled {
+        session.validate_reassembled_project_analysis_result(&result)?;
+    } else {
+        session.validate_project_analysis_result(&result)?;
+    }
     if result.request_id.as_slice() != pending.request_id {
         return Err(AdapterHostError::RequestMismatch);
     }

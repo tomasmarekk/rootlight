@@ -311,6 +311,10 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
                 )
             })?;
         resources.insert("bytes_examined".to_owned(), json!(64));
+        resources.insert("referenced_bytes".to_owned(), json!(0));
+        resources.insert("newly_written_bytes".to_owned(), json!(0));
+        resources.insert("reserved_memory_bytes".to_owned(), json!(0));
+        resources.insert("owned_memory_bytes".to_owned(), json!(0));
         Ok(())
     })?;
     validate_examples(&tools)?;

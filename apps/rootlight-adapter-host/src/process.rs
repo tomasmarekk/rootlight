@@ -13,14 +13,18 @@ use std::{
 };
 
 use rootlight_cancel::Cancellation;
+use rootlight_ids::content_hash;
 use rootlight_ir::{ExtensionSupport, NormalizedIrDocument};
 use rootlight_protocol::{
     adapter_contract::{
-        ADAPTER_DIGEST_BYTES, ADAPTER_FRAME_PREFIX_BYTES, AdapterFrameDecoder,
-        MAX_ADAPTER_FRAME_BYTES, NegotiatedSession, encode_adapter_frame,
+        ADAPTER_DIGEST_BYTES, AdapterFrameDecoder, MAX_ADAPTER_FRAME_BYTES,
+        MAX_ADAPTER_PROJECT_RESULT_CHUNKS, NegotiatedSession, encode_adapter_frame,
         encode_length_delimited_adapter_frame,
     },
-    generated::adapter::v1::{AdapterFrame, ProjectAnalysisRequest, adapter_frame},
+    generated::adapter::v1::{
+        AdapterFrame, ProjectAnalysisRequest, ProjectAnalysisResult, ProjectAnalysisResultChunk,
+        ProjectAnalysisResultEnd, adapter_frame,
+    },
 };
 use rootlight_sandbox::{
     AdapterExecutableDigest, AdapterProcessCommand, AdapterSandboxLimits, AdapterStderr,
@@ -33,9 +37,11 @@ use crate::project::{
 };
 use crate::{
     AdapterHostError, IsolationReport, prepare_project_analysis, validate_project_analysis_result,
+    validate_reassembled_project_analysis_result,
 };
 
 const MAX_ADAPTER_DIAGNOSTIC_BYTES: usize = 64 * 1024;
+const OUTPUT_READ_BUFFER_BYTES: usize = 16 * 1024;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const PROCESS_REAP_GRACE: Duration = Duration::from_secs(2);
 
@@ -44,6 +50,12 @@ const PROCESS_REAP_GRACE: Duration = Duration::from_secs(2);
 pub struct IsolatedProjectAnalysis {
     document: NormalizedIrDocument,
     isolation: IsolationReport,
+}
+
+#[derive(Debug)]
+enum ProjectProcessOutput {
+    Single(ProjectAnalysisResult),
+    Chunked(ProjectAnalysisResult),
 }
 
 impl IsolatedProjectAnalysis {
@@ -86,8 +98,9 @@ pub fn execute_isolated_project_adapter(
             request.clone(),
         )),
     })?;
-    let output_limit = MAX_ADAPTER_FRAME_BYTES
-        .checked_add(ADAPTER_FRAME_PREFIX_BYTES)
+    let output_limit = usize::try_from(session.limits().output_bytes)
+        .map_err(|_| AdapterHostError::Limit)?
+        .checked_add(MAX_ADAPTER_FRAME_BYTES)
         .ok_or(AdapterHostError::Limit)?;
     let expected_executable_digest: [u8; ADAPTER_DIGEST_BYTES] = session
         .adapter()
@@ -129,7 +142,7 @@ pub fn execute_isolated_project_adapter(
     let stdin = process.take_stdin().ok_or(AdapterHostError::ProcessIo)?;
     let stdout = process.take_stdout().ok_or(AdapterHostError::ProcessIo)?;
     let stderr = process.take_stderr().ok_or(AdapterHostError::ProcessIo)?;
-    let output_reader = spawn_reader("rootlight-adapter-stdout", stdout, &process)?;
+    let output_reader = spawn_project_output_reader(stdout, session.clone(), &process)?;
     let diagnostic_reader = spawn_diagnostic_reader(stderr, &process)?;
     let input_writer = spawn_writer(stdin, packet, &process)?;
 
@@ -143,16 +156,14 @@ pub fn execute_isolated_project_adapter(
             terminate_and_reap(&process);
             drop(process);
             let _ = join_worker(input_writer);
-            let _ = join_worker(output_reader);
+            let _ = join_adapter_worker(output_reader);
             let _ = join_worker(diagnostic_reader);
             return Err(error);
         }
     };
     let input_result = join_worker(input_writer);
-    let output_result = join_worker(output_reader);
+    let output_result = join_adapter_worker(output_reader);
     let diagnostic_result = join_worker(diagnostic_reader);
-    input_result?;
-    let output = output_result?;
     let diagnostic = diagnostic_result?;
     process
         .wait_empty(reap_deadline())
@@ -161,16 +172,31 @@ pub fn execute_isolated_project_adapter(
     if !status.success() || !diagnostic.is_empty() {
         return Err(classify_process_failure(&diagnostic));
     }
+    input_result?;
+    let output = output_result?;
 
-    let frame = decode_exact_packet(&output)?;
-    let encoded = encode_adapter_frame(&frame)?;
-    let document = validate_project_analysis_result(
-        session,
-        pending,
-        &encoded,
-        supported_extensions,
-        cancellation,
-    )?;
+    let document = match output {
+        ProjectProcessOutput::Single(result) => {
+            let frame = AdapterFrame {
+                message: Some(adapter_frame::Message::ProjectAnalysisResult(result)),
+            };
+            let encoded = encode_adapter_frame(&frame)?;
+            validate_project_analysis_result(
+                session,
+                pending,
+                &encoded,
+                supported_extensions,
+                cancellation,
+            )?
+        }
+        ProjectProcessOutput::Chunked(result) => validate_reassembled_project_analysis_result(
+            session,
+            pending,
+            result,
+            supported_extensions,
+            cancellation,
+        )?,
+    };
     Ok(IsolatedProjectAnalysis {
         document,
         isolation,
@@ -190,18 +216,14 @@ fn classify_process_failure(diagnostic: &[u8]) -> AdapterHostError {
     }
 }
 
-fn spawn_reader(
-    name: &str,
+fn spawn_project_output_reader(
     mut reader: AdapterStdout,
+    session: NegotiatedSession,
     process: &IsolatedAdapterProcess,
-) -> Result<JoinHandle<std::io::Result<Vec<u8>>>, AdapterHostError> {
+) -> Result<JoinHandle<Result<ProjectProcessOutput, AdapterHostError>>, AdapterHostError> {
     thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(move || {
-            let mut output = Vec::new();
-            reader.read_to_end(&mut output)?;
-            Ok(output)
-        })
+        .name("rootlight-adapter-stdout".to_owned())
+        .spawn(move || decode_project_output(&mut reader, &session))
         .map_err(|_| {
             terminate_and_reap(process);
             AdapterHostError::ProcessIo
@@ -279,21 +301,223 @@ fn join_worker<T>(worker: JoinHandle<std::io::Result<T>>) -> Result<T, AdapterHo
         .map_err(|_| AdapterHostError::ProcessIo)
 }
 
+fn join_adapter_worker<T>(
+    worker: JoinHandle<Result<T, AdapterHostError>>,
+) -> Result<T, AdapterHostError> {
+    worker.join().map_err(|_| AdapterHostError::ProcessIo)?
+}
+
+#[cfg(test)]
 fn decode_exact_packet(packet: &[u8]) -> Result<AdapterFrame, AdapterHostError> {
-    let mut decoder = AdapterFrameDecoder::new();
-    let (consumed, frame) = decoder.push(packet)?;
-    if consumed != packet.len() {
+    let mut frames = decode_packets(packet)?;
+    if frames.len() != 1 {
         return Err(AdapterHostError::UnexpectedFrame);
     }
-    frame.ok_or(AdapterHostError::UnexpectedFrame)
+    frames.pop().ok_or(AdapterHostError::UnexpectedFrame)
+}
+
+#[cfg(test)]
+fn decode_packets(packet: &[u8]) -> Result<Vec<AdapterFrame>, AdapterHostError> {
+    let mut decoder = AdapterFrameDecoder::new();
+    let mut frames = Vec::new();
+    let mut offset = 0usize;
+    while offset < packet.len() {
+        let (consumed, frame) = decoder.push(&packet[offset..])?;
+        if consumed == 0 {
+            return Err(AdapterHostError::UnexpectedFrame);
+        }
+        offset = offset
+            .checked_add(consumed)
+            .ok_or(AdapterHostError::Limit)?;
+        if let Some(frame) = frame {
+            frames.try_reserve(1).map_err(|_| AdapterHostError::Limit)?;
+            frames.push(frame);
+        } else if offset == packet.len() {
+            return Err(AdapterHostError::UnexpectedFrame);
+        }
+    }
+    if frames.is_empty() {
+        return Err(AdapterHostError::UnexpectedFrame);
+    }
+    Ok(frames)
+}
+
+fn decode_project_output(
+    reader: &mut impl std::io::Read,
+    session: &NegotiatedSession,
+) -> Result<ProjectProcessOutput, AdapterHostError> {
+    let mut decoder = AdapterFrameDecoder::new();
+    let mut accumulator = ProjectOutputAccumulator::default();
+    let mut buffer = [0_u8; OUTPUT_READ_BUFFER_BYTES];
+    let mut incomplete_frame = false;
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|_| AdapterHostError::ProcessIo)?;
+        if read == 0 {
+            break;
+        }
+        let mut offset = 0usize;
+        while offset < read {
+            let (consumed, frame) = decoder.push(&buffer[offset..read])?;
+            if consumed == 0 {
+                return Err(AdapterHostError::UnexpectedFrame);
+            }
+            offset = offset
+                .checked_add(consumed)
+                .ok_or(AdapterHostError::Limit)?;
+            incomplete_frame = frame.is_none();
+            if let Some(frame) = frame {
+                accumulator.accept(session, frame)?;
+            }
+        }
+    }
+    if incomplete_frame {
+        return Err(AdapterHostError::UnexpectedFrame);
+    }
+    accumulator.finish()
+}
+
+#[derive(Debug, Default)]
+struct ProjectOutputAccumulator {
+    single: Option<ProjectAnalysisResult>,
+    session_id: Option<Vec<u8>>,
+    request_id: Option<Vec<u8>>,
+    next_chunk_index: u32,
+    normalized_ir: Vec<u8>,
+    completed: Option<ProjectAnalysisResult>,
+}
+
+impl ProjectOutputAccumulator {
+    fn accept(
+        &mut self,
+        session: &NegotiatedSession,
+        frame: AdapterFrame,
+    ) -> Result<(), AdapterHostError> {
+        if self.single.is_some() || self.completed.is_some() {
+            return Err(AdapterHostError::UnexpectedFrame);
+        }
+        match frame.message {
+            Some(adapter_frame::Message::ProjectAnalysisResult(result))
+                if self.next_chunk_index == 0 =>
+            {
+                self.single = Some(result);
+                Ok(())
+            }
+            Some(adapter_frame::Message::ProjectAnalysisResultChunk(chunk)) => {
+                self.accept_chunk(session, chunk)
+            }
+            Some(adapter_frame::Message::ProjectAnalysisResultEnd(end)) => {
+                self.accept_end(session, end)
+            }
+            _ => Err(AdapterHostError::UnexpectedFrame),
+        }
+    }
+
+    fn accept_chunk(
+        &mut self,
+        session: &NegotiatedSession,
+        chunk: ProjectAnalysisResultChunk,
+    ) -> Result<(), AdapterHostError> {
+        session.validate_project_analysis_result_chunk(&chunk)?;
+        if chunk.chunk_index != self.next_chunk_index
+            || self
+                .session_id
+                .as_ref()
+                .is_some_and(|expected| expected != &chunk.session_id)
+            || self
+                .request_id
+                .as_ref()
+                .is_some_and(|expected| expected != &chunk.request_id)
+        {
+            return Err(AdapterHostError::RequestMismatch);
+        }
+        if self.session_id.is_none() {
+            self.session_id = Some(chunk.session_id.clone());
+            self.request_id = Some(chunk.request_id.clone());
+        }
+        let complete_bytes = self
+            .normalized_ir
+            .len()
+            .checked_add(chunk.normalized_ir_chunk.len())
+            .ok_or(AdapterHostError::Limit)?;
+        if u64::try_from(complete_bytes).map_err(|_| AdapterHostError::Limit)?
+            > session.limits().output_bytes
+        {
+            return Err(AdapterHostError::ProjectOutputLimit);
+        }
+        self.normalized_ir
+            .try_reserve(chunk.normalized_ir_chunk.len())
+            .map_err(|_| AdapterHostError::Limit)?;
+        self.normalized_ir
+            .extend_from_slice(&chunk.normalized_ir_chunk);
+        self.next_chunk_index = self
+            .next_chunk_index
+            .checked_add(1)
+            .filter(|index| *index <= MAX_ADAPTER_PROJECT_RESULT_CHUNKS)
+            .ok_or(AdapterHostError::ProjectOutputLimit)?;
+        Ok(())
+    }
+
+    fn accept_end(
+        &mut self,
+        session: &NegotiatedSession,
+        end: ProjectAnalysisResultEnd,
+    ) -> Result<(), AdapterHostError> {
+        session.validate_project_analysis_result_end(&end)?;
+        let observed_digest = content_hash(&self.normalized_ir);
+        if self.session_id.as_ref() != Some(&end.session_id)
+            || self.request_id.as_ref() != Some(&end.request_id)
+            || self.next_chunk_index != end.chunk_count
+            || u64::try_from(self.normalized_ir.len()).map_err(|_| AdapterHostError::Limit)?
+                != end.total_output_bytes
+        {
+            return Err(AdapterHostError::RequestMismatch);
+        }
+        if end
+            .output_digest
+            .as_ref()
+            .is_none_or(|digest| digest.value.as_slice() != observed_digest.as_bytes())
+        {
+            return Err(AdapterHostError::DigestMismatch);
+        }
+        self.completed = Some(ProjectAnalysisResult {
+            session_id: end.session_id,
+            request_id: end.request_id,
+            normalized_ir: std::mem::take(&mut self.normalized_ir),
+            output_digest: end.output_digest,
+        });
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<ProjectProcessOutput, AdapterHostError> {
+        if let Some(result) = self.single.take() {
+            return Ok(ProjectProcessOutput::Single(result));
+        }
+        if let Some(result) = self.completed.take() {
+            return Ok(ProjectProcessOutput::Chunked(result));
+        }
+        Err(AdapterHostError::UnexpectedFrame)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
+    use rootlight_ids::content_hash;
     use rootlight_protocol::{
-        adapter_contract::encode_length_delimited_adapter_frame,
-        generated::adapter::v1::{AdapterFrame, ProjectAnalysisResult, adapter_frame},
+        adapter_contract::{ADAPTER_NONCE_BYTES, encode_length_delimited_adapter_frame},
+        generated::{
+            adapter::v1::{
+                AdapterFrame, ProjectAnalysisResult, ProjectAnalysisResultChunk,
+                ProjectAnalysisResultEnd, adapter_frame,
+            },
+            common::v1::ContentHash,
+        },
     };
+
+    use crate::{PROJECT_ADAPTER_HARD_LIMITS, negotiate_project_adapter_session};
 
     use super::*;
 
@@ -351,5 +575,169 @@ mod tests {
             classify_process_failure(b"error: unrecognized adapter failure\n"),
             AdapterHostError::ProcessFailed
         ));
+    }
+
+    #[test]
+    fn chunked_decoder_requires_ordered_authenticated_commit() {
+        let session = project_session();
+        let request_id = vec![9; ADAPTER_NONCE_BYTES];
+        let first = b"first".to_vec();
+        let second = b"second".to_vec();
+        let complete = [first.as_slice(), second.as_slice()].concat();
+        let frames = vec![
+            chunk_frame(&session, &request_id, 0, first),
+            chunk_frame(&session, &request_id, 1, second),
+            end_frame(&session, &request_id, 2, &complete),
+        ];
+        let encoded = encode_frames(&frames);
+
+        let output = decode_project_output(&mut Cursor::new(encoded), &session)
+            .expect("a complete chunk stream commits");
+        let ProjectProcessOutput::Chunked(result) = output else {
+            panic!("chunked output expected");
+        };
+        assert_eq!(result.normalized_ir, complete);
+    }
+
+    #[test]
+    fn chunked_decoder_rejects_missing_duplicate_and_trailing_frames() {
+        let session = project_session();
+        let request_id = vec![10; ADAPTER_NONCE_BYTES];
+        let first = b"first".to_vec();
+        let second = b"second".to_vec();
+        let complete = [first.as_slice(), second.as_slice()].concat();
+        let first_frame = chunk_frame(&session, &request_id, 0, first);
+        let second_frame = chunk_frame(&session, &request_id, 1, second);
+        let end = end_frame(&session, &request_id, 2, &complete);
+
+        let missing_end = encode_frames(&[first_frame.clone(), second_frame.clone()]);
+        assert!(matches!(
+            decode_project_output(&mut Cursor::new(missing_end), &session),
+            Err(AdapterHostError::UnexpectedFrame)
+        ));
+
+        let duplicate = encode_frames(&[first_frame.clone(), first_frame.clone(), end.clone()]);
+        assert!(matches!(
+            decode_project_output(&mut Cursor::new(duplicate), &session),
+            Err(AdapterHostError::RequestMismatch)
+        ));
+
+        let trailing = encode_frames(&[first_frame, second_frame, end.clone(), end]);
+        assert!(matches!(
+            decode_project_output(&mut Cursor::new(trailing), &session),
+            Err(AdapterHostError::UnexpectedFrame)
+        ));
+    }
+
+    #[test]
+    fn chunked_decoder_rejects_chunk_and_result_digest_substitution() {
+        let session = project_session();
+        let request_id = vec![11; ADAPTER_NONCE_BYTES];
+        let first = b"first".to_vec();
+        let second = b"second".to_vec();
+        let complete = [first.as_slice(), second.as_slice()].concat();
+
+        let mut corrupted_chunk = chunk_frame(&session, &request_id, 0, first.clone());
+        let Some(adapter_frame::Message::ProjectAnalysisResultChunk(chunk)) =
+            corrupted_chunk.message.as_mut()
+        else {
+            panic!("chunk fixture expected");
+        };
+        chunk.chunk_digest = Some(ContentHash {
+            value: vec![0; ADAPTER_DIGEST_BYTES],
+        });
+        let invalid_chunk = encode_frames(&[
+            corrupted_chunk,
+            chunk_frame(&session, &request_id, 1, second.clone()),
+            end_frame(&session, &request_id, 2, &complete),
+        ]);
+        assert!(matches!(
+            decode_project_output(&mut Cursor::new(invalid_chunk), &session),
+            Err(AdapterHostError::Protocol(_))
+        ));
+
+        let mut corrupted_end = end_frame(&session, &request_id, 2, &complete);
+        let Some(adapter_frame::Message::ProjectAnalysisResultEnd(end)) =
+            corrupted_end.message.as_mut()
+        else {
+            panic!("end fixture expected");
+        };
+        end.output_digest = Some(ContentHash {
+            value: vec![0; ADAPTER_DIGEST_BYTES],
+        });
+        let invalid_result = encode_frames(&[
+            chunk_frame(&session, &request_id, 0, first),
+            chunk_frame(&session, &request_id, 1, second),
+            corrupted_end,
+        ]);
+        assert!(matches!(
+            decode_project_output(&mut Cursor::new(invalid_result), &session),
+            Err(AdapterHostError::DigestMismatch)
+        ));
+    }
+
+    fn project_session() -> NegotiatedSession {
+        let executable = std::env::current_exe().expect("test executable path is available");
+        negotiate_project_adapter_session(
+            &executable,
+            [7; ADAPTER_NONCE_BYTES],
+            PROJECT_ADAPTER_HARD_LIMITS,
+        )
+        .expect("project session negotiates")
+    }
+
+    fn chunk_frame(
+        session: &NegotiatedSession,
+        request_id: &[u8],
+        chunk_index: u32,
+        normalized_ir_chunk: Vec<u8>,
+    ) -> AdapterFrame {
+        let chunk_digest = content_hash(&normalized_ir_chunk);
+        AdapterFrame {
+            message: Some(adapter_frame::Message::ProjectAnalysisResultChunk(
+                ProjectAnalysisResultChunk {
+                    session_id: session.session_id().to_vec(),
+                    request_id: request_id.to_vec(),
+                    chunk_index,
+                    normalized_ir_chunk,
+                    chunk_digest: Some(ContentHash {
+                        value: chunk_digest.as_bytes().to_vec(),
+                    }),
+                },
+            )),
+        }
+    }
+
+    fn end_frame(
+        session: &NegotiatedSession,
+        request_id: &[u8],
+        chunk_count: u32,
+        normalized_ir: &[u8],
+    ) -> AdapterFrame {
+        AdapterFrame {
+            message: Some(adapter_frame::Message::ProjectAnalysisResultEnd(
+                ProjectAnalysisResultEnd {
+                    session_id: session.session_id().to_vec(),
+                    request_id: request_id.to_vec(),
+                    chunk_count,
+                    total_output_bytes: u64::try_from(normalized_ir.len())
+                        .expect("fixture length is representable"),
+                    output_digest: Some(ContentHash {
+                        value: content_hash(normalized_ir).as_bytes().to_vec(),
+                    }),
+                },
+            )),
+        }
+    }
+
+    fn encode_frames(frames: &[AdapterFrame]) -> Vec<u8> {
+        frames
+            .iter()
+            .flat_map(|frame| {
+                encode_length_delimited_adapter_frame(frame)
+                    .expect("fixture frame encodes")
+                    .into_iter()
+            })
+            .collect()
     }
 }

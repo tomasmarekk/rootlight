@@ -161,6 +161,20 @@ mod tests {
             semantic_operation: Some(common::OperationId {
                 value: vec![13; 20],
             }),
+            build_strategy: daemon::RepositoryBuildStrategy::RepositoryBuildDependencyDirected
+                as i32,
+            fallback_reason: None,
+            invalidated_units: 6,
+            changed_inputs: 7,
+            changed_files: 8,
+            reused_files: 9,
+            rebuilt_files: 10,
+            reused_facts: 11,
+            rebuilt_facts: 12,
+            referenced_bytes: 13,
+            newly_written_bytes: 14,
+            reserved_memory_bytes: 15,
+            owned_memory_bytes: 16,
         };
 
         let decoded =

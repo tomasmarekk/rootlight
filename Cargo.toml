@@ -12,6 +12,7 @@ members = [
     "crates/rootlight-adapters",
     "crates/rootlight-agent",
     "crates/rootlight-bench",
+    "crates/rootlight-build",
     "crates/rootlight-cancel",
     "crates/rootlight-catalog",
     "crates/rootlight-client",

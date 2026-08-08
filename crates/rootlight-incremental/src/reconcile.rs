@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FileId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{IncrementalError, ResourceKind, model::validate_limit};
 
@@ -67,7 +67,7 @@ impl PlatformFileIdentity {
 }
 
 /// Whether the VFS attests that metadata is sufficient for no-op hash reuse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetadataReliability {
     /// Length, monotonic comparison semantics, and stable identity are trusted.
@@ -713,7 +713,7 @@ fn unique_identities(
 }
 
 /// Canonical authoritative file transition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileChangeKind {
     /// Path and actual bytes are unchanged.

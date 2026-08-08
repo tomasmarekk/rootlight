@@ -255,6 +255,46 @@ pub struct ProjectAnalysisResult {
     #[allow(missing_docs)]
     pub output_digest: ::core::option::Option<super::super::common::v1::ContentHash>,
 }
+/// One ordered frame of a project result whose complete normalized IR exceeds
+/// the transport frame ceiling but remains inside the negotiated output quota.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProjectAnalysisResultChunk {
+    #[prost(bytes = "vec", tag = "1")]
+    #[allow(missing_docs)]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    #[allow(missing_docs)]
+    pub request_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub chunk_index: u32,
+    #[prost(bytes = "vec", tag = "4")]
+    #[allow(missing_docs)]
+    pub normalized_ir_chunk: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub chunk_digest: ::core::option::Option<super::super::common::v1::ContentHash>,
+}
+/// Authenticated commit marker for one complete chunked project result. A host
+/// discards all staged chunks unless this frame matches their count and digest.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProjectAnalysisResultEnd {
+    #[prost(bytes = "vec", tag = "1")]
+    #[allow(missing_docs)]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    #[allow(missing_docs)]
+    pub request_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub chunk_count: u32,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub total_output_bytes: u64,
+    #[prost(message, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub output_digest: ::core::option::Option<super::super::common::v1::ContentHash>,
+}
 /// Cooperative cancellation for one in-flight adapter request.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CancelRequest {
@@ -268,7 +308,7 @@ pub struct CancelRequest {
 /// Length-prefixed message union used on the adapter pipe.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AdapterFrame {
-    #[prost(oneof = "adapter_frame::Message", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
+    #[prost(oneof = "adapter_frame::Message", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
     #[allow(missing_docs)]
     pub message: ::core::option::Option<adapter_frame::Message>,
 }
@@ -301,6 +341,12 @@ pub mod adapter_frame {
         #[prost(message, tag = "8")]
         #[allow(missing_docs)]
         ProjectAnalysisResult(super::ProjectAnalysisResult),
+        #[prost(message, tag = "9")]
+        #[allow(missing_docs)]
+        ProjectAnalysisResultChunk(super::ProjectAnalysisResultChunk),
+        #[prost(message, tag = "10")]
+        #[allow(missing_docs)]
+        ProjectAnalysisResultEnd(super::ProjectAnalysisResultEnd),
     }
 }
 /// Trust origin applied before any adapter process is started.

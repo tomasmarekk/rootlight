@@ -12,6 +12,7 @@ cap-std.workspace = true
 data-encoding.workspace = true
 ed25519-compact.workspace = true
 fs2.workspace = true
+rootlight-build = { path = "../rootlight-build" }
 rootlight-error = { path = "../rootlight-error" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ipc = { path = "../rootlight-ipc" }

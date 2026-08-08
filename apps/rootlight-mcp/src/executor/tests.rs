@@ -45,11 +45,12 @@ use rootlight_client::{
     PlanChangeContextPack as ClientPlanContextPack, PlanChangeDecision as ClientPlanDecision,
     PlanChangeImpactSummary as ClientPlanImpactSummary, PlanChangeStep as ClientPlanStep,
     QueryContext, QueryUsage, RecoveryClass, RelationshipGroup as ClientRelationshipGroup,
-    RelationshipTarget as ClientRelationshipTarget, RepositoryCatalogEntry,
-    RepositoryCatalogFreshness, RepositoryCatalogPage, RepositoryCatalogPageRequest,
-    RepositoryCatalogSnapshotId, RepositoryCatalogSortKey, RepositoryCatalogState,
-    RepositoryCoverageEntry, RepositoryList, RepositoryListEntry, RepositoryStatus,
-    RepositoryStatusOperation, ResultCompleteness as ClientResultCompleteness,
+    RelationshipTarget as ClientRelationshipTarget, RepositoryBuildStrategy as ClientBuildStrategy,
+    RepositoryCatalogEntry, RepositoryCatalogFreshness, RepositoryCatalogPage,
+    RepositoryCatalogPageRequest, RepositoryCatalogSnapshotId, RepositoryCatalogSortKey,
+    RepositoryCatalogState, RepositoryCoverageEntry, RepositoryList, RepositoryListEntry,
+    RepositoryOperationEvidence, RepositoryStatus, RepositoryStatusOperation,
+    ResultCompleteness as ClientResultCompleteness,
     ResultCompletenessState as ClientResultCompletenessState, SourceChunk as ClientSourceChunk,
     SymbolExplanation as ClientExplanation, SymbolRelationships as ClientRelationships,
     TestsSelect as ClientTestsSelect, TestsSelectCoverageStrategy as ClientCoverageStrategy,
@@ -3225,6 +3226,7 @@ async fn maps_operation_status_action_time_progress_and_resources() {
         bytes_examined: 300,
         index_stage: "analysis".to_owned(),
         retry_after_ms: Some(0),
+        evidence: None,
     };
     let harness = Harness::new(FakeOutcome::OperationStatus(Ok(response)));
     let output: OperationStatusOutput = decode(
@@ -3245,6 +3247,7 @@ async fn maps_operation_status_action_time_progress_and_resources() {
     let OperationToolResponse::Success(output) = output else {
         panic!("expected operation status success");
     };
+    assert_eq!(output.data.operation.kind, "repository_index");
     assert_eq!(output.data.operation.state, OperationState::Running);
     assert_eq!(output.data.operation.started_at, "1970-01-01T00:00:00.001Z");
     assert_eq!(output.data.operation.progress.completed_units, 4);
@@ -3259,6 +3262,98 @@ async fn maps_operation_status_action_time_progress_and_resources() {
             after_revision: Some(7),
         })
     );
+}
+
+#[tokio::test]
+async fn maps_durable_incremental_and_generation_resource_evidence() {
+    let response = RepositoryOperationStatus {
+        operation: operation_status(ClientOperationState::Succeeded),
+        published_generation: Some(generation()),
+        semantic_operation: None,
+        started_unix_ms: 1,
+        peak_rss_bytes: 100,
+        written_bytes: 2_048,
+        files_examined: 5,
+        bytes_examined: 512,
+        index_stage: "complete".to_owned(),
+        retry_after_ms: None,
+        evidence: Some(RepositoryOperationEvidence {
+            build_strategy: ClientBuildStrategy::DependencyDirected,
+            fallback_reason: None,
+            invalidated_units: 2,
+            changed_inputs: 1,
+            changed_files: 1,
+            reused_files: 4,
+            rebuilt_files: 1,
+            reused_facts: 0,
+            rebuilt_facts: 17,
+            referenced_bytes: 1_024,
+            newly_written_bytes: 2_048,
+            reserved_memory_bytes: 4_096,
+            owned_memory_bytes: 3_072,
+        }),
+    };
+    let harness = Harness::new(FakeOutcome::OperationStatus(Ok(response)));
+    let output: OperationStatusOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::OperationStatus,
+            json!({"operation_id": operation()}),
+        )
+        .await
+        .expect("operation evidence maps"),
+    );
+
+    let OperationToolResponse::Success(output) = output else {
+        panic!("expected operation status success");
+    };
+    let incremental = output
+        .data
+        .incremental
+        .expect("incremental evidence is projected");
+    assert_eq!(incremental.reused_files, 4);
+    assert_eq!(incremental.rebuilt_facts, 17);
+    assert_eq!(output.data.operation.resources.referenced_bytes, 1_024);
+    assert_eq!(output.data.operation.resources.newly_written_bytes, 2_048);
+    assert_eq!(output.data.operation.resources.reserved_memory_bytes, 4_096);
+    assert_eq!(output.data.operation.resources.owned_memory_bytes, 3_072);
+}
+
+#[tokio::test]
+async fn maps_recovery_operation_status_without_index_projection() {
+    let mut recovery = operation_status(ClientOperationState::Running);
+    recovery.kind = OperationKind::Recovery;
+    let response = RepositoryOperationStatus {
+        operation: recovery,
+        published_generation: None,
+        semantic_operation: None,
+        started_unix_ms: 1,
+        peak_rss_bytes: 100,
+        written_bytes: 200,
+        files_examined: 3,
+        bytes_examined: 300,
+        index_stage: "persistence".to_owned(),
+        retry_after_ms: None,
+        evidence: None,
+    };
+    let harness = Harness::new(FakeOutcome::OperationStatus(Ok(response)));
+    let output: OperationStatusOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::OperationStatus,
+            json!({"operation_id": operation()}),
+        )
+        .await
+        .expect("recovery status maps"),
+    );
+
+    let OperationToolResponse::Success(output) = output else {
+        panic!("expected recovery operation status success");
+    };
+    assert_eq!(output.data.operation.kind, "recovery");
+    assert_eq!(output.data.published_generation.0, None);
+    assert_eq!(output.data.semantic_operation_id, None);
+    assert_eq!(output.data.index_stage, None);
 }
 
 #[tokio::test]
@@ -3293,6 +3388,7 @@ async fn maps_interrupted_operation_status_to_typed_terminal_errors() {
             bytes_examined: 300,
             index_stage: "analysis".to_owned(),
             retry_after_ms: None,
+            evidence: None,
         };
         let harness = Harness::new(FakeOutcome::OperationStatus(Ok(response)));
         let output: OperationStatusOutput = decode(
@@ -6333,6 +6429,15 @@ async fn repo_status_projects_bounded_operations_and_freshness_controls() {
         owned_by_client: true,
         started_unix_ms: 1,
     });
+    status.operations.push(RepositoryStatusOperation {
+        operation: second_operation(),
+        kind: client::OperationKind::Recovery,
+        state: client::OperationState::Queued,
+        completed_units: 0,
+        total_units: 2,
+        owned_by_client: false,
+        started_unix_ms: 2,
+    });
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(status)));
     let output: RepoStatusOutput = decode(
         execute(
@@ -6351,12 +6456,17 @@ async fn repo_status_projects_bounded_operations_and_freshness_controls() {
         panic!("expected repository status success");
     };
 
-    assert_eq!(output.data.operations.len(), 1);
+    assert_eq!(output.data.operations.len(), 2);
     assert_eq!(output.data.operations[0].operation_id, operation());
+    assert_eq!(output.data.operations[0].kind, "repository_index");
     assert_eq!(output.data.operations[0].state, OperationState::Running);
     assert_eq!(output.data.operations[0].progress_permille, 500);
     assert!(output.data.operations[0].owned_by_session);
-    assert_eq!(output.usage.rows, 3);
+    assert_eq!(output.data.operations[1].operation_id, second_operation());
+    assert_eq!(output.data.operations[1].kind, "recovery");
+    assert_eq!(output.data.operations[1].state, OperationState::Queued);
+    assert!(!output.data.operations[1].owned_by_session);
+    assert_eq!(output.usage.rows, 4);
     assert_eq!(
         output.data.recommended_actions[0].as_str(),
         "inspect operation"

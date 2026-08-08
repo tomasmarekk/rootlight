@@ -163,7 +163,7 @@ jobs:
           test "$(npm --version)" = "11.6.2"
           npm ci --ignore-scripts
           npm run release:dependencies
-          npm audit --omit=dev --audit-level=high
+          npm audit --omit=dev --audit-level=moderate
           npm run check
           mkdir -p "$GITHUB_WORKSPACE/artifacts/web-release/dist"
           cp -R dist/. "$GITHUB_WORKSPACE/artifacts/web-release/dist/"
@@ -281,6 +281,8 @@ jobs:
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"release-audit","version":"1.0.0"}}}' |
             "target/repro-first/$TARGET_TRIPLE/release/rootlight-mcp${suffix}" \
               > target/release-version.jsonl
+          "target/repro-first/$TARGET_TRIPLE/release/rootlight${suffix}" \
+            --version --json > target/release-cli-version.json
           VERSION="$version" python - <<'PY'
           import json
           import os
@@ -295,6 +297,11 @@ jobs:
           observed = response.get("result", {}).get("serverInfo", {}).get("version")
           if observed != os.environ["VERSION"]:
               raise SystemExit("release MCP version differs from the candidate version")
+
+          cli = json.loads(Path("target/release-cli-version.json").read_text(encoding="utf-8"))
+          observed = cli.get("result", {}).get("data", {}).get("version")
+          if observed != os.environ["VERSION"]:
+              raise SystemExit("release CLI version differs from the candidate version")
           PY
           cargo run --locked --quiet --package xtask -- package-build \
             --target "$TARGET_TRIPLE" \

@@ -1,4 +1,5 @@
 use rootlight_cancel::Cancellation;
+use rootlight_ir::{ContainerRef, EntityFlag, EntityKind, EntityRecord, NormalizedIrDocument};
 use rootlight_search::{BuildBudget, LexicalDocument, SearchError, validate_build_admission};
 use rootlight_storage::GenerationSnapshot;
 use serde::Serialize;
@@ -90,12 +91,38 @@ pub fn project_lexical_documents(
             type_names: Vec::new(),
             documentation: None,
             generated: file.generated,
+            test: matches!(entity.kind, EntityKind::Test)
+                || entity.flags.contains(&EntityFlag::Test),
+            declaration_only: entity_is_declaration_only(document, entity),
         });
     }
     cancellation
         .check()
         .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
     Ok(projected)
+}
+
+fn entity_is_declaration_only(document: &NormalizedIrDocument, entity: &EntityRecord) -> bool {
+    if matches!(
+        entity.kind,
+        EntityKind::Interface | EntityKind::Trait | EntityKind::Protocol | EntityKind::TypeAlias
+    ) {
+        return true;
+    }
+    let Some(ContainerRef::Entity(container)) = entity.container else {
+        return false;
+    };
+    document
+        .entities
+        .binary_search_by_key(&container, |candidate| candidate.id)
+        .ok()
+        .and_then(|index| document.entities.get(index))
+        .is_some_and(|container| {
+            matches!(
+                container.kind,
+                EntityKind::Interface | EntityKind::Trait | EntityKind::Protocol
+            )
+        })
 }
 
 fn serialized_label(value: &impl Serialize) -> Result<String, QueryError> {

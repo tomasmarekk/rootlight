@@ -384,6 +384,8 @@ pub enum SupportOperationKind {
     ControlProbe,
     /// Repository indexing and generation publication.
     RepositoryIndex,
+    /// Durable generation recovery after process restart.
+    Recovery,
 }
 
 /// Closed terminal operation state retained in production support evidence.

@@ -16,6 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rootlight_build::BuildIdentity;
 use rootlight_client::{
     Client, ClientError, ConnectPolicy, DaemonLifecycle as ClientDaemonLifecycle,
     DetachedArtifactSignature, DetachedUpdateSignature, DiagnosticsQuick, FilesystemUpdateError,
@@ -168,13 +169,12 @@ fn discovery_output(arguments: &[std::ffi::OsString]) -> Option<DiscoveryOutput>
     let human_help = arguments.is_empty()
         || matches!(arguments, [value] if value == "--help" || value == "help");
     if human_help {
-        return Some(DiscoveryOutput::Human(CLI_HELP));
+        return Some(DiscoveryOutput::Human(CLI_HELP.to_owned()));
     }
     if matches!(arguments, [value] if value == "--version") {
-        return Some(DiscoveryOutput::Human(concat!(
-            "rootlight ",
-            env!("CARGO_PKG_VERSION"),
-            "\n"
+        return Some(DiscoveryOutput::Human(format!(
+            "rootlight {}\n",
+            BuildIdentity::current(env!("CARGO_PKG_VERSION")).product_version
         )));
     }
     if matches!(
@@ -201,7 +201,7 @@ fn discovery_output(arguments: &[std::ffi::OsString]) -> Option<DiscoveryOutput>
 }
 
 enum DiscoveryOutput {
-    Human(&'static str),
+    Human(String),
     Json(Box<CommandResult>),
 }
 
@@ -2132,6 +2132,7 @@ fn operation_from_domain(operation: OperationRecord) -> OperationStatus {
         kind: match operation.kind {
             rootlight_operations::OperationKind::ControlProbe => OperationKind::ControlProbe,
             rootlight_operations::OperationKind::RepositoryIndex => OperationKind::RepositoryIndex,
+            rootlight_operations::OperationKind::Recovery => OperationKind::Recovery,
         },
         stage: match operation.stage {
             JournalStage::Accepted => OperationStage::Accepted,
@@ -2266,13 +2267,18 @@ impl CliHelp {
 struct CliVersion {
     name: &'static str,
     version: &'static str,
+    component_version: &'static str,
+    source_revision: Option<&'static str>,
 }
 
 impl CliVersion {
     const fn current() -> Self {
+        let identity = BuildIdentity::current(env!("CARGO_PKG_VERSION"));
         Self {
             name: "rootlight",
-            version: env!("CARGO_PKG_VERSION"),
+            version: identity.product_version,
+            component_version: identity.component_version,
+            source_revision: identity.source_revision,
         }
     }
 }
@@ -2833,7 +2839,7 @@ mod tests {
     fn discovery_commands_do_not_require_daemon_state() {
         assert!(matches!(
             discovery_output(&[]),
-            Some(DiscoveryOutput::Human(CLI_HELP))
+            Some(DiscoveryOutput::Human(output)) if output == CLI_HELP
         ));
         assert!(matches!(
             discovery_output(&arguments(&["--version"])),

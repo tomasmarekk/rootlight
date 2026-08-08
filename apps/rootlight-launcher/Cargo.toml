@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 fs2.workspace = true
+rootlight-build = { path = "../../crates/rootlight-build" }
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -593,6 +593,7 @@ struct DeclarationDraft {
     visibility: EntityVisibility,
     parent_declaration: Option<u64>,
     scope_identity: Option<[u8; 32]>,
+    is_test: bool,
     source: SourceRef,
 }
 
@@ -637,6 +638,7 @@ struct OccurrenceDraft {
     qualifier: Option<String>,
     syntax_kind: String,
     role: OccurrenceRole,
+    enclosing_declaration: Option<u64>,
     enclosing: Option<SymbolId>,
     source: SourceRef,
 }
@@ -697,6 +699,8 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     occurrences: Vec<OccurrenceDraft>,
     module_by_file: BTreeMap<FileId, SymbolId>,
     path_by_file: BTreeMap<FileId, String>,
+    package_by_file: BTreeMap<FileId, String>,
+    symbol_by_declaration: BTreeMap<(FileId, u64), SymbolId>,
 }
 
 impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'source> {
@@ -719,6 +723,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             occurrences: Vec::new(),
             module_by_file: BTreeMap::new(),
             path_by_file: BTreeMap::new(),
+            package_by_file: BTreeMap::new(),
+            symbol_by_declaration: BTreeMap::new(),
         }
     }
 
@@ -900,6 +906,12 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .iter()
                 .filter(|fact| fact.kind() == SyntaxFactKind::Declaration)
                 .collect::<Vec<_>>();
+            let rust_test_declarations = if self.analyzer.language == SemanticProjectLanguage::Rust
+            {
+                rust_test_declarations(&facts)
+            } else {
+                BTreeSet::new()
+            };
             declaration_facts.sort_by_key(|fact| {
                 (
                     fact.depth(),
@@ -1130,6 +1142,15 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     visibility,
                     parent_declaration,
                     scope_identity,
+                    is_test: rust_test_declarations.contains(&declaration.local_id())
+                        || declaration_is_test(
+                            self.analyzer.language,
+                            self.path_by_file
+                                .get(&definition.span().file())
+                                .map(String::as_str)
+                                .unwrap_or_default(),
+                            name,
+                        ),
                     source: source_for_span(input, declaration.span()),
                 });
             }
@@ -1159,6 +1180,20 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         let Some(parsed_name) = occurrence_name(observed_name, call) else {
                             continue;
                         };
+                        if self.analyzer.language == SemanticProjectLanguage::Go
+                            && fact.syntax_kind().as_str() == "go.package_identifier.definition"
+                        {
+                            match self.package_by_file.entry(fact.span().file()) {
+                                std::collections::btree_map::Entry::Vacant(entry) => {
+                                    entry.insert(parsed_name.name.to_owned());
+                                }
+                                std::collections::btree_map::Entry::Occupied(entry)
+                                    if entry.get() == parsed_name.name => {}
+                                std::collections::btree_map::Entry::Occupied(_) => {
+                                    return Err(provider_failure("go-package-scope"));
+                                }
+                            }
+                        }
                         let in_import = self.imports.iter().any(|import| {
                             import.file == fact.span().file()
                                 && contains_span(import.span, fact.span())
@@ -1172,6 +1207,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         } else {
                             OccurrenceRole::Reference
                         };
+                        let enclosing_declaration = fact
+                            .parent()
+                            .and_then(|parent| nearest_declaration.get(&parent).copied().flatten());
                         let enclosing = enclosing_scope(fact, &facts_by_id, &scope_symbols)
                             .or_else(|| self.module_by_file.get(&fact.span().file()).copied());
                         self.occurrences.push(OccurrenceDraft {
@@ -1180,6 +1218,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                             qualifier: parsed_name.qualifier.map(str::to_owned),
                             syntax_kind: fact.syntax_kind().as_str().to_owned(),
                             role,
+                            enclosing_declaration,
                             enclosing,
                             source: source_for_span(input, fact.span()),
                         });
@@ -1197,7 +1236,6 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             .iter()
             .map(|entity| entity.symbol)
             .collect::<BTreeSet<_>>();
-        let mut symbols_by_declaration = BTreeMap::<(FileId, u64), SymbolId>::new();
         let mut qualified_by_declaration = BTreeMap::<(FileId, u64), String>::new();
         let structural_containers = self
             .entities
@@ -1232,7 +1270,11 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             let draft = self.declarations[index].clone();
             let container = draft
                 .parent_declaration
-                .and_then(|parent| symbols_by_declaration.get(&(draft.file, parent)).copied())
+                .and_then(|parent| {
+                    self.symbol_by_declaration
+                        .get(&(draft.file, parent))
+                        .copied()
+                })
                 .map(ContainerRef::Entity)
                 .or_else(|| {
                     uses_explicit_file_module(self.analyzer.language)
@@ -1264,7 +1306,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     || format!("{}::{}", state.path, draft.name),
                     |parent| format!("{parent}::{}", draft.name),
                 );
-            symbols_by_declaration.insert((draft.file, draft.local_id), symbol);
+            self.symbol_by_declaration
+                .insert((draft.file, draft.local_id), symbol);
             qualified_by_declaration.insert((draft.file, draft.local_id), qualified_name.clone());
             // Repeated declarations with the same stable signature share one
             // entity; their distinct definition occurrences retain each site.
@@ -1272,6 +1315,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 continue;
             }
             let provenance = state.provenance;
+            let mut flags = generated_flag(self.input_for_file(draft.file)?.is_generated());
+            if draft.is_test {
+                flags.push(EntityFlag::Test);
+            }
             self.records.push(IrRecord::Entity(EntityRecord {
                 id: symbol,
                 repository: draft.source.repository(),
@@ -1284,7 +1331,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 qualified_name,
                 container: Some(container),
                 visibility: draft.visibility,
-                flags: generated_flag(self.input_for_file(draft.file)?.is_generated()),
+                flags,
                 provenance,
                 evidence: direct_evidence(draft.source.clone()),
             }));
@@ -1389,6 +1436,14 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             };
             let target = occurrence_target(&draft.name, &resolution)?;
             let provenance = self.provenance_for_file(draft.file)?;
+            let enclosing = draft
+                .enclosing_declaration
+                .and_then(|declaration| {
+                    self.symbol_by_declaration
+                        .get(&(draft.file, declaration))
+                        .copied()
+                })
+                .or(draft.enclosing);
             let mut record = OccurrenceRecord {
                 id: FactId::from_bytes([0; 20]),
                 repository: draft.source.repository(),
@@ -1396,7 +1451,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 file: draft.file,
                 source: draft.source.clone(),
                 role: draft.role,
-                enclosing: draft.enclosing,
+                enclosing,
                 target,
                 syntactic_text_hash: content_hash(draft.name.as_bytes()),
                 syntax_kind: draft.syntax_kind,
@@ -2053,6 +2108,28 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             }
         }
         if symbols.is_empty()
+            && self.analyzer.language == SemanticProjectLanguage::Go
+            && let (Some(package), Some(path)) = (
+                self.package_by_file.get(&occurrence.file),
+                self.path_by_file.get(&occurrence.file),
+            )
+            && let Some(candidates) = definitions.get(&occurrence.name)
+        {
+            let directory = project_directory(path);
+            symbols.extend(
+                candidates
+                    .iter()
+                    .filter(|entity| {
+                        self.package_by_file.get(&entity.file) == Some(package)
+                            && self
+                                .path_by_file
+                                .get(&entity.file)
+                                .is_some_and(|candidate| project_directory(candidate) == directory)
+                    })
+                    .map(|entity| entity.symbol),
+            );
+        }
+        if symbols.is_empty()
             && permit_global_fallback
             && let Some(candidates) = definitions.get(&occurrence.name)
         {
@@ -2386,6 +2463,60 @@ fn source_text(bytes: &[u8], span: SourceSpan) -> Option<&str> {
     let start = usize::try_from(span.start_byte()).ok()?;
     let end = usize::try_from(span.end_byte()).ok()?;
     std::str::from_utf8(bytes.get(start..end)?).ok()
+}
+
+fn rust_test_declarations(facts: &[SyntaxFact]) -> BTreeSet<u64> {
+    let mut source_order = facts.iter().collect::<Vec<_>>();
+    source_order.sort_unstable_by_key(|fact| {
+        (
+            fact.span().start_byte(),
+            fact.span().end_byte(),
+            fact.depth(),
+            fact.local_id(),
+        )
+    });
+    let mut pending_parents = BTreeSet::new();
+    let mut tests = BTreeSet::new();
+    for fact in source_order {
+        if fact.syntax_kind().as_str() == "rust.test_attribute.test_attribute" {
+            pending_parents.insert(fact.parent());
+            continue;
+        }
+        if fact.kind() == SyntaxFactKind::Declaration
+            && pending_parents.remove(&fact.parent())
+            && fact.syntax_kind().as_str() == "rust.function.declaration"
+        {
+            tests.insert(fact.local_id());
+        }
+    }
+    tests
+}
+
+fn declaration_is_test(language: SemanticProjectLanguage, path: &str, name: &str) -> bool {
+    let path = path.replace('\\', "/").to_ascii_lowercase();
+    let file_name = path.rsplit('/').next().unwrap_or(path.as_str());
+    let test_path = path
+        .split('/')
+        .any(|component| matches!(component, "test" | "tests" | "__tests__"))
+        || file_name.starts_with("test_")
+        || file_name.ends_with("_test.py")
+        || file_name.ends_with("_test.go")
+        || file_name.contains(".test.")
+        || file_name.contains(".spec.");
+    test_path
+        || match language {
+            SemanticProjectLanguage::Python => {
+                name.starts_with("test_") || name.starts_with("Test")
+            }
+            SemanticProjectLanguage::Rust
+            | SemanticProjectLanguage::TypeScript
+            | SemanticProjectLanguage::JavaScript
+            | SemanticProjectLanguage::Go => false,
+        }
+}
+
+fn project_directory(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(directory, _)| directory)
 }
 
 fn enclosing_scope(

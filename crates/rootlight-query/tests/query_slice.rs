@@ -307,6 +307,8 @@ fn fixture_search(snapshot: &GenerationSnapshot) -> FakeSearch {
             language: entity.language.clone(),
             tier: serialized_label(&entity.tier),
             generated: file.generated,
+            test: false,
+            declaration_only: false,
             relevance_score: 1.0,
         }],
     }

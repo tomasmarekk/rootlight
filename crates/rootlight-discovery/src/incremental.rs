@@ -74,6 +74,16 @@ pub struct IncrementalDiscoveryBaseline {
 }
 
 impl IncrementalDiscoveryBaseline {
+    /// Reconstitutes a previously validated durable baseline.
+    ///
+    /// Callers must rebuild both parts through their bounded constructors before
+    /// using this function. Keeping that validation outside the value prevents
+    /// deserialization from bypassing file-count and identity-collision checks.
+    #[must_use]
+    pub const fn from_validated_parts(metadata: MetadataBaseline, inputs: InputSnapshot) -> Self {
+        Self { metadata, inputs }
+    }
+
     /// Returns the source-free metadata and verified content-hash baseline.
     #[must_use]
     pub const fn metadata(&self) -> &MetadataBaseline {

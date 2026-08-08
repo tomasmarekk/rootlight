@@ -191,7 +191,7 @@ jobs:
         run: |
           npm ci --ignore-scripts
           npm run release:dependencies
-          npm audit --omit=dev --audit-level=high
+          npm audit --omit=dev --audit-level=moderate
       - name: Build and verify target-neutral web assets
         env:
           RELEASE_VERSION: 0.0.0
@@ -1288,7 +1288,7 @@ jobs:
           TOOLCHAIN="$(rustc -V)"
           cargo build --locked --release --package rootlight-bench \
             --bin workspace-scale-evidence
-          for repositories in 1 10 100; do
+          for repositories in 1 24 100; do
             target/release/workspace-scale-evidence \
               --repositories "$repositories" \
               --source-revision "$SOURCE_REVISION" \
@@ -1312,10 +1312,10 @@ jobs:
           from pathlib import Path
 
           observations = []
-          for repositories in (1, 10, 100):
+          for repositories in (1, 24, 100):
               path = Path(f"target/rootlight-workspace-scale-{repositories}.json")
               evidence = json.loads(path.read_bytes())
-              if evidence.get("schema") != "rootlight.workspace-scale-evidence/1":
+              if evidence.get("schema") != "rootlight.workspace-scale-evidence/2":
                   raise SystemExit("workspace scale schema differs")
               if evidence.get("source_revision") != os.environ["SOURCE_REVISION"]:
                   raise SystemExit("workspace scale revision differs")
@@ -1323,12 +1323,13 @@ jobs:
                   "repositories_requested",
                   "repositories_indexed",
                   "repositories_restored",
-                  "indexed_files",
               )):
                   raise SystemExit("workspace scale repository coverage differs")
-              if evidence.get("discovered_inputs", 0) < repositories or \
+              if evidence.get("indexed_files") != repositories * 6 or \
+                      evidence.get("discovered_inputs", 0) < repositories * 6 or \
                       evidence.get("entities", 0) < repositories or \
-                      evidence.get("durable_state_bytes", 0) <= 0:
+                      evidence.get("durable_state_bytes", 0) <= 0 or \
+                      evidence.get("retained_memory_bytes", 0) <= 0:
                   raise SystemExit("workspace scale durable work counts differ")
               if not all(evidence.get(field) is True for field in (
                   "durable_publication",
@@ -1336,8 +1337,18 @@ jobs:
                   "independent_update_published",
                   "unrelated_generations_unchanged",
                   "updated_generation_restored",
+                  "first_restore_query_parity",
+                  "second_restore_query_parity",
               )):
                   raise SystemExit("workspace scale durability behavior differs")
+              if not all(evidence.get(field, 0) > 0 for field in (
+                  "initial_newly_written_bytes",
+                  "independent_update_newly_written_bytes",
+                  "independent_update_referenced_bytes",
+                  "independent_update_reserved_memory_bytes",
+                  "independent_update_owned_memory_bytes",
+              )):
+                  raise SystemExit("workspace scale operation evidence is missing")
               if not all(evidence.get(field, 0) > 0 for field in (
                   "service_open_micros",
                   "index_wall_micros",
@@ -1356,7 +1367,8 @@ jobs:
                   raise SystemExit("workspace scale peak RSS measurement differs")
               bounds = evidence.get("bounds", {})
               if bounds.get("elapsed_within_bound") is not True or \
-                      bounds.get("peak_rss_within_bound") is not True:
+                      bounds.get("peak_rss_within_bound") is not True or \
+                      bounds.get("retained_memory_within_bound") is not True:
                   raise SystemExit("workspace scale resource bound failed")
               observations.append(evidence)
           state_bytes = [item["durable_state_bytes"] for item in observations]
@@ -1796,8 +1808,8 @@ jobs:
           fetch-depth: 0
       - name: Install pinned Rust
         run: rustup show active-toolchain
-      - name: Build release daemon and MCP bridge
-        run: cargo build --release --locked --package rootlight-daemon --package rootlight-mcp
+      - name: Build release semantic process boundaries
+        run: cargo build --release --locked --package rootlight-adapter-host --package rootlight-daemon --package rootlight-mcp
       - name: Measure controlled agent workflows and context quality
         env:
           ROOTLIGHT_ABLATION_REPORT: ${{ github.workspace }}/artifacts/trajectory/context-pack-ablation.json
@@ -1807,6 +1819,9 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
           mkdir -p artifacts/trajectory
+          cargo test --release --locked --package rootlight-mcp \
+            --test cold_index_process \
+            -- --ignored --exact installed_process_semantics_and_query_truth_are_release_ready
           cargo test --release --locked --package rootlight-mcp \
             --test trajectory_process \
             -- --ignored --exact preregistered_trajectories_run_through_daemon_and_mcp_processes
@@ -2133,6 +2148,21 @@ jobs:
             --package rootlight-semantic-host \
             --package rootlight-web
           bin_dir="target/$TARGET_TRIPLE/release"
+          suffix=""
+          if [[ "$TARGET_TRIPLE" == *windows* ]]; then
+            suffix=".exe"
+          fi
+          "$bin_dir/rootlight${suffix}" --version --json > target/ci-cli-version.json
+          CANDIDATE_VERSION="$CANDIDATE_VERSION" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          response = json.loads(Path("target/ci-cli-version.json").read_text(encoding="utf-8"))
+          observed = response.get("result", {}).get("data", {}).get("version")
+          if observed != os.environ["CANDIDATE_VERSION"]:
+              raise SystemExit("CI CLI version differs from the candidate version")
+          PY
           candidate_dir="artifacts/ci-package/candidate"
           baseline_dir="artifacts/ci-package/baseline"
           cargo run --locked --quiet --package xtask -- package-build \

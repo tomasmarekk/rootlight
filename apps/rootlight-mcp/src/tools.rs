@@ -3249,8 +3249,8 @@ mod tests {
                     "0d4c1369e6695856729d6e0c61fbf61723a0a04e585d354832825e06dd2c5372".to_owned(),
                 ),
                 (
-                    679_160,
-                    "be7fd277b11670f5d1f817e7624ef8e95a0b2dcb6f5d495109ee318dca3dcb74".to_owned(),
+                    683_110,
+                    "9e9d7ff6bc11778909707c4fcecad9bd58384ea5bd3c27bf787e1997720e2cd0".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -4200,7 +4200,11 @@ mod tests {
                     "resources": {
                         "peak_rss_bytes": 0,
                         "written_bytes": 0,
-                        "files_examined": 0
+                        "files_examined": 0,
+                        "referenced_bytes": 0,
+                        "newly_written_bytes": 0,
+                        "reserved_memory_bytes": 0,
+                        "owned_memory_bytes": 0
                     }
                 },
                 "published_generation": null,

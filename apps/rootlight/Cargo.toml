@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 getrandom.workspace = true
+rootlight-build = { path = "../../crates/rootlight-build" }
 rootlight-client = { path = "../../crates/rootlight-client" }
 rootlight-daemon-core = { path = "../../crates/rootlight-daemon-core" }
 rootlight-error = { path = "../../crates/rootlight-error" }

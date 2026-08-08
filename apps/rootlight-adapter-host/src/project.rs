@@ -64,7 +64,7 @@ pub const PROJECT_ADAPTER_HARD_LIMITS: ResourceLimits = ResourceLimits {
     cpu_time_ms: 45_000,
     memory_bytes: 1024 * 1024 * 1024,
     input_bytes: 16 * 1024 * 1024,
-    output_bytes: 16 * 1024 * 1024,
+    output_bytes: 128 * 1024 * 1024,
     files: 4_096,
     processes: 1,
     handles: 256,
@@ -129,7 +129,7 @@ fn project_adapter_identity_from_digest(digest: ContentHash) -> AdapterIdentity 
 
 /// Builds and validates the production advertisement for one exact executable.
 ///
-/// The advertisement fixes protocol 1.2, project normalized IR, first-party
+/// The advertisement fixes protocol 1.3, project normalized IR, first-party
 /// lexical evidence, producer-neutral identity claims, first-party trust,
 /// cancellation, and the built-in hard resource ceiling.
 ///
@@ -548,7 +548,7 @@ fn analyze_project_request(
     if normalized_ir.is_empty() {
         return Err(AdapterHostError::ProjectAnalysis);
     }
-    if normalized_ir.len() > limits.output_bytes || normalized_ir.len() > MAX_ADAPTER_FRAME_BYTES {
+    if normalized_ir.len() > limits.output_bytes {
         return Err(AdapterHostError::ProjectOutputLimit);
     }
     let output_digest = content_hash(&normalized_ir);

@@ -31,8 +31,8 @@ use rootlight_adapter_host::{
 use rootlight_daemon_core::{
     ControlRequest, ControlResponse, DaemonState, FirstSliceEffectiveBudget, FirstSliceIpcContext,
     FirstSliceIpcFuture, FirstSliceIpcHandler, FirstSliceIpcRequest, FirstSliceIpcResponse,
-    HealthStatus, IndexSupportInventory, JournalActorHandle, RepositoryIndexProvider,
-    ResourcePressure, ServiceError, operation_record_to_wire,
+    HealthStatus, IndexSupportInventory, JournalActorHandle, PROTOCOL_MINOR,
+    RepositoryIndexProvider, ResourcePressure, ServiceError, operation_record_to_wire,
 };
 use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
 use rootlight_ids::{
@@ -51,7 +51,8 @@ use rootlight_operations::RecoveryClass;
 use rootlight_operations::{
     Cancellation, CancellationAuthority, CancellationReason, ClientInstanceId,
     InternalCancellationAuthority, OperationError, OperationKind, OperationRecord, OperationStage,
-    OperationState, OperationSubmission, PlanHash, Progress, RepositoryOperationContext,
+    OperationState, OperationSubmission, PlanHash, Progress, RepositoryBuildStrategy,
+    RepositoryFallbackReason, RepositoryOperationContext, RepositoryOperationEvidence,
     RepositoryOperationMode, RepositoryOperationSubmission,
 };
 use rootlight_protocol::{
@@ -72,14 +73,15 @@ use rootlight_query::{
 use rootlight_runtime::{CoordinatedStartupSignal, STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT};
 use rootlight_service::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
-    AdvancedAstNode, FirstSliceBudget, FirstSliceDeferredRestore, FirstSliceDurableOperation,
-    FirstSliceError, FirstSliceGenerationContext, FirstSliceIndexAdmission, FirstSliceIndexMode,
-    FirstSliceIndexProgress, FirstSliceIndexProvider, FirstSliceIndexReceipt,
-    FirstSliceObservedFreshness, FirstSliceOperationContext, FirstSliceProjectAnalysis,
-    FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisProgress,
-    FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer, FirstSliceService,
-    FirstSliceSupportInventory, HistoryChangeKind, PlanChangeObjective,
-    SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
+    AdvancedAstNode, FallbackReason as ServiceFallbackReason, FirstSliceBudget,
+    FirstSliceDeferredRestore, FirstSliceDurableOperation, FirstSliceError,
+    FirstSliceGenerationContext, FirstSliceIndexAdmission, FirstSliceIndexMode,
+    FirstSliceIndexOperationEvidence, FirstSliceIndexOperationStrategy, FirstSliceIndexProgress,
+    FirstSliceIndexProvider, FirstSliceIndexReceipt, FirstSliceObservedFreshness,
+    FirstSliceOperationContext, FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError,
+    FirstSliceProjectAnalysisProgress, FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer,
+    FirstSliceRecoveryTarget, FirstSliceService, FirstSliceSupportInventory, HistoryChangeKind,
+    PlanChangeObjective, SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
         CatalogPageSize, CatalogRepositoryRecord, CatalogRepositoryState, CatalogSnapshotId,
@@ -110,6 +112,12 @@ const OPERATION_STATUS_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 const LIFECYCLE_FINALIZATION_GRACE: Duration = Duration::from_secs(2);
 const REFINEMENT_ADMISSION_WAIT: Duration = Duration::from_secs(2);
 const DETACHED_INDEX_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const WATCHER_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(250);
+const WATCHER_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const WATCHER_AUTHORITATIVE_INTERVAL: Duration = Duration::from_secs(30);
+const WATCHER_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const WATCHER_MAX_REPOSITORY_ENTRIES: usize = 250_000;
 const DEFAULT_RELATIONSHIP_RESULTS: u32 = 100;
 const DEFAULT_FLOW_DEPTH: u32 = 3;
 const DEFAULT_FLOW_PATHS: u32 = 10;
@@ -128,7 +136,7 @@ const PROJECT_ADAPTER_WALL_TIME_MS: u64 = 20_000;
 const PROJECT_ADAPTER_CPU_TIME_MS: u64 = 15_000;
 const PROJECT_ADAPTER_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 const PROJECT_ADAPTER_INPUT_BYTES: u64 = 16 * 1024 * 1024;
-const PROJECT_ADAPTER_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
+const PROJECT_ADAPTER_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
 // Source expands into normalized facts, so partitions need output and CPU
 // headroom even when the encoded request remains below the hard input limit.
 const PROJECT_ADAPTER_PARTITION_SOURCE_BYTES: u64 = 1024 * 1024;
@@ -271,12 +279,53 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
                 if batch.is_empty() {
                     return Err(FirstSliceProjectAnalysisError::Analysis);
                 }
-                let (partition_files, partition_bytes) = project_partition_progress(&batch)?;
-                let (document, isolated) =
-                    self.execute_partition(&request, &session, batch, cancellation)?;
+                self.execute_adaptive_partition(
+                    &request,
+                    &session,
+                    batch,
+                    cancellation,
+                    &mut |document, isolated, partition_files, partition_bytes| {
+                        match &mut analysis {
+                            Some(analysis) => analysis.append_partition(document, isolated)?,
+                            None => {
+                                analysis = Some(FirstSliceProjectAnalysis::new(document, isolated));
+                            }
+                        }
+                        completed_files = completed_files
+                            .checked_add(partition_files)
+                            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                        completed_bytes = completed_bytes
+                            .checked_add(partition_bytes)
+                            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+                        observe_progress(FirstSliceProjectAnalysisProgress {
+                            completed_files,
+                            total_files,
+                            completed_bytes,
+                            total_bytes,
+                        });
+                        Ok(())
+                    },
+                )?;
+                if partition.try_push(rejected)?.is_some() {
+                    return Err(FirstSliceProjectAnalysisError::Analysis);
+                }
+            }
+        }
+        let batch = partition.take();
+        if batch.is_empty() {
+            return Err(FirstSliceProjectAnalysisError::Analysis);
+        }
+        self.execute_adaptive_partition(
+            &request,
+            &session,
+            batch,
+            cancellation,
+            &mut |document, isolated, partition_files, partition_bytes| {
                 match &mut analysis {
                     Some(analysis) => analysis.append_partition(document, isolated)?,
-                    None => analysis = Some(FirstSliceProjectAnalysis::new(document, isolated)),
+                    None => {
+                        analysis = Some(FirstSliceProjectAnalysis::new(document, isolated));
+                    }
                 }
                 completed_files = completed_files
                     .checked_add(partition_files)
@@ -290,34 +339,9 @@ impl FirstSliceProjectAnalyzer for InstalledProjectAnalyzer {
                     completed_bytes,
                     total_bytes,
                 });
-                if partition.try_push(rejected)?.is_some() {
-                    return Err(FirstSliceProjectAnalysisError::Analysis);
-                }
-            }
-        }
-        let batch = partition.take();
-        if batch.is_empty() {
-            return Err(FirstSliceProjectAnalysisError::Analysis);
-        }
-        let (partition_files, partition_bytes) = project_partition_progress(&batch)?;
-        let (document, isolated) =
-            self.execute_partition(&request, &session, batch, cancellation)?;
-        match &mut analysis {
-            Some(analysis) => analysis.append_partition(document, isolated)?,
-            None => analysis = Some(FirstSliceProjectAnalysis::new(document, isolated)),
-        }
-        completed_files = completed_files
-            .checked_add(partition_files)
-            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
-        completed_bytes = completed_bytes
-            .checked_add(partition_bytes)
-            .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
-        observe_progress(FirstSliceProjectAnalysisProgress {
-            completed_files,
-            total_files,
-            completed_bytes,
-            total_bytes,
-        });
+                Ok(())
+            },
+        )?;
         analysis.ok_or(FirstSliceProjectAnalysisError::Analysis)
     }
 }
@@ -339,17 +363,66 @@ fn project_partition_progress(
 }
 
 impl InstalledProjectAnalyzer {
+    fn execute_adaptive_partition(
+        &self,
+        request: &FirstSliceProjectAnalysisRequest<'_>,
+        session: &NegotiatedSession,
+        inputs: Vec<adapter::ProjectInput>,
+        cancellation: &Cancellation,
+        append: &mut dyn FnMut(
+            NormalizedIrDocument,
+            bool,
+            u64,
+            u64,
+        ) -> Result<(), FirstSliceProjectAnalysisError>,
+    ) -> Result<(), FirstSliceProjectAnalysisError> {
+        let mut pending = Vec::new();
+        pending
+            .try_reserve(1)
+            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        pending.push(inputs);
+        while let Some(batch) = pending.pop() {
+            cancellation.check().map_err(|cancelled| {
+                FirstSliceProjectAnalysisError::Cancelled(cancelled.reason())
+            })?;
+            let progress = project_partition_progress(&batch)?;
+            match self.execute_partition(request, session, batch, cancellation) {
+                Ok((document, isolated)) => {
+                    append(document, isolated, progress.0, progress.1)?;
+                }
+                Err(ProjectPartitionError::OutputLimit(oversized)) => {
+                    let Some((left, right)) = split_project_partition(oversized) else {
+                        return Err(FirstSliceProjectAnalysisError::OutputLimit);
+                    };
+                    pending
+                        .try_reserve(2)
+                        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+                    // LIFO ordering keeps the left half observable before the
+                    // right half and therefore preserves canonical path order.
+                    pending.push(right);
+                    pending.push(left);
+                }
+                Err(ProjectPartitionError::Analysis(error)) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
     fn execute_partition(
         &self,
         request: &FirstSliceProjectAnalysisRequest<'_>,
         session: &NegotiatedSession,
         inputs: Vec<adapter::ProjectInput>,
         cancellation: &Cancellation,
-    ) -> Result<(NormalizedIrDocument, bool), FirstSliceProjectAnalysisError> {
+    ) -> Result<(NormalizedIrDocument, bool), ProjectPartitionError> {
         let mut request_id = [0_u8; ADAPTER_NONCE_BYTES];
-        getrandom::fill(&mut request_id).map_err(|_| FirstSliceProjectAnalysisError::Identity)?;
+        getrandom::fill(&mut request_id).map_err(|_| {
+            ProjectPartitionError::Analysis(FirstSliceProjectAnalysisError::Identity)
+        })?;
         if request_id.iter().all(|byte| *byte == 0) {
-            return Err(FirstSliceProjectAnalysisError::Identity);
+            return Err(ProjectPartitionError::Analysis(
+                FirstSliceProjectAnalysisError::Identity,
+            ));
         }
         let project_request = build_project_analysis_request(
             request,
@@ -362,21 +435,44 @@ impl InstalledProjectAnalyzer {
         if project_analysis_frame_bytes(payload_bytes)
             .is_none_or(|bytes| bytes > MAX_ADAPTER_FRAME_BYTES)
         {
-            return Err(FirstSliceProjectAnalysisError::Analysis);
+            return Err(ProjectPartitionError::Analysis(
+                FirstSliceProjectAnalysisError::Analysis,
+            ));
         }
-        let output = execute_isolated_project_adapter(
+        let output = match execute_isolated_project_adapter(
             &self.executable,
             session,
             &project_request,
             &rootlight_ir::ExtensionSupport::default(),
             cancellation,
-        )
-        .map_err(map_project_adapter_error)?;
+        ) {
+            Ok(output) => output,
+            Err(AdapterHostError::ProjectOutputLimit) => {
+                return Err(ProjectPartitionError::OutputLimit(project_request.inputs));
+            }
+            Err(error) => {
+                return Err(ProjectPartitionError::Analysis(map_project_adapter_error(
+                    error,
+                )));
+            }
+        };
         Ok((
             output.document().clone(),
             output.isolation().permits_deep_adapter(),
         ))
     }
+}
+
+enum ProjectPartitionError {
+    OutputLimit(Vec<adapter::ProjectInput>),
+    Analysis(FirstSliceProjectAnalysisError),
+}
+
+fn split_project_partition<T>(mut items: Vec<T>) -> Option<(Vec<T>, Vec<T>)> {
+    (items.len() > 1).then(|| {
+        let right = items.split_off(items.len() / 2);
+        (items, right)
+    })
 }
 
 struct ProjectPartitionBuffer {
@@ -585,6 +681,100 @@ type SharedFirstSliceService = Arc<RwLock<FirstSliceService>>;
 type IndexSerialization = Arc<Mutex<()>>;
 type SemanticRefinements = Arc<Mutex<BTreeMap<OperationId, PendingSemanticRefinement>>>;
 type GraphProjections = Arc<Mutex<GraphProjectionRegistry>>;
+type RecoveringRepositories = Arc<RwLock<BTreeSet<RepositoryId>>>;
+
+#[derive(Debug, Clone, Copy)]
+struct WatcherConfig {
+    poll_interval: Duration,
+    debounce_interval: Duration,
+    retry_interval: Duration,
+    authoritative_interval: Duration,
+    maximum_repository_entries: usize,
+}
+
+impl Default for WatcherConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval: WATCHER_POLL_INTERVAL,
+            debounce_interval: WATCHER_DEBOUNCE_INTERVAL,
+            retry_interval: WATCHER_RETRY_INTERVAL,
+            authoritative_interval: WATCHER_AUTHORITATIVE_INTERVAL,
+            maximum_repository_entries: WATCHER_MAX_REPOSITORY_ENTRIES,
+        }
+    }
+}
+
+struct WatcherWorkerResources {
+    journal: JournalActorHandle,
+    metadata: Arc<Mutex<OperationMetadataSet>>,
+    runtime: tokio::runtime::Runtime,
+    config: WatcherConfig,
+    nonce: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WatcherTarget {
+    repository: RepositoryId,
+    root: PathBuf,
+}
+
+#[derive(Debug)]
+struct WatchedRepository {
+    fingerprint: ContentHash,
+    dirty: bool,
+    next_attempt: Instant,
+    last_authoritative_reconcile: Instant,
+}
+
+impl WatchedRepository {
+    fn discovered(fingerprint: ContentHash, now: Instant) -> Self {
+        Self {
+            fingerprint,
+            dirty: false,
+            next_attempt: now,
+            last_authoritative_reconcile: now,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        fingerprint: ContentHash,
+        now: Instant,
+        debounce: Duration,
+        authoritative_interval: Duration,
+    ) {
+        if self.fingerprint != fingerprint {
+            self.fingerprint = fingerprint;
+            self.dirty = true;
+            self.next_attempt = watcher_deadline(now, debounce);
+        } else if !self.dirty
+            && now
+                .checked_duration_since(self.last_authoritative_reconcile)
+                .is_some_and(|elapsed| elapsed >= authoritative_interval)
+        {
+            self.dirty = true;
+            self.next_attempt = now;
+        }
+    }
+
+    fn retry_after(&mut self, now: Instant, retry_interval: Duration) {
+        self.dirty = true;
+        self.next_attempt = watcher_deadline(now, retry_interval);
+    }
+
+    fn reconciled(&mut self, now: Instant) {
+        self.dirty = false;
+        self.next_attempt = now;
+        self.last_authoritative_reconcile = now;
+    }
+}
+
+#[derive(Debug)]
+enum WatcherScanError {
+    Cancelled,
+    EntryLimit,
+    Io,
+}
 
 #[derive(Clone)]
 struct FirstSliceServiceLanes {
@@ -595,6 +785,7 @@ struct FirstSliceServiceLanes {
     refinement: SyncSender<SemanticRefinementCommand>,
     recovery_ready: Arc<AtomicBool>,
     recovery_complete: Arc<AtomicBool>,
+    recovering_repositories: RecoveringRepositories,
     support_state: Option<Arc<DaemonState>>,
 }
 
@@ -602,6 +793,7 @@ struct DeferredRecoveryWork {
     restore: FirstSliceDeferredRestore,
     installed_generations: BTreeSet<GenerationId>,
     restore_active: bool,
+    targets: Vec<FirstSliceRecoveryTarget>,
 }
 
 struct PublicationBoundaryHook {
@@ -700,9 +892,10 @@ impl FirstSliceDaemon {
             }
         }
         .map_err(FirstSliceHostError::Service)?;
-        let restore_active = deferred_restore
-            .has_active_restore_work()
+        let recovery_targets = deferred_restore
+            .active_targets()
             .map_err(FirstSliceHostError::Service)?;
+        let restore_active = !recovery_targets.is_empty();
         if let Some(publish) = startup_signal {
             let signal = if restore_active {
                 CoordinatedStartupSignal::ActiveGenerationRestore
@@ -730,6 +923,7 @@ impl FirstSliceDaemon {
                 restore: deferred_restore,
                 installed_generations: BTreeSet::new(),
                 restore_active: true,
+                targets: recovery_targets,
             }),
         )
     }
@@ -789,7 +983,7 @@ impl FirstSliceDaemon {
         journal: &JournalActorHandle,
     ) -> Result<Vec<(RepositoryOperationContext, OperationRecord)>, FirstSliceHostError> {
         let contexts = journal
-            .repository_operation_contexts()
+            .repository_index_operation_contexts()
             .await
             .map_err(FirstSliceHostError::Journal)?;
         let mut restored = Vec::new();
@@ -881,18 +1075,43 @@ impl FirstSliceDaemon {
                     .map_err(FirstSliceHostError::AsyncRuntime)
             })
             .transpose()?;
+        let watcher_config = support_state.as_ref().map(|_| WatcherConfig::default());
+        let watcher_runtime = watcher_config
+            .map(|_| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .map_err(FirstSliceHostError::AsyncRuntime)
+            })
+            .transpose()?;
+        let watcher_nonce = if watcher_config.is_some() {
+            let mut nonce = [0_u8; 32];
+            getrandom::fill(&mut nonce)
+                .map_err(|_| FirstSliceHostError::Service(FirstSliceError::RandomUnavailable))?;
+            Some(nonce)
+        } else {
+            None
+        };
         let metadata = Arc::new(Mutex::new(operation_metadata));
         let stopping = Arc::new(AtomicBool::new(false));
         let service = Arc::new(RwLock::new(service));
         let index_serialization = Arc::new(Mutex::new(()));
         let semantic_refinements = Arc::new(Mutex::new(BTreeMap::new()));
         let graph_projections = Arc::new(Mutex::new(GraphProjectionRegistry::new()));
-        let recovery_ready = Arc::new(AtomicBool::new(
+        let recovery_ready = Arc::new(AtomicBool::new(deferred_restore.is_none()));
+        let recovery_complete = Arc::clone(&recovery_ready);
+        let recovering_repositories = Arc::new(RwLock::new(
             deferred_restore
                 .as_ref()
-                .is_none_or(|recovery| !recovery.restore_active),
+                .map(|recovery| {
+                    recovery
+                        .targets
+                        .iter()
+                        .map(FirstSliceRecoveryTarget::repository)
+                        .collect()
+                })
+                .unwrap_or_default(),
         ));
-        let recovery_complete = Arc::new(AtomicBool::new(deferred_restore.is_none()));
         let (work, work_receiver) = mpsc::sync_channel(DEFAULT_WORK_QUEUE);
         let (read, read_receiver) = mpsc::sync_channel(DEFAULT_READ_QUEUE);
         let (control, control_receiver) = mpsc::sync_channel(DEFAULT_CONTROL_QUEUE);
@@ -905,6 +1124,7 @@ impl FirstSliceDaemon {
             refinement: refinement.clone(),
             recovery_ready: Arc::clone(&recovery_ready),
             recovery_complete,
+            recovering_repositories,
             support_state,
         };
         let work_journal = journal.clone();
@@ -987,10 +1207,64 @@ impl FirstSliceDaemon {
                 stopping.store(true, Ordering::Release);
                 FirstSliceHostError::Thread(error)
             })?;
+        let (watcher_cancellation, watcher_thread) =
+            match (watcher_config, watcher_runtime, watcher_nonce) {
+                (Some(config), Some(runtime), Some(nonce)) => {
+                    let cancellation = Cancellation::new();
+                    let worker_cancellation = cancellation.clone();
+                    let watcher_lanes = lanes.clone();
+                    let watcher_journal = journal.clone();
+                    let watcher_metadata = Arc::clone(&metadata);
+                    let watcher_stopping = Arc::clone(&stopping);
+                    let watcher_state = watcher_lanes
+                        .support_state
+                        .as_ref()
+                        .map(Arc::clone)
+                        .ok_or(FirstSliceHostError::Service(FirstSliceError::Retention))?;
+                    watcher_state.set_watcher_status(HealthStatus::Unavailable);
+                    let thread_state = Arc::clone(&watcher_state);
+                    let thread_stopping = Arc::clone(&watcher_stopping);
+                    let thread = thread::Builder::new()
+                        .name("rootlight-repository-watcher".to_owned())
+                        .spawn(move || {
+                            let worker_stopping = Arc::clone(&thread_stopping);
+                            let shutdown_cancellation = worker_cancellation.clone();
+                            let result = watcher_worker(
+                                watcher_lanes,
+                                worker_stopping,
+                                worker_cancellation,
+                                WatcherWorkerResources {
+                                    journal: watcher_journal,
+                                    metadata: watcher_metadata,
+                                    runtime,
+                                    config,
+                                    nonce,
+                                },
+                            );
+                            let result = background_result_after_shutdown(
+                                result,
+                                thread_stopping.as_ref(),
+                                &shutdown_cancellation,
+                            );
+                            if result.is_err() {
+                                thread_state.set_watcher_status(HealthStatus::Failed);
+                            }
+                            result
+                        })
+                        .map_err(|error| {
+                            watcher_state.set_watcher_status(HealthStatus::Failed);
+                            stopping.store(true, Ordering::Release);
+                            FirstSliceHostError::Thread(error)
+                        })?;
+                    (Some(cancellation), Some(thread))
+                }
+                (None, None, None) => (None, None),
+                _ => return Err(FirstSliceHostError::Service(FirstSliceError::Retention)),
+            };
         let (recovery_cancellation, recovery_thread) = match (deferred_restore, recovery_runtime) {
             (Some(deferred_restore), Some(recovery_runtime)) => {
                 let deadline = Instant::now()
-                    .checked_add(STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT)
+                    .checked_add(DETACHED_INDEX_TIMEOUT)
                     .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
                 let cancellation = Cancellation::with_deadline(deadline);
                 let worker_cancellation = cancellation.clone();
@@ -1002,14 +1276,21 @@ impl FirstSliceDaemon {
                 let thread = thread::Builder::new()
                     .name("rootlight-durable-recovery".to_owned())
                     .spawn(move || {
+                        let worker_stopping = Arc::clone(&recovery_stopping);
+                        let shutdown_cancellation = worker_cancellation.clone();
                         let result = durable_recovery_worker(
                             deferred_restore,
                             recovery_lanes,
                             recovery_journal,
                             recovery_metadata,
-                            recovery_stopping,
+                            worker_stopping,
                             recovery_runtime,
                             worker_cancellation,
+                        );
+                        let result = background_result_after_shutdown(
+                            result,
+                            recovery_stopping.as_ref(),
+                            &shutdown_cancellation,
                         );
                         if result.is_err()
                             && let Some(state) = recovery_state.as_deref()
@@ -1043,11 +1324,13 @@ impl FirstSliceDaemon {
                 stopping,
                 journal,
                 recovery_cancellation,
+                watcher_cancellation,
                 work_thread: Some(work_thread),
                 read_thread: Some(read_thread),
                 control_thread: Some(control_thread),
                 refinement_thread: Some(refinement_thread),
                 recovery_thread,
+                watcher_thread,
             },
         ))
     }
@@ -1157,6 +1440,24 @@ impl FirstSliceIpcHandler for FirstSliceDaemon {
     }
 }
 
+fn background_result_after_shutdown(
+    result: Result<(), FirstSliceHostError>,
+    stopping: &AtomicBool,
+    cancellation: &Cancellation,
+) -> Result<(), FirstSliceHostError> {
+    // Global shutdown interrupts the journal concurrently with worker
+    // cancellation. A lifecycle call may therefore report the interruption
+    // before the worker observes its local cancellation checkpoint.
+    if result.is_err()
+        && stopping.load(Ordering::Acquire)
+        && cancellation.reason() == Some(CancellationReason::Shutdown)
+    {
+        Ok(())
+    } else {
+        result
+    }
+}
+
 fn operation_status_observation(
     response: &FirstSliceIpcResponse,
 ) -> Result<(u64, bool), PublicError> {
@@ -1187,11 +1488,13 @@ pub(crate) struct FirstSliceWorkers {
     stopping: Arc<AtomicBool>,
     journal: JournalActorHandle,
     recovery_cancellation: Option<Cancellation>,
+    watcher_cancellation: Option<Cancellation>,
     work_thread: Option<JoinHandle<()>>,
     read_thread: Option<JoinHandle<()>>,
     control_thread: Option<JoinHandle<()>>,
     refinement_thread: Option<JoinHandle<()>>,
     recovery_thread: Option<JoinHandle<Result<(), FirstSliceHostError>>>,
+    watcher_thread: Option<JoinHandle<Result<(), FirstSliceHostError>>>,
 }
 
 impl FirstSliceWorkers {
@@ -1207,6 +1510,9 @@ impl FirstSliceWorkers {
     ) -> Result<(), FirstSliceHostError> {
         self.stopping.store(true, Ordering::Release);
         if let Some(cancellation) = self.recovery_cancellation.take() {
+            let _ = cancellation.cancel(CancellationReason::Shutdown);
+        }
+        if let Some(cancellation) = self.watcher_cancellation.take() {
             let _ = cancellation.cancel(CancellationReason::Shutdown);
         }
         // Cancel the local registry before scanning the journal. A refinement
@@ -1228,6 +1534,7 @@ impl FirstSliceWorkers {
         let control = self.control_thread.take();
         let refinement = self.refinement_thread.take();
         let recovery = self.recovery_thread.take();
+        let watcher = self.watcher_thread.take();
         let (joined, completion) = tokio::sync::oneshot::channel();
         thread::Builder::new()
             .name("rootlight-first-slice-join".to_owned())
@@ -1240,10 +1547,11 @@ impl FirstSliceWorkers {
                             .join()
                             .map_err(|_| FirstSliceHostError::ThreadPanicked)
                     });
-                if result.is_ok()
-                    && let Some(recovery) = recovery
-                {
-                    result = recovery
+                for lifecycle in [recovery, watcher].into_iter().flatten() {
+                    if result.is_err() {
+                        break;
+                    }
+                    result = lifecycle
                         .join()
                         .map_err(|_| FirstSliceHostError::ThreadPanicked)
                         .and_then(std::convert::identity);
@@ -1263,6 +1571,9 @@ impl Drop for FirstSliceWorkers {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
         if let Some(cancellation) = self.recovery_cancellation.take() {
+            let _ = cancellation.cancel(CancellationReason::Shutdown);
+        }
+        if let Some(cancellation) = self.watcher_cancellation.take() {
             let _ = cancellation.cancel(CancellationReason::Shutdown);
         }
         if let Ok(refinements) = self.semantic_refinements.try_lock() {
@@ -1449,6 +1760,13 @@ impl OperationMetadataSet {
         Ok(())
     }
 
+    fn has_committed_publication(&self, operation: OperationId, generation: GenerationId) -> bool {
+        self.records.get(&operation).is_some_and(|metadata| {
+            metadata.publication == PublicationState::Committed
+                && metadata.published_generation == Some(generation)
+        })
+    }
+
     fn restore_context(
         &mut self,
         context: RepositoryOperationContext,
@@ -1456,7 +1774,10 @@ impl OperationMetadataSet {
     ) -> Result<(), FirstSliceError> {
         if self.records.contains_key(&context.operation)
             || record.operation != context.operation
-            || record.kind != OperationKind::RepositoryIndex
+            || !matches!(
+                record.kind,
+                OperationKind::RepositoryIndex | OperationKind::Recovery
+            )
         {
             return Err(FirstSliceError::Retention);
         }
@@ -1773,6 +2094,379 @@ fn classify_resource_pressure(
     }
 }
 
+struct RecoveryOperation {
+    operation: OperationId,
+    cancellation: Cancellation,
+    deadline: Instant,
+}
+
+struct RecoveryOperationGuard<'a> {
+    journal: &'a JournalActorHandle,
+    target: FirstSliceRecoveryTarget,
+    recovery: RecoveryOperation,
+    terminalized: bool,
+}
+
+impl<'a> RecoveryOperationGuard<'a> {
+    #[cfg(test)]
+    fn start(
+        journal: &'a JournalActorHandle,
+        runtime: &tokio::runtime::Runtime,
+        target: FirstSliceRecoveryTarget,
+    ) -> Result<Self, FirstSliceHostError> {
+        Self::start_batch(journal, runtime, vec![target])?
+            .pop()
+            .ok_or(FirstSliceHostError::Service(FirstSliceError::Retention))
+    }
+
+    fn start_batch(
+        journal: &'a JournalActorHandle,
+        runtime: &tokio::runtime::Runtime,
+        targets: Vec<FirstSliceRecoveryTarget>,
+    ) -> Result<Vec<Self>, FirstSliceHostError> {
+        start_recovery_operations(journal, runtime, &targets).map(|recoveries| {
+            targets
+                .into_iter()
+                .zip(recoveries)
+                .map(|(target, recovery)| Self {
+                    journal,
+                    target,
+                    recovery,
+                    terminalized: false,
+                })
+                .collect()
+        })
+    }
+
+    #[cfg(test)]
+    fn operation(&self) -> OperationId {
+        self.recovery.operation
+    }
+
+    fn cancellation(&self) -> &Cancellation {
+        &self.recovery.cancellation
+    }
+
+    fn complete(&mut self, runtime: &tokio::runtime::Runtime) -> Result<(), FirstSliceHostError> {
+        complete_recovery_operation(self.journal, runtime, &self.recovery)?;
+        self.terminalized = true;
+        Ok(())
+    }
+
+    fn cancel(
+        &mut self,
+        runtime: &tokio::runtime::Runtime,
+        reason: CancellationReason,
+    ) -> Result<(), FirstSliceHostError> {
+        finish_cancelled_recovery_operation(self.journal, runtime, &self.recovery, reason)?;
+        self.terminalized = true;
+        Ok(())
+    }
+
+    fn fail(
+        &mut self,
+        runtime: &tokio::runtime::Runtime,
+        error: FirstSliceError,
+    ) -> Result<(), FirstSliceHostError> {
+        fail_recovery_operation(self.journal, runtime, &self.recovery, self.target, error)?;
+        self.terminalized = true;
+        Ok(())
+    }
+}
+
+impl Drop for RecoveryOperationGuard<'_> {
+    fn drop(&mut self) {
+        if self.terminalized {
+            return;
+        }
+        // Every fallible worker edge must leave an inspectable terminal record,
+        // including lock poisoning or journal reconciliation failures.
+        let reason = self.recovery.cancellation.reason();
+        let error = reason.map_or_else(
+            || recovery_lifecycle_error(self.recovery.operation, self.target.repository()),
+            |reason| recovery_cancelled_error(self.recovery.operation, reason),
+        );
+        let _ = self
+            .journal
+            .compensate_unowned_operation(self.recovery.operation, error, reason);
+    }
+}
+
+fn start_recovery_operations(
+    journal: &JournalActorHandle,
+    runtime: &tokio::runtime::Runtime,
+    targets: &[FirstSliceRecoveryTarget],
+) -> Result<Vec<RecoveryOperation>, FirstSliceHostError> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let started_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .filter(|started| *started != 0)
+        .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
+    let deadline = Instant::now()
+        .checked_add(DETACHED_INDEX_TIMEOUT)
+        .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
+    let prepared = targets
+        .iter()
+        .copied()
+        .map(|target| {
+            let operation = recovery_operation_id(target, started_unix_ms);
+            let repository_context = RepositoryOperationSubmission::new(
+                target.repository(),
+                Some(target.generation()),
+                started_unix_ms,
+                0,
+                RepositoryOperationMode::Structural,
+            )
+            .map_err(|_| FirstSliceHostError::Service(FirstSliceError::Limits))?;
+            let submission = OperationSubmission::new(
+                operation,
+                OperationKind::Recovery,
+                recovery_plan_hash(target),
+                ClientInstanceId::SYSTEM,
+                true,
+                None,
+                None,
+            )
+            .and_then(|submission| submission.with_repository_context(repository_context))
+            .map_err(|_| FirstSliceHostError::Service(FirstSliceError::Limits))?;
+            Ok((target, operation, submission))
+        })
+        .collect::<Result<Vec<_>, FirstSliceHostError>>()?;
+    let activated = runtime
+        .block_on(
+            journal.activate_recovery_batch_until(
+                prepared
+                    .iter()
+                    .map(|(_, _, submission)| *submission)
+                    .collect(),
+                deadline,
+            ),
+        )
+        .map_err(FirstSliceHostError::Journal)?;
+    let valid_batch = activated.len() == prepared.len()
+        && prepared
+            .iter()
+            .zip(&activated)
+            .all(|((_, operation, _), (record, _))| {
+                record.operation == *operation
+                    && record.state == OperationState::Running
+                    && record.progress.completed == 0
+                    && record.progress.total == 1
+            });
+    if !valid_batch {
+        for ((target, operation, _), _) in prepared.iter().zip(&activated) {
+            journal
+                .compensate_unowned_operation(
+                    *operation,
+                    recovery_lifecycle_error(*operation, target.repository()),
+                    None,
+                )
+                .map_err(ServiceError::Operations)
+                .map_err(FirstSliceHostError::Journal)?;
+        }
+        return Err(FirstSliceHostError::Service(
+            FirstSliceError::CatalogCorrupt,
+        ));
+    }
+    if let Some(reason) = activated.iter().find_map(|(_, cancellation)| {
+        cancellation.extend_deadline(deadline).err().map(|_| {
+            cancellation
+                .reason()
+                .unwrap_or(CancellationReason::DeadlineExceeded)
+        })
+    }) {
+        for ((_, operation, _), _) in prepared.iter().zip(&activated) {
+            journal
+                .compensate_unowned_operation(
+                    *operation,
+                    recovery_cancelled_error(*operation, reason),
+                    Some(reason),
+                )
+                .map_err(ServiceError::Operations)
+                .map_err(FirstSliceHostError::Journal)?;
+        }
+        return Err(FirstSliceHostError::Service(FirstSliceError::Cancelled(
+            reason,
+        )));
+    }
+
+    let mut recoveries = Vec::with_capacity(activated.len());
+    for ((_, operation, _), (_, cancellation)) in prepared.into_iter().zip(activated) {
+        recoveries.push(RecoveryOperation {
+            operation,
+            cancellation,
+            deadline,
+        });
+    }
+    Ok(recoveries)
+}
+
+fn complete_recovery_operation(
+    journal: &JournalActorHandle,
+    runtime: &tokio::runtime::Runtime,
+    recovery: &RecoveryOperation,
+) -> Result<(), FirstSliceHostError> {
+    let record = runtime
+        .block_on(journal.finish_operation_until(recovery.operation, None, recovery.deadline))
+        .map_err(FirstSliceHostError::Journal)?;
+    if record.state != OperationState::Succeeded {
+        return Err(FirstSliceHostError::Service(
+            FirstSliceError::CatalogCorrupt,
+        ));
+    }
+    Ok(())
+}
+
+fn finish_cancelled_recovery_operation(
+    journal: &JournalActorHandle,
+    runtime: &tokio::runtime::Runtime,
+    recovery: &RecoveryOperation,
+    reason: CancellationReason,
+) -> Result<(), FirstSliceHostError> {
+    let record = runtime
+        .block_on(journal.finish_operation_until(
+            recovery.operation,
+            Some(reason),
+            recovery.deadline,
+        ))
+        .or_else(|_| {
+            journal
+                .compensate_unowned_operation(
+                    recovery.operation,
+                    recovery_cancelled_error(recovery.operation, reason),
+                    Some(reason),
+                )
+                .map_err(ServiceError::Operations)
+        })
+        .map_err(FirstSliceHostError::Journal)?;
+    if !record.state.is_terminal() {
+        return Err(FirstSliceHostError::Service(
+            FirstSliceError::CatalogCorrupt,
+        ));
+    }
+    Ok(())
+}
+
+fn fail_recovery_operation(
+    journal: &JournalActorHandle,
+    runtime: &tokio::runtime::Runtime,
+    recovery: &RecoveryOperation,
+    target: FirstSliceRecoveryTarget,
+    error: FirstSliceError,
+) -> Result<(), FirstSliceHostError> {
+    let public = repository_index_error(
+        error,
+        RepositoryIndexErrorContext {
+            operation: recovery.operation,
+            repository: target.repository(),
+            provider: "rootlight-durable-recovery",
+        },
+    );
+    let record = runtime
+        .block_on(journal.fail_operation_until(
+            recovery.operation,
+            public.clone(),
+            recovery.deadline,
+        ))
+        .or_else(|_| {
+            journal
+                .compensate_unowned_operation(recovery.operation, public, None)
+                .map_err(ServiceError::Operations)
+        })
+        .map_err(FirstSliceHostError::Journal)?;
+    if !record.state.is_terminal() {
+        return Err(FirstSliceHostError::Service(
+            FirstSliceError::CatalogCorrupt,
+        ));
+    }
+    Ok(())
+}
+
+fn remove_recovering_repository(
+    lanes: &FirstSliceServiceLanes,
+    repository: RepositoryId,
+) -> Result<(), FirstSliceHostError> {
+    lanes
+        .recovering_repositories
+        .write()
+        .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+        .remove(&repository);
+    Ok(())
+}
+
+fn recovery_operation_id(target: FirstSliceRecoveryTarget, started_unix_ms: u64) -> OperationId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rootlight.repository-recovery-operation/1\0");
+    hasher.update(target.repository().as_bytes());
+    hasher.update(target.generation().as_bytes());
+    hasher.update(&started_unix_ms.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut operation = [0_u8; 16];
+    operation.copy_from_slice(&digest.as_bytes()[..16]);
+    OperationId::from_bytes(operation)
+}
+
+fn recovery_plan_hash(target: FirstSliceRecoveryTarget) -> PlanHash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rootlight.repository-recovery-plan/1\0");
+    hasher.update(target.repository().as_bytes());
+    hasher.update(target.generation().as_bytes());
+    PlanHash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn recovery_lifecycle_error(operation: OperationId, repository: RepositoryId) -> PublicError {
+    PublicError::builder(
+        ErrorCode::Internal,
+        "durable repository recovery could not start",
+    )
+    .operation(operation)
+    .repository(repository)
+    .next_action(NextAction::InspectOperation)
+    .next_action(NextAction::Retry)
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed recovery error is statically bounded"))
+}
+
+fn recovery_cancelled_error(operation: OperationId, reason: CancellationReason) -> PublicError {
+    let (code, message, retryable) = match reason {
+        CancellationReason::DeadlineExceeded | CancellationReason::Shutdown => (
+            ErrorCode::Busy,
+            "durable repository recovery was interrupted",
+            true,
+        ),
+        CancellationReason::ClientRequest | CancellationReason::ParentCancelled => (
+            ErrorCode::Cancelled,
+            "durable repository recovery was cancelled",
+            false,
+        ),
+        CancellationReason::ResourceLimit => (
+            ErrorCode::ResourceExhausted,
+            "durable repository recovery reached a resource limit",
+            false,
+        ),
+        _ => (
+            ErrorCode::Cancelled,
+            "durable repository recovery was cancelled",
+            false,
+        ),
+    };
+    let mut builder = PublicError::builder(code, message)
+        .operation(operation)
+        .next_action(NextAction::InspectOperation);
+    if retryable {
+        builder = builder
+            .retry_after(retry_after())
+            .next_action(NextAction::Retry);
+    }
+    builder
+        .build()
+        .unwrap_or_else(|_| unreachable!("closed recovery error is statically bounded"))
+}
+
 fn durable_recovery_worker(
     mut deferred: DeferredRecoveryWork,
     lanes: FirstSliceServiceLanes,
@@ -1782,73 +2476,170 @@ fn durable_recovery_worker(
     runtime: tokio::runtime::Runtime,
     cancellation: Cancellation,
 ) -> Result<(), FirstSliceHostError> {
+    let mut degraded = false;
+    let mut recovered_targets = Vec::new();
     if deferred.restore_active {
-        let active = match deferred.restore.restore_active(&cancellation) {
-            Ok(restored) => restored,
-            Err(FirstSliceError::Cancelled(CancellationReason::Shutdown))
-                if stopping.load(Ordering::Acquire) =>
+        let active_recoveries = RecoveryOperationGuard::start_batch(
+            &journal,
+            &runtime,
+            std::mem::take(&mut deferred.targets),
+        )?;
+        for mut recovery in active_recoveries {
+            let target = recovery.target;
+            if let Some(reason) = cancellation.reason() {
+                let _ = recovery.cancellation().cancel(reason);
+            }
+            let active = match deferred
+                .restore
+                .restore_active_repository(target.repository(), recovery.cancellation())
             {
+                Ok(restored) => restored,
+                Err(FirstSliceError::Cancelled(reason)) => {
+                    recovery.cancel(&runtime, reason)?;
+                    deferred.installed_generations.insert(target.generation());
+                    remove_recovering_repository(&lanes, target.repository())?;
+                    if stopping.load(Ordering::Acquire) || reason == CancellationReason::Shutdown {
+                        return Ok(());
+                    }
+                    degraded = true;
+                    continue;
+                }
+                Err(error) => {
+                    recovery.fail(&runtime, error)?;
+                    deferred.installed_generations.insert(target.generation());
+                    remove_recovering_repository(&lanes, target.repository())?;
+                    if let Some(state) = lanes.support_state.as_deref() {
+                        state.set_generation_status(HealthStatus::Degraded);
+                    }
+                    degraded = true;
+                    continue;
+                }
+            };
+            if stopping.load(Ordering::Acquire) {
+                recovery.cancel(&runtime, CancellationReason::Shutdown)?;
                 return Ok(());
             }
-            Err(error) => return Err(FirstSliceHostError::Service(error)),
+            let installed = active.generation_ids();
+            if let Err(error) = lanes
+                .service
+                .write()
+                .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+                .install_progressive_deferred_restore(active, recovery.cancellation())
+            {
+                match error {
+                    FirstSliceError::Cancelled(reason) => {
+                        recovery.cancel(&runtime, reason)?;
+                    }
+                    error => {
+                        recovery.fail(&runtime, error)?;
+                    }
+                }
+                deferred.installed_generations.insert(target.generation());
+                remove_recovering_repository(&lanes, target.repository())?;
+                if stopping.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                if let Some(state) = lanes.support_state.as_deref() {
+                    state.set_generation_status(HealthStatus::Degraded);
+                }
+                degraded = true;
+                continue;
+            }
+            deferred
+                .installed_generations
+                .extend(installed.iter().copied());
+            if let Err(error) = reconcile_restored_publications(
+                &lanes,
+                &journal,
+                metadata.as_ref(),
+                &stopping,
+                &runtime,
+                &installed,
+            ) {
+                recovery.fail(&runtime, FirstSliceError::Catalog)?;
+                return Err(error);
+            }
+            remove_recovering_repository(&lanes, target.repository())?;
+            recovered_targets.push((target, recovery));
+        }
+        if let Err(error) = complete_durable_recovery(&lanes, degraded) {
+            for (_, recovery) in &mut recovered_targets {
+                recovery.fail(&runtime, FirstSliceError::Catalog)?;
+            }
+            return Err(error);
+        }
+    }
+    for (target, mut recovery) in recovered_targets {
+        if stopping.load(Ordering::Acquire) {
+            recovery.cancel(&runtime, CancellationReason::Shutdown)?;
+            continue;
+        }
+        let remaining = match deferred.restore.restore_retained_repository(
+            target.repository(),
+            &deferred.installed_generations,
+            recovery.cancellation(),
+        ) {
+            Ok(restored) => restored,
+            Err(FirstSliceError::Cancelled(reason)) => {
+                recovery.cancel(&runtime, reason)?;
+                if stopping.load(Ordering::Acquire) || reason == CancellationReason::Shutdown {
+                    continue;
+                }
+                degraded = true;
+                continue;
+            }
+            Err(error) => {
+                recovery.fail(&runtime, error)?;
+                if let Some(state) = lanes.support_state.as_deref() {
+                    state.set_generation_status(HealthStatus::Degraded);
+                }
+                degraded = true;
+                continue;
+            }
         };
         if stopping.load(Ordering::Acquire) {
-            return Ok(());
+            recovery.cancel(&runtime, CancellationReason::Shutdown)?;
+            continue;
         }
-        deferred.installed_generations = active.generation_ids();
-        lanes
-            .service
-            .write()
-            .map_err(|_| FirstSliceHostError::ThreadPanicked)?
-            .install_deferred_restore(active, &cancellation)
-            .map_err(FirstSliceHostError::Service)?;
+        let remaining_generations = remaining.generation_ids();
+        if !remaining_generations.is_empty()
+            && let Err(error) = lanes
+                .service
+                .write()
+                .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+                .install_additional_deferred_restore(remaining, recovery.cancellation())
+        {
+            match error {
+                FirstSliceError::Cancelled(reason) => {
+                    recovery.cancel(&runtime, reason)?;
+                }
+                error => {
+                    recovery.fail(&runtime, error)?;
+                }
+            }
+            if stopping.load(Ordering::Acquire) {
+                continue;
+            }
+            if let Some(state) = lanes.support_state.as_deref() {
+                state.set_generation_status(HealthStatus::Degraded);
+            }
+            degraded = true;
+            continue;
+        }
         reconcile_restored_publications(
             &lanes,
             &journal,
             metadata.as_ref(),
             &stopping,
             &runtime,
-            &deferred.installed_generations,
+            &remaining_generations,
         )?;
+        recovery.complete(&runtime)?;
         refresh_recovery_support_inventory(&lanes)?;
-        lanes.recovery_ready.store(true, Ordering::Release);
-    }
-    let remaining = match deferred
-        .restore
-        .restore_excluding(&deferred.installed_generations, &cancellation)
-    {
-        Ok(restored) => restored,
-        Err(FirstSliceError::Cancelled(CancellationReason::Shutdown))
-            if stopping.load(Ordering::Acquire) =>
-        {
-            return Ok(());
+        if degraded && let Some(state) = lanes.support_state.as_deref() {
+            state.set_generation_status(HealthStatus::Degraded);
         }
-        Err(error) => return Err(FirstSliceHostError::Service(error)),
-    };
-    if stopping.load(Ordering::Acquire) {
-        return Ok(());
     }
-    let remaining_generations = remaining.generation_ids();
-    if remaining_generations.is_empty() {
-        lanes.recovery_complete.store(true, Ordering::Release);
-        return Ok(());
-    }
-    lanes
-        .service
-        .write()
-        .map_err(|_| FirstSliceHostError::ThreadPanicked)?
-        .install_additional_deferred_restore(remaining, &cancellation)
-        .map_err(FirstSliceHostError::Service)?;
-    reconcile_restored_publications(
-        &lanes,
-        &journal,
-        metadata.as_ref(),
-        &stopping,
-        &runtime,
-        &remaining_generations,
-    )?;
-    refresh_recovery_support_inventory(&lanes)?;
-    lanes.recovery_complete.store(true, Ordering::Release);
     Ok(())
 }
 
@@ -1871,18 +2662,24 @@ fn reconcile_restored_publications(
         if stopping.load(Ordering::Acquire) {
             return Ok(());
         }
+        let publication_was_committed = metadata
+            .lock()
+            .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+            .has_committed_publication(publication.operation, publication.receipt.generation);
         match runtime.block_on(journal.reconcile_committed_publication(publication.operation)) {
             Ok(record) => {
-                let deadline = Instant::now()
-                    .checked_add(LIFECYCLE_FINALIZATION_GRACE)
-                    .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
-                match runtime.block_on(journal.record_repository_publication_until(
-                    publication.operation,
-                    publication.receipt.generation,
-                    deadline,
-                )) {
-                    Ok(_) | Err(ServiceError::Operations(OperationError::NotFound)) => {}
-                    Err(error) => return Err(FirstSliceHostError::Journal(error)),
+                if !publication_was_committed {
+                    let deadline = Instant::now()
+                        .checked_add(LIFECYCLE_FINALIZATION_GRACE)
+                        .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
+                    match runtime.block_on(journal.record_repository_publication_until(
+                        publication.operation,
+                        publication.receipt.generation,
+                        deadline,
+                    )) {
+                        Ok(_) | Err(ServiceError::Operations(OperationError::NotFound)) => {}
+                        Err(error) => return Err(FirstSliceHostError::Journal(error)),
+                    }
                 }
                 metadata
                     .lock()
@@ -1914,8 +2711,366 @@ fn refresh_recovery_support_inventory(
         state
             .replace_index_support_inventory(inventory)
             .map_err(FirstSliceHostError::Journal)?;
+        if !lanes.recovery_complete.load(Ordering::Acquire) {
+            state.set_generation_status(HealthStatus::Unavailable);
+        }
     }
     Ok(())
+}
+
+fn complete_durable_recovery(
+    lanes: &FirstSliceServiceLanes,
+    degraded: bool,
+) -> Result<(), FirstSliceHostError> {
+    lanes.recovery_complete.store(true, Ordering::Release);
+    refresh_recovery_support_inventory(lanes)?;
+    if degraded && let Some(state) = lanes.support_state.as_deref() {
+        state.set_generation_status(HealthStatus::Degraded);
+    }
+    Ok(())
+}
+
+fn watcher_worker(
+    lanes: FirstSliceServiceLanes,
+    stopping: Arc<AtomicBool>,
+    cancellation: Cancellation,
+    resources: WatcherWorkerResources,
+) -> Result<(), FirstSliceHostError> {
+    let WatcherWorkerResources {
+        journal,
+        metadata,
+        runtime,
+        config,
+        nonce,
+    } = resources;
+    let support_state = lanes
+        .support_state
+        .as_ref()
+        .map(Arc::clone)
+        .ok_or(FirstSliceHostError::Service(FirstSliceError::Retention))?;
+    let catalog_epoch = Instant::now();
+    let mut watched = BTreeMap::<RepositoryId, WatchedRepository>::new();
+    let mut sequence = 0_u64;
+
+    loop {
+        if stopping.load(Ordering::Acquire) || cancellation.check().is_err() {
+            return Ok(());
+        }
+        if !lanes.recovery_complete.load(Ordering::Acquire) {
+            wait_for_watcher_poll(&cancellation, config.poll_interval);
+            continue;
+        }
+
+        let now = Instant::now();
+        let targets = watcher_targets(&lanes.service)?;
+        let retained = targets
+            .iter()
+            .map(|target| target.repository)
+            .collect::<BTreeSet<_>>();
+        watched.retain(|repository, _| retained.contains(repository));
+        let mut degraded = false;
+
+        for target in &targets {
+            match watcher_fingerprint(
+                &target.root,
+                config.maximum_repository_entries,
+                &cancellation,
+            ) {
+                Ok(fingerprint) => match watched.get_mut(&target.repository) {
+                    Some(repository) => repository.observe(
+                        fingerprint,
+                        now,
+                        config.debounce_interval,
+                        config.authoritative_interval,
+                    ),
+                    None => {
+                        watched.insert(
+                            target.repository,
+                            WatchedRepository::discovered(fingerprint, now),
+                        );
+                    }
+                },
+                Err(WatcherScanError::Cancelled) => {
+                    if stopping.load(Ordering::Acquire) || cancellation.check().is_err() {
+                        return Ok(());
+                    }
+                    degraded = true;
+                }
+                Err(WatcherScanError::EntryLimit | WatcherScanError::Io) => {
+                    degraded = true;
+                    if let Some(repository) = watched.get_mut(&target.repository) {
+                        repository.retry_after(now, config.retry_interval);
+                    }
+                }
+            }
+        }
+
+        for target in targets {
+            let due = watched.get(&target.repository).is_some_and(|repository| {
+                repository.dirty && repository.next_attempt <= Instant::now()
+            });
+            if !due {
+                continue;
+            }
+            if stopping.load(Ordering::Acquire) || cancellation.check().is_err() {
+                return Ok(());
+            }
+            if !lanes.recovery_complete.load(Ordering::Acquire) {
+                break;
+            }
+            sequence = sequence
+                .checked_add(1)
+                .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
+            let outcome = watcher_reconcile_target(
+                &lanes,
+                ServiceRequestResources {
+                    journal: &journal,
+                    metadata: metadata.as_ref(),
+                    runtime: &runtime,
+                    catalog_epoch,
+                    publication_hook: None,
+                },
+                &target,
+                &cancellation,
+                nonce,
+                sequence,
+            )?;
+            let Some(repository) = watched.get_mut(&target.repository) else {
+                continue;
+            };
+            match outcome {
+                WatcherReconcileOutcome::Reconciled => {
+                    repository.reconciled(Instant::now());
+                }
+                WatcherReconcileOutcome::Removed => {
+                    watched.remove(&target.repository);
+                }
+                WatcherReconcileOutcome::Retry => {
+                    repository.retry_after(Instant::now(), config.retry_interval);
+                }
+                WatcherReconcileOutcome::Degraded => {
+                    degraded = true;
+                    repository.retry_after(Instant::now(), config.retry_interval);
+                }
+            }
+        }
+
+        support_state.set_watcher_status(if degraded {
+            HealthStatus::Degraded
+        } else {
+            HealthStatus::Healthy
+        });
+        wait_for_watcher_poll(&cancellation, config.poll_interval);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatcherReconcileOutcome {
+    Reconciled,
+    Removed,
+    Retry,
+    Degraded,
+}
+
+fn watcher_reconcile_target(
+    lanes: &FirstSliceServiceLanes,
+    resources: ServiceRequestResources<'_>,
+    target: &WatcherTarget,
+    cancellation: &Cancellation,
+    nonce: [u8; 32],
+    sequence: u64,
+) -> Result<WatcherReconcileOutcome, FirstSliceHostError> {
+    if semantic_refinement_active(&lanes.semantic_refinements, target.repository)
+        .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+    {
+        return Ok(WatcherReconcileOutcome::Retry);
+    }
+    let deadline = Instant::now()
+        .checked_add(DETACHED_INDEX_TIMEOUT)
+        .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
+    if cancellation.extend_deadline(deadline).is_err() {
+        return Ok(WatcherReconcileOutcome::Retry);
+    }
+    let registered = lanes
+        .service
+        .read()
+        .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+        .registered_repository_for_root(&target.root, cancellation);
+    match registered {
+        Ok(Some(repository)) if repository == target.repository => {}
+        Ok(None) => return Ok(WatcherReconcileOutcome::Removed),
+        Ok(Some(_)) => {
+            return Err(FirstSliceHostError::Service(
+                FirstSliceError::CatalogCorrupt,
+            ));
+        }
+        Err(FirstSliceError::Cancelled(_)) => return Ok(WatcherReconcileOutcome::Retry),
+        Err(_) => return Ok(WatcherReconcileOutcome::Degraded),
+    }
+
+    let context = FirstSliceIpcContext {
+        client_instance_id: ClientInstanceId::SYSTEM,
+        selected_protocol_minor: PROTOCOL_MINOR,
+        cancellation: cancellation.clone(),
+        deadline,
+        effective_budget: None,
+        index_admission: None,
+    };
+    let request = daemon::RepositoryIndexRequest {
+        schema_version: Some(schema_version()),
+        root: target.root.to_string_lossy().into_owned(),
+        operation: Some(operation_to_wire(watcher_operation_id(
+            nonce,
+            target.repository,
+            sequence,
+        ))),
+        detached: true,
+        mode: daemon::RepositoryIndexMode::RepositoryIndexAuto as i32,
+    };
+    let mut reply = None;
+    match repository_index_with_intent(
+        lanes,
+        resources,
+        request,
+        &context,
+        &mut reply,
+        RepositoryIndexIntent::Watcher,
+        None,
+    ) {
+        Ok(_) => Ok(WatcherReconcileOutcome::Reconciled),
+        Err(error) if error.code() == ErrorCode::Busy => Ok(WatcherReconcileOutcome::Retry),
+        Err(error) if error.code() == ErrorCode::Cancelled => Ok(WatcherReconcileOutcome::Retry),
+        Err(error) if error.code() == ErrorCode::Internal => {
+            Err(FirstSliceHostError::Service(FirstSliceError::Catalog))
+        }
+        Err(_) => Ok(WatcherReconcileOutcome::Degraded),
+    }
+}
+
+fn watcher_targets(
+    service: &RwLock<FirstSliceService>,
+) -> Result<Vec<WatcherTarget>, FirstSliceHostError> {
+    let roots = service
+        .read()
+        .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+        .registered_repository_roots()
+        .map_err(FirstSliceHostError::Service)?;
+    let targets = roots
+        .into_iter()
+        .map(|root| WatcherTarget {
+            repository: root.repository(),
+            root: root.root().to_path_buf(),
+        })
+        .collect();
+    Ok(targets)
+}
+
+fn watcher_fingerprint(
+    root: &Path,
+    maximum_entries: usize,
+    cancellation: &Cancellation,
+) -> Result<ContentHash, WatcherScanError> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut examined = 0_usize;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rootlight.repository-watcher-fingerprint/1\0");
+
+    while let Some(path) = pending.pop() {
+        cancellation
+            .check()
+            .map_err(|_| WatcherScanError::Cancelled)?;
+        examined = examined
+            .checked_add(1)
+            .ok_or(WatcherScanError::EntryLimit)?;
+        if examined > maximum_entries {
+            return Err(WatcherScanError::EntryLimit);
+        }
+        let metadata = std::fs::symlink_metadata(&path).map_err(|_| WatcherScanError::Io)?;
+        if metadata.file_type().is_dir() && watcher_ignores_default_directory(root, &path) {
+            continue;
+        }
+        let relative = path.strip_prefix(root).map_err(|_| WatcherScanError::Io)?;
+        let path_bytes = relative.as_os_str().as_encoded_bytes();
+        let path_length =
+            u64::try_from(path_bytes.len()).map_err(|_| WatcherScanError::EntryLimit)?;
+        hasher.update(&path_length.to_le_bytes());
+        hasher.update(path_bytes);
+        let file_type = metadata.file_type();
+        hasher.update(&[if file_type.is_dir() {
+            1
+        } else if file_type.is_file() {
+            2
+        } else if file_type.is_symlink() {
+            3
+        } else {
+            4
+        }]);
+        hasher.update(&metadata.len().to_le_bytes());
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok());
+        hasher.update(
+            &modified
+                .map_or(0, |duration| duration.as_secs())
+                .to_le_bytes(),
+        );
+        hasher.update(
+            &modified
+                .map_or(0, |duration| duration.subsec_nanos())
+                .to_le_bytes(),
+        );
+
+        if file_type.is_dir() {
+            let mut children = std::fs::read_dir(&path)
+                .map_err(|_| WatcherScanError::Io)?
+                .map(|entry| {
+                    entry
+                        .map(|entry| entry.path())
+                        .map_err(|_| WatcherScanError::Io)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            children.sort();
+            pending.extend(children.into_iter().rev());
+        }
+    }
+    Ok(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
+}
+
+fn watcher_ignores_default_directory(root: &Path, path: &Path) -> bool {
+    if path == root {
+        return false;
+    }
+    // These are discovery's fixed default exclusions. Repository ignore files
+    // remain fingerprinted, while the authoritative index owns scoped policy.
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(".git" | "target" | "node_modules" | ".venv" | "dist" | "build")
+    )
+}
+
+fn watcher_operation_id(nonce: [u8; 32], repository: RepositoryId, sequence: u64) -> OperationId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rootlight.repository-watcher-operation/1\0");
+    hasher.update(&nonce);
+    hasher.update(repository.as_bytes());
+    hasher.update(&sequence.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut operation = [0_u8; 16];
+    operation.copy_from_slice(&digest.as_bytes()[..16]);
+    OperationId::from_bytes(operation)
+}
+
+fn wait_for_watcher_poll(cancellation: &Cancellation, interval: Duration) {
+    let started = Instant::now();
+    while cancellation.check().is_ok() && started.elapsed() < interval {
+        let remaining = interval.saturating_sub(started.elapsed());
+        thread::park_timeout(remaining.min(WATCHER_STOP_POLL_INTERVAL));
+    }
+}
+
+fn watcher_deadline(now: Instant, interval: Duration) -> Instant {
+    now.checked_add(interval).unwrap_or(now)
 }
 
 fn service_worker(
@@ -1986,6 +3141,23 @@ fn semantic_refinement_worker(
             service.active_generation_for(command.repository) != Some(command.structural_generation)
         });
         if cancelled || superseded {
+            let error = command
+                .context
+                .cancellation
+                .reason()
+                .map_or_else(stale_generation, cancellation_error);
+            if fail_queued_semantic_refinement(
+                command.operation,
+                error.clone(),
+                &journal,
+                &runtime,
+                command.context.deadline,
+            )
+            .is_err()
+            {
+                return;
+            }
+            let _ = command.admitted.try_send(Err(error));
             if remove_semantic_refinement(&lanes.semantic_refinements, command.operation).is_err() {
                 return;
             }
@@ -2069,6 +3241,15 @@ fn execute_service_request(
         .cancellation
         .check()
         .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
+    if let Some(repository) = request_repository(&request)?
+        && lanes
+            .recovering_repositories
+            .read()
+            .map_err(|_| internal_error())?
+            .contains(&repository)
+    {
+        return Err(recovery_in_progress());
+    }
     if !lanes.recovery_ready.load(Ordering::Acquire)
         && !matches!(
             &request,
@@ -2079,7 +3260,11 @@ fn execute_service_request(
         return Err(recovery_in_progress());
     }
     if !lanes.recovery_complete.load(Ordering::Acquire)
-        && matches!(&request, FirstSliceIpcRequest::RepositoryIndex(_))
+        && matches!(
+            &request,
+            FirstSliceIpcRequest::RepositoryIndex(_)
+                | FirstSliceIpcRequest::RepositoryCatalogMutation(_)
+        )
     {
         return Err(recovery_in_progress());
     }
@@ -2236,6 +3421,36 @@ fn lock_publication_until<'a>(
 
 fn retry_after() -> Duration {
     Duration::from_millis(u64::from(RETRY_AFTER_MS))
+}
+
+fn request_repository(request: &FirstSliceIpcRequest) -> Result<Option<RepositoryId>, PublicError> {
+    let repository = match request {
+        FirstSliceIpcRequest::CodeLocate(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::SymbolExplain(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::SourceRead(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::RepositoryStatus(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::SymbolRelationships(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::FlowTrace(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::ArchitectureCycles(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::CodeDead(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::ArchitectureOverview(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::TestsSelect(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::ChangeImpact(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::PlanChange(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::HistoryCompare(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::QueryAdvanced(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::GraphProjectionOpen(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::RepositoryIndex(_)
+        | FirstSliceIpcRequest::RepositoryOperationStatus(_)
+        | FirstSliceIpcRequest::RepositoryList(_)
+        | FirstSliceIpcRequest::RepositoryCatalogPage(_)
+        | FirstSliceIpcRequest::RepositoryCatalogMutation(_)
+        | FirstSliceIpcRequest::GraphProjectionPage(_)
+        | FirstSliceIpcRequest::GraphProjectionRelease(_) => None,
+    };
+    repository
+        .map(|repository| parse_repository(Some(repository)))
+        .transpose()
 }
 
 fn operation_in_progress() -> PublicError {
@@ -2438,6 +3653,7 @@ fn repository_index(
 #[derive(Clone, Copy)]
 enum RepositoryIndexIntent {
     Requested,
+    Watcher,
     SemanticRefinement { structural_generation: GenerationId },
 }
 
@@ -2464,12 +3680,14 @@ fn repository_index_with_intent(
     let operation = parse_operation(request.operation.as_ref())?;
     let requested_mode =
         daemon::RepositoryIndexMode::try_from(request.mode).map_err(|_| invalid_argument())?;
-    let auto_refinement = matches!(intent, RepositoryIndexIntent::Requested)
-        && requested_mode == daemon::RepositoryIndexMode::RepositoryIndexAuto
+    let auto_refinement = matches!(
+        intent,
+        RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher
+    ) && requested_mode == daemon::RepositoryIndexMode::RepositoryIndexAuto
         && read_service(service)?.deep_analysis_available();
     let mode = match intent {
         RepositoryIndexIntent::SemanticRefinement { .. } => FirstSliceIndexMode::Deep,
-        RepositoryIndexIntent::Requested => match requested_mode {
+        RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher => match requested_mode {
             daemon::RepositoryIndexMode::Unspecified
             | daemon::RepositoryIndexMode::RepositoryIndexStructural => {
                 FirstSliceIndexMode::Structural
@@ -2499,9 +3717,9 @@ fn repository_index_with_intent(
     };
     let lifecycle_deadline = lifecycle_deadline(work_deadline)?;
     let deadline_unix_ms = deadline_unix_ms(work_deadline)?;
-    let mut plan_hasher = blake3::Hasher::new();
-    match intent {
-        RepositoryIndexIntent::Requested => {
+    let plan_hash = match intent {
+        RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher => {
+            let mut plan_hasher = blake3::Hasher::new();
             // Preserve the original caller-plan identity across the two-stage
             // activation change so a durable Auto submission remains retryable.
             let plan_mode = if requested_mode == daemon::RepositoryIndexMode::RepositoryIndexAuto
@@ -2514,27 +3732,23 @@ fn repository_index_with_intent(
             plan_hasher.update(b"rootlight.repository-index-plan/1\0");
             plan_hasher.update(request.root.as_bytes());
             plan_hasher.update(&[repository_index_mode_tag(plan_mode)]);
+            PlanHash::from_bytes(*plan_hasher.finalize().as_bytes())
         }
         RepositoryIndexIntent::SemanticRefinement {
             structural_generation,
-        } => {
-            plan_hasher.update(b"rootlight.repository-index-plan/2\0");
-            plan_hasher.update(request.root.as_bytes());
-            plan_hasher.update(&[repository_index_mode_tag(mode)]);
-            plan_hasher.update(b"\0semantic-refinement\0");
-            plan_hasher.update(structural_generation.as_bytes());
-        }
-    }
+        } => semantic_refinement_plan_hash(&request.root, structural_generation),
+    };
     let mut submission = OperationSubmission::new(
         operation,
         OperationKind::RepositoryIndex,
-        PlanHash::from_bytes(*plan_hasher.finalize().as_bytes()),
+        plan_hash,
         context.client_instance_id,
         detached,
         Some(deadline_unix_ms),
         (!detached).then_some(deadline_unix_ms),
     )
     .map_err(|error| operation_error(&error, Some(operation)))?;
+    let mut resume_pre_submitted_semantic = false;
     match journal_call(
         runtime,
         context.deadline,
@@ -2573,22 +3787,33 @@ fn repository_index_with_intent(
                 ..submission
             };
             let existing = journal_call(runtime, context.deadline, journal.retry_status(retry))?;
-            if let Some(admitted) = admission_ack {
-                let _ = admitted.try_send(Ok(()));
+            if matches!(intent, RepositoryIndexIntent::SemanticRefinement { .. })
+                && existing.state == OperationState::Queued
+            {
+                submission = retry;
+                resume_pre_submitted_semantic = true;
+            } else {
+                if let Some(admitted) = admission_ack {
+                    let _ = admitted.try_send(Ok(()));
+                }
+                let response = retry_index_response(metadata, existing, mode)?;
+                if auto_refinement {
+                    return complete_auto_structural_index(
+                        &request.root,
+                        operation,
+                        context,
+                        reply,
+                        response,
+                        AutoRefinementResources {
+                            semantic_refinements,
+                            refinement,
+                            journal,
+                            runtime,
+                        },
+                    );
+                }
+                return Ok(response);
             }
-            let response = retry_index_response(metadata, existing, mode)?;
-            if auto_refinement {
-                return complete_auto_structural_index(
-                    &request.root,
-                    operation,
-                    context,
-                    reply,
-                    response,
-                    semantic_refinements,
-                    refinement,
-                );
-            }
-            return Ok(response);
         }
         Err(error) if error.code() == ErrorCode::NotFound => {}
         Ok(_) => return Err(internal_error()),
@@ -2601,9 +3826,20 @@ fn repository_index_with_intent(
     }
     let started_unix_ms = unix_time_ms()?;
     let service_guard = read_service(service)?;
-    let admission = service_guard
-        .admit_rust_fixture(&root, &context.cancellation)
-        .map_err(service_error)?;
+    let admission = match service_guard.admit_rust_fixture(&root, &context.cancellation) {
+        Ok(admission) => admission,
+        Err(error) => {
+            drop(service_guard);
+            let error = service_error(error);
+            terminalize_pre_submitted_semantic(
+                resume_pre_submitted_semantic,
+                operation,
+                &error,
+                journal,
+            )?;
+            return Err(error);
+        }
+    };
     drop(service_guard);
     let metadata_admission = match lock_metadata(metadata) {
         Ok(mut operation_metadata) => operation_metadata
@@ -2613,35 +3849,67 @@ fn repository_index_with_intent(
     };
     if let Err(error) = metadata_admission {
         read_service(service)?.release_index_admission(admission);
+        terminalize_pre_submitted_semantic(
+            resume_pre_submitted_semantic,
+            operation,
+            &error,
+            journal,
+        )?;
         return Err(error);
     }
-    submission = submission
-        .with_repository_context(
-            RepositoryOperationSubmission::new(
-                admission.repository,
-                admission.parent,
-                started_unix_ms,
-                admission.estimated_disk_bytes,
-                if auto_refinement {
-                    RepositoryOperationMode::Auto
-                } else {
-                    repository_operation_mode(mode)
-                },
+    if resume_pre_submitted_semantic {
+        let Some(repository_context) = submission.repository_context else {
+            let error = internal_error();
+            lock_metadata(metadata)?.remove_unpublished(operation);
+            read_service(service)?.release_index_admission(admission);
+            terminalize_pre_submitted_semantic(true, operation, &error, journal)?;
+            return Err(error);
+        };
+        if repository_context.repository != admission.repository
+            || repository_context.parent_generation != admission.parent
+            || repository_context.root_identity != Some(*admission.root_identity.as_bytes())
+        {
+            let error = internal_error();
+            lock_metadata(metadata)?.remove_unpublished(operation);
+            read_service(service)?.release_index_admission(admission);
+            terminalize_pre_submitted_semantic(true, operation, &error, journal)?;
+            return Err(error);
+        }
+    } else {
+        submission = submission
+            .with_repository_context(
+                RepositoryOperationSubmission::new(
+                    admission.repository,
+                    admission.parent,
+                    started_unix_ms,
+                    admission.estimated_disk_bytes,
+                    if auto_refinement {
+                        RepositoryOperationMode::Auto
+                    } else {
+                        repository_operation_mode(mode)
+                    },
+                )
+                .unwrap_or_else(|_| unreachable!("wall-clock starts are nonzero"))
+                .with_root_identity(*admission.root_identity.as_bytes()),
             )
-            .unwrap_or_else(|_| unreachable!("wall-clock starts are nonzero"))
-            .with_root_identity(*admission.root_identity.as_bytes()),
-        )
-        .unwrap_or_else(|_| unreachable!("repository context matches the operation kind"));
+            .unwrap_or_else(|_| unreachable!("repository context matches the operation kind"));
+    }
     let submitted =
         match journal_lifecycle_call(runtime, journal.submit_until(submission, context.deadline)) {
             Ok(submitted) => submitted,
             Err(error) => {
                 lock_metadata(metadata)?.remove_unpublished(operation);
                 read_service(service)?.release_index_admission(admission);
+                terminalize_pre_submitted_semantic(
+                    resume_pre_submitted_semantic,
+                    operation,
+                    &error,
+                    journal,
+                )?;
                 return Err(error);
             }
         };
-    if !submitted.inserted {
+    if !submitted.inserted && !resume_pre_submitted_semantic {
         if let Some(admitted) = admission_ack {
             let _ = admitted.try_send(Ok(()));
         }
@@ -2667,6 +3935,7 @@ fn repository_index_with_intent(
         let response = admitted_index_response(admission, &submitted.operation, mode);
         let _ = reply.send(Ok(FirstSliceIpcResponse::RepositoryIndex(response)));
     }
+    let mut publication_committed = false;
     let result = (|| {
         if let Some(hook) = publication_hook
             && let Err(error) = hook.pause(PublicationBoundary::AfterAdmission)
@@ -2780,7 +4049,7 @@ fn repository_index_with_intent(
             };
             let service = read_service(service)?;
             match intent {
-                RepositoryIndexIntent::Requested => service
+                RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher => service
                     .prepare_repository_with_mode_and_progress(
                         &root,
                         mode,
@@ -2860,6 +4129,21 @@ fn repository_index_with_intent(
                         != Some(structural_generation)
                 {
                     let error = stale_generation();
+                    finish_failed_index(
+                        runtime,
+                        lifecycle_deadline,
+                        journal,
+                        metadata,
+                        operation,
+                        &cancellation,
+                        &error,
+                    )?;
+                    return Err(error);
+                }
+                if matches!(intent, RepositoryIndexIntent::Watcher)
+                    && semantic_refinement_active(semantic_refinements, admission.repository)?
+                {
+                    let error = operation_in_progress();
                     finish_failed_index(
                         runtime,
                         lifecycle_deadline,
@@ -3037,13 +4321,14 @@ fn repository_index_with_intent(
                         },
                     )
                 };
-                let (receipt, written_bytes) = match commit {
+                let (receipt, written_bytes, operation_evidence) = match commit {
                     Ok(commit) => {
+                        let operation_evidence = *commit.evidence();
                         let (receipt, written_bytes) = commit.into_parts();
                         if receipt != staged_receipt {
                             lock_metadata(metadata)?.stage(operation, receipt.clone());
                         }
-                        (receipt, written_bytes)
+                        (receipt, written_bytes, operation_evidence)
                     }
                     Err(_error) => {
                         let public = failed_closed_publication(operation);
@@ -3131,10 +4416,50 @@ fn repository_index_with_intent(
                         ),
                     );
                 }
-                let mut metadata = lock_metadata(metadata)?;
-                metadata.observe_terminal(&operation_record);
-                metadata.commit(operation)?;
-                Ok(index_response(receipt, &operation_record, mode))
+                let operation_evidence = repository_operation_evidence(operation_evidence);
+                let evidence_deadline = fresh_lifecycle_deadline(lifecycle_deadline)?;
+                let evidence_projection = journal_lifecycle_call(
+                    runtime,
+                    journal.record_repository_evidence_until(
+                        operation,
+                        operation_evidence,
+                        evidence_deadline,
+                    ),
+                );
+                if evidence_projection.is_err() {
+                    let retry_deadline = fresh_lifecycle_deadline(lifecycle_deadline)?;
+                    journal_lifecycle_call(
+                        runtime,
+                        journal.record_repository_evidence_until(
+                            operation,
+                            operation_evidence,
+                            retry_deadline,
+                        ),
+                    )?;
+                }
+                let mut operation_metadata = lock_metadata(metadata)?;
+                operation_metadata.observe_terminal(&operation_record);
+                operation_metadata.commit(operation)?;
+                drop(operation_metadata);
+                publication_committed = true;
+                let response = index_response(receipt, &operation_record, mode);
+                if auto_refinement {
+                    complete_auto_structural_index(
+                        &request.root,
+                        operation,
+                        context,
+                        reply,
+                        response,
+                        AutoRefinementResources {
+                            semantic_refinements,
+                            refinement,
+                            journal,
+                            runtime,
+                        },
+                    )
+                } else {
+                    Ok(response)
+                }
             }
             Err(error) => {
                 let public = repository_index_error(
@@ -3168,23 +4493,20 @@ fn repository_index_with_intent(
     {
         state.set_adapter_status(HealthStatus::Degraded);
     }
-    if result.is_err() {
+    if result.is_err() && !publication_committed {
         read_service(service)?
             .restore_repository_registration(admission.root_identity, admission.repository)
             .map_err(service_error)?;
     }
-    match result {
-        Ok(response) if auto_refinement => complete_auto_structural_index(
-            &request.root,
-            operation,
-            context,
-            reply,
-            response,
-            semantic_refinements,
-            refinement,
-        ),
-        result => result,
-    }
+    result
+}
+
+#[derive(Clone, Copy)]
+struct AutoRefinementResources<'a> {
+    semantic_refinements: &'a SemanticRefinements,
+    refinement: &'a SyncSender<SemanticRefinementCommand>,
+    journal: &'a JournalActorHandle,
+    runtime: &'a tokio::runtime::Runtime,
 }
 
 fn complete_auto_structural_index(
@@ -3193,8 +4515,7 @@ fn complete_auto_structural_index(
     context: &FirstSliceIpcContext,
     reply: &mut Option<Reply>,
     mut response: daemon::RepositoryIndexResponse,
-    semantic_refinements: &SemanticRefinements,
-    refinement: &SyncSender<SemanticRefinementCommand>,
+    resources: AutoRefinementResources<'_>,
 ) -> Result<daemon::RepositoryIndexResponse, PublicError> {
     let Some(published_generation) = response.published_generation.as_ref() else {
         return Ok(response);
@@ -3206,6 +4527,23 @@ fn complete_auto_structural_index(
     let refinement_deadline = Instant::now()
         .checked_add(DETACHED_INDEX_TIMEOUT)
         .ok_or_else(internal_error)?;
+    let semantic_record = ensure_semantic_refinement_operation(
+        SemanticRefinementAdmission {
+            root,
+            parent_operation: operation,
+            semantic_operation,
+            repository,
+            structural_generation,
+            context,
+        },
+        resources.journal,
+        resources.runtime,
+        refinement_deadline,
+    )?;
+    response.semantic_operation = Some(operation_to_wire(semantic_operation));
+    if semantic_record.state != OperationState::Queued {
+        return deliver_structural_response(reply, response);
+    }
     let cancellation = Cancellation::with_deadline(refinement_deadline);
     let refinement_context = FirstSliceIpcContext {
         client_instance_id: context.client_instance_id,
@@ -3232,38 +4570,199 @@ fn complete_auto_structural_index(
     };
     let mut scheduled = false;
     if register_semantic_refinement(
-        semantic_refinements,
+        resources.semantic_refinements,
         semantic_operation,
         repository,
         cancellation,
     )? {
-        match refinement.try_send(command) {
+        match resources.refinement.try_send(command) {
             Ok(()) => {
                 scheduled = true;
             }
             Err(TrySendError::Full(_)) => {
-                remove_semantic_refinement(semantic_refinements, semantic_operation)?;
+                remove_semantic_refinement(resources.semantic_refinements, semantic_operation)?;
+                fail_queued_semantic_refinement(
+                    semantic_operation,
+                    resource_exhausted(),
+                    resources.journal,
+                    resources.runtime,
+                    refinement_deadline,
+                )?;
             }
             Err(TrySendError::Disconnected(_)) => {
-                remove_semantic_refinement(semantic_refinements, semantic_operation)?;
+                remove_semantic_refinement(resources.semantic_refinements, semantic_operation)?;
+                fail_queued_semantic_refinement(
+                    semantic_operation,
+                    internal_error(),
+                    resources.journal,
+                    resources.runtime,
+                    refinement_deadline,
+                )?;
             }
         }
     }
-    if scheduled
-        && matches!(
-            admission.recv_timeout(REFINEMENT_ADMISSION_WAIT),
-            Ok(Ok(()))
-        )
-    {
-        response.semantic_operation = Some(operation_to_wire(semantic_operation));
+    if scheduled {
+        // Admission remains a best-effort latency optimization. The stable
+        // identity must not disappear merely because an earlier refinement is
+        // still occupying the serialized semantic lane.
+        let _ = admission.recv_timeout(REFINEMENT_ADMISSION_WAIT);
     }
 
     // The bounded refinement lane now owns the expensive follow-up. Queries
     // share the immutable service view while it prepares the next generation.
+    deliver_structural_response(reply, response)
+}
+
+fn deliver_structural_response(
+    reply: &mut Option<Reply>,
+    response: daemon::RepositoryIndexResponse,
+) -> Result<daemon::RepositoryIndexResponse, PublicError> {
     if let Some(reply) = reply.take() {
         let _ = reply.send(Ok(FirstSliceIpcResponse::RepositoryIndex(response.clone())));
     }
     Ok(response)
+}
+
+#[derive(Clone, Copy)]
+struct SemanticRefinementAdmission<'a> {
+    root: &'a str,
+    parent_operation: OperationId,
+    semantic_operation: OperationId,
+    repository: RepositoryId,
+    structural_generation: GenerationId,
+    context: &'a FirstSliceIpcContext,
+}
+
+fn ensure_semantic_refinement_operation(
+    admission: SemanticRefinementAdmission<'_>,
+    journal: &JournalActorHandle,
+    runtime: &tokio::runtime::Runtime,
+    deadline: Instant,
+) -> Result<OperationRecord, PublicError> {
+    let SemanticRefinementAdmission {
+        root,
+        parent_operation,
+        semantic_operation,
+        repository,
+        structural_generation,
+        context,
+    } = admission;
+    let parent_context = journal_call(
+        runtime,
+        deadline,
+        journal.repository_operation_context(parent_operation),
+    )?;
+    if parent_context.repository != repository
+        || parent_context.mode != RepositoryOperationMode::Auto
+    {
+        return Err(internal_error());
+    }
+    let root_identity = parent_context.root_identity.ok_or_else(internal_error)?;
+    let plan_hash = semantic_refinement_plan_hash(root, structural_generation);
+    match journal_call(
+        runtime,
+        deadline,
+        journal.control(ControlRequest::OperationStatus(semantic_operation)),
+    ) {
+        Ok(ControlResponse::OperationStatus(record)) => {
+            let repository_context = journal_call(
+                runtime,
+                deadline,
+                journal.repository_operation_context(semantic_operation),
+            )?;
+            if record.kind != OperationKind::RepositoryIndex
+                || record.plan_hash != plan_hash
+                || record.owner != context.client_instance_id
+                || !record.detached
+                || repository_context.repository != repository
+                || repository_context.parent_generation != Some(structural_generation)
+                || repository_context.mode != RepositoryOperationMode::Deep
+                || repository_context.root_identity != Some(root_identity)
+            {
+                return Err(internal_error());
+            }
+            return Ok(record);
+        }
+        Err(error) if error.code() == ErrorCode::NotFound => {}
+        Ok(_) => return Err(internal_error()),
+        Err(error) => return Err(error),
+    }
+    let started_unix_ms = unix_time_ms()?;
+    let deadline_unix_ms = deadline_unix_ms(deadline)?;
+    let repository_submission = RepositoryOperationSubmission::new(
+        repository,
+        Some(structural_generation),
+        started_unix_ms,
+        parent_context.estimated_disk_bytes,
+        RepositoryOperationMode::Deep,
+    )
+    .map_err(|error| operation_error(&error, Some(semantic_operation)))?
+    .with_root_identity(root_identity);
+    let submission = OperationSubmission::new(
+        semantic_operation,
+        OperationKind::RepositoryIndex,
+        plan_hash,
+        context.client_instance_id,
+        true,
+        Some(deadline_unix_ms),
+        None,
+    )
+    .map_err(|error| operation_error(&error, Some(semantic_operation)))?
+    .with_repository_context(repository_submission)
+    .map_err(|error| operation_error(&error, Some(semantic_operation)))?;
+    journal_lifecycle_call(runtime, journal.submit_until(submission, deadline))
+        .map(|submitted| submitted.operation)
+}
+
+fn fail_queued_semantic_refinement(
+    operation: OperationId,
+    error: PublicError,
+    journal: &JournalActorHandle,
+    runtime: &tokio::runtime::Runtime,
+    deadline: Instant,
+) -> Result<(), PublicError> {
+    let error_for_compensation = error.clone();
+    let record = journal_lifecycle_call(
+        runtime,
+        journal.fail_operation_until(operation, error, deadline),
+    )
+    .or_else(|_| {
+        journal
+            .compensate_unowned_operation(operation, error_for_compensation, None)
+            .map_err(|error| operation_error(&error, Some(operation)))
+    })?;
+    if !record.state.is_terminal() {
+        return Err(internal_error());
+    }
+    Ok(())
+}
+
+fn terminalize_pre_submitted_semantic(
+    pre_submitted: bool,
+    operation: OperationId,
+    error: &PublicError,
+    journal: &JournalActorHandle,
+) -> Result<(), PublicError> {
+    if !pre_submitted {
+        return Ok(());
+    }
+    let record = journal
+        .compensate_unowned_operation(operation, error.clone(), None)
+        .map_err(|error| operation_error(&error, Some(operation)))?;
+    if !record.state.is_terminal() {
+        return Err(internal_error());
+    }
+    Ok(())
+}
+
+fn semantic_refinement_plan_hash(root: &str, structural_generation: GenerationId) -> PlanHash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rootlight.repository-index-plan/2\0");
+    hasher.update(root.as_bytes());
+    hasher.update(&[repository_index_mode_tag(FirstSliceIndexMode::Deep)]);
+    hasher.update(b"\0semantic-refinement\0");
+    hasher.update(structural_generation.as_bytes());
+    PlanHash::from_bytes(*hasher.finalize().as_bytes())
 }
 
 fn register_semantic_refinement(
@@ -3312,6 +4811,17 @@ fn cancel_semantic_refinements(
         }
     }
     Ok(())
+}
+
+fn semantic_refinement_active(
+    refinements: &Mutex<BTreeMap<OperationId, PendingSemanticRefinement>>,
+    repository: RepositoryId,
+) -> Result<bool, PublicError> {
+    Ok(refinements
+        .lock()
+        .map_err(|_| internal_error())?
+        .values()
+        .any(|pending| pending.repository == repository))
 }
 
 fn cancel_all_semantic_refinements(
@@ -3708,6 +5218,44 @@ fn index_response(
     }
 }
 
+fn repository_operation_evidence(
+    evidence: FirstSliceIndexOperationEvidence,
+) -> RepositoryOperationEvidence {
+    RepositoryOperationEvidence {
+        build_strategy: match evidence.strategy {
+            FirstSliceIndexOperationStrategy::Initial => RepositoryBuildStrategy::Initial,
+            FirstSliceIndexOperationStrategy::DependencyDirected => {
+                RepositoryBuildStrategy::DependencyDirected
+            }
+            FirstSliceIndexOperationStrategy::ConservativeRepositoryRebuild => {
+                RepositoryBuildStrategy::ConservativeRepositoryRebuild
+            }
+            FirstSliceIndexOperationStrategy::RetainedGeneration => {
+                RepositoryBuildStrategy::RetainedGeneration
+            }
+        },
+        fallback_reason: evidence.fallback_reason.map(|reason| match reason {
+            ServiceFallbackReason::MissingDependencyDeclaration => {
+                RepositoryFallbackReason::MissingDependencyDeclaration
+            }
+            ServiceFallbackReason::ClosureWorkExceeded => {
+                RepositoryFallbackReason::ClosureWorkExceeded
+            }
+        }),
+        invalidated_units: evidence.invalidated_units,
+        changed_inputs: evidence.changed_inputs,
+        changed_files: evidence.changed_files,
+        reused_files: evidence.reused_files,
+        rebuilt_files: evidence.rebuilt_files,
+        reused_facts: evidence.reused_facts,
+        rebuilt_facts: evidence.rebuilt_facts,
+        referenced_bytes: evidence.referenced_bytes,
+        newly_written_bytes: evidence.newly_written_bytes,
+        reserved_memory_bytes: evidence.reserved_memory_bytes,
+        owned_memory_bytes: evidence.owned_memory_bytes,
+    }
+}
+
 fn repository_operation_status(
     journal: &JournalActorHandle,
     metadata: &Mutex<OperationMetadataSet>,
@@ -3743,19 +5291,27 @@ fn repository_operation_status(
         ControlResponse::Error(error) => return Err(error),
         _ => return Err(internal_error()),
     };
-    if record.kind != OperationKind::RepositoryIndex {
+    if !matches!(
+        record.kind,
+        OperationKind::RepositoryIndex | OperationKind::Recovery
+    ) {
         return Err(not_found());
     }
+    let repository_context = match journal_call(
+        runtime,
+        context.deadline,
+        journal.repository_operation_context(operation),
+    ) {
+        Ok(context) => Some(context),
+        Err(error) if error.code() == ErrorCode::NotFound => None,
+        Err(error) => return Err(error),
+    };
     let metadata = match lock_metadata(metadata)?.records.get(&operation).cloned() {
         Some(metadata) => metadata,
-        None => {
-            let durable_context = journal_call(
-                runtime,
-                context.deadline,
-                journal.repository_operation_context(operation),
-            )?;
-            OperationMetadata::from_durable_context(durable_context, &record)
-        }
+        None => OperationMetadata::from_durable_context(
+            repository_context.ok_or_else(not_found)?,
+            &record,
+        ),
     };
     let record =
         persist_visible_operation_resources(journal, runtime, context.deadline, record, &metadata)?;
@@ -3780,9 +5336,12 @@ fn repository_operation_status(
             bytes_examined: metadata.bytes_examined,
             index_stage: repository_operation_stage(&visible).to_owned(),
             semantic_operation: None,
+            ..Default::default()
         });
     }
-    let published_generation = if record.state == OperationState::Succeeded {
+    let published_generation = if record.kind == OperationKind::RepositoryIndex
+        && record.state == OperationState::Succeeded
+    {
         match metadata.publication {
             PublicationState::Staged => return Err(operation_in_progress()),
             PublicationState::Committed => {}
@@ -3804,16 +5363,9 @@ fn repository_operation_status(
     // expose only this durable snapshot so an immediate restart cannot make a
     // value already returned to the client regress.
     let (peak_rss_bytes, written_bytes) = (record.peak_rss_bytes, record.written_bytes);
-    let semantic_operation = if record.state == OperationState::Succeeded {
-        let repository_context = match journal_call(
-            runtime,
-            context.deadline,
-            journal.repository_operation_context(operation),
-        ) {
-            Ok(context) => Some(context),
-            Err(error) if error.code() == ErrorCode::NotFound => None,
-            Err(error) => return Err(error),
-        };
+    let semantic_operation = if record.kind == OperationKind::RepositoryIndex
+        && record.state == OperationState::Succeeded
+    {
         if repository_context.is_some_and(|context| context.mode == RepositoryOperationMode::Auto) {
             let candidate = semantic_refinement_operation(operation);
             match journal_call(
@@ -3836,7 +5388,7 @@ fn repository_operation_status(
     } else {
         None
     };
-    Ok(daemon::RepositoryOperationStatusResponse {
+    let mut response = daemon::RepositoryOperationStatusResponse {
         schema_version: Some(schema_version()),
         operation: Some(operation_record_to_wire(&record)),
         published_generation: published_generation.map(generation_to_wire),
@@ -3848,7 +5400,53 @@ fn repository_operation_status(
         bytes_examined: metadata.bytes_examined,
         index_stage: repository_operation_stage(&record).to_owned(),
         semantic_operation: semantic_operation.map(operation_to_wire),
-    })
+        ..Default::default()
+    };
+    if record.kind == OperationKind::RepositoryIndex
+        && let Some(evidence) = repository_context.and_then(|context| context.evidence)
+    {
+        project_repository_operation_evidence(&mut response, evidence);
+    }
+    Ok(response)
+}
+
+fn project_repository_operation_evidence(
+    response: &mut daemon::RepositoryOperationStatusResponse,
+    evidence: RepositoryOperationEvidence,
+) {
+    response.build_strategy = match evidence.build_strategy {
+        RepositoryBuildStrategy::Initial => daemon::RepositoryBuildStrategy::RepositoryBuildInitial,
+        RepositoryBuildStrategy::DependencyDirected => {
+            daemon::RepositoryBuildStrategy::RepositoryBuildDependencyDirected
+        }
+        RepositoryBuildStrategy::ConservativeRepositoryRebuild => {
+            daemon::RepositoryBuildStrategy::RepositoryBuildConservativeRepositoryRebuild
+        }
+        RepositoryBuildStrategy::RetainedGeneration => {
+            daemon::RepositoryBuildStrategy::RepositoryBuildRetainedGeneration
+        }
+    } as i32;
+    response.fallback_reason = evidence.fallback_reason.map(|reason| {
+        (match reason {
+            RepositoryFallbackReason::MissingDependencyDeclaration => {
+                daemon::RepositoryFallbackReason::RepositoryFallbackMissingDependencyDeclaration
+            }
+            RepositoryFallbackReason::ClosureWorkExceeded => {
+                daemon::RepositoryFallbackReason::RepositoryFallbackClosureWorkExceeded
+            }
+        }) as i32
+    });
+    response.invalidated_units = evidence.invalidated_units;
+    response.changed_inputs = evidence.changed_inputs;
+    response.changed_files = evidence.changed_files;
+    response.reused_files = evidence.reused_files;
+    response.rebuilt_files = evidence.rebuilt_files;
+    response.reused_facts = evidence.reused_facts;
+    response.rebuilt_facts = evidence.rebuilt_facts;
+    response.referenced_bytes = evidence.referenced_bytes;
+    response.newly_written_bytes = evidence.newly_written_bytes;
+    response.reserved_memory_bytes = evidence.reserved_memory_bytes;
+    response.owned_memory_bytes = evidence.owned_memory_bytes;
 }
 
 const fn repository_operation_stage(record: &OperationRecord) -> &'static str {
@@ -6333,6 +7931,7 @@ const fn operation_kind_to_wire(kind: OperationKind) -> daemon::OperationKind {
     match kind {
         OperationKind::ControlProbe => daemon::OperationKind::ControlProbe,
         OperationKind::RepositoryIndex => daemon::OperationKind::RepositoryIndex,
+        OperationKind::Recovery => daemon::OperationKind::Recovery,
     }
 }
 
@@ -7317,7 +8916,7 @@ fn internal_error() -> PublicError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rootlight_daemon_core::JournalActor;
+    use rootlight_daemon_core::{ControlService, DaemonLimits, JournalActor};
     use rootlight_operations::{ClientInstanceId, OperationJournal, OperationStage, RecoveryClass};
     use rootlight_runtime::RuntimePaths;
     use std::{
@@ -7399,6 +8998,253 @@ mod tests {
         assert_eq!(mapped.repositories[0].generation_count, 1);
         assert_eq!(mapped.unreclaimed_temporary_bytes, 64);
         assert_eq!(mapped.disk_margin_bytes, Some(1024));
+    }
+
+    #[test]
+    fn watcher_coalesces_changes_and_preserves_retry_state() {
+        let started = Instant::now();
+        let first = ContentHash::from_bytes([1; 32]);
+        let second = ContentHash::from_bytes([2; 32]);
+        let mut watched = WatchedRepository::discovered(first, started);
+        let first_due = watched.next_attempt;
+        assert!(!watched.dirty);
+        assert_eq!(first_due, started);
+
+        watched.observe(
+            second,
+            watcher_deadline(started, Duration::from_millis(50)),
+            Duration::from_millis(100),
+            Duration::from_secs(30),
+        );
+        assert!(watched.dirty);
+        assert!(watched.next_attempt > first_due);
+
+        let retry_started = watcher_deadline(started, Duration::from_millis(200));
+        watched.retry_after(retry_started, Duration::from_millis(75));
+        assert!(watched.dirty);
+        assert_eq!(
+            watched.next_attempt,
+            watcher_deadline(retry_started, Duration::from_millis(75))
+        );
+
+        let reconciled = watcher_deadline(started, Duration::from_millis(300));
+        watched.reconciled(reconciled);
+        assert!(!watched.dirty);
+        assert_eq!(watched.last_authoritative_reconcile, reconciled);
+    }
+
+    #[test]
+    fn watcher_publication_retries_without_superseding_semantic_refinement() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn watcher_guard() -> bool { true }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut service =
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
+        let initial = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("initial generation publishes");
+        let service = Arc::new(RwLock::new(service));
+        let semantic_refinements = Arc::new(Mutex::new(BTreeMap::new()));
+        let semantic_cancellation = Cancellation::new();
+        register_semantic_refinement(
+            &semantic_refinements,
+            OperationId::from_bytes([111; 16]),
+            initial.repository,
+            semantic_cancellation.clone(),
+        )
+        .expect("semantic refinement registers");
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 8, 8).expect("journal actor starts");
+        let handle = actor.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let metadata = Mutex::new(OperationMetadataSet::new(8));
+        let (refinement, refinement_receiver) = mpsc::sync_channel(1);
+        let lanes = FirstSliceServiceLanes {
+            service: Arc::clone(&service),
+            index_serialization: Arc::new(Mutex::new(())),
+            semantic_refinements,
+            graph_projections: Arc::new(Mutex::new(GraphProjectionRegistry::new())),
+            refinement,
+            recovery_ready: Arc::new(AtomicBool::new(true)),
+            recovery_complete: Arc::new(AtomicBool::new(true)),
+            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
+            support_state: None,
+        };
+        let resources = ServiceRequestResources {
+            journal: &handle,
+            metadata: &metadata,
+            runtime: &runtime,
+            catalog_epoch: Instant::now(),
+            publication_hook: None,
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::SYSTEM,
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation: Cancellation::with_deadline(deadline),
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+        let watcher_operation = OperationId::from_bytes([112; 16]);
+        let mut reply = None;
+
+        let error = repository_index_with_intent(
+            &lanes,
+            resources,
+            daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root: fixture.path().to_string_lossy().into_owned(),
+                operation: Some(operation_to_wire(watcher_operation)),
+                detached: true,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexAuto as i32,
+            },
+            &context,
+            &mut reply,
+            RepositoryIndexIntent::Watcher,
+            None,
+        )
+        .expect_err("watcher retries while semantic work owns the repository");
+
+        assert_eq!(error.code(), ErrorCode::Busy);
+        assert_eq!(semantic_cancellation.reason(), None);
+        assert_eq!(
+            service
+                .read()
+                .expect("service reads")
+                .active_generation_for(initial.repository),
+            Some(initial.generation)
+        );
+        let watcher_record = journal
+            .status(watcher_operation)
+            .expect("watcher operation remains queryable");
+        assert_eq!(watcher_record.state, OperationState::Failed);
+        assert_eq!(
+            watcher_record
+                .error
+                .as_ref()
+                .expect("retry reason persists")
+                .code(),
+            ErrorCode::Busy
+        );
+
+        drop(refinement_receiver);
+        drop(handle);
+        actor.join().expect("journal actor joins");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn watcher_automatically_reconciles_add_edit_and_delete() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        let source = fixture.path().join("src/lib.rs");
+        fs::write(&source, "pub fn answer() -> u32 { 1 }\n").expect("initial source writes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut service = FirstSliceService::new_durable(8, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        let initial = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("initial generation publishes");
+        let service = Arc::new(RwLock::new(service));
+
+        let state = Arc::new(DaemonState::starting());
+        state.set_catalog_status(HealthStatus::Healthy);
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor =
+            JournalActor::start_with_state(Arc::clone(&journal), 16, 16, Arc::clone(&state))
+                .expect("journal actor starts");
+        let handle = actor.handle();
+        let (refinement, _refinement_receiver) = mpsc::sync_channel(4);
+        let lanes = FirstSliceServiceLanes {
+            service: Arc::clone(&service),
+            index_serialization: Arc::new(Mutex::new(())),
+            semantic_refinements: Arc::new(Mutex::new(BTreeMap::new())),
+            graph_projections: Arc::new(Mutex::new(GraphProjectionRegistry::new())),
+            refinement,
+            recovery_ready: Arc::new(AtomicBool::new(true)),
+            recovery_complete: Arc::new(AtomicBool::new(true)),
+            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
+            support_state: Some(Arc::clone(&state)),
+        };
+        let metadata = Arc::new(Mutex::new(OperationMetadataSet::new(32)));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let watcher_cancellation = Cancellation::new();
+        let worker_cancellation = watcher_cancellation.clone();
+        let worker_stopping = Arc::clone(&stopping);
+        let watcher = thread::spawn(move || {
+            watcher_worker(
+                lanes,
+                worker_stopping,
+                worker_cancellation,
+                WatcherWorkerResources {
+                    journal: handle,
+                    metadata,
+                    runtime: tokio::runtime::Builder::new_current_thread()
+                        .enable_time()
+                        .build()
+                        .expect("watcher runtime builds"),
+                    config: WatcherConfig {
+                        poll_interval: Duration::from_millis(10),
+                        debounce_interval: Duration::from_millis(10),
+                        retry_interval: Duration::from_millis(10),
+                        authoritative_interval: Duration::from_secs(30),
+                        maximum_repository_entries: 1_000,
+                    },
+                    nonce: [91; 32],
+                },
+            )
+        });
+        let control = ControlService::with_state(
+            Arc::clone(&journal),
+            [92; 16],
+            Arc::clone(&state),
+            DaemonLimits::default(),
+        );
+
+        wait_for_watcher_status(&control, HealthStatus::Healthy);
+        assert!(
+            journal
+                .repository_operation_contexts()
+                .expect("repository contexts remain readable")
+                .is_empty(),
+            "first observation establishes the watcher baseline without a redundant index"
+        );
+
+        fs::write(&source, "pub fn answer() -> u64 { 200 }\n").expect("source edit writes");
+        let edited = wait_for_watcher_generation(&service, initial.repository, initial.generation);
+
+        let added_source = fixture.path().join("src/added.rs");
+        fs::write(&added_source, "pub fn added() -> bool { true }\n").expect("added source writes");
+        let added = wait_for_watcher_generation(&service, initial.repository, edited);
+
+        fs::remove_file(&added_source).expect("added source deletes");
+        let deleted = wait_for_watcher_generation(&service, initial.repository, added);
+        assert_ne!(deleted, added);
+        wait_for_watcher_operations(&journal, initial.repository, 3);
+        assert_eq!(control.health().watcher_status, HealthStatus::Healthy);
+
+        stopping.store(true, Ordering::Release);
+        let _ = watcher_cancellation.cancel(CancellationReason::Shutdown);
+        watcher
+            .join()
+            .expect("watcher thread joins")
+            .expect("watcher exits cleanly");
+        actor.join().expect("journal actor joins");
     }
 
     #[test]
@@ -7542,6 +9388,16 @@ mod tests {
                                 .expect("adapter input limit fits usize")
                 })
         );
+    }
+
+    #[test]
+    fn output_driven_partition_split_preserves_canonical_order() {
+        let (left, right) =
+            split_project_partition(vec!["a", "b", "c", "d", "e"]).expect("batch is splittable");
+
+        assert_eq!(left, ["a", "b"]);
+        assert_eq!(right, ["c", "d", "e"]);
+        assert!(split_project_partition(vec!["only"]).is_none());
     }
 
     #[test]
@@ -7856,6 +9712,7 @@ mod tests {
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),
+            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
             support_state: None,
         };
 
@@ -7868,9 +9725,10 @@ mod tests {
             daemon::RepositoryIndexMode::RepositoryIndexStructural as i32
         );
         assert!(response.published_generation.is_some());
-        assert!(
-            response.semantic_operation.is_none(),
-            "the parent cannot advertise a child before durable child admission"
+        assert_eq!(
+            parse_operation(response.semantic_operation.as_ref())
+                .expect("scheduled semantic child has a stable identity"),
+            semantic_refinement_operation(operation)
         );
         assert_eq!(
             journal
@@ -8033,6 +9891,15 @@ mod tests {
                 .expect("durably admitted semantic child is exposed"),
             semantic_refinement_operation(operation)
         );
+        assert_eq!(
+            status.build_strategy,
+            daemon::RepositoryBuildStrategy::RepositoryBuildInitial as i32
+        );
+        assert!(status.rebuilt_files > 0);
+        assert!(status.rebuilt_facts > 0);
+        assert_eq!(status.newly_written_bytes, status.written_bytes);
+        assert!(status.reserved_memory_bytes > 0);
+        assert_eq!(status.owned_memory_bytes, status.reserved_memory_bytes);
 
         drop(handle);
         actor.join().expect("journal actor joins");
@@ -8059,7 +9926,7 @@ mod tests {
     }
 
     #[test]
-    fn full_refinement_queue_preserves_the_published_structural_response() {
+    fn full_refinement_queue_terminalizes_the_durable_semantic_child() {
         let repository = RepositoryId::from_bytes([31; 16]);
         let generation = GenerationId::from_bytes([32; 20]);
         let operation = OperationId::from_bytes([33; 16]);
@@ -8094,6 +9961,39 @@ mod tests {
         };
         let semantic_refinements = Arc::new(Mutex::new(BTreeMap::new()));
         let mut reply = None;
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        journal
+            .submit(
+                OperationSubmission::new(
+                    operation,
+                    OperationKind::RepositoryIndex,
+                    PlanHash::from_bytes([33; 32]),
+                    context.client_instance_id,
+                    true,
+                    None,
+                    None,
+                )
+                .expect("parent submission is valid")
+                .with_repository_context(
+                    RepositoryOperationSubmission::new(
+                        repository,
+                        None,
+                        1,
+                        1,
+                        RepositoryOperationMode::Auto,
+                    )
+                    .expect("parent repository context is valid")
+                    .with_root_identity([36; 32]),
+                )
+                .expect("repository context matches the operation kind"),
+            )
+            .expect("parent operation submits");
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("journal actor starts");
+        let handle = actor.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
 
         let completed = complete_auto_structural_index(
             "repository",
@@ -8101,8 +10001,12 @@ mod tests {
             &context,
             &mut reply,
             response.clone(),
-            &semantic_refinements,
-            &refinement,
+            AutoRefinementResources {
+                semantic_refinements: &semantic_refinements,
+                refinement: &refinement,
+                journal: &handle,
+                runtime: &runtime,
+            },
         )
         .expect("queue pressure cannot replace structural success");
 
@@ -8110,7 +10014,21 @@ mod tests {
             completed.published_generation,
             response.published_generation
         );
-        assert!(completed.semantic_operation.is_none());
+        let semantic_operation = parse_operation(completed.semantic_operation.as_ref())
+            .expect("the durable semantic child is advertised");
+        assert_eq!(semantic_operation, semantic_refinement_operation(operation));
+        let semantic_record = journal
+            .status(semantic_operation)
+            .expect("the rejected semantic child remains queryable");
+        assert_eq!(semantic_record.state, OperationState::Failed);
+        assert_eq!(
+            semantic_record
+                .error
+                .as_ref()
+                .expect("queue rejection is persisted")
+                .code(),
+            ErrorCode::ResourceExhausted
+        );
         assert!(
             semantic_refinements
                 .lock()
@@ -8118,6 +10036,145 @@ mod tests {
                 .is_empty()
         );
         drop(receiver);
+        drop(handle);
+        actor.join().expect("journal actor joins");
+    }
+
+    #[test]
+    fn superseded_semantic_worker_terminalizes_the_durable_queue_entry() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn current_generation() -> bool { true }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut service =
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
+        let indexed = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("initial generation publishes");
+        let service = Arc::new(RwLock::new(service));
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let semantic_operation = OperationId::from_bytes([113; 16]);
+        let stale_generation = GenerationId::from_bytes([114; 20]);
+        journal
+            .submit(
+                OperationSubmission::new(
+                    semantic_operation,
+                    OperationKind::RepositoryIndex,
+                    PlanHash::from_bytes([113; 32]),
+                    ClientInstanceId::SYSTEM,
+                    true,
+                    None,
+                    None,
+                )
+                .expect("semantic submission is valid")
+                .with_repository_context(
+                    RepositoryOperationSubmission::new(
+                        indexed.repository,
+                        Some(stale_generation),
+                        1,
+                        1,
+                        RepositoryOperationMode::Deep,
+                    )
+                    .expect("semantic context is valid")
+                    .with_root_identity([115; 32]),
+                )
+                .expect("semantic context attaches"),
+            )
+            .expect("semantic operation is durable");
+        let actor = JournalActor::start(Arc::clone(&journal), 8, 8).expect("journal actor starts");
+        let handle = actor.handle();
+        let semantic_refinements = Arc::new(Mutex::new(BTreeMap::new()));
+        register_semantic_refinement(
+            &semantic_refinements,
+            semantic_operation,
+            indexed.repository,
+            Cancellation::new(),
+        )
+        .expect("semantic refinement registers");
+        let (unused_refinement, unused_receiver) = mpsc::sync_channel(1);
+        let lanes = FirstSliceServiceLanes {
+            service,
+            index_serialization: Arc::new(Mutex::new(())),
+            semantic_refinements: Arc::clone(&semantic_refinements),
+            graph_projections: Arc::new(Mutex::new(GraphProjectionRegistry::new())),
+            refinement: unused_refinement,
+            recovery_ready: Arc::new(AtomicBool::new(true)),
+            recovery_complete: Arc::new(AtomicBool::new(true)),
+            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
+            support_state: None,
+        };
+        let stopping = Arc::new(AtomicBool::new(false));
+        let worker_stopping = Arc::clone(&stopping);
+        let metadata = Arc::new(Mutex::new(OperationMetadataSet::new(8)));
+        let (commands, command_receiver) = mpsc::sync_channel(1);
+        let worker_handle = handle.clone();
+        let worker = thread::spawn(move || {
+            semantic_refinement_worker(
+                lanes,
+                worker_handle,
+                metadata,
+                worker_stopping,
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .expect("semantic runtime builds"),
+                command_receiver,
+            );
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (admitted, admission) = mpsc::sync_channel(1);
+        commands
+            .send(SemanticRefinementCommand {
+                request: daemon::RepositoryIndexRequest::default(),
+                context: FirstSliceIpcContext {
+                    client_instance_id: ClientInstanceId::SYSTEM,
+                    selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+                    cancellation: Cancellation::with_deadline(deadline),
+                    deadline,
+                    effective_budget: None,
+                    index_admission: None,
+                },
+                operation: semantic_operation,
+                repository: indexed.repository,
+                structural_generation: stale_generation,
+                admitted,
+            })
+            .expect("semantic command sends");
+
+        let admission_error = admission
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker reports the terminal admission")
+            .expect_err("superseded refinement is rejected");
+        assert_eq!(admission_error.code(), ErrorCode::StaleGeneration);
+        let terminal = journal
+            .status(semantic_operation)
+            .expect("semantic operation remains queryable");
+        assert_eq!(terminal.state, OperationState::Failed);
+        assert_eq!(
+            terminal
+                .error
+                .as_ref()
+                .expect("supersession reason persists")
+                .code(),
+            ErrorCode::StaleGeneration
+        );
+        assert!(
+            semantic_refinements
+                .lock()
+                .expect("refinement registry locks")
+                .is_empty()
+        );
+
+        stopping.store(true, Ordering::Release);
+        drop(commands);
+        worker.join().expect("semantic worker joins");
+        drop(unused_receiver);
+        drop(handle);
+        actor.join().expect("journal actor joins");
     }
 
     #[test]
@@ -8377,6 +10434,70 @@ mod tests {
             panic!("code locate response expected");
         };
         assert_eq!(located.hits.len(), 1);
+        let recovery_deadline = Instant::now() + Duration::from_secs(5);
+        let recovery_context = loop {
+            let context = journal
+                .repository_operation_contexts()
+                .expect("recovery contexts remain queryable")
+                .into_iter()
+                .find(|context| {
+                    journal
+                        .status(context.operation)
+                        .is_ok_and(|record| record.kind == OperationKind::Recovery)
+                });
+            if let Some(context) = context {
+                break context;
+            }
+            assert!(
+                Instant::now() < recovery_deadline,
+                "retained-generation validation did not publish a recovery operation"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(recovery_context.repository, receipt.repository);
+        assert_eq!(recovery_context.parent_generation, Some(receipt.generation));
+        let recovery_status = loop {
+            let recovery_status = execute(
+                &daemon,
+                FirstSliceIpcRequest::RepositoryOperationStatus(
+                    daemon::RepositoryOperationStatusRequest {
+                        schema_version: Some(schema_version()),
+                        operation: Some(operation_to_wire(recovery_context.operation)),
+                        action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                        wait_ms: None,
+                        after_revision: None,
+                    },
+                ),
+            );
+            let FirstSliceIpcResponse::RepositoryOperationStatus(recovery_status) = recovery_status
+            else {
+                panic!("recovery operation status response expected");
+            };
+            if recovery_status.operation.as_ref().is_some_and(|operation| {
+                operation.state == daemon::OperationState::Succeeded as i32
+            }) {
+                break recovery_status;
+            }
+            assert!(
+                Instant::now() < recovery_deadline,
+                "retained-generation recovery did not reach a terminal state"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        let recovery_record = recovery_status
+            .operation
+            .expect("recovery operation remains visible");
+        assert_eq!(recovery_record.kind, daemon::OperationKind::Recovery as i32);
+        assert_eq!(
+            recovery_record.state,
+            daemon::OperationState::Succeeded as i32
+        );
+        assert_eq!(recovery_status.index_stage, "complete");
+        assert!(recovery_status.published_generation.is_none());
+        assert_eq!(
+            recovery_status.build_strategy,
+            daemon::RepositoryBuildStrategy::Unspecified as i32
+        );
 
         drop(daemon);
         runtime
@@ -9535,6 +11656,7 @@ mod tests {
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),
+            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
             support_state: None,
         };
         let error = repository_index(
@@ -10013,6 +12135,7 @@ mod tests {
             refinement: _refinement,
             recovery_ready: Arc::new(AtomicBool::new(false)),
             recovery_complete: Arc::new(AtomicBool::new(false)),
+            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
             support_state: None,
         };
         let resources = ServiceRequestResources {
@@ -10075,6 +12198,77 @@ mod tests {
     }
 
     #[test]
+    fn active_recovery_is_durable_and_guarded_before_restore_work_starts() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn recovery_visibility() -> bool { true }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("active generation publishes");
+        drop(service);
+        let (_, deferred) = FirstSliceService::open_durable_deferred(2, paths.state_dir())
+            .expect("deferred recovery opens");
+        let targets = deferred
+            .active_targets()
+            .expect("active recovery targets load");
+        let [target] = targets.as_slice() else {
+            panic!("one active recovery target expected");
+        };
+        let target = *target;
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("journal actor starts");
+        let handle = actor.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+
+        let recovery = RecoveryOperationGuard::start(&handle, &runtime, target)
+            .expect("recovery operation starts");
+        let operation = recovery.operation();
+
+        let record = journal
+            .status(operation)
+            .expect("recovery operation is immediately queryable");
+        assert_eq!(record.kind, OperationKind::Recovery);
+        assert_eq!(record.state, OperationState::Running);
+        let context = journal
+            .repository_operation_context(operation)
+            .expect("recovery repository context persists");
+        assert_eq!(context.repository, target.repository());
+        assert_eq!(context.parent_generation, Some(target.generation()));
+        drop(recovery);
+        let terminal = journal
+            .status(operation)
+            .expect("unwound recovery remains queryable");
+        assert_eq!(terminal.state, OperationState::Failed);
+        assert_eq!(
+            terminal
+                .error
+                .as_ref()
+                .expect("unwind reason persists")
+                .code(),
+            ErrorCode::Internal
+        );
+
+        drop(handle);
+        actor.join().expect("journal actor joins");
+    }
+
+    #[test]
     fn repository_catalog_mutations_rename_and_delete_only_rootlight_state() {
         let fixture = TempDir::new().expect("fixture root exists");
         fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
@@ -10105,6 +12299,7 @@ mod tests {
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),
+            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
             support_state: None,
         };
         let resources = ServiceRequestResources {
@@ -10219,6 +12414,7 @@ mod tests {
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),
+            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
             support_state: None,
         };
         let resources = ServiceRequestResources {
@@ -10935,6 +13131,79 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "operation did not reach a terminal state"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_watcher_generation(
+        service: &RwLock<FirstSliceService>,
+        repository: RepositoryId,
+        previous: GenerationId,
+    ) -> GenerationId {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let active = service
+                .read()
+                .expect("service lock remains healthy")
+                .active_generation_for(repository)
+                .expect("repository remains registered");
+            if active != previous {
+                return active;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "watcher did not publish a successor generation"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_watcher_status(control: &ControlService, expected: HealthStatus) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if control.health().watcher_status == expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "watcher did not reach the expected health status"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_watcher_operations(
+        journal: &OperationJournal,
+        repository: RepositoryId,
+        minimum: usize,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let contexts = journal
+                .repository_operation_contexts()
+                .expect("repository contexts remain readable")
+                .into_iter()
+                .filter(|context| context.repository == repository)
+                .collect::<Vec<_>>();
+            let records = contexts
+                .iter()
+                .map(|context| {
+                    journal
+                        .status(context.operation)
+                        .expect("watcher operation remains visible")
+                })
+                .collect::<Vec<_>>();
+            if records.len() >= minimum
+                && records
+                    .iter()
+                    .all(|record| record.state == OperationState::Succeeded)
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "watcher operations did not become durably visible"
             );
             thread::sleep(Duration::from_millis(10));
         }

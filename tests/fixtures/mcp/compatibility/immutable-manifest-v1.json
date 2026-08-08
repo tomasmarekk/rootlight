@@ -10,8 +10,8 @@
     },
     {
       "path": "current/catalog.json",
-      "bytes": 1355047,
-      "sha256": "9e34134a7f4a3b11219ddc7bd7c49a41d4a1c6141edbd33573675a6dab8e1abb"
+      "bytes": 1362110,
+      "sha256": "cdc6fc996818d164710f8e848aea603fb694a1f42cd7a776c8ff76b3cb6bc2b0"
     },
     {
       "path": "current/error-examples.json",
@@ -30,8 +30,8 @@
     },
     {
       "path": "current/success-examples.json",
-      "bytes": 36085,
-      "sha256": "c1ceb7eb92d91f7b3dd4eb20970c458ba0f4205977e32a8e4589abfb3a0bd790"
+      "bytes": 36243,
+      "sha256": "013b25667595ca0a554ee0c04b7ffaaa7d9f2ebaff8965ab50516ac1b73118f9"
     },
     {
       "path": "release-history-v1.json",

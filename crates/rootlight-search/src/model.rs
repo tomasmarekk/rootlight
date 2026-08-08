@@ -39,6 +39,10 @@ pub struct LexicalDocument {
     pub documentation: Option<String>,
     /// Whether the declaring file is generated.
     pub generated: bool,
+    /// Whether the entity is test-only or test-related.
+    pub test: bool,
+    /// Whether the entity belongs to a declaration-only type surface.
+    pub declaration_only: bool,
 }
 
 /// Resource limits for deterministic index construction.
@@ -162,6 +166,10 @@ pub struct SearchHit {
     pub tier: String,
     /// Whether the declaring file is generated.
     pub generated: bool,
+    /// Whether the entity is test-only or test-related.
+    pub test: bool,
+    /// Whether the entity belongs to a declaration-only type surface.
+    pub declaration_only: bool,
     /// Versioned backend relevance score before stable identity tie-breaking.
     pub relevance_score: f32,
 }

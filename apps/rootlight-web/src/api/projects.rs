@@ -508,6 +508,7 @@ const fn operation_kind_label(value: OperationKind) -> &'static str {
     match value {
         OperationKind::ControlProbe => "control_probe",
         OperationKind::RepositoryIndex => "repository_index",
+        OperationKind::Recovery => "recovery",
     }
 }
 

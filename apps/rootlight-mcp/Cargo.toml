@@ -15,6 +15,7 @@ blake3.workspace = true
 getrandom.workspace = true
 jsonschema.workspace = true
 rootlight-agent = { path = "../../crates/rootlight-agent" }
+rootlight-build = { path = "../../crates/rootlight-build" }
 rootlight-client = { path = "../../crates/rootlight-client" }
 rootlight-ids = { path = "../../crates/rootlight-ids" }
 rootlight-ir = { path = "../../crates/rootlight-ir" }

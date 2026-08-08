@@ -11,7 +11,7 @@ use std::{
 
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{IncrementalError, ResourceKind};
 
@@ -33,7 +33,7 @@ pub(crate) const HARD_MAX_CLOSURE_WORK: usize = 32_000_000;
 pub(crate) const HARD_MAX_TRACE_ENTRIES: usize = 16_000_000;
 
 /// Stable identity of one language or repository analysis unit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(transparent)]
 pub struct AnalysisUnitId(FactId);
 
@@ -120,7 +120,7 @@ impl FromStr for PassId {
 }
 
 /// A declared class of base or derived semantic facts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FactDomain {
     /// Parsed syntax and syntax diagnostics.
@@ -285,7 +285,7 @@ impl InputKind {
 }
 
 /// One typed dependency key whose value is stored separately as a hash.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(tag = "kind", content = "subject", rename_all = "snake_case")]
 pub enum InputKey {
     /// Actual bytes of one file.
@@ -597,7 +597,7 @@ impl InputSnapshot {
 }
 
 /// Semantic classification of one stable input transition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeClass {
     /// No complete input value changed.

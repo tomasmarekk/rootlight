@@ -449,16 +449,17 @@ fn actual_child_output_quota_and_parent_cancellation_fail_closed() {
             ),
         ],
     );
-    assert!(matches!(
-        execute_isolated_project_adapter(
-            &executable,
-            &session,
-            &request,
-            &ExtensionSupport::default(),
-            &deadline(),
-        ),
-        Err(AdapterHostError::ProjectOutputLimit)
-    ));
+    let output_limited = execute_isolated_project_adapter(
+        &executable,
+        &session,
+        &request,
+        &ExtensionSupport::default(),
+        &deadline(),
+    );
+    assert!(
+        matches!(output_limited, Err(AdapterHostError::ProjectOutputLimit)),
+        "explicit output quota must retain its public error category: {output_limited:?}"
+    );
 
     let cancellation = Cancellation::new();
     assert!(cancellation.cancel(CancellationReason::ClientRequest));

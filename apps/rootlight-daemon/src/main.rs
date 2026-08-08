@@ -93,11 +93,11 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     let telemetry = Arc::new(Telemetry::new(TelemetryOutput::StderrJson));
     let state = Arc::new(DaemonState::starting_with_telemetry(telemetry));
     state.set_catalog_status(HealthStatus::Healthy);
-    let actor = JournalActor::start_with_telemetry(
+    let actor = JournalActor::start_with_state(
         Arc::clone(&journal),
         limits.control_queue_limit(),
         usize::try_from(limits.operation_queue_limit()).map_err(|_| DaemonError::InvalidLimits)?,
-        state.telemetry(),
+        Arc::clone(&state),
     )?;
     let actor_handle = actor.handle();
     let startup_signal = coordinated_startup_signal_publisher(mode);

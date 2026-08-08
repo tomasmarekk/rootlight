@@ -260,8 +260,8 @@ fn tools_list_payloads_match_all_profile_goldens_across_the_process_boundary() {
         ),
         (
             ExposureProfile::Developer,
-            679_160,
-            "be7fd277b11670f5d1f817e7624ef8e95a0b2dcb6f5d495109ee318dca3dcb74",
+            683_110,
+            "9e9d7ff6bc11778909707c4fcecad9bd58384ea5bd3c27bf787e1997720e2cd0",
         ),
     ];
     for (profile, expected_bytes, expected_hash) in expected {

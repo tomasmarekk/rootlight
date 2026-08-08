@@ -140,6 +140,10 @@ fn repository_generation_and_source_queries_survive_daemon_restart() {
             "published_generation",
         ],
     );
+    let successor_operation_id = required_text(
+        &successor,
+        &["result", "structuredContent", "data", "operation_id"],
+    );
     assert_eq!(
         successor["result"]["structuredContent"]["data"]["repository_id"],
         repository_id
@@ -174,12 +178,18 @@ fn repository_generation_and_source_queries_survive_daemon_restart() {
         successor_status["result"]["structuredContent"]["generation"]["parent_generation"],
         generation
     );
-    assert_eq!(
-        successor_status["result"]["structuredContent"]["data"]["operations"]
-            .as_array()
-            .map(Vec::len),
-        Some(2)
+    let operations = successor_status["result"]["structuredContent"]["data"]["operations"]
+        .as_array()
+        .expect("repo.status includes requested operation history");
+    assert!(operations.len() >= 2);
+    assert!(
+        operations
+            .iter()
+            .any(|operation| { operation["operation_id"].as_str() == Some(operation_id.as_str()) })
     );
+    assert!(operations.iter().any(|operation| {
+        operation["operation_id"].as_str() == Some(successor_operation_id.as_str())
+    }));
 
     mcp.finish();
     daemon.finish();

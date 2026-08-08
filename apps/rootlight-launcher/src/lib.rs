@@ -34,6 +34,8 @@ use mcp_bootstrap::{
     DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_RESPONSE_BYTES, bootstrap_initialize,
     exposure_profile_policy_is_valid,
 };
+#[cfg(windows)]
+use rootlight_build::PRODUCT_VERSION;
 use semver::Version;
 use serde::Deserialize;
 
@@ -55,7 +57,7 @@ const MCP_PROFILE_CEILING_ENV: &str = "ROOTLIGHT_MCP_PROFILE_CEILING";
 #[cfg(windows)]
 const MCP_PROFILE_ENV: &str = "ROOTLIGHT_MCP_PROFILE";
 #[cfg(windows)]
-const ROOTLIGHT_LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const ROOTLIGHT_LAUNCHER_VERSION: &str = PRODUCT_VERSION;
 #[cfg(windows)]
 const MCP_INTERNAL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(windows)]

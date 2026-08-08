@@ -26,7 +26,7 @@ use rootlight_adapters::{SemanticProjectAnalyzer, SemanticProjectLanguage};
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, RepositoryId, content_hash};
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, CoverageStatus, DiagnosticSeverity, EntityKind,
+    AnalysisTier, BuildContextIdentity, CoverageStatus, DiagnosticSeverity, EntityFlag, EntityKind,
     ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain, FactRef, IrLimits, OccurrenceRole,
     OccurrenceTarget, ProducerIdentity, ProducerKind, RelationPredicate,
     SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceMappingKind, SourceRef, SourceSpan,
@@ -235,6 +235,135 @@ fn nested_rust_impl_identity_matches_structural_and_project_analysis() {
     );
 }
 
+#[test]
+fn call_occurrences_are_owned_by_the_declaring_function() {
+    let fixture = ProjectFixture::new(
+        ["src/dep.rs", "src/main.rs"],
+        [
+            "pub fn ping() {}\n",
+            "use crate::dep::ping;\npub fn run() {\n    ping();\n}\n",
+        ],
+        SemanticProjectLanguage::Rust,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let run = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "run")
+        .expect("caller function is materialized");
+    let ping = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "ping")
+        .expect("callee function is materialized");
+    let call = output
+        .document()
+        .occurrences
+        .iter()
+        .find(|occurrence| {
+            occurrence.role == OccurrenceRole::CallSite
+                && matches!(
+                    occurrence.target,
+                    OccurrenceTarget::Resolved { symbol } if symbol == ping.id
+                )
+        })
+        .expect("resolved call is materialized");
+
+    assert_eq!(call.enclosing, Some(run.id));
+}
+
+#[test]
+fn project_semantics_preserve_test_classification() {
+    let fixture = ProjectFixture::new(
+        ["src/lib.rs", "tests/semantic.rs"],
+        [
+            "pub fn production() {}\n",
+            "use crate::production;\n#[test]\nfn semantic_behavior() {\n    production();\n}\n",
+        ],
+        SemanticProjectLanguage::Rust,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let test = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "semantic_behavior")
+        .expect("test function is materialized");
+
+    assert!(test.flags.contains(&EntityFlag::Test));
+}
+
+#[test]
+fn go_project_semantics_preserve_test_calls() {
+    let fixture = ProjectFixture::new(
+        ["server/handlers.go", "server/handlers_test.go"],
+        [
+            "package server\nfunc GenerateHandler() {}\n",
+            concat!(
+                "package server\n",
+                "import \"testing\"\n",
+                "func TestGenerateHandler(t *testing.T) {\n",
+                "    GenerateHandler()\n",
+                "}\n",
+            ),
+        ],
+        SemanticProjectLanguage::Go,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let production = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "GenerateHandler")
+        .expect("production function is materialized");
+    let test = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "TestGenerateHandler")
+        .expect("Go test function is materialized");
+
+    assert!(test.flags.contains(&EntityFlag::Test));
+    assert!(
+        output.document().occurrences.iter().any(|occurrence| {
+            occurrence.role == OccurrenceRole::CallSite
+                && occurrence.enclosing == Some(test.id)
+                && matches!(
+                    occurrence.target,
+                    OccurrenceTarget::Resolved { symbol } if symbol == production.id
+                )
+        }),
+        "Go test call resolves through its package scope"
+    );
+}
+
+#[test]
+fn go_project_semantics_do_not_cross_package_directories() {
+    let fixture = ProjectFixture::new(
+        ["first/worker.go", "second/caller.go"],
+        [
+            "package shared\nfunc Work() {}\n",
+            "package shared\nfunc Call() { Work() }\n",
+        ],
+        SemanticProjectLanguage::Go,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let caller = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.display_name == "Call")
+        .expect("caller function is materialized");
+
+    assert!(output.document().occurrences.iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::CallSite
+            && occurrence.enclosing == Some(caller.id)
+            && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    }));
+}
+
 fn assert_real_parser_symbol_identity(
     fixture: &ProjectFixture,
     language: &str,
@@ -328,6 +457,28 @@ fn assert_real_parser_symbol_identity(
             "{kind:?} {name}; project={project_claim:?}; structural={structural_claim:?}"
         );
     }
+}
+
+fn analyze_with_real_parser(
+    fixture: &ProjectFixture,
+) -> rootlight_adapter_sdk::ProjectAnalysisOutput {
+    let parser: Arc<dyn ParseProvider> = Arc::new(real_parser());
+    let analyzer = SemanticProjectAnalyzer::new(
+        fixture.language,
+        parser,
+        producer_identity(),
+        content_hash(b"real-parser-binary"),
+        fixture.build_context,
+    )
+    .expect("project analyzer constructs");
+    execute_project_analysis(
+        &analyzer,
+        &fixture.request(&real_parser_limits(), AnalysisTier::TierB),
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect("project analysis commits")
 }
 
 #[test]
