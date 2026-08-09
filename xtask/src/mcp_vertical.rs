@@ -1888,7 +1888,7 @@ fn exercise_malformed_source(
         &locate.structured["coverage"]["skipped_inputs"],
         "malformed-source skipped inputs",
     )?;
-    if coverage.overall_status != "bounded"
+    if coverage.overall_status != "unknown"
         || coverage.language_status.is_some()
         || coverage.tier.is_some()
         || skipped_inputs == 0
@@ -1899,7 +1899,7 @@ fn exercise_malformed_source(
         || healthy_snapshot.symbol.is_empty()
     {
         return Err(VerticalError::Invariant(
-            "malformed-source scenario did not retain bounded aggregate coverage without inventing language metadata",
+            "malformed-source scenario did not retain unknown aggregate coverage without inventing language metadata",
         ));
     }
     Ok(MalformedSourceEvidence {
