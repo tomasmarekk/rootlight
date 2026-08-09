@@ -991,11 +991,13 @@ fn source_provider_reservation(targets: usize, max_bytes: u32) -> BudgetCharge {
     // preserves a conservative payload bound without multiplying fixed
     // protocol overhead by the number of explicit targets.
     let json_bytes = source_bytes.saturating_add(SOURCE_PROVIDER_ENVELOPE_BYTES);
-    let tokens = source_bytes.max(json_bytes.div_ceil(4));
     BudgetCharge {
         rows: targets,
         results: targets,
-        tokens,
+        // Query responses use the UTF-8 byte upper bound for authoritative
+        // token accounting. Reserving fewer tokens than response bytes lets a
+        // valid child response consume the budget retained for local shaping.
+        tokens: json_bytes,
         source_bytes,
         traversal_facts: targets.saturating_mul(8),
         // Transport budgets require a nonzero depth even for a direct source read.
@@ -4308,6 +4310,11 @@ mod tests {
                 + super::SOURCE_LANGUAGE_BYTES
                 + super::SOURCE_METADATA_BYTES,
             "the serialized snippet, signature, language, and metadata are all reserved"
+        );
+        let provider = super::source_provider_reservation(1, 2_048);
+        assert_eq!(
+            provider.tokens, provider.json_bytes,
+            "provider tokens retain the authoritative UTF-8 byte upper bound"
         );
         let exact_capacity = source_materialization_reservation(1, 2_048, true);
         assert_eq!(
