@@ -357,7 +357,7 @@ fn repository_lifecycle_is_generation_exact_and_preflights_unsupported_controls(
 }
 
 #[test]
-fn repository_status_distinguishes_empty_missing_failed_and_unavailable_results() {
+fn repository_status_distinguishes_empty_missing_unsupported_and_unavailable_results() {
     let fixture = process_support::private_process_tempdir("rl-repo-");
     let repository_root = fixture.path().join("empty-repository");
     fs::create_dir_all(repository_root.join("src"))
@@ -429,9 +429,9 @@ fn repository_status_distinguishes_empty_missing_failed_and_unavailable_results(
     );
 
     fs::remove_file(repository_root.join("src").join("lib.rs"))
-        .expect("indexed source is removed before the failed update");
-    let failed_index = mcp.call(
-        "index-failed",
+        .expect("indexed source is removed before the unsupported-only update");
+    let unsupported_index = mcp.call(
+        "index-unsupported",
         "repo.index",
         json!({
             "root": repository_root,
@@ -439,25 +439,56 @@ fn repository_status_distinguishes_empty_missing_failed_and_unavailable_results(
             "detached": false
         }),
     );
-    assert_public_error(&failed_index, "UNSUPPORTED_CAPABILITY");
+    assert_success(&unsupported_index, "repo.index");
+    let unsupported_content = &unsupported_index["result"]["structuredContent"];
+    assert_eq!(unsupported_content["data"]["state"], "published");
+    assert!(
+        unsupported_content["data"]["diagnostics"]
+            .as_array()
+            .expect("unsupported-only indexing returns diagnostics")
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "unsupported-language")
+    );
+    let successor_generation = required_text(
+        &unsupported_index,
+        &[
+            "result",
+            "structuredContent",
+            "data",
+            "published_generation",
+        ],
+    );
 
-    let failed = mcp.call(
-        "status-failed",
+    let unsupported = mcp.call(
+        "status-unsupported",
         "repo.status",
         json!({
             "repository": {"repository_id": repository_id},
             "include_operations": true
         }),
     );
-    assert_success(&failed, "repo.status");
-    let failed_status = &failed["result"]["structuredContent"];
-    assert_eq!(failed_status["data"]["repository_state"], "ready");
-    assert_eq!(failed_status["data"]["operations"][0]["state"], "failed");
+    assert_success(&unsupported, "repo.status");
+    let unsupported_status = &unsupported["result"]["structuredContent"];
+    assert_eq!(unsupported_status["data"]["repository_state"], "ready");
     assert_eq!(
-        failed_status["data"]["recommended_actions"],
-        json!(["index repository", "inspect operation"])
+        unsupported_status["generation"]["generation_id"],
+        successor_generation
     );
-    assert_eq!(failed_status["warnings"][0]["code"], "stale_generation");
+    assert_eq!(
+        unsupported_status["data"]["operations"][0]["state"],
+        "published"
+    );
+    assert!(
+        !unsupported_status["data"]["recommended_actions"]
+            .as_array()
+            .expect("repository status returns recommended actions")
+            .iter()
+            .any(|action| action == "inspect operation")
+    );
+    assert_eq!(
+        unsupported_status["warnings"][0]["code"],
+        "stale_generation"
+    );
 
     mcp.finish();
     daemon.finish();

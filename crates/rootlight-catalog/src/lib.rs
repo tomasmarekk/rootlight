@@ -375,7 +375,7 @@ impl OracleReader {
                 }
                 IdentityVerificationError::InvalidGeneration
                 | IdentityVerificationError::DuplicateClaim
-                | IdentityVerificationError::IdentityMismatch
+                | IdentityVerificationError::IdentityMismatch(_)
                 | IdentityVerificationError::ManifestMismatch
                 | IdentityVerificationError::UnsupportedExtension
                 | IdentityVerificationError::RecipeEncoding => {
@@ -666,7 +666,7 @@ impl EphemeralOracleReader {
                 }
                 IdentityVerificationError::InvalidGeneration
                 | IdentityVerificationError::DuplicateClaim
-                | IdentityVerificationError::IdentityMismatch
+                | IdentityVerificationError::IdentityMismatch(_)
                 | IdentityVerificationError::ManifestMismatch
                 | IdentityVerificationError::UnsupportedExtension
                 | IdentityVerificationError::RecipeEncoding => {

@@ -67,7 +67,7 @@ fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
 
     let relationships = &outputs["symbol.relationships"];
     assert!(relationships["data"]["groups"].is_array());
-    assert_eq!(relationships["data"]["totals"]["exact"], true);
+    assert_eq!(relationships["data"]["totals"]["exact"], false);
 
     let trace = &outputs["flow.trace"];
     assert_eq!(trace["data"]["projection"]["relations"], json!(["calls"]));
@@ -435,11 +435,11 @@ fn assert_relationship_pagination(mcp: &mut McpProcess, index: &IndexReceipt, sy
     let expected = relationship_records(output);
     if expected.is_empty() {
         // The production first-slice parser records containment and dispatch
-        // candidates, not the served semantic relationship families. This
-        // path proves that missing Tier B facts stay exact and non-pageable;
-        // authenticated multi-page concatenation is covered by the executor's
-        // semantic-port fixture.
-        assert_eq!(output["data"]["totals"]["exact"], true);
+        // candidates, not the served semantic relationship families. An empty
+        // observed set remains non-pageable, while incomplete semantic
+        // coverage prevents an exact negative claim. Authenticated multi-page
+        // concatenation is covered by the executor's semantic-port fixture.
+        assert_eq!(output["data"]["totals"]["exact"], false);
         assert_eq!(output["data"]["totals"]["total_edges"], 0);
         assert_eq!(output["truncated"], false);
         assert!(output["next_cursor"].is_null());

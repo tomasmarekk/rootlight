@@ -15,8 +15,8 @@ use std::{
 use rootlight_client::{
     AdvancedQuery, AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview,
     ChangeImpact, Client, ClientError, CodeDead, CodeLocate, CoverageStatus, FlowTrace,
-    GenerationSelector, HistoryCompare, LocateMode, PlanChange, QueryFreshness,
-    RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryIndex,
+    GenerationSelector, HistoryCompare, LocateMode, OperationKind, OperationState, PlanChange,
+    QueryFreshness, RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryIndex,
     RepositoryIndexMode as ClientRepositoryIndexMode, RepositoryOperationAction,
     RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
     RequestTimeout, SourceEncoding as ClientSourceEncoding, SourceRead,
@@ -855,7 +855,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 IndexMode::Deep => ClientRepositoryIndexMode::Deep,
                 IndexMode::Rebuild => return Err(ClientPortError::Executor),
             };
-            let result = client
+            let mut result = client
                 .repository_index(
                     request.root().to_owned(),
                     operation,
@@ -865,6 +865,38 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 )
                 .await
                 .map_err(|error| map_operation_client_error(error, operation))?;
+            if let Some(wait_ms) = request.wait_ms()
+                && !matches!(
+                    result.state,
+                    OperationState::Succeeded
+                        | OperationState::Failed
+                        | OperationState::Interrupted
+                        | OperationState::Cancelled
+                )
+            {
+                let status = client
+                    .operation_status(
+                        operation,
+                        RepositoryOperationAction::Get,
+                        Some(wait_ms),
+                        Some(result.revision),
+                        request_timeout()?,
+                    )
+                    .await
+                    .map_err(|error| map_operation_client_error(error, operation))?;
+                if status.operation.operation != operation
+                    || status.operation.kind != OperationKind::RepositoryIndex
+                    || status.operation.revision < result.revision
+                    || status.published_generation.is_some()
+                        != (status.operation.state == OperationState::Succeeded)
+                {
+                    return Err(ClientPortError::InvalidResponse);
+                }
+                result.state = status.operation.state;
+                result.revision = status.operation.revision;
+                result.published_generation = status.published_generation;
+                result.semantic_operation = status.semantic_operation;
+            }
             let (mode, providers) = match result.mode {
                 ClientRepositoryIndexMode::Structural => {
                     (IndexMode::Structural, vec![FIRST_SLICE_PROVIDER.to_owned()])

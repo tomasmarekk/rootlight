@@ -264,22 +264,6 @@
         }
       ]
     },
-    "RepositoryAliasSelector": {
-      "description": "Registered repository-alias selector.",
-      "type": "object",
-      "properties": {
-        "alias": {
-          "description": "Registered alias, resolved to exactly one repository.",
-          "type": "string",
-          "maxLength": 256,
-          "minLength": 1
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "alias"
-      ]
-    },
     "RepositoryId": {
       "type": "string",
       "pattern": "^repo1_[a-z2-7]{32}$"
@@ -304,10 +288,6 @@
         {
           "description": "Select by stable repository identifier.",
           "$ref": "#/$defs/RepositoryIdSelector"
-        },
-        {
-          "description": "Select by a configured local alias.",
-          "$ref": "#/$defs/RepositoryAliasSelector"
         }
       ]
     },

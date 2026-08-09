@@ -77,9 +77,50 @@ fn retrieval_contract_matrix_crosses_real_process_boundaries() {
     let mut fixture = RetrievalFixture::spawn();
     supported_profiles_preserve_standalone_and_batch_semantics(&mut fixture);
     supported_language_filters_apply_across_process_boundaries(&mut fixture);
+    source_symbol_selector_resolves_the_complete_definition(&mut fixture);
     unsupported_retrieval_options_fail_with_stable_preflight_errors(&mut fixture);
     retrieval_limits_cursors_and_unresolved_ids_are_truthful(&mut fixture);
     fixture.finish();
+}
+
+fn source_symbol_selector_resolves_the_complete_definition(fixture: &mut RetrievalFixture) {
+    let arguments = json!({
+        "references": [{"symbol_id": fixture.symbols[0].clone()}]
+    });
+    let standalone = fixture.standalone("source-symbol-selector", "source.read", arguments.clone());
+    let batch = fixture.mcp.call(
+        "batch-source-symbol-selector",
+        "query.batch",
+        json!({
+            "repository": {"repository_id": fixture.repository_id},
+            "generation": "active",
+            "budget": {"max_tokens": 16_000},
+            "operations": [{
+                "id": "retrieval",
+                "tool": "source.read",
+                "arguments": arguments
+            }]
+        }),
+    );
+    assert_standalone_batch_parity(&standalone, &batch, "source.read");
+    let output = &standalone["result"]["structuredContent"];
+    assert_common_read_contract(output, &fixture.repository_id);
+    let chunks = output["data"]["chunks"]
+        .as_array()
+        .expect("symbol source selector returns chunks");
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(
+        chunks[0]["content"],
+        "pub fn matrix_target_alpha(value: usize) -> usize {\n    matrix_target_beta(value).saturating_add(1)\n}"
+    );
+    let resolved = &chunks[0]["source_ref"];
+    for field in ["content_hash", "generation", "repository", "span"] {
+        assert_eq!(resolved[field], fixture.source_refs[0][field]);
+    }
+    assert_eq!(
+        resolved["line_hint"],
+        json!({"start_line": 1, "end_line": 3})
+    );
 }
 
 fn supported_language_filters_apply_across_process_boundaries(fixture: &mut RetrievalFixture) {
@@ -298,6 +339,20 @@ fn unsupported_retrieval_options_fail_with_stable_preflight_errors(fixture: &mut
     let repository = || json!({"repository_id": fixture.repository_id});
     let source_ref = fixture.source_refs[0].clone();
     let symbol = fixture.symbols[0].clone();
+    let file_selector = fixture.mcp.call(
+        "source-file-selector",
+        "source.read",
+        json!({
+            "repository": repository(),
+            "references": [{
+                "file_id": source_ref["span"]["file"].clone(),
+                "start_byte": 0,
+                "end_byte": 1
+            }]
+        }),
+    );
+    assert_public_error(&file_selector, "INVALID_ARGUMENT");
+
     let cases = [
         (
             "locate-kinds",
@@ -363,20 +418,6 @@ fn unsupported_retrieval_options_fail_with_stable_preflight_errors(fixture: &mut
             "explain-full-provenance",
             "symbol.explain",
             json!({"repository": repository(), "symbol_ids": [symbol.clone()], "include_provenance": "full"}),
-        ),
-        (
-            "source-symbol-selector",
-            "source.read",
-            json!({"repository": repository(), "references": [{"symbol_id": symbol.clone()}]}),
-        ),
-        (
-            "source-file-selector",
-            "source.read",
-            json!({"repository": repository(), "references": [{
-                "file_id": source_ref["span"]["file"].clone(),
-                "start_byte": 0,
-                "end_byte": 1
-            }]}),
         ),
         (
             "source-standard",
@@ -781,7 +822,10 @@ fn assert_public_error(response: &Value, expected: &str) {
         response.get("error").is_none(),
         "public tool failure escaped as JSON-RPC: {response:#}"
     );
-    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(
+        response["result"]["isError"], true,
+        "expected {expected} public error: {response:#}"
+    );
     assert_eq!(
         response["result"]["structuredContent"]["error"]["code"], expected,
         "unexpected process error: {response:#}"

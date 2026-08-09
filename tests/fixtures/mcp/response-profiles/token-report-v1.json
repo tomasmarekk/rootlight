@@ -64,9 +64,9 @@
       "tool": "operation.status",
       "profile": "compact",
       "framing": "compact_json_output_object",
-      "serialized_bytes": 421,
-      "o200k_tokens": 112,
-      "sha256": "52f1760e539dd4cb9aff8a13cc1f87a27adb4f81ea54ebbeca14221d9ea69558",
+      "serialized_bytes": 515,
+      "o200k_tokens": 137,
+      "sha256": "108aef596049752ef857e773dcab9c5c1446780680e242bd0dee8f538e5743a9",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -501,6 +501,6 @@
       "hard_budget_ceiling_unchanged": true
     }
   ],
-  "total_serialized_bytes": 84960,
-  "total_o200k_tokens": 26402
+  "total_serialized_bytes": 85054,
+  "total_o200k_tokens": 26427
 }

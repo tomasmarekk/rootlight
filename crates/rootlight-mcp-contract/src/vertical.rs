@@ -425,6 +425,7 @@ pub enum RepositorySelector {
     /// Select by stable repository identifier.
     ById(RepositoryIdSelector),
     /// Select by a configured local alias.
+    #[schemars(skip)]
     ByAlias(RepositoryAliasSelector),
 }
 
@@ -584,6 +585,7 @@ pub enum IndexMode {
     /// Request available deep tiers.
     Deep,
     /// Rebuild from a clean generation.
+    #[schemars(skip)]
     Rebuild,
 }
 
@@ -610,20 +612,22 @@ pub struct RepoIndexInput {
     pub root: Option<String>,
     /// Existing repository identity to update.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
     pub repository_id: Option<RepositoryId>,
     /// Optional indexing scope.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
     pub scope: Option<IndexScope>,
     /// Requested indexing mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<IndexMode>,
     /// Per-language maximum requested tier.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 64))]
+    #[schemars(skip)]
     pub requested_tiers: Option<BTreeMap<String, AnalysisTier>>,
     /// Validated operation-scoped configuration override.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 128))]
+    #[schemars(skip)]
     pub configuration_patch: Option<BTreeMap<String, Value>>,
     /// Maximum time to wait for publication or a terminal state.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -852,6 +856,180 @@ pub enum OperationFallbackReason {
     ClosureWorkExceeded,
 }
 
+/// Fact domain named by one invalidation decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationInvalidationFactDomain {
+    /// Parsed syntax and syntax diagnostics.
+    Syntax,
+    /// Exported declarations, signatures, visibility, and imports.
+    PublicSurface,
+    /// Local implementation bodies and body-dependent occurrences.
+    Body,
+    /// Import, type, call, hierarchy, and candidate resolution.
+    Resolution,
+    /// Generation-aligned lexical and derived search facts.
+    Search,
+    /// Bounded derived graph projections and intent-plan aids.
+    DerivedGraph,
+    /// Test identities and explicit test relationships.
+    Tests,
+    /// Routes, RPC, messaging, database, and foreign service links.
+    Services,
+    /// Bounded Git, lineage, ownership, and co-change facts.
+    History,
+}
+
+/// Semantic classification of one invalidation input transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationInvalidationChangeClass {
+    /// No complete input value changed.
+    NoChange,
+    /// A stable input was newly added.
+    Added,
+    /// Only an implementation-body summary changed.
+    BodyOnly,
+    /// A declaration, import, route, test, or exported surface changed.
+    Surface,
+    /// Build targets, compiler options, or dependency context changed.
+    BuildContext,
+    /// Canonical path or containment semantics changed.
+    Move,
+    /// A stable input was removed.
+    Delete,
+    /// Rootlight analysis or derived-index configuration changed.
+    Configuration,
+    /// Grammar, adapter, or resolver producer version changed.
+    ProviderChange,
+}
+
+/// Typed generation input named by an invalidation decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", content = "subject", rename_all = "snake_case")]
+pub enum OperationInvalidationInput {
+    /// Actual bytes of one file.
+    FileContent(String),
+    /// Canonical path semantics of one file.
+    FilePath(String),
+    /// Exported surface of one analysis unit.
+    PublicSurface(String),
+    /// Body summary of one analysis unit.
+    BodySummary(String),
+    /// Import set of one analysis unit.
+    ImportSet(String),
+    /// Build-target identity and membership.
+    BuildTarget(String),
+    /// Compiler and macro option context.
+    CompilerOptions(String),
+    /// Dependency or lockfile resolution.
+    DependencyVersion(String),
+    /// Parser grammar identity.
+    GrammarVersion(String),
+    /// Adapter producer identity.
+    AdapterVersion(String),
+    /// Global resolver revision.
+    ResolverVersion,
+    /// Global analysis-configuration revision.
+    ConfigurationRevision,
+    /// Global search revision.
+    SearchRevision,
+    /// Derived plan or projection identity.
+    DerivedPlan(String),
+}
+
+/// Scoped fact-domain target named by an invalidation decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationInvalidationFactTarget {
+    /// Stable analysis-unit fact identity.
+    pub unit: String,
+    /// Invalidated fact domain.
+    pub domain: OperationInvalidationFactDomain,
+}
+
+/// Source-free target named by one invalidation decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum OperationInvalidationTarget {
+    /// A changed generation input.
+    Input(OperationInvalidationInput),
+    /// A scoped fact-domain node.
+    Fact(OperationInvalidationFactTarget),
+    /// A reusable immutable artifact identity.
+    Artifact(String),
+    /// The complete invalidation plan.
+    Plan,
+}
+
+/// Stable action recorded by one invalidation decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationInvalidationAction {
+    /// A complete generation input value changed.
+    Changed,
+    /// A fact node entered the fixed-point invalidation closure.
+    Invalidated,
+    /// An immutable artifact can be retained.
+    Reused,
+    /// An immutable artifact must be rebuilt.
+    Rebuilt,
+    /// Fine-grained reuse escalated to a repository rebuild.
+    ConservativeFallback,
+}
+
+/// Stable source-free explanation for one invalidation decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum OperationInvalidationReason {
+    /// A complete input transitioned under this conservative class.
+    InputTransition(OperationInvalidationChangeClass),
+    /// A declared pass dependency propagated invalidation.
+    DependencyPass(String),
+    /// A changed input had no declared dependent edge.
+    MissingDependencyDeclaration,
+    /// The configured fixed-point edge-visit budget was exhausted.
+    ClosureWorkExceeded,
+    /// One artifact output node is invalidated.
+    ArtifactOutputInvalidated,
+    /// One artifact's complete dependency fingerprint changed.
+    ArtifactDependencyChanged(OperationInvalidationInput),
+    /// Every artifact dependency and output remains reusable.
+    CompleteDependencyMatch,
+    /// A conservative repository fallback rebuilds this target.
+    ConservativeRepositoryRebuild(OperationFallbackReason),
+}
+
+/// One deterministic source-free invalidation decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationInvalidationTraceEntry {
+    /// Input, fact node, artifact, or whole-plan target.
+    pub target: OperationInvalidationTarget,
+    /// Decision applied to the target.
+    pub action: OperationInvalidationAction,
+    /// Stable reason for the decision.
+    pub reason: OperationInvalidationReason,
+    /// Direct predecessor that propagated invalidation, when present.
+    pub via: Option<OperationInvalidationTarget>,
+}
+
+/// Bounded prefix of the complete source-free invalidation trace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationInvalidationTraceV1_1 {
+    /// Incremental trace schema version.
+    #[schemars(length(min = 1, max = 32))]
+    pub version: String,
+    /// Canonically ordered trace decisions retained in this response.
+    #[schemars(length(max = 8))]
+    pub entries: Vec<OperationInvalidationTraceEntry>,
+    /// Complete number of decisions in the durable trace.
+    pub total_entries: u64,
+    /// Whether every durable decision fits in this response.
+    pub complete: bool,
+}
+
 /// Durable source-free invalidation, reuse, and rebuild evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -874,6 +1052,9 @@ pub struct OperationIncrementalEvidenceV1_1 {
     pub reused_facts: u64,
     /// Normalized facts rebuilt for the published generation.
     pub rebuilt_facts: u64,
+    /// Bounded source-free explanation of invalidation and reuse decisions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalidation_trace: Option<OperationInvalidationTraceV1_1>,
 }
 
 /// One operation journal view.
@@ -1558,6 +1739,7 @@ pub enum SourceReadSelector {
     /// Select a symbol definition.
     Symbol(SymbolDefinitionSelector),
     /// Select a verified byte range in one indexed file.
+    #[schemars(skip)]
     FileRange(FileRangeSelector),
 }
 
@@ -2027,20 +2209,68 @@ mod tests {
     }
 
     #[test]
-    fn repo_index_schema_requires_exactly_one_non_null_target() {
+    fn repo_index_schema_advertises_only_executable_registration_fields() {
         let schema: Value = serde_json::from_str(VerticalTool::RepoIndex.input_schema_json())
             .expect("checked schema is valid JSON");
         let validator = jsonschema::draft202012::new(&schema).expect("checked schema compiles");
-        assert!(validator.is_valid(&json!({"root": "C:/fixture"})));
         assert!(validator.is_valid(&json!({
-            "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+            "root": "C:/fixture",
+            "mode": "deep",
+            "wait_ms": 1000,
+            "detached": true
         })));
         assert!(!validator.is_valid(&json!({})));
         assert!(!validator.is_valid(&json!({
-            "root": "C:/fixture",
             "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         })));
+        for unsupported in [
+            json!({"root": "C:/fixture", "scope": {"repository": "whole"}}),
+            json!({"root": "C:/fixture", "mode": "rebuild"}),
+            json!({"root": "C:/fixture", "requested_tiers": {"rust": "A"}}),
+            json!({"root": "C:/fixture", "configuration_patch": {}}),
+        ] {
+            assert!(!validator.is_valid(&unsupported));
+        }
         assert!(!validator.is_valid(&json!({"root": null})));
+    }
+
+    #[test]
+    fn source_read_schema_advertises_exact_and_executable_symbol_selectors_only() {
+        let schema: Value = serde_json::from_str(VerticalTool::SourceRead.input_schema_json())
+            .expect("checked schema is valid JSON");
+        let validator = jsonschema::draft202012::new(&schema).expect("checked schema compiles");
+        let exact = retained_tool_input("source.read");
+        assert!(validator.is_valid(&exact));
+
+        let repository = exact["repository"].clone();
+        let symbol = retained_tool_input("symbol.explain")["symbol_ids"][0].clone();
+        assert!(validator.is_valid(&json!({
+            "repository": repository,
+            "references": [{"symbol_id": symbol}]
+        })));
+        assert!(!validator.is_valid(&json!({
+            "repository": {"alias": "fixture"},
+            "references": exact["references"].clone()
+        })));
+        assert!(!validator.is_valid(&json!({
+            "repository": exact["repository"].clone(),
+            "references": [{
+                "file_id": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                "start_byte": 0,
+                "end_byte": 10
+            }]
+        })));
+    }
+
+    #[test]
+    fn no_tool_input_schema_advertises_an_unserved_repository_alias() {
+        for tool in VerticalTool::ALL {
+            assert!(
+                !tool.input_schema_json().contains("RepositoryAliasSelector"),
+                "{} must not advertise repository aliases",
+                tool.name()
+            );
+        }
     }
 
     #[test]

@@ -169,7 +169,11 @@
             "resources": {
               "bytes_examined": 64,
               "files_examined": 1,
+              "newly_written_bytes": 0,
+              "owned_memory_bytes": 0,
               "peak_rss_bytes": 0,
+              "referenced_bytes": 0,
+              "reserved_memory_bytes": 0,
               "written_bytes": 0
             },
             "revision": 1,

@@ -1409,7 +1409,12 @@ fn real_treesitter_generation_obtains_verified_capability_and_round_trips() {
         &context,
     )
     .expect_err("arbitrary caller fact identity is rejected");
-    assert_eq!(error, IdentityVerificationError::IdentityMismatch);
+    assert_eq!(
+        error,
+        IdentityVerificationError::IdentityMismatch(
+            rootlight_storage::IdentityMismatchComponent::Coverage,
+        )
+    );
 
     let mut mismatched_file_claim_document = output.document().clone();
     let file_claim_envelope = mismatched_file_claim_document
@@ -1439,7 +1444,12 @@ fn real_treesitter_generation_obtains_verified_capability_and_round_trips() {
         &context,
     )
     .expect_err("file claim that disagrees with the typed record is rejected");
-    assert_eq!(error, IdentityVerificationError::IdentityMismatch);
+    assert_eq!(
+        error,
+        IdentityVerificationError::IdentityMismatch(
+            rootlight_storage::IdentityMismatchComponent::FileClaim,
+        )
+    );
 
     let mut mismatched_symbol_claim_document = output.document().clone();
     let symbol_claim_envelope = mismatched_symbol_claim_document
@@ -1469,7 +1479,12 @@ fn real_treesitter_generation_obtains_verified_capability_and_round_trips() {
         &context,
     )
     .expect_err("symbol claim that disagrees with the typed record is rejected");
-    assert_eq!(error, IdentityVerificationError::IdentityMismatch);
+    assert_eq!(
+        error,
+        IdentityVerificationError::IdentityMismatch(
+            rootlight_storage::IdentityMismatchComponent::SymbolClaim,
+        )
+    );
 
     let reader = OracleWriter::create_in(&generation_directory)
         .expect("oracle target is created")

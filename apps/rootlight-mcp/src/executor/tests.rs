@@ -2724,6 +2724,28 @@ async fn hard_limits_never_masquerade_as_page_continuations() {
 }
 
 #[tokio::test]
+async fn semantic_inexactness_preserves_observed_relationship_pagination() {
+    let mut relationships = relationships_page(missing_symbol(), Some(1));
+    relationships.result.exact = false;
+    let harness = Harness::new(FakeOutcome::SymbolRelationships(Ok(relationships)));
+    let output: SymbolRelationshipsOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::SymbolRelationships,
+            pagination_arguments(VerticalTool::SymbolRelationships),
+        )
+        .await
+        .expect("semantically incomplete relationships remain pageable"),
+    );
+    let ToolResponse::Success(page) = output else {
+        panic!("expected relationships success");
+    };
+    assert!(!page.data.totals.exact);
+    assert!(page.truncated);
+    assert!(page.next_cursor.0.is_some());
+}
+
+#[tokio::test]
 async fn unsupported_partial_results_surface_public_warnings_without_a_cursor() {
     let mut advanced = advanced_page("partial", None);
     advanced.result.completeness = "unsupported".to_owned();
@@ -3291,6 +3313,9 @@ async fn maps_durable_incremental_and_generation_resource_evidence() {
             newly_written_bytes: 2_048,
             reserved_memory_bytes: 4_096,
             owned_memory_bytes: 3_072,
+            invalidation_trace_json: Some(
+                br#"{"version":"1.0","entries":[],"total_entries":0,"complete":true}"#.to_vec(),
+            ),
         }),
     };
     let harness = Harness::new(FakeOutcome::OperationStatus(Ok(response)));
@@ -3313,6 +3338,12 @@ async fn maps_durable_incremental_and_generation_resource_evidence() {
         .expect("incremental evidence is projected");
     assert_eq!(incremental.reused_files, 4);
     assert_eq!(incremental.rebuilt_facts, 17);
+    assert!(
+        incremental
+            .invalidation_trace
+            .expect("invalidation trace is projected")
+            .complete
+    );
     assert_eq!(output.data.operation.resources.referenced_bytes, 1_024);
     assert_eq!(output.data.operation.resources.newly_written_bytes, 2_048);
     assert_eq!(output.data.operation.resources.reserved_memory_bytes, 4_096);
@@ -4372,6 +4403,64 @@ async fn batch_adapter_rejects_unrepresentable_evidence_before_client_dispatch()
     };
     assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
     assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn batch_adapter_accepts_semantically_inexact_complete_relationships() {
+    let mut relationships = relationships_page(missing_symbol(), None);
+    relationships.result.groups[0].total_count = 1;
+    relationships.result.total_edges = 1;
+    relationships.result.exact = false;
+    let harness = Harness::new(FakeOutcome::SymbolRelationships(Ok(relationships)));
+    let public = PublicError::builder(ErrorCode::InvalidArgument, "invalid batch")
+        .build()
+        .expect("static error is valid");
+    let adapter = McpAgentToolPort {
+        port: Arc::clone(&harness.executor.port),
+        validator: Arc::new(
+            MaterializedToolValidator::compile().expect("checked contracts compile"),
+        ),
+        unsupported: public.clone(),
+        invalid_arguments: public,
+        invalid_cursor: harness.executor.invalid_cursor.clone(),
+        exposure_profile: ExposureProfile::Developer,
+        cursor_key: harness.executor.cursor_key,
+    };
+    let request = AgentToolRequest::new(
+        BatchTool::SymbolRelationships,
+        Map::from_iter([
+            (
+                "repository".to_owned(),
+                json!({"repository_id": repository()}),
+            ),
+            ("generation".to_owned(), json!(generation())),
+            ("symbol_ids".to_owned(), json!([symbol()])),
+            ("relations".to_owned(), json!(["calls"])),
+        ]),
+    );
+    let context = AgentCallContext::new(
+        cancellation(),
+        ResponseBudget {
+            max_results: None,
+            max_tokens: Some(16_000),
+            max_source_bytes: None,
+            max_traversal_facts: None,
+            max_depth: None,
+            max_paths: None,
+            timeout_ms: Some(1_000),
+            evidence_level: None,
+        },
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(1)),
+    )
+    .with_pinned_identity(agent_identity_from_status(repository_status_response()));
+
+    let output = adapter
+        .execute(request, context)
+        .await
+        .expect("semantic incompleteness remains a valid batch child response");
+
+    assert!(!output.truncated);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
@@ -8666,7 +8755,7 @@ async fn source_read_rejects_line_context_for_raw_bytes_before_the_port() {
 }
 
 #[tokio::test]
-async fn repository_index_rejects_explicit_scope_before_the_port() {
+async fn repository_index_unadvertised_scope_fails_schema_before_the_port() {
     let harness = Harness::new(FakeOutcome::RepositoryIndex(Err(ClientPortError::Executor)));
     let call_count = Arc::clone(&harness.call_count);
     let router = ToolRouter::new(
@@ -8687,30 +8776,22 @@ async fn repository_index_rejects_explicit_scope_before_the_port() {
         )
         .await;
     let HandlerResponse::Success(result) = response else {
-        panic!("capability rejection is an MCP tool result");
+        panic!("schema rejection is an MCP tool result");
     };
     assert_eq!(result["isError"], true);
     assert_eq!(
         result["structuredContent"]["error"]["code"],
-        "UNSUPPORTED_CAPABILITY"
-    );
-    assert_eq!(
-        result["structuredContent"]["error"]["details"]["field_path"]["value"],
-        "scope.repository"
-    );
-    assert_eq!(
-        result["structuredContent"]["error"]["details"]["capability_reason"]["value"],
-        "unsupported_field"
+        "INVALID_ARGUMENT"
     );
     assert_eq!(
         call_count.load(Ordering::Relaxed),
         0,
-        "capability rejection must happen before indexing"
+        "schema rejection must happen before indexing"
     );
 }
 
 #[tokio::test]
-async fn source_read_rejects_non_reference_selectors_before_the_port() {
+async fn source_read_unadvertised_file_selector_fails_schema_before_the_port() {
     let harness = Harness::new(FakeOutcome::SourceRead(Err(ClientPortError::Executor)));
     let call_count = Arc::clone(&harness.call_count);
     let router = ToolRouter::new(
@@ -8718,46 +8799,34 @@ async fn source_read_rejects_non_reference_selectors_before_the_port() {
         rootlight_mcp_contract::ExposureProfile::Developer,
     )
     .expect("router compiles");
-    for (selector, field_path) in [
-        (json!({"symbol_id": symbol()}), "references.0.symbol_id"),
-        (
-            json!({"file_id": file(), "start_byte": 0, "end_byte": 1}),
-            "references.0.end_byte",
-        ),
-    ] {
-        let response = router
-            .handle(
-                operating_request(json!({
-                    "name": "source.read",
-                    "arguments": {
-                        "repository": {"repository_id": repository()},
-                        "references": [selector]
-                    }
-                })),
-                cancellation(),
-            )
-            .await;
-        let HandlerResponse::Success(result) = response else {
-            panic!("capability rejection is an MCP tool result");
-        };
-        assert_eq!(result["isError"], true);
-        assert_eq!(
-            result["structuredContent"]["error"]["code"],
-            "UNSUPPORTED_CAPABILITY"
-        );
-        assert_eq!(
-            result["structuredContent"]["error"]["details"]["field_path"]["value"],
-            field_path
-        );
-        assert_eq!(
-            result["structuredContent"]["error"]["details"]["capability_reason"]["value"],
-            "unsupported_field"
-        );
-    }
+    let response = router
+        .handle(
+            operating_request(json!({
+                "name": "source.read",
+                "arguments": {
+                    "repository": {"repository_id": repository()},
+                    "references": [{
+                        "file_id": file(),
+                        "start_byte": 0,
+                        "end_byte": 1
+                    }]
+                }
+            })),
+            cancellation(),
+        )
+        .await;
+    let HandlerResponse::Success(result) = response else {
+        panic!("schema rejection is an MCP tool result");
+    };
+    assert_eq!(result["isError"], true);
+    assert_eq!(
+        result["structuredContent"]["error"]["code"],
+        "INVALID_ARGUMENT"
+    );
     assert_eq!(
         call_count.load(Ordering::Relaxed),
         0,
-        "capability rejection must happen before source retrieval"
+        "schema rejection must happen before source retrieval"
     );
 }
 
@@ -8777,34 +8846,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         (
             VerticalTool::RepoList,
             json!({"response_profile": "standard"}),
-        ),
-        (
-            VerticalTool::RepoIndex,
-            json!({"repository_id": repository()}),
-        ),
-        (
-            VerticalTool::RepoIndex,
-            json!({"root": "C:/fixture", "scope": {"paths": ["src"]}}),
-        ),
-        (
-            VerticalTool::RepoIndex,
-            json!({"root": "C:/fixture", "scope": {"repository": "whole"}}),
-        ),
-        (
-            VerticalTool::RepoIndex,
-            json!({"root": "C:/fixture", "requested_tiers": {"rust": "C"}}),
-        ),
-        (
-            VerticalTool::RepoIndex,
-            json!({"root": "C:/fixture", "configuration_patch": {"feature": true}}),
-        ),
-        (
-            VerticalTool::RepoIndex,
-            json!({"root": "C:/fixture", "wait_ms": 0}),
-        ),
-        (
-            VerticalTool::CodeLocate,
-            json!({"repository": {"alias": "fixture"}, "query": "x"}),
         ),
         (
             VerticalTool::CodeLocate,
@@ -8848,10 +8889,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         ),
         (
             VerticalTool::SymbolExplain,
-            json!({"repository": {"alias": "fixture"}, "symbol_ids": [symbol()]}),
-        ),
-        (
-            VerticalTool::SymbolExplain,
             json!({"repository": {"repository_id": repository()}, "symbol_ids": [symbol()], "sections": ["signature"]}),
         ),
         (
@@ -8865,18 +8902,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         (
             VerticalTool::SymbolExplain,
             json!({"repository": {"repository_id": repository()}, "symbol_ids": [symbol()], "include_provenance": "full"}),
-        ),
-        (
-            VerticalTool::SourceRead,
-            json!({"repository": {"alias": "fixture"}, "references": [{"source_ref": source.clone()}]}),
-        ),
-        (
-            VerticalTool::SourceRead,
-            json!({"repository": {"repository_id": repository()}, "references": [{"symbol_id": symbol()}]}),
-        ),
-        (
-            VerticalTool::SourceRead,
-            json!({"repository": {"repository_id": repository()}, "references": [{"file_id": file(), "start_byte": 0, "end_byte": 1}]}),
         ),
         (
             VerticalTool::SourceRead,
@@ -10133,7 +10158,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         }};
     }
 
-    group!(RepoIndex, NormalizedDelta, ["mode", "root"]);
+    group!(RepoIndex, NormalizedDelta, ["mode", "root", "wait_ms"]);
     group!(RepoIndex, DefaultEquivalent, ["detached"]);
     group!(RepoStatus, NormalizedDelta, ["generation", "repository"]);
     group!(RepoStatus, ExplainPlan, ["explain"]);
@@ -10374,7 +10399,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     );
     group!(ContextPack, CursorContinuation, ["continuation"]);
     group!(ContextPack, ExplainPlan, ["explain"]);
-    group!(
+    group_excluding!(
         SourceRead,
         NormalizedDelta,
         [
@@ -10383,8 +10408,10 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
             "generation",
             "references",
             "repository"
-        ]
+        ],
+        ["references[].symbol_id"]
     );
+    group!(SourceRead, StructuredVariant, ["references[].symbol_id"]);
     group!(SourceRead, BudgetRuntime, ["budget", "max_source_bytes"]);
     group!(SourceRead, ExplainPlan, ["explain"]);
     group!(
@@ -10484,7 +10511,7 @@ fn accepted_schema_paths_have_effect_evidence() {
     let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
     assert_eq!(
         accepted_digest.as_str(),
-        "d3f02a179f08977b1d4f9f828aa8713b0c4c485b86a960d74501285ded5924bb",
+        "d285be9f238ece87c7b0ee8939be12b4d8655ed3ba5c2c7eb9edfa0737b0d86a",
         "accepted path universe changed"
     );
     let categorized: Vec<_> = accepted
@@ -10549,8 +10576,8 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[10],
         counts[11],
     );
-    assert_eq!(counts, [132, 97, 3, 69, 28, 16, 5, 16, 25, 1, 1, 4]);
-    assert_eq!(categorized.len(), 397);
+    assert_eq!(counts, [133, 97, 4, 69, 28, 16, 5, 16, 25, 1, 1, 4]);
+    assert_eq!(categorized.len(), 399);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
@@ -10740,6 +10767,7 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
         false,
     );
     add(VerticalTool::RepoIndex, "mode", json!("structural"), true);
+    add(VerticalTool::RepoIndex, "wait_ms", bounded.clone(), true);
     add(
         VerticalTool::RepoStatus,
         "repository",
@@ -11033,6 +11061,7 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
             match field {
                 "root" => json!(request.root()),
                 "mode" => json!(format!("{:?}", request.mode())),
+                "wait_ms" => json!(request.wait_ms()),
                 "detached" => json!(request.detached()),
                 _ => panic!("unknown repo.index observation field"),
             }
@@ -12030,6 +12059,18 @@ fn structural_change_and_plan_variants_reach_distinct_normalized_targets() {
     assert!(plan.target_symbols().is_empty());
     assert_eq!(plan.target_files(), &[file()]);
 
+    let source = normalize_source_read(
+        decode_arguments(json!({
+            "repository": {"repository_id": repository()},
+            "references": [{"symbol_id": symbol()}]
+        })),
+        &unsupported,
+        &normalization_error(),
+    )
+    .expect("symbol source selector normalizes");
+    assert!(source.references().is_empty());
+    assert_eq!(source.symbol_selectors, vec![(0, symbol())]);
+
     let expected: std::collections::BTreeSet<_> = accepted_field_evidence()
         .into_iter()
         .filter(|evidence| evidence.oracle == AcceptedFieldOracle::StructuredVariant)
@@ -12045,7 +12086,8 @@ fn structural_change_and_plan_variants_reach_distinct_normalized_targets() {
         expected,
         std::collections::BTreeSet::from([
             ("change.impact", "change.paths"),
-            ("plan.change", "targets[].file_id")
+            ("plan.change", "targets[].file_id"),
+            ("source.read", "references[].symbol_id")
         ])
     );
 }

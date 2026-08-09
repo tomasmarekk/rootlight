@@ -8,8 +8,8 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, SymbolId, content_hash};
 use rootlight_ir::{
     AnalysisTier, ContainerRef, CoverageRecord, CoverageScope, CoverageStatus, EntityFlag,
-    EntityKind, EntityVisibility, NormalizedIrDocument, OccurrenceTarget, RelationEndpoint,
-    RelationPredicate, SourceRef,
+    EntityKind, EntityVisibility, FactDomain, NormalizedIrDocument, OccurrenceTarget,
+    RelationEndpoint, RelationPredicate, SourceRef,
 };
 use rootlight_search::{
     LexicalSearch, SearchBudget, SearchRequest, validate_search_request_with_languages,
@@ -623,6 +623,7 @@ where
             BTreeMap::new();
         let mut total_edges: u64 = 0;
         let mut scan_truncated = false;
+        let mut saw_non_exact_relation = false;
 
         'scan: for family in &plan.families {
             let predicates = family.predicates();
@@ -649,10 +650,14 @@ where
                 if !predicates.contains(&relation.predicate) {
                     continue;
                 }
-                for (seed, direction, target) in
-                    relation_candidates(document, relation, &plan.seeds, effective)
+                let candidates = relation_candidates(document, relation, &plan.seeds, effective);
+                if !candidates.is_empty()
+                    && relation.predicate == RelationPredicate::DispatchCandidate
                 {
-                    let confidence = relation.confidence.get();
+                    saw_non_exact_relation = true;
+                }
+                let confidence = effective_relation_confidence(document, relation);
+                for (seed, direction, target) in candidates {
                     if confidence < plan.min_confidence {
                         continue;
                     }
@@ -681,6 +686,10 @@ where
                 }
             }
         }
+        let coverage =
+            repository_coverage_summary(document, &control, &mut tracker, &mut limiting_resources)?;
+        scan_truncated |= coverage.truncated;
+        let coverage_complete = relationship_families_are_complete(&plan.families, &coverage);
 
         let mut groups: Vec<RelationshipGroup> = groups.into_values().collect();
         for group in &mut groups {
@@ -717,7 +726,7 @@ where
             groups,
             returned_edges: u32::try_from(returned_edges).unwrap_or(u32::MAX),
             total_edges: u32::try_from(total_edges).unwrap_or(u32::MAX),
-            exact: !scan_truncated,
+            exact: !scan_truncated && coverage_complete && !saw_non_exact_relation,
             execution,
             truncated,
             limiting_resources,
@@ -3306,6 +3315,136 @@ fn occurrence_enclosing(document: &NormalizedIrDocument, occurrence: FactId) -> 
         .and_then(|record| record.enclosing)
 }
 
+/// Maximum confidence of a syntax-fallback dispatch candidate.
+///
+/// Tier-D analysis can identify a bounded lexical candidate, but it cannot
+/// establish a semantic call. Keeping the ceiling in the weak-evidence band
+/// prevents downstream query projections from promoting that candidate merely
+/// because a producer supplied an optimistic raw confidence.
+const TIER_D_DISPATCH_MAX_CONFIDENCE: u16 = 399;
+
+/// Returns relation confidence after applying query-level semantic ceilings.
+fn effective_relation_confidence(
+    document: &NormalizedIrDocument,
+    relation: &rootlight_ir::RelationRecord,
+) -> u16 {
+    let confidence = relation.confidence.get();
+    if relation.predicate != RelationPredicate::DispatchCandidate {
+        return confidence;
+    }
+    let tier_d_provenance = document
+        .provenance
+        .binary_search_by_key(&relation.provenance, |record| record.id)
+        .ok()
+        .and_then(|index| document.provenance.get(index))
+        .is_some_and(|record| matches!(record.tier, AnalysisTier::TierD));
+    let tier_d_endpoint = [relation.subject, relation.object]
+        .into_iter()
+        .filter_map(|endpoint| endpoint_entity(document, endpoint))
+        .filter_map(|symbol| find_entity(document, symbol))
+        .any(|entity| matches!(entity.tier, AnalysisTier::TierD));
+    if tier_d_provenance || tier_d_endpoint {
+        confidence.min(TIER_D_DISPATCH_MAX_CONFIDENCE)
+    } else {
+        confidence
+    }
+}
+
+/// Repository-wide completeness needed to qualify negative query conclusions.
+#[derive(Debug, Default)]
+struct RepositoryCoverageSummary {
+    entities_complete: bool,
+    relations_structural_complete: bool,
+    relations_semantic_complete: bool,
+    truncated: bool,
+}
+
+/// Returns whether one repository coverage record is internally complete.
+fn coverage_record_is_complete(record: &CoverageRecord) -> bool {
+    matches!(record.status, CoverageStatus::Complete)
+        && record.indexed == record.discovered
+        && record.skipped == 0
+}
+
+/// Reads repository-level entity and relation coverage under the query budget.
+///
+/// File- or entity-scoped records cannot establish an exhaustive repository
+/// negative. Semantic relation completeness additionally requires Tier A or B;
+/// Tier C can establish structural imports, while Tier D is syntax fallback.
+fn repository_coverage_summary(
+    document: &NormalizedIrDocument,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<RepositoryCoverageSummary, QueryError> {
+    let mut entity_seen = false;
+    let mut entities_complete = true;
+    let mut relation_seen = false;
+    let mut relations_structural_complete = true;
+    let mut relations_semantic_complete = true;
+    let mut summary = RepositoryCoverageSummary::default();
+
+    for record in &document.coverage_records {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            summary.truncated = true;
+            break;
+        }
+        tracker.add_rows(1)?;
+        if record.scope != CoverageScope::Repository(document.repository) {
+            continue;
+        }
+        match record.domain {
+            FactDomain::Entities => {
+                entity_seen = true;
+                entities_complete &= coverage_record_is_complete(record);
+            }
+            FactDomain::Relations => {
+                relation_seen = true;
+                let complete = coverage_record_is_complete(record);
+                relations_structural_complete &=
+                    complete && !matches!(record.tier, AnalysisTier::TierD);
+                relations_semantic_complete &=
+                    complete && matches!(record.tier, AnalysisTier::TierA | AnalysisTier::TierB);
+            }
+            _ => {}
+        }
+    }
+
+    if !summary.truncated {
+        summary.entities_complete = entity_seen && entities_complete;
+        summary.relations_structural_complete = relation_seen && relations_structural_complete;
+        summary.relations_semantic_complete = relation_seen && relations_semantic_complete;
+    }
+    Ok(summary)
+}
+
+/// Returns whether coverage can make one relationship-family result exhaustive.
+fn relationship_families_are_complete(
+    families: &[RelationFamily],
+    coverage: &RepositoryCoverageSummary,
+) -> bool {
+    families.iter().all(|family| match family {
+        RelationFamily::Imports => coverage.relations_structural_complete,
+        RelationFamily::Calls
+        | RelationFamily::CalledBy
+        | RelationFamily::References
+        | RelationFamily::Types
+        | RelationFamily::Implements => coverage.relations_semantic_complete,
+        RelationFamily::Tests
+        | RelationFamily::Ownership
+        | RelationFamily::ServiceCall
+        | RelationFamily::CallsRoute
+        | RelationFamily::Messaging
+        | RelationFamily::ReadsTable
+        | RelationFamily::WritesTable
+        | RelationFamily::BuildDependency
+        | RelationFamily::DataFlow
+        | RelationFamily::History => false,
+    })
+}
+
 /// One directed adjacency edge used by a `flow.trace` traversal.
 #[derive(Debug, Clone)]
 struct FlowAdjEdge {
@@ -3371,7 +3510,7 @@ fn build_flow_adjacency(
         if !allowed.contains(&relation.predicate) {
             continue;
         }
-        let confidence = relation.confidence.get();
+        let confidence = effective_relation_confidence(document, relation);
         if confidence < plan.min_confidence {
             continue;
         }
@@ -3901,7 +4040,7 @@ fn build_architecture_overview(
         {
             continue;
         }
-        let confidence = relation.confidence.get();
+        let confidence = effective_relation_confidence(document, relation);
         if confidence < plan.min_confidence {
             continue;
         }
@@ -4193,10 +4332,12 @@ fn build_tests_select(
     // immutable source evidence.
     let mut entity_file: BTreeMap<SymbolId, FileId> = BTreeMap::new();
     let mut tests: BTreeMap<SymbolId, TestsSelectKind> = BTreeMap::new();
+    let mut scan_truncated = false;
     for entity in &document.entities {
         control.check()?;
         if !tracker.can_add(QueryResource::Rows, 1) {
             record_limit(limiting_resources, QueryResource::Rows)?;
+            scan_truncated = true;
             break;
         }
         tracker.add_rows(1)?;
@@ -4215,11 +4356,14 @@ fn build_tests_select(
         .iter()
         .flat_map(|family| family.predicates().iter().copied())
         .collect();
-    let mut out_adj: BTreeMap<SymbolId, Vec<(SymbolId, RelationFamily, u16)>> = BTreeMap::new();
+    let mut out_adj: BTreeMap<SymbolId, Vec<(SymbolId, RelationFamily, u16, bool)>> =
+        BTreeMap::new();
+    let mut saw_dispatch_candidate = false;
     for relation in &document.relations {
         control.check()?;
         if !tracker.can_add(QueryResource::Rows, 1) {
             record_limit(limiting_resources, QueryResource::Rows)?;
+            scan_truncated = true;
             break;
         }
         tracker.add_rows(1)?;
@@ -4234,6 +4378,8 @@ fn build_tests_select(
         if !allowed.contains(&relation.predicate) {
             continue;
         }
+        let dispatch_candidate = relation.predicate == RelationPredicate::DispatchCandidate;
+        saw_dispatch_candidate |= dispatch_candidate;
         let Some(family) = predicate_family(TESTS_SELECT_FAMILIES, relation.predicate) else {
             continue;
         };
@@ -4246,17 +4392,24 @@ fn build_tests_select(
         if subject == object {
             continue;
         }
-        let confidence = relation.confidence.get();
+        let confidence = effective_relation_confidence(document, relation);
         if !tracker.can_add(QueryResource::Edges, 1) {
             record_limit(limiting_resources, QueryResource::Edges)?;
+            scan_truncated = true;
             break;
         }
         tracker.add_edges(1)?;
         out_adj
             .entry(subject)
             .or_default()
-            .push((object, family, confidence));
+            .push((object, family, confidence, dispatch_candidate));
     }
+    let coverage = repository_coverage_summary(document, control, tracker, limiting_resources)?;
+    scan_truncated |= coverage.truncated;
+    let negative_coverage_complete = coverage.entities_complete
+        && coverage.relations_semantic_complete
+        && !scan_truncated
+        && !saw_dispatch_candidate;
 
     // Resolve the file set occupied by the seeds for the co-location signal.
     let mut seed_files: BTreeSet<FileId> = BTreeSet::new();
@@ -4283,31 +4436,35 @@ fn build_tests_select(
         // Direct signal: strongest outbound edge into a seed.
         let mut direct_confidence = 0_u16;
         let mut direct_family: Option<RelationFamily> = None;
-        for (target, family, confidence) in edges {
+        let mut direct_candidate = false;
+        for (target, family, confidence, candidate) in edges {
             if plan.seeds.contains(target) && *confidence > direct_confidence {
                 direct_confidence = *confidence;
                 direct_family = Some(*family);
+                direct_candidate = *candidate;
                 covered_seeds.insert(*target);
             }
         }
         // Transitive signal: strongest two-hop path test -> node -> seed,
         // weighted by the weakest edge on the path.
         let mut transitive_confidence = 0_u16;
+        let mut transitive_candidate = false;
         if direct_confidence == 0 {
-            for (mid, _family, first_confidence) in edges {
+            for (mid, _family, first_confidence, first_candidate) in edges {
                 if plan.seeds.contains(mid) {
                     continue;
                 }
                 let Some(second_hop) = out_adj.get(mid) else {
                     continue;
                 };
-                for (target, _second_family, second_confidence) in second_hop {
+                for (target, _second_family, second_confidence, second_candidate) in second_hop {
                     if !plan.seeds.contains(target) {
                         continue;
                     }
                     let path_confidence = (*first_confidence).min(*second_confidence);
                     if path_confidence > transitive_confidence {
                         transitive_confidence = path_confidence;
+                        transitive_candidate = *first_candidate || *second_candidate;
                         covered_seeds.insert(*target);
                     }
                 }
@@ -4350,6 +4507,9 @@ fn build_tests_select(
         }
         if transitive {
             why.push("transitive_dependency".to_owned());
+        }
+        if direct_candidate || transitive_candidate {
+            why.push("dispatch_candidate".to_owned());
         }
         if colocated {
             why.push("shared_file_with_seed".to_owned());
@@ -4413,7 +4573,11 @@ fn build_tests_select(
         }
         let gap = TestsSelectGap {
             scope: seed.to_string(),
-            reason: "no_related_test".to_owned(),
+            reason: if negative_coverage_complete {
+                "no_related_test_observed".to_owned()
+            } else {
+                "related_test_coverage_incomplete".to_owned()
+            },
         };
         emit_cycle_value(&mut gaps, gap, tracker, limiting_resources, control)?;
     }
@@ -4527,7 +4691,7 @@ fn build_change_impact(
         if !allowed.contains(&relation.predicate) {
             continue;
         }
-        let confidence = relation.confidence.get();
+        let confidence = effective_relation_confidence(document, relation);
         if confidence < plan.min_confidence {
             continue;
         }
@@ -5246,7 +5410,8 @@ fn plan_change_impact_closure(
                 return Ok(entries);
             }
             tracker.add_edges(1)?;
-            let confidence = (*parent_confidence).min(relation.confidence.get());
+            let confidence =
+                (*parent_confidence).min(effective_relation_confidence(document, relation));
             let mut path = parent_path.clone();
             path.push(family.as_str().to_owned());
             path.truncate(16);
@@ -5746,37 +5911,101 @@ struct HistoryEntityFingerprint {
     kind_label: String,
     language: String,
     canonical_name: String,
-    container: Option<ContainerRef>,
+    normalized_name: String,
+    container_identity: Option<HistoryContainerIdentity>,
     is_public: bool,
-    source_file: Option<FileId>,
+    source_identity: Option<HistoryFileIdentity>,
     source_content_hash: Option<ContentHash>,
     source_start: u64,
     source_end: u64,
 }
 
 impl HistoryEntityFingerprint {
-    fn from_entity(entity: &rootlight_ir::EntityRecord) -> Result<Self, QueryError> {
+    fn from_entity(
+        entity: &rootlight_ir::EntityRecord,
+        entities: &BTreeMap<SymbolId, &rootlight_ir::EntityRecord>,
+        file_paths: &BTreeMap<FileId, &str>,
+    ) -> Result<Self, QueryError> {
         let span = entity.evidence.source.as_ref().map(|source| source.span());
         Ok(Self {
             kind_label: serialized_label(&entity.kind)?,
             language: entity.language.clone(),
             canonical_name: entity.canonical_name.clone(),
-            container: entity.container,
+            normalized_name: if entity.flags.contains(&EntityFlag::Synthetic) {
+                entity.display_name.clone()
+            } else {
+                entity.canonical_name.clone()
+            },
+            container_identity: history_container_identity(entity.container, entities, file_paths)?,
             is_public: entity_is_exported(entity),
-            source_file: span.map(|span| span.file()),
+            source_identity: span.map(|span| history_file_identity(span.file(), file_paths)),
             source_content_hash: entity.evidence.source.as_ref().map(SourceRef::content_hash),
             source_start: span.map_or(0, |span| span.start_byte()),
             source_end: span.map_or(0, |span| span.end_byte()),
         })
     }
 
-    /// Returns whether the kind or definition source span differs from `other`.
-    fn signature_differs(&self, other: &Self) -> bool {
-        self.kind_label != other.kind_label
-            || self.source_file != other.source_file
-            || self.source_start != other.source_start
-            || self.source_end != other.source_end
+    fn semantic_key(&self) -> HistorySemanticKey {
+        HistorySemanticKey {
+            kind_label: self.kind_label.clone(),
+            language: self.language.clone(),
+            normalized_name: self.normalized_name.clone(),
+            container_identity: self.container_identity.clone(),
+            source_identity: self.source_identity.clone(),
+        }
     }
+
+    fn signature_key(&self) -> HistorySignatureKey {
+        HistorySignatureKey {
+            language: self.language.clone(),
+            normalized_name: self.normalized_name.clone(),
+            container_identity: self.container_identity.clone(),
+            source_identity: self.source_identity.clone(),
+        }
+    }
+
+    fn surface_differs(&self, other: &Self) -> bool {
+        self.kind_label != other.kind_label || self.is_public != other.is_public
+    }
+}
+
+/// Stable file identity used only while comparing generation-local records.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum HistoryFileIdentity {
+    Path(String),
+    Id(FileId),
+}
+
+/// Stable container identity used only while comparing generation-local records.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum HistoryContainerIdentity {
+    Repository,
+    File(HistoryFileIdentity),
+    Entity {
+        kind_label: String,
+        language: String,
+        qualified_name: String,
+    },
+    EntityId(SymbolId),
+}
+
+/// Normalized semantic identity available in the current common IR.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct HistorySemanticKey {
+    kind_label: String,
+    language: String,
+    normalized_name: String,
+    container_identity: Option<HistoryContainerIdentity>,
+    source_identity: Option<HistoryFileIdentity>,
+}
+
+/// Declaration identity used to preserve lineage across a kind change.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct HistorySignatureKey {
+    language: String,
+    normalized_name: String,
+    container_identity: Option<HistoryContainerIdentity>,
+    source_identity: Option<HistoryFileIdentity>,
 }
 
 /// Exact fields that prove an entity moved with unchanged source content.
@@ -5795,8 +6024,8 @@ struct HistoryMoveKey {
 struct HistoryRenameKey {
     kind_label: String,
     language: String,
-    container: Option<ContainerRef>,
-    source_file: FileId,
+    container_identity: Option<HistoryContainerIdentity>,
+    source_identity: HistoryFileIdentity,
     source_start: u64,
 }
 
@@ -5807,6 +6036,65 @@ struct HistoryCompareAnalysis {
     architecture_delta: HistoryArchitectureDelta,
     breaking_candidates: Vec<BreakingCandidateRecord>,
     lineage: Vec<LineageMatchRecord>,
+}
+
+fn history_file_identity(file: FileId, file_paths: &BTreeMap<FileId, &str>) -> HistoryFileIdentity {
+    file_paths
+        .get(&file)
+        .map_or(HistoryFileIdentity::Id(file), |path| {
+            HistoryFileIdentity::Path((*path).to_owned())
+        })
+}
+
+fn history_container_identity(
+    container: Option<ContainerRef>,
+    entities: &BTreeMap<SymbolId, &rootlight_ir::EntityRecord>,
+    file_paths: &BTreeMap<FileId, &str>,
+) -> Result<Option<HistoryContainerIdentity>, QueryError> {
+    let identity = match container {
+        None => return Ok(None),
+        Some(ContainerRef::Repository(_)) => HistoryContainerIdentity::Repository,
+        Some(ContainerRef::File(file)) => {
+            HistoryContainerIdentity::File(history_file_identity(file, file_paths))
+        }
+        Some(ContainerRef::Entity(symbol)) => {
+            if let Some(entity) = entities.get(&symbol) {
+                HistoryContainerIdentity::Entity {
+                    kind_label: serialized_label(&entity.kind)?,
+                    language: entity.language.clone(),
+                    qualified_name: entity.qualified_name.clone(),
+                }
+            } else {
+                HistoryContainerIdentity::EntityId(symbol)
+            }
+        }
+    };
+    Ok(Some(identity))
+}
+
+fn history_source_snapshot(
+    document: &NormalizedIrDocument,
+) -> Option<BTreeMap<&str, (ContentHash, u64)>> {
+    let mut snapshot = BTreeMap::new();
+    for file in &document.files {
+        if snapshot
+            .insert(file.path.as_str(), (file.content_hash, file.byte_length))
+            .is_some()
+        {
+            return None;
+        }
+    }
+    Some(snapshot)
+}
+
+fn history_source_snapshots_match(
+    base: &NormalizedIrDocument,
+    head: &NormalizedIrDocument,
+) -> bool {
+    base.repository == head.repository
+        && history_source_snapshot(base)
+            .zip(history_source_snapshot(head))
+            .is_some_and(|(base, head)| base == head)
 }
 
 /// Builds a bounded semantic comparison between two generation documents.
@@ -5826,6 +6114,7 @@ fn build_history_compare(
     tracker: &mut UsageTracker,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<HistoryCompareAnalysis, QueryError> {
+    let source_snapshots_match = history_source_snapshots_match(base_document, head_document);
     let base_entities = history_entity_index(base_document, control, tracker, limiting_resources)?;
     let head_entities = history_entity_index(head_document, control, tracker, limiting_resources)?;
 
@@ -5868,14 +6157,9 @@ fn build_history_compare(
                         control,
                     )?;
                 }
-                // A kind or definition-span difference is a modification.
-                if base.signature_differs(head) {
-                    let kind = if base.kind_label != head.kind_label {
-                        HistorySemanticChangeKind::SignatureModified
-                    } else {
-                        HistorySemanticChangeKind::Modified
-                    };
-                    let breaking_candidate = base.is_public || head.is_public;
+                if !source_snapshots_match && base.surface_differs(head) {
+                    let kind = HistorySemanticChangeKind::SignatureModified;
+                    let breaking_candidate = base.is_public;
                     let significance = history_significance(kind, breaking_candidate);
                     let change = SemanticChangeRecord {
                         kind,
@@ -5897,172 +6181,303 @@ fn build_history_compare(
                             },
                         ));
                     }
+                } else if !source_snapshots_match && base.source_identity != head.source_identity {
+                    let kind = HistorySemanticChangeKind::Moved;
+                    emit_cycle_value(
+                        &mut changes,
+                        SemanticChangeRecord {
+                            kind,
+                            symbol_id: symbol,
+                            entity_kind: head.kind_label.clone(),
+                            breaking_candidate: false,
+                            significance: history_significance(kind, false),
+                        },
+                        tracker,
+                        limiting_resources,
+                        control,
+                    )?;
                 }
             }
             (None, None) => {}
         }
     }
 
-    let move_pairs = unique_history_matches(
+    let semantic_pairs = unique_history_matches(
         &base_entities,
         &head_entities,
         &unmatched_base,
         &unmatched_head,
-        |entity| {
-            Some(HistoryMoveKey {
-                kind_label: entity.kind_label.clone(),
-                language: entity.language.clone(),
-                canonical_name: entity.canonical_name.clone(),
-                source_content_hash: entity.source_content_hash?,
-                source_start: entity.source_start,
-                source_end: entity.source_end,
-            })
-        },
+        |entity| Some(entity.semantic_key()),
         control,
     )?;
-    for (base_symbol, head_symbol) in move_pairs {
+    for (base_symbol, head_symbol) in semantic_pairs {
         let base = base_entities
             .get(&base_symbol)
             .ok_or(QueryError::SymbolNotFound)?;
         let head = head_entities
             .get(&head_symbol)
             .ok_or(QueryError::SymbolNotFound)?;
-        if base.source_file == head.source_file {
-            continue;
-        }
         unmatched_base.remove(&base_symbol);
         unmatched_head.remove(&head_symbol);
-        emit_history_lineage_change(
-            &mut changes,
-            &mut lineage,
-            HistorySemanticChangeKind::Moved,
-            base_symbol,
-            head_symbol,
-            head,
-            false,
-            1_000,
-            plan,
-            tracker,
-            limiting_resources,
-            control,
-        )?;
-    }
-
-    let rename_pairs = unique_history_matches(
-        &base_entities,
-        &head_entities,
-        &unmatched_base,
-        &unmatched_head,
-        |entity| {
-            Some(HistoryRenameKey {
-                kind_label: entity.kind_label.clone(),
-                language: entity.language.clone(),
-                container: entity.container,
-                source_file: entity.source_file?,
-                source_start: entity.source_start,
-            })
-        },
-        control,
-    )?;
-    for (base_symbol, head_symbol) in rename_pairs {
-        let base = base_entities
-            .get(&base_symbol)
-            .ok_or(QueryError::SymbolNotFound)?;
-        let head = head_entities
-            .get(&head_symbol)
-            .ok_or(QueryError::SymbolNotFound)?;
-        if base.canonical_name == head.canonical_name
-            || !history_names_resemble(&base.canonical_name, &head.canonical_name)
-        {
-            continue;
-        }
-        unmatched_base.remove(&base_symbol);
-        unmatched_head.remove(&head_symbol);
-        let breaking_candidate = base.is_public;
-        let significance =
-            history_significance(HistorySemanticChangeKind::Renamed, breaking_candidate);
-        emit_history_lineage_change(
-            &mut changes,
-            &mut lineage,
-            HistorySemanticChangeKind::Renamed,
-            base_symbol,
-            head_symbol,
-            head,
-            breaking_candidate,
-            900,
-            plan,
-            tracker,
-            limiting_resources,
-            control,
-        )?;
-        if breaking_candidate {
-            breaking_symbols.insert(base_symbol);
-            breaking.push((
-                significance,
-                BreakingCandidateRecord {
-                    symbol_id: base_symbol,
-                    consumer_count: 0,
-                    is_public_surface: true,
-                    reason: "renamed_public_surface".to_owned(),
+        if lineage.len() < plan.max_results {
+            emit_cycle_value(
+                &mut lineage,
+                LineageMatchRecord {
+                    base_symbol_id: base_symbol,
+                    head_symbol_id: head_symbol,
+                    confidence: 1_000,
+                    is_rename: false,
                 },
-            ));
+                tracker,
+                limiting_resources,
+                control,
+            )?;
+        }
+        if !source_snapshots_match && base.surface_differs(head) {
+            let kind = HistorySemanticChangeKind::SignatureModified;
+            let breaking_candidate = base.is_public;
+            let significance = history_significance(kind, breaking_candidate);
+            emit_cycle_value(
+                &mut changes,
+                SemanticChangeRecord {
+                    kind,
+                    symbol_id: head_symbol,
+                    entity_kind: head.kind_label.clone(),
+                    breaking_candidate,
+                    significance,
+                },
+                tracker,
+                limiting_resources,
+                control,
+            )?;
+            if breaking_candidate {
+                breaking_symbols.insert(base_symbol);
+                breaking.push((
+                    significance,
+                    BreakingCandidateRecord {
+                        symbol_id: base_symbol,
+                        consumer_count: 0,
+                        is_public_surface: true,
+                        reason: "modified_public_surface".to_owned(),
+                    },
+                ));
+            }
         }
     }
 
-    for symbol in unmatched_base {
-        control.check()?;
-        let base = base_entities
-            .get(&symbol)
-            .ok_or(QueryError::SymbolNotFound)?;
-        let kind = HistorySemanticChangeKind::Removed;
-        let breaking_candidate = base.is_public;
-        let significance = history_significance(kind, breaking_candidate);
-        emit_cycle_value(
-            &mut changes,
-            SemanticChangeRecord {
+    if !source_snapshots_match {
+        let signature_pairs = unique_history_matches(
+            &base_entities,
+            &head_entities,
+            &unmatched_base,
+            &unmatched_head,
+            |entity| Some(entity.signature_key()),
+            control,
+        )?;
+        for (base_symbol, head_symbol) in signature_pairs {
+            let base = base_entities
+                .get(&base_symbol)
+                .ok_or(QueryError::SymbolNotFound)?;
+            let head = head_entities
+                .get(&head_symbol)
+                .ok_or(QueryError::SymbolNotFound)?;
+            if !base.surface_differs(head) {
+                continue;
+            }
+            unmatched_base.remove(&base_symbol);
+            unmatched_head.remove(&head_symbol);
+            let kind = HistorySemanticChangeKind::SignatureModified;
+            let breaking_candidate = base.is_public;
+            let significance = history_significance(kind, breaking_candidate);
+            emit_history_lineage_change(
+                &mut changes,
+                &mut lineage,
                 kind,
-                symbol_id: symbol,
-                entity_kind: base.kind_label.clone(),
+                base_symbol,
+                head_symbol,
+                head,
                 breaking_candidate,
-                significance,
-            },
-            tracker,
-            limiting_resources,
-            control,
-        )?;
-        if breaking_candidate {
-            breaking_symbols.insert(symbol);
-            breaking.push((
-                significance,
-                BreakingCandidateRecord {
-                    symbol_id: symbol,
-                    consumer_count: 0,
-                    is_public_surface: true,
-                    reason: "removed_public_surface".to_owned(),
-                },
-            ));
+                950,
+                plan,
+                tracker,
+                limiting_resources,
+                control,
+            )?;
+            if breaking_candidate {
+                breaking_symbols.insert(base_symbol);
+                breaking.push((
+                    significance,
+                    BreakingCandidateRecord {
+                        symbol_id: base_symbol,
+                        consumer_count: 0,
+                        is_public_surface: true,
+                        reason: "modified_public_surface".to_owned(),
+                    },
+                ));
+            }
         }
-    }
 
-    for symbol in unmatched_head {
-        control.check()?;
-        let head = head_entities
-            .get(&symbol)
-            .ok_or(QueryError::SymbolNotFound)?;
-        let kind = HistorySemanticChangeKind::Added;
-        emit_cycle_value(
-            &mut changes,
-            SemanticChangeRecord {
-                kind,
-                symbol_id: symbol,
-                entity_kind: head.kind_label.clone(),
-                breaking_candidate: false,
-                significance: history_significance(kind, false),
+        let move_pairs = unique_history_matches(
+            &base_entities,
+            &head_entities,
+            &unmatched_base,
+            &unmatched_head,
+            |entity| {
+                Some(HistoryMoveKey {
+                    kind_label: entity.kind_label.clone(),
+                    language: entity.language.clone(),
+                    canonical_name: entity.canonical_name.clone(),
+                    source_content_hash: entity.source_content_hash?,
+                    source_start: entity.source_start,
+                    source_end: entity.source_end,
+                })
             },
-            tracker,
-            limiting_resources,
             control,
         )?;
+        for (base_symbol, head_symbol) in move_pairs {
+            let base = base_entities
+                .get(&base_symbol)
+                .ok_or(QueryError::SymbolNotFound)?;
+            let head = head_entities
+                .get(&head_symbol)
+                .ok_or(QueryError::SymbolNotFound)?;
+            if base.source_identity == head.source_identity {
+                continue;
+            }
+            unmatched_base.remove(&base_symbol);
+            unmatched_head.remove(&head_symbol);
+            emit_history_lineage_change(
+                &mut changes,
+                &mut lineage,
+                HistorySemanticChangeKind::Moved,
+                base_symbol,
+                head_symbol,
+                head,
+                false,
+                1_000,
+                plan,
+                tracker,
+                limiting_resources,
+                control,
+            )?;
+        }
+
+        let rename_pairs = unique_history_matches(
+            &base_entities,
+            &head_entities,
+            &unmatched_base,
+            &unmatched_head,
+            |entity| {
+                Some(HistoryRenameKey {
+                    kind_label: entity.kind_label.clone(),
+                    language: entity.language.clone(),
+                    container_identity: entity.container_identity.clone(),
+                    source_identity: entity.source_identity.clone()?,
+                    source_start: entity.source_start,
+                })
+            },
+            control,
+        )?;
+        for (base_symbol, head_symbol) in rename_pairs {
+            let base = base_entities
+                .get(&base_symbol)
+                .ok_or(QueryError::SymbolNotFound)?;
+            let head = head_entities
+                .get(&head_symbol)
+                .ok_or(QueryError::SymbolNotFound)?;
+            if base.canonical_name == head.canonical_name
+                || !history_names_resemble(&base.canonical_name, &head.canonical_name)
+            {
+                continue;
+            }
+            unmatched_base.remove(&base_symbol);
+            unmatched_head.remove(&head_symbol);
+            let breaking_candidate = base.is_public;
+            let significance =
+                history_significance(HistorySemanticChangeKind::Renamed, breaking_candidate);
+            emit_history_lineage_change(
+                &mut changes,
+                &mut lineage,
+                HistorySemanticChangeKind::Renamed,
+                base_symbol,
+                head_symbol,
+                head,
+                breaking_candidate,
+                900,
+                plan,
+                tracker,
+                limiting_resources,
+                control,
+            )?;
+            if breaking_candidate {
+                breaking_symbols.insert(base_symbol);
+                breaking.push((
+                    significance,
+                    BreakingCandidateRecord {
+                        symbol_id: base_symbol,
+                        consumer_count: 0,
+                        is_public_surface: true,
+                        reason: "renamed_public_surface".to_owned(),
+                    },
+                ));
+            }
+        }
+
+        for symbol in unmatched_base {
+            control.check()?;
+            let base = base_entities
+                .get(&symbol)
+                .ok_or(QueryError::SymbolNotFound)?;
+            let kind = HistorySemanticChangeKind::Removed;
+            let breaking_candidate = base.is_public;
+            let significance = history_significance(kind, breaking_candidate);
+            emit_cycle_value(
+                &mut changes,
+                SemanticChangeRecord {
+                    kind,
+                    symbol_id: symbol,
+                    entity_kind: base.kind_label.clone(),
+                    breaking_candidate,
+                    significance,
+                },
+                tracker,
+                limiting_resources,
+                control,
+            )?;
+            if breaking_candidate {
+                breaking_symbols.insert(symbol);
+                breaking.push((
+                    significance,
+                    BreakingCandidateRecord {
+                        symbol_id: symbol,
+                        consumer_count: 0,
+                        is_public_surface: true,
+                        reason: "removed_public_surface".to_owned(),
+                    },
+                ));
+            }
+        }
+
+        for symbol in unmatched_head {
+            control.check()?;
+            let head = head_entities
+                .get(&symbol)
+                .ok_or(QueryError::SymbolNotFound)?;
+            let kind = HistorySemanticChangeKind::Added;
+            emit_cycle_value(
+                &mut changes,
+                SemanticChangeRecord {
+                    kind,
+                    symbol_id: symbol,
+                    entity_kind: head.kind_label.clone(),
+                    breaking_candidate: false,
+                    significance: history_significance(kind, false),
+                },
+                tracker,
+                limiting_resources,
+                control,
+            )?;
+        }
     }
 
     // Fill base-generation consumer counts for the breaking candidates.
@@ -6283,6 +6698,16 @@ fn history_entity_index(
     tracker: &mut UsageTracker,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<BTreeMap<SymbolId, HistoryEntityFingerprint>, QueryError> {
+    let entities: BTreeMap<SymbolId, &rootlight_ir::EntityRecord> = document
+        .entities
+        .iter()
+        .map(|entity| (entity.id, entity))
+        .collect();
+    let file_paths: BTreeMap<FileId, &str> = document
+        .files
+        .iter()
+        .map(|file| (file.id, file.path.as_str()))
+        .collect();
     let mut index: BTreeMap<SymbolId, HistoryEntityFingerprint> = BTreeMap::new();
     for entity in &document.entities {
         control.check()?;
@@ -6291,7 +6716,10 @@ fn history_entity_index(
             break;
         }
         tracker.add_rows(1)?;
-        index.insert(entity.id, HistoryEntityFingerprint::from_entity(entity)?);
+        index.insert(
+            entity.id,
+            HistoryEntityFingerprint::from_entity(entity, &entities, &file_paths)?,
+        );
     }
     Ok(index)
 }
@@ -6410,7 +6838,7 @@ fn build_cycle_adjacency(
         if !allowed.contains(&relation.predicate) {
             continue;
         }
-        let confidence = relation.confidence.get();
+        let confidence = effective_relation_confidence(document, relation);
         if confidence < plan.min_confidence {
             continue;
         }
@@ -6792,10 +7220,10 @@ fn break_candidate(
 /// Relation families whose served predicates back the static reachability graph.
 ///
 /// The first-slice oracle records direct calls as `DispatchCandidate`
-/// occurrences rather than entity-to-entity relations, so the reachability scan
-/// also admits the `DispatchCandidate` predicate explicitly below. On a purely
-/// lexical fixture no served predicate yields an entity-to-entity edge, so the
-/// graph stays empty and `code.dead` honestly reports no observations.
+/// occurrences rather than exact entity-to-entity calls. The `Calls` family
+/// admits those candidates, but coverage and confidence retain their
+/// uncertainty; occurrence endpoints contribute only when their enclosing
+/// entity is known.
 const CODE_DEAD_FAMILIES: &[RelationFamily] = &[
     RelationFamily::Calls,
     RelationFamily::References,
@@ -6820,6 +7248,8 @@ struct DeadGraph {
     incoming_count: BTreeMap<SymbolId, u32>,
     /// Strongest incoming served-edge confidence per symbol.
     incoming_max_confidence: BTreeMap<SymbolId, u16>,
+    /// Whether repository-wide semantic relationship coverage is exhaustive.
+    relationship_coverage_complete: bool,
     /// Whether the relation scan was cut short by a row or edge budget.
     truncated: bool,
 }
@@ -6845,15 +7275,13 @@ fn build_dead_graph(
     tracker: &mut UsageTracker,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<DeadGraph, QueryError> {
-    let mut allowed: BTreeSet<RelationPredicate> = CODE_DEAD_FAMILIES
+    let allowed: BTreeSet<RelationPredicate> = CODE_DEAD_FAMILIES
         .iter()
         .flat_map(|family| family.predicates().iter().copied())
         .collect();
-    // Ambiguous direct calls remain explicit dispatch candidates. They stay in
-    // the partial reachability model without being promoted to exact calls.
-    allowed.insert(RelationPredicate::DispatchCandidate);
 
     let mut graph = DeadGraph::default();
+    let mut saw_dispatch_candidate = false;
     for entity in &document.entities {
         control.check()?;
         if !tracker.can_add(QueryResource::Rows, 1) {
@@ -6881,7 +7309,8 @@ fn build_dead_graph(
         if !allowed.contains(&relation.predicate) {
             continue;
         }
-        let confidence = relation.confidence.get();
+        saw_dispatch_candidate |= relation.predicate == RelationPredicate::DispatchCandidate;
+        let confidence = effective_relation_confidence(document, relation);
         if confidence < plan.min_confidence {
             continue;
         }
@@ -6908,6 +7337,10 @@ fn build_dead_graph(
             *max_confidence = confidence;
         }
     }
+    let coverage = repository_coverage_summary(document, control, tracker, limiting_resources)?;
+    graph.truncated |= coverage.truncated;
+    graph.relationship_coverage_complete =
+        coverage.relations_semantic_complete && !graph.truncated && !saw_dispatch_candidate;
     for edges in graph.adjacency.values_mut() {
         edges.sort_by(|left, right| {
             left.target
@@ -7006,7 +7439,7 @@ fn analyze_dead_code(
             // resolved.
             complete: false,
         },
-        blind_spots: dead_blind_spots(plan, document, graph.truncated),
+        blind_spots: dead_blind_spots(plan, document, graph),
         suppression_rules: dead_suppression_rules(
             exported_suppressed,
             test_suppressed,
@@ -7093,16 +7526,22 @@ fn detect_dead_candidates(
         } else {
             DeadCodeClassification::NotObservedFromEntryPointsWeakReferences
         };
-        let confidence = match classification {
-            DeadCodeClassification::NoObservedIncomingReferences => 1_000,
-            DeadCodeClassification::NotObservedFromEntryPointsStrongReferences => 700,
-            DeadCodeClassification::NotObservedFromEntryPointsWeakReferences => 400,
+        let confidence = match (classification, graph.relationship_coverage_complete) {
+            (DeadCodeClassification::NoObservedIncomingReferences, true) => 1_000,
+            (DeadCodeClassification::NoObservedIncomingReferences, false) => 300,
+            (DeadCodeClassification::NotObservedFromEntryPointsStrongReferences, true) => 700,
+            (DeadCodeClassification::NotObservedFromEntryPointsStrongReferences, false) => 500,
+            (DeadCodeClassification::NotObservedFromEntryPointsWeakReferences, true) => 400,
+            (DeadCodeClassification::NotObservedFromEntryPointsWeakReferences, false) => 250,
         };
         let mut why = Vec::new();
         if incoming == 0 {
             why.push("no_incoming_references".to_owned());
         }
         why.push("not_observed_from_partial_entry_points".to_owned());
+        if !graph.relationship_coverage_complete {
+            why.push("incoming_relation_coverage_incomplete".to_owned());
+        }
         let candidate = DeadCodeCandidate {
             symbol_id: symbol,
             classification,
@@ -7165,7 +7604,7 @@ fn suppressions_checked_for(
 fn dead_blind_spots(
     plan: &CodeDeadPlan,
     document: &NormalizedIrDocument,
-    scan_truncated: bool,
+    graph: &DeadGraph,
 ) -> Vec<CodeDeadBlindSpot> {
     let mut blind_spots = Vec::new();
     // Dynamic dispatch and reflection can reach symbols the static call graph
@@ -7190,6 +7629,12 @@ fn dead_blind_spots(
         category: "partial_entry_point_model".to_owned(),
         affected_count: 0,
     });
+    if !graph.relationship_coverage_complete {
+        blind_spots.push(CodeDeadBlindSpot {
+            category: "incomplete_relationship_coverage".to_owned(),
+            affected_count: u32::try_from(graph.nodes.len()).unwrap_or(u32::MAX),
+        });
+    }
     if matches!(
         plan.entry_point_policy,
         CodeDeadEntryPointPolicy::Application
@@ -7199,7 +7644,7 @@ fn dead_blind_spots(
             affected_count: 0,
         });
     }
-    if scan_truncated {
+    if graph.truncated {
         blind_spots.push(CodeDeadBlindSpot {
             category: "budget_truncated_scan".to_owned(),
             affected_count: 0,
@@ -8305,7 +8750,7 @@ mod tests {
             observation.classification,
             DeadCodeClassification::NoObservedIncomingReferences
         );
-        assert_eq!(observation.confidence, 1_000);
+        assert_eq!(observation.confidence, 300);
         assert!(
             observation
                 .why
@@ -8315,6 +8760,35 @@ mod tests {
             observation
                 .why
                 .contains(&"not_observed_from_partial_entry_points".to_owned())
+        );
+        assert!(
+            observation
+                .why
+                .contains(&"incoming_relation_coverage_incomplete".to_owned())
+        );
+    }
+
+    #[test]
+    fn code_dead_reserves_exact_negative_confidence_for_complete_relationship_coverage() {
+        let (entry, reached, candidate, referenced) = (symbol(1), symbol(2), symbol(3), symbol(4));
+        let mut graph = dead_graph(&[(entry, reached, 900), (candidate, referenced, 900)]);
+        graph.relationship_coverage_complete = true;
+
+        let candidates = run_dead(&graph, &BTreeSet::from([entry]), 50);
+        let observation = candidates
+            .iter()
+            .find(|item| item.symbol_id == candidate)
+            .expect("the complete-coverage negative is reported");
+
+        assert_eq!(
+            observation.classification,
+            DeadCodeClassification::NoObservedIncomingReferences
+        );
+        assert_eq!(observation.confidence, 1_000);
+        assert!(
+            !observation
+                .why
+                .contains(&"incoming_relation_coverage_incomplete".to_owned())
         );
     }
 
@@ -8335,7 +8809,7 @@ mod tests {
             suspected.classification,
             DeadCodeClassification::NotObservedFromEntryPointsWeakReferences
         );
-        assert_eq!(suspected.confidence, 400);
+        assert_eq!(suspected.confidence, 250);
     }
 
     #[test]
@@ -8546,6 +9020,31 @@ mod tests {
         });
     }
 
+    fn add_complete_repository_coverage(
+        document: &mut NormalizedIrDocument,
+        byte: u8,
+        domain: FactDomain,
+        discovered: u64,
+    ) {
+        document.coverage_records.push(CoverageRecord {
+            id: FactId::from_bytes([byte; 20]),
+            repository: document.repository,
+            generation: document.generation,
+            scope: CoverageScope::Repository(document.repository),
+            domain,
+            tier: AnalysisTier::TierB,
+            status: CoverageStatus::Complete,
+            discovered,
+            indexed: discovered,
+            skipped: 0,
+            provenance: FactId::from_bytes([byte; 20]),
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        });
+    }
+
     fn add_contains(
         document: &mut NormalizedIrDocument,
         byte: u8,
@@ -8575,6 +9074,23 @@ mod tests {
             byte,
             RelationEndpoint::Entity(symbol(from_byte)),
             RelationPredicate::Calls,
+            RelationEndpoint::Entity(symbol(to_byte)),
+            confidence,
+        );
+    }
+
+    fn add_dispatch_candidate(
+        document: &mut NormalizedIrDocument,
+        byte: u8,
+        from_byte: u8,
+        to_byte: u8,
+        confidence: u16,
+    ) {
+        add_relation(
+            document,
+            byte,
+            RelationEndpoint::Entity(symbol(from_byte)),
+            RelationPredicate::DispatchCandidate,
             RelationEndpoint::Entity(symbol(to_byte)),
             confidence,
         );
@@ -9088,6 +9604,43 @@ mod tests {
     }
 
     #[test]
+    fn tests_select_uses_flagged_tests_and_weak_dispatch_candidates() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/seed.rs");
+        add_file(&mut document, 2, "src/flagged_test.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 21, 2, EntityKind::Function);
+        document
+            .entities
+            .last_mut()
+            .expect("flagged test entity was just pushed")
+            .flags
+            .push(EntityFlag::Test);
+        add_dispatch_candidate(&mut document, 110, 21, 11, 900);
+
+        let plan = tests_select_plan(BTreeSet::from([symbol(11)]), Vec::new(), 20, false);
+        let selection = run_tests_select(&document, &plan);
+
+        assert_eq!(selection.tests.len(), 1);
+        assert_eq!(selection.tests[0].test_id, symbol(21));
+        assert_eq!(selection.tests[0].kind, TestsSelectKind::Unit);
+        // Tier-D dispatch is capped at 399 before entering the direct band.
+        assert_eq!(selection.tests[0].score, 819);
+        assert!(
+            selection.tests[0]
+                .why
+                .contains(&"direct_test_edge".to_owned())
+        );
+        assert!(
+            selection.tests[0]
+                .why
+                .contains(&"dispatch_candidate".to_owned())
+        );
+        assert!(selection.coverage_strategy.direct_edges);
+        assert!(selection.gaps.is_empty());
+    }
+
+    #[test]
     fn tests_select_honors_the_max_tests_cap() {
         let mut document = overview_document();
         add_file(&mut document, 1, "src/a.rs");
@@ -9127,10 +9680,33 @@ mod tests {
 
         assert_eq!(selection.tests.len(), 1);
         assert_eq!(selection.tests[0].test_id, symbol(21));
-        // Seed 12 has no related test, so it is reported as an honest gap.
+        // The relation/test domains have no repository-wide completeness
+        // evidence, so the absent edge is qualified rather than exhaustive.
         assert_eq!(selection.gaps.len(), 1);
         assert_eq!(selection.gaps[0].scope, symbol(12).to_string());
-        assert_eq!(selection.gaps[0].reason, "no_related_test");
+        assert_eq!(selection.gaps[0].reason, "related_test_coverage_incomplete");
+    }
+
+    #[test]
+    fn tests_select_qualifies_an_exhaustive_gap_with_complete_coverage() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        document
+            .entities
+            .last_mut()
+            .expect("seed entity was just pushed")
+            .tier = AnalysisTier::TierB;
+        add_complete_repository_coverage(&mut document, 120, FactDomain::Entities, 1);
+        add_complete_repository_coverage(&mut document, 121, FactDomain::Relations, 0);
+
+        let plan = tests_select_plan(BTreeSet::from([symbol(11)]), Vec::new(), 20, false);
+        let selection = run_tests_select(&document, &plan);
+
+        assert!(selection.tests.is_empty());
+        assert_eq!(selection.gaps.len(), 1);
+        assert_eq!(selection.gaps[0].scope, symbol(11).to_string());
+        assert_eq!(selection.gaps[0].reason, "no_related_test_observed");
     }
 
     #[test]
@@ -9907,8 +10483,8 @@ mod tests {
         add_calls(&mut base, 110, 22, 21, 900);
 
         let mut head = history_document(2);
-        add_file(&mut head, 1, "src/a.rs");
-        add_entity(&mut head, 22, 1, EntityKind::Function);
+        add_file_with_content(&mut head, 1, 2, "src/a.rs");
+        add_history_entity(&mut head, 22, 1, 2, 0, 10, "sym_22", EntityKind::Function);
 
         let plan = history_compare_plan(
             history_generation(1),
@@ -9940,8 +10516,8 @@ mod tests {
         add_entity(&mut base, 31, 1, EntityKind::Function);
 
         let mut head = history_document(2);
-        add_file(&mut head, 1, "src/a.rs");
-        add_entity(&mut head, 31, 1, EntityKind::Struct);
+        add_file_with_content(&mut head, 1, 2, "src/a.rs");
+        add_history_entity(&mut head, 31, 1, 2, 0, 10, "sym_31", EntityKind::Struct);
 
         let plan = history_compare_plan(
             history_generation(1),
@@ -9963,6 +10539,65 @@ mod tests {
         assert!(!analysis.changes[0].breaking_candidate);
         assert_eq!(analysis.lineage.len(), 1);
         assert_eq!(analysis.lineage[0].base_symbol_id, symbol(31));
+    }
+
+    #[test]
+    fn history_compare_preserves_signature_lineage_when_the_symbol_id_changes() {
+        let mut base = history_document(1);
+        add_file_with_content(&mut base, 1, 1, "src/a.rs");
+        add_history_entity(
+            &mut base,
+            32,
+            1,
+            1,
+            5,
+            15,
+            "public_item",
+            EntityKind::Function,
+        );
+        base.entities
+            .last_mut()
+            .expect("entity was just pushed")
+            .visibility = EntityVisibility::Public;
+
+        let mut head = history_document(2);
+        add_file_with_content(&mut head, 1, 2, "src/a.rs");
+        add_history_entity(
+            &mut head,
+            33,
+            1,
+            2,
+            5,
+            15,
+            "public_item",
+            EntityKind::Struct,
+        );
+        head.entities
+            .last_mut()
+            .expect("entity was just pushed")
+            .visibility = EntityVisibility::Public;
+
+        let plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::new(),
+            100,
+        );
+        let analysis = run_history_compare(&base, &head, &plan);
+
+        assert_eq!(analysis.changes.len(), 1);
+        assert_eq!(
+            analysis.changes[0].kind,
+            HistorySemanticChangeKind::SignatureModified
+        );
+        assert!(analysis.changes[0].breaking_candidate);
+        assert_eq!(analysis.lineage.len(), 1);
+        assert_eq!(analysis.lineage[0].base_symbol_id, symbol(32));
+        assert_eq!(analysis.lineage[0].head_symbol_id, symbol(33));
+        assert_eq!(analysis.lineage[0].confidence, 950);
+        assert!(!analysis.lineage[0].is_rename);
+        assert_eq!(analysis.breaking_candidates.len(), 1);
+        assert_eq!(analysis.breaking_candidates[0].symbol_id, symbol(32));
     }
 
     #[test]
@@ -10125,6 +10760,121 @@ mod tests {
             lineage.base_symbol_id == lineage.head_symbol_id
                 && !lineage.is_rename
                 && lineage.confidence == 1_000
+        }));
+    }
+
+    #[test]
+    fn history_compare_reports_no_changes_for_equivalent_source_snapshots() {
+        let mut base = history_document(1);
+        add_file_with_content(&mut base, 1, 9, "src/a.rs");
+        add_history_entity(&mut base, 81, 1, 9, 5, 15, "stable", EntityKind::Function);
+
+        let mut head = history_document(2);
+        add_file_with_content(&mut head, 1, 9, "src/a.rs");
+        add_history_entity(&mut head, 82, 1, 9, 5, 25, "stable", EntityKind::Function);
+
+        let plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::new(),
+            100,
+        );
+        let analysis = run_history_compare(&base, &head, &plan);
+
+        assert!(analysis.changes.is_empty());
+        assert!(analysis.breaking_candidates.is_empty());
+        assert_eq!(analysis.lineage.len(), 1);
+        assert_eq!(analysis.lineage[0].base_symbol_id, symbol(81));
+        assert_eq!(analysis.lineage[0].head_symbol_id, symbol(82));
+        assert!(!analysis.lineage[0].is_rename);
+    }
+
+    #[test]
+    fn history_compare_ignores_comment_only_span_and_synthetic_scope_churn() {
+        let mut base = history_document(1);
+        add_file_with_content(&mut base, 1, 1, "src/a.ts");
+        add_history_entity(&mut base, 83, 1, 1, 0, 200, "src/a.ts", EntityKind::Module);
+        add_history_entity(
+            &mut base,
+            84,
+            1,
+            1,
+            10,
+            100,
+            "public_api",
+            EntityKind::Function,
+        );
+        {
+            let function = base.entities.last_mut().expect("entity was just pushed");
+            function.container = Some(ContainerRef::Entity(symbol(83)));
+            function.visibility = EntityVisibility::Public;
+        }
+        add_history_entity(
+            &mut base,
+            85,
+            1,
+            1,
+            20,
+            100,
+            "scope@20:100",
+            EntityKind::Namespace,
+        );
+        {
+            let scope = base.entities.last_mut().expect("entity was just pushed");
+            scope.display_name = "<lexical scope>".to_owned();
+            scope.container = Some(ContainerRef::Entity(symbol(83)));
+            scope.flags.push(EntityFlag::Synthetic);
+        }
+
+        let mut head = history_document(2);
+        add_file_with_content(&mut head, 1, 2, "src/a.ts");
+        add_history_entity(&mut head, 83, 1, 2, 0, 260, "src/a.ts", EntityKind::Module);
+        add_history_entity(
+            &mut head,
+            84,
+            1,
+            2,
+            10,
+            160,
+            "public_api",
+            EntityKind::Function,
+        );
+        {
+            let function = head.entities.last_mut().expect("entity was just pushed");
+            function.container = Some(ContainerRef::Entity(symbol(83)));
+            function.visibility = EntityVisibility::Public;
+        }
+        add_history_entity(
+            &mut head,
+            86,
+            1,
+            2,
+            20,
+            160,
+            "scope@20:160",
+            EntityKind::Namespace,
+        );
+        {
+            let scope = head.entities.last_mut().expect("entity was just pushed");
+            scope.display_name = "<lexical scope>".to_owned();
+            scope.container = Some(ContainerRef::Entity(symbol(83)));
+            scope.flags.push(EntityFlag::Synthetic);
+        }
+
+        let plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::new(),
+            100,
+        );
+        let analysis = run_history_compare(&base, &head, &plan);
+
+        assert!(analysis.changes.is_empty());
+        assert!(analysis.breaking_candidates.is_empty());
+        assert!(analysis.lineage.iter().any(|lineage| {
+            lineage.base_symbol_id == symbol(85)
+                && lineage.head_symbol_id == symbol(86)
+                && !lineage.is_rename
         }));
     }
 

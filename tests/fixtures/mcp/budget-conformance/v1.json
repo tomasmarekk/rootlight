@@ -1,6 +1,6 @@
 {
   "schema": "rootlight.mcp-budget-conformance/1",
-  "source_revision": "d652d8ad0a868054f2ee9283a0b765fe6995775b",
+  "source_revision": "0c836a558d56352523ac3da1fade03e20bfb18f3",
   "tools": [
     {
       "tool": "repo.index",
@@ -538,7 +538,7 @@
     },
     {
       "file": "crates/rootlight-query/tests/query_slice.rs",
-      "sha256": "63c149b5a7ee6f7795b4b2b5a035f9121f6da742dcdef99c53e6f55c20ccb11e",
+      "sha256": "27a1a8b12961959893216b8f236e15393cdcd0e6c820869dfedcdddf382ab865",
       "symbols": [
         "execution_enforces_cancellation_and_exact_output_bounds",
         "plans_and_execution_enforce_all_query_resource_families",
@@ -547,7 +547,7 @@
     },
     {
       "file": "apps/rootlight-mcp/src/executor/tests.rs",
-      "sha256": "113c789cc13f918273c3af38a4eceb4e5c33dff9a0a5cbe304ffa52c3a67cb8a",
+      "sha256": "162a02a47a7f61d6f71ca5108f411c3e2d47d7440a73c2f243d1f5749e66e29a",
       "symbols": [
         "analytical_budget_lowers_every_public_resource_dimension",
         "omitted_analytical_budget_transports_the_complete_server_ceiling",
@@ -559,7 +559,7 @@
     },
     {
       "file": "apps/rootlight-daemon/src/first_slice.rs",
-      "sha256": "90a9dc44a2f52d53e2ae0fe975ab2de1b8a9237425655b8659d61600e9dd4f20",
+      "sha256": "2adc355bf9efa5490ec966037d7e3cf95af71c515deee9d6965ed3be1efd4542",
       "symbols": [
         "peer_cancellation_leaves_work_lane_reusable_before_publication",
         "durable_commit_boundary_failure_is_terminal_and_publishes_nothing"
@@ -593,10 +593,10 @@
       "asset_sha256": "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
     },
     "input_schema": "rootlight.mcp-budget-conformance-input/1",
-    "input_sha256": "a3b3469c9e02dc1f7d9dc9e3072876a65da0f99a1325669dc2d3ffe8599dc20a",
+    "input_sha256": "0114f360290de88240ff62bcbe48439030eac50ef899b843c3b42458f5ed6ed1",
     "serialized_bytes": 13148,
     "deterministic_estimated_tokens": 3287,
-    "actual_tokens": 3001,
+    "actual_tokens": 2990,
     "normalization": "none_exact_utf8",
     "framing": "canonical_compact_json_without_accounting_measurement"
   },

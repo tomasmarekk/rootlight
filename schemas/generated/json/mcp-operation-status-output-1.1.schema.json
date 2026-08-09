@@ -399,6 +399,17 @@
           "maximum": 18446744073709551615,
           "minimum": 0
         },
+        "invalidation_trace": {
+          "description": "Bounded source-free explanation of invalidation and reuse decisions.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationInvalidationTraceV1_1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "rebuilt_facts": {
           "description": "Normalized facts rebuilt for the published generation.",
           "type": "integer",
@@ -439,6 +450,679 @@
         "rebuilt_files",
         "reused_facts",
         "rebuilt_facts"
+      ]
+    },
+    "OperationInvalidationAction": {
+      "description": "Stable action recorded by one invalidation decision.",
+      "oneOf": [
+        {
+          "description": "A complete generation input value changed.",
+          "type": "string",
+          "const": "changed"
+        },
+        {
+          "description": "A fact node entered the fixed-point invalidation closure.",
+          "type": "string",
+          "const": "invalidated"
+        },
+        {
+          "description": "An immutable artifact can be retained.",
+          "type": "string",
+          "const": "reused"
+        },
+        {
+          "description": "An immutable artifact must be rebuilt.",
+          "type": "string",
+          "const": "rebuilt"
+        },
+        {
+          "description": "Fine-grained reuse escalated to a repository rebuild.",
+          "type": "string",
+          "const": "conservative_fallback"
+        }
+      ]
+    },
+    "OperationInvalidationChangeClass": {
+      "description": "Semantic classification of one invalidation input transition.",
+      "oneOf": [
+        {
+          "description": "No complete input value changed.",
+          "type": "string",
+          "const": "no_change"
+        },
+        {
+          "description": "A stable input was newly added.",
+          "type": "string",
+          "const": "added"
+        },
+        {
+          "description": "Only an implementation-body summary changed.",
+          "type": "string",
+          "const": "body_only"
+        },
+        {
+          "description": "A declaration, import, route, test, or exported surface changed.",
+          "type": "string",
+          "const": "surface"
+        },
+        {
+          "description": "Build targets, compiler options, or dependency context changed.",
+          "type": "string",
+          "const": "build_context"
+        },
+        {
+          "description": "Canonical path or containment semantics changed.",
+          "type": "string",
+          "const": "move"
+        },
+        {
+          "description": "A stable input was removed.",
+          "type": "string",
+          "const": "delete"
+        },
+        {
+          "description": "Rootlight analysis or derived-index configuration changed.",
+          "type": "string",
+          "const": "configuration"
+        },
+        {
+          "description": "Grammar, adapter, or resolver producer version changed.",
+          "type": "string",
+          "const": "provider_change"
+        }
+      ]
+    },
+    "OperationInvalidationFactDomain": {
+      "description": "Fact domain named by one invalidation decision.",
+      "oneOf": [
+        {
+          "description": "Parsed syntax and syntax diagnostics.",
+          "type": "string",
+          "const": "syntax"
+        },
+        {
+          "description": "Exported declarations, signatures, visibility, and imports.",
+          "type": "string",
+          "const": "public_surface"
+        },
+        {
+          "description": "Local implementation bodies and body-dependent occurrences.",
+          "type": "string",
+          "const": "body"
+        },
+        {
+          "description": "Import, type, call, hierarchy, and candidate resolution.",
+          "type": "string",
+          "const": "resolution"
+        },
+        {
+          "description": "Generation-aligned lexical and derived search facts.",
+          "type": "string",
+          "const": "search"
+        },
+        {
+          "description": "Bounded derived graph projections and intent-plan aids.",
+          "type": "string",
+          "const": "derived_graph"
+        },
+        {
+          "description": "Test identities and explicit test relationships.",
+          "type": "string",
+          "const": "tests"
+        },
+        {
+          "description": "Routes, RPC, messaging, database, and foreign service links.",
+          "type": "string",
+          "const": "services"
+        },
+        {
+          "description": "Bounded Git, lineage, ownership, and co-change facts.",
+          "type": "string",
+          "const": "history"
+        }
+      ]
+    },
+    "OperationInvalidationFactTarget": {
+      "description": "Scoped fact-domain target named by an invalidation decision.",
+      "type": "object",
+      "properties": {
+        "domain": {
+          "description": "Invalidated fact domain.",
+          "$ref": "#/$defs/OperationInvalidationFactDomain"
+        },
+        "unit": {
+          "description": "Stable analysis-unit fact identity.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "unit",
+        "domain"
+      ]
+    },
+    "OperationInvalidationInput": {
+      "description": "Typed generation input named by an invalidation decision.",
+      "oneOf": [
+        {
+          "description": "Actual bytes of one file.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "file_content"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject"
+          ]
+        },
+        {
+          "description": "Canonical path semantics of one file.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "file_path"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject"
+          ]
+        },
+        {
+          "description": "Exported surface of one analysis unit.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "public_surface"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject"
+          ]
+        },
+        {
+          "description": "Body summary of one analysis unit.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "body_summary"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject"
+          ]
+        },
+        {
+          "description": "Import set of one analysis unit.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "import_set"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject"
+          ]
+        },
+        {
+          "description": "Build-target identity and membership.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "build_target"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject"
+          ]
+        },
+        {
+          "description": "Compiler and macro option context.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "compiler_options"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject"
+          ]
+        },
+        {
+          "description": "Dependency or lockfile resolution.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "dependency_version"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject"
+          ]
+        },
+        {
+          "description": "Parser grammar identity.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "grammar_version"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject"
+          ]
+        },
+        {
+          "description": "Adapter producer identity.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "adapter_version"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject"
+          ]
+        },
+        {
+          "description": "Global resolver revision.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "resolver_version"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Global analysis-configuration revision.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "configuration_revision"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Global search revision.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "search_revision"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Derived plan or projection identity.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "derived_plan"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject"
+          ]
+        }
+      ]
+    },
+    "OperationInvalidationReason": {
+      "description": "Stable source-free explanation for one invalidation decision.",
+      "oneOf": [
+        {
+          "description": "A complete input transitioned under this conservative class.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "input_transition"
+            },
+            "value": {
+              "$ref": "#/$defs/OperationInvalidationChangeClass"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "A declared pass dependency propagated invalidation.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "dependency_pass"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "A changed input had no declared dependent edge.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "missing_dependency_declaration"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "The configured fixed-point edge-visit budget was exhausted.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "closure_work_exceeded"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "One artifact output node is invalidated.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "artifact_output_invalidated"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "One artifact's complete dependency fingerprint changed.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "artifact_dependency_changed"
+            },
+            "value": {
+              "$ref": "#/$defs/OperationInvalidationInput"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "Every artifact dependency and output remains reusable.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "complete_dependency_match"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "A conservative repository fallback rebuilds this target.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "conservative_repository_rebuild"
+            },
+            "value": {
+              "$ref": "#/$defs/OperationFallbackReason"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
+      ]
+    },
+    "OperationInvalidationTarget": {
+      "description": "Source-free target named by one invalidation decision.",
+      "oneOf": [
+        {
+          "description": "A changed generation input.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "input"
+            },
+            "value": {
+              "$ref": "#/$defs/OperationInvalidationInput"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "A scoped fact-domain node.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "fact"
+            },
+            "value": {
+              "$ref": "#/$defs/OperationInvalidationFactTarget"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "A reusable immutable artifact identity.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "artifact"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "The complete invalidation plan.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "plan"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "OperationInvalidationTraceEntry": {
+      "description": "One deterministic source-free invalidation decision.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "Decision applied to the target.",
+          "$ref": "#/$defs/OperationInvalidationAction"
+        },
+        "reason": {
+          "description": "Stable reason for the decision.",
+          "$ref": "#/$defs/OperationInvalidationReason"
+        },
+        "target": {
+          "description": "Input, fact node, artifact, or whole-plan target.",
+          "$ref": "#/$defs/OperationInvalidationTarget"
+        },
+        "via": {
+          "description": "Direct predecessor that propagated invalidation, when present.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationInvalidationTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "action",
+        "reason"
+      ]
+    },
+    "OperationInvalidationTraceV1_1": {
+      "description": "Bounded prefix of the complete source-free invalidation trace.",
+      "type": "object",
+      "properties": {
+        "complete": {
+          "description": "Whether every durable decision fits in this response.",
+          "type": "boolean"
+        },
+        "entries": {
+          "description": "Canonically ordered trace decisions retained in this response.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OperationInvalidationTraceEntry"
+          },
+          "maxItems": 8
+        },
+        "total_entries": {
+          "description": "Complete number of decisions in the durable trace.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "version": {
+          "description": "Incremental trace schema version.",
+          "type": "string",
+          "maxLength": 32,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "entries",
+        "total_entries",
+        "complete"
       ]
     },
     "OperationProgress": {

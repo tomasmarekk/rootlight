@@ -201,6 +201,8 @@ enum Call {
 #[derive(Clone, Default)]
 struct FakeAsyncClient {
     calls: Arc<Mutex<Vec<Call>>>,
+    index_state: Option<OperationState>,
+    resolve_symbols: bool,
 }
 
 fn complete_execution() -> ResultCompleteness {
@@ -213,6 +215,20 @@ fn complete_execution() -> ResultCompleteness {
 }
 
 impl FakeAsyncClient {
+    fn with_pending_index() -> Self {
+        Self {
+            index_state: Some(OperationState::Running),
+            ..Self::default()
+        }
+    }
+
+    fn with_resolved_symbols() -> Self {
+        Self {
+            resolve_symbols: true,
+            ..Self::default()
+        }
+    }
+
     fn record(&self, call: Call) {
         self.calls
             .lock()
@@ -246,16 +262,17 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             RepositoryIndexMode::Structural => RepositoryIndexMode::Structural,
             RepositoryIndexMode::Deep => RepositoryIndexMode::Deep,
         };
+        let state = self.index_state.unwrap_or(OperationState::Succeeded);
         Box::pin(async move {
             Ok(RepositoryIndex {
                 repository: repository(),
                 operation,
                 semantic_operation: None,
                 mode: selected_mode,
-                state: OperationState::Succeeded,
+                state,
                 revision: 2,
                 parent_generation: Some(parent_generation()),
-                published_generation: Some(generation()),
+                published_generation: (state == OperationState::Succeeded).then(generation),
                 discovered_inputs: 1,
                 indexed_files: 1,
                 entities: 1,
@@ -364,11 +381,40 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             symbols: symbols.clone(),
             options,
         });
+        let resolve_symbols = self.resolve_symbols;
         Box::pin(async move {
+            let resolves_active_generation = matches!(generation, GenerationSelector::Active);
+            let (symbols, unresolved_symbols) = if resolve_symbols {
+                (
+                    symbols
+                        .into_iter()
+                        .map(|symbol| SymbolExplanation {
+                            symbol,
+                            kind: "function".to_owned(),
+                            display_name: "fixture".to_owned(),
+                            signature: None,
+                            definition: source_reference(),
+                            outbound_exact: 0,
+                            outbound_candidates: 0,
+                            inbound_exact: 0,
+                            inbound_candidates: 0,
+                            references_exact: 1,
+                            provider: FIRST_SLICE_PROVIDER.to_owned(),
+                            evidence: "parser".to_owned(),
+                            language: "rust".to_owned(),
+                            tier: ClientAnalysisTier::TierB,
+                            confidence: 1_000,
+                        })
+                        .collect(),
+                    Vec::new(),
+                )
+            } else {
+                (Vec::new(), symbols)
+            };
             Ok(SymbolExplain {
-                context: query_context(repository, generation, false),
-                symbols: Vec::new(),
-                unresolved_symbols: symbols,
+                context: query_context(repository, generation, resolves_active_generation),
+                symbols,
+                unresolved_symbols,
                 truncated: false,
                 execution_completeness: complete_execution(),
             })
@@ -1065,6 +1111,94 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
 }
 
 #[tokio::test]
+async fn repository_index_waits_for_progress_when_the_initial_operation_is_pending() {
+    let fake = FakeAsyncClient::with_pending_index();
+    let calls = Arc::clone(&fake.calls);
+    let executor = FirstSliceToolExecutor::new(NativeFirstSliceClientPort::with_client(fake))
+        .expect("executor initializes");
+
+    let output: RepoIndexOutput = execute(
+        &executor,
+        VerticalTool::RepoIndex,
+        json!({"root": "C:/fixture", "wait_ms": 250}),
+    )
+    .await;
+    let OperationToolResponse::Success(output) = output else {
+        panic!("pending repository index remains a successful operation response");
+    };
+    assert_eq!(
+        output.data.state,
+        rootlight_mcp_contract::vertical::OperationState::Running
+    );
+
+    let calls = calls.lock().expect("fake call recorder is not poisoned");
+    assert!(matches!(
+        calls.as_slice(),
+        [
+            Call::RepositoryIndex { operation, .. },
+            Call::OperationStatus {
+                operation: observed,
+                action: RepositoryOperationAction::Get,
+                wait_ms: Some(250),
+                after_revision: Some(2),
+                ..
+            }
+        ] if operation == observed
+    ));
+}
+
+#[tokio::test]
+async fn source_read_resolves_an_advertised_symbol_selector_before_reading() {
+    let fake = FakeAsyncClient::with_resolved_symbols();
+    let calls = Arc::clone(&fake.calls);
+    let executor = FirstSliceToolExecutor::new(NativeFirstSliceClientPort::with_client(fake))
+        .expect("executor initializes");
+
+    let output: SourceReadOutput = execute(
+        &executor,
+        VerticalTool::SourceRead,
+        json!({
+            "repository": {"repository_id": repository()},
+            "generation": "active",
+            "references": [{"symbol_id": symbol()}]
+        }),
+    )
+    .await;
+    let ToolResponse::Success(output) = output else {
+        panic!("schema-valid symbol source selector is executable");
+    };
+    assert_eq!(output.data.chunks.len(), 1);
+    assert_eq!(output.data.chunks[0].source_ref, {
+        rootlight_ir::SourceRef::new(
+            repository(),
+            generation(),
+            rootlight_ir::SourceSpan::new(file(), 0, 0).expect("source span is valid"),
+            content_hash(),
+            Some(rootlight_ir::LineRange::new(1, 1).expect("line range is valid")),
+        )
+    });
+
+    let calls = calls.lock().expect("fake call recorder is not poisoned");
+    assert!(matches!(
+        calls.as_slice(),
+        [
+            Call::SymbolExplain {
+                generation: GenerationSelector::Active,
+                symbols,
+                ..
+            },
+            Call::SourceRead {
+                generation: GenerationSelector::Generation(observed_generation),
+                references,
+                ..
+            }
+        ] if symbols == &[symbol()]
+            && *observed_generation == generation()
+            && references == &[source_reference()]
+    ));
+}
+
+#[tokio::test]
 async fn native_port_forwards_the_typed_catalog_continuation() {
     let fake = FakeAsyncClient::default();
     let calls = Arc::clone(&fake.calls);
@@ -1462,4 +1596,16 @@ const fn file() -> FileId {
 
 const fn content_hash() -> ContentHash {
     ContentHash::from_bytes([7; 32])
+}
+
+fn source_reference() -> SourceReference {
+    SourceReference::new(
+        repository(),
+        generation(),
+        file(),
+        0..0,
+        content_hash(),
+        Some(1..=1),
+    )
+    .expect("test source reference is valid")
 }

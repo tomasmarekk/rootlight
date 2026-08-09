@@ -94,7 +94,8 @@ use rootlight_mcp_contract::{
         GenerationSummary, IndexMode, IndexPlanScope, IndexPlanSummary, LanguageCoverage,
         LocateReason, LocatedItem, OperationAction, OperationBuildStrategy,
         OperationDetailV1_1 as OperationDetail, OperationFallbackReason,
-        OperationIncrementalEvidenceV1_1 as OperationIncrementalEvidence, OperationProgress,
+        OperationIncrementalEvidenceV1_1 as OperationIncrementalEvidence,
+        OperationInvalidationTraceV1_1 as OperationInvalidationTrace, OperationProgress,
         OperationResourcesV1_1 as OperationResources, OperationSchemaVersion, OperationState,
         OperationStatusDataV1_1 as OperationStatusData, OperationStatusInput,
         OperationStatusSuccessV1_1 as OperationStatusSuccess, ProvenanceLevel, ProvenanceSummary,
@@ -455,6 +456,7 @@ impl RepositoryStatusPortRequest {
 pub struct RepositoryIndexPortRequest {
     root: String,
     mode: IndexMode,
+    wait_ms: Option<u32>,
     detached: bool,
 }
 
@@ -471,6 +473,12 @@ impl RepositoryIndexPortRequest {
         self.mode
     }
 
+    /// Returns the maximum time to wait for operation progress or completion.
+    #[must_use]
+    pub const fn wait_ms(&self) -> Option<u32> {
+        self.wait_ms
+    }
+
     /// Reports whether work may continue after transport disconnect.
     #[must_use]
     pub const fn detached(&self) -> bool {
@@ -484,6 +492,7 @@ impl fmt::Debug for RepositoryIndexPortRequest {
             .debug_struct("RepositoryIndexPortRequest")
             .field("root_bytes", &self.root.len())
             .field("mode", &self.mode)
+            .field("wait_ms", &self.wait_ms)
             .field("detached", &self.detached)
             .finish()
     }
@@ -1378,6 +1387,9 @@ pub struct SourceReadPortRequest {
     repository: RepositoryId,
     generation: client::GenerationSelector,
     references: Vec<client::SourceReference>,
+    reference_selector_indexes: Vec<usize>,
+    symbol_selectors: Vec<(usize, SymbolId)>,
+    selector_count: usize,
     context_lines_before: u8,
     context_lines_after: u8,
     merge_overlaps: bool,
@@ -4120,7 +4132,7 @@ where
     )
     .await?;
     let explanation = rootlight_agent::explain::finalize_plan(
-        rootlight_agent::explain::source_read_plan(request.references.len()),
+        rootlight_agent::explain::source_read_plan(request.selector_count),
         &status.active_generation.to_string(),
     );
     let data = SourceReadData {
@@ -4381,12 +4393,9 @@ fn map_symbol_relationships(
     if response.result.returned_edges != mapped_returned_edges
         || response.result.returned_edges > response.result.total_edges
         || (!response.result.truncated
-            && (!response.result.exact
-                || next_page_offset.is_some()
-                || returned_end != response.result.total_edges))
+            && (next_page_offset.is_some() || returned_end != response.result.total_edges))
         || next_page_offset.is_some_and(|next| {
-            !response.result.exact
-                || !response.result.truncated
+            !response.result.truncated
                 || next != returned_end
                 || next >= response.result.total_edges
         })
@@ -6259,6 +6268,14 @@ where
         let output = explain_source_read(port, request, cancellation).await?;
         return serialize_measured_read_success(output, started_at, budget.limits);
     }
+    let request = resolve_source_read_symbols(
+        &port,
+        request,
+        budget.options,
+        cancellation.clone(),
+        invalid_arguments,
+    )
+    .await?;
     let expected = request.clone();
     let future = port.source_read(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -6402,7 +6419,6 @@ fn normalize_repository_index(
             .configuration_patch
             .as_ref()
             .is_some_and(|patch| !patch.is_empty())
-        || input.wait_ms.is_some()
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -6415,6 +6431,7 @@ fn normalize_repository_index(
     Ok(RepositoryIndexPortRequest {
         root,
         mode: input.mode.unwrap_or(IndexMode::Auto),
+        wait_ms: input.wait_ms,
         detached: input.detached.unwrap_or(false),
     })
 }
@@ -6522,56 +6539,173 @@ fn normalize_source_read(
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
 
-    let generation = client_generation(input.generation);
+    let mut generation = client_generation(input.generation);
     let explicit_generation = match generation {
         client::GenerationSelector::Active => None,
         client::GenerationSelector::Generation(generation) => Some(generation),
     };
     let mut reference_generation = None;
     let mut references = Vec::new();
+    let mut reference_selector_indexes = Vec::new();
+    let mut symbol_selectors = Vec::new();
     references
         .try_reserve_exact(input.references.len())
         .map_err(|_| internal(ToolExecutionFailure::Executor))?;
-    for selector in input.references {
-        let SourceReadSelector::Reference(reference) = selector else {
-            return Err(ToolExecutionError::new(unsupported.clone()));
-        };
-        let source = reference.source_ref;
-        if source.repository() != repository
-            || explicit_generation.is_some_and(|generation| source.generation() != generation)
-            || reference_generation.is_some_and(|generation| source.generation() != generation)
-        {
-            return Err(ToolExecutionError::new(invalid_arguments.clone()));
-        }
-        reference_generation = Some(source.generation());
-        let span = source.span();
-        let lines = source
-            .line_hint()
-            .map(|lines| lines.start_line()..=lines.end_line());
-        let reference = client::SourceReference::new(
-            source.repository(),
-            source.generation(),
-            span.file(),
-            span.start_byte()..span.end_byte(),
-            source.content_hash(),
-            lines,
-        )
+    reference_selector_indexes
+        .try_reserve_exact(input.references.len())
         .map_err(|_| internal(ToolExecutionFailure::Executor))?;
-        if references.contains(&reference) {
-            return Err(ToolExecutionError::new(invalid_arguments.clone()));
+    symbol_selectors
+        .try_reserve_exact(input.references.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    let selector_count = input.references.len();
+    for (selector_index, selector) in input.references.into_iter().enumerate() {
+        match selector {
+            SourceReadSelector::Reference(reference) => {
+                let source = reference.source_ref;
+                if source.repository() != repository
+                    || explicit_generation
+                        .is_some_and(|generation| source.generation() != generation)
+                    || reference_generation
+                        .is_some_and(|generation| source.generation() != generation)
+                {
+                    return Err(ToolExecutionError::new(invalid_arguments.clone()));
+                }
+                reference_generation = Some(source.generation());
+                let span = source.span();
+                let lines = source
+                    .line_hint()
+                    .map(|lines| lines.start_line()..=lines.end_line());
+                let reference = client::SourceReference::new(
+                    source.repository(),
+                    source.generation(),
+                    span.file(),
+                    span.start_byte()..span.end_byte(),
+                    source.content_hash(),
+                    lines,
+                )
+                .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+                if references.contains(&reference) {
+                    return Err(ToolExecutionError::new(invalid_arguments.clone()));
+                }
+                reference_selector_indexes.push(selector_index);
+                references.push(reference);
+            }
+            SourceReadSelector::Symbol(selector) => {
+                if symbol_selectors
+                    .iter()
+                    .any(|(_, symbol)| *symbol == selector.symbol_id)
+                {
+                    return Err(ToolExecutionError::new(invalid_arguments.clone()));
+                }
+                symbol_selectors.push((selector_index, selector.symbol_id));
+            }
+            SourceReadSelector::FileRange(_) => {
+                return Err(ToolExecutionError::new(unsupported.clone()));
+            }
         }
-        references.push(reference);
+    }
+    if explicit_generation.is_none()
+        && let Some(reference_generation) = reference_generation
+    {
+        generation = client::GenerationSelector::Generation(reference_generation);
     }
     Ok(SourceReadPortRequest {
         repository,
         generation,
         references,
+        reference_selector_indexes,
+        symbol_selectors,
+        selector_count,
         context_lines_before,
         context_lines_after,
         merge_overlaps: input.merge_overlaps.unwrap_or(false),
         include_line_numbers,
         encoding,
     })
+}
+
+async fn resolve_source_read_symbols<P>(
+    port: &Arc<P>,
+    mut request: SourceReadPortRequest,
+    options: client::RequestOptions,
+    cancellation: RequestCancellation,
+    invalid_arguments: &PublicError,
+) -> Result<SourceReadPortRequest, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    if request.symbol_selectors.is_empty() {
+        return Ok(request);
+    }
+
+    let mut resolved = vec![None; request.selector_count];
+    for (selector_index, reference) in request
+        .reference_selector_indexes
+        .iter()
+        .copied()
+        .zip(request.references.drain(..))
+    {
+        resolved[selector_index] = Some(reference);
+    }
+
+    for selectors in request.symbol_selectors.chunks(16) {
+        let symbols = selectors
+            .iter()
+            .map(|(_, symbol)| *symbol)
+            .collect::<Vec<_>>();
+        let explain_request = SymbolExplainPortRequest {
+            repository: request.repository,
+            generation: request.generation,
+            symbols,
+            include_provenance: ProvenanceLevel::None,
+        };
+        let response = await_port(
+            port.symbol_explain(explain_request.clone(), options, cancellation.clone()),
+            cancellation.clone(),
+        )
+        .await?;
+        validate_query_context(
+            &response.result.context,
+            explain_request.repository,
+            explain_request.generation,
+        )?;
+        if response.result.truncated
+            || !response.result.unresolved_symbols.is_empty()
+            || response.result.symbols.len() != selectors.len()
+        {
+            return Err(ToolExecutionError::new(invalid_arguments.clone()));
+        }
+        let resolved_generation = response.result.context.generation;
+        request.generation = client::GenerationSelector::Generation(resolved_generation);
+        for ((selector_index, requested_symbol), explanation) in
+            selectors.iter().zip(response.result.symbols)
+        {
+            if explanation.symbol != *requested_symbol
+                || explanation.definition.repository() != request.repository
+                || explanation.definition.generation() != resolved_generation
+                || resolved[*selector_index].is_some()
+            {
+                return Err(internal(ToolExecutionFailure::InvalidResponse));
+            }
+            resolved[*selector_index] = Some(explanation.definition);
+        }
+    }
+
+    request.references = resolved
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
+    if request
+        .references
+        .iter()
+        .enumerate()
+        .any(|(index, reference)| request.references[..index].contains(reference))
+    {
+        return Err(ToolExecutionError::new(invalid_arguments.clone()));
+    }
+    request.reference_selector_indexes.clear();
+    request.symbol_selectors.clear();
+    Ok(request)
 }
 
 fn repository_id(
@@ -6707,15 +6841,19 @@ fn map_operation_status(
                     bytes_examined: Some(response.bytes_examined),
                     referenced_bytes: response
                         .evidence
+                        .as_ref()
                         .map_or(0, |evidence| evidence.referenced_bytes),
                     newly_written_bytes: response
                         .evidence
+                        .as_ref()
                         .map_or(0, |evidence| evidence.newly_written_bytes),
                     reserved_memory_bytes: response
                         .evidence
+                        .as_ref()
                         .map_or(0, |evidence| evidence.reserved_memory_bytes),
                     owned_memory_bytes: response
                         .evidence
+                        .as_ref()
                         .map_or(0, |evidence| evidence.owned_memory_bytes),
                 },
             },
@@ -6723,7 +6861,10 @@ fn map_operation_status(
             semantic_operation_id: response.semantic_operation,
             index_stage: (operation.kind == client::OperationKind::RepositoryIndex)
                 .then_some(response.index_stage),
-            incremental: response.evidence.map(map_operation_incremental_evidence),
+            incremental: response
+                .evidence
+                .map(map_operation_incremental_evidence)
+                .transpose()?,
             error: RequiredNullable(error),
             retry_after_ms: RequiredNullable(response.retry_after_ms),
         },
@@ -6732,8 +6873,8 @@ fn map_operation_status(
 
 fn map_operation_incremental_evidence(
     evidence: client::RepositoryOperationEvidence,
-) -> OperationIncrementalEvidence {
-    OperationIncrementalEvidence {
+) -> Result<OperationIncrementalEvidence, ToolExecutionError> {
+    Ok(OperationIncrementalEvidence {
         build_strategy: match evidence.build_strategy {
             client::RepositoryBuildStrategy::Initial => OperationBuildStrategy::Initial,
             client::RepositoryBuildStrategy::DependencyDirected => {
@@ -6761,7 +6902,15 @@ fn map_operation_incremental_evidence(
         rebuilt_files: evidence.rebuilt_files,
         reused_facts: evidence.reused_facts,
         rebuilt_facts: evidence.rebuilt_facts,
-    }
+        invalidation_trace: evidence
+            .invalidation_trace_json
+            .as_deref()
+            .map(|trace| {
+                serde_json::from_slice::<OperationInvalidationTrace>(trace)
+                    .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+            })
+            .transpose()?,
+    })
 }
 
 fn repository_operation_kind(

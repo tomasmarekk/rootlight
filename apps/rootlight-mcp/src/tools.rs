@@ -2856,15 +2856,11 @@ mod tests {
             }
         }
 
-        assert_eq!(
-            exclusions,
-            [
-                "source.read:references[].file_id=*:co_required_selector",
-                "source.read:references[].start_byte=*:co_required_selector",
-            ],
-            "review any new generated-rule exclusion"
+        assert!(
+            exclusions.is_empty(),
+            "review any new generated-rule exclusion: {exclusions:?}"
         );
-        assert_eq!((declared, covered, exclusions.len()), (150, 148, 2));
+        assert_eq!((declared, covered, exclusions.len()), (124, 124, 0));
     }
 
     #[tokio::test]
@@ -3241,16 +3237,16 @@ mod tests {
             observed,
             [
                 (
-                    230_107,
-                    "df9dd692d70631f7d1dcdee6abc3adcb5a2b766eacf3f69b21caac134037f45b".to_owned(),
+                    225_535,
+                    "094fe3d41cf4e67e7898fb38600add9d8bf412c838910306732038f8c2f48fce".to_owned(),
                 ),
                 (
-                    502_345,
-                    "0d4c1369e6695856729d6e0c61fbf61723a0a04e585d354832825e06dd2c5372".to_owned(),
+                    493_965,
+                    "22e3a801dcb69c3c94edd49eee3f0b340c2b7b12924e2b5dbb46fab6134c0895".to_owned(),
                 ),
                 (
-                    683_110,
-                    "9e9d7ff6bc11778909707c4fcecad9bd58384ea5bd3c27bf787e1997720e2cd0".to_owned(),
+                    679_867,
+                    "ea881b4587d6c6fa23e463aaf13877f13fca4c277a033c33e82a60a734cdc065".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"

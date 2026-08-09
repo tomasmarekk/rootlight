@@ -197,11 +197,6 @@
           "description": "Request available deep tiers.",
           "type": "string",
           "const": "deep"
-        },
-        {
-          "description": "Rebuild from a clean generation.",
-          "type": "string",
-          "const": "rebuild"
         }
       ]
     },

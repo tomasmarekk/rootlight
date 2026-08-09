@@ -4,18 +4,19 @@ use std::{collections::BTreeSet, fs, path::Path, time::Duration};
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{
-    GenerationIdentity, RepositoryId, content_hash, derive_fact, derive_generation,
-    derive_repository,
+    FactId, GenerationIdentity, RepositoryId, SymbolId, content_hash, derive_fact,
+    derive_generation, derive_repository,
 };
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, ExtensionSupport, FactEvidence, FileRecord, IrDocument,
-    IrLimits, NormalizedIrDocument, ProducerIdentity, ProducerKind, ProvenanceRecord, SourceRef,
-    SourceSpan, decode_ir_document,
+    AnalysisTier, BuildContextIdentity, Confidence, EvidenceKind, ExtensionSupport, FactEvidence,
+    FileRecord, IrDocument, IrLimits, NormalizedIrDocument, ProducerIdentity, ProducerKind,
+    ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SourceRef, SourceSpan,
+    decode_ir_document,
 };
 use rootlight_query::{
     ExecutionCompletenessState, GenerationSet, LocateMode, PlanKind, QueryBudget, QueryError,
-    QueryResource, QueryResponse, QueryService, RelationFamily, RepositoryDataTrust,
-    TokenAccountingProfile, project_lexical_documents,
+    QueryResource, QueryResponse, QueryService, RelationDirection, RelationFamily,
+    RepositoryDataTrust, TokenAccountingProfile, project_lexical_documents,
 };
 use rootlight_search::{
     BuildBudget, LexicalSearch, QueryViolation, SearchBudget, SearchError, SearchHit,
@@ -279,6 +280,47 @@ fn fixture_snapshot() -> GenerationSnapshot {
         &ExtensionSupport::default(),
     )
     .expect("query fixture is canonical")
+}
+
+fn dispatch_candidate_snapshot() -> (GenerationSnapshot, SymbolId, SymbolId) {
+    let base = fixture_snapshot();
+    let metadata = base.metadata();
+    let mut document = base.document().clone();
+    let seed = document.entities[0].id;
+    document.entities[0].tier = AnalysisTier::TierD;
+
+    let target = SymbolId::from_bytes([0xa5; 20]);
+    let mut target_entity = document.entities[0].clone();
+    target_entity.id = target;
+    target_entity.canonical_name = "dispatch_target".to_owned();
+    target_entity.display_name = "dispatch_target".to_owned();
+    target_entity.qualified_name = "crate::dispatch_target".to_owned();
+    document.entities.push(target_entity);
+
+    document.relations.push(RelationRecord {
+        id: FactId::from_bytes([0xa6; 20]),
+        repository: document.repository,
+        generation: document.generation,
+        subject: RelationEndpoint::Entity(seed),
+        predicate: RelationPredicate::DispatchCandidate,
+        object: RelationEndpoint::Entity(target),
+        confidence: Confidence::new(900).expect("fixture confidence is valid"),
+        evidence_kind: EvidenceKind::Syntax,
+        provenance: document.provenance[0].id,
+        evidence: FactEvidence {
+            source: document.entities[0].evidence.source.clone(),
+            derivation: Vec::new(),
+        },
+    });
+
+    let snapshot = GenerationSnapshot::new(
+        metadata,
+        document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .expect("dispatch-candidate fixture is canonical");
+    (snapshot, seed, target)
 }
 
 fn fixture_search(snapshot: &GenerationSnapshot) -> FakeSearch {
@@ -827,6 +869,51 @@ fn symbol_relationships_enforces_plan_and_serialization_limits() {
             limit: 1,
         })
     ));
+}
+
+#[test]
+fn symbol_relationships_returns_tier_d_dispatch_as_weak_non_exact_call() {
+    let (snapshot, seed, target) = dispatch_candidate_snapshot();
+    let mut search = fixture_search(&snapshot);
+    let seed_entity = snapshot
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.id == seed)
+        .expect("seed entity exists");
+    search.hits[0].symbol_id = seed;
+    search.hits[0].identifier = seed_entity.display_name.clone();
+    search.hits[0].qualified_name = seed_entity.qualified_name.clone();
+    let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
+    let plan = service
+        .plan_symbol_relationships(
+            BTreeSet::from([seed]),
+            vec![RelationFamily::Calls],
+            Some(RelationDirection::Outbound),
+            0,
+            10,
+            0,
+            QueryBudget::new(),
+        )
+        .expect("candidate call relationship plan is admitted");
+
+    let response = service
+        .execute_symbol_relationships(&plan, &Cancellation::new())
+        .expect("candidate call relationship query succeeds");
+
+    assert!(!response.data.exact);
+    assert!(!response.data.truncated);
+    assert_eq!(response.data.returned_edges, 1);
+    assert_eq!(response.data.total_edges, 1);
+    assert_eq!(response.data.groups.len(), 1);
+    let group = &response.data.groups[0];
+    assert_eq!(group.seed, seed);
+    assert_eq!(group.family, RelationFamily::Calls);
+    assert_eq!(group.direction, RelationDirection::Outbound);
+    assert_eq!(group.items.len(), 1);
+    assert_eq!(group.items[0].symbol, target);
+    assert_eq!(group.items[0].confidence, 399);
+    assert_eq!(group.items[0].source_refs.len(), 1);
 }
 
 #[test]

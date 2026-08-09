@@ -487,21 +487,10 @@ const REPO_INDEX_RULES: &[CapabilityRule] = &[
         "deep",
         "selects native-isolated whole-project semantic analysis",
     ),
-    unsupported(
-        "repository_id",
-        "updating a registered repository is not served",
+    implemented(
+        "wait_ms",
+        "waits up to the requested bound for operation progress or completion",
     ),
-    unsupported("scope", "request-scoped index selection is not served"),
-    unsupported(
-        "requested_tiers",
-        "explicit analysis-tier selection is not served",
-    ),
-    unsupported(
-        "configuration_patch",
-        "configuration patching is not served",
-    ),
-    unsupported("wait_ms", "synchronous index waiting is not served"),
-    unsupported_value("mode", "rebuild", "rebuild indexing is not served"),
 ];
 
 const REPO_STATUS_RULES: &[CapabilityRule] = &[
@@ -544,10 +533,6 @@ const REPO_STATUS_RULES: &[CapabilityRule] = &[
     ),
     accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     unsupported("budget", "custom response budgets are not served"),
     unsupported_value(
         "response_profile",
@@ -610,10 +595,6 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
     ),
     implemented("explain", "returns a deterministic source-free plan"),
     implemented("cursor", "uses an authenticated request-bound continuation"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     unsupported("kinds", "kind filtering is not served"),
     unsupported("scope", "structural scope filtering is not served"),
     unsupported(
@@ -650,10 +631,6 @@ const SYMBOL_EXPLAIN_RULES: &[CapabilityRule] = &[
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     unsupported("sections", "section selection is not served"),
     unsupported(
         "relation_sample_limit",
@@ -690,10 +667,6 @@ const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
     ),
     implemented("explain", "returns a deterministic source-free plan"),
     implemented("cursor", "uses an authenticated request-bound continuation"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     unsupported("scope", "structural scope filtering is not served"),
     unsupported_value(
         "include_candidates",
@@ -779,10 +752,6 @@ const FLOW_TRACE_RULES: &[CapabilityRule] = &[
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     unsupported(
         "path_policy",
         "explicit path selection policy is not served",
@@ -870,10 +839,6 @@ const CHANGE_IMPACT_RULES: &[CapabilityRule] = &[
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     unsupported("scope", "structural scope filtering is not served"),
     implemented("budget", "reduces the common hard execution budget"),
     unsupported("budget.evidence_level", "evidence projection is not served"),
@@ -909,10 +874,6 @@ const TESTS_SELECT_RULES: &[CapabilityRule] = &[
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     implemented("budget", "reduces the common hard execution budget"),
     unsupported("budget.evidence_level", "evidence projection is not served"),
     unsupported("execution_budget", "execution-time budgeting is not served"),
@@ -959,10 +920,6 @@ const ARCHITECTURE_OVERVIEW_RULES: &[CapabilityRule] = &[
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     unsupported("scope", "structural scope filtering is not served"),
     unsupported("detail", "explicit detail projection is not served"),
     implemented("budget", "reduces the common hard execution budget"),
@@ -987,10 +944,6 @@ const ARCHITECTURE_CYCLES_RULES: &[CapabilityRule] = &[
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     unsupported("scope", "structural scope filtering is not served"),
     unsupported(
         "projection.level",
@@ -1099,10 +1052,6 @@ const CODE_DEAD_RULES: &[CapabilityRule] = &[
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     unsupported("scope", "structural scope filtering is not served"),
     implemented_value(
         "entry_point_policy",
@@ -1132,10 +1081,6 @@ const HISTORY_COMPARE_RULES: &[CapabilityRule] = &[
     accepted_fallback("include_unchanged_context"),
     accepted_fallback("profile"),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     unsupported("scope", "structural scope filtering is not served"),
     unsupported_value(
         "include_unchanged_context",
@@ -1203,10 +1148,6 @@ const PLAN_CHANGE_RULES: &[CapabilityRule] = &[
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     unsupported("change_context", "change-context resolution is not served"),
     unsupported("constraints", "user constraint evaluation is not served"),
     implemented("budget", "reduces the common hard execution budget"),
@@ -1219,10 +1160,6 @@ const CONTEXT_PACK_RULES: &[CapabilityRule] = &[
     accepted_fallback("task"),
     accepted_fallback("seeds"),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     unsupported("seeds.paths", "path seeds are not served"),
     unsupported("seeds.routes", "route seeds are not served"),
     unsupported("seeds.located", "located-result seeds are not served"),
@@ -1267,10 +1204,6 @@ const SOURCE_READ_RULES: &[CapabilityRule] = &[
     implemented("encoding", "selects exact UTF-8 or explicit base64 bytes"),
     accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     implemented(
         "context_lines_before",
         "expands UTF-8 selections by bounded leading lines",
@@ -1279,21 +1212,9 @@ const SOURCE_READ_RULES: &[CapabilityRule] = &[
         "context_lines_after",
         "expands UTF-8 selections by bounded trailing lines",
     ),
-    unsupported(
+    implemented(
         "references[].symbol_id",
-        "symbol selectors are not served by source reads",
-    ),
-    unsupported(
-        "references[].file_id",
-        "file range selectors are not served by source reads",
-    ),
-    unsupported(
-        "references[].start_byte",
-        "file range selectors are not served by source reads",
-    ),
-    unsupported(
-        "references[].end_byte",
-        "file range selectors are not served by source reads",
+        "resolves the symbol definition in the pinned generation before reading source",
     ),
     implemented("max_source_bytes", "reduces the common source-byte ceiling"),
     implemented("budget", "reduces the common hard execution budget"),
@@ -1316,10 +1237,6 @@ const QUERY_ADVANCED_RULES: &[CapabilityRule] = &[
     accepted_fallback("query"),
     implemented("explain", "returns a deterministic source-free plan"),
     implemented("cursor", "uses an authenticated request-bound continuation"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     implemented(
         "parameters",
         "binds typed scalars only at AST value positions before execution",
@@ -1341,10 +1258,6 @@ const QUERY_BATCH_RULES: &[CapabilityRule] = &[
         "propagates compact, standard, or evidence representation to compatible child tools",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported(
-        "repository.alias",
-        "only stable repository identifiers are served",
-    ),
     fallback_limited(
         "generation",
         "active is resolved and pinned once; non-active explicit generations fail closed until retained-generation lookup is available",
@@ -1671,39 +1584,39 @@ const fn budget_semantics(tool: McpTool) -> BudgetSemantics {
 
 const fn input_shape_hash(tool: McpTool) -> &'static str {
     match tool {
-        McpTool::RepoIndex => "ca3b1fcc7237dea36cfb927003b8a97b39baeefe2ef08cd0c8f116d6381f160d",
-        McpTool::RepoStatus => "4c74ff8e95f44eb590430a3a603fbb6248a18e590fc6026989d99ed8d696796e",
+        McpTool::RepoIndex => "5a755ef510ba28a57e7520f88a961b95fc384da8c5c38550964013bc2db0190e",
+        McpTool::RepoStatus => "209bc1a141e386684f402cf339130536f63e16ecbc960d92f720529ff522d9bb",
         McpTool::RepoList => "5f2a9e3fe96343fa1e75e8c4151d07cbc38ca6b1935ee7a8fadfd9defa9759b7",
         McpTool::OperationStatus => {
             "9703820cfd7dba86a224059c47287e73e06876df4d3245375fef88489f2554f3"
         }
-        McpTool::CodeLocate => "b91668688cc5139eae13e51d3720319d8167440666155447251d2e29c208a811",
+        McpTool::CodeLocate => "61c2dc41754b35809a808527e2fa15b8b93f9ea5755afacff558ea4eaa6aa8c4",
         McpTool::SymbolExplain => {
-            "698666081b80d3b8a031dcc103b74f5281dd0caa073d42ff3ee1679c21cf41a7"
+            "94f736e1ad7a5cc7a6aa51f5a9ce52d23c2e912065e6403d2a194ae942d13cab"
         }
         McpTool::SymbolRelationships => {
-            "8023c0c362d18ed970b5a0d5ff8af700c986fd9ab186663fbd1e29ba07cd201a"
+            "069fcd4baaab602bd4857fe3f8181c4f512c2567622fcb0c0b013ba689c7bdd4"
         }
-        McpTool::FlowTrace => "b228a48614c0069f4347b6c9ce4040a8532db4c7a17a83b6d52108d50fcb1360",
-        McpTool::ChangeImpact => "93aded61e1aa507496fd7179a636e8c0f1f8384a9304750d20f98d41ab03f717",
-        McpTool::TestsSelect => "6d468db8eb4ce2585faf489f3de96fa2a326af799024e8a2bd741d417ee9c846",
+        McpTool::FlowTrace => "8650a95d727af584f8e11256c853bd9f83f8367a02673f1623e5324d742d1555",
+        McpTool::ChangeImpact => "6661f5c1ce1434a50f72b7bd9b9f0fbeb473f3d9b8862b31ac57b7fad89d7c6a",
+        McpTool::TestsSelect => "c809badeeeaf4211023a6e79c6528e1107f22f1b0d5c1fabc000da9286b9715e",
         McpTool::ArchitectureOverview => {
-            "86c25ac4db8505c1754dba09d9c73d122541095f69edc75b7f6851fdc9fa253a"
+            "88a025148025aba3a15c75079c84fae1cc6279bd02fc4321c92f762cdb632676"
         }
         McpTool::ArchitectureCycles => {
-            "081ec741b4821a67453a0161a900577670faf06eb2ee7c1ff8d681c743875879"
+            "0901c86176b3e32dfdc0db4ae60e920904f4b3ad50a4976c6f54e49262de2bfc"
         }
-        McpTool::CodeDead => "5a0fb3d5c1812d6ab023e4764e786dac63ec294e01d06466ae5f7e4e992c9f0b",
+        McpTool::CodeDead => "bcfeb504626e073f2ca7412e8c8c836fe63e54812c969f059cd960d01af6d8da",
         McpTool::HistoryCompare => {
-            "ca8734f87fb7a3c7e8215c19ff295d9ba37092ab4e9288f6f5f7e993fe5c777c"
+            "d13e631267a97376b41023ab79cdf3afbd80f8de46414857259e528bc8214f5b"
         }
-        McpTool::PlanChange => "6f2e2f974582a6025e15233d36ce798742089e8bb055c726b63c3258a27ef411",
-        McpTool::ContextPack => "bcefc3fce03c389f26078725694aabdd2878e315e31e213c0ef8fb961b197142",
-        McpTool::SourceRead => "df1472b995ed8d489d9abafb8adc95ab0b5da699beb3ed29dcc16b7293de32f8",
+        McpTool::PlanChange => "90e947c75b35325cb394ddcf457016defd0ec7cd54de62c026ce5c37566c07d1",
+        McpTool::ContextPack => "b83aa16bc6f116cc4354fb3058f61d637090562f70f7966a9220b63db3e564fc",
+        McpTool::SourceRead => "0bf1574c6ce6a0a4e99261bc6ec5f0e22dd872da1071dc2f26a9eb00663a4659",
         McpTool::QueryAdvanced => {
-            "a05697bd45a30db206a189f177a08f60da5644d897a0eb18390fff58b4a92aa3"
+            "2dbf557a4dbc11d056aadbc16b3200660ddf90e024a6f8e29103e9897dc3841a"
         }
-        McpTool::QueryBatch => "7a9e82cf00569c6df57b9cf733703517e918ce5fbc0143c88c61514ef82fb927",
+        McpTool::QueryBatch => "18861b971b68ea45b8f742ef3e266d84d3af981db3f067854265053d87974b56",
     }
 }
 
@@ -2105,14 +2018,8 @@ mod tests {
     fn known_silent_fields_have_explicit_dispositions() {
         let repo_index = CAPABILITIES[McpTool::RepoIndex as usize];
         let scoped_index = repo_index.disposition("scope.repository", None);
-        assert_eq!(
-            scoped_index.status,
-            CapabilityStatus::UnsupportedStableError
-        );
-        assert_eq!(
-            scoped_index.error_code,
-            Some(ErrorCode::UnsupportedCapability)
-        );
+        assert_eq!(scoped_index.status, CapabilityStatus::Blocked);
+        assert_eq!(scoped_index.error_code, None);
         let detached_index = repo_index.disposition("detached", Some("true"));
         assert_eq!(detached_index.status, CapabilityStatus::Implemented);
         assert_eq!(detached_index.error_code, None);
@@ -2206,24 +2113,12 @@ mod tests {
         );
 
         let source_read = CAPABILITIES[McpTool::SourceRead as usize];
-        for path in [
-            "references[].symbol_id",
-            "references[].file_id",
-            "references[].start_byte",
-            "references[].end_byte",
-        ] {
-            let disposition = source_read.disposition(path, None);
-            assert_eq!(
-                disposition.status,
-                CapabilityStatus::UnsupportedStableError,
-                "{path} must fail closed"
-            );
-            assert_eq!(
-                disposition.error_code,
-                Some(ErrorCode::UnsupportedCapability),
-                "{path} must preserve the stable public code"
-            );
-        }
+        assert_eq!(
+            source_read
+                .disposition("references[].symbol_id", None)
+                .status,
+            CapabilityStatus::Implemented
+        );
         for path in ["context_lines_before", "context_lines_after"] {
             assert_eq!(
                 source_read.disposition(path, None).status,

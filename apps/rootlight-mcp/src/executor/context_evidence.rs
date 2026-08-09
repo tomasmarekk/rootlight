@@ -141,6 +141,9 @@ where
             SourceReadPortRequest {
                 repository: request.repository,
                 generation: client::GenerationSelector::Generation(request.generation),
+                selector_count: references.len(),
+                reference_selector_indexes: Vec::new(),
+                symbol_selectors: Vec::new(),
                 references,
                 context_lines_before,
                 context_lines_after,
@@ -989,6 +992,9 @@ where
             SourceReadPortRequest {
                 repository: invocation.repository(),
                 generation: client::GenerationSelector::Generation(invocation.generation()),
+                selector_count: references.len(),
+                reference_selector_indexes: Vec::new(),
+                symbol_selectors: Vec::new(),
                 references,
                 context_lines_before: 0,
                 context_lines_after: 0,

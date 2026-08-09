@@ -108,36 +108,6 @@
       "type": "string",
       "pattern": "^file1_[a-z2-7]{39}$"
     },
-    "FileRangeSelector": {
-      "description": "Explicit indexed-file range selector.",
-      "type": "object",
-      "properties": {
-        "end_byte": {
-          "description": "Exclusive end byte.",
-          "type": "integer",
-          "format": "uint64",
-          "maximum": 18446744073709551615,
-          "minimum": 0
-        },
-        "file_id": {
-          "description": "Stable indexed file identity.",
-          "$ref": "#/$defs/FileId"
-        },
-        "start_byte": {
-          "description": "Inclusive start byte.",
-          "type": "integer",
-          "format": "uint64",
-          "maximum": 18446744073709551615,
-          "minimum": 0
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "file_id",
-        "start_byte",
-        "end_byte"
-      ]
-    },
     "GenerationId": {
       "type": "string",
       "pattern": "^gen1_[a-z2-7]{39}$"
@@ -198,22 +168,6 @@
         }
       ]
     },
-    "RepositoryAliasSelector": {
-      "description": "Registered repository-alias selector.",
-      "type": "object",
-      "properties": {
-        "alias": {
-          "description": "Registered alias, resolved to exactly one repository.",
-          "type": "string",
-          "maxLength": 256,
-          "minLength": 1
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "alias"
-      ]
-    },
     "RepositoryId": {
       "type": "string",
       "pattern": "^repo1_[a-z2-7]{32}$"
@@ -238,10 +192,6 @@
         {
           "description": "Select by stable repository identifier.",
           "$ref": "#/$defs/RepositoryIdSelector"
-        },
-        {
-          "description": "Select by a configured local alias.",
-          "$ref": "#/$defs/RepositoryAliasSelector"
         }
       ]
     },
@@ -354,10 +304,6 @@
         {
           "description": "Select a symbol definition.",
           "$ref": "#/$defs/SymbolDefinitionSelector"
-        },
-        {
-          "description": "Select a verified byte range in one indexed file.",
-          "$ref": "#/$defs/FileRangeSelector"
         }
       ]
     },

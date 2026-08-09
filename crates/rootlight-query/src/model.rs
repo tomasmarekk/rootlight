@@ -687,8 +687,10 @@ impl RelationFamily {
     #[must_use]
     pub fn predicates(self) -> &'static [RelationPredicate] {
         match self {
-            Self::Calls => &[RelationPredicate::Calls],
-            Self::CalledBy => &[RelationPredicate::Calls],
+            Self::Calls | Self::CalledBy => &[
+                RelationPredicate::Calls,
+                RelationPredicate::DispatchCandidate,
+            ],
             Self::References => &[RelationPredicate::RefersTo],
             Self::Types => &[
                 RelationPredicate::UsesType,
@@ -2999,11 +3001,14 @@ pub(crate) fn search_mode(mode: LocateMode) -> SearchMode {
 mod tests {
     use std::time::Duration;
 
+    use rootlight_ir::RelationPredicate;
+
     use super::{
         ExecutionCompleteness, ExecutionCompletenessState, HARD_MAX_QUERY_DURATION,
         HARD_MAX_QUERY_EDGES, HARD_MAX_QUERY_JSON_BYTES, HARD_MAX_QUERY_MEMORY_BYTES,
         HARD_MAX_QUERY_RESULTS, HARD_MAX_QUERY_ROWS, HARD_MAX_QUERY_SOURCE_BYTES,
         HARD_MAX_QUERY_TOKENS, HistorySemanticChangeKind, QueryBudget, QueryError, QueryResource,
+        RelationFamily,
     };
 
     const RESOURCES: [QueryResource; 10] = [
@@ -3020,6 +3025,19 @@ mod tests {
     ];
 
     type BudgetBoundaryCase = (QueryResource, u64, fn(QueryBudget, u64) -> QueryBudget);
+
+    #[test]
+    fn call_families_preserve_exact_and_candidate_predicates() {
+        for family in [RelationFamily::Calls, RelationFamily::CalledBy] {
+            assert_eq!(
+                family.predicates(),
+                &[
+                    RelationPredicate::Calls,
+                    RelationPredicate::DispatchCandidate,
+                ]
+            );
+        }
+    }
 
     #[test]
     fn complete_execution_has_no_limiting_resource() {

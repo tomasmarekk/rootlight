@@ -11,7 +11,7 @@
             "explainSupported": false,
             "fallbackSummary": "bounded attached durable generation creation",
             "generation": "creates_generation",
-            "inputShapeHash": "ca3b1fcc7237dea36cfb927003b8a97b39baeefe2ef08cd0c8f116d6381f160d",
+            "inputShapeHash": "5a755ef510ba28a57e7520f88a961b95fc384da8c5c38550964013bc2db0190e",
             "lifecycle": {
               "acceptedModes": [
                 "auto",
@@ -30,45 +30,7 @@
               "updateByRepositoryId": false,
               "version": "1.0"
             },
-            "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository_id",
-                "status": "unsupported_stable_error",
-                "summary": "updating a registered repository is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "scope",
-                "status": "unsupported_stable_error",
-                "summary": "request-scoped index selection is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "requested_tiers",
-                "status": "unsupported_stable_error",
-                "summary": "explicit analysis-tier selection is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "configuration_patch",
-                "status": "unsupported_stable_error",
-                "summary": "configuration patching is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "wait_ms",
-                "status": "unsupported_stable_error",
-                "summary": "synchronous index waiting is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "mode",
-                "status": "unsupported_stable_error",
-                "summary": "rebuild indexing is not served",
-                "value": "rebuild"
-              }
-            ],
+            "limitations": [],
             "pagination": "not_applicable",
             "profiles": [
               "developer"
@@ -92,53 +54,6 @@
         },
         "inputSchema": {
           "$defs": {
-            "AnalysisTier": {
-              "description": "Requested or observed language support tier.",
-              "oneOf": [
-                {
-                  "const": "A",
-                  "description": "Compiler-quality or equivalent semantic evidence.",
-                  "type": "string"
-                },
-                {
-                  "const": "B",
-                  "description": "High-confidence partial semantic evidence.",
-                  "type": "string"
-                },
-                {
-                  "const": "C",
-                  "description": "Generic structural extraction.",
-                  "type": "string"
-                },
-                {
-                  "const": "D",
-                  "description": "Lexical-only support.",
-                  "type": "string"
-                }
-              ]
-            },
-            "BuildTargetScope": {
-              "additionalProperties": false,
-              "description": "Build-target scope.",
-              "properties": {
-                "build_targets": {
-                  "description": "Distinct build-target identities.",
-                  "items": {
-                    "maxLength": 512,
-                    "minLength": 1,
-                    "type": "string"
-                  },
-                  "maxItems": 256,
-                  "minItems": 1,
-                  "type": "array",
-                  "uniqueItems": true
-                }
-              },
-              "required": [
-                "build_targets"
-              ],
-              "type": "object"
-            },
             "IndexMode": {
               "description": "Indexing mode requested by `repo.index`.",
               "oneOf": [
@@ -155,104 +70,6 @@
                 {
                   "const": "deep",
                   "description": "Request available deep tiers.",
-                  "type": "string"
-                },
-                {
-                  "const": "rebuild",
-                  "description": "Rebuild from a clean generation.",
-                  "type": "string"
-                }
-              ]
-            },
-            "IndexScope": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/RepositoryScope",
-                  "description": "Index the complete repository policy scope."
-                },
-                {
-                  "$ref": "#/$defs/PathScope",
-                  "description": "Index selected repository-relative paths."
-                },
-                {
-                  "$ref": "#/$defs/PackageScope",
-                  "description": "Index selected package identities."
-                },
-                {
-                  "$ref": "#/$defs/BuildTargetScope",
-                  "description": "Index selected build-target identities without executing builds."
-                }
-              ],
-              "description": "Scope accepted by repository indexing."
-            },
-            "PackageScope": {
-              "additionalProperties": false,
-              "description": "Package scope.",
-              "properties": {
-                "packages": {
-                  "description": "Distinct package identities.",
-                  "items": {
-                    "maxLength": 512,
-                    "minLength": 1,
-                    "type": "string"
-                  },
-                  "maxItems": 256,
-                  "minItems": 1,
-                  "type": "array",
-                  "uniqueItems": true
-                }
-              },
-              "required": [
-                "packages"
-              ],
-              "type": "object"
-            },
-            "PathScope": {
-              "additionalProperties": false,
-              "description": "Repository-relative path scope.",
-              "properties": {
-                "paths": {
-                  "description": "Distinct repository-relative paths.",
-                  "items": {
-                    "maxLength": 8192,
-                    "minLength": 1,
-                    "type": "string"
-                  },
-                  "maxItems": 256,
-                  "minItems": 1,
-                  "type": "array",
-                  "uniqueItems": true
-                }
-              },
-              "required": [
-                "paths"
-              ],
-              "type": "object"
-            },
-            "RepositoryId": {
-              "pattern": "^repo1_[a-z2-7]{32}$",
-              "type": "string"
-            },
-            "RepositoryScope": {
-              "additionalProperties": false,
-              "description": "Whole-repository scope marker.",
-              "properties": {
-                "repository": {
-                  "$ref": "#/$defs/RepositoryScopeValue",
-                  "description": "Must be the repository scope keyword."
-                }
-              },
-              "required": [
-                "repository"
-              ],
-              "type": "object"
-            },
-            "RepositoryScopeValue": {
-              "description": "Whole-repository scope keyword.",
-              "oneOf": [
-                {
-                  "const": "whole",
-                  "description": "Complete repository policy scope.",
                   "type": "string"
                 }
               ]
@@ -285,17 +102,6 @@
             }
           ],
           "properties": {
-            "configuration_patch": {
-              "additionalProperties": true,
-              "description": "Validated operation-scoped configuration override.",
-              "maxProperties": 128,
-              "propertyNames": {
-                "maxLength": 256,
-                "minLength": 1,
-                "type": "string"
-              },
-              "type": "object"
-            },
             "detached": {
               "description": "Requests permission to continue after client disconnect.\n\nWhen `true`, the daemon owns the durable operation independently of the\nrequesting transport. Status and a successfully published generation\nremain recoverable after daemon restart.",
               "type": "boolean"
@@ -308,40 +114,11 @@
               ],
               "description": "Requested indexing mode."
             },
-            "repository_id": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/RepositoryId"
-                }
-              ],
-              "description": "Existing repository identity to update."
-            },
-            "requested_tiers": {
-              "additionalProperties": {
-                "$ref": "#/$defs/AnalysisTier"
-              },
-              "description": "Per-language maximum requested tier.",
-              "maxProperties": 64,
-              "propertyNames": {
-                "maxLength": 64,
-                "minLength": 1,
-                "type": "string"
-              },
-              "type": "object"
-            },
             "root": {
               "description": "Canonicalizable local root for first registration.",
               "maxLength": 4096,
               "minLength": 1,
               "type": "string"
-            },
-            "scope": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/IndexScope"
-                }
-              ],
-              "description": "Optional indexing scope."
             },
             "wait_ms": {
               "description": "Maximum time to wait for publication or a terminal state.",
@@ -518,11 +295,6 @@
                 {
                   "const": "deep",
                   "description": "Request available deep tiers.",
-                  "type": "string"
-                },
-                {
-                  "const": "rebuild",
-                  "description": "Rebuild from a clean generation.",
                   "type": "string"
                 }
               ]
@@ -1117,7 +889,7 @@
             "explainSupported": true,
             "fallbackSummary": "bounded durable active or exact-generation status with coverage, operations, and freshness conditions",
             "generation": "selects_generation",
-            "inputShapeHash": "4c74ff8e95f44eb590430a3a603fbb6248a18e590fc6026989d99ed8d696796e",
+            "inputShapeHash": "209bc1a141e386684f402cf339130536f63e16ecbc960d92f720529ff522d9bb",
             "limitations": [
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -1132,12 +904,6 @@
                 "status": "unsupported_stable_error",
                 "summary": "file coverage is not served because repo status has no file scope",
                 "value": "file"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -1281,22 +1047,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -1320,10 +1070,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -4734,6 +4480,17 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "invalidation_trace": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/OperationInvalidationTraceV1_1"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Bounded source-free explanation of invalidation and reuse decisions."
+                },
                 "rebuilt_facts": {
                   "description": "Normalized facts rebuilt for the published generation.",
                   "format": "uint64",
@@ -4773,6 +4530,679 @@
                 "rebuilt_files",
                 "reused_facts",
                 "rebuilt_facts"
+              ],
+              "type": "object"
+            },
+            "OperationInvalidationAction": {
+              "description": "Stable action recorded by one invalidation decision.",
+              "oneOf": [
+                {
+                  "const": "changed",
+                  "description": "A complete generation input value changed.",
+                  "type": "string"
+                },
+                {
+                  "const": "invalidated",
+                  "description": "A fact node entered the fixed-point invalidation closure.",
+                  "type": "string"
+                },
+                {
+                  "const": "reused",
+                  "description": "An immutable artifact can be retained.",
+                  "type": "string"
+                },
+                {
+                  "const": "rebuilt",
+                  "description": "An immutable artifact must be rebuilt.",
+                  "type": "string"
+                },
+                {
+                  "const": "conservative_fallback",
+                  "description": "Fine-grained reuse escalated to a repository rebuild.",
+                  "type": "string"
+                }
+              ]
+            },
+            "OperationInvalidationChangeClass": {
+              "description": "Semantic classification of one invalidation input transition.",
+              "oneOf": [
+                {
+                  "const": "no_change",
+                  "description": "No complete input value changed.",
+                  "type": "string"
+                },
+                {
+                  "const": "added",
+                  "description": "A stable input was newly added.",
+                  "type": "string"
+                },
+                {
+                  "const": "body_only",
+                  "description": "Only an implementation-body summary changed.",
+                  "type": "string"
+                },
+                {
+                  "const": "surface",
+                  "description": "A declaration, import, route, test, or exported surface changed.",
+                  "type": "string"
+                },
+                {
+                  "const": "build_context",
+                  "description": "Build targets, compiler options, or dependency context changed.",
+                  "type": "string"
+                },
+                {
+                  "const": "move",
+                  "description": "Canonical path or containment semantics changed.",
+                  "type": "string"
+                },
+                {
+                  "const": "delete",
+                  "description": "A stable input was removed.",
+                  "type": "string"
+                },
+                {
+                  "const": "configuration",
+                  "description": "Rootlight analysis or derived-index configuration changed.",
+                  "type": "string"
+                },
+                {
+                  "const": "provider_change",
+                  "description": "Grammar, adapter, or resolver producer version changed.",
+                  "type": "string"
+                }
+              ]
+            },
+            "OperationInvalidationFactDomain": {
+              "description": "Fact domain named by one invalidation decision.",
+              "oneOf": [
+                {
+                  "const": "syntax",
+                  "description": "Parsed syntax and syntax diagnostics.",
+                  "type": "string"
+                },
+                {
+                  "const": "public_surface",
+                  "description": "Exported declarations, signatures, visibility, and imports.",
+                  "type": "string"
+                },
+                {
+                  "const": "body",
+                  "description": "Local implementation bodies and body-dependent occurrences.",
+                  "type": "string"
+                },
+                {
+                  "const": "resolution",
+                  "description": "Import, type, call, hierarchy, and candidate resolution.",
+                  "type": "string"
+                },
+                {
+                  "const": "search",
+                  "description": "Generation-aligned lexical and derived search facts.",
+                  "type": "string"
+                },
+                {
+                  "const": "derived_graph",
+                  "description": "Bounded derived graph projections and intent-plan aids.",
+                  "type": "string"
+                },
+                {
+                  "const": "tests",
+                  "description": "Test identities and explicit test relationships.",
+                  "type": "string"
+                },
+                {
+                  "const": "services",
+                  "description": "Routes, RPC, messaging, database, and foreign service links.",
+                  "type": "string"
+                },
+                {
+                  "const": "history",
+                  "description": "Bounded Git, lineage, ownership, and co-change facts.",
+                  "type": "string"
+                }
+              ]
+            },
+            "OperationInvalidationFactTarget": {
+              "additionalProperties": false,
+              "description": "Scoped fact-domain target named by an invalidation decision.",
+              "properties": {
+                "domain": {
+                  "$ref": "#/$defs/OperationInvalidationFactDomain",
+                  "description": "Invalidated fact domain."
+                },
+                "unit": {
+                  "description": "Stable analysis-unit fact identity.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "unit",
+                "domain"
+              ],
+              "type": "object"
+            },
+            "OperationInvalidationInput": {
+              "description": "Typed generation input named by an invalidation decision.",
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "Actual bytes of one file.",
+                  "properties": {
+                    "kind": {
+                      "const": "file_content",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Canonical path semantics of one file.",
+                  "properties": {
+                    "kind": {
+                      "const": "file_path",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Exported surface of one analysis unit.",
+                  "properties": {
+                    "kind": {
+                      "const": "public_surface",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Body summary of one analysis unit.",
+                  "properties": {
+                    "kind": {
+                      "const": "body_summary",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Import set of one analysis unit.",
+                  "properties": {
+                    "kind": {
+                      "const": "import_set",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Build-target identity and membership.",
+                  "properties": {
+                    "kind": {
+                      "const": "build_target",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Compiler and macro option context.",
+                  "properties": {
+                    "kind": {
+                      "const": "compiler_options",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Dependency or lockfile resolution.",
+                  "properties": {
+                    "kind": {
+                      "const": "dependency_version",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Parser grammar identity.",
+                  "properties": {
+                    "kind": {
+                      "const": "grammar_version",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Adapter producer identity.",
+                  "properties": {
+                    "kind": {
+                      "const": "adapter_version",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Global resolver revision.",
+                  "properties": {
+                    "kind": {
+                      "const": "resolver_version",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Global analysis-configuration revision.",
+                  "properties": {
+                    "kind": {
+                      "const": "configuration_revision",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Global search revision.",
+                  "properties": {
+                    "kind": {
+                      "const": "search_revision",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Derived plan or projection identity.",
+                  "properties": {
+                    "kind": {
+                      "const": "derived_plan",
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "subject"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "OperationInvalidationReason": {
+              "description": "Stable source-free explanation for one invalidation decision.",
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "A complete input transitioned under this conservative class.",
+                  "properties": {
+                    "kind": {
+                      "const": "input_transition",
+                      "type": "string"
+                    },
+                    "value": {
+                      "$ref": "#/$defs/OperationInvalidationChangeClass"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "A declared pass dependency propagated invalidation.",
+                  "properties": {
+                    "kind": {
+                      "const": "dependency_pass",
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "A changed input had no declared dependent edge.",
+                  "properties": {
+                    "kind": {
+                      "const": "missing_dependency_declaration",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "The configured fixed-point edge-visit budget was exhausted.",
+                  "properties": {
+                    "kind": {
+                      "const": "closure_work_exceeded",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "One artifact output node is invalidated.",
+                  "properties": {
+                    "kind": {
+                      "const": "artifact_output_invalidated",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "One artifact's complete dependency fingerprint changed.",
+                  "properties": {
+                    "kind": {
+                      "const": "artifact_dependency_changed",
+                      "type": "string"
+                    },
+                    "value": {
+                      "$ref": "#/$defs/OperationInvalidationInput"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Every artifact dependency and output remains reusable.",
+                  "properties": {
+                    "kind": {
+                      "const": "complete_dependency_match",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "A conservative repository fallback rebuilds this target.",
+                  "properties": {
+                    "kind": {
+                      "const": "conservative_repository_rebuild",
+                      "type": "string"
+                    },
+                    "value": {
+                      "$ref": "#/$defs/OperationFallbackReason"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "value"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "OperationInvalidationTarget": {
+              "description": "Source-free target named by one invalidation decision.",
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "A changed generation input.",
+                  "properties": {
+                    "kind": {
+                      "const": "input",
+                      "type": "string"
+                    },
+                    "value": {
+                      "$ref": "#/$defs/OperationInvalidationInput"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "A scoped fact-domain node.",
+                  "properties": {
+                    "kind": {
+                      "const": "fact",
+                      "type": "string"
+                    },
+                    "value": {
+                      "$ref": "#/$defs/OperationInvalidationFactTarget"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "A reusable immutable artifact identity.",
+                  "properties": {
+                    "kind": {
+                      "const": "artifact",
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "The complete invalidation plan.",
+                  "properties": {
+                    "kind": {
+                      "const": "plan",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "OperationInvalidationTraceEntry": {
+              "additionalProperties": false,
+              "description": "One deterministic source-free invalidation decision.",
+              "properties": {
+                "action": {
+                  "$ref": "#/$defs/OperationInvalidationAction",
+                  "description": "Decision applied to the target."
+                },
+                "reason": {
+                  "$ref": "#/$defs/OperationInvalidationReason",
+                  "description": "Stable reason for the decision."
+                },
+                "target": {
+                  "$ref": "#/$defs/OperationInvalidationTarget",
+                  "description": "Input, fact node, artifact, or whole-plan target."
+                },
+                "via": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/OperationInvalidationTarget"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Direct predecessor that propagated invalidation, when present."
+                }
+              },
+              "required": [
+                "target",
+                "action",
+                "reason"
+              ],
+              "type": "object"
+            },
+            "OperationInvalidationTraceV1_1": {
+              "additionalProperties": false,
+              "description": "Bounded prefix of the complete source-free invalidation trace.",
+              "properties": {
+                "complete": {
+                  "description": "Whether every durable decision fits in this response.",
+                  "type": "boolean"
+                },
+                "entries": {
+                  "description": "Canonically ordered trace decisions retained in this response.",
+                  "items": {
+                    "$ref": "#/$defs/OperationInvalidationTraceEntry"
+                  },
+                  "maxItems": 8,
+                  "type": "array"
+                },
+                "total_entries": {
+                  "description": "Complete number of decisions in the durable trace.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "version": {
+                  "description": "Incremental trace schema version.",
+                  "maxLength": 32,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "version",
+                "entries",
+                "total_entries",
+                "complete"
               ],
               "type": "object"
             },
@@ -5304,14 +5734,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded exact-identifier or indexed lexical-text matching",
             "generation": "selects_generation",
-            "inputShapeHash": "b91668688cc5139eae13e51d3720319d8167440666155447251d2e29c208a811",
+            "inputShapeHash": "61c2dc41754b35809a808527e2fa15b8b93f9ea5755afacff558ea4eaa6aa8c4",
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "kinds",
@@ -5576,22 +6000,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -5615,10 +6023,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -7560,14 +7964,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded definitions, exact relation counts, and optional compact producer provenance",
             "generation": "selects_generation",
-            "inputShapeHash": "698666081b80d3b8a031dcc103b74f5281dd0caa073d42ff3ee1679c21cf41a7",
+            "inputShapeHash": "94f736e1ad7a5cc7a6aa51f5a9ce52d23c2e912065e6403d2a194ae942d13cab",
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "sections",
@@ -7733,22 +8131,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -7772,10 +8154,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -9545,14 +9923,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded static call, caller, reference, type, implementation, and import relationships",
             "generation": "selects_generation",
-            "inputShapeHash": "8023c0c362d18ed970b5a0d5ff8af700c986fd9ab186663fbd1e29ba07cd201a",
+            "inputShapeHash": "069fcd4baaab602bd4857fe3f8181c4f512c2567622fcb0c0b013ba689c7bdd4",
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "scope",
@@ -9897,22 +10269,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -9936,10 +10292,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -11815,14 +12167,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded paths over static call, reference, type, implementation, and import edges",
             "generation": "selects_generation",
-            "inputShapeHash": "b228a48614c0069f4347b6c9ce4040a8532db4c7a17a83b6d52108d50fcb1360",
+            "inputShapeHash": "8650a95d727af584f8e11256c853bd9f83f8367a02673f1623e5324d742d1555",
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "path_policy",
@@ -12184,22 +12530,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -12223,10 +12553,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -14004,14 +14330,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded explicit symbol-or-path change mapping",
             "generation": "selects_generation",
-            "inputShapeHash": "93aded61e1aa507496fd7179a636e8c0f1f8384a9304750d20f98d41ab03f717",
+            "inputShapeHash": "6661f5c1ce1434a50f72b7bd9b9f0fbeb473f3d9b8862b31ac57b7fad89d7c6a",
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "scope",
@@ -14229,22 +14549,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -14268,10 +14572,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -16298,14 +16598,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded unit-test ranking from explicit symbol seeds",
             "generation": "selects_generation",
-            "inputShapeHash": "6d468db8eb4ce2585faf489f3de96fa2a326af799024e8a2bd741d417ee9c846",
+            "inputShapeHash": "c809badeeeaf4211023a6e79c6528e1107f22f1b0d5c1fabc000da9286b9715e",
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "budget.evidence_level",
@@ -16517,22 +16811,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -16556,10 +16834,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -18252,14 +18526,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded file-granularity architecture map with optional hotspots",
             "generation": "selects_generation",
-            "inputShapeHash": "86c25ac4db8505c1754dba09d9c73d122541095f69edc75b7f6851fdc9fa253a",
+            "inputShapeHash": "88a025148025aba3a15c75079c84fae1cc6279bd02fc4321c92f762cdb632676",
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "scope",
@@ -18529,22 +18797,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -18568,10 +18820,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -20425,14 +20673,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded symbol-level cycles over static call, reference, type, implementation, and import edges",
             "generation": "selects_generation",
-            "inputShapeHash": "081ec741b4821a67453a0161a900577670faf06eb2ee7c1ff8d681c743875879",
+            "inputShapeHash": "0901c86176b3e32dfdc0db4ae60e920904f4b3ad50a4976c6f54e49262de2bfc",
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "scope",
@@ -20815,22 +21057,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -20854,10 +21080,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -22627,14 +22849,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded static reachability observations from the partial standard entry-point model",
             "generation": "selects_generation",
-            "inputShapeHash": "5a0fb3d5c1812d6ab023e4764e786dac63ec294e01d06466ae5f7e4e992c9f0b",
+            "inputShapeHash": "bcfeb504626e073f2ca7412e8c8c836fe63e54812c969f059cd960d01af6d8da",
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "scope",
@@ -22825,22 +23041,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -22864,10 +23064,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -24618,14 +24814,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded entity and signature comparison of two explicit retained generation identifiers",
             "generation": "compares_generations",
-            "inputShapeHash": "ca8734f87fb7a3c7e8215c19ff295d9ba37092ab4e9288f6f5f7e993fe5c777c",
+            "inputShapeHash": "d13e631267a97376b41023ab79cdf3afbd80f8de46414857259e528bc8214f5b",
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "scope",
@@ -24864,22 +25054,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -24903,10 +25077,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -26777,14 +26947,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded change planning from a caller-authored objective and explicit targets",
             "generation": "selects_generation",
-            "inputShapeHash": "6f2e2f974582a6025e15233d36ce798742089e8bb055c726b63c3258a27ef411",
+            "inputShapeHash": "90e947c75b35325cb394ddcf457016defd0ec7cd54de62c026ce5c37566c07d1",
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "change_context",
@@ -26996,22 +27160,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -27035,10 +27183,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -29008,14 +29152,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded profiled evidence assembly with authenticated continuation, generation-pinned references signatures and source snippets under a token budget",
             "generation": "selects_generation",
-            "inputShapeHash": "bcefc3fce03c389f26078725694aabdd2878e315e31e213c0ef8fb961b197142",
+            "inputShapeHash": "b83aa16bc6f116cc4354fb3058f61d637090562f70f7966a9220b63db3e564fc",
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "seeds.paths",
@@ -29254,22 +29392,6 @@
               ],
               "description": "Generation selector shared by first-slice read tools."
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -29293,10 +29415,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -31356,38 +31474,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded source ranges from pinned source references as untrusted data",
             "generation": "selects_generation",
-            "inputShapeHash": "df1472b995ed8d489d9abafb8adc95ab0b5da699beb3ed29dcc16b7293de32f8",
+            "inputShapeHash": "0bf1574c6ce6a0a4e99261bc6ec5f0e22dd872da1071dc2f26a9eb00663a4659",
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "references[].symbol_id",
-                "status": "unsupported_stable_error",
-                "summary": "symbol selectors are not served by source reads"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "references[].file_id",
-                "status": "unsupported_stable_error",
-                "summary": "file range selectors are not served by source reads"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "references[].start_byte",
-                "status": "unsupported_stable_error",
-                "summary": "file range selectors are not served by source reads"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "references[].end_byte",
-                "status": "unsupported_stable_error",
-                "summary": "file range selectors are not served by source reads"
-              },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "budget.evidence_level",
@@ -31456,36 +31544,6 @@
               "pattern": "^file1_[a-z2-7]{39}$",
               "type": "string"
             },
-            "FileRangeSelector": {
-              "additionalProperties": false,
-              "description": "Explicit indexed-file range selector.",
-              "properties": {
-                "end_byte": {
-                  "description": "Exclusive end byte.",
-                  "format": "uint64",
-                  "maximum": 18446744073709551615,
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "file_id": {
-                  "$ref": "#/$defs/FileId",
-                  "description": "Stable indexed file identity."
-                },
-                "start_byte": {
-                  "description": "Inclusive start byte.",
-                  "format": "uint64",
-                  "maximum": 18446744073709551615,
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "file_id",
-                "start_byte",
-                "end_byte"
-              ],
-              "type": "object"
-            },
             "GenerationId": {
               "pattern": "^gen1_[a-z2-7]{39}$",
               "type": "string"
@@ -31546,22 +31604,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -31585,10 +31627,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -31701,10 +31739,6 @@
                 {
                   "$ref": "#/$defs/SymbolDefinitionSelector",
                   "description": "Select a symbol definition."
-                },
-                {
-                  "$ref": "#/$defs/FileRangeSelector",
-                  "description": "Select a verified byte range in one indexed file."
                 }
               ],
               "description": "One source selector accepted by `source.read`."
@@ -33410,15 +33444,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded safe-ast query with typed value parameters, authenticated continuation, and enforced cost, row, and depth limits",
             "generation": "selects_generation",
-            "inputShapeHash": "a05697bd45a30db206a189f177a08f60da5644d897a0eb18390fff58b4a92aa3",
-            "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              }
-            ],
+            "inputShapeHash": "2dbf557a4dbc11d056aadbc16b3200660ddf90e024a6f8e29103e9897dc3841a",
+            "limitations": [],
             "pagination": "authenticated_cursor",
             "profiles": [
               "developer"
@@ -34165,22 +34192,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -34204,10 +34215,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
@@ -35668,14 +35675,8 @@
             "explainSupported": true,
             "fallbackSummary": "bounded active-generation batch dispatch for up to sixteen eligible reads with shared child accounting",
             "generation": "batch_inherited",
-            "inputShapeHash": "7a9e82cf00569c6df57b9cf733703517e918ce5fbc0143c88c61514ef82fb927",
+            "inputShapeHash": "18861b971b68ea45b8f742ef3e266d84d3af981db3f067854265053d87974b56",
             "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "repository.alias",
-                "status": "unsupported_stable_error",
-                "summary": "only stable repository identifiers are served"
-              },
               {
                 "field": "generation",
                 "status": "fallback_limited",
@@ -36026,22 +36027,6 @@
                 }
               ]
             },
-            "RepositoryAliasSelector": {
-              "additionalProperties": false,
-              "description": "Registered repository-alias selector.",
-              "properties": {
-                "alias": {
-                  "description": "Registered alias, resolved to exactly one repository.",
-                  "maxLength": 256,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "alias"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -36065,10 +36050,6 @@
                 {
                   "$ref": "#/$defs/RepositoryIdSelector",
                   "description": "Select by stable repository identifier."
-                },
-                {
-                  "$ref": "#/$defs/RepositoryAliasSelector",
-                  "description": "Select by a configured local alias."
                 }
               ],
               "description": "Repository selector accepted by first-slice read tools."
