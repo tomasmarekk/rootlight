@@ -3739,9 +3739,10 @@ where
         return Ok(());
     }
     let generation = &structured["generation"];
-    if generation["structural_freshness"] != "current"
-        || generation["semantic_freshness"] != "current"
-    {
+    // Auto mode may expose a current structural watcher generation while its
+    // semantic child is pending; the bounded ancestry check still rejects
+    // unrelated or superseded structural publications.
+    if generation["structural_freshness"] != "current" {
         return Err(VerticalError::Invariant(
             "active generation was not current-related to the expected snapshot",
         ));
@@ -6857,7 +6858,7 @@ mod tests {
     }
 
     #[test]
-    fn active_generation_accepts_only_current_descendants() {
+    fn active_generation_accepts_only_structurally_current_descendants() {
         let structural = json!({
             "generation": {
                 "generation_id": "structural",
@@ -6919,16 +6920,14 @@ mod tests {
                 "structural_freshness": "current"
             }
         });
-        assert!(
-            assert_active_generation_lineage(
-                &watcher_structural,
-                "structural",
-                None,
-                "watcher",
-                |_, _| unreachable!("a stale active generation is rejected before ancestry lookup")
-            )
-            .is_err()
-        );
+        assert_active_generation_lineage(
+            &watcher_structural,
+            "structural",
+            None,
+            "watcher",
+            |_, _| unreachable!("a direct structural descendant needs no ancestry lookup"),
+        )
+        .expect("an active watcher generation may await semantic refinement");
 
         let unrelated = json!({
             "generation": {
