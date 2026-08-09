@@ -3661,11 +3661,17 @@ fn call_tool_unchecked(
     catalog.validate_result(tool, &exchange.response)
 }
 
-fn require_tool_success(outcome: &ToolOutcome, _tool: &str) -> Result<(), VerticalError> {
+fn require_tool_success(outcome: &ToolOutcome, tool: &'static str) -> Result<(), VerticalError> {
     if outcome.is_error {
-        Err(VerticalError::Invariant(
-            "first-slice tool returned a checked domain error",
-        ))
+        let code = outcome.structured["error"]["code"]
+            .as_str()
+            .ok_or(VerticalError::Invariant(
+                "checked domain error omitted its stable code",
+            ))?;
+        Err(VerticalError::CheckedToolDomain {
+            tool,
+            code: code.to_owned(),
+        })
     } else {
         Ok(())
     }
@@ -6635,6 +6641,8 @@ pub(crate) enum VerticalError {
     },
     #[error("MCP vertical invariant failed: {0}")]
     Invariant(&'static str),
+    #[error("MCP first-slice tool {tool} returned checked domain error {code}")]
+    CheckedToolDomain { tool: &'static str, code: String },
     #[error("MCP request timed out")]
     RequestTimedOut,
     #[error("daemon readiness timed out")]
@@ -6684,7 +6692,7 @@ impl VerticalError {
             Self::OperationJournal(_) => "operation_journal_probe",
             Self::Io { .. } => "io",
             Self::Json { .. } | Self::Utf8 { .. } | Self::OwnedUtf8 { .. } => "encoding",
-            Self::Invariant(_) => "invariant",
+            Self::Invariant(_) | Self::CheckedToolDomain { .. } => "invariant",
             Self::RequestTimedOut => "request_timeout",
             Self::DaemonReadyTimedOut => "daemon_ready_timeout",
             Self::DaemonAdmissionTimedOut => "daemon_admission_timeout",
@@ -6710,8 +6718,8 @@ mod tests {
         canonicalize_known_identities, diagnostic_code_is_present, estimated_tokens,
         matrix_not_applicable_reason, modify_fixture_to_v2, nearest_rank, normalize_read_response,
         observe_rust_coverage, prepare_cancellation_repository, redact_request_for_evidence,
-        retryable_busy_delay, shrink_cancellation_repository, source_tokenizer_input,
-        validate_architecture_community_data, validate_tool_matrix_cells,
+        require_tool_success, retryable_busy_delay, shrink_cancellation_repository,
+        source_tokenizer_input, validate_architecture_community_data, validate_tool_matrix_cells,
     };
     use serde_json::json;
 
@@ -6781,6 +6789,26 @@ mod tests {
         ] {
             assert!(retryable_busy_delay(&outcome).is_none());
         }
+    }
+
+    #[test]
+    fn checked_domain_error_identifies_the_public_tool_and_code() {
+        let outcome = ToolOutcome {
+            structured: json!({
+                "error": {
+                    "code": "BUDGET_EXCEEDED",
+                    "retryable": false
+                }
+            }),
+            is_error: true,
+        };
+
+        let error = require_tool_success(&outcome, "context.pack")
+            .expect_err("checked domain error must fail the vertical assertion");
+        assert_eq!(
+            error.to_string(),
+            "MCP first-slice tool context.pack returned checked domain error BUDGET_EXCEEDED"
+        );
     }
 
     #[test]
