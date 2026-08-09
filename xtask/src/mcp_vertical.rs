@@ -91,7 +91,11 @@ const PROJECT_SEMANTICS_PROVIDER: &str = "rootlight-project-semantics";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
-const SETUP_RETRY_ATTEMPTS: u8 = 3;
+const SETUP_RETRY_ATTEMPTS: u8 = 32;
+const SETUP_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+// A watcher can retain repository admission longer than the daemon's minimum
+// retry hint, so setup retries need a floor that also prevents request storms.
+const SETUP_RETRY_DELAY_FLOOR: Duration = Duration::from_millis(250);
 // Match the daemon's retained-generation window so lineage proof cannot turn
 // watcher churn into an unbounded sequence of public reads.
 const GENERATION_LINEAGE_LIMIT: usize = 8;
@@ -1646,6 +1650,9 @@ fn index_repository_with_mode(
         "mode": mode,
         "detached": false
     });
+    let retry_deadline = Instant::now()
+        .checked_add(SETUP_RETRY_TIMEOUT)
+        .ok_or(VerticalError::Clock)?;
     let mut attempt = 1_u8;
     let response = loop {
         let request_label = if attempt == 1 {
@@ -1661,12 +1668,13 @@ fn index_repository_with_mode(
             "repo.index",
             arguments.clone(),
         )?;
-        let Some(delay) = retryable_busy_delay(&outcome) else {
+        let Some(server_delay) = retryable_busy_delay(&outcome) else {
             break outcome;
         };
-        if attempt == SETUP_RETRY_ATTEMPTS {
+        let remaining = retry_deadline.saturating_duration_since(Instant::now());
+        let Some(delay) = setup_retry_delay(attempt, server_delay, remaining) else {
             break outcome;
-        }
+        };
         thread::sleep(delay);
         attempt = attempt.saturating_add(1);
     };
@@ -2307,8 +2315,10 @@ fn exercise_complete_tool_matrix(
         &matrix_index.operation,
     )?;
     require_tool_success(&operation, "operation.status")?;
+    // A watcher may publish a validated descendant of the prior head, so this
+    // terminal operation must bind to its own index receipt.
     if operation.structured["data"]["operation"]["state"] != "published"
-        || operation.structured["data"]["published_generation"] != head.generation
+        || operation.structured["data"]["published_generation"] != matrix_index.generation
     {
         return Err(VerticalError::Invariant(
             "matrix operation status did not preserve its published identity",
@@ -3688,6 +3698,14 @@ fn retryable_busy_delay(outcome: &ToolOutcome) -> Option<Duration> {
             .unwrap_or(25)
             .clamp(1, 1_000),
     ))
+}
+
+fn setup_retry_delay(attempt: u8, server_delay: Duration, remaining: Duration) -> Option<Duration> {
+    if attempt >= SETUP_RETRY_ATTEMPTS {
+        return None;
+    }
+    let delay = server_delay.max(SETUP_RETRY_DELAY_FLOOR);
+    (delay <= remaining).then_some(delay)
 }
 
 fn assert_read_correlation(
@@ -6711,6 +6729,8 @@ impl VerticalError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{
         CANCELLATION_FIXTURE_FILES, EXPECTED_TOOLS, MATRIX_STATES, Options, ToolMatrixCell,
         ToolOutcome, VerticalError, assert_active_generation_lineage,
@@ -6718,8 +6738,9 @@ mod tests {
         canonicalize_known_identities, diagnostic_code_is_present, estimated_tokens,
         matrix_not_applicable_reason, modify_fixture_to_v2, nearest_rank, normalize_read_response,
         observe_rust_coverage, prepare_cancellation_repository, redact_request_for_evidence,
-        require_tool_success, retryable_busy_delay, shrink_cancellation_repository,
-        source_tokenizer_input, validate_architecture_community_data, validate_tool_matrix_cells,
+        require_tool_success, retryable_busy_delay, setup_retry_delay,
+        shrink_cancellation_repository, source_tokenizer_input,
+        validate_architecture_community_data, validate_tool_matrix_cells,
     };
     use serde_json::json;
 
@@ -6789,6 +6810,30 @@ mod tests {
         ] {
             assert!(retryable_busy_delay(&outcome).is_none());
         }
+    }
+
+    #[test]
+    fn setup_retry_window_is_count_time_and_rate_bounded() {
+        assert_eq!(
+            setup_retry_delay(1, Duration::from_millis(7), Duration::from_secs(1)),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            setup_retry_delay(1, Duration::from_millis(500), Duration::from_secs(1)),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            setup_retry_delay(
+                super::SETUP_RETRY_ATTEMPTS,
+                Duration::from_millis(7),
+                Duration::from_secs(1)
+            ),
+            None
+        );
+        assert_eq!(
+            setup_retry_delay(1, Duration::from_secs(1), Duration::from_millis(999)),
+            None
+        );
     }
 
     #[test]
