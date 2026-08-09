@@ -991,6 +991,10 @@ pub struct RepositoryOperationStatusResponse {
     #[prost(uint64, tag = "24")]
     #[allow(missing_docs)]
     pub owned_memory_bytes: u64,
+    /// Bounded canonical JSON for the source-free invalidation trace.
+    #[prost(bytes = "vec", optional, tag = "25")]
+    #[allow(missing_docs)]
+    pub invalidation_trace_json: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
 /// Bounded measured usage for one first-slice query.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]

@@ -626,7 +626,9 @@ impl GenerationManifestRecipe {
                 || derived_file != claim.file
                 || previous == Some(claim.file)
             {
-                return Err(IdentityVerificationError::IdentityMismatch);
+                return Err(IdentityVerificationError::IdentityMismatch(
+                    IdentityMismatchComponent::FileClaim,
+                ));
             }
             previous = Some(claim.file);
             checkpoint()?;
@@ -909,11 +911,11 @@ fn verify_snapshot_identities(
                     context.check().is_ok()
                 })
                 .map_err(|error| map_claim_error(error, context))?;
-                let source = envelope
-                    .evidence
-                    .source
-                    .clone()
-                    .ok_or(IdentityVerificationError::IdentityMismatch)?;
+                let source = envelope.evidence.source.clone().ok_or(
+                    IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope,
+                    ),
+                )?;
                 if file_claims.insert(claim.file, (claim, source)).is_some() {
                     return Err(IdentityVerificationError::DuplicateClaim);
                 }
@@ -926,11 +928,11 @@ fn verify_snapshot_identities(
                     context.check().is_ok()
                 })
                 .map_err(|error| map_claim_error(error, context))?;
-                let source = envelope
-                    .evidence
-                    .source
-                    .clone()
-                    .ok_or(IdentityVerificationError::IdentityMismatch)?;
+                let source = envelope.evidence.source.clone().ok_or(
+                    IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope,
+                    ),
+                )?;
                 if symbol_claims
                     .insert(claim.symbol, (claim, source))
                     .is_some()
@@ -948,14 +950,20 @@ fn verify_snapshot_identities(
                     .first()
                     .copied()
                     .filter(|_| envelope.evidence.derivation.len() == 1)
-                    .ok_or(IdentityVerificationError::IdentityMismatch)?;
-                let source = envelope
-                    .evidence
-                    .source
-                    .as_ref()
-                    .ok_or(IdentityVerificationError::IdentityMismatch)?;
+                    .ok_or(IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::LexicalEvidence,
+                    ))?;
+                let source = envelope.evidence.source.as_ref().ok_or(
+                    IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::LexicalEvidence,
+                    ),
+                )?;
                 validate_lexical_evidence_envelope(envelope, subject, source, envelope.provenance)
-                    .map_err(|_| IdentityVerificationError::IdentityMismatch)?;
+                    .map_err(|_| {
+                        IdentityVerificationError::IdentityMismatch(
+                            IdentityMismatchComponent::LexicalEvidence,
+                        )
+                    })?;
                 context
                     .check()
                     .map_err(IdentityVerificationError::Control)?;
@@ -984,7 +992,9 @@ fn verify_snapshot_identities(
             || claim.derived_file() != file.id
             || file.evidence.source.as_ref() != Some(claim_source)
         {
-            return Err(IdentityVerificationError::IdentityMismatch);
+            return Err(IdentityVerificationError::IdentityMismatch(
+                IdentityMismatchComponent::FileClaim,
+            ));
         }
         context
             .check()
@@ -1039,9 +1049,9 @@ fn verify_snapshot_identities(
         let (claim, claim_source) = symbol_claims
             .get(&entity.id)
             .ok_or(IdentityVerificationError::MissingClaim)?;
-        let provenance = provenance_by_id
-            .get(&entity.provenance)
-            .ok_or(IdentityVerificationError::IdentityMismatch)?;
+        let provenance = provenance_by_id.get(&entity.provenance).ok_or(
+            IdentityVerificationError::IdentityMismatch(IdentityMismatchComponent::SymbolClaim),
+        )?;
         if claim.repository != entity.repository
             || claim.language != entity.language
             || claim.kind != entity.kind
@@ -1052,7 +1062,9 @@ fn verify_snapshot_identities(
                 != provenance.build_context.digest().as_bytes().as_slice()
             || claim.derived_symbol() != entity.id
         {
-            return Err(IdentityVerificationError::IdentityMismatch);
+            return Err(IdentityVerificationError::IdentityMismatch(
+                IdentityMismatchComponent::SymbolClaim,
+            ));
         }
         context
             .check()
@@ -1069,10 +1081,12 @@ fn map_claim_error(
     if error == IdentityClaimError::Interrupted {
         match context.check() {
             Err(error) => IdentityVerificationError::Control(error),
-            Ok(()) => IdentityVerificationError::IdentityMismatch,
+            Ok(()) => IdentityVerificationError::IdentityMismatch(
+                IdentityMismatchComponent::ClaimEnvelope,
+            ),
         }
     } else {
-        IdentityVerificationError::IdentityMismatch
+        IdentityVerificationError::IdentityMismatch(IdentityMismatchComponent::ClaimEnvelope)
     }
 }
 
@@ -1098,7 +1112,9 @@ fn verify_fact_ids(
             .check()
             .map_err(IdentityVerificationError::Control)?;
         if derived != record.id {
-            return Err(IdentityVerificationError::IdentityMismatch);
+            return Err(IdentityVerificationError::IdentityMismatch(
+                IdentityMismatchComponent::Provenance,
+            ));
         }
     }
     for record in &document.occurrences {
@@ -1112,7 +1128,9 @@ fn verify_fact_ids(
             .check()
             .map_err(IdentityVerificationError::Control)?;
         if derived != record.id {
-            return Err(IdentityVerificationError::IdentityMismatch);
+            return Err(IdentityVerificationError::IdentityMismatch(
+                IdentityMismatchComponent::Occurrence,
+            ));
         }
     }
     for record in &document.relations {
@@ -1125,7 +1143,9 @@ fn verify_fact_ids(
             .check()
             .map_err(IdentityVerificationError::Control)?;
         if derived != record.id {
-            return Err(IdentityVerificationError::IdentityMismatch);
+            return Err(IdentityVerificationError::IdentityMismatch(
+                IdentityMismatchComponent::Relation,
+            ));
         }
     }
     for record in &document.source_mappings {
@@ -1139,7 +1159,9 @@ fn verify_fact_ids(
             .check()
             .map_err(IdentityVerificationError::Control)?;
         if derived != record.id {
-            return Err(IdentityVerificationError::IdentityMismatch);
+            return Err(IdentityVerificationError::IdentityMismatch(
+                IdentityMismatchComponent::SourceMapping,
+            ));
         }
     }
     for record in &document.coverage_records {
@@ -1152,7 +1174,9 @@ fn verify_fact_ids(
             .check()
             .map_err(IdentityVerificationError::Control)?;
         if derived != record.id {
-            return Err(IdentityVerificationError::IdentityMismatch);
+            return Err(IdentityVerificationError::IdentityMismatch(
+                IdentityMismatchComponent::Coverage,
+            ));
         }
     }
     for record in &document.skipped_regions {
@@ -1165,7 +1189,9 @@ fn verify_fact_ids(
             .check()
             .map_err(IdentityVerificationError::Control)?;
         if derived != record.id {
-            return Err(IdentityVerificationError::IdentityMismatch);
+            return Err(IdentityVerificationError::IdentityMismatch(
+                IdentityMismatchComponent::SkippedRegion,
+            ));
         }
     }
     for record in &document.diagnostics {
@@ -1179,7 +1205,9 @@ fn verify_fact_ids(
             .check()
             .map_err(IdentityVerificationError::Control)?;
         if derived != record.id {
-            return Err(IdentityVerificationError::IdentityMismatch);
+            return Err(IdentityVerificationError::IdentityMismatch(
+                IdentityMismatchComponent::Diagnostic,
+            ));
         }
     }
     context.check().map_err(IdentityVerificationError::Control)
@@ -1583,8 +1611,8 @@ pub enum IdentityVerificationError {
     #[error("generation contains duplicate identity claims")]
     DuplicateClaim,
     /// A stable ID differs from the result of its canonical recipe.
-    #[error("generation identity does not match its canonical recipe")]
-    IdentityMismatch,
+    #[error("generation {0:?} identity does not match its canonical recipe")]
+    IdentityMismatch(IdentityMismatchComponent),
     /// Canonical manifest inputs do not match generation metadata.
     #[error("generation manifest does not match its canonical file inputs")]
     ManifestMismatch,
@@ -1594,6 +1622,53 @@ pub enum IdentityVerificationError {
     /// A fixed typed recipe could not be encoded.
     #[error("generation identity recipe could not be encoded")]
     RecipeEncoding,
+}
+
+/// Closed record family identifying a canonical identity mismatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityMismatchComponent {
+    /// An identity-claim envelope is malformed or not bound to direct evidence.
+    ClaimEnvelope,
+    /// A lexical evidence extension is not bound to its asserted subject.
+    LexicalEvidence,
+    /// A file record disagrees with its canonical identity claim.
+    FileClaim,
+    /// An entity record disagrees with its canonical symbol claim or provenance.
+    SymbolClaim,
+    /// A provenance record ID differs from its typed recipe.
+    Provenance,
+    /// An occurrence record ID differs from its typed recipe.
+    Occurrence,
+    /// A relation record ID differs from its typed recipe.
+    Relation,
+    /// A source-mapping record ID differs from its typed recipe.
+    SourceMapping,
+    /// A coverage record ID differs from its typed recipe.
+    Coverage,
+    /// A skipped-region record ID differs from its typed recipe.
+    SkippedRegion,
+    /// A diagnostic record ID differs from its typed recipe.
+    Diagnostic,
+}
+
+impl IdentityMismatchComponent {
+    /// Returns the stable source-free label used by operational diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaimEnvelope => "claim_envelope",
+            Self::LexicalEvidence => "lexical_evidence",
+            Self::FileClaim => "file_claim",
+            Self::SymbolClaim => "symbol_claim",
+            Self::Provenance => "provenance",
+            Self::Occurrence => "occurrence",
+            Self::Relation => "relation",
+            Self::SourceMapping => "source_mapping",
+            Self::Coverage => "coverage",
+            Self::SkippedRegion => "skipped_region",
+            Self::Diagnostic => "diagnostic",
+        }
+    }
 }
 
 impl IdentityVerificationError {

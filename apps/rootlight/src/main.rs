@@ -2594,6 +2594,11 @@ impl CliError {
         if let Some(error) = self.embedded_public_error() {
             return exit_family_for_code(error.code());
         }
+        if let Self::Client(error) = self
+            && error.is_daemon_unavailable()
+        {
+            return ExitFamily::Unavailable;
+        }
         match self {
             Self::Usage
             | Self::IncompletePathOverride
@@ -2651,6 +2656,7 @@ impl CliError {
             Self::Client(ClientError::DaemonUnavailable)
             | Self::Client(ClientError::DaemonExecutableMissing)
             | Self::Client(ClientError::DaemonLaunchFailed)
+            | Self::Client(ClientError::DaemonLaunchCleanupTimedOut)
             | Self::Client(ClientError::DaemonStartTimedOut)
             | Self::WebService(_)
             | Self::DaemonActiveDuringUninstall
@@ -2740,7 +2746,7 @@ impl CliError {
         };
         let builder = PublicError::builder(code, message);
         let builder = if retryable {
-            builder.retryable()
+            builder.retryable().next_action(NextAction::Retry)
         } else {
             builder
         };
@@ -3376,6 +3382,28 @@ mod tests {
         assert_eq!(json["exit_family"], "usage");
         assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
         assert!(json.get("result").is_none());
+    }
+
+    #[test]
+    fn contended_daemon_endpoint_is_retryable_and_actionable() {
+        let error = CliError::Client(ClientError::Ipc(rootlight_ipc::IpcError::Transport(
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "fixture has no available pipe instance",
+            ),
+        )));
+        let envelope = CliEnvelope::failure(
+            error.exit_family(),
+            error
+                .public_error()
+                .expect("closed unavailable error template is valid"),
+        );
+        let json = serde_json::to_value(envelope).expect("CLI envelope serializes");
+
+        assert_eq!(json["exit_family"], "unavailable");
+        assert_eq!(json["error"]["code"], "BUSY");
+        assert_eq!(json["error"]["retryable"], true);
+        assert_eq!(json["error"]["next_actions"][0]["action"], "retry");
     }
 
     #[test]

@@ -383,11 +383,11 @@ fn lowering_emits_only_evidence_backed_conservative_relations() {
             .as_ref()
             .expect("entity has direct definition evidence")
             .span(),
-        span_for_nth(&source, "alpha", 1)
+        span_for(&source, "pub fn alpha() { beta(); }")
     );
     assert!(document.occurrences.iter().any(|occurrence| {
         occurrence.role == OccurrenceRole::Definition
-            && occurrence.source.span() == span_for_nth(&source, "alpha", 1)
+            && occurrence.source.span() == span_for(&source, "pub fn alpha() { beta(); }")
     }));
     assert!(document.occurrences.iter().any(|occurrence| {
         occurrence.role == OccurrenceRole::CallSite
@@ -880,7 +880,7 @@ fn annotated_java_uses_definition_and_signature_captures_only() {
     assert!(!names.contains(&"Override"));
     assert!(output.document().occurrences.iter().any(|occurrence| {
         occurrence.role == OccurrenceRole::Definition
-            && occurrence.source.span() == span_in(JAVA, &source, "foo", 0)
+            && occurrence.source.span() == span_in(JAVA, &source, "@Override() void foo() {}", 0)
     }));
 }
 

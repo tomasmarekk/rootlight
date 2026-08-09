@@ -452,6 +452,48 @@ fn reviewed_rust_structural_profile_marks_tests_and_scoped_calls() {
 }
 
 #[test]
+fn definition_evidence_covers_complete_go_and_rust_declarations() {
+    const GO_SOURCE: &str =
+        "package api\n\nfunc (handler Handler) GenerateHandler() {\n\tserve()\n}\n";
+    const GO_DECLARATION: &str = "func (handler Handler) GenerateHandler() {\n\tserve()\n}";
+    const RUST_SOURCE: &str =
+        "pub enum DenoSubcommand {\n    Run,\n    Test {\n        watch: bool,\n    },\n}\n";
+    const RUST_DECLARATION: &str =
+        "pub enum DenoSubcommand {\n    Run,\n    Test {\n        watch: bool,\n    },\n}";
+    for (case, source, symbol, expected) in [
+        (CASES[4], GO_SOURCE, "GenerateHandler", GO_DECLARATION),
+        (CASES[0], RUST_SOURCE, "DenoSubcommand", RUST_DECLARATION),
+    ] {
+        let fixture = Fixture::new(case, source.as_bytes());
+        let provider = Arc::new(provider());
+        let analyzer = analyzer(&provider, case);
+        let limits = limits();
+        let request = request(&fixture.snapshot, &fixture.source, case, &limits);
+        let output = analyze(&analyzer, &request, &ExtensionSupport::default());
+        let entity = output
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == symbol)
+            .expect("definition entity is indexed");
+        let span = entity
+            .evidence
+            .source
+            .as_ref()
+            .expect("definition carries source evidence")
+            .span();
+        let start = usize::try_from(span.start_byte()).expect("span start fits");
+        let end = usize::try_from(span.end_byte()).expect("span end fits");
+
+        assert_eq!(
+            source.get(start..end),
+            Some(expected),
+            "{symbol} evidence must compose with a complete definition read"
+        );
+    }
+}
+
+#[test]
 fn real_analyzer_reports_invalid_utf8_without_source_material() {
     const SECRET: &str = "do-not-leak-this-source-material";
     let case = CASES[0];

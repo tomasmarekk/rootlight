@@ -28,9 +28,9 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 /// authenticated operation submission and cannot satisfy the current contract.
 pub const MINIMUM_PROTOCOL_MINOR: u32 = 1;
 /// Latest daemon protocol implemented by the current client and server.
-pub const CURRENT_PROTOCOL_MINOR: u32 = 11;
+pub const CURRENT_PROTOCOL_MINOR: u32 = 12;
 /// Current production protocol contract version.
-pub const PROTOCOL_VERSION: &str = "1.11";
+pub const PROTOCOL_VERSION: &str = "1.12";
 /// Schema version for a complete effective first-slice request budget.
 pub const FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION: u32 = 1;
 /// Hard transport admission maximum for logical rows.
@@ -175,6 +175,7 @@ mod tests {
             newly_written_bytes: 14,
             reserved_memory_bytes: 15,
             owned_memory_bytes: 16,
+            invalidation_trace_json: Some(br#"{"version":"1.0"}"#.to_vec()),
         };
 
         let decoded =

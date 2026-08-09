@@ -78,11 +78,21 @@ fn summary(inputs: InputSnapshot, artifacts: Vec<ArtifactSummary>) -> Generation
 #[test]
 fn pass_ids_are_bounded_and_canonical() {
     assert!(PassId::parse("resolver.calls_v1").is_ok());
+    assert_eq!(
+        serde_json::from_str::<PassId>("\"resolver.calls_v1\"")
+            .expect("canonical pass ID deserializes")
+            .as_str(),
+        "resolver.calls_v1"
+    );
     for invalid in ["", "Upper", "contains space", "path/shaped"] {
         assert!(matches!(
             PassId::parse(invalid),
             Err(IncrementalError::InvalidPassId)
         ));
+        assert!(
+            serde_json::from_value::<PassId>(serde_json::Value::String(invalid.to_owned()))
+                .is_err()
+        );
     }
 }
 
@@ -165,7 +175,7 @@ fn typed_inputs_cover_every_normative_change_class() {
     let keyed_fact = fact(2);
     let keyed_file = file(3);
     let cases = [
-        (InputKey::FileContent(keyed_file), ChangeClass::Surface),
+        (InputKey::FileContent(keyed_file), ChangeClass::BodyOnly),
         (InputKey::FilePath(keyed_file), ChangeClass::Move),
         (InputKey::PublicSurface(subject), ChangeClass::Surface),
         (InputKey::BodySummary(subject), ChangeClass::BodyOnly),

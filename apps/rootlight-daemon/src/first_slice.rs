@@ -102,6 +102,7 @@ const DEFAULT_WORK_QUEUE: usize = 16;
 const DEFAULT_READ_QUEUE: usize = 32;
 const DEFAULT_CONTROL_QUEUE: usize = 32;
 const DEFAULT_OPERATION_METADATA: usize = 256;
+const MAX_PUBLIC_INVALIDATION_TRACE_ENTRIES: usize = 8;
 const RETRY_AFTER_MS: u32 = 100;
 const MAX_OPERATION_STATUS_WAIT_MS: u32 = 30_000;
 const OPERATION_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -115,7 +116,6 @@ const DETACHED_INDEX_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const WATCHER_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(250);
 const WATCHER_RETRY_INTERVAL: Duration = Duration::from_secs(1);
-const WATCHER_AUTHORITATIVE_INTERVAL: Duration = Duration::from_secs(30);
 const WATCHER_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const WATCHER_MAX_REPOSITORY_ENTRIES: usize = 250_000;
 const DEFAULT_RELATIONSHIP_RESULTS: u32 = 100;
@@ -688,7 +688,6 @@ struct WatcherConfig {
     poll_interval: Duration,
     debounce_interval: Duration,
     retry_interval: Duration,
-    authoritative_interval: Duration,
     maximum_repository_entries: usize,
 }
 
@@ -698,7 +697,6 @@ impl Default for WatcherConfig {
             poll_interval: WATCHER_POLL_INTERVAL,
             debounce_interval: WATCHER_DEBOUNCE_INTERVAL,
             retry_interval: WATCHER_RETRY_INTERVAL,
-            authoritative_interval: WATCHER_AUTHORITATIVE_INTERVAL,
             maximum_repository_entries: WATCHER_MAX_REPOSITORY_ENTRIES,
         }
     }
@@ -722,9 +720,7 @@ struct WatcherTarget {
 struct WatchedRepository {
     fingerprint: ContentHash,
     dirty: bool,
-    content_change_pending: bool,
     next_attempt: Instant,
-    last_authoritative_reconcile: Instant,
 }
 
 impl WatchedRepository {
@@ -732,32 +728,15 @@ impl WatchedRepository {
         Self {
             fingerprint,
             dirty: false,
-            content_change_pending: false,
             next_attempt: now,
-            last_authoritative_reconcile: now,
         }
     }
 
-    fn observe(
-        &mut self,
-        fingerprint: ContentHash,
-        now: Instant,
-        debounce: Duration,
-        authoritative_interval: Duration,
-    ) {
+    fn observe(&mut self, fingerprint: ContentHash, now: Instant, debounce: Duration) {
         if self.fingerprint != fingerprint {
             self.fingerprint = fingerprint;
             self.dirty = true;
-            self.content_change_pending = true;
             self.next_attempt = watcher_deadline(now, debounce);
-        } else if !self.dirty
-            && now
-                .checked_duration_since(self.last_authoritative_reconcile)
-                .is_some_and(|elapsed| elapsed >= authoritative_interval)
-        {
-            self.dirty = true;
-            self.content_change_pending = false;
-            self.next_attempt = now;
         }
     }
 
@@ -767,21 +746,12 @@ impl WatchedRepository {
     }
 
     fn deferred_by_busy_index(&mut self, now: Instant, retry_interval: Duration) {
-        if self.content_change_pending {
-            self.retry_after(now, retry_interval);
-        } else {
-            // A concurrent user index already performs the authoritative scan
-            // needed by a periodic-only checkpoint. Avoid immediately
-            // replacing its publication with a redundant watcher generation.
-            self.reconciled(now);
-        }
+        self.retry_after(now, retry_interval);
     }
 
     fn reconciled(&mut self, now: Instant) {
         self.dirty = false;
-        self.content_change_pending = false;
         self.next_attempt = now;
-        self.last_authoritative_reconcile = now;
     }
 }
 
@@ -1123,7 +1093,7 @@ impl FirstSliceDaemon {
         let semantic_refinements = Arc::new(Mutex::new(BTreeMap::new()));
         let graph_projections = Arc::new(Mutex::new(GraphProjectionRegistry::new()));
         let recovery_ready = Arc::new(AtomicBool::new(deferred_restore.is_none()));
-        let recovery_complete = Arc::clone(&recovery_ready);
+        let recovery_complete = Arc::new(AtomicBool::new(deferred_restore.is_none()));
         let recovering_repositories = Arc::new(RwLock::new(
             deferred_restore
                 .as_ref()
@@ -1141,7 +1111,7 @@ impl FirstSliceDaemon {
         let (control, control_receiver) = mpsc::sync_channel(DEFAULT_CONTROL_QUEUE);
         let (refinement, refinement_receiver) = mpsc::sync_channel(DEFAULT_OPERATION_METADATA);
         let lanes = FirstSliceServiceLanes {
-            service,
+            service: Arc::clone(&service),
             index_serialization,
             semantic_refinements: Arc::clone(&semantic_refinements),
             graph_projections,
@@ -1216,10 +1186,12 @@ impl FirstSliceDaemon {
         let control_journal = journal.clone();
         let control_stopping = Arc::clone(&stopping);
         let control_metadata = Arc::clone(&metadata);
+        let control_service = Arc::clone(&service);
         let control_thread = thread::Builder::new()
             .name("rootlight-first-slice-control".to_owned())
             .spawn(move || {
                 lifecycle_worker(
+                    control_service,
                     control_journal,
                     control_metadata,
                     control_stopping,
@@ -1871,6 +1843,20 @@ impl OperationMetadataSet {
         Ok(())
     }
 
+    fn reserve_repository_index(
+        &mut self,
+        operation: OperationId,
+        started_unix_ms: u64,
+        admission: FirstSliceIndexAdmission,
+    ) -> Result<(), PublicError> {
+        if let Some(active_operation) = self.active_repository_operation(admission.repository) {
+            return Err(index_admission_in_progress(active_operation));
+        }
+        self.reserve(operation, started_unix_ms, Some(admission.repository))?;
+        self.admit(operation, admission);
+        Ok(())
+    }
+
     fn stage(&mut self, operation: OperationId, receipt: FirstSliceIndexReceipt) {
         if let Some(metadata) = self.records.get_mut(&operation) {
             metadata.repository = Some(receipt.repository);
@@ -2009,10 +1995,14 @@ impl OperationMetadataSet {
         operations
     }
 
+    fn active_repository_operation(&self, repository: RepositoryId) -> Option<OperationId> {
+        self.records.iter().find_map(|(operation, metadata)| {
+            (metadata.repository == Some(repository) && !metadata.terminal).then_some(*operation)
+        })
+    }
+
     fn has_active_repository_operation(&self, repository: RepositoryId) -> bool {
-        self.records
-            .values()
-            .any(|metadata| metadata.repository == Some(repository) && !metadata.terminal)
+        self.active_repository_operation(repository).is_some()
     }
 
     fn remove_repository(&mut self, repository: RepositoryId) {
@@ -2655,6 +2645,7 @@ fn durable_recovery_worker(
             let _ = cancellation.cancel(CancellationReason::Shutdown);
             return Ok(());
         }
+        lanes.recovery_ready.store(true, Ordering::Release);
         if deferred.restore_active {
             for recovery in &mut active_recoveries {
                 let target = recovery.target;
@@ -2986,12 +2977,9 @@ fn watcher_worker(
                 &cancellation,
             ) {
                 Ok(fingerprint) => match watched.get_mut(&target.repository) {
-                    Some(repository) => repository.observe(
-                        fingerprint,
-                        now,
-                        config.debounce_interval,
-                        config.authoritative_interval,
-                    ),
+                    Some(repository) => {
+                        repository.observe(fingerprint, now, config.debounce_interval);
+                    }
                     None => {
                         watched.insert(
                             target.repository,
@@ -3405,6 +3393,7 @@ fn semantic_refinement_worker(
 }
 
 fn lifecycle_worker(
+    service: SharedFirstSliceService,
     journal: JournalActorHandle,
     metadata: Arc<Mutex<OperationMetadataSet>>,
     stopping: Arc<AtomicBool>,
@@ -3427,6 +3416,7 @@ fn lifecycle_worker(
                 reply,
             } => {
                 let result = repository_operation_status(
+                    service.as_ref(),
                     &journal,
                     metadata.as_ref(),
                     &runtime,
@@ -4064,9 +4054,9 @@ fn repository_index_with_intent(
     };
     drop(service_guard);
     let metadata_admission = match lock_metadata(metadata) {
-        Ok(mut operation_metadata) => operation_metadata
-            .reserve(operation, started_unix_ms, Some(admission.repository))
-            .map(|()| operation_metadata.admit(operation, admission)),
+        Ok(mut operation_metadata) => {
+            operation_metadata.reserve_repository_index(operation, started_unix_ms, admission)
+        }
         Err(error) => Err(error),
     };
     if let Err(error) = metadata_admission {
@@ -5479,6 +5469,7 @@ fn repository_operation_evidence(
 }
 
 fn repository_operation_status(
+    service: &RwLock<FirstSliceService>,
     journal: &JournalActorHandle,
     metadata: &Mutex<OperationMetadataSet>,
     runtime: &tokio::runtime::Runtime,
@@ -5628,6 +5619,17 @@ fn repository_operation_status(
         && let Some(evidence) = repository_context.and_then(|context| context.evidence)
     {
         project_repository_operation_evidence(&mut response, evidence);
+        let generation = published_generation.ok_or_else(internal_error)?;
+        let trace = match read_service(service)?
+            .incremental_trace_view(generation, MAX_PUBLIC_INVALIDATION_TRACE_ENTRIES)
+        {
+            Ok(trace) => Some(trace),
+            Err(FirstSliceError::GenerationNotFound) => None,
+            Err(error) => return Err(service_error(error)),
+        };
+        response.invalidation_trace_json = trace
+            .map(|trace| trace.canonical_json().map_err(service_error))
+            .transpose()?;
     }
     Ok(response)
 }
@@ -8604,7 +8606,7 @@ fn build_service_error(
             "resolution",
             "resolution",
         ),
-        FirstSliceError::Identity => (
+        FirstSliceError::Identity | FirstSliceError::IdentityVerification(_) => (
             ErrorCode::Internal,
             "generation identity verification failed",
             false,
@@ -8724,6 +8726,12 @@ fn build_service_error(
                 PublicValue::Unsigned(available_bytes),
             );
     }
+    if let FirstSliceError::IdentityVerification(component) = error {
+        builder = builder.detail(
+            static_detail_key("identity_component"),
+            PublicValue::Label(static_safe_label(component.as_str())),
+        );
+    }
     if matches!(
         error,
         FirstSliceError::AdapterWallTimeLimit
@@ -8817,6 +8825,7 @@ fn build_service_error(
             | FirstSliceError::Adapter
             | FirstSliceError::Resolution
             | FirstSliceError::Identity
+            | FirstSliceError::IdentityVerification(_)
             | FirstSliceError::Catalog
             | FirstSliceError::Search
             | FirstSliceError::Source
@@ -9233,17 +9242,14 @@ mod tests {
         let mut watched = WatchedRepository::discovered(first, started);
         let first_due = watched.next_attempt;
         assert!(!watched.dirty);
-        assert!(!watched.content_change_pending);
         assert_eq!(first_due, started);
 
         watched.observe(
             second,
             watcher_deadline(started, Duration::from_millis(50)),
             Duration::from_millis(100),
-            Duration::from_secs(30),
         );
         assert!(watched.dirty);
-        assert!(watched.content_change_pending);
         assert!(watched.next_attempt > first_due);
 
         let retry_started = watcher_deadline(started, Duration::from_millis(200));
@@ -9257,33 +9263,16 @@ mod tests {
         let reconciled = watcher_deadline(started, Duration::from_millis(300));
         watched.reconciled(reconciled);
         assert!(!watched.dirty);
-        assert!(!watched.content_change_pending);
-        assert_eq!(watched.last_authoritative_reconcile, reconciled);
 
         let periodic = watcher_deadline(reconciled, Duration::from_secs(30));
-        watched.observe(
-            second,
-            periodic,
-            Duration::from_millis(100),
-            Duration::from_secs(30),
-        );
-        assert!(watched.dirty);
-        assert!(!watched.content_change_pending);
-        watched.deferred_by_busy_index(periodic, Duration::from_millis(75));
+        watched.observe(second, periodic, Duration::from_millis(100));
         assert!(!watched.dirty);
-        assert_eq!(watched.last_authoritative_reconcile, periodic);
 
         let changed = watcher_deadline(periodic, Duration::from_millis(50));
-        watched.observe(
-            first,
-            changed,
-            Duration::from_millis(100),
-            Duration::from_secs(30),
-        );
-        assert!(watched.content_change_pending);
+        watched.observe(first, changed, Duration::from_millis(100));
+        assert!(watched.dirty);
         watched.deferred_by_busy_index(changed, Duration::from_millis(75));
         assert!(watched.dirty);
-        assert!(watched.content_change_pending);
         assert_eq!(
             watched.next_attempt,
             watcher_deadline(changed, Duration::from_millis(75))
@@ -9459,7 +9448,6 @@ mod tests {
                         poll_interval: Duration::from_millis(10),
                         debounce_interval: Duration::from_millis(10),
                         retry_interval: Duration::from_millis(10),
-                        authoritative_interval: Duration::from_secs(30),
                         maximum_repository_entries: 1_000,
                     },
                     nonce: [91; 32],
@@ -9891,6 +9879,24 @@ mod tests {
     }
 
     #[test]
+    fn identity_verification_failure_names_the_canonical_component() {
+        let error = build_service_error(
+            FirstSliceError::IdentityVerification(
+                rootlight_service::FirstSliceIdentityFailure::ManifestMismatch,
+            ),
+            None,
+        );
+
+        assert_eq!(error.code(), ErrorCode::Internal);
+        assert_eq!(
+            error
+                .details()
+                .get(&static_detail_key("identity_component")),
+            Some(&PublicValue::Label(static_safe_label("manifest_mismatch")))
+        );
+    }
+
+    #[test]
     fn auto_index_keeps_the_structural_stage_when_semantic_refinement_fails() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -10140,6 +10146,7 @@ mod tests {
             semantic_context.started_unix_ms
         );
         let status = repository_operation_status(
+            service.as_ref(),
             &handle,
             &metadata,
             &runtime,
@@ -10165,8 +10172,29 @@ mod tests {
         assert!(status.rebuilt_files > 0);
         assert!(status.rebuilt_facts > 0);
         assert_eq!(status.newly_written_bytes, status.written_bytes);
+        let trace: serde_json::Value = serde_json::from_slice(
+            status
+                .invalidation_trace_json
+                .as_deref()
+                .expect("bounded invalidation trace is exposed"),
+        )
+        .expect("invalidation trace is canonical JSON");
+        assert_eq!(trace["version"], "1.0");
+        let visible_entries = trace["entries"]
+            .as_array()
+            .expect("trace entries are an array")
+            .len();
+        let total_entries = trace["total_entries"]
+            .as_u64()
+            .expect("trace total is numeric");
+        assert!(total_entries >= u64::try_from(visible_entries).expect("entry count fits"));
+        assert_eq!(
+            trace["complete"],
+            total_entries == u64::try_from(visible_entries).expect("entry count fits")
+        );
         assert!(status.reserved_memory_bytes > 0);
-        assert_eq!(status.owned_memory_bytes, status.reserved_memory_bytes);
+        assert!(status.owned_memory_bytes > 0);
+        assert!(status.owned_memory_bytes <= status.reserved_memory_bytes);
 
         drop(handle);
         actor.join().expect("journal actor joins");
@@ -11600,6 +11628,35 @@ mod tests {
     }
 
     #[test]
+    fn repository_index_admission_returns_the_active_operation() {
+        let root = durable_test_tempdir();
+        fs::write(root.path().join("lib.rs"), "pub fn admitted() {}\n")
+            .expect("fixture source writes");
+        let service =
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(5));
+        let admission = service
+            .admit_rust_fixture(root.path(), &cancellation)
+            .expect("repository admission succeeds");
+        let active = OperationId::from_bytes([73; 16]);
+        let next = OperationId::from_bytes([74; 16]);
+        let mut metadata = OperationMetadataSet::new(4);
+
+        metadata
+            .reserve_repository_index(active, 10, admission)
+            .expect("first operation reserves the repository");
+        let error = metadata
+            .reserve_repository_index(next, 20, admission)
+            .expect_err("parallel repository operation is rejected");
+        assert_eq!(error, index_admission_in_progress(active));
+
+        metadata.mark_terminal(active);
+        metadata
+            .reserve_repository_index(next, 20, admission)
+            .expect("terminal operation releases repository admission");
+    }
+
+    #[test]
     fn repository_status_reuses_verified_terminal_operation_snapshots() {
         let (service, _root) = indexed_catalog(&["alpha"]);
         let repository = service.list_repositories()[0].repository;
@@ -11714,6 +11771,10 @@ mod tests {
         };
 
         let response = repository_operation_status(
+            &RwLock::new(
+                FirstSliceService::new(DEFAULT_GENERATION_RETENTION)
+                    .expect("status service initializes"),
+            ),
             &handle,
             &metadata,
             &runtime,
@@ -12394,13 +12455,14 @@ mod tests {
             .build()
             .expect("runtime builds");
         let (_refinement, refinement_receiver) = mpsc::sync_channel(1);
+        let recovery_ready = Arc::new(AtomicBool::new(false));
         let lanes = FirstSliceServiceLanes {
             service,
             index_serialization: Arc::new(Mutex::new(())),
             semantic_refinements: Arc::new(Mutex::new(BTreeMap::new())),
             graph_projections: Arc::new(Mutex::new(GraphProjectionRegistry::new())),
             refinement: _refinement,
-            recovery_ready: Arc::new(AtomicBool::new(false)),
+            recovery_ready: Arc::clone(&recovery_ready),
             recovery_complete: Arc::new(AtomicBool::new(false)),
             recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
             support_state: None,
@@ -12459,6 +12521,18 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::Busy);
         assert!(error.retryable());
         assert_eq!(error.next_actions(), &[NextAction::Retry]);
+
+        recovery_ready.store(true, Ordering::Release);
+        let repository = RepositoryId::from_bytes([94; 16]);
+        let error = execute_service_request(
+            &lanes,
+            resources,
+            FirstSliceIpcRequest::RepositoryStatus(status_request(repository, None)),
+            context(),
+            &mut reply,
+        )
+        .expect_err("restored repository reads are admitted before global recovery completes");
+        assert_eq!(error.code(), ErrorCode::NotFound);
 
         drop(refinement_receiver);
         actor.join().expect("journal actor joins");
@@ -14799,6 +14873,10 @@ mod tests {
             .expect("runtime builds");
         let deadline = Instant::now() + Duration::from_secs(1);
         let error = repository_operation_status(
+            &RwLock::new(
+                FirstSliceService::new(DEFAULT_GENERATION_RETENTION)
+                    .expect("status service initializes"),
+            ),
             &actor.handle(),
             &Mutex::new(metadata),
             &runtime,
@@ -14862,6 +14940,10 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
 
         let status = repository_operation_status(
+            &RwLock::new(
+                FirstSliceService::new(DEFAULT_GENERATION_RETENTION)
+                    .expect("status service initializes"),
+            ),
             &actor.handle(),
             &Mutex::new(OperationMetadataSet::new(1)),
             &runtime,

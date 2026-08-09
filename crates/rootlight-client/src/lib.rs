@@ -776,7 +776,7 @@ pub enum RepositoryFallbackReason {
 }
 
 /// Durable source-free incremental and generation-resource evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RepositoryOperationEvidence {
     /// Construction strategy used by this operation.
     pub build_strategy: RepositoryBuildStrategy,
@@ -804,6 +804,8 @@ pub struct RepositoryOperationEvidence {
     pub reserved_memory_bytes: u64,
     /// Retained generation-memory charge owned after successful publication.
     pub owned_memory_bytes: u64,
+    /// Bounded canonical JSON for the source-free invalidation trace.
+    pub invalidation_trace_json: Option<Vec<u8>>,
 }
 
 /// Durable repository-index operation state and bounded evidence.
@@ -6404,7 +6406,10 @@ fn ipc_unavailable(error: &IpcError) -> bool {
                 io::ErrorKind::NotFound
                     | io::ErrorKind::ConnectionRefused
                     | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
                     | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::WouldBlock
             )
     )
 }
@@ -7873,7 +7878,7 @@ fn parse_repository_operation_status(
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct RepositoryOperationEvidenceWire {
     build_strategy: i32,
     fallback_reason: Option<i32>,
@@ -7888,6 +7893,7 @@ struct RepositoryOperationEvidenceWire {
     newly_written_bytes: u64,
     reserved_memory_bytes: u64,
     owned_memory_bytes: u64,
+    invalidation_trace_json: Option<Vec<u8>>,
 }
 
 impl From<&daemon::RepositoryOperationStatusResponse> for RepositoryOperationEvidenceWire {
@@ -7906,6 +7912,7 @@ impl From<&daemon::RepositoryOperationStatusResponse> for RepositoryOperationEvi
             newly_written_bytes: response.newly_written_bytes,
             reserved_memory_bytes: response.reserved_memory_bytes,
             owned_memory_bytes: response.owned_memory_bytes,
+            invalidation_trace_json: response.invalidation_trace_json.clone(),
         }
     }
 }
@@ -7929,7 +7936,9 @@ fn parse_repository_operation_evidence(
         response.owned_memory_bytes,
     ];
     if response.build_strategy == daemon::RepositoryBuildStrategy::Unspecified as i32 {
-        return if response.fallback_reason.is_none() && counters.iter().all(|counter| *counter == 0)
+        return if response.fallback_reason.is_none()
+            && response.invalidation_trace_json.is_none()
+            && counters.iter().all(|counter| *counter == 0)
         {
             Ok(None)
         } else {
@@ -7997,6 +8006,7 @@ fn parse_repository_operation_evidence(
         newly_written_bytes: response.newly_written_bytes,
         reserved_memory_bytes: response.reserved_memory_bytes,
         owned_memory_bytes: response.owned_memory_bytes,
+        invalidation_trace_json: response.invalidation_trace_json,
     }))
 }
 
@@ -8576,14 +8586,9 @@ fn parse_symbol_relationships(
         || returned_edges > u64::from(max_results.unwrap_or(50))
         || response.returned_edges > response.total_edges
         || (!response.truncated
-            && (!response.exact
-                || response.next_page_offset.is_some()
-                || returned_end != response.total_edges))
+            && (response.next_page_offset.is_some() || returned_end != response.total_edges))
         || response.next_page_offset.is_some_and(|next| {
-            !response.exact
-                || !response.truncated
-                || next != returned_end
-                || next >= response.total_edges
+            !response.truncated || next != returned_end || next >= response.total_edges
         })
     {
         return Err(ClientError::InvalidResponseCorrelation);
@@ -11152,6 +11157,19 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    /// Returns whether retrying discovery or startup can restore daemon service.
+    #[must_use]
+    pub fn is_daemon_unavailable(&self) -> bool {
+        matches!(
+            self,
+            Self::DaemonUnavailable
+                | Self::DaemonExecutableMissing
+                | Self::DaemonLaunchFailed
+                | Self::DaemonLaunchCleanupTimedOut
+                | Self::DaemonStartTimedOut
+        ) || matches!(self, Self::Ipc(error) if ipc_unavailable(error))
+    }
+
     /// Returns the daemon's stable public error, when this failure contains one.
     #[must_use]
     pub fn as_public_error(&self) -> Option<&PublicError> {
@@ -11475,6 +11493,42 @@ mod tests {
 
     fn wire_source(reference: &SourceReference) -> daemon::FirstSliceSourceRef {
         source_reference_to_wire(reference)
+    }
+
+    #[test]
+    fn semantic_relationship_inexactness_is_not_transport_truncation() {
+        let response = daemon::SymbolRelationshipsResponse {
+            schema_version: Some(first_slice_schema()),
+            context: Some(wire_query_context(0, 0)),
+            groups: Vec::new(),
+            returned_edges: 0,
+            total_edges: 0,
+            exact: false,
+            truncated: false,
+            next_page_offset: None,
+            completeness: Some(daemon::FirstSliceCompleteness {
+                state: daemon::FirstSliceCompletenessState::FirstSliceCompletenessComplete as i32,
+                limiting_resources: Vec::new(),
+                continuation:
+                    daemon::FirstSliceContinuationAvailability::FirstSliceContinuationNotApplicable
+                        as i32,
+                guidance: Vec::new(),
+            }),
+        };
+
+        let parsed = parse_symbol_relationships(
+            response,
+            test_repository(),
+            GenerationSelector::Active,
+            &[SymbolId::from_bytes([9; 20])],
+            None,
+            0,
+        )
+        .expect("semantic incompleteness remains a valid complete transport response");
+
+        assert!(!parsed.exact);
+        assert!(!parsed.truncated);
+        assert!(parsed.next_page_offset.is_none());
     }
 
     #[test]
@@ -13792,15 +13846,18 @@ mod tests {
         incremental_status.newly_written_bytes = 2_048;
         incremental_status.reserved_memory_bytes = 4_096;
         incremental_status.owned_memory_bytes = 3_072;
+        incremental_status.invalidation_trace_json =
+            Some(br#"{"version":"1.0","entries":[],"total_entries":0,"complete":true}"#.to_vec());
         let incremental = parse_repository_operation_status(incremental_status, operation)
             .expect("durable incremental evidence decodes");
+        let evidence = incremental
+            .evidence
+            .expect("incremental evidence is retained");
         assert_eq!(
-            incremental
-                .evidence
-                .expect("incremental evidence is retained")
-                .build_strategy,
+            evidence.build_strategy,
             RepositoryBuildStrategy::DependencyDirected
         );
+        assert!(evidence.invalidation_trace_json.is_some());
         let mut recovery_status = status.clone();
         recovery_status
             .operation
@@ -14714,6 +14771,19 @@ mod tests {
             )))),
         )
         .expect("absence is retryable");
+        assert!(matches!(unavailable, ProbeOutcome::Unavailable));
+
+        let endpoint = test_endpoint("busy");
+        let client = Client::new(endpoint, [1; 16], [2; 16]);
+        let unavailable = classify_health_probe(
+            client,
+            identity,
+            Err(ClientError::Ipc(IpcError::Transport(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "fixture has no available pipe instance",
+            )))),
+        )
+        .expect("temporary endpoint contention is retryable");
         assert!(matches!(unavailable, ProbeOutcome::Unavailable));
 
         let endpoint = test_endpoint("nonce");

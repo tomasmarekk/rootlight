@@ -82,7 +82,7 @@ impl ArtifactDecision {
 }
 
 /// Source-free target named by one invalidation trace entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum TraceTarget {
     /// A changed generation input.
@@ -96,7 +96,7 @@ pub enum TraceTarget {
 }
 
 /// Stable action recorded by an invalidation trace entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TraceAction {
     /// A complete generation input value changed.
@@ -112,7 +112,7 @@ pub enum TraceAction {
 }
 
 /// Stable source-free explanation for one trace action.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum TraceReason {
     /// A complete input transitioned under this conservative class.
@@ -134,7 +134,7 @@ pub enum TraceReason {
 }
 
 /// One deterministic human- and machine-readable invalidation decision.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TraceEntry {
     target: TraceTarget,

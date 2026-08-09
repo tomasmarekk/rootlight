@@ -1381,6 +1381,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 ))
         });
         let rust_test_declarations = rust_test_declarations(&ordered_facts);
+        let file_is_test = test_source_path(self.request.source().path().as_str());
         let mut nearest_declaration = HashMap::new();
         let mut captures = HashMap::<u64, AssociatedCaptures>::new();
         let mut scope_identity_captures = HashMap::<u64, ScopeIdentityCaptures>::new();
@@ -1521,8 +1522,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             }
             let capture = captures.get(&fact.local_id()).cloned().unwrap_or_default();
             let definition = select_unique_capture(&capture.definitions);
-            let (name, definition_local_id, definition_span) = if let Some(definition) = definition
-            {
+            let (name, definition_local_id) = if let Some(definition) = definition {
                 let text = self.text_for_span(definition.span())?;
                 let Some(name) = captured_name(text, self.request.limits().ir().max_string_bytes)
                 else {
@@ -1530,10 +1530,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
                     continue;
                 };
-                (name, Some(definition.local_id()), definition.span())
+                (name, Some(definition.local_id()))
             } else if is_explicit_file_module(fact, self.request.language().as_str()) {
                 let name = self.request.source().path().as_str();
-                (name, None, fact.span())
+                (name, None)
             } else {
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                 nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
@@ -1592,9 +1592,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .and_then(|scope| scope.collision_guard),
                     qualified_prefix: qualified_prefix.map(str::to_owned),
                     synthetic: definition_local_id.is_none(),
-                    is_test: rust_test_declarations.contains(&fact.local_id()),
+                    is_test: file_is_test || rust_test_declarations.contains(&fact.local_id()),
                     definition_local_id,
-                    span: definition_span,
+                    span: fact.span(),
                     depth: fact.depth(),
                     kind,
                     name: name.to_owned(),
@@ -2526,6 +2526,29 @@ fn rust_test_declarations(facts: &[&SyntaxFact]) -> BTreeSet<u64> {
     tests
 }
 
+fn test_source_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let mut components = normalized
+        .split('/')
+        .filter(|component| !component.is_empty());
+    let file_name = components.next_back().unwrap_or_default();
+    if components.any(|component| {
+        matches!(component, "test" | "tests" | "__tests__" | "spec" | "specs")
+            || component.ends_with(".tests")
+    }) {
+        return true;
+    }
+    let stem = file_name
+        .rsplit_once('.')
+        .map_or(file_name, |(stem, _extension)| stem);
+    stem.starts_with("test_")
+        || stem.ends_with("_test")
+        || stem.ends_with("_spec")
+        || stem.ends_with(".test")
+        || stem.ends_with(".spec")
+        || matches!(stem, "test" | "tests")
+}
+
 fn entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
     match fact.kind() {
@@ -3053,6 +3076,31 @@ mod tests {
             SyntaxFactKind::Signature,
             "rust.function.declaration"
         )));
+    }
+
+    #[test]
+    fn test_source_paths_cover_supported_language_conventions() {
+        for path in [
+            "packages/runtime-core/__tests__/apiAsyncComponent.spec.ts",
+            "tests/test_newton_raphson.py",
+            "server/routes_test.go",
+            "cli/tests/unit/flags_test.ts",
+            "spec/models/user_spec.rb",
+            "src/Parser.Tests/parser.cs",
+        ] {
+            assert!(test_source_path(path), "{path} should be a test source");
+        }
+        for path in [
+            "src/contest_score.go",
+            "src/latest_release.ts",
+            "src/specification.rs",
+            "examples/testdata.py",
+        ] {
+            assert!(
+                !test_source_path(path),
+                "{path} should be production source"
+            );
+        }
     }
 
     #[test]

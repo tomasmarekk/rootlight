@@ -2426,7 +2426,10 @@ fn occurrence_target(
     name: &str,
     resolution: &ResolutionCandidates,
 ) -> Result<OccurrenceTarget, AdapterError> {
-    match resolution.symbols.as_slice() {
+    let mut symbols = resolution.symbols.clone();
+    symbols.sort_unstable();
+    symbols.dedup();
+    match symbols.as_slice() {
         [] => Ok(OccurrenceTarget::Unresolved {
             text_hash: content_hash(name.as_bytes()),
         }),
@@ -3581,6 +3584,25 @@ mod tests {
         assert_eq!(
             occurrence_target("run", &binding).expect("binding target is valid"),
             OccurrenceTarget::Resolved { symbol }
+        );
+    }
+
+    #[test]
+    fn occurrence_candidates_are_canonical_before_identity_derivation() {
+        let first = SymbolId::from_bytes([1; 20]);
+        let last = SymbolId::from_bytes([9; 20]);
+        let resolution = ResolutionCandidates {
+            symbols: vec![last, first, last],
+            kind: ResolutionKind::Binding,
+        };
+
+        assert_eq!(
+            occurrence_target("duplicate", &resolution).expect("candidate target is valid"),
+            OccurrenceTarget::Candidates {
+                symbols: vec![first, last],
+                total_count: 2,
+                completeness: CoverageStatus::Complete,
+            }
         );
     }
 

@@ -8,7 +8,7 @@ use std::{
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, RepositoryId, content_hash};
-use rootlight_incremental::{FactDomain, FactDomainSet};
+use rootlight_incremental::FactDomain;
 use rootlight_ir::CoverageStatus;
 use rootlight_query::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_MAX_TRAVERSAL, AdvancedAggregateFunction, AdvancedAstNode,
@@ -268,8 +268,12 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
         .expect("successor incremental evidence is retained");
     assert_dependency_directed_rebuild(incremental_evidence);
     assert_eq!(
-        input_change_count(incremental_evidence, ChangeClass::Surface),
+        input_change_count(incremental_evidence, ChangeClass::BodyOnly),
         1
+    );
+    assert_eq!(
+        input_change_count(incremental_evidence, ChangeClass::Surface),
+        0
     );
     assert_eq!(
         file_change_count(incremental_evidence, FileChangeKind::Modified),
@@ -625,7 +629,7 @@ fn prepared_generation_is_not_queryable_before_publication() {
 }
 
 #[test]
-fn rust_repository_indexes_only_extension_sources_and_preserves_lineage() {
+fn rust_repository_indexes_sources_and_explicit_dispositions_with_lineage() {
     let fixture = TempDir::new().expect("fixture root exists");
     fs::create_dir_all(fixture.path().join("src/nested")).expect("fixture source directory exists");
     fs::write(
@@ -648,7 +652,7 @@ fn rust_repository_indexes_only_extension_sources_and_preserves_lineage() {
         .index_rust_fixture(fixture.path(), &cancellation)
         .expect("multi-file Rust repository indexes");
     assert_eq!(first.discovered_inputs, 5);
-    assert_eq!(first.indexed_files, 3);
+    assert_eq!(first.indexed_files, 5);
 
     let answer = service
         .code_locate(
@@ -778,17 +782,26 @@ fn assert_dependency_directed_rebuild(evidence: &FirstSliceIncrementalEvidence) 
         FirstSliceBuildStrategy::DependencyDirected
     );
     assert_eq!(evidence.fallback_reason(), None);
-    let expected_domains = FactDomainSet::all()
-        .iter()
-        .filter(|domain| *domain != FactDomain::History)
-        .collect::<Vec<_>>();
-    assert_eq!(evidence.invalidated_domains(), expected_domains.as_slice());
-    assert_eq!(evidence.invalidated_units(), 2);
+    assert_eq!(
+        evidence.invalidated_domains(),
+        &[
+            FactDomain::Syntax,
+            FactDomain::PublicSurface,
+            FactDomain::Body,
+            FactDomain::Tests,
+            FactDomain::Services,
+        ]
+    );
+    assert_eq!(evidence.invalidated_units(), 1);
     assert_eq!(evidence.parsed_files(), 1);
     assert_eq!(evidence.reused_parser_artifacts(), 0);
     assert_eq!(evidence.lowered_files(), 1);
     assert!(evidence.structural_cache_retained());
     assert!(evidence.trace_entries() > 0);
+    assert_eq!(
+        evidence.trace_entries(),
+        u64::try_from(evidence.invalidation_trace().len()).expect("bounded trace length fits u64")
+    );
 }
 
 fn input_change_count(evidence: &FirstSliceIncrementalEvidence, class: ChangeClass) -> u64 {
@@ -982,7 +995,7 @@ fn symbol_relationships_returns_a_resolved_rust_call() {
         )
         .expect("symbol relationships query succeeds");
 
-    assert!(relationships.data.exact);
+    assert!(!relationships.data.exact);
     assert!(!relationships.data.truncated);
     assert_eq!(relationships.data.returned_edges, 1);
     assert_eq!(relationships.data.total_edges, 1);
@@ -1272,7 +1285,7 @@ fn code_dead_includes_an_isolated_rust_symbol() {
             .why
             .contains(&"no_incoming_references".to_owned())
     );
-    assert_eq!(isolated_candidate.confidence, 1_000);
+    assert_eq!(isolated_candidate.confidence, 300);
     let mut last_symbol = None;
     for candidate in &dead.data.candidates {
         if let Some(previous) = last_symbol {

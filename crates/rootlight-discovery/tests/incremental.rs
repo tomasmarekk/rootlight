@@ -170,7 +170,7 @@ fn complete_scan_detects_missed_same_size_rewrite_with_clock_regression() {
     assert_eq!(update.hashed_files(), &[file_id]);
     assert_eq!(update.file_changes()[0].kind(), FileChangeKind::Modified);
     assert!(update.changes().changes().iter().any(|change| {
-        change.class() == ChangeClass::Surface
+        change.class() == ChangeClass::BodyOnly
             && change.key() == rootlight_incremental::InputKey::FileContent(file_id)
     }));
 }

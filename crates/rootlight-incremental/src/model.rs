@@ -52,7 +52,7 @@ impl AnalysisUnitId {
 }
 
 /// Stable identity of one reusable immutable artifact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(transparent)]
 pub struct ArtifactId(FactId);
 
@@ -116,6 +116,16 @@ impl FromStr for PassId {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::parse(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for PassId {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -204,7 +214,7 @@ impl FactDomainSet {
 }
 
 /// A scoped fact-domain node in the invalidation graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FactNode {
     unit: AnalysisUnitId,
@@ -268,9 +278,9 @@ pub enum InputKind {
 impl InputKind {
     fn changed_class(self) -> ChangeClass {
         match self {
-            Self::FileContent | Self::PublicSurface | Self::ImportSet => ChangeClass::Surface,
+            Self::FileContent | Self::BodySummary => ChangeClass::BodyOnly,
             Self::FilePath => ChangeClass::Move,
-            Self::BodySummary => ChangeClass::BodyOnly,
+            Self::PublicSurface | Self::ImportSet => ChangeClass::Surface,
             Self::BuildTarget | Self::CompilerOptions | Self::DependencyVersion => {
                 ChangeClass::BuildContext
             }

@@ -517,6 +517,8 @@ message RepositoryOperationStatusResponse {
   // Generation-owned accounting is separate from process-wide peak RSS.
   uint64 reserved_memory_bytes = 23;
   uint64 owned_memory_bytes = 24;
+  // Bounded canonical JSON for the source-free invalidation trace.
+  optional bytes invalidation_trace_json = 25;
 }
 
 // Operation-local construction strategy retained with the durable receipt.

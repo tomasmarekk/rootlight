@@ -1041,6 +1041,25 @@ fn extension_language(path: &str) -> Option<&'static str> {
         (".java", "java"),
         (".cs", "csharp"),
         (".php", "php"),
+        (".sql", "sql"),
+        (".bash", "bash"),
+        (".sh", "bash"),
+        (".html", "html"),
+        (".htm", "html"),
+        (".swift", "swift"),
+        (".ruby", "ruby"),
+        (".rb", "ruby"),
+        (".dart", "dart"),
+        (".psm1", "powershell"),
+        (".psd1", "powershell"),
+        (".ps1", "powershell"),
+        (".scala", "scala"),
+        (".sc", "scala"),
+        (".groovy", "groovy"),
+        (".gradle", "groovy"),
+        (".asm", "assembly"),
+        (".s", "assembly"),
+        (".sol", "solidity"),
     ] {
         if path.ends_with(suffix) {
             return Some(language);
@@ -1414,6 +1433,22 @@ max_source_file_bytes = 2097152
         assert!(signals.iter().any(|signal| {
             signal.language == "typescript" && signal.evidence == LanguageEvidence::Extension
         }));
+
+        for (path, expected) in [
+            ("schema.sql", "sql"),
+            ("script.sh", "bash"),
+            ("page.html", "html"),
+            ("client.swift", "swift"),
+            ("model.rb", "ruby"),
+            ("request.dart", "dart"),
+            ("setup.ps1", "powershell"),
+            ("build.scala", "scala"),
+            ("pipeline.groovy", "groovy"),
+            ("boot.asm", "assembly"),
+            ("token.sol", "solidity"),
+        ] {
+            assert_eq!(extension_language(path), Some(expected));
+        }
     }
 
     #[test]

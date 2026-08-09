@@ -7609,12 +7609,10 @@ fn first_slice_response_correlates(
             let returned_end = request.page_offset.saturating_add(response.returned_edges);
             let result_shape_correlates = if response.truncated {
                 response.next_page_offset.map_or(!response.exact, |next| {
-                    response.exact && next == returned_end && next < response.total_edges
+                    next == returned_end && next < response.total_edges
                 })
             } else {
-                response.exact
-                    && response.next_page_offset.is_none()
-                    && returned_end == response.total_edges
+                response.next_page_offset.is_none() && returned_end == response.total_edges
             };
             first_slice_schema_matches(response.schema_version.as_ref())
                 && query_context_correlates(
@@ -17662,6 +17660,23 @@ mod tests {
         assert!(first_slice_response_correlates(
             &request,
             &FirstSliceIpcResponse::SymbolRelationships(response.clone())
+        ));
+
+        let mut semantically_inexact_page = response.clone();
+        semantically_inexact_page.exact = false;
+        assert!(first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::SymbolRelationships(semantically_inexact_page)
+        ));
+
+        let mut semantically_inexact_complete = response.clone();
+        semantically_inexact_complete.total_edges = 1;
+        semantically_inexact_complete.exact = false;
+        semantically_inexact_complete.truncated = false;
+        semantically_inexact_complete.next_page_offset = None;
+        assert!(first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::SymbolRelationships(semantically_inexact_complete)
         ));
 
         let mut invalid_cursor = response;
