@@ -220,6 +220,12 @@ pub(crate) fn build(options: &BuildOptions) -> Result<(), PackageError> {
     let version = parse_version(&options.version)?;
     validate_source_revision(&options.source_revision)?;
     let platform = platform_for(&spec, &options.target)?;
+    installed::verify_cli_source_revision(
+        &options
+            .bin_dir
+            .join(format!("rootlight{}", platform.executable_suffix)),
+        &options.source_revision,
+    )?;
     let outcome = build_archive(
         &workspace,
         &spec,
@@ -1117,7 +1123,11 @@ fn exercise_install_lifecycle(
     verify_installed_web_payload(&install_root, &baseline_manifest)?;
     verify_installed_web_payload(&install_root, &candidate_manifest)?;
     probe_launcher(&install_root, Duration::from_secs(30))?;
-    let installed_release = installed::exercise(&install_root, &candidate_manifest.version)?;
+    let installed_release = installed::exercise(
+        &install_root,
+        &candidate_manifest.version,
+        &candidate_manifest.source_revision,
+    )?;
     let recovered_status = recover_update(&install_root)?;
     if recovered_status != active_status {
         return invalid_install("clean recovery changed committed update state");
@@ -1771,14 +1781,17 @@ fn validate_resource_id(value: &str) -> Result<(), PackageError> {
 }
 
 fn validate_source_revision(value: &str) -> Result<(), PackageError> {
-    if !matches!(value.len(), 40 | 64)
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
+    if !is_canonical_source_revision(value) {
         return Err(PackageError::InvalidSourceRevision);
     }
     Ok(())
+}
+
+fn is_canonical_source_revision(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn invalid_spec<T>(detail: impl Into<String>) -> Result<T, PackageError> {
@@ -2109,6 +2122,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             EXPECTED_TARGETS
         );
+    }
+
+    #[test]
+    fn package_source_revision_requires_a_canonical_sha_digest() {
+        for revision in [
+            "0123456789abcdef0123456789abcdef01234567",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ] {
+            validate_source_revision(revision).expect("canonical revision passes");
+        }
+        for revision in [
+            "",
+            "0123456789abcdef0123456789abcdef0123456",
+            "0123456789abcdef0123456789abcdef0123456A",
+            "0123456789abcdef0123456789abcdef0123456g",
+        ] {
+            assert!(matches!(
+                validate_source_revision(revision),
+                Err(PackageError::InvalidSourceRevision)
+            ));
+        }
     }
 
     #[test]

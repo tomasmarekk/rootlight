@@ -81,7 +81,12 @@ struct McpInitializeEvidence {
 pub(super) fn exercise(
     install_root: &Path,
     candidate_version: &str,
+    source_revision: &str,
 ) -> Result<InstalledReleaseEvidence, PackageError> {
+    verify_cli_source_revision(
+        &installed_binary(install_root, "rootlight"),
+        source_revision,
+    )?;
     let windows_first_health = exercise_windows_first_health(install_root)?;
     let mcp_initialize = exercise_mcp_initialize(install_root, candidate_version)?;
     let vertical_sandbox = private_tempdir("rootlight-installed-vertical-")?;
@@ -97,6 +102,53 @@ pub(super) fn exercise(
         lazy_payload_handoff_observed: cfg!(windows).then_some(true),
         mcp_vertical,
     })
+}
+
+pub(super) fn verify_cli_source_revision(
+    executable: &Path,
+    expected_revision: &str,
+) -> Result<(), PackageError> {
+    let mut tree = ProcessTree::new()?;
+    let started = Instant::now();
+    let command = ProcessCommand::new(executable)
+        .arg("--version")
+        .arg("--json")
+        .stdin(StdioMode::Null)
+        .stdout(StdioMode::Piped)
+        .stderr(StdioMode::Piped);
+    let mut child = ExactChild::new(tree.spawn(command)?);
+    let stdout = child
+        .take_stdout()
+        .ok_or_else(|| invalid_error("package CLI version stdout was not retained"))?;
+    let stderr = child
+        .take_stderr()
+        .ok_or_else(|| invalid_error("package CLI version stderr was not retained"))?;
+    let stdout_reader = bounded_reader(stdout, "package-cli-version-stdout")?;
+    let stderr_reader = bounded_reader(stderr, "package-cli-version-stderr")?;
+    let deadline = started
+        .checked_add(PROCESS_COMPLETION_TIMEOUT)
+        .ok_or(PackageError::Clock)?;
+    let status = wait_for_exit_and_eof(
+        &mut child,
+        &stdout_reader,
+        &stderr_reader,
+        deadline,
+        "package CLI version",
+    )?;
+    child.mark_reaped();
+    let stdout = join_reader(stdout_reader, "package CLI version stdout")?;
+    let stderr = join_reader(stderr_reader, "package CLI version stderr")?;
+    if !status.success() {
+        return invalid("package CLI version returned a non-success status");
+    }
+    if !stderr.is_empty() {
+        return invalid("package CLI version wrote to stderr");
+    }
+    validate_cli_version_response(&stdout, expected_revision)?;
+    if matches!(tree.wait_empty()?, Some(active) if active != 0) {
+        return invalid("package CLI version retained an owned process after exit");
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -638,6 +690,43 @@ fn validate_initialize_response(bytes: &[u8]) -> Result<(), PackageError> {
     Ok(())
 }
 
+fn validate_cli_version_response(
+    bytes: &[u8],
+    expected_revision: &str,
+) -> Result<(), PackageError> {
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|_| invalid_error("package CLI version response is not JSON"))?;
+    if value.get("contract_version").and_then(Value::as_str) != Some("1.0")
+        || value.get("ok").and_then(Value::as_bool) != Some(true)
+        || value.get("exit_family").and_then(Value::as_str) != Some("success")
+        || value.pointer("/result/type").and_then(Value::as_str) != Some("version")
+        || value.pointer("/result/data/name").and_then(Value::as_str) != Some("rootlight")
+        || value
+            .pointer("/result/data/version")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        || value
+            .pointer("/result/data/component_version")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return invalid("package CLI version response violates the release contract");
+    }
+    let Some(observed_revision) = value
+        .pointer("/result/data/source_revision")
+        .and_then(Value::as_str)
+    else {
+        return invalid("package CLI source revision is missing");
+    };
+    if !super::is_canonical_source_revision(observed_revision) {
+        return invalid("package CLI source revision is not canonical");
+    }
+    if observed_revision != expected_revision {
+        return invalid("package CLI source revision does not match the package manifest");
+    }
+    Ok(())
+}
+
 fn nearest_rank(samples: &[u64], percentile: usize) -> Result<u64, PackageError> {
     if samples.is_empty() || !(1..=100).contains(&percentile) {
         return invalid("installed MCP percentile input is invalid");
@@ -656,7 +745,6 @@ fn nearest_rank(samples: &[u64], percentile: usize) -> Result<u64, PackageError>
         .ok_or_else(|| invalid_error("installed MCP percentile rank is unavailable"))
 }
 
-#[cfg(windows)]
 fn wait_for_exit_and_eof(
     child: &mut ExactChild,
     stdout: &JoinHandle<Result<Vec<u8>, std::io::Error>>,
@@ -1171,6 +1259,8 @@ fn process_error(operation: &'static str, source: ProcessError) -> PackageError 
 mod tests {
     use super::*;
 
+    const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
     #[test]
     fn nearest_rank_uses_the_release_contract_definition() {
         let samples = (1..=100).collect::<Vec<_>>();
@@ -1178,6 +1268,73 @@ mod tests {
         assert_eq!(nearest_rank(&samples, 50).expect("p50 exists"), 50);
         assert_eq!(nearest_rank(&samples, 95).expect("p95 exists"), 95);
         assert_eq!(nearest_rank(&samples, 99).expect("p99 exists"), 99);
+    }
+
+    #[test]
+    fn cli_version_validation_accepts_the_manifest_revision() {
+        let response = serde_json::to_vec(&serde_json::json!({
+            "contract_version": "1.0",
+            "ok": true,
+            "exit_family": "success",
+            "result": {
+                "type": "version",
+                "data": {
+                    "name": "rootlight",
+                    "version": "1.2.3",
+                    "component_version": "0.1.0",
+                    "source_revision": REVISION
+                }
+            }
+        }))
+        .expect("version fixture serializes");
+
+        validate_cli_version_response(&response, REVISION)
+            .expect("matching canonical source revision passes");
+    }
+
+    #[test]
+    fn cli_version_validation_rejects_missing_noncanonical_and_mismatched_revisions() {
+        for (revision, expected_message) in [
+            (Value::Null, "package CLI source revision is missing"),
+            (
+                Value::String("0123456789abcdef0123456789abcdef0123456A".to_owned()),
+                "package CLI source revision is not canonical",
+            ),
+            (
+                Value::String("1123456789abcdef0123456789abcdef01234567".to_owned()),
+                "package CLI source revision does not match the package manifest",
+            ),
+        ] {
+            let response = serde_json::to_vec(&serde_json::json!({
+                "contract_version": "1.0",
+                "ok": true,
+                "exit_family": "success",
+                "result": {
+                    "type": "version",
+                    "data": {
+                        "name": "rootlight",
+                        "version": "1.2.3",
+                        "component_version": "0.1.0",
+                        "source_revision": revision
+                    }
+                }
+            }))
+            .expect("version fixture serializes");
+
+            let error = validate_cli_version_response(&response, REVISION)
+                .expect_err("invalid source revision is rejected");
+            assert_eq!(
+                error.to_string(),
+                format!("package install state is invalid: {expected_message}")
+            );
+        }
+    }
+
+    #[test]
+    fn cli_version_validation_rejects_non_version_envelopes() {
+        let response = br#"{"contract_version":"1.0","ok":true,"exit_family":"success","result":{"type":"health","data":{"name":"rootlight","version":"1.2.3","component_version":"0.1.0","source_revision":"0123456789abcdef0123456789abcdef01234567"}}}"#;
+
+        assert!(validate_cli_version_response(response, REVISION).is_err());
     }
 
     #[test]

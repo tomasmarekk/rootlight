@@ -302,6 +302,9 @@ jobs:
           observed = cli.get("result", {}).get("data", {}).get("version")
           if observed != os.environ["VERSION"]:
               raise SystemExit("release CLI version differs from the candidate version")
+          observed_revision = cli.get("result", {}).get("data", {}).get("source_revision")
+          if observed_revision != os.environ["SOURCE_REVISION"]:
+              raise SystemExit("release CLI source revision differs from the candidate revision")
           PY
           cargo run --locked --quiet --package xtask -- package-build \
             --target "$TARGET_TRIPLE" \

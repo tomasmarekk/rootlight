@@ -109,7 +109,7 @@ jobs:
               "sourceRevision": revision,
               "status": "passed",
               "toolCount": 19,
-              "reviewedInputFields": 565,
+              "reviewedInputFields": 535,
               "schemaGoldenPairs": 19,
               "profileCounts": {
                   "scout": 6,
@@ -2162,6 +2162,9 @@ jobs:
           observed = response.get("result", {}).get("data", {}).get("version")
           if observed != os.environ["CANDIDATE_VERSION"]:
               raise SystemExit("CI CLI version differs from the candidate version")
+          observed_revision = response.get("result", {}).get("data", {}).get("source_revision")
+          if observed_revision != os.environ["SOURCE_REVISION"]:
+              raise SystemExit("CI CLI source revision differs from the package revision")
           PY
           candidate_dir="artifacts/ci-package/candidate"
           baseline_dir="artifacts/ci-package/baseline"
