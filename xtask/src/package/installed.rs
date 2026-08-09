@@ -108,9 +108,10 @@ pub(super) fn verify_cli_source_revision(
     executable: &Path,
     expected_revision: &str,
 ) -> Result<(), PackageError> {
+    let executable = absolute_process_path(executable)?;
     let mut tree = ProcessTree::new()?;
     let started = Instant::now();
-    let command = ProcessCommand::new(executable)
+    let command = ProcessCommand::new(&executable)
         .arg("--version")
         .arg("--json")
         .stdin(StdioMode::Null)
@@ -149,6 +150,10 @@ pub(super) fn verify_cli_source_revision(
         return invalid("package CLI version retained an owned process after exit");
     }
     Ok(())
+}
+
+fn absolute_process_path(path: &Path) -> Result<PathBuf, PackageError> {
+    std::path::absolute(path).map_err(PackageError::WorkingDir)
 }
 
 #[cfg(windows)]
@@ -1335,6 +1340,15 @@ mod tests {
         let response = br#"{"contract_version":"1.0","ok":true,"exit_family":"success","result":{"type":"health","data":{"name":"rootlight","version":"1.2.3","component_version":"0.1.0","source_revision":"0123456789abcdef0123456789abcdef01234567"}}}"#;
 
         assert!(validate_cli_version_response(response, REVISION).is_err());
+    }
+
+    #[test]
+    fn relative_package_binary_paths_are_absolutized_before_spawn() {
+        let relative = Path::new("target/package-binaries/rootlight");
+        let absolute = absolute_process_path(relative).expect("current directory is available");
+
+        assert!(absolute.is_absolute());
+        assert!(absolute.ends_with(relative));
     }
 
     #[test]
