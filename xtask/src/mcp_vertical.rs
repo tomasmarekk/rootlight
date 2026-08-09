@@ -94,7 +94,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const SETUP_RETRY_ATTEMPTS: u8 = 3;
 // Match the daemon's retained-generation window so lineage proof cannot turn
 // watcher churn into an unbounded sequence of public reads.
-const ACTIVE_GENERATION_LINEAGE_LIMIT: usize = 8;
+const GENERATION_LINEAGE_LIMIT: usize = 8;
 const CANCELLATION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(4);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const TRANSPORT_SAMPLES: usize = 20;
@@ -2191,18 +2191,54 @@ fn exercise_complete_tool_matrix(
     } = scenario;
     let matrix_index =
         index_repository_deep("matrix", process, catalog, transcript, repository_root)?;
-    if matrix_index.repository != head.repository || matrix_index.generation != head.generation {
+    if matrix_index.repository != head.repository {
         return Err(VerticalError::Invariant(
-            "unchanged matrix fixture did not preserve repository and generation identity",
+            "unchanged matrix fixture did not preserve repository identity",
         ));
+    }
+    if matrix_index.generation != head.generation {
+        let parent = matrix_index
+            .parent_generation
+            .clone()
+            .ok_or(VerticalError::Invariant(
+                "unchanged matrix fixture published an unrelated generation",
+            ))?;
+        assert_generation_lineage(
+            &head.generation,
+            &matrix_index.generation,
+            parent,
+            |generation, depth| {
+                let ancestor = call_tool(
+                    &format!("matrix.repo-index-lineage-{depth}"),
+                    process,
+                    catalog,
+                    transcript,
+                    "code.locate",
+                    json!({
+                        "repository": {"repository_id": head.repository},
+                        "generation": generation,
+                        "query": "answer",
+                        "search_modes": ["exact"],
+                        "max_results": 10,
+                        "response_profile": "compact"
+                    }),
+                )?;
+                require_tool_success(&ancestor, "code.locate")?;
+                require_trust_labels(&ancestor.structured)?;
+                assert_control_value_omits_sentinels(&ancestor.structured)?;
+                assert_read_correlation(&ancestor.structured, &head.repository, generation)?;
+                expected_answer_match(&ancestor.structured)?;
+                Ok(ancestor.structured)
+            },
+        )?;
     }
 
     let mut cells = vec![ToolMatrixCell::executed(
         "repo.index",
         "fresh_success",
         "success",
-        "unchanged fixture publication preserves repository and generation identity",
-        "matched_published_receipt",
+        "unchanged fixture publication preserves repository and generation lineage",
+        "matched_published_generation_lineage",
         "not_applicable_operational_contract",
         "not_applicable_operational_contract",
         None,
@@ -3661,7 +3697,7 @@ fn assert_active_generation_lineage<F>(
     structured: &Value,
     expected_generation: &str,
     active_generation: &str,
-    mut load_generation: F,
+    load_generation: F,
 ) -> Result<(), VerticalError>
 where
     F: FnMut(&str, usize) -> Result<Value, VerticalError>,
@@ -3677,18 +3713,35 @@ where
             "active generation was not a current descendant of the expected snapshot",
         ));
     }
-    let mut ancestor =
+    let ancestor =
         optional_string(&generation["parent_generation"])?.ok_or(VerticalError::Invariant(
             "active generation was not a current descendant of the expected snapshot",
         ))?;
-    let mut visited = BTreeSet::from([active_generation.to_owned()]);
-    for depth in 0..ACTIVE_GENERATION_LINEAGE_LIMIT {
+    assert_generation_lineage(
+        expected_generation,
+        active_generation,
+        ancestor,
+        load_generation,
+    )
+}
+
+fn assert_generation_lineage<F>(
+    expected_generation: &str,
+    generation: &str,
+    mut ancestor: String,
+    mut load_generation: F,
+) -> Result<(), VerticalError>
+where
+    F: FnMut(&str, usize) -> Result<Value, VerticalError>,
+{
+    let mut visited = BTreeSet::from([generation.to_owned()]);
+    for depth in 0..GENERATION_LINEAGE_LIMIT {
         if ancestor == expected_generation {
             return Ok(());
         }
         if !visited.insert(ancestor.clone()) {
             return Err(VerticalError::Invariant(
-                "active generation lineage contained a cycle",
+                "generation lineage contained a cycle",
             ));
         }
         let generation = load_generation(&ancestor, depth)?;
@@ -3698,20 +3751,18 @@ where
         )?;
         if observed != ancestor {
             return Err(VerticalError::Invariant(
-                "active generation lineage resolved an unexpected ancestor",
+                "generation lineage resolved an unexpected ancestor",
             ));
         }
         ancestor = optional_string(&generation["generation"]["parent_generation"])?.ok_or(
-            VerticalError::Invariant(
-                "active generation was not a current descendant of the expected snapshot",
-            ),
+            VerticalError::Invariant("generation was not a descendant of the expected snapshot"),
         )?;
     }
     if ancestor == expected_generation {
         Ok(())
     } else {
         Err(VerticalError::Invariant(
-            "active generation lineage exceeded the retained traversal bound",
+            "generation lineage exceeded the retained traversal bound",
         ))
     }
 }
@@ -6649,11 +6700,11 @@ mod tests {
         CANCELLATION_FIXTURE_FILES, EXPECTED_TOOLS, MATRIX_STATES, Options, ToolMatrixCell,
         ToolOutcome, VerticalError, assert_active_generation_lineage,
         assert_bounded_tier_b_rust_coverage, assert_complete_tier_b_rust_coverage,
-        canonicalize_known_identities, diagnostic_code_is_present, estimated_tokens,
-        matrix_not_applicable_reason, modify_fixture_to_v2, nearest_rank, normalize_read_response,
-        observe_rust_coverage, prepare_cancellation_repository, redact_request_for_evidence,
-        retryable_busy_delay, shrink_cancellation_repository, source_tokenizer_input,
-        validate_architecture_community_data, validate_tool_matrix_cells,
+        assert_generation_lineage, canonicalize_known_identities, diagnostic_code_is_present,
+        estimated_tokens, matrix_not_applicable_reason, modify_fixture_to_v2, nearest_rank,
+        normalize_read_response, observe_rust_coverage, prepare_cancellation_repository,
+        redact_request_for_evidence, retryable_busy_delay, shrink_cancellation_repository,
+        source_tokenizer_input, validate_architecture_community_data, validate_tool_matrix_cells,
     };
     use serde_json::json;
 
@@ -6842,6 +6893,25 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn published_generation_accepts_bounded_watcher_descendants() {
+        assert_generation_lineage(
+            "semantic-head",
+            "matrix-semantic",
+            "watcher-structural".to_owned(),
+            |generation, _| {
+                assert_eq!(generation, "watcher-structural");
+                Ok(json!({
+                    "generation": {
+                        "generation_id": "watcher-structural",
+                        "parent_generation": "semantic-head"
+                    }
+                }))
+            },
+        )
+        .expect("an unchanged deep publication may descend through a watcher generation");
     }
 
     #[test]
