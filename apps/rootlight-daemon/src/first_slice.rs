@@ -3853,6 +3853,40 @@ fn repository_index(
     )
 }
 
+fn reconcile_terminal_repository_admission(
+    runtime: &tokio::runtime::Runtime,
+    journal: &JournalActorHandle,
+    metadata: &Mutex<OperationMetadataSet>,
+    repository: RepositoryId,
+    deadline: Instant,
+) -> Result<(), PublicError> {
+    let active_operation = lock_metadata(metadata)?.active_repository_operation(repository);
+    let Some(active_operation) = active_operation else {
+        return Ok(());
+    };
+    let record = match journal_call(
+        runtime,
+        deadline,
+        journal.control(ControlRequest::OperationStatus(active_operation)),
+    ) {
+        Ok(ControlResponse::OperationStatus(record)) => record,
+        Err(error) if error.code() == ErrorCode::NotFound => return Ok(()),
+        Ok(_) => return Err(internal_error()),
+        Err(error) => return Err(error),
+    };
+    // Attached transport cancellation can terminalize the durable operation
+    // before its abandoned worker refreshes process-local admission metadata.
+    // Only negative terminal states are safe to reconcile here: a successful
+    // journal record still needs the worker's generation commit projection.
+    if matches!(
+        record.state,
+        OperationState::Failed | OperationState::Cancelled | OperationState::Interrupted
+    ) {
+        lock_metadata(metadata)?.observe_terminal(&record);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum RepositoryIndexIntent {
     Requested,
@@ -4053,12 +4087,18 @@ fn repository_index_with_intent(
         }
     };
     drop(service_guard);
-    let metadata_admission = match lock_metadata(metadata) {
-        Ok(mut operation_metadata) => {
+    let metadata_admission = reconcile_terminal_repository_admission(
+        runtime,
+        journal,
+        metadata,
+        admission.repository,
+        context.deadline,
+    )
+    .and_then(|()| {
+        lock_metadata(metadata).and_then(|mut operation_metadata| {
             operation_metadata.reserve_repository_index(operation, started_unix_ms, admission)
-        }
-        Err(error) => Err(error),
-    };
+        })
+    });
     if let Err(error) = metadata_admission {
         read_service(service)?.release_index_admission(admission);
         terminalize_pre_submitted_semantic(
@@ -11654,6 +11694,69 @@ mod tests {
         metadata
             .reserve_repository_index(next, 20, admission)
             .expect("terminal operation releases repository admission");
+    }
+
+    #[test]
+    fn durable_cancellation_releases_stale_repository_admission() {
+        let root = durable_test_tempdir();
+        fs::write(root.path().join("lib.rs"), "pub fn cancelled() {}\n")
+            .expect("fixture source writes");
+        let service =
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(5));
+        let admission = service
+            .admit_rust_fixture(root.path(), &cancellation)
+            .expect("repository admission succeeds");
+        let active = OperationId::from_bytes([75; 16]);
+        let next = OperationId::from_bytes([76; 16]);
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        journal
+            .submit(repository_submission(active, 75))
+            .expect("operation submits");
+        journal
+            .request_cancellation(
+                active,
+                CancellationAuthority::Internal(InternalCancellationAuthority::ClientDisconnect),
+            )
+            .expect("queued operation cancels");
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let handle = actor.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let metadata = Mutex::new(OperationMetadataSet::new(4));
+        metadata
+            .lock()
+            .expect("metadata locks")
+            .reserve_repository_index(active, 10, admission)
+            .expect("stale process metadata reserves the repository");
+
+        reconcile_terminal_repository_admission(
+            &runtime,
+            &handle,
+            &metadata,
+            admission.repository,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect("durable cancellation reconciles");
+
+        let mut metadata = metadata.lock().expect("metadata lock is healthy");
+        let reconciled = metadata
+            .records
+            .get(&active)
+            .expect("cancelled operation metadata remains visible");
+        assert!(reconciled.terminal);
+        assert!(matches!(
+            reconciled.terminal_snapshot.as_ref(),
+            Some(snapshot) if snapshot.state == OperationState::Cancelled
+        ));
+        metadata
+            .reserve_repository_index(next, 20, admission)
+            .expect("durable terminal state releases repository admission");
+        drop(metadata);
+        drop(handle);
+        actor.join().expect("actor joins");
     }
 
     #[test]
