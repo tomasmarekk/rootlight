@@ -7719,6 +7719,10 @@ fn collect_coverage_partial(
 ) -> Result<(Vec<CoverageRecord>, bool), QueryError> {
     let mut coverage = Vec::new();
     let mut truncated = false;
+    // An empty locate result has no narrower scope. Its negative claim must
+    // therefore retain repository-wide coverage instead of inheriting
+    // completeness from an empty coverage projection.
+    let repository_wide = symbols.is_empty() && files.is_empty();
     for record in &document.coverage_records {
         control.check()?;
         if !tracker.can_add(QueryResource::Rows, 1) {
@@ -7729,8 +7733,8 @@ fn collect_coverage_partial(
         tracker.add_rows(1)?;
         let relevant = match record.scope {
             CoverageScope::Repository(repository) => repository == document.repository,
-            CoverageScope::File(file) => files.contains(&file),
-            CoverageScope::Entity(symbol) => symbols.contains(&symbol),
+            CoverageScope::File(file) => repository_wide || files.contains(&file),
+            CoverageScope::Entity(symbol) => repository_wide || symbols.contains(&symbol),
         };
         if relevant {
             if !tracker.can_add(QueryResource::Results, 1) {
@@ -9172,6 +9176,47 @@ mod tests {
         .expect("bounded architecture overview succeeds");
         let execution = authoritative_execution(&limiting_resources);
         (overview, execution)
+    }
+
+    #[test]
+    fn empty_locate_scope_retains_file_coverage_for_repository_negative_claims() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/malformed.rs");
+        document.coverage_records.push(CoverageRecord {
+            id: FactId::from_bytes([2; 20]),
+            repository: document.repository,
+            generation: document.generation,
+            scope: CoverageScope::File(file_id(1)),
+            domain: FactDomain::Entities,
+            tier: AnalysisTier::TierB,
+            status: CoverageStatus::Unknown,
+            discovered: 1,
+            indexed: 0,
+            skipped: 1,
+            provenance: FactId::from_bytes([3; 20]),
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        });
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(1));
+        let mut tracker = UsageTracker::new(QueryBudget::new());
+        let mut limiting_resources = Vec::new();
+
+        let (coverage, truncated) = collect_coverage_partial(
+            &document,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &mut tracker,
+            &control,
+            &mut limiting_resources,
+        )
+        .expect("repository-wide coverage projection succeeds");
+
+        assert!(!truncated);
+        assert!(limiting_resources.is_empty());
+        assert_eq!(coverage, document.coverage_records);
     }
 
     #[test]

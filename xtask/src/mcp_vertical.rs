@@ -659,8 +659,8 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
             observed_valid_query_coverage_status: "complete",
             observed_valid_query_rust_coverage_status: "complete",
             observed_valid_query_rust_coverage_tier: "B",
-            observed_source_read_coverage_status: "bounded",
-            observed_source_read_rust_coverage_status: "bounded",
+            observed_source_read_coverage_status: "complete",
+            observed_source_read_rust_coverage_status: "complete",
             observed_source_read_rust_coverage_tier: "B",
             expected_syntax_diagnostic_code: SYNTAX_RECOVERY_DIAGNOSTIC,
             syntax_recovery_diagnostic_observed,
@@ -2126,7 +2126,7 @@ fn query_snapshot(
     require_tool_success(&source, "source.read")?;
     require_trust_labels(&source.structured)?;
     assert_read_correlation(&source.structured, repository, expected_generation)?;
-    assert_bounded_tier_b_rust_coverage(&source.structured)?;
+    assert_complete_tier_b_rust_coverage(&source.structured)?;
     assert_absent(&source.structured, IGNORED_SENTINEL)?;
     assert_absent(&source.structured, OUTSIDE_SENTINEL)?;
     let chunks = source.structured["data"]["chunks"]
@@ -3376,7 +3376,7 @@ fn exercise_nested_ignore_policy(
     require_tool_success(&kept_source, "source.read")?;
     require_trust_labels(&kept_source.structured)?;
     assert_read_correlation(&kept_source.structured, repository, generation)?;
-    assert_bounded_tier_b_rust_coverage(&kept_source.structured)?;
+    assert_complete_tier_b_rust_coverage(&kept_source.structured)?;
     assert_control_value_omits_sentinels(&kept_source.structured)?;
     let chunks =
         kept_source.structured["data"]["chunks"]
@@ -3805,14 +3805,6 @@ fn assert_complete_tier_b_rust_coverage(structured: &Value) -> Result<(), Vertic
         structured,
         "complete",
         "valid first-slice query did not report complete Tier-B Rust coverage",
-    )
-}
-
-fn assert_bounded_tier_b_rust_coverage(structured: &Value) -> Result<(), VerticalError> {
-    assert_tier_b_rust_coverage(
-        structured,
-        "bounded",
-        "source.read did not report bounded Tier-B Rust coverage",
     )
 }
 
@@ -6714,12 +6706,12 @@ mod tests {
     use super::{
         CANCELLATION_FIXTURE_FILES, EXPECTED_TOOLS, MATRIX_STATES, Options, ToolMatrixCell,
         ToolOutcome, VerticalError, assert_active_generation_lineage,
-        assert_bounded_tier_b_rust_coverage, assert_complete_tier_b_rust_coverage,
-        assert_generation_relationship, canonicalize_known_identities, diagnostic_code_is_present,
-        estimated_tokens, matrix_not_applicable_reason, modify_fixture_to_v2, nearest_rank,
-        normalize_read_response, observe_rust_coverage, prepare_cancellation_repository,
-        redact_request_for_evidence, retryable_busy_delay, shrink_cancellation_repository,
-        source_tokenizer_input, validate_architecture_community_data, validate_tool_matrix_cells,
+        assert_complete_tier_b_rust_coverage, assert_generation_relationship,
+        canonicalize_known_identities, diagnostic_code_is_present, estimated_tokens,
+        matrix_not_applicable_reason, modify_fixture_to_v2, nearest_rank, normalize_read_response,
+        observe_rust_coverage, prepare_cancellation_repository, redact_request_for_evidence,
+        retryable_busy_delay, shrink_cancellation_repository, source_tokenizer_input,
+        validate_architecture_community_data, validate_tool_matrix_cells,
     };
     use serde_json::json;
 
@@ -7049,7 +7041,6 @@ mod tests {
             }
         });
         assert!(assert_complete_tier_b_rust_coverage(&complete).is_ok());
-        assert!(assert_bounded_tier_b_rust_coverage(&complete).is_err());
         let bounded = json!({
             "coverage": {
                 "status": "bounded",
@@ -7058,7 +7049,6 @@ mod tests {
                 ]
             }
         });
-        assert!(assert_bounded_tier_b_rust_coverage(&bounded).is_ok());
         assert!(assert_complete_tier_b_rust_coverage(&bounded).is_err());
         let semantic = json!({
             "coverage": {
