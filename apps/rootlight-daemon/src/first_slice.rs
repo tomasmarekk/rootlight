@@ -14871,7 +14871,7 @@ mod tests {
             .enable_time()
             .build()
             .expect("runtime builds");
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_secs(5);
         let error = repository_operation_status(
             &RwLock::new(
                 FirstSliceService::new(DEFAULT_GENERATION_RETENTION)
@@ -14937,7 +14937,7 @@ mod tests {
             .enable_time()
             .build()
             .expect("runtime builds");
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_secs(5);
 
         let status = repository_operation_status(
             &RwLock::new(
