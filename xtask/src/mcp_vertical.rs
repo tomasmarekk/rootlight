@@ -315,6 +315,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         &repository_root,
         &v1_index.repository,
         &v1_index.generation,
+        v1_index.parent_generation.as_deref(),
         Value::String("active".to_owned()),
         42,
         43,
@@ -361,6 +362,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         &repository_root,
         &v2_index.repository,
         &v2_index.generation,
+        v2_index.parent_generation.as_deref(),
         Value::String("active".to_owned()),
         43,
         42,
@@ -373,6 +375,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         &repository_root,
         &v1_index.repository,
         &v1_index.generation,
+        v1_index.parent_generation.as_deref(),
         Value::String(v1_index.generation.clone()),
         42,
         43,
@@ -462,6 +465,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         &repository_root,
         &v2_index.repository,
         &v2_index.generation,
+        v2_index.parent_generation.as_deref(),
         Value::String("active".to_owned()),
         43,
         42,
@@ -527,6 +531,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         &repository_root,
         &rebuilt_index.repository,
         &rebuilt_index.generation,
+        rebuilt_index.parent_generation.as_deref(),
         Value::String("active".to_owned()),
         42,
         43,
@@ -1917,6 +1922,7 @@ fn query_snapshot(
     repository_root: &Path,
     repository: &str,
     expected_generation: &str,
+    expected_parent_generation: Option<&str>,
     generation_selector: Value,
     expected_value: u32,
     excluded_value: u32,
@@ -1951,6 +1957,7 @@ fn query_snapshot(
         assert_active_generation_lineage(
             &locate.structured,
             expected_generation,
+            expected_parent_generation,
             &located_generation,
             |generation, depth| {
                 let ancestor = call_tool(
@@ -2203,8 +2210,9 @@ fn exercise_complete_tool_matrix(
             .ok_or(VerticalError::Invariant(
                 "unchanged matrix fixture published an unrelated generation",
             ))?;
-        assert_generation_lineage(
+        assert_generation_relationship(
             &head.generation,
+            head.parent_generation.as_deref(),
             &matrix_index.generation,
             parent,
             |generation, depth| {
@@ -3696,6 +3704,7 @@ fn assert_read_correlation(
 fn assert_active_generation_lineage<F>(
     structured: &Value,
     expected_generation: &str,
+    expected_parent_generation: Option<&str>,
     active_generation: &str,
     load_generation: F,
 ) -> Result<(), VerticalError>
@@ -3710,23 +3719,25 @@ where
         || generation["semantic_freshness"] != "current"
     {
         return Err(VerticalError::Invariant(
-            "active generation was not a current descendant of the expected snapshot",
+            "active generation was not current-related to the expected snapshot",
         ));
     }
     let ancestor =
         optional_string(&generation["parent_generation"])?.ok_or(VerticalError::Invariant(
-            "active generation was not a current descendant of the expected snapshot",
+            "active generation was not current-related to the expected snapshot",
         ))?;
-    assert_generation_lineage(
+    assert_generation_relationship(
         expected_generation,
+        expected_parent_generation,
         active_generation,
         ancestor,
         load_generation,
     )
 }
 
-fn assert_generation_lineage<F>(
+fn assert_generation_relationship<F>(
     expected_generation: &str,
+    expected_parent_generation: Option<&str>,
     generation: &str,
     mut ancestor: String,
     mut load_generation: F,
@@ -3736,7 +3747,9 @@ where
 {
     let mut visited = BTreeSet::from([generation.to_owned()]);
     for depth in 0..GENERATION_LINEAGE_LIMIT {
-        if ancestor == expected_generation {
+        if ancestor == expected_generation
+            || expected_parent_generation.is_some_and(|parent| ancestor == parent)
+        {
             return Ok(());
         }
         if !visited.insert(ancestor.clone()) {
@@ -3755,10 +3768,12 @@ where
             ));
         }
         ancestor = optional_string(&generation["generation"]["parent_generation"])?.ok_or(
-            VerticalError::Invariant("generation was not a descendant of the expected snapshot"),
+            VerticalError::Invariant("generation was not related to the expected snapshot"),
         )?;
     }
-    if ancestor == expected_generation {
+    if ancestor == expected_generation
+        || expected_parent_generation.is_some_and(|parent| ancestor == parent)
+    {
         Ok(())
     } else {
         Err(VerticalError::Invariant(
@@ -6700,7 +6715,7 @@ mod tests {
         CANCELLATION_FIXTURE_FILES, EXPECTED_TOOLS, MATRIX_STATES, Options, ToolMatrixCell,
         ToolOutcome, VerticalError, assert_active_generation_lineage,
         assert_bounded_tier_b_rust_coverage, assert_complete_tier_b_rust_coverage,
-        assert_generation_lineage, canonicalize_known_identities, diagnostic_code_is_present,
+        assert_generation_relationship, canonicalize_known_identities, diagnostic_code_is_present,
         estimated_tokens, matrix_not_applicable_reason, modify_fixture_to_v2, nearest_rank,
         normalize_read_response, observe_rust_coverage, prepare_cancellation_repository,
         redact_request_for_evidence, retryable_busy_delay, shrink_cancellation_repository,
@@ -6786,7 +6801,7 @@ mod tests {
                 "structural_freshness": "current"
             }
         });
-        assert_active_generation_lineage(&structural, "structural", "structural", |_, _| {
+        assert_active_generation_lineage(&structural, "structural", None, "structural", |_, _| {
             unreachable!("the exact active generation needs no ancestry lookup")
         })
         .expect("the requested structural generation remains active");
@@ -6799,7 +6814,7 @@ mod tests {
                 "structural_freshness": "current"
             }
         });
-        assert_active_generation_lineage(&semantic, "structural", "semantic", |_, _| {
+        assert_active_generation_lineage(&semantic, "structural", None, "semantic", |_, _| {
             unreachable!("a direct semantic refinement needs no ancestry lookup")
         })
         .expect("the current semantic refinement may replace the structural generation");
@@ -6815,6 +6830,7 @@ mod tests {
         assert_active_generation_lineage(
             &watcher_semantic,
             "structural",
+            None,
             "watcher-semantic",
             |generation, _| {
                 assert_eq!(generation, "watcher-structural");
@@ -6842,6 +6858,7 @@ mod tests {
             assert_active_generation_lineage(
                 &watcher_structural,
                 "structural",
+                None,
                 "watcher",
                 |_, _| unreachable!("a stale active generation is rejected before ancestry lookup")
             )
@@ -6860,6 +6877,7 @@ mod tests {
             assert_active_generation_lineage(
                 &unrelated,
                 "structural",
+                None,
                 "unrelated",
                 |generation, _| {
                     assert_eq!(generation, "other");
@@ -6886,6 +6904,7 @@ mod tests {
             assert_active_generation_lineage(
                 &superseded,
                 "structural",
+                None,
                 "semantic",
                 |_, _| unreachable!(
                     "a superseded active generation is rejected before ancestry lookup"
@@ -6893,12 +6912,30 @@ mod tests {
             )
             .is_err()
         );
+
+        let sibling = json!({
+            "generation": {
+                "generation_id": "semantic-sibling",
+                "parent_generation": "structural",
+                "semantic_freshness": "current",
+                "structural_freshness": "current"
+            }
+        });
+        assert_active_generation_lineage(
+            &sibling,
+            "semantic-head",
+            Some("structural"),
+            "semantic-sibling",
+            |_, _| unreachable!("a direct semantic sibling needs no ancestry lookup"),
+        )
+        .expect("concurrent semantic publications may share one structural parent");
     }
 
     #[test]
     fn published_generation_accepts_bounded_watcher_descendants() {
-        assert_generation_lineage(
+        assert_generation_relationship(
             "semantic-head",
+            Some("base-structural"),
             "matrix-semantic",
             "watcher-structural".to_owned(),
             |generation, _| {
@@ -6906,7 +6943,7 @@ mod tests {
                 Ok(json!({
                     "generation": {
                         "generation_id": "watcher-structural",
-                        "parent_generation": "semantic-head"
+                        "parent_generation": "base-structural"
                     }
                 }))
             },
