@@ -10193,21 +10193,28 @@ fn prepare_project_analysis_document(
 ) -> Result<NormalizedIrDocument, FirstSliceError> {
     // The project document is appended to the structural target, so its local
     // quota must account for diagnostics already owned by earlier providers.
-    let diagnostic_reserve = if partitioned {
+    let available_diagnostics = limits
+        .max_diagnostics
+        .checked_sub(existing_target_diagnostics)
+        .ok_or(FirstSliceError::Limits)?;
+    let requested_reserve = if partitioned {
         PROJECT_PARTITION_DIAGNOSTIC_RESERVE
     } else {
         1
     };
-    let diagnostic_capacity = limits
-        .max_diagnostics
-        .checked_sub(existing_target_diagnostics)
-        .and_then(|available| available.checked_sub(diagnostic_reserve))
-        .ok_or(FirstSliceError::Limits)?;
+    let diagnostic_reserve = available_diagnostics.min(requested_reserve);
+    let diagnostic_capacity = available_diagnostics - diagnostic_reserve;
     let (mut document, merge_truncated) = merge_project_documents(documents, diagnostic_capacity)?;
-    if diagnostics_truncated || merge_truncated {
-        append_project_diagnostics_truncated(&mut document, limits)?;
+    let diagnostics_truncated = diagnostics_truncated || merge_truncated;
+    if partitioned || diagnostics_truncated {
+        bound_project_coverage(&mut document)?;
     }
-    if partitioned {
+    let mut remaining_reserve = diagnostic_reserve;
+    if diagnostics_truncated && remaining_reserve > 0 {
+        append_project_diagnostics_truncated(&mut document, limits)?;
+        remaining_reserve -= 1;
+    }
+    if partitioned && remaining_reserve > 0 {
         append_project_partition_diagnostic(&mut document, language, limits)?;
     }
     let combined_diagnostics = existing_target_diagnostics
@@ -10217,6 +10224,17 @@ fn prepare_project_analysis_document(
         return Err(FirstSliceError::Limits);
     }
     Ok(document)
+}
+
+fn bound_project_coverage(document: &mut NormalizedIrDocument) -> Result<(), FirstSliceError> {
+    for coverage in &mut document.coverage_records {
+        if coverage.tier == AnalysisTier::TierB && coverage.status == CoverageStatus::Complete {
+            coverage.status = CoverageStatus::Bounded;
+            coverage.id =
+                derive_coverage_record_id(coverage).map_err(|_| FirstSliceError::Identity)?;
+        }
+    }
+    Ok(())
 }
 
 fn append_project_diagnostics_truncated(
@@ -10262,13 +10280,6 @@ fn append_project_partition_diagnostic(
     language: &str,
     limits: &IrLimits,
 ) -> Result<(), FirstSliceError> {
-    for coverage in &mut document.coverage_records {
-        if coverage.tier == AnalysisTier::TierB && coverage.status == CoverageStatus::Complete {
-            coverage.status = CoverageStatus::Bounded;
-            coverage.id =
-                derive_coverage_record_id(coverage).map_err(|_| FirstSliceError::Identity)?;
-        }
-    }
     let provenance = document
         .provenance
         .first()
@@ -12176,9 +12187,29 @@ mod tests {
                     diagnostic
                 })
                 .collect();
+            let mut coverage = CoverageRecord {
+                id: FactId::from_bytes([0; 20]),
+                repository,
+                generation,
+                scope: CoverageScope::File(file),
+                domain: IrFactDomain::Relations,
+                tier: AnalysisTier::TierB,
+                status: CoverageStatus::Complete,
+                discovered: 1,
+                indexed: 1,
+                skipped: 0,
+                provenance: provenance.id,
+                evidence: FactEvidence {
+                    source: Some(source),
+                    derivation: Vec::new(),
+                },
+            };
+            coverage.id =
+                derive_coverage_record_id(&coverage).expect("project coverage identity derives");
             let mut document = NormalizedIrDocument::empty(repository, generation);
             document.files.push(file_record);
             document.provenance.push(provenance);
+            document.coverage_records.push(coverage);
             document.diagnostics = diagnostics;
             document
         }
@@ -12238,6 +12269,44 @@ mod tests {
             diagnostic.code == "project-adapter-partitioned-coverage"
                 && diagnostic.coverage_effect == CoverageStatus::Bounded
         }));
+        assert!(
+            merged
+                .coverage_records
+                .iter()
+                .all(|coverage| coverage.status == CoverageStatus::Bounded)
+        );
+
+        let saturated = prepare_project_analysis_document(
+            vec![
+                document(
+                    repository,
+                    generation,
+                    FileId::from_bytes([3; 20]),
+                    3,
+                    diagnostics_per_partition,
+                ),
+                document(
+                    repository,
+                    generation,
+                    FileId::from_bytes([4; 20]),
+                    4,
+                    diagnostics_per_partition,
+                ),
+            ],
+            "rust",
+            true,
+            false,
+            limits.max_diagnostics,
+            &limits,
+        )
+        .expect("saturated structural diagnostics retain bounded project coverage");
+        assert!(saturated.diagnostics.is_empty());
+        assert!(
+            saturated
+                .coverage_records
+                .iter()
+                .all(|coverage| coverage.status == CoverageStatus::Bounded)
+        );
     }
 
     struct FailingProjectAnalyzer {
