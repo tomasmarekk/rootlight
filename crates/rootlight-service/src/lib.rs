@@ -4810,6 +4810,7 @@ impl FirstSliceService {
                                 &language,
                                 partitioned,
                                 diagnostics_truncated,
+                                target.diagnostics.len(),
                                 self.analysis_limits.ir(),
                             ) {
                                 Ok(document) => {
@@ -10187,20 +10188,33 @@ fn prepare_project_analysis_document(
     language: &str,
     partitioned: bool,
     diagnostics_truncated: bool,
+    existing_target_diagnostics: usize,
     limits: &IrLimits,
 ) -> Result<NormalizedIrDocument, FirstSliceError> {
+    // The project document is appended to the structural target, so its local
+    // quota must account for diagnostics already owned by earlier providers.
     let diagnostic_reserve = if partitioned {
         PROJECT_PARTITION_DIAGNOSTIC_RESERVE
     } else {
-        0
+        1
     };
-    let diagnostic_capacity = limits.max_diagnostics.saturating_sub(diagnostic_reserve);
+    let diagnostic_capacity = limits
+        .max_diagnostics
+        .checked_sub(existing_target_diagnostics)
+        .and_then(|available| available.checked_sub(diagnostic_reserve))
+        .ok_or(FirstSliceError::Limits)?;
     let (mut document, merge_truncated) = merge_project_documents(documents, diagnostic_capacity)?;
+    if diagnostics_truncated || merge_truncated {
+        append_project_diagnostics_truncated(&mut document, limits)?;
+    }
     if partitioned {
-        if diagnostics_truncated || merge_truncated {
-            append_project_diagnostics_truncated(&mut document, limits)?;
-        }
         append_project_partition_diagnostic(&mut document, language, limits)?;
+    }
+    let combined_diagnostics = existing_target_diagnostics
+        .checked_add(document.diagnostics.len())
+        .ok_or(FirstSliceError::Limits)?;
+    if combined_diagnostics > limits.max_diagnostics {
+        return Err(FirstSliceError::Limits);
     }
     Ok(document)
 }
@@ -12172,6 +12186,7 @@ mod tests {
         let repository = derive_repository(b"partition-diagnostic-repository").id();
         let generation = GenerationId::from_bytes([22; 20]);
         let limits = IrLimits::default();
+        let existing_target_diagnostics = 1;
         let diagnostics_per_partition = limits.max_diagnostics / 2 + 1;
         let mut analysis = FirstSliceProjectAnalysis::new(
             document(
@@ -12205,10 +12220,14 @@ mod tests {
             "rust",
             partitioned,
             diagnostics_truncated,
+            existing_target_diagnostics,
             &limits,
         )
         .expect("bounded aggregate diagnostics remain publishable");
-        assert_eq!(merged.diagnostics.len(), limits.max_diagnostics);
+        assert_eq!(
+            existing_target_diagnostics + merged.diagnostics.len(),
+            limits.max_diagnostics
+        );
         assert!(
             merged
                 .diagnostics
