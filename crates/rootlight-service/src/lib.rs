@@ -167,6 +167,9 @@ const PROJECT_PARTITION_DIAGNOSTIC_RESERVE: usize = 2;
 const PROJECT_DIAGNOSTICS_TRUNCATED_CODE: &str = "project-adapter-diagnostics-truncated";
 const PROJECT_DIAGNOSTICS_TRUNCATED_MESSAGE: &str =
     "additional project adapter diagnostics were omitted by the aggregate diagnostic limit";
+const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
+const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
+    "additional project semantic facts were omitted by aggregate resource limits";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/2";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
@@ -2545,6 +2548,7 @@ pub struct FirstSliceProjectAnalysis {
     isolation_permits_deep_adapter: bool,
     partitioned: bool,
     diagnostics_truncated: bool,
+    facts_truncated: bool,
 }
 
 impl FirstSliceProjectAnalysis {
@@ -2558,6 +2562,7 @@ impl FirstSliceProjectAnalysis {
             isolation_permits_deep_adapter,
             partitioned: false,
             diagnostics_truncated: false,
+            facts_truncated: false,
         }
     }
 
@@ -2578,6 +2583,7 @@ impl FirstSliceProjectAnalysis {
             isolation_permits_deep_adapter,
             partitioned,
             diagnostics_truncated: false,
+            facts_truncated: false,
         }
     }
 
@@ -2604,24 +2610,28 @@ impl FirstSliceProjectAnalysis {
         let diagnostic_capacity = IrLimits::default()
             .max_diagnostics
             .saturating_sub(PROJECT_PARTITION_DIAGNOSTIC_RESERVE);
-        self.diagnostics_truncated |= merge_project_document(
+        let truncation = merge_project_document(
             merged,
             document,
             &mut self.external_symbols,
             diagnostic_capacity,
+            &IrLimits::default(),
         )
         .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        self.diagnostics_truncated |= truncation.diagnostics;
+        self.facts_truncated |= truncation.facts;
         self.isolation_permits_deep_adapter &= isolation_permits_deep_adapter;
         self.partitioned = true;
         Ok(())
     }
 
-    fn into_parts(self) -> (Vec<NormalizedIrDocument>, bool, bool, bool) {
+    fn into_parts(self) -> (Vec<NormalizedIrDocument>, bool, bool, bool, bool) {
         (
             self.documents,
             self.isolation_permits_deep_adapter,
             self.partitioned,
             self.diagnostics_truncated,
+            self.facts_truncated,
         )
     }
 }
@@ -4794,6 +4804,7 @@ impl FirstSliceService {
                             isolation_permits_deep_adapter,
                             partitioned,
                             diagnostics_truncated,
+                            facts_truncated,
                         ) = output.into_parts();
                         if !isolation_permits_deep_adapter {
                             fallback_error = Some(FirstSliceProjectAnalysisError::Isolation);
@@ -4811,6 +4822,7 @@ impl FirstSliceService {
                                 &language,
                                 partitioned,
                                 diagnostics_truncated,
+                                facts_truncated,
                                 target.diagnostics.len(),
                                 self.analysis_limits.ir(),
                             ) {
@@ -10075,21 +10087,38 @@ fn project_documents_match_inputs(
 fn merge_project_documents(
     documents: Vec<NormalizedIrDocument>,
     diagnostic_capacity: usize,
-) -> Result<(NormalizedIrDocument, bool), FirstSliceError> {
+) -> Result<(NormalizedIrDocument, ProjectMergeTruncation), FirstSliceError> {
     let mut documents = documents.into_iter();
     let mut merged = documents.next().ok_or(FirstSliceError::Identity)?;
     let mut external_symbols = project_external_symbols(&merged);
-    let mut diagnostics_truncated = merged.diagnostics.len() > diagnostic_capacity;
+    let mut truncation = ProjectMergeTruncation {
+        diagnostics: merged.diagnostics.len() > diagnostic_capacity,
+        facts: false,
+    };
     merged.diagnostics.truncate(diagnostic_capacity);
     for document in documents {
-        diagnostics_truncated |= merge_project_document(
+        truncation.merge(merge_project_document(
             &mut merged,
             document,
             &mut external_symbols,
             diagnostic_capacity,
-        )?;
+            &IrLimits::default(),
+        )?);
     }
-    Ok((merged, diagnostics_truncated))
+    Ok((merged, truncation))
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ProjectMergeTruncation {
+    diagnostics: bool,
+    facts: bool,
+}
+
+impl ProjectMergeTruncation {
+    fn merge(&mut self, other: Self) {
+        self.diagnostics |= other.diagnostics;
+        self.facts |= other.facts;
+    }
 }
 
 fn project_external_symbols(document: &NormalizedIrDocument) -> BTreeSet<SymbolId> {
@@ -10105,7 +10134,8 @@ fn merge_project_document(
     mut document: NormalizedIrDocument,
     external_symbols: &mut BTreeSet<SymbolId>,
     diagnostic_capacity: usize,
-) -> Result<bool, FirstSliceError> {
+    limits: &IrLimits,
+) -> Result<ProjectMergeTruncation, FirstSliceError> {
     if document.version != merged.version
         || document.repository != merged.repository
         || document.generation != merged.generation
@@ -10113,9 +10143,10 @@ fn merge_project_document(
         return Err(FirstSliceError::Identity);
     }
     let mut duplicate_external_symbols = BTreeSet::new();
+    let mut new_external_symbols = BTreeSet::new();
     document.entities.retain(|entity| {
         entity.kind != EntityKind::ExternalSymbol
-            || if external_symbols.insert(entity.id) {
+            || if !external_symbols.contains(&entity.id) && new_external_symbols.insert(entity.id) {
                 true
             } else {
                 duplicate_external_symbols.insert(entity.id);
@@ -10133,11 +10164,59 @@ fn merge_project_document(
             !duplicate_external_symbols.contains(symbol)
         });
     }
+    drop(new_external_symbols);
     let mut diagnostics_truncated = merged.diagnostics.len() > diagnostic_capacity;
     merged.diagnostics.truncate(diagnostic_capacity);
     let remaining_diagnostics = diagnostic_capacity.saturating_sub(merged.diagnostics.len());
     diagnostics_truncated |= document.diagnostics.len() > remaining_diagnostics;
     document.diagnostics.truncate(remaining_diagnostics);
+    let mut facts_truncated = false;
+    match preflight_normalized_document_append(merged, &document, limits) {
+        Ok(()) => {}
+        Err(FirstSliceError::ResourceLimit { .. }) => {
+            retain_project_capacity_summary(&mut document)?;
+            facts_truncated = true;
+            preflight_normalized_document_append(merged, &document, limits)?;
+        }
+        Err(error) => return Err(error),
+    }
+    if let Err(error) = reserve_project_merge(merged, &document) {
+        if error != FirstSliceError::Limits || facts_truncated {
+            return Err(error);
+        }
+        retain_project_capacity_summary(&mut document)?;
+        facts_truncated = true;
+        preflight_normalized_document_append(merged, &document, limits)?;
+        reserve_project_merge(merged, &document)?;
+    }
+    external_symbols.extend(
+        document
+            .entities
+            .iter()
+            .filter_map(|entity| (entity.kind == EntityKind::ExternalSymbol).then_some(entity.id)),
+    );
+    merged.files.append(&mut document.files);
+    merged.entities.append(&mut document.entities);
+    merged.occurrences.append(&mut document.occurrences);
+    merged.relations.append(&mut document.relations);
+    merged.provenance.append(&mut document.provenance);
+    merged.source_mappings.append(&mut document.source_mappings);
+    merged
+        .coverage_records
+        .append(&mut document.coverage_records);
+    merged.skipped_regions.append(&mut document.skipped_regions);
+    merged.diagnostics.append(&mut document.diagnostics);
+    merged.extensions.append(&mut document.extensions);
+    Ok(ProjectMergeTruncation {
+        diagnostics: diagnostics_truncated,
+        facts: facts_truncated,
+    })
+}
+
+fn reserve_project_merge(
+    merged: &mut NormalizedIrDocument,
+    document: &NormalizedIrDocument,
+) -> Result<(), FirstSliceError> {
     merged
         .files
         .try_reserve_exact(document.files.len())
@@ -10178,19 +10257,7 @@ fn merge_project_document(
         .extensions
         .try_reserve_exact(document.extensions.len())
         .map_err(|_| FirstSliceError::Limits)?;
-    merged.files.append(&mut document.files);
-    merged.entities.append(&mut document.entities);
-    merged.occurrences.append(&mut document.occurrences);
-    merged.relations.append(&mut document.relations);
-    merged.provenance.append(&mut document.provenance);
-    merged.source_mappings.append(&mut document.source_mappings);
-    merged
-        .coverage_records
-        .append(&mut document.coverage_records);
-    merged.skipped_regions.append(&mut document.skipped_regions);
-    merged.diagnostics.append(&mut document.diagnostics);
-    merged.extensions.append(&mut document.extensions);
-    Ok(diagnostics_truncated)
+    Ok(())
 }
 
 fn prepare_project_analysis_document(
@@ -10198,6 +10265,7 @@ fn prepare_project_analysis_document(
     language: &str,
     partitioned: bool,
     diagnostics_truncated: bool,
+    facts_truncated: bool,
     existing_target_diagnostics: usize,
     limits: &IrLimits,
 ) -> Result<NormalizedIrDocument, FirstSliceError> {
@@ -10214,12 +10282,17 @@ fn prepare_project_analysis_document(
     };
     let diagnostic_reserve = available_diagnostics.min(requested_reserve);
     let diagnostic_capacity = available_diagnostics - diagnostic_reserve;
-    let (mut document, merge_truncated) = merge_project_documents(documents, diagnostic_capacity)?;
-    let diagnostics_truncated = diagnostics_truncated || merge_truncated;
-    if partitioned || diagnostics_truncated {
+    let (mut document, merge_truncation) = merge_project_documents(documents, diagnostic_capacity)?;
+    let diagnostics_truncated = diagnostics_truncated || merge_truncation.diagnostics;
+    let facts_truncated = facts_truncated || merge_truncation.facts;
+    if partitioned || diagnostics_truncated || facts_truncated {
         bound_project_coverage(&mut document)?;
     }
     let mut remaining_reserve = diagnostic_reserve;
+    if facts_truncated && remaining_reserve > 0 {
+        append_project_facts_truncated(&mut document, limits)?;
+        remaining_reserve -= 1;
+    }
     if diagnostics_truncated && remaining_reserve > 0 {
         append_project_diagnostics_truncated(&mut document, limits)?;
         remaining_reserve -= 1;
@@ -10251,6 +10324,32 @@ fn append_project_diagnostics_truncated(
     document: &mut NormalizedIrDocument,
     limits: &IrLimits,
 ) -> Result<(), FirstSliceError> {
+    append_project_truncation_diagnostic(
+        document,
+        PROJECT_DIAGNOSTICS_TRUNCATED_CODE,
+        PROJECT_DIAGNOSTICS_TRUNCATED_MESSAGE,
+        limits,
+    )
+}
+
+fn append_project_facts_truncated(
+    document: &mut NormalizedIrDocument,
+    limits: &IrLimits,
+) -> Result<(), FirstSliceError> {
+    append_project_truncation_diagnostic(
+        document,
+        PROJECT_FACTS_TRUNCATED_CODE,
+        PROJECT_FACTS_TRUNCATED_MESSAGE,
+        limits,
+    )
+}
+
+fn append_project_truncation_diagnostic(
+    document: &mut NormalizedIrDocument,
+    code: &str,
+    message: &str,
+    limits: &IrLimits,
+) -> Result<(), FirstSliceError> {
     let provenance = document
         .provenance
         .first()
@@ -10268,8 +10367,8 @@ fn append_project_diagnostics_truncated(
         id: FactId::from_bytes([0; 20]),
         repository: document.repository,
         generation: document.generation,
-        code: PROJECT_DIAGNOSTICS_TRUNCATED_CODE.to_owned(),
-        message: PROJECT_DIAGNOSTICS_TRUNCATED_MESSAGE.to_owned(),
+        code: code.to_owned(),
+        message: message.to_owned(),
         severity: DiagnosticSeverity::Warning,
         source: None,
         coverage_effect: CoverageStatus::Bounded,
@@ -10825,17 +10924,18 @@ fn preflight_normalized_document_append(
 fn retain_project_capacity_summary(
     document: &mut NormalizedIrDocument,
 ) -> Result<(), FirstSliceError> {
-    document.entities.clear();
-    document.occurrences.clear();
-    document.relations.clear();
-    document.source_mappings.clear();
-    document.skipped_regions.clear();
-    document.diagnostics.clear();
+    document.entities = Vec::new();
+    document.occurrences = Vec::new();
+    document.relations = Vec::new();
+    document.source_mappings = Vec::new();
+    document.skipped_regions = Vec::new();
+    document.diagnostics = Vec::new();
     // File claims remain required for generation identity verification. Other
     // extensions can name entities or mappings omitted by this summary.
-    document
-        .extensions
-        .retain(|extension| extension.namespace == FILE_IDENTITY_CLAIM_NAMESPACE);
+    document.extensions = std::mem::take(&mut document.extensions)
+        .into_iter()
+        .filter(|extension| extension.namespace == FILE_IDENTITY_CLAIM_NAMESPACE)
+        .collect();
     for coverage in &mut document.coverage_records {
         coverage.status = CoverageStatus::Bounded;
         if !matches!(
@@ -12289,11 +12389,17 @@ mod tests {
                 false,
             )
             .expect("the next project partition merges immediately");
-        let (documents, isolation_permits_deep_adapter, partitioned, diagnostics_truncated) =
-            analysis.into_parts();
+        let (
+            documents,
+            isolation_permits_deep_adapter,
+            partitioned,
+            diagnostics_truncated,
+            facts_truncated,
+        ) = analysis.into_parts();
         assert!(!isolation_permits_deep_adapter);
         assert!(partitioned);
         assert!(!diagnostics_truncated);
+        assert!(!facts_truncated);
         assert_eq!(documents.len(), 1);
         let merged = &documents[0];
 
@@ -12444,16 +12550,19 @@ mod tests {
                 true,
             )
             .expect("the bounded diagnostic partition merges");
-        let (documents, isolated, partitioned, diagnostics_truncated) = analysis.into_parts();
+        let (documents, isolated, partitioned, diagnostics_truncated, facts_truncated) =
+            analysis.into_parts();
         assert!(isolated);
         assert!(partitioned);
         assert!(diagnostics_truncated);
+        assert!(!facts_truncated);
 
         let merged = prepare_project_analysis_document(
             documents,
             "rust",
             partitioned,
             diagnostics_truncated,
+            facts_truncated,
             existing_target_diagnostics,
             &limits,
         )
@@ -12499,6 +12608,7 @@ mod tests {
             "rust",
             true,
             false,
+            false,
             limits.max_diagnostics,
             &limits,
         )
@@ -12540,6 +12650,7 @@ mod tests {
         });
         let mut capacity_limits = limits;
         capacity_limits.max_entities = 0;
+        let partition_document = capacity_document.clone();
         let mut target = NormalizedIrDocument::empty(repository, generation);
         let mut append_state =
             DocumentAppendState::from_document(&target).expect("empty append state initializes");
@@ -12559,6 +12670,25 @@ mod tests {
         }));
         rootlight_ir::validate_ir_document(&target, &capacity_limits, &ExtensionSupport::default())
             .expect("the bounded project summary remains valid normalized IR");
+
+        let mut merged_partition = NormalizedIrDocument::empty(repository, generation);
+        let mut external_symbols = BTreeSet::new();
+        let truncation = merge_project_document(
+            &mut merged_partition,
+            partition_document,
+            &mut external_symbols,
+            capacity_limits.max_diagnostics,
+            &capacity_limits,
+        )
+        .expect("streaming partition capacity exhaustion commits a bounded summary");
+        assert!(truncation.facts);
+        assert!(merged_partition.entities.is_empty());
+        rootlight_ir::validate_ir_document(
+            &merged_partition,
+            &capacity_limits,
+            &ExtensionSupport::default(),
+        )
+        .expect("the bounded streaming partition remains valid normalized IR");
     }
 
     struct FailingProjectAnalyzer {
