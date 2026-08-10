@@ -825,6 +825,39 @@ fn oversized_project_fact_sets_commit_bounded_tier_b_output() {
 }
 
 #[test]
+fn excessive_parser_diagnostics_commit_a_bounded_summary() {
+    let fixture = ProjectFixture::new(
+        ["dep.py", "main.py"],
+        ["BROKEN\nBROKEN\n", "BROKEN\nBROKEN\n"],
+        SemanticProjectLanguage::Python,
+    );
+    let mut ir_limits = IrLimits::default();
+    ir_limits.max_diagnostics = 3;
+    let limits = limits_with_ir_limits(ir_limits);
+    let request = fixture.request(&limits, AnalysisTier::TierB);
+    let analyzer = analyzer(SemanticProjectLanguage::Python, fixture.build_context);
+
+    let output = execute_project_analysis(
+        &analyzer,
+        &request,
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect("excessive parser diagnostics commit bounded output");
+
+    assert_eq!(
+        output.report().work().coverage().status(),
+        CoverageStatus::Bounded
+    );
+    assert_eq!(output.document().diagnostics.len(), 3);
+    assert!(output.document().diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "project-parser-diagnostics-truncated"
+            && diagnostic.coverage_effect == CoverageStatus::Bounded
+    }));
+}
+
+#[test]
 fn build_context_cancellation_and_output_quota_fail_closed() {
     let fixture = ProjectFixture::new(
         ["src/dep.rs", "src/main.rs"],
@@ -937,12 +970,15 @@ impl ParseProvider for FixtureParser {
                 1,
                 SyntaxKindLabel::new("fixture.error").expect("label is valid"),
             ));
-            diagnostics.push(AdapterDiagnostic::new(
-                DiagnosticCode::new("fixture-parse-error").expect("code is valid"),
-                DiagnosticSeverity::Error,
-                Some(full),
-                CoverageStatus::Bounded,
-            ));
+            for index in 0..source.matches("BROKEN").count() {
+                diagnostics.push(AdapterDiagnostic::new(
+                    DiagnosticCode::new(&format!("fixture-parse-error-{index}"))
+                        .expect("code is valid"),
+                    DiagnosticSeverity::Error,
+                    Some(full.clone()),
+                    CoverageStatus::Bounded,
+                ));
+            }
         }
         facts.sort_by_key(|fact| (fact.span(), fact.local_id()));
         for chunk in facts.chunks(256) {
@@ -1388,6 +1424,17 @@ fn limits() -> AnalysisLimits {
 }
 
 fn limits_with_output_bytes(max_output_bytes: usize) -> AnalysisLimits {
+    limits_with_output_bytes_and_ir_limits(max_output_bytes, IrLimits::default())
+}
+
+fn limits_with_ir_limits(ir_limits: IrLimits) -> AnalysisLimits {
+    limits_with_output_bytes_and_ir_limits(4 * 1024 * 1024, ir_limits)
+}
+
+fn limits_with_output_bytes_and_ir_limits(
+    max_output_bytes: usize,
+    ir_limits: IrLimits,
+) -> AnalysisLimits {
     let batch =
         BatchThresholds::new(256, max_output_bytes, 128, 128 * 1024).expect("batch is valid");
     let stream = StreamLimits::new(
@@ -1408,7 +1455,7 @@ fn limits_with_output_bytes(max_output_bytes: usize) -> AnalysisLimits {
         16 * 1024 * 1024,
         stream.clone(),
         stream,
-        IrLimits::default(),
+        ir_limits,
     )
     .expect("analysis limits are valid")
     .with_project_limits(

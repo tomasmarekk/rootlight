@@ -46,6 +46,9 @@ const FALLBACK_REFERENCE_CONFIDENCE: u16 = 550;
 const BASE_PROJECT_SYNTAX_FACTS: usize = 256;
 const PROJECT_SYNTAX_FACTS_PER_INPUT: usize = 16;
 const MAX_PROJECT_SYNTAX_FACTS: usize = 8_192;
+const PROJECT_DIAGNOSTICS_TRUNCATED_CODE: &str = "project-parser-diagnostics-truncated";
+const PROJECT_DIAGNOSTICS_TRUNCATED_MESSAGE: &str =
+    "additional parser diagnostics were omitted by the project diagnostic limit";
 
 const ALL_DOMAINS: [FactDomain; 8] = [
     FactDomain::Files,
@@ -1660,6 +1663,24 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
     }
 
     fn materialize_parser_diagnostics(&mut self) -> Result<(), AdapterError> {
+        let limits = self.request.limits();
+        let maximum_diagnostics = limits
+            .ir()
+            .max_diagnostics
+            .min(limits.ir_stream().max_diagnostics());
+        let diagnostic_count = self.parsed.iter().try_fold(0_usize, |total, parsed| {
+            total
+                .checked_add(parsed.diagnostics.len())
+                .ok_or_else(|| provider_failure("project-diagnostic-accounting"))
+        })?;
+        // The sink accounts raw records before canonical deduplication, so keep
+        // one raw slot for an explicit truncation summary whenever the cap binds.
+        let reserve_summary =
+            usize::from(maximum_diagnostics > 0 && diagnostic_count > maximum_diagnostics);
+        let mut remaining_diagnostics = maximum_diagnostics.saturating_sub(reserve_summary);
+        let mut omitted_diagnostics = 0_usize;
+        let mut first_omitted_input = None;
+
         for parsed_index in 0..self.parsed.len() {
             check_periodically(parsed_index, self.cancellation)?;
             let input = self.parsed[parsed_index].input;
@@ -1673,7 +1694,16 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
 
             for (diagnostic_index, diagnostic) in diagnostics.iter().enumerate() {
                 check_periodically(diagnostic_index, self.cancellation)?;
-                self.push_diagnostic(input, diagnostic)?;
+                if remaining_diagnostics > 0 {
+                    self.push_diagnostic(input, diagnostic)?;
+                    remaining_diagnostics -= 1;
+                } else {
+                    self.record_diagnostic_coverage(input, diagnostic)?;
+                    omitted_diagnostics = omitted_diagnostics
+                        .checked_add(1)
+                        .ok_or_else(|| provider_failure("project-diagnostic-accounting"))?;
+                    first_omitted_input.get_or_insert(parsed_index);
+                }
             }
 
             let spans = if recovery_spans.is_empty()
@@ -1687,6 +1717,23 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 self.push_skipped_region(input, span)?;
             }
         }
+        if reserve_summary > 0 {
+            let parsed_index = first_omitted_input
+                .ok_or_else(|| provider_failure("project-diagnostic-summary"))?;
+            let input = self.parsed[parsed_index].input;
+            let diagnostic = AdapterDiagnostic::new(
+                DiagnosticCode::new(PROJECT_DIAGNOSTICS_TRUNCATED_CODE)
+                    .map_err(|_| provider_failure("project-diagnostic-code"))?,
+                DiagnosticSeverity::Warning,
+                Some(input.source().source_ref().clone()),
+                CoverageStatus::Bounded,
+            );
+            self.push_diagnostic(input, &diagnostic)?;
+        }
+        debug_assert!(
+            reserve_summary == 0 || omitted_diagnostics > 0,
+            "a reserved summary requires at least one omitted parser diagnostic"
+        );
         Ok(())
     }
 
@@ -2310,6 +2357,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             "project-syntax-fact-limit" => {
                 "project syntax facts exceeded the bounded semantic limit"
             }
+            PROJECT_DIAGNOSTICS_TRUNCATED_CODE => PROJECT_DIAGNOSTICS_TRUNCATED_MESSAGE,
             _ => "parser recovered from malformed or incomplete syntax",
         };
         let mut record = DiagnosticRecord {
@@ -2330,9 +2378,19 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         record.id = derive_diagnostic_record_id(&record)
             .map_err(|_| provider_failure("project-diagnostic-identity"))?;
         self.records.push(IrRecord::Diagnostic(record));
+        self.record_diagnostic_coverage(input, diagnostic)?;
+        let state = self.state_mut(input)?;
+        state.increment(FactDomain::Diagnostics)
+    }
+
+    fn record_diagnostic_coverage(
+        &mut self,
+        input: &ProjectSourceInput<'_>,
+        diagnostic: &AdapterDiagnostic,
+    ) -> Result<(), AdapterError> {
         let state = self.state_mut(input)?;
         state.status = merge_status(state.status, diagnostic.coverage_effect());
-        state.increment(FactDomain::Diagnostics)
+        Ok(())
     }
 
     fn push_skipped_region(
