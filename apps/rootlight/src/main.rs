@@ -19,18 +19,18 @@ use std::{
 use rootlight_build::BuildIdentity;
 use rootlight_client::{
     Client, ClientError, ConnectPolicy, DaemonLifecycle as ClientDaemonLifecycle,
-    DetachedArtifactSignature, DetachedUpdateSignature, DiagnosticsQuick, FilesystemUpdateError,
-    FilesystemUpdateOutcome, GenerationSelector as ClientGenerationSelector, Health,
-    HealthStatus as ClientHealthStatus, MAX_UPDATE_ARTIFACT_BYTES, MAX_UPDATE_LICENSE_BUNDLE_BYTES,
-    MAX_UPDATE_METADATA_BYTES, MAX_UPDATE_PROVENANCE_BYTES, MAX_UPDATE_SBOM_BYTES, OperationKind,
-    OperationStage, OperationStatus, PackageInstallOutcome, PackageUninstallOutcome,
-    ProcessCandidateHealthCheck, RecoveryClass, RepositoryIndex, RepositoryIndexMode,
-    RepositoryList, RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
-    ResourcePressure as ClientResourcePressure, SupportBundle as ClientSupportBundle,
-    TrustedUpdatePolicy, UPDATE_HEALTH_STATE_DIR_ENV, UpdateContext, UpdateInputPaths,
-    UpdatePublicKey, UpdateRuntimeStatus, UpdateSignatures, UpdateSupportingEvidence,
-    VerifiedUpdate, apply_update_package, install_package_with_policy, recover_update,
-    uninstall_package, update_runtime_status, verify_update_with_evidence,
+    DetachedArtifactSignature, DetachedUpdateSignature, DiagnosticsQuick, DiagnosticsReport,
+    FilesystemUpdateError, FilesystemUpdateOutcome, GenerationSelector as ClientGenerationSelector,
+    Health, HealthStatus as ClientHealthStatus, MAX_UPDATE_ARTIFACT_BYTES,
+    MAX_UPDATE_LICENSE_BUNDLE_BYTES, MAX_UPDATE_METADATA_BYTES, MAX_UPDATE_PROVENANCE_BYTES,
+    MAX_UPDATE_SBOM_BYTES, OperationKind, OperationStage, OperationStatus, PackageInstallOutcome,
+    PackageUninstallOutcome, ProcessCandidateHealthCheck, RecoveryClass, RepositoryIndex,
+    RepositoryIndexMode, RepositoryList, RepositoryOperationAction, RepositoryOperationStatus,
+    RepositoryStatus, RequestTimeout, ResourcePressure as ClientResourcePressure,
+    SupportBundle as ClientSupportBundle, TrustedUpdatePolicy, UPDATE_HEALTH_STATE_DIR_ENV,
+    UpdateContext, UpdateInputPaths, UpdatePublicKey, UpdateRuntimeStatus, UpdateSignatures,
+    UpdateSupportingEvidence, VerifiedUpdate, apply_update_package, install_package_with_policy,
+    recover_update, uninstall_package, update_runtime_status, verify_update_with_evidence,
 };
 use rootlight_daemon_core::{
     ControlRequest, ControlResponse, ControlService, DaemonLifecycle, DaemonLimits,
@@ -72,6 +72,11 @@ const SHARED_GENERATION_RETENTION: usize = 8;
 const MAX_REPAIR_INVENTORY_BYTES: u64 = 2 * 1024 * 1024;
 const DAEMON_UNINSTALL_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const DAEMON_UNINSTALL_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const INITIAL_REPOSITORY_INDEX_POLL_MS: u32 = 250;
+const MIN_REPOSITORY_INDEX_POLL_MS: u32 = 50;
+const MAX_REPOSITORY_INDEX_POLL_MS: u32 = 30_000;
+const REPOSITORY_INDEX_POLL_TRANSPORT_GRACE: Duration = Duration::from_millis(250);
+const REPOSITORY_INDEX_CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_UPDATE_CONTEXT_BYTES: u64 = 64 * 1024;
 const MAX_UPDATE_KEY_FILE_BYTES: u64 = 256;
 const MAX_UPDATE_CHECKSUM_FILE_BYTES: u64 = 512;
@@ -101,8 +106,12 @@ Service commands:
   service <install|start|status|stop|restart|uninstall>
   health [--json]
   diagnostics quick
-  support-bundle --output <file>
-  repair --dry-run <action> [--inventory <file>]
+  diagnostics full --repo <repository-id>
+  diagnostics storage --repo <repository-id> [--scrub]
+  diagnostics adapter <language>
+  diagnostics network-audit
+  support-bundle [--repo <repository-id>] --output <file>
+  repair [--repo <repository-id>] --dry-run <action> [--inventory <file>]
   update <install|uninstall|apply|recover|status|verify> [options]
 
 Discovery:
@@ -423,6 +432,12 @@ fn execute_repair(
     paths: &RuntimePaths,
     arguments: &[std::ffi::OsString],
 ) -> Result<CommandResult, CliError> {
+    let (repository, arguments) = match arguments {
+        [repository_flag, repository, trailing @ ..] if repository_flag == "--repo" => {
+            (Some(parse_repository(repository)?), trailing)
+        }
+        _ => (None, arguments),
+    };
     let (action, candidates) = match arguments {
         [dry_run, action] if dry_run == "--dry-run" => (parse_repair_action(action)?, Vec::new()),
         [dry_run, action, inventory_flag, inventory_path]
@@ -441,11 +456,30 @@ fn execute_repair(
     if action != RepairAction::ReconstructCatalogFromManifests && !candidates.is_empty() {
         return Err(CliError::Usage);
     }
-    Ok(CommandResult::RepairPlan(plan_catalog_repair(
-        &paths.operation_journal_path(),
-        action,
-        &candidates,
-    )?))
+    if repository.is_some()
+        && matches!(
+            action,
+            RepairAction::VerifyCatalog | RepairAction::ReconstructCatalogFromManifests
+        )
+    {
+        // The catalog planner has no repository dimension. Keep scoped
+        // requests fail-closed until candidates and proposed writes carry one.
+        return Err(if candidates.is_empty() {
+            CliError::Usage
+        } else {
+            CliError::InvalidRepairInventory
+        });
+    }
+    let plan = plan_catalog_repair(&paths.operation_journal_path(), action, &candidates)?;
+    if repository.is_some()
+        && (!plan.affected_generation_ids.is_empty() || !plan.proposed_writes.is_empty())
+    {
+        return Err(CliError::InvalidRepairInventory);
+    }
+    Ok(match repository {
+        Some(repository) => CommandResult::RepositoryRepairPlan { repository, plan },
+        None => CommandResult::RepairPlan(plan),
+    })
 }
 
 fn parse_repair_action(argument: &std::ffi::OsStr) -> Result<RepairAction, CliError> {
@@ -935,6 +969,10 @@ fn dispatch_after_command_preflight<T>(
     if matches!(
         arguments,
         [output, _] if command == "support-bundle" && output == "--output"
+    ) || matches!(
+        arguments,
+        [repository, _, output, _]
+            if command == "support-bundle" && repository == "--repo" && output == "--output"
     ) {
         preflight_support_output()?;
     }
@@ -1073,9 +1111,49 @@ fn execute_client(
         ("diagnostics", [quick]) if quick == "quick" => {
             Ok(CommandResult::DiagnosticsQuick(client.diagnostics_quick()?))
         }
+        ("diagnostics", [full, repository_flag, repository])
+            if full == "full" && repository_flag == "--repo" =>
+        {
+            Ok(CommandResult::Diagnostics(
+                client.diagnostics_full(parse_repository(repository)?)?,
+            ))
+        }
+        ("diagnostics", [storage, repository_flag, repository])
+            if storage == "storage" && repository_flag == "--repo" =>
+        {
+            Ok(CommandResult::Diagnostics(client.diagnostics_storage(
+                parse_repository(repository)?,
+                false,
+            )?))
+        }
+        ("diagnostics", [storage, repository_flag, repository, scrub])
+            if storage == "storage" && repository_flag == "--repo" && scrub == "--scrub" =>
+        {
+            Ok(CommandResult::Diagnostics(client.diagnostics_storage(
+                parse_repository(repository)?,
+                true,
+            )?))
+        }
+        ("diagnostics", [adapter, language]) if adapter == "adapter" => {
+            let language = language.to_str().ok_or(CliError::Usage)?;
+            Ok(CommandResult::Diagnostics(
+                client.diagnostics_adapter(language)?,
+            ))
+        }
+        ("diagnostics", [network]) if network == "network-audit" => Ok(CommandResult::Diagnostics(
+            client.diagnostics_network_audit()?,
+        )),
         ("support-bundle", [output, path]) if output == "--output" => {
             let path = support_output_path(path)?;
             let bundle = client.support_bundle()?;
+            write_support_bundle(path, &bundle.archive)?;
+            Ok(CommandResult::SupportBundle(support_receipt(&bundle)?))
+        }
+        ("support-bundle", [repository_flag, repository, output, path])
+            if repository_flag == "--repo" && output == "--output" =>
+        {
+            let path = support_output_path(path)?;
+            let bundle = client.support_bundle_for_repository(parse_repository(repository)?)?;
             write_support_bundle(path, &bundle.archive)?;
             Ok(CommandResult::SupportBundle(support_receipt(&bundle)?))
         }
@@ -1146,7 +1224,7 @@ enum RepositoryCliCommand {
     Index {
         root: String,
         mode: RepositoryIndexMode,
-        detached: bool,
+        wait_for_completion: bool,
     },
     List {
         max_results: Option<u32>,
@@ -1178,12 +1256,18 @@ fn execute_repository_client(
         RepositoryCliCommand::Index {
             root,
             mode,
-            detached,
+            wait_for_completion,
         } => {
             let operation = random_operation_id()?;
-            Ok(CommandResult::RepositoryIndex(
-                client.repository_index_with_mode(&root, operation, detached, mode)?,
-            ))
+            // Foreground waiting is a client-side policy. The daemon submission stays
+            // detached so its durable handle survives every bounded status exchange.
+            let submission = client.repository_index_with_mode(&root, operation, true, mode)?;
+            let result = if wait_for_completion {
+                wait_for_repository_index(client, submission)?
+            } else {
+                submission
+            };
+            Ok(CommandResult::RepositoryIndex(result))
         }
         RepositoryCliCommand::List { max_results, query } => Ok(CommandResult::RepositoryList(
             client.repository_list(max_results, query.as_deref())?,
@@ -1222,6 +1306,135 @@ fn execute_repository_operation_client(
     Ok(CommandResult::RepositoryOperationStatus(status))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RepositoryIndexPoll {
+    wait_ms: u32,
+    after_revision: u64,
+}
+
+impl RepositoryIndexPoll {
+    const fn initial(after_revision: u64) -> Self {
+        Self {
+            wait_ms: INITIAL_REPOSITORY_INDEX_POLL_MS,
+            after_revision,
+        }
+    }
+
+    fn after(status: &RepositoryOperationStatus) -> Self {
+        let fallback_ms = match status.index_stage.as_str() {
+            "discovery" | "snapshot" => 250,
+            "analysis" | "merge" => 750,
+            "persistence" | "search" => 250,
+            "complete" => MIN_REPOSITORY_INDEX_POLL_MS,
+            _ => INITIAL_REPOSITORY_INDEX_POLL_MS,
+        };
+        Self {
+            wait_ms: status
+                .retry_after_ms
+                .unwrap_or(fallback_ms)
+                .clamp(MIN_REPOSITORY_INDEX_POLL_MS, MAX_REPOSITORY_INDEX_POLL_MS),
+            after_revision: status.operation.revision,
+        }
+    }
+
+    fn timeout(self) -> Result<RequestTimeout, ClientError> {
+        let wait = Duration::from_millis(u64::from(self.wait_ms));
+        let timeout = wait
+            .checked_add(REPOSITORY_INDEX_POLL_TRANSPORT_GRACE)
+            .ok_or(ClientError::InvalidRequestTimeout)?;
+        RequestTimeout::new(timeout)
+    }
+}
+
+fn wait_for_repository_index(
+    client: &Client,
+    submission: RepositoryIndex,
+) -> Result<RepositoryIndex, CliError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(CliError::AsyncRuntime)?;
+    runtime.block_on(wait_for_repository_index_async(client, submission))
+}
+
+async fn wait_for_repository_index_async(
+    client: &Client,
+    mut submission: RepositoryIndex,
+) -> Result<RepositoryIndex, CliError> {
+    let operation = submission.operation;
+    let mut poll = RepositoryIndexPoll::initial(submission.revision);
+    let interrupted = tokio::signal::ctrl_c();
+    tokio::pin!(interrupted);
+
+    loop {
+        let status = tokio::select! {
+            status = client.repository_operation_status_async(
+                operation,
+                RepositoryOperationAction::Get,
+                Some(poll.wait_ms),
+                Some(poll.after_revision),
+                poll.timeout()?,
+            ) => status?,
+            signal = &mut interrupted => {
+                signal.map_err(CliError::WaitSignal)?;
+                client.repository_operation_status_async(
+                    operation,
+                    RepositoryOperationAction::Cancel,
+                    None,
+                    None,
+                    RequestTimeout::new(REPOSITORY_INDEX_CANCEL_TIMEOUT)?,
+                ).await?;
+                return Err(CliError::RepositoryIndexWaitInterrupted(operation));
+            }
+        };
+        match status.operation.state {
+            rootlight_client::OperationState::Queued
+            | rootlight_client::OperationState::Running
+            | rootlight_client::OperationState::Cancelling => {
+                poll = RepositoryIndexPoll::after(&status);
+            }
+            rootlight_client::OperationState::Succeeded => {
+                apply_repository_index_completion(&mut submission, status)?;
+                return Ok(submission);
+            }
+            rootlight_client::OperationState::Failed
+            | rootlight_client::OperationState::Interrupted
+            | rootlight_client::OperationState::Cancelled => {
+                return Err(status
+                    .operation
+                    .error
+                    .map(|error| CliError::Public(Box::new(error)))
+                    .unwrap_or(CliError::UnexpectedResponse));
+            }
+        }
+    }
+}
+
+fn apply_repository_index_completion(
+    submission: &mut RepositoryIndex,
+    completion: RepositoryOperationStatus,
+) -> Result<(), CliError> {
+    if completion.operation.operation != submission.operation
+        || completion.operation.state != rootlight_client::OperationState::Succeeded
+        || completion.published_generation.is_none()
+    {
+        return Err(CliError::UnexpectedResponse);
+    }
+    submission.state = completion.operation.state;
+    submission.revision = completion.operation.revision;
+    submission.published_generation = completion.published_generation;
+    submission.semantic_operation = completion.semantic_operation;
+    if let Some(evidence) = completion.evidence {
+        let indexed_files = evidence
+            .reused_files
+            .checked_add(evidence.rebuilt_files)
+            .ok_or(CliError::UnexpectedResponse)?;
+        submission.indexed_files = indexed_files;
+        submission.discovered_inputs = submission.discovered_inputs.max(indexed_files);
+    }
+    Ok(())
+}
+
 fn parse_repository_command(
     arguments: &[std::ffi::OsString],
 ) -> Result<RepositoryCliCommand, CliError> {
@@ -1249,7 +1462,7 @@ fn parse_repository_index_arguments(
         .to_owned();
     let mut mode = RepositoryIndexMode::Auto;
     let mut mode_seen = false;
-    let mut detached = true;
+    let mut wait_for_completion = false;
     let mut attachment_seen = false;
     let mut flags = flags.iter();
     while let Some(flag) = flags.next() {
@@ -1259,11 +1472,11 @@ fn parse_repository_index_arguments(
                 mode_seen = true;
             }
             Some("--detached") if !attachment_seen => {
-                detached = true;
+                wait_for_completion = false;
                 attachment_seen = true;
             }
             Some("--attached") if !attachment_seen => {
-                detached = false;
+                wait_for_completion = true;
                 attachment_seen = true;
             }
             _ => return Err(CliError::Usage),
@@ -1272,7 +1485,7 @@ fn parse_repository_index_arguments(
     Ok(RepositoryCliCommand::Index {
         root,
         mode,
-        detached,
+        wait_for_completion,
     })
 }
 
@@ -1681,6 +1894,7 @@ async fn execute_standalone_command(
             let path = support_output_path(path)?;
             let response = control_response(service.execute(ControlRequest::SupportBundle(
                 rootlight_observability::SupportBundleSchema::V2,
+                None,
             )))?;
             let ControlResponse::SupportBundle(bundle) = response else {
                 return Err(CliError::UnexpectedResponse);
@@ -2236,7 +2450,7 @@ impl CliEnvelope {
 struct CliHelp {
     usage: &'static str,
     repository_commands: [&'static str; 5],
-    service_commands: [&'static str; 7],
+    service_commands: [&'static str; 11],
 }
 
 impl CliHelp {
@@ -2255,8 +2469,12 @@ impl CliHelp {
                 "service <install|start|status|stop|restart|uninstall>",
                 "health [--json]",
                 "diagnostics quick",
-                "support-bundle --output <file>",
-                "repair --dry-run <action> [--inventory <file>]",
+                "diagnostics full --repo <repository-id>",
+                "diagnostics storage --repo <repository-id> [--scrub]",
+                "diagnostics adapter <language>",
+                "diagnostics network-audit",
+                "support-bundle [--repo <repository-id>] --output <file>",
+                "repair [--repo <repository-id>] --dry-run <action> [--inventory <file>]",
                 "update <install|uninstall|apply|recover|status|verify> [options]",
             ],
         }
@@ -2291,12 +2509,17 @@ enum CommandResult {
     WebService(web_service::WebServiceStatus),
     Health(Health),
     DiagnosticsQuick(DiagnosticsQuick),
+    Diagnostics(DiagnosticsReport),
     SupportBundle(SupportBundleReceipt),
     RepositoryIndex(RepositoryIndex),
     RepositoryList(RepositoryList),
     RepositoryStatus(RepositoryStatus),
     RepositoryOperationStatus(RepositoryOperationStatus),
     RepairPlan(RepairPlan),
+    RepositoryRepairPlan {
+        repository: RepositoryId,
+        plan: RepairPlan,
+    },
     UpdateVerified(VerifiedUpdate),
     UpdateInstalled(PackageInstallOutcome),
     UpdateUninstalled(PackageUninstallOutcome),
@@ -2571,8 +2794,12 @@ enum CliError {
     UnexpectedResponse,
     #[error("system clock is before the supported epoch")]
     Clock,
-    #[error("standalone async runtime setup failed")]
+    #[error("async runtime setup failed")]
     AsyncRuntime(#[source] std::io::Error),
+    #[error("foreground wait signal failed")]
+    WaitSignal(#[source] std::io::Error),
+    #[error("repository index wait was interrupted for operation {0}")]
+    RepositoryIndexWaitInterrupted(OperationId),
     #[error("daemon request failed")]
     Public(Box<rootlight_error::PublicError>),
     #[error("daemon client failed")]
@@ -2691,6 +2918,14 @@ impl CliError {
         }
         if matches!(self, Self::FirstSlice(FirstSliceError::Cancelled(_))) {
             return PublicError::builder(ErrorCode::Cancelled, "operation was cancelled").build();
+        }
+        if let Self::RepositoryIndexWaitInterrupted(operation) = self {
+            return PublicError::builder(
+                ErrorCode::Cancelled,
+                "repository index wait was interrupted",
+            )
+            .operation(*operation)
+            .build();
         }
         if matches!(self, Self::DaemonActiveDuringUninstall) {
             return PublicError::builder(
@@ -2837,6 +3072,62 @@ mod tests {
         }
     }
 
+    fn repository_index_submission(operation: OperationId) -> RepositoryIndex {
+        RepositoryIndex {
+            repository: RepositoryId::from_bytes([8; 16]),
+            operation,
+            semantic_operation: None,
+            state: rootlight_client::OperationState::Running,
+            revision: 3,
+            mode: RepositoryIndexMode::Structural,
+            parent_generation: None,
+            published_generation: None,
+            discovered_inputs: 0,
+            indexed_files: 0,
+            entities: 0,
+            elapsed_micros: 0,
+            estimated_disk_bytes: 4096,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn repository_operation_status(
+        operation: OperationId,
+        state: rootlight_client::OperationState,
+        revision: u64,
+        index_stage: &str,
+        retry_after_ms: Option<u32>,
+    ) -> RepositoryOperationStatus {
+        RepositoryOperationStatus {
+            operation: OperationStatus {
+                operation,
+                state,
+                revision,
+                completed_units: 0,
+                total_units: 0,
+                error: None,
+                kind: OperationKind::RepositoryIndex,
+                stage: OperationStage::Executing,
+                plan_hash: [0; 32],
+                detached: true,
+                cancellation_requested: false,
+                deadline_unix_ms: None,
+                lease_expires_unix_ms: None,
+                recovery_class: RecoveryClass::NotApplicable,
+            },
+            published_generation: None,
+            semantic_operation: None,
+            started_unix_ms: 0,
+            peak_rss_bytes: 0,
+            written_bytes: 0,
+            files_examined: 0,
+            bytes_examined: 0,
+            index_stage: index_stage.to_owned(),
+            retry_after_ms,
+            evidence: None,
+        }
+    }
+
     fn arguments(values: &[&str]) -> Vec<std::ffi::OsString> {
         values.iter().map(std::ffi::OsString::from).collect()
     }
@@ -2866,6 +3157,16 @@ mod tests {
                 .any(|command| command.starts_with("repo index"))
         );
         assert!(help.service_commands.contains(&"web [--no-open]"));
+        for command in [
+            "diagnostics full --repo <repository-id>",
+            "diagnostics storage --repo <repository-id> [--scrub]",
+            "diagnostics adapter <language>",
+            "diagnostics network-audit",
+            "support-bundle [--repo <repository-id>] --output <file>",
+            "repair [--repo <repository-id>] --dry-run <action> [--inventory <file>]",
+        ] {
+            assert!(help.service_commands.contains(&command));
+        }
     }
 
     #[test]
@@ -2896,7 +3197,7 @@ mod tests {
             RepositoryCliCommand::Index {
                 root: "C:/source".to_owned(),
                 mode: RepositoryIndexMode::Auto,
-                detached: true,
+                wait_for_completion: false,
             }
         );
 
@@ -2908,7 +3209,7 @@ mod tests {
             RepositoryCliCommand::Index {
                 root: "C:/source".to_owned(),
                 mode: RepositoryIndexMode::Auto,
-                detached: false,
+                wait_for_completion: true,
             }
         );
 
@@ -2925,7 +3226,7 @@ mod tests {
             RepositoryCliCommand::Index {
                 root: "C:/source".to_owned(),
                 mode: RepositoryIndexMode::Structural,
-                detached: true,
+                wait_for_completion: false,
             }
         );
 
@@ -2985,6 +3286,110 @@ mod tests {
                 .expect("operation cancel arguments parse"),
             RepositoryOperationCliCommand::Cancel { operation }
         );
+    }
+
+    #[test]
+    fn foreground_index_polling_tracks_revisions_and_server_retry_hints() {
+        let operation = OperationId::from_bytes([9; 16]);
+        assert_eq!(
+            RepositoryIndexPoll::initial(3),
+            RepositoryIndexPoll {
+                wait_ms: INITIAL_REPOSITORY_INDEX_POLL_MS,
+                after_revision: 3,
+            }
+        );
+
+        let hinted = repository_operation_status(
+            operation,
+            rootlight_client::OperationState::Running,
+            4,
+            "analysis",
+            Some(1_250),
+        );
+        assert_eq!(
+            RepositoryIndexPoll::after(&hinted),
+            RepositoryIndexPoll {
+                wait_ms: 1_250,
+                after_revision: 4,
+            }
+        );
+
+        let mut stage_fallback = hinted;
+        stage_fallback.operation.revision = 5;
+        stage_fallback.retry_after_ms = None;
+        assert_eq!(
+            RepositoryIndexPoll::after(&stage_fallback),
+            RepositoryIndexPoll {
+                wait_ms: 750,
+                after_revision: 5,
+            }
+        );
+
+        stage_fallback.retry_after_ms = Some(0);
+        assert_eq!(
+            RepositoryIndexPoll::after(&stage_fallback).wait_ms,
+            MIN_REPOSITORY_INDEX_POLL_MS
+        );
+        stage_fallback.retry_after_ms = Some(u32::MAX);
+        assert_eq!(
+            RepositoryIndexPoll::after(&stage_fallback).wait_ms,
+            MAX_REPOSITORY_INDEX_POLL_MS
+        );
+    }
+
+    #[test]
+    fn foreground_index_completion_preserves_the_submission_contract() {
+        let operation = OperationId::from_bytes([10; 16]);
+        let generation = GenerationId::from_bytes([11; 20]);
+        let mut submission = repository_index_submission(operation);
+        let mut completion = repository_operation_status(
+            operation,
+            rootlight_client::OperationState::Succeeded,
+            8,
+            "complete",
+            None,
+        );
+        completion.published_generation = Some(generation);
+        completion.evidence = Some(rootlight_client::RepositoryOperationEvidence {
+            build_strategy: rootlight_client::RepositoryBuildStrategy::DependencyDirected,
+            fallback_reason: None,
+            invalidated_units: 2,
+            changed_inputs: 1,
+            changed_files: 1,
+            reused_files: 4,
+            rebuilt_files: 2,
+            reused_facts: 10,
+            rebuilt_facts: 3,
+            referenced_bytes: 128,
+            newly_written_bytes: 64,
+            reserved_memory_bytes: 256,
+            owned_memory_bytes: 64,
+            retained_durable_bytes: 192,
+            invalidation_trace_json: None,
+        });
+
+        apply_repository_index_completion(&mut submission, completion)
+            .expect("terminal status completes the original submission");
+
+        assert_eq!(
+            submission.state,
+            rootlight_client::OperationState::Succeeded
+        );
+        assert_eq!(submission.revision, 8);
+        assert_eq!(submission.published_generation, Some(generation));
+        assert_eq!(submission.indexed_files, 6);
+        assert_eq!(submission.discovered_inputs, 6);
+    }
+
+    #[test]
+    fn interrupted_foreground_wait_reports_the_durable_operation() {
+        let operation = OperationId::from_bytes([12; 16]);
+        let error = CliError::RepositoryIndexWaitInterrupted(operation)
+            .public_error()
+            .expect("interrupted wait builds a public error");
+
+        assert_eq!(error.code(), ErrorCode::Cancelled);
+        assert_eq!(error.operation(), Some(operation));
     }
 
     #[test]
@@ -3523,6 +3928,76 @@ mod tests {
         let arguments = [
             std::ffi::OsString::from("--dry-run"),
             std::ffi::OsString::from("reconstruct-catalog"),
+        ];
+
+        assert!(matches!(
+            execute_repair(&paths, &arguments),
+            Err(CliError::InvalidRepairInventory)
+        ));
+    }
+
+    #[test]
+    fn repair_dry_run_preserves_the_validated_repository_scope() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .expect("runtime paths are valid");
+        let repository = RepositoryId::from_bytes([31; 16]);
+        let arguments = arguments(&[
+            "--repo",
+            &repository.to_string(),
+            "--dry-run",
+            "rebuild-repository",
+        ]);
+
+        let result = execute_repair(&paths, &arguments).expect("scoped repair plan builds");
+        let CommandResult::RepositoryRepairPlan {
+            repository: actual,
+            plan,
+        } = result
+        else {
+            panic!("scoped repair returns a repository-bound plan");
+        };
+        assert_eq!(actual, repository);
+        assert!(plan.dry_run);
+        assert_eq!(plan.status, rootlight_operations::RepairPlanStatus::Blocked);
+        assert!(plan.proposed_writes.is_empty());
+    }
+
+    #[test]
+    fn scoped_repair_rejects_unbound_generation_inventory() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .expect("runtime paths are valid");
+        let inventory_path = temporary.path().join("foreign-inventory.json");
+        let inventory = serde_json::json!({
+            "schema_version": "1.0",
+            "candidates": [{
+                "generation_id": "foreign-generation",
+                "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "complete": true,
+                "verified": true,
+                "required_bytes": 4096
+            }]
+        });
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("inventory serializes"),
+        )
+        .expect("inventory writes");
+        let repository = RepositoryId::from_bytes([32; 16]);
+        let arguments = [
+            std::ffi::OsString::from("--repo"),
+            std::ffi::OsString::from(repository.to_string()),
+            std::ffi::OsString::from("--dry-run"),
+            std::ffi::OsString::from("reconstruct-catalog"),
+            std::ffi::OsString::from("--inventory"),
+            inventory_path.into_os_string(),
         ];
 
         assert!(matches!(

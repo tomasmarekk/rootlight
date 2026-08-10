@@ -116,7 +116,19 @@ impl VerticalTool {
     pub const fn contract_version(self) -> &'static str {
         match self {
             Self::RepoList => crate::REPO_LIST_SCHEMA_VERSION,
-            Self::RepoIndex | Self::OperationStatus => crate::MCP_OPERATION_SCHEMA_VERSION,
+            Self::RepoIndex => crate::MCP_OPERATION_SCHEMA_VERSION,
+            Self::OperationStatus => crate::MCP_OPERATION_STATUS_SCHEMA_VERSION,
+            Self::RepoStatus => crate::MCP_REPOSITORY_STATUS_SCHEMA_VERSION,
+            Self::SymbolExplain
+            | Self::SymbolRelationships
+            | Self::ChangeImpact
+            | Self::TestsSelect
+            | Self::ArchitectureOverview
+            | Self::ArchitectureCycles
+            | Self::CodeDead
+            | Self::HistoryCompare
+            | Self::PlanChange
+            | Self::ContextPack => crate::MCP_ANALYSIS_SCHEMA_VERSION,
             _ => crate::MCP_SCHEMA_VERSION,
         }
     }
@@ -129,49 +141,49 @@ impl VerticalTool {
                 include_str!("../../../schemas/generated/json/mcp-repo-index-input-1.1.schema.json")
             }
             Self::RepoStatus => include_str!(
-                "../../../schemas/generated/json/mcp-repo-status-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-repo-status-input-1.1.schema.json"
             ),
             Self::RepoList => {
                 include_str!("../../../schemas/generated/json/mcp-repo-list-input-2.0.schema.json")
             }
             Self::OperationStatus => include_str!(
-                "../../../schemas/generated/json/mcp-operation-status-input-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-operation-status-input-1.2.schema.json"
             ),
             Self::CodeLocate => include_str!(
                 "../../../schemas/generated/json/mcp-code-locate-input-1.0.schema.json"
             ),
             Self::SymbolExplain => include_str!(
-                "../../../schemas/generated/json/mcp-symbol-explain-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-symbol-explain-input-1.1.schema.json"
             ),
             Self::SymbolRelationships => include_str!(
-                "../../../schemas/generated/json/mcp-symbol-relationships-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-symbol-relationships-input-1.1.schema.json"
             ),
             Self::FlowTrace => {
                 include_str!("../../../schemas/generated/json/mcp-flow-trace-input-1.0.schema.json")
             }
             Self::ChangeImpact => include_str!(
-                "../../../schemas/generated/json/mcp-change-impact-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-change-impact-input-1.1.schema.json"
             ),
             Self::TestsSelect => include_str!(
-                "../../../schemas/generated/json/mcp-tests-select-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-tests-select-input-1.1.schema.json"
             ),
             Self::ArchitectureOverview => include_str!(
-                "../../../schemas/generated/json/mcp-architecture-overview-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-architecture-overview-input-1.1.schema.json"
             ),
             Self::ArchitectureCycles => include_str!(
-                "../../../schemas/generated/json/mcp-architecture-cycles-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-architecture-cycles-input-1.1.schema.json"
             ),
             Self::CodeDead => {
-                include_str!("../../../schemas/generated/json/mcp-code-dead-input-1.0.schema.json")
+                include_str!("../../../schemas/generated/json/mcp-code-dead-input-1.1.schema.json")
             }
             Self::HistoryCompare => include_str!(
-                "../../../schemas/generated/json/mcp-history-compare-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-history-compare-input-1.1.schema.json"
             ),
             Self::PlanChange => include_str!(
-                "../../../schemas/generated/json/mcp-plan-change-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-plan-change-input-1.1.schema.json"
             ),
             Self::ContextPack => include_str!(
-                "../../../schemas/generated/json/mcp-context-pack-input-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-context-pack-input-1.1.schema.json"
             ),
             Self::SourceRead => include_str!(
                 "../../../schemas/generated/json/mcp-source-read-input-1.0.schema.json"
@@ -193,49 +205,49 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-repo-index-output-1.1.schema.json"
             ),
             Self::RepoStatus => include_str!(
-                "../../../schemas/generated/json/mcp-repo-status-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-repo-status-output-1.1.schema.json"
             ),
             Self::RepoList => {
                 include_str!("../../../schemas/generated/json/mcp-repo-list-output-2.0.schema.json")
             }
             Self::OperationStatus => include_str!(
-                "../../../schemas/generated/json/mcp-operation-status-output-1.1.schema.json"
+                "../../../schemas/generated/json/mcp-operation-status-output-1.2.schema.json"
             ),
             Self::CodeLocate => include_str!(
                 "../../../schemas/generated/json/mcp-code-locate-output-1.0.schema.json"
             ),
             Self::SymbolExplain => include_str!(
-                "../../../schemas/generated/json/mcp-symbol-explain-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-symbol-explain-output-1.1.schema.json"
             ),
             Self::SymbolRelationships => include_str!(
-                "../../../schemas/generated/json/mcp-symbol-relationships-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-symbol-relationships-output-1.1.schema.json"
             ),
             Self::FlowTrace => include_str!(
                 "../../../schemas/generated/json/mcp-flow-trace-output-1.0.schema.json"
             ),
             Self::ChangeImpact => include_str!(
-                "../../../schemas/generated/json/mcp-change-impact-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-change-impact-output-1.1.schema.json"
             ),
             Self::TestsSelect => include_str!(
-                "../../../schemas/generated/json/mcp-tests-select-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-tests-select-output-1.1.schema.json"
             ),
             Self::ArchitectureOverview => include_str!(
-                "../../../schemas/generated/json/mcp-architecture-overview-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-architecture-overview-output-1.1.schema.json"
             ),
             Self::ArchitectureCycles => include_str!(
-                "../../../schemas/generated/json/mcp-architecture-cycles-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-architecture-cycles-output-1.1.schema.json"
             ),
             Self::CodeDead => {
-                include_str!("../../../schemas/generated/json/mcp-code-dead-output-1.0.schema.json")
+                include_str!("../../../schemas/generated/json/mcp-code-dead-output-1.1.schema.json")
             }
             Self::HistoryCompare => include_str!(
-                "../../../schemas/generated/json/mcp-history-compare-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-history-compare-output-1.1.schema.json"
             ),
             Self::PlanChange => include_str!(
-                "../../../schemas/generated/json/mcp-plan-change-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-plan-change-output-1.1.schema.json"
             ),
             Self::ContextPack => include_str!(
-                "../../../schemas/generated/json/mcp-context-pack-output-1.0.schema.json"
+                "../../../schemas/generated/json/mcp-context-pack-output-1.1.schema.json"
             ),
             Self::SourceRead => include_str!(
                 "../../../schemas/generated/json/mcp-source-read-output-1.0.schema.json"
@@ -249,6 +261,80 @@ impl VerticalTool {
         }
     }
 
+    /// Previous additive-minor contract version retained for explicit callers.
+    #[must_use]
+    pub const fn previous_contract_version(self) -> Option<&'static str> {
+        match self {
+            Self::OperationStatus => Some(crate::MCP_OPERATION_SCHEMA_VERSION),
+            Self::RepoIndex
+            | Self::RepoStatus
+            | Self::SymbolExplain
+            | Self::SymbolRelationships
+            | Self::ChangeImpact
+            | Self::TestsSelect
+            | Self::ArchitectureOverview
+            | Self::ArchitectureCycles
+            | Self::CodeDead
+            | Self::HistoryCompare
+            | Self::PlanChange
+            | Self::ContextPack => Some(crate::MCP_SCHEMA_VERSION),
+            _ => None,
+        }
+    }
+
+    /// Second retained additive-minor contract version, when required.
+    #[must_use]
+    pub const fn legacy_contract_version(self) -> Option<&'static str> {
+        match self {
+            Self::OperationStatus => Some(crate::MCP_SCHEMA_VERSION),
+            _ => None,
+        }
+    }
+
+    /// Previous additive-minor input schema retained for explicit callers.
+    #[must_use]
+    pub const fn previous_input_schema_json(self) -> Option<&'static str> {
+        match self {
+            Self::RepoStatus => Some(include_str!(
+                "../../../schemas/generated/json/mcp-repo-status-input-1.0.schema.json"
+            )),
+            Self::OperationStatus => Some(include_str!(
+                "../../../schemas/generated/json/mcp-operation-status-input-1.1.schema.json"
+            )),
+            Self::SymbolExplain => Some(include_str!(
+                "../../../schemas/generated/json/mcp-symbol-explain-input-1.0.schema.json"
+            )),
+            Self::SymbolRelationships => Some(include_str!(
+                "../../../schemas/generated/json/mcp-symbol-relationships-input-1.0.schema.json"
+            )),
+            Self::ChangeImpact => Some(include_str!(
+                "../../../schemas/generated/json/mcp-change-impact-input-1.0.schema.json"
+            )),
+            Self::TestsSelect => Some(include_str!(
+                "../../../schemas/generated/json/mcp-tests-select-input-1.0.schema.json"
+            )),
+            Self::ArchitectureOverview => Some(include_str!(
+                "../../../schemas/generated/json/mcp-architecture-overview-input-1.0.schema.json"
+            )),
+            Self::ArchitectureCycles => Some(include_str!(
+                "../../../schemas/generated/json/mcp-architecture-cycles-input-1.0.schema.json"
+            )),
+            Self::CodeDead => Some(include_str!(
+                "../../../schemas/generated/json/mcp-code-dead-input-1.0.schema.json"
+            )),
+            Self::HistoryCompare => Some(include_str!(
+                "../../../schemas/generated/json/mcp-history-compare-input-1.0.schema.json"
+            )),
+            Self::PlanChange => Some(include_str!(
+                "../../../schemas/generated/json/mcp-plan-change-input-1.0.schema.json"
+            )),
+            Self::ContextPack => Some(include_str!(
+                "../../../schemas/generated/json/mcp-context-pack-input-1.0.schema.json"
+            )),
+            _ => None,
+        }
+    }
+
     /// Previous additive-minor output schema retained for explicit callers.
     #[must_use]
     pub const fn previous_output_schema_json(self) -> Option<&'static str> {
@@ -256,6 +342,61 @@ impl VerticalTool {
             Self::RepoIndex => Some(include_str!(
                 "../../../schemas/generated/json/mcp-repo-index-output-1.0.schema.json"
             )),
+            Self::RepoStatus => Some(include_str!(
+                "../../../schemas/generated/json/mcp-repo-status-output-1.0.schema.json"
+            )),
+            Self::OperationStatus => Some(include_str!(
+                "../../../schemas/generated/json/mcp-operation-status-output-1.1.schema.json"
+            )),
+            Self::SymbolExplain => Some(include_str!(
+                "../../../schemas/generated/json/mcp-symbol-explain-output-1.0.schema.json"
+            )),
+            Self::SymbolRelationships => Some(include_str!(
+                "../../../schemas/generated/json/mcp-symbol-relationships-output-1.0.schema.json"
+            )),
+            Self::ChangeImpact => Some(include_str!(
+                "../../../schemas/generated/json/mcp-change-impact-output-1.0.schema.json"
+            )),
+            Self::TestsSelect => Some(include_str!(
+                "../../../schemas/generated/json/mcp-tests-select-output-1.0.schema.json"
+            )),
+            Self::ArchitectureOverview => Some(include_str!(
+                "../../../schemas/generated/json/mcp-architecture-overview-output-1.0.schema.json"
+            )),
+            Self::ArchitectureCycles => Some(include_str!(
+                "../../../schemas/generated/json/mcp-architecture-cycles-output-1.0.schema.json"
+            )),
+            Self::CodeDead => Some(include_str!(
+                "../../../schemas/generated/json/mcp-code-dead-output-1.0.schema.json"
+            )),
+            Self::HistoryCompare => Some(include_str!(
+                "../../../schemas/generated/json/mcp-history-compare-output-1.0.schema.json"
+            )),
+            Self::PlanChange => Some(include_str!(
+                "../../../schemas/generated/json/mcp-plan-change-output-1.0.schema.json"
+            )),
+            Self::ContextPack => Some(include_str!(
+                "../../../schemas/generated/json/mcp-context-pack-output-1.0.schema.json"
+            )),
+            _ => None,
+        }
+    }
+
+    /// Second retained additive-minor input schema, when required.
+    #[must_use]
+    pub const fn legacy_input_schema_json(self) -> Option<&'static str> {
+        match self {
+            Self::OperationStatus => Some(include_str!(
+                "../../../schemas/generated/json/mcp-operation-status-input-1.0.schema.json"
+            )),
+            _ => None,
+        }
+    }
+
+    /// Second retained additive-minor output schema, when required.
+    #[must_use]
+    pub const fn legacy_output_schema_json(self) -> Option<&'static str> {
+        match self {
             Self::OperationStatus => Some(include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-output-1.0.schema.json"
             )),
@@ -280,6 +421,42 @@ pub enum OperationSchemaVersion {
     V1_1,
 }
 
+/// Version marker carried by additive operation-status responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum OperationStatusSchemaVersion {
+    /// Tool contract version 1.2.
+    #[serde(rename = "1.2")]
+    V1_2,
+}
+
+/// Version marker carried by additive analysis responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum AnalysisSchemaVersion {
+    /// Tool contract version 1.1.
+    #[serde(rename = "1.1")]
+    V1_1,
+}
+
+/// Checked error response for analysis schema 1.1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalysisErrorResponse {
+    /// Tool error schema version.
+    pub schema_version: AnalysisSchemaVersion,
+    /// Stable source-redacted error.
+    pub error: PublicError,
+}
+
+/// Success-or-error response for analysis schema 1.1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum AnalysisToolResponse<T> {
+    /// Tool-specific successful response.
+    Success(T),
+    /// Checked source-redacted domain error.
+    Error(AnalysisErrorResponse),
+}
+
 /// Checked error response for repository-operation schema 1.1.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -298,6 +475,26 @@ pub enum OperationToolResponse<T> {
     Success(T),
     /// Checked source-redacted domain error.
     Error(OperationErrorResponse),
+}
+
+/// Checked error response for operation-status schema 1.2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationStatusErrorResponseV1_2 {
+    /// Tool error schema version.
+    pub schema_version: OperationStatusSchemaVersion,
+    /// Stable source-redacted error.
+    pub error: PublicError,
+}
+
+/// Success-or-error response for operation-status schema 1.2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum OperationStatusToolResponseV1_2<T> {
+    /// Tool-specific successful response.
+    Success(T),
+    /// Checked source-redacted domain error.
+    Error(OperationStatusErrorResponseV1_2),
 }
 
 /// A checked success-or-error result accepted by one tool output schema.
@@ -1117,6 +1314,91 @@ pub struct OperationStatusSuccessV1_1 {
 /// Checked success-or-error output for `operation.status`.
 pub type OperationStatusOutputV1_1 = OperationToolResponse<OperationStatusSuccessV1_1>;
 
+/// Bounded resource counters for operation-status schema 1.2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationResourcesV1_2 {
+    /// Peak resident bytes observed so far.
+    pub peak_rss_bytes: u64,
+    /// Durable bytes written so far.
+    pub written_bytes: u64,
+    /// Files examined so far.
+    pub files_examined: u64,
+    /// Source bytes examined so far.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_examined: Option<u64>,
+    /// Existing artifact or generation bytes referenced by this operation.
+    pub referenced_bytes: u64,
+    /// Bytes confirmed by operation-owned durable writer boundaries.
+    pub newly_written_bytes: u64,
+    /// Conservative generation-memory reservation, separate from process RSS.
+    pub reserved_memory_bytes: u64,
+    /// Retained generation-memory charge, separate from process RSS.
+    pub owned_memory_bytes: u64,
+    /// Durable bytes retained for the resulting immutable generation.
+    pub retained_durable_bytes: u64,
+}
+
+/// One operation journal view for operation-status schema 1.2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationDetailV1_2 {
+    /// Operation kind.
+    #[schemars(length(min = 1, max = 128))]
+    pub kind: String,
+    /// Durable state.
+    pub state: OperationState,
+    /// Current source-free stage name.
+    #[schemars(length(min = 1, max = 128))]
+    pub stage: String,
+    /// Bounded progress counters.
+    pub progress: OperationProgress,
+    /// Monotonic journal revision.
+    pub revision: u64,
+    /// RFC 3339 UTC creation time.
+    #[schemars(length(min = 20, max = 35))]
+    pub started_at: String,
+    /// Bounded resource summary.
+    pub resources: OperationResourcesV1_2,
+}
+
+/// `operation.status` result data for schema 1.2.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationStatusDataV1_2 {
+    /// Current operation view.
+    pub operation: OperationDetailV1_2,
+    /// Generation published by the operation, if any.
+    pub published_generation: RequiredNullable<GenerationId>,
+    /// Separately journaled semantic refinement created by a successful Auto operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_operation_id: Option<OperationId>,
+    /// Current source-free repository-index stage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 128))]
+    pub index_stage: Option<String>,
+    /// Final invalidation, reuse, and rebuild evidence, when published.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incremental: Option<OperationIncrementalEvidenceV1_1>,
+    /// Terminal public error, if any.
+    pub error: RequiredNullable<PublicError>,
+    /// Recommended delay before polling again.
+    pub retry_after_ms: RequiredNullable<u32>,
+}
+
+/// Strict output for operation-status schema 1.2.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationStatusSuccessV1_2 {
+    /// Tool response schema version.
+    pub schema_version: OperationStatusSchemaVersion,
+    /// Operation result.
+    pub data: OperationStatusDataV1_2,
+}
+
+/// Checked `operation.status` output for schema 1.2.
+pub type OperationStatusOutputV1_2 = OperationStatusToolResponseV1_2<OperationStatusSuccessV1_2>;
+
 /// Bounded resource counters for one operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1176,11 +1458,11 @@ pub struct OperationStatusSuccess {
     pub data: OperationStatusData,
 }
 
-/// Checked success-or-error output for `operation.status`.
-pub type OperationStatusOutput = ToolResponse<OperationStatusSuccess>;
-
 /// Checked `operation.status` output retained for explicit 1.0 callers.
-pub type OperationStatusOutputV1_0 = OperationStatusOutput;
+pub type OperationStatusOutputV1_0 = ToolResponse<OperationStatusSuccess>;
+
+/// Current checked success-or-error output for `operation.status`.
+pub type OperationStatusOutput = OperationStatusOutputV1_2;
 
 /// Common scope selector for read tools.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1443,6 +1725,35 @@ pub struct ReadEnvelope<T> {
     pub trust: TrustClassification,
 }
 
+/// Common strict response envelope for additive analysis-tool responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalysisReadEnvelope<T> {
+    /// Tool response schema version.
+    pub schema_version: AnalysisSchemaVersion,
+    /// Resolved repository.
+    pub repository: ResolvedRepository,
+    /// Pinned generation and freshness.
+    pub generation: GenerationSummary,
+    /// Relevant coverage.
+    pub coverage: CoverageSummary,
+    /// Tool-specific result.
+    pub data: T,
+    /// Whether any hard or requested limit stopped completion.
+    pub truncated: bool,
+    /// Authoritative execution completeness and safe continuation semantics.
+    pub completeness: crate::completeness::ResultCompleteness,
+    /// Safe continuation cursor, when the result is pageable.
+    pub next_cursor: RequiredNullable<ContinuationCursor>,
+    /// Runtime resource accounting.
+    pub usage: UsageSummary,
+    /// Source-free warnings.
+    #[schemars(length(max = 100))]
+    pub warnings: Vec<ResponseWarning>,
+    /// Response-level classification for all repository-derived content.
+    pub trust: TrustClassification,
+}
+
 /// Why a locate item ranked in the result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -1664,12 +1975,107 @@ pub struct ProvenanceSummary {
     /// Confidence from 0 through 1000.
     #[schemars(range(min = 0, max = 1000))]
     pub confidence: u16,
+    /// Grammar, compiler, or frontend version when full provenance was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub frontend_version: Option<String>,
+    /// Deterministic resolver rule when full provenance was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub rule: Option<String>,
+}
+
+/// Compact provenance item retained for explicit 1.0 callers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProvenanceSummaryV1_0 {
+    /// Provider identity.
+    #[schemars(length(min = 1, max = 128))]
+    pub provider: String,
+    /// Evidence class.
+    #[schemars(length(min = 1, max = 128))]
+    pub evidence: String,
+    /// Confidence from 0 through 1000.
+    #[schemars(range(min = 0, max = 1000))]
+    pub confidence: u16,
+}
+
+/// One bounded typed relation sample for a symbol explanation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolRelationSample {
+    /// Stable relation predicate label.
+    #[schemars(length(min = 1, max = 128))]
+    pub kind: String,
+    /// Direction relative to the explained symbol.
+    #[schemars(length(min = 1, max = 16))]
+    pub direction: String,
+    /// Related symbol when the endpoint is an indexed entity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<SymbolId>,
+    /// Direct immutable evidence for this relation.
+    #[schemars(length(max = 8))]
+    pub source_refs: Vec<SourceRef>,
+    /// Fixed-point confidence from 0 through 1000.
+    #[schemars(range(max = 1000))]
+    pub confidence: u16,
 }
 
 /// One bounded symbol explanation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolExplanation {
+    /// Stable symbol identity.
+    pub symbol_id: SymbolId,
+    /// Entity kind.
+    pub kind: EntityKind,
+    /// Repository-controlled display name.
+    #[schemars(length(min = 1, max = 1024))]
+    pub display_name: String,
+    /// Repository-controlled qualified display name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 4096))]
+    pub qualified_name: Option<String>,
+    /// Repository-controlled signature.
+    #[schemars(length(max = 4096))]
+    pub signature: Option<String>,
+    /// Exact definition evidence.
+    pub definition: SourceRef,
+    /// Compact relation counts.
+    pub relations: RelationSummary,
+    /// Semantic container label when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 4096))]
+    pub container: Option<String>,
+    /// Bounded typed relation evidence requested by the caller.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 250))]
+    pub relation_samples: Vec<SymbolRelationSample>,
+    /// Bounded untrusted source preview when requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 65_536))]
+    pub source_preview: Option<String>,
+    /// Bounded provenance.
+    #[schemars(length(max = 64))]
+    pub provenance: Vec<ProvenanceSummary>,
+    /// Aggregate confidence from 0 through 1000.
+    #[schemars(range(min = 0, max = 1000))]
+    pub confidence: u16,
+    /// Source-free uncertainty notes.
+    #[schemars(length(max = 32))]
+    pub uncertainty: Vec<ResponseWarning>,
+    /// Explicit gaps for requested sections not supported by available evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 10))]
+    pub section_gaps: Vec<ResponseWarning>,
+    /// Mandatory repository-data trust marker.
+    pub trust: TrustClassification,
+}
+
+/// Symbol explanation retained for explicit 1.0 callers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolExplanationV1_0 {
     /// Stable symbol identity.
     pub symbol_id: SymbolId,
     /// Entity kind.
@@ -1686,7 +2092,7 @@ pub struct SymbolExplanation {
     pub relations: RelationSummary,
     /// Bounded provenance.
     #[schemars(length(max = 64))]
-    pub provenance: Vec<ProvenanceSummary>,
+    pub provenance: Vec<ProvenanceSummaryV1_0>,
     /// Aggregate confidence from 0 through 1000.
     #[schemars(range(min = 0, max = 1000))]
     pub confidence: u16,
@@ -1727,8 +2133,32 @@ pub struct SymbolExplainData {
     pub explanation: Option<crate::context::PlanExplanation>,
 }
 
+/// `symbol.explain` result data retained for explicit 1.0 callers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolExplainDataV1_0 {
+    /// Explanations in request identity order.
+    #[schemars(length(max = 16))]
+    pub symbols: Vec<SymbolExplanationV1_0>,
+    /// Requested identities absent from the pinned generation.
+    #[schemars(length(max = 16))]
+    pub unresolved_ids: Vec<SymbolId>,
+    /// Reserved handles; empty while this tool uses explicit truncation.
+    #[schemars(length(max = 64))]
+    pub detail_handles: Vec<DetailHandle>,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
+}
+
 /// Checked success-or-error output for `symbol.explain`.
 pub type SymbolExplainOutput = ToolResponse<ReadEnvelope<SymbolExplainData>>;
+
+/// Checked `symbol.explain` output retained for explicit 1.0 callers.
+pub type SymbolExplainOutputV1_0 = ToolResponse<ReadEnvelope<SymbolExplainDataV1_0>>;
+
+/// Current checked `symbol.explain` output.
+pub type SymbolExplainOutputV1_1 = AnalysisToolResponse<AnalysisReadEnvelope<SymbolExplainData>>;
 
 /// One source selector accepted by `source.read`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2136,23 +2566,27 @@ mod tests {
 
     use super::{
         CodeLocateInput, CodeLocateOutput, OperationStatusInput, OperationStatusOutput,
-        OperationStatusOutputV1_1, RepoIndexInput, RepoIndexOutput, RepoIndexOutputV1_1,
-        SourceReadInput, SourceReadOutput, SymbolExplainInput, SymbolExplainOutput, VerticalTool,
+        OperationStatusOutputV1_0, OperationStatusOutputV1_1, RepoIndexInput, RepoIndexOutput,
+        RepoIndexOutputV1_1, SourceReadInput, SourceReadOutput, SymbolExplainInput,
+        SymbolExplainOutputV1_0, SymbolExplainOutputV1_1, VerticalTool,
     };
     use crate::change::{
-        ChangeImpactInput, ChangeImpactOutput, HistoryCompareInput, HistoryCompareOutput,
-        PlanChangeInput, PlanChangeOutput, TestsSelectInput, TestsSelectOutput,
+        ChangeImpactInput, ChangeImpactOutputV1_0, ChangeImpactOutputV1_1, HistoryCompareInputV1_0,
+        HistoryCompareOutputV1_0, PlanChangeInputV1_0, PlanChangeOutputV1_0, TestsSelectInput,
+        TestsSelectOutputV1_0, TestsSelectOutputV1_1,
     };
     use crate::context::{
         ContextPackInput, ContextPackOutput, QueryAdvancedInput, QueryAdvancedOutput,
         QueryBatchInput, QueryBatchOutput,
     };
     use crate::intent::{
-        ArchitectureCyclesInput, ArchitectureCyclesOutput, ArchitectureOverviewInput,
-        ArchitectureOverviewOutput, CodeDeadInput, CodeDeadOutput, FlowTraceInput, FlowTraceOutput,
-        SymbolRelationshipsInput, SymbolRelationshipsOutput,
+        ArchitectureCyclesInput, ArchitectureCyclesOutputV1_0, ArchitectureOverviewInput,
+        ArchitectureOverviewOutputV1_0, CodeDeadInput, CodeDeadOutputV1_0, FlowTraceInput,
+        FlowTraceOutput, SymbolRelationshipsInput, SymbolRelationshipsOutputV1_0,
     };
-    use crate::repository::{RepoListInput, RepoListOutput, RepoStatusInput, RepoStatusOutput};
+    use crate::repository::{
+        RepoListInput, RepoListOutput, RepoStatusInput, RepoStatusOutputV1_0, RepoStatusOutputV1_1,
+    };
 
     #[test]
     fn embedded_vertical_schemas_are_unique_strict_draft_2020_12_objects() {
@@ -2328,8 +2762,20 @@ mod tests {
                     );
                 }
                 "repo.status" => {
-                    assert_round_trip::<RepoStatusInput>(VerticalTool::RepoStatus, &input, true);
-                    assert_round_trip::<RepoStatusOutput>(VerticalTool::RepoStatus, &output, false);
+                    assert_round_trip_with_schema::<RepoStatusInput>(
+                        VerticalTool::RepoStatus,
+                        &input,
+                        VerticalTool::RepoStatus
+                            .previous_input_schema_json()
+                            .expect("repo.status retains its 1.0 input schema"),
+                    );
+                    assert_round_trip_with_schema::<RepoStatusOutputV1_0>(
+                        VerticalTool::RepoStatus,
+                        &output,
+                        VerticalTool::RepoStatus
+                            .previous_output_schema_json()
+                            .expect("repo.status retains its 1.0 output schema"),
+                    );
                 }
                 "repo.list" => {
                     assert_round_trip::<RepoListInput>(VerticalTool::RepoList, &input, true);
@@ -2342,16 +2788,18 @@ mod tests {
                     );
                 }
                 "operation.status" => {
-                    assert_round_trip::<OperationStatusInput>(
+                    assert_round_trip_with_schema::<OperationStatusInput>(
                         VerticalTool::OperationStatus,
                         &input,
-                        true,
+                        VerticalTool::OperationStatus
+                            .legacy_input_schema_json()
+                            .expect("operation.status retains its 1.0 input schema"),
                     );
-                    assert_round_trip_with_schema::<OperationStatusOutput>(
+                    assert_round_trip_with_schema::<OperationStatusOutputV1_0>(
                         VerticalTool::OperationStatus,
                         &output,
                         VerticalTool::OperationStatus
-                            .previous_output_schema_json()
+                            .legacy_output_schema_json()
                             .expect("operation.status retains its 1.0 output schema"),
                     );
                 }
@@ -2360,15 +2808,19 @@ mod tests {
                     assert_round_trip::<CodeLocateOutput>(VerticalTool::CodeLocate, &output, false);
                 }
                 "symbol.explain" => {
-                    assert_round_trip::<SymbolExplainInput>(
+                    assert_round_trip_with_schema::<SymbolExplainInput>(
                         VerticalTool::SymbolExplain,
                         &input,
-                        true,
+                        VerticalTool::SymbolExplain
+                            .previous_input_schema_json()
+                            .expect("symbol.explain retains its 1.0 input schema"),
                     );
-                    assert_round_trip::<SymbolExplainOutput>(
+                    assert_round_trip_with_schema::<SymbolExplainOutputV1_0>(
                         VerticalTool::SymbolExplain,
                         &output,
-                        false,
+                        VerticalTool::SymbolExplain
+                            .previous_output_schema_json()
+                            .expect("symbol.explain retains its 1.0 output schema"),
                     );
                 }
                 "source.read" => {
@@ -2376,15 +2828,19 @@ mod tests {
                     assert_round_trip::<SourceReadOutput>(VerticalTool::SourceRead, &output, false);
                 }
                 "symbol.relationships" => {
-                    assert_round_trip::<SymbolRelationshipsInput>(
+                    assert_round_trip_with_schema::<SymbolRelationshipsInput>(
                         VerticalTool::SymbolRelationships,
                         &input,
-                        true,
+                        VerticalTool::SymbolRelationships
+                            .previous_input_schema_json()
+                            .expect("symbol.relationships retains its 1.0 input schema"),
                     );
-                    assert_round_trip::<SymbolRelationshipsOutput>(
+                    assert_round_trip_with_schema::<SymbolRelationshipsOutputV1_0>(
                         VerticalTool::SymbolRelationships,
                         &output,
-                        false,
+                        VerticalTool::SymbolRelationships
+                            .previous_output_schema_json()
+                            .expect("symbol.relationships retains its 1.0 output schema"),
                     );
                 }
                 "flow.trace" => {
@@ -2392,75 +2848,131 @@ mod tests {
                     assert_round_trip::<FlowTraceOutput>(VerticalTool::FlowTrace, &output, false);
                 }
                 "architecture.overview" => {
-                    assert_round_trip::<ArchitectureOverviewInput>(
+                    assert_round_trip_with_schema::<ArchitectureOverviewInput>(
                         VerticalTool::ArchitectureOverview,
                         &input,
-                        true,
+                        VerticalTool::ArchitectureOverview
+                            .previous_input_schema_json()
+                            .expect("architecture.overview retains its 1.0 input schema"),
                     );
-                    assert_round_trip::<ArchitectureOverviewOutput>(
+                    assert_round_trip_with_schema::<ArchitectureOverviewOutputV1_0>(
                         VerticalTool::ArchitectureOverview,
                         &output,
-                        false,
+                        VerticalTool::ArchitectureOverview
+                            .previous_output_schema_json()
+                            .expect("architecture.overview retains its 1.0 output schema"),
                     );
                 }
                 "architecture.cycles" => {
-                    assert_round_trip::<ArchitectureCyclesInput>(
+                    assert_round_trip_with_schema::<ArchitectureCyclesInput>(
                         VerticalTool::ArchitectureCycles,
                         &input,
-                        true,
+                        VerticalTool::ArchitectureCycles
+                            .previous_input_schema_json()
+                            .expect("architecture.cycles retains its 1.0 input schema"),
                     );
-                    assert_round_trip::<ArchitectureCyclesOutput>(
+                    assert_round_trip_with_schema::<ArchitectureCyclesOutputV1_0>(
                         VerticalTool::ArchitectureCycles,
                         &output,
-                        false,
+                        VerticalTool::ArchitectureCycles
+                            .previous_output_schema_json()
+                            .expect("architecture.cycles retains its 1.0 output schema"),
                     );
                 }
                 "code.dead" => {
-                    assert_round_trip::<CodeDeadInput>(VerticalTool::CodeDead, &input, true);
-                    assert_round_trip::<CodeDeadOutput>(VerticalTool::CodeDead, &output, false);
+                    assert_round_trip_with_schema::<CodeDeadInput>(
+                        VerticalTool::CodeDead,
+                        &input,
+                        VerticalTool::CodeDead
+                            .previous_input_schema_json()
+                            .expect("code.dead retains its 1.0 input schema"),
+                    );
+                    assert_round_trip_with_schema::<CodeDeadOutputV1_0>(
+                        VerticalTool::CodeDead,
+                        &output,
+                        VerticalTool::CodeDead
+                            .previous_output_schema_json()
+                            .expect("code.dead retains its 1.0 output schema"),
+                    );
                 }
                 "change.impact" => {
-                    assert_round_trip::<ChangeImpactInput>(
+                    assert_round_trip_with_schema::<ChangeImpactInput>(
                         VerticalTool::ChangeImpact,
                         &input,
-                        true,
+                        VerticalTool::ChangeImpact
+                            .previous_input_schema_json()
+                            .expect("change.impact retains its 1.0 input schema"),
                     );
-                    assert_round_trip::<ChangeImpactOutput>(
+                    assert_round_trip_with_schema::<ChangeImpactOutputV1_0>(
                         VerticalTool::ChangeImpact,
                         &output,
-                        false,
+                        VerticalTool::ChangeImpact
+                            .previous_output_schema_json()
+                            .expect("change.impact retains its 1.0 output schema"),
                     );
                 }
                 "tests.select" => {
-                    assert_round_trip::<TestsSelectInput>(VerticalTool::TestsSelect, &input, true);
-                    assert_round_trip::<TestsSelectOutput>(
+                    assert_round_trip_with_schema::<TestsSelectInput>(
+                        VerticalTool::TestsSelect,
+                        &input,
+                        VerticalTool::TestsSelect
+                            .previous_input_schema_json()
+                            .expect("tests.select retains its 1.0 input schema"),
+                    );
+                    assert_round_trip_with_schema::<TestsSelectOutputV1_0>(
                         VerticalTool::TestsSelect,
                         &output,
-                        false,
+                        VerticalTool::TestsSelect
+                            .previous_output_schema_json()
+                            .expect("tests.select retains its 1.0 output schema"),
                     );
                 }
                 "history.compare" => {
-                    assert_round_trip::<HistoryCompareInput>(
+                    assert_round_trip_with_schema::<HistoryCompareInputV1_0>(
                         VerticalTool::HistoryCompare,
                         &input,
-                        true,
+                        VerticalTool::HistoryCompare
+                            .previous_input_schema_json()
+                            .expect("history.compare retains its 1.0 input schema"),
                     );
-                    assert_round_trip::<HistoryCompareOutput>(
+                    assert_round_trip_with_schema::<HistoryCompareOutputV1_0>(
                         VerticalTool::HistoryCompare,
                         &output,
-                        false,
+                        VerticalTool::HistoryCompare
+                            .previous_output_schema_json()
+                            .expect("history.compare retains its 1.0 output schema"),
                     );
                 }
                 "plan.change" => {
-                    assert_round_trip::<PlanChangeInput>(VerticalTool::PlanChange, &input, true);
-                    assert_round_trip::<PlanChangeOutput>(VerticalTool::PlanChange, &output, false);
+                    assert_round_trip_with_schema::<PlanChangeInputV1_0>(
+                        VerticalTool::PlanChange,
+                        &input,
+                        VerticalTool::PlanChange
+                            .previous_input_schema_json()
+                            .expect("plan.change retains its 1.0 input schema"),
+                    );
+                    assert_round_trip_with_schema::<PlanChangeOutputV1_0>(
+                        VerticalTool::PlanChange,
+                        &output,
+                        VerticalTool::PlanChange
+                            .previous_output_schema_json()
+                            .expect("plan.change retains its 1.0 output schema"),
+                    );
                 }
                 "context.pack" => {
-                    assert_round_trip::<ContextPackInput>(VerticalTool::ContextPack, &input, true);
-                    assert_round_trip::<ContextPackOutput>(
+                    assert_round_trip_with_schema::<ContextPackInput>(
+                        VerticalTool::ContextPack,
+                        &input,
+                        VerticalTool::ContextPack
+                            .previous_input_schema_json()
+                            .expect("context.pack retains its 1.0 input schema"),
+                    );
+                    assert_round_trip_with_schema::<ContextPackOutput>(
                         VerticalTool::ContextPack,
                         &output,
-                        false,
+                        VerticalTool::ContextPack
+                            .previous_output_schema_json()
+                            .expect("context.pack retains its 1.0 output schema"),
                     );
                 }
                 "query.advanced" => {
@@ -2524,8 +3036,9 @@ mod tests {
     where
         T: DeserializeOwned + Serialize + PartialEq + Debug,
     {
-        let decoded: T =
-            serde_json::from_value(fixture.clone()).expect("fixture decodes through Rust");
+        let decoded: T = serde_json::from_value(fixture.clone()).unwrap_or_else(|error| {
+            panic!("{} fixture decodes through Rust: {error}", tool.name())
+        });
         let encoded = serde_json::to_value(&decoded).expect("typed fixture serializes");
         assert_eq!(
             &encoded,
@@ -2560,13 +3073,49 @@ mod tests {
             VerticalTool::RepoList.contract_version(),
             crate::REPO_LIST_SCHEMA_VERSION
         );
-        for tool in [VerticalTool::RepoIndex, VerticalTool::OperationStatus] {
-            assert_eq!(tool.contract_version(), crate::MCP_OPERATION_SCHEMA_VERSION);
+        assert_eq!(
+            VerticalTool::RepoIndex.contract_version(),
+            crate::MCP_OPERATION_SCHEMA_VERSION
+        );
+        assert_eq!(
+            VerticalTool::RepoStatus.contract_version(),
+            crate::MCP_REPOSITORY_STATUS_SCHEMA_VERSION
+        );
+        assert_eq!(
+            VerticalTool::OperationStatus.contract_version(),
+            crate::MCP_OPERATION_STATUS_SCHEMA_VERSION
+        );
+        for tool in [
+            VerticalTool::SymbolExplain,
+            VerticalTool::SymbolRelationships,
+            VerticalTool::ChangeImpact,
+            VerticalTool::TestsSelect,
+            VerticalTool::ArchitectureOverview,
+            VerticalTool::ArchitectureCycles,
+            VerticalTool::CodeDead,
+            VerticalTool::HistoryCompare,
+            VerticalTool::PlanChange,
+            VerticalTool::ContextPack,
+        ] {
+            assert_eq!(tool.contract_version(), crate::MCP_ANALYSIS_SCHEMA_VERSION);
         }
         for tool in VerticalTool::ALL {
             if !matches!(
                 tool,
-                VerticalTool::RepoList | VerticalTool::RepoIndex | VerticalTool::OperationStatus
+                VerticalTool::RepoList
+                    | VerticalTool::RepoIndex
+                    | VerticalTool::RepoStatus
+                    | VerticalTool::OperationStatus
+                    | VerticalTool::SymbolExplain
+                    | VerticalTool::SymbolRelationships
+                    | VerticalTool::ChangeImpact
+                    | VerticalTool::TestsSelect
+                    | VerticalTool::ArchitectureOverview
+                    | VerticalTool::ArchitectureCycles
+                    | VerticalTool::CodeDead
+                    | VerticalTool::HistoryCompare
+                    | VerticalTool::PlanChange
+                    | VerticalTool::ContextPack
             ) {
                 assert_eq!(tool.contract_version(), crate::MCP_SCHEMA_VERSION);
             }
@@ -2608,10 +3157,21 @@ mod tests {
             jsonschema::draft202012::new(&schema).expect("architecture cycles schema compiles");
         let symbol = json!("sym1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v");
         let mut output = retained_tool_output("architecture.cycles");
+        output["schema_version"] = json!("1.1");
+        output["data"]["projection"] = json!({
+            "relations": ["calls"],
+            "min_confidence": 0,
+            "level": "module",
+            "rank_by": "size",
+            "omitted_nodes": 0
+        });
         output["data"]["components"] = json!([{
             "size": 128,
             "members": vec![symbol.clone(); 128],
-            "internal_edges": 128
+            "internal_edges": 128,
+            "edge_weight": 128,
+            "change_risk": 0,
+            "break_cost": 500
         }]);
         output["data"]["cycles"] = json!([{
             "nodes": vec![symbol.clone(); 129],
@@ -2623,7 +3183,10 @@ mod tests {
         output["data"]["components"] = json!([{
             "size": 1,
             "members": [symbol.clone()],
-            "internal_edges": 1
+            "internal_edges": 1,
+            "edge_weight": 1,
+            "change_risk": 0,
+            "break_cost": 500
         }]);
         output["data"]["cycles"] = json!([{
             "nodes": [symbol.clone(), symbol],
@@ -2655,13 +3218,10 @@ mod tests {
             let schema: Value =
                 serde_json::from_str(tool.output_schema_json()).expect("output schema is valid");
             let validator = jsonschema::draft202012::new(&schema).expect("output schema compiles");
-            let schema_version = if matches!(
-                tool,
-                VerticalTool::RepoIndex | VerticalTool::OperationStatus
-            ) {
-                "1.1"
+            let schema_version = if tool == VerticalTool::RepoList {
+                crate::MCP_SCHEMA_VERSION
             } else {
-                "1.0"
+                tool.contract_version()
             };
             assert!(
                 validator.is_valid(&error(schema_version)),
@@ -2669,22 +3229,39 @@ mod tests {
                 tool.name()
             );
         }
+        let current_operation_error = error("1.2");
+        serde_json::from_value::<OperationStatusOutput>(current_operation_error)
+            .expect("current operation error decodes");
         let current_error = error("1.1");
         serde_json::from_value::<RepoIndexOutputV1_1>(current_error.clone())
             .expect("current repo error decodes");
+        serde_json::from_value::<RepoStatusOutputV1_1>(current_error.clone())
+            .expect("current status error decodes");
         serde_json::from_value::<OperationStatusOutputV1_1>(current_error.clone())
-            .expect("current operation error decodes");
+            .expect("retained operation 1.1 error decodes");
+        serde_json::from_value::<SymbolExplainOutputV1_1>(current_error.clone())
+            .expect("current explain error decodes");
+        serde_json::from_value::<ChangeImpactOutputV1_1>(current_error.clone())
+            .expect("current impact error decodes");
+        serde_json::from_value::<TestsSelectOutputV1_1>(current_error.clone())
+            .expect("current tests error decodes");
         let legacy_error = error("1.0");
         serde_json::from_value::<RepoIndexOutput>(legacy_error.clone())
             .expect("legacy repo error decodes");
-        serde_json::from_value::<OperationStatusOutput>(legacy_error.clone())
+        serde_json::from_value::<RepoStatusOutputV1_0>(legacy_error.clone())
+            .expect("legacy status error decodes");
+        serde_json::from_value::<OperationStatusOutputV1_0>(legacy_error.clone())
             .expect("operation error decodes");
         serde_json::from_value::<RepoListOutput>(legacy_error.clone())
             .expect("catalog error decodes");
         serde_json::from_value::<CodeLocateOutput>(legacy_error.clone())
             .expect("locate error decodes");
-        serde_json::from_value::<SymbolExplainOutput>(legacy_error.clone())
+        serde_json::from_value::<SymbolExplainOutputV1_0>(legacy_error.clone())
             .expect("explain error decodes");
+        serde_json::from_value::<ChangeImpactOutputV1_0>(legacy_error.clone())
+            .expect("impact error decodes");
+        serde_json::from_value::<TestsSelectOutputV1_0>(legacy_error.clone())
+            .expect("tests error decodes");
         serde_json::from_value::<SourceReadOutput>(legacy_error).expect("source error decodes");
 
         let mut arbitrary_code = current_error.clone();

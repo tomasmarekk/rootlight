@@ -608,7 +608,11 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
         "docs",
         "documentation search is not served",
     ),
-    unsupported_value("search_modes[]", "path", "path search is not served"),
+    implemented_value(
+        "search_modes[]",
+        "path",
+        "searches normalized source paths by bounded prefix",
+    ),
     unsupported_value(
         "search_modes[]",
         "semantic",
@@ -622,30 +626,42 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
 ];
 
 const SYMBOL_EXPLAIN_RULES: &[CapabilityRule] = &[
-    accepted_fallback("repository"),
-    accepted_fallback("generation"),
-    accepted_fallback("symbol_ids"),
-    accepted_fallback("include_provenance"),
+    implemented("repository", "selects the owning indexed repository"),
+    implemented(
+        "generation",
+        "selects an active or retained immutable generation",
+    ),
+    implemented(
+        "symbol_ids",
+        "selects one to sixteen stable symbol identities",
+    ),
+    implemented(
+        "include_provenance",
+        "selects none, compact, or full bounded provenance",
+    ),
     implemented(
         "response_profile",
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported("sections", "section selection is not served"),
-    unsupported(
+    implemented("sections", "selects bounded explanation sections"),
+    implemented(
         "relation_sample_limit",
-        "custom relation samples are not served",
+        "bounds typed relation samples per relation predicate",
     ),
-    unsupported(
+    implemented(
         "source_preview_lines",
-        "custom source previews are not served",
+        "bounds generation-pinned untrusted source preview lines",
     ),
     implemented("budget", "reduces the common hard execution budget"),
-    unsupported("budget.evidence_level", "evidence projection is not served"),
-    unsupported_value(
+    implemented(
+        "budget.evidence_level",
+        "caps optional provenance detail without weakening correctness metadata",
+    ),
+    implemented_value(
         "include_provenance",
         "full",
-        "full provenance projection is not served",
+        "returns available frontend-version and resolver-rule provenance",
     ),
 ];
 
@@ -826,135 +842,254 @@ const FLOW_TRACE_RULES: &[CapabilityRule] = &[
 ];
 
 const CHANGE_IMPACT_RULES: &[CapabilityRule] = &[
-    accepted_fallback("repository"),
-    accepted_fallback("generation"),
-    accepted_fallback("change"),
-    accepted_fallback("relation_policy"),
-    accepted_fallback("max_depth"),
-    accepted_fallback("include_tests"),
-    accepted_fallback("include_history"),
-    accepted_fallback("min_confidence"),
+    implemented("repository", "selects the owning indexed repository"),
+    implemented(
+        "generation",
+        "selects an active or retained immutable generation",
+    ),
+    implemented(
+        "change",
+        "resolves bounded explicit, working-tree, and revision-range changes",
+    ),
+    implemented(
+        "relation_policy",
+        "selects standard, conservative, or direct-only propagation",
+    ),
+    implemented("max_depth", "bounds transitive propagation depth"),
+    implemented("include_tests", "selects bounded related test candidates"),
+    implemented(
+        "include_history",
+        "selects bounded indexed historical signals",
+    ),
+    implemented("min_confidence", "filters propagated impacts by confidence"),
     implemented(
         "profile",
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported("scope", "structural scope filtering is not served"),
+    implemented(
+        "scope",
+        "bounds impacts by path, package, and service identities",
+    ),
     implemented("budget", "reduces the common hard execution budget"),
-    unsupported("budget.evidence_level", "evidence projection is not served"),
-    unsupported(
+    implemented(
+        "budget.evidence_level",
+        "accepts an evidence ceiling while retaining mandatory risk and coverage truth",
+    ),
+    implemented(
         "change.working_tree",
-        "working-tree diff resolution is not served",
+        "collects a read-only bounded staged, unstaged, or combined Git diff",
     ),
-    unsupported(
+    implemented(
         "change.revision_range",
-        "revision-range resolution is not served",
+        "collects a read-only bounded explicit Git revision diff",
     ),
-    unsupported_value(
+    implemented_value(
         "include_history",
         "true",
-        "history-derived signals are not served",
+        "uses indexed bounded history and reports its absence in risk reasons",
     ),
-    unsupported_value(
+    implemented_value(
         "relation_policy",
         "conservative",
-        "conservative relation expansion is not served",
+        "adds bounded service, data, ownership, test, and history relation families",
     ),
 ];
 
 const TESTS_SELECT_RULES: &[CapabilityRule] = &[
-    accepted_fallback("repository"),
-    accepted_fallback("generation"),
-    accepted_fallback("seeds"),
-    accepted_fallback("test_kinds"),
-    accepted_fallback("max_tests"),
-    accepted_fallback("include_commands"),
+    implemented("repository", "selects the owning indexed repository"),
+    implemented(
+        "generation",
+        "selects an active or retained immutable generation",
+    ),
+    implemented(
+        "seeds",
+        "resolves bounded symbol, path, change, and build-target seeds",
+    ),
+    implemented(
+        "test_kinds",
+        "filters all declared test-kind classifications",
+    ),
+    implemented("max_tests", "bounds deterministic ranked candidates"),
+    implemented(
+        "include_commands",
+        "returns inert declarative command metadata",
+    ),
     implemented(
         "profile",
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
     implemented("budget", "reduces the common hard execution budget"),
-    unsupported("budget.evidence_level", "evidence projection is not served"),
-    unsupported("execution_budget", "execution-time budgeting is not served"),
-    unsupported("frameworks", "framework filtering is not served"),
-    unsupported("seeds.paths", "path seeds are not served"),
-    unsupported("seeds.change", "change seeds are not served"),
-    unsupported("seeds.build_targets", "build-target seeds are not served"),
-    unsupported_value(
+    implemented(
+        "budget.evidence_level",
+        "accepts an evidence ceiling while retaining mandatory selection rationale and gaps",
+    ),
+    implemented(
+        "execution_budget",
+        "bounds aggregate estimated cost and slow candidates",
+    ),
+    implemented("frameworks", "filters normalized observed test frameworks"),
+    implemented(
+        "seeds.paths",
+        "resolves exact indexed repository-relative paths",
+    ),
+    implemented(
+        "seeds.change",
+        "derives path and symbol seeds from bounded change selectors",
+    ),
+    implemented(
+        "seeds.build_targets",
+        "resolves indexed build-target identities",
+    ),
+    implemented_value(
         "test_kinds[]",
         "integration",
-        "integration-test classification is not served",
+        "selects integration-test candidates",
     ),
-    unsupported_value(
-        "test_kinds[]",
-        "e2e",
-        "end-to-end test classification is not served",
-    ),
-    unsupported_value(
+    implemented_value("test_kinds[]", "e2e", "selects end-to-end test candidates"),
+    implemented_value(
         "test_kinds[]",
         "contract",
-        "contract-test classification is not served",
+        "selects contract-test candidates",
     ),
-    unsupported_value(
-        "test_kinds[]",
-        "static",
-        "static-check classification is not served",
-    ),
-    unsupported_value(
-        "test_kinds[]",
-        "build",
-        "build-check classification is not served",
-    ),
+    implemented_value("test_kinds[]", "static", "selects static-check candidates"),
+    implemented_value("test_kinds[]", "build", "selects build-check candidates"),
 ];
 
 const ARCHITECTURE_OVERVIEW_RULES: &[CapabilityRule] = &[
-    accepted_fallback("repository"),
-    accepted_fallback("generation"),
-    accepted_fallback("views"),
-    accepted_fallback("max_components"),
-    accepted_fallback("include_edges"),
-    accepted_fallback("min_confidence"),
+    implemented("repository", "selects the owning indexed repository"),
+    implemented(
+        "generation",
+        "selects an active or retained immutable generation",
+    ),
+    implemented(
+        "scope",
+        "bounds components by path, package, build-target, or symbol identities",
+    ),
+    implemented("views", "selects all declared architecture projections"),
+    implemented(
+        "detail",
+        "selects summary, standard, or detailed bounded component evidence",
+    ),
+    implemented(
+        "max_components",
+        "bounds deterministic component and connection projection",
+    ),
+    implemented(
+        "include_edges",
+        "selects aggregated directed architecture connections",
+    ),
+    implemented(
+        "min_confidence",
+        "filters heuristic architecture connections and hotspots",
+    ),
     implemented(
         "response_profile",
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported("scope", "structural scope filtering is not served"),
-    unsupported("detail", "explicit detail projection is not served"),
     implemented("budget", "reduces the common hard execution budget"),
-    unsupported("budget.evidence_level", "evidence projection is not served"),
-    unsupported_value("views[]", "build", "build view is not served"),
-    unsupported_value("views[]", "data", "data view is not served"),
-    unsupported_value("views[]", "modules", "module view is not served"),
-    unsupported_value("views[]", "ownership", "ownership view is not served"),
-    unsupported_value("views[]", "packages", "package view is not served"),
-    unsupported_value("views[]", "services", "service view is not served"),
+    implemented(
+        "budget.evidence_level",
+        "accepts an evidence ceiling while retaining coverage and trust caveats",
+    ),
+    implemented_value("views[]", "modules", "serves module decomposition"),
+    implemented_value("views[]", "packages", "serves package decomposition"),
+    implemented_value("views[]", "services", "serves service boundaries"),
+    implemented_value(
+        "views[]",
+        "data",
+        "serves normalized data-object structure when indexed",
+    ),
+    implemented_value("views[]", "build", "serves normalized build targets"),
+    implemented_value(
+        "views[]",
+        "ownership",
+        "reports ownership projection coverage without inventing owners",
+    ),
+    implemented_value(
+        "views[]",
+        "communities",
+        "serves deterministic structural communities",
+    ),
+    implemented_value(
+        "views[]",
+        "hotspots",
+        "serves bounded structural hotspot signals",
+    ),
+    implemented_value("detail", "summary", "serves count-oriented summaries"),
+    implemented_value(
+        "detail",
+        "standard",
+        "serves components and aggregated connections",
+    ),
+    implemented_value(
+        "detail",
+        "detailed",
+        "serves bounded generation-pinned component evidence",
+    ),
 ];
 
 const ARCHITECTURE_CYCLES_RULES: &[CapabilityRule] = &[
-    accepted_fallback("repository"),
-    accepted_fallback("generation"),
-    accepted_fallback("projection"),
-    accepted_fallback("min_size"),
-    accepted_fallback("max_cycles"),
-    accepted_fallback("include_self_cycles"),
+    implemented("repository", "selects the owning indexed repository"),
+    implemented(
+        "generation",
+        "selects an active or retained immutable generation",
+    ),
+    implemented(
+        "scope",
+        "bounds the cycle graph by path, package, build-target, or symbol identities",
+    ),
+    implemented(
+        "projection",
+        "selects bounded relation families and aggregation level",
+    ),
+    implemented("min_size", "filters strongly connected components by size"),
+    implemented("max_cycles", "bounds deterministic ranked cycle results"),
+    implemented(
+        "include_self_cycles",
+        "selects size-one strongly connected components with self edges",
+    ),
+    implemented(
+        "rank_by",
+        "orders components by size, edge weight, change risk, or break cost",
+    ),
     implemented(
         "response_profile",
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported("scope", "structural scope filtering is not served"),
-    unsupported(
-        "projection.level",
-        "only symbol-level cycle projection is served",
+    implemented("budget", "reduces the common hard execution budget"),
+    implemented(
+        "budget.evidence_level",
+        "accepts an evidence ceiling while retaining minimal cycle and gap evidence",
     ),
     implemented_value(
         "projection.level",
         "symbol",
         "detects cycles between symbols",
     ),
-    unsupported("rank_by", "cycle ranking strategy is not served"),
+    implemented_value(
+        "projection.level",
+        "module",
+        "detects cycles between normalized modules",
+    ),
+    implemented_value(
+        "projection.level",
+        "package",
+        "detects cycles between normalized packages",
+    ),
+    implemented_value(
+        "projection.level",
+        "build_target",
+        "detects cycles between normalized build targets",
+    ),
+    implemented_value(
+        "projection.level",
+        "service",
+        "detects cycles between normalized services",
+    ),
     implemented_value(
         "projection.relations[]",
         "calls",
@@ -980,191 +1115,239 @@ const ARCHITECTURE_CYCLES_RULES: &[CapabilityRule] = &[
         "imports",
         "serves static import edges",
     ),
-    unsupported_value(
+    implemented_value(
         "projection.relations[]",
         "called_by",
-        "cycle projection requires canonical directed edges",
+        "serves reversed direct call edges",
     ),
-    unsupported_value(
+    implemented_value(
         "projection.relations[]",
         "tests",
-        "test relations are not served",
+        "serves normalized test relations when indexed",
     ),
-    unsupported_value(
+    implemented_value(
         "projection.relations[]",
         "ownership",
-        "ownership relations are not served",
+        "admits ownership relations while reporting unavailable adapter coverage",
     ),
-    unsupported_value(
+    implemented_value(
         "projection.relations[]",
         "service_call",
-        "service-call relations are not served",
+        "serves normalized service-call relations",
     ),
-    unsupported_value(
+    implemented_value(
         "projection.relations[]",
         "calls_route",
-        "route-call relations are not served",
+        "serves normalized route-call relations",
     ),
-    unsupported_value(
+    implemented_value(
         "projection.relations[]",
         "messaging",
-        "messaging relations are not served",
+        "serves normalized publish and consume relations",
     ),
-    unsupported_value(
+    implemented_value(
         "projection.relations[]",
         "reads_table",
-        "database-read relations are not served",
+        "serves normalized database-read relations",
     ),
-    unsupported_value(
+    implemented_value(
         "projection.relations[]",
         "writes_table",
-        "database-write relations are not served",
+        "serves normalized database-write relations",
     ),
-    unsupported_value(
+    implemented_value(
         "projection.relations[]",
         "build_dependency",
-        "build-dependency relations are not served",
+        "serves normalized build-dependency relations",
     ),
-    unsupported_value(
+    implemented_value(
         "projection.relations[]",
         "data_flow",
-        "data-flow relations are not served",
+        "serves normalized data read and write relations",
     ),
-    unsupported_value(
+    implemented_value(
         "projection.relations[]",
         "history",
-        "history relations are not served",
+        "serves normalized co-change relations",
     ),
-    implemented("budget", "reduces the common hard execution budget"),
-    unsupported("budget.evidence_level", "evidence projection is not served"),
+    implemented_value("rank_by", "size", "ranks larger components first"),
+    implemented_value(
+        "rank_by",
+        "edge_weight",
+        "ranks higher aggregate-confidence components first",
+    ),
+    implemented_value(
+        "rank_by",
+        "change_risk",
+        "ranks components with more internal history edges first",
+    ),
+    implemented_value(
+        "rank_by",
+        "break_cost",
+        "ranks more expensive minimum break candidates first",
+    ),
 ];
 
 const CODE_DEAD_RULES: &[CapabilityRule] = &[
-    accepted_fallback("repository"),
-    accepted_fallback("generation"),
-    accepted_fallback("entry_point_policy"),
-    accepted_fallback("include_exported"),
-    accepted_fallback("include_tests"),
-    accepted_fallback("min_confidence"),
-    accepted_fallback("max_candidates"),
+    implemented("repository", "selects the owning indexed repository"),
+    implemented(
+        "generation",
+        "selects an active or retained immutable generation",
+    ),
+    implemented(
+        "scope",
+        "bounds observations by path, package, build-target, or symbol identities",
+    ),
+    implemented(
+        "entry_point_policy",
+        "selects a named policy or a bounded caller-supplied stable root set",
+    ),
+    implemented(
+        "include_exported",
+        "controls exported-symbol candidate suppression",
+    ),
+    implemented(
+        "include_tests",
+        "controls test-symbol candidate suppression",
+    ),
+    implemented(
+        "min_confidence",
+        "sets the minimum admitted static reachability edge confidence",
+    ),
+    implemented(
+        "max_candidates",
+        "bounds deterministic confidence-ranked observations",
+    ),
     implemented(
         "response_profile",
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported("scope", "structural scope filtering is not served"),
     implemented_value(
         "entry_point_policy",
         "standard",
-        "uses a disclosed partial mixed entry-point model",
+        "uses a disclosed mixed static entry-point model",
     ),
-    unsupported_value(
+    implemented_value(
         "entry_point_policy",
         "library",
-        "library-specific entry-point resolution is not served",
+        "uses the normalized exported library surface",
     ),
-    unsupported_value(
+    implemented_value(
         "entry_point_policy",
         "application",
-        "application-specific entry-point resolution is not served",
+        "uses normalized application mains and registered handlers",
+    ),
+    implemented_value(
+        "entry_point_policy",
+        "framework_specific",
+        "uses normalized routes, services, and framework registrations",
     ),
     implemented("budget", "reduces the common hard execution budget"),
-    unsupported("budget.evidence_level", "evidence projection is not served"),
+    implemented(
+        "budget.evidence_level",
+        "accepts an evidence ceiling while retaining reachability uncertainty and caveats",
+    ),
 ];
 
 const HISTORY_COMPARE_RULES: &[CapabilityRule] = &[
-    accepted_fallback("repository"),
-    accepted_fallback("base"),
-    accepted_fallback("head"),
-    accepted_fallback("change_kinds"),
-    accepted_fallback("max_results"),
-    accepted_fallback("include_unchanged_context"),
-    accepted_fallback("profile"),
-    implemented("explain", "returns a deterministic source-free plan"),
-    unsupported("scope", "structural scope filtering is not served"),
-    unsupported_value(
+    implemented(
+        "repository",
+        "selects the repository containing both states",
+    ),
+    implemented(
+        "base",
+        "resolves a retained generation or a Git ref matching the indexed tree",
+    ),
+    implemented(
+        "head",
+        "resolves a retained generation or a Git ref matching the indexed tree",
+    ),
+    implemented("scope", "combines path package service and symbol bounds"),
+    implemented(
+        "change_kinds",
+        "filters entity signature relation architecture ownership test route and data deltas",
+    ),
+    implemented(
+        "max_results",
+        "bounds deterministic significance-ranked changes",
+    ),
+    implemented(
         "include_unchanged_context",
-        "true",
-        "unchanged-context projection is not served",
+        "includes stable identity lineage context when requested",
     ),
+    implemented(
+        "profile",
+        "selects compact standard or bounded evidence representation",
+    ),
+    implemented("explain", "returns a deterministic source-free plan"),
     implemented("budget", "reduces the common hard execution budget"),
-    unsupported("budget.evidence_level", "evidence projection is not served"),
-    unsupported("base.git", "git revision resolution is not served"),
-    unsupported("head.git", "git revision resolution is not served"),
-    unsupported_value(
-        "change_kinds[]",
-        "relations",
-        "relation delta comparison is not served",
-    ),
-    unsupported_value(
-        "change_kinds[]",
-        "architecture",
-        "architecture delta comparison is not served",
-    ),
-    unsupported_value(
-        "change_kinds[]",
-        "ownership",
-        "ownership delta comparison is not served",
-    ),
-    unsupported_value(
-        "change_kinds[]",
-        "tests",
-        "test delta comparison is not served",
-    ),
-    unsupported_value(
-        "change_kinds[]",
-        "routes",
-        "route delta comparison is not served",
-    ),
-    unsupported_value(
-        "change_kinds[]",
-        "data",
-        "data-schema delta comparison is not served",
-    ),
-    unsupported_value(
-        "profile",
-        "evidence",
-        "the current output has no optional evidence representation",
-    ),
-    unsupported_value(
-        "profile",
-        "standard",
-        "the current output has no optional standard representation",
+    implemented(
+        "budget.evidence_level",
+        "reduces optional evidence representation without changing detected deltas",
     ),
 ];
 
 const PLAN_CHANGE_RULES: &[CapabilityRule] = &[
-    accepted_fallback("repository"),
-    accepted_fallback("generation"),
-    accepted_fallback("objective"),
+    implemented("repository", "selects the repository to plan against"),
+    implemented(
+        "generation",
+        "pins every provider to one immutable generation",
+    ),
+    implemented(
+        "objective",
+        "selects the objective-specific ordered plan policy",
+    ),
     implemented(
         "objective_text",
         "is preserved as a caller-authored outcome to validate in the first plan step",
     ),
-    accepted_fallback("targets"),
-    accepted_fallback("max_steps"),
+    implemented(
+        "targets",
+        "resolves symbols files packages routes and located-result handles",
+    ),
+    implemented(
+        "constraints",
+        "adds a bounded caller-constraint verification step",
+    ),
+    implemented(
+        "change_context",
+        "expands impact evidence and targets from working-tree Git or hypothetical changes",
+    ),
+    implemented(
+        "max_steps",
+        "bounds the valid dependency-ordered plan prefix",
+    ),
     implemented(
         "profile",
         "selects compact, standard, or bounded evidence representation",
     ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported("change_context", "change-context resolution is not served"),
-    unsupported("constraints", "user constraint evaluation is not served"),
     implemented("budget", "reduces the common hard execution budget"),
-    unsupported("budget.evidence_level", "evidence projection is not served"),
+    implemented(
+        "budget.evidence_level",
+        "bounds provider evidence retained in plan rationales",
+    ),
 ];
 
 const CONTEXT_PACK_RULES: &[CapabilityRule] = &[
-    accepted_fallback("repository"),
-    accepted_fallback("generation"),
-    accepted_fallback("task"),
-    accepted_fallback("seeds"),
+    implemented(
+        "repository",
+        "selects the repository containing pack evidence",
+    ),
+    implemented(
+        "generation",
+        "pins all evidence providers to one immutable generation",
+    ),
+    implemented(
+        "task",
+        "drives objective inference and required-role policy",
+    ),
+    implemented(
+        "seeds",
+        "resolves symbol path route test located change and plan anchors",
+    ),
     implemented("explain", "returns a deterministic source-free plan"),
-    unsupported("seeds.paths", "path seeds are not served"),
-    unsupported("seeds.routes", "route seeds are not served"),
-    unsupported("seeds.located", "located-result seeds are not served"),
-    unsupported("seeds.change", "change seeds are not served"),
-    unsupported("seeds.plan", "plan seeds are not served"),
     implemented(
         "source_policy",
         "controls references, signatures, or bounded source snippets",
@@ -1428,7 +1611,16 @@ const fn handler_path(tool: McpTool) -> &'static str {
 
 const fn tool_status(tool: McpTool) -> CapabilityStatus {
     match tool {
-        McpTool::OperationStatus => CapabilityStatus::Implemented,
+        McpTool::OperationStatus
+        | McpTool::SymbolExplain
+        | McpTool::ChangeImpact
+        | McpTool::TestsSelect
+        | McpTool::ArchitectureOverview
+        | McpTool::ArchitectureCycles
+        | McpTool::CodeDead
+        | McpTool::HistoryCompare
+        | McpTool::PlanChange
+        | McpTool::ContextPack => CapabilityStatus::Implemented,
         _ => CapabilityStatus::FallbackLimited,
     }
 }
@@ -1478,7 +1670,7 @@ const fn response_profile_support(tool: McpTool) -> ResponseProfileSupport {
         },
         McpTool::HistoryCompare => ResponseProfileSupport::Selectable {
             wire_field: ResponseProfileField::Profile,
-            supported: COMPACT_RESPONSE_PROFILES,
+            supported: ANALYTICAL_RESPONSE_PROFILES,
             default: ResponseProfile::Compact,
         },
         McpTool::ChangeImpact | McpTool::TestsSelect | McpTool::PlanChange => {
@@ -1604,13 +1796,13 @@ const fn input_shape_hash(tool: McpTool) -> &'static str {
             "88a025148025aba3a15c75079c84fae1cc6279bd02fc4321c92f762cdb632676"
         }
         McpTool::ArchitectureCycles => {
-            "0901c86176b3e32dfdc0db4ae60e920904f4b3ad50a4976c6f54e49262de2bfc"
+            "c0735c083bc4237f2bdf348c9dc49eb86dd150757175b30829409069ee279adb"
         }
-        McpTool::CodeDead => "bcfeb504626e073f2ca7412e8c8c836fe63e54812c969f059cd960d01af6d8da",
+        McpTool::CodeDead => "27795802c702c0cd175cec9f563dfdcc92a9265255deaf7864c35d3ba59735ed",
         McpTool::HistoryCompare => {
-            "d13e631267a97376b41023ab79cdf3afbd80f8de46414857259e528bc8214f5b"
+            "af9136aed73a5347ffd2911202ad79690df87465468ba5e5379537d23097e099"
         }
-        McpTool::PlanChange => "90e947c75b35325cb394ddcf457016defd0ec7cd54de62c026ce5c37566c07d1",
+        McpTool::PlanChange => "e5f71b656fee51909c5e890683ec943cd445ba1261e4c76ba827ae51a3ae35e7",
         McpTool::ContextPack => "b83aa16bc6f116cc4354fb3058f61d637090562f70f7966a9220b63db3e564fc",
         McpTool::SourceRead => "0bf1574c6ce6a0a4e99261bc6ec5f0e22dd872da1071dc2f26a9eb00663a4659",
         McpTool::QueryAdvanced => {
@@ -1632,7 +1824,7 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
         McpTool::OperationStatus => "bounded operation read and cancel",
         McpTool::CodeLocate => "bounded exact-identifier or indexed lexical-text matching",
         McpTool::SymbolExplain => {
-            "bounded definitions, exact relation counts, and optional compact producer provenance"
+            "bounded sectioned explanations with typed evidence, source preview, and provenance"
         }
         McpTool::SymbolRelationships => {
             "bounded static call, caller, reference, type, implementation, and import relationships"
@@ -1640,25 +1832,29 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
         McpTool::FlowTrace => {
             "bounded paths over static call, reference, type, implementation, and import edges"
         }
-        McpTool::ChangeImpact => "bounded explicit symbol-or-path change mapping",
-        McpTool::TestsSelect => "bounded unit-test ranking from explicit symbol seeds",
+        McpTool::ChangeImpact => {
+            "bounded explicit or Git-derived change mapping with scoped conservative coverage"
+        }
+        McpTool::TestsSelect => {
+            "bounded cost-aware test ranking from symbol, path, change, and build-target seeds"
+        }
         McpTool::ArchitectureOverview => {
-            "bounded file-granularity architecture map with optional hotspots"
+            "bounded scoped multi-view architecture map with optional connections and evidence"
         }
         McpTool::ArchitectureCycles => {
-            "bounded symbol-level cycles over static call, reference, type, implementation, and import edges"
+            "bounded scoped ranked cycles over declared normalized relation projections and aggregation levels"
         }
         McpTool::CodeDead => {
-            "bounded static reachability observations from the partial standard entry-point model"
+            "bounded static reachability observations with explicit entry policies, suppressions, and coverage caveats"
         }
         McpTool::HistoryCompare => {
-            "bounded entity and signature comparison of two explicit retained generation identifiers"
+            "bounded scoped semantic comparison across retained or current Git-resolved states"
         }
         McpTool::PlanChange => {
-            "bounded change planning from a caller-authored objective and explicit targets"
+            "bounded evidence-backed change planning with typed targets constraints and change context"
         }
         McpTool::ContextPack => {
-            "bounded profiled evidence assembly with authenticated continuation, generation-pinned references signatures and source snippets under a token budget"
+            "bounded profiled multi-seed evidence assembly with authenticated continuation under a token budget"
         }
         McpTool::SourceRead => {
             "bounded source ranges from pinned source references as untrusted data"
@@ -1682,7 +1878,7 @@ mod tests {
     use super::{
         ANALYTICAL_RESPONSE_PROFILES, BATCH_ELIGIBLE, CAPABILITIES, COMPACT_RESPONSE_PROFILES,
         CapabilityStatus, GenerationSemantics, McpTool, PaginationSemantics,
-        ResponseProfileSupport, is_batch_eligible,
+        ResponseProfileSupport, capability_for, discovery_metadata, is_batch_eligible,
     };
     use crate::{ErrorCode, vertical::ResponseProfile};
 
@@ -1704,7 +1900,20 @@ mod tests {
                 .filter(|entry| {
                     !matches!(
                         entry.tool,
-                        McpTool::RepoList | McpTool::RepoIndex | McpTool::OperationStatus
+                        McpTool::RepoList
+                            | McpTool::RepoIndex
+                            | McpTool::RepoStatus
+                            | McpTool::OperationStatus
+                            | McpTool::SymbolExplain
+                            | McpTool::SymbolRelationships
+                            | McpTool::ChangeImpact
+                            | McpTool::TestsSelect
+                            | McpTool::ArchitectureOverview
+                            | McpTool::ArchitectureCycles
+                            | McpTool::CodeDead
+                            | McpTool::HistoryCompare
+                            | McpTool::PlanChange
+                            | McpTool::ContextPack
                     )
                 })
                 .all(|entry| entry.contract_version == crate::MCP_SCHEMA_VERSION)
@@ -1824,7 +2033,7 @@ mod tests {
                 McpTool::HistoryCompare,
                 Selectable {
                     wire_field: Profile,
-                    supported: COMPACT_RESPONSE_PROFILES,
+                    supported: ANALYTICAL_RESPONSE_PROFILES,
                     default: Compact,
                 },
             ),
@@ -2102,15 +2311,9 @@ mod tests {
                 .status,
             CapabilityStatus::Implemented
         );
-        let unsupported_level = cycles.disposition("projection.level", Some("module"));
-        assert_eq!(
-            unsupported_level.status,
-            CapabilityStatus::UnsupportedStableError
-        );
-        assert_eq!(
-            unsupported_level.error_code,
-            Some(ErrorCode::UnsupportedCapability)
-        );
+        let module_level = cycles.disposition("projection.level", Some("module"));
+        assert_eq!(module_level.status, CapabilityStatus::Implemented);
+        assert_eq!(module_level.error_code, None);
 
         let source_read = CAPABILITIES[McpTool::SourceRead as usize];
         assert_eq!(
@@ -2123,6 +2326,36 @@ mod tests {
             assert_eq!(
                 source_read.disposition(path, None).status,
                 CapabilityStatus::Implemented
+            );
+        }
+    }
+
+    #[test]
+    fn completed_analysis_workflows_advertise_no_fallback_limitations() {
+        for tool in [
+            McpTool::SymbolExplain,
+            McpTool::ChangeImpact,
+            McpTool::TestsSelect,
+            McpTool::ArchitectureOverview,
+            McpTool::ArchitectureCycles,
+            McpTool::CodeDead,
+        ] {
+            let capability = capability_for(tool);
+            assert_eq!(capability.status, CapabilityStatus::Implemented);
+            assert!(
+                capability
+                    .rules
+                    .iter()
+                    .all(|rule| rule.status == CapabilityStatus::Implemented),
+                "{} retains a non-implemented field disposition",
+                tool.name()
+            );
+            let discovery = discovery_metadata(tool);
+            assert_eq!(discovery.status, "implemented");
+            assert!(
+                discovery.limitations.is_empty(),
+                "{} retains public fallback limitations",
+                tool.name()
             );
         }
     }

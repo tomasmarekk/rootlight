@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
-    io::{BufWriter, Write as _},
+    io::{BufWriter, Read as _, Write as _},
     path::{Path, PathBuf},
     str::FromStr as _,
     sync::{
@@ -13,6 +13,7 @@ use std::{
 };
 
 use cap_std::{ambient_authority, fs::Dir};
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use rootlight_cancel::Cancellation;
 use rootlight_catalog::OracleReader;
 use rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES;
@@ -51,6 +52,7 @@ const SOURCE_BLOB_PAYLOAD_FILENAME: &str = "content";
 const SOURCE_POINTER_MAGIC: &[u8] = b"rootlight.source-pointer/1\n";
 const MANIFEST_FILENAME: &str = "manifest.json";
 const RECOVERY_SNAPSHOT_FILENAME: &str = "recovery.json";
+const RECOVERY_SNAPSHOT_GZIP_FILENAME: &str = "recovery.json.gz";
 const RECOVERY_MANIFEST_FILENAME: &str = "recovery-manifest.json";
 const INCREMENTAL_STATE_FILENAME: &str = "incremental.json";
 const ACTIVATION_MANIFEST_FILENAME: &str = "activation.json";
@@ -59,7 +61,8 @@ const LEGACY_GENERATION_MANIFEST_VERSION: u16 = 1;
 const GENERATION_MANIFEST_VERSION: u16 = 2;
 pub(super) const REPOSITORY_METADATA_VERSION: u16 = 1;
 const SOURCE_STORAGE_VERSION: u16 = 1;
-const RECOVERY_SNAPSHOT_VERSION: u16 = 1;
+const LEGACY_RECOVERY_SNAPSHOT_VERSION: u16 = 1;
+const RECOVERY_SNAPSHOT_VERSION: u16 = 2;
 const INCREMENTAL_STATE_VERSION: u16 = 1;
 const LEGACY_ACTIVATION_MANIFEST_VERSION: u16 = 1;
 const ACTIVATION_MANIFEST_VERSION: u16 = 2;
@@ -67,6 +70,8 @@ const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_ACTIVATION_MANIFEST_BYTES: u64 = 4 * 1024;
 const MAX_RECOVERY_MANIFEST_BYTES: u64 = 4 * 1024;
 const MAX_RECOVERY_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_RECOVERY_ENCODED_BYTES: u64 = MAX_RECOVERY_SNAPSHOT_BYTES + 1024 * 1024;
+const RECOVERY_DECODE_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_INCREMENTAL_STATE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SOURCE_POINTER_BYTES: u64 = 256;
 const RECOVERY_WRITE_BUFFER_BYTES: usize = 1024 * 1024;
@@ -219,11 +224,23 @@ struct DurableRecoverySnapshot {
     version: u16,
     bytes: u64,
     digest: ContentHash,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encoding: Option<RecoverySnapshotEncoding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    decoded_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    decoded_digest: Option<ContentHash>,
     contract_major: u16,
     contract_minor: u16,
     manifest_hash: ContentHash,
     configuration_hash: ContentHash,
     provider_set_hash: ContentHash,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RecoverySnapshotEncoding {
+    Gzip,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -302,6 +319,43 @@ fn buffered_recovery_writer<W: std::io::Write>(inner: W) -> RecoverySnapshotWrit
 
 fn content_hash_bytes(bytes: &[u8]) -> ContentHash {
     ContentHash::from_bytes(*blake3::hash(bytes).as_bytes())
+}
+
+fn decode_recovery_snapshot(
+    encoded: &[u8],
+    expected_bytes: u64,
+    cancellation: &Cancellation,
+) -> Result<Vec<u8>, FirstSliceError> {
+    let mut decoder = GzDecoder::new(encoded);
+    let mut decoded = Vec::new();
+    decoded
+        .try_reserve_exact(usize::try_from(expected_bytes).map_err(|_| FirstSliceError::Limits)?)
+        .map_err(|_| FirstSliceError::Limits)?;
+    let mut buffer = [0_u8; RECOVERY_DECODE_BUFFER_BYTES];
+    loop {
+        check_cancellation(cancellation)?;
+        let read = decoder
+            .read(&mut buffer)
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        if read == 0 {
+            break;
+        }
+        let next = u64::try_from(decoded.len())
+            .map_err(|_| FirstSliceError::Limits)?
+            .checked_add(u64::try_from(read).map_err(|_| FirstSliceError::Limits)?)
+            .ok_or(FirstSliceError::Limits)?;
+        if next > expected_bytes {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        decoded
+            .try_reserve(read)
+            .map_err(|_| FirstSliceError::Limits)?;
+        decoded.extend_from_slice(&buffer[..read]);
+    }
+    if u64::try_from(decoded.len()).ok() != Some(expected_bytes) {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(decoded)
 }
 
 impl<W: std::io::Write> std::io::Write for RecoverySnapshotWriter<W> {
@@ -1318,27 +1372,48 @@ impl DurablePreparedGeneration {
         }
         let staging = self.staging();
         let file = staging
-            .create_file(OsStr::new(RECOVERY_SNAPSHOT_FILENAME))
+            .create_file(OsStr::new(RECOVERY_SNAPSHOT_GZIP_FILENAME))
             .map_err(|_| FirstSliceError::Catalog)?;
-        let mut writer = buffered_recovery_writer(file);
-        serde_json::to_writer(&mut writer, snapshot.document())
+        let encoded_writer = buffered_recovery_writer(file);
+        let encoder = GzEncoder::new(encoded_writer, Compression::fast());
+        let mut decoded_writer = RecoverySnapshotWriter::new(encoder);
+        serde_json::to_writer(&mut decoded_writer, snapshot.document())
             .map_err(|_| FirstSliceError::Catalog)?;
-        writer.flush().map_err(|_| FirstSliceError::Catalog)?;
-        if writer.bytes != expected_bytes || writer.bytes > MAX_RECOVERY_SNAPSHOT_BYTES {
+        decoded_writer
+            .flush()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        if decoded_writer.bytes != expected_bytes
+            || decoded_writer.bytes > MAX_RECOVERY_SNAPSHOT_BYTES
+        {
             return Err(FirstSliceError::CatalogCorrupt);
         }
-        writer
+        let decoded_bytes = decoded_writer.bytes;
+        let decoded_digest = ContentHash::from_bytes(*decoded_writer.hasher.finalize().as_bytes());
+        let mut encoded_writer = decoded_writer
+            .inner
+            .finish()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        encoded_writer
+            .flush()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        if encoded_writer.bytes == 0 || encoded_writer.bytes > MAX_RECOVERY_ENCODED_BYTES {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        encoded_writer
             .inner
             .get_ref()
             .sync_all()
             .map_err(|_| FirstSliceError::Catalog)?;
-        self.account_staging_bytes(writer.bytes)?;
+        self.account_staging_bytes(encoded_writer.bytes)?;
         let metadata = snapshot.metadata();
         let contract = metadata.contract_version();
         let recovery = DurableRecoverySnapshot {
             version: RECOVERY_SNAPSHOT_VERSION,
-            bytes: writer.bytes,
-            digest: ContentHash::from_bytes(*writer.hasher.finalize().as_bytes()),
+            bytes: encoded_writer.bytes,
+            digest: ContentHash::from_bytes(*encoded_writer.hasher.finalize().as_bytes()),
+            encoding: Some(RecoverySnapshotEncoding::Gzip),
+            decoded_bytes: Some(decoded_bytes),
+            decoded_digest: Some(decoded_digest),
             contract_major: contract.major(),
             contract_minor: contract.minor(),
             manifest_hash: metadata.manifest_hash(),
@@ -1361,7 +1436,7 @@ impl DurablePreparedGeneration {
             .sync_all()
             .map_err(|_| FirstSliceError::Catalog)?;
         self.account_staging_bytes(descriptor_bytes)?;
-        writer
+        encoded_writer
             .bytes
             .checked_add(descriptor_bytes)
             .ok_or(FirstSliceError::Limits)
@@ -1407,28 +1482,42 @@ impl DurablePreparedGeneration {
         root_identity: ContentHash,
         display_name: &str,
         root_path: &str,
-        receipt: FirstSliceIndexReceipt,
+        receipt: &mut FirstSliceIndexReceipt,
     ) -> Result<u64, FirstSliceError> {
         if receipt.generation != self.generation || display_name.is_empty() || root_path.is_empty()
         {
             return Err(FirstSliceError::CatalogCorrupt);
         }
-        let manifest = DurableGenerationManifest {
-            version: GENERATION_MANIFEST_VERSION,
-            root_identity,
-            display_name: display_name.to_owned(),
-            root_path: Some(root_path.to_owned()),
-            receipt,
-            incremental_state: *self
-                .incremental_state
-                .lock()
-                .map_err(|_| FirstSliceError::Catalog)?,
-            source_storage: *self
-                .source_storage
-                .lock()
-                .map_err(|_| FirstSliceError::Catalog)?,
+        let retained_before_manifest = self.accounted_bytes.load(Ordering::Acquire);
+        let incremental_state = *self
+            .incremental_state
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        let source_storage = *self
+            .source_storage
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        // The manifest stores its own contribution to retained size. Re-encode
+        // until the decimal field width is reflected in that exact total.
+        let bytes = loop {
+            let manifest = DurableGenerationManifest {
+                version: GENERATION_MANIFEST_VERSION,
+                root_identity,
+                display_name: display_name.to_owned(),
+                root_path: Some(root_path.to_owned()),
+                receipt: receipt.clone(),
+                incremental_state,
+                source_storage,
+            };
+            let bytes = serde_json::to_vec(&manifest).map_err(|_| FirstSliceError::Catalog)?;
+            let retained_durable_bytes = retained_before_manifest
+                .checked_add(u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)?)
+                .ok_or(FirstSliceError::Limits)?;
+            if receipt.retained_durable_bytes == retained_durable_bytes {
+                break bytes;
+            }
+            receipt.retained_durable_bytes = retained_durable_bytes;
         };
-        let bytes = serde_json::to_vec(&manifest).map_err(|_| FirstSliceError::Catalog)?;
         if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_MANIFEST_BYTES {
             return Err(FirstSliceError::Limits);
         }
@@ -2209,26 +2298,60 @@ fn restore_recovery_generation(
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
     let recovery: DurableRecoverySnapshot =
         serde_json::from_slice(&descriptor).map_err(|_| FirstSliceError::CatalogCorrupt)?;
-    if recovery.version != RECOVERY_SNAPSHOT_VERSION
-        || recovery.bytes == 0
-        || recovery.bytes > MAX_RECOVERY_SNAPSHOT_BYTES
-        || GenerationContractVersion::new(recovery.contract_major, recovery.contract_minor)
-            != GENERATION_CONTRACT_VERSION
+    let contract = GenerationContractVersion::new(recovery.contract_major, recovery.contract_minor);
+    if contract != GENERATION_CONTRACT_VERSION {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let (snapshot_name, decoded_bytes, decoded_digest) = match recovery.version {
+        LEGACY_RECOVERY_SNAPSHOT_VERSION
+            if recovery.encoding.is_none()
+                && recovery.decoded_bytes.is_none()
+                && recovery.decoded_digest.is_none()
+                && recovery.bytes > 0
+                && recovery.bytes <= MAX_RECOVERY_SNAPSHOT_BYTES =>
+        {
+            (RECOVERY_SNAPSHOT_FILENAME, recovery.bytes, recovery.digest)
+        }
+        RECOVERY_SNAPSHOT_VERSION
+            if matches!(recovery.encoding, Some(RecoverySnapshotEncoding::Gzip))
+                && recovery.bytes > 0
+                && recovery.bytes <= MAX_RECOVERY_ENCODED_BYTES =>
+        {
+            let decoded_bytes = recovery
+                .decoded_bytes
+                .filter(|bytes| *bytes > 0 && *bytes <= MAX_RECOVERY_SNAPSHOT_BYTES)
+                .ok_or(FirstSliceError::CatalogCorrupt)?;
+            let decoded_digest = recovery
+                .decoded_digest
+                .ok_or(FirstSliceError::CatalogCorrupt)?;
+            (
+                RECOVERY_SNAPSHOT_GZIP_FILENAME,
+                decoded_bytes,
+                decoded_digest,
+            )
+        }
+        _ => return Err(FirstSliceError::CatalogCorrupt),
+    };
+    let encoded = generation_directory
+        .read_file_bounded_cancellable(OsStr::new(snapshot_name), recovery.bytes, cancellation)
+        .map_err(map_private_read_error)?;
+    if u64::try_from(encoded.len()).ok() != Some(recovery.bytes)
+        || content_hash_bytes(&encoded) != recovery.digest
     {
         return Err(FirstSliceError::CatalogCorrupt);
     }
-    let encoded = generation_directory
-        .read_file_bounded_cancellable(
-            OsStr::new(RECOVERY_SNAPSHOT_FILENAME),
-            recovery.bytes,
-            cancellation,
-        )
-        .map_err(map_private_read_error)?;
-    if u64::try_from(encoded.len()).ok() != Some(recovery.bytes) {
+    let decoded = match recovery.version {
+        LEGACY_RECOVERY_SNAPSHOT_VERSION => encoded,
+        RECOVERY_SNAPSHOT_VERSION => {
+            decode_recovery_snapshot(&encoded, decoded_bytes, cancellation)?
+        }
+        _ => return Err(FirstSliceError::CatalogCorrupt),
+    };
+    if content_hash_bytes(&decoded) != decoded_digest {
         return Err(FirstSliceError::CatalogCorrupt);
     }
     let metadata = GenerationMetadata::new_for_contract(
-        GenerationContractVersion::new(recovery.contract_major, recovery.contract_minor),
+        contract,
         repository,
         generation,
         parent,
@@ -2242,11 +2365,11 @@ fn restore_recovery_generation(
     // default import envelope. The sidecar supplies the exact checksummed
     // length, still capped by the recovery hard bound.
     recovery_limits.max_document_bytes =
-        usize::try_from(recovery.bytes).map_err(|_| FirstSliceError::Limits)?;
+        usize::try_from(decoded_bytes).map_err(|_| FirstSliceError::Limits)?;
     IdentityVerifiedGeneration::restore_published_json(
         metadata,
-        &encoded,
-        recovery.digest,
+        &decoded,
+        decoded_digest,
         &recovery_limits,
         &ExtensionSupport::default(),
         context,

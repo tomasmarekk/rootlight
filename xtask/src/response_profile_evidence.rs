@@ -11,11 +11,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rootlight_agent::response_profile::shape_batch_child_data;
+use rootlight_agent::response_profile::{shape_batch_child_data, shape_data};
 use rootlight_mcp_contract::{
     accounting::estimate_tokens,
     capability::{CAPABILITIES, ResponseProfileSupport},
     catalog::McpTool,
+    change::HistoryCompareData,
     context::BatchTool,
     vertical::ResponseProfile,
 };
@@ -573,6 +574,7 @@ fn representative_output(
                 "kind": "crate",
                 "name": "agent",
                 "symbol_count": 17,
+                "file_count": 1,
                 "responsibility_evidence": [
                     "responsibility-0",
                     "responsibility-1",
@@ -581,6 +583,7 @@ fn representative_output(
                     "responsibility-4",
                     "responsibility-5"
                 ],
+                "source_refs": refs(6),
                 "confidence": 940,
                 "trust": "untrusted_repository_data"
             }],
@@ -597,6 +600,8 @@ fn representative_output(
                 "fan_out": 13,
                 "change_frequency": 21,
                 "complexity": 34,
+                "ownership_signal": 8,
+                "test_signal": 5,
                 "score": 915
             }],
             "views": [{
@@ -608,7 +613,10 @@ fn representative_output(
             "components": [{
                 "size": 2,
                 "members": ["component-a", "component-b"],
-                "internal_edges": 3
+                "internal_edges": 3,
+                "edge_weight": 2_700,
+                "change_risk": 4,
+                "break_cost": 420
             }],
             "cycles": [{
                 "nodes": ["component-a", "component-b", "component-a"],
@@ -621,7 +629,14 @@ fn representative_output(
                 "kind": "imports",
                 "break_cost": 420,
                 "source_refs": refs(6)
-            }]
+            }],
+            "projection": {
+                "relations": ["imports"],
+                "min_confidence": 700,
+                "level": "symbol",
+                "rank_by": "size",
+                "omitted_nodes": 0
+            }
         }),
         McpTool::CodeDead => serde_json::json!({
             "candidates": [{
@@ -634,12 +649,19 @@ fn representative_output(
                     "public-export",
                     "reflection-hook"
                 ],
+                "reachability": {
+                    "reached_from_entry_points": false,
+                    "incoming_edges": 1,
+                    "strongest_incoming_confidence": 700
+                },
+                "uncertainty": ["dynamic-dispatch"],
                 "source_refs": refs(6),
                 "trust": "untrusted_repository_data"
             }],
             "entry_points": {
                 "policy": "standard",
                 "entry_point_count": 7,
+                "entry_symbols": [symbol_id],
                 "complete": false
             },
             "blind_spots": [{
@@ -649,7 +671,8 @@ fn representative_output(
             "false_positive_controls": [{
                 "rule": "exported-symbol",
                 "suppressed_count": 5
-            }]
+            }],
+            "coverage_caveats": ["runtime-dispatch-is-not-observed"]
         }),
         McpTool::PlanChange => serde_json::json!({
             "plan": [{
@@ -724,6 +747,45 @@ fn representative_output(
             }
             return Ok(output);
         }
+        McpTool::HistoryCompare => {
+            let matched_states =
+                output
+                    .pointer("/data/matched_states")
+                    .cloned()
+                    .ok_or_else(|| {
+                        ResponseProfileEvidenceError::Contract(
+                            "history.compare source example has no matched states".to_owned(),
+                        )
+                    })?;
+            serde_json::json!({
+                "matched_states": matched_states,
+                "changes": [{
+                    "kind": "signature_modified",
+                    "symbol_id": symbol_id,
+                    "entity_kind": "function",
+                    "breaking_candidate": true,
+                    "significance": 950
+                }],
+                "architecture_delta": {
+                    "new_cross_service_edges": 2,
+                    "removed_cross_service_edges": 1,
+                    "new_boundaries": 1,
+                    "removed_boundaries": 0
+                },
+                "breaking_candidates": (0_u32..6).map(|index| serde_json::json!({
+                    "symbol_id": symbol_id,
+                    "consumer_count": index + 1,
+                    "is_public_surface": true,
+                    "reason": "public-consumer"
+                })).collect::<Vec<_>>(),
+                "lineage": (0_u16..6).map(|index| serde_json::json!({
+                    "base_symbol_id": symbol_id,
+                    "head_symbol_id": symbol_id,
+                    "confidence": 900 - index,
+                    "is_rename": index % 2 == 0
+                })).collect::<Vec<_>>()
+            })
+        }
         McpTool::QueryBatch => {
             let child_data = representative_output(McpTool::CodeLocate, canonical, source_ref)?
                 .get("data")
@@ -748,7 +810,6 @@ fn representative_output(
         | McpTool::RepoStatus
         | McpTool::RepoList
         | McpTool::OperationStatus
-        | McpTool::HistoryCompare
         | McpTool::SourceRead
         | McpTool::QueryAdvanced => return Ok(output),
     };
@@ -793,6 +854,26 @@ fn shape_output(
         })?;
     } else if matches!(tool, McpTool::QueryBatch) {
         shape_batch_output(&mut output, profile)?;
+    } else if matches!(tool, McpTool::HistoryCompare) {
+        let data = output.get_mut("data").ok_or_else(|| {
+            ResponseProfileEvidenceError::Contract(
+                "history.compare source example has no data".to_owned(),
+            )
+        })?;
+        let mut history: HistoryCompareData =
+            serde_json::from_value(data.take()).map_err(|source| {
+                ResponseProfileEvidenceError::JsonValue {
+                    context: "history.compare data",
+                    source,
+                }
+            })?;
+        shape_data(&mut history, profile);
+        *data = serde_json::to_value(history).map_err(|source| {
+            ResponseProfileEvidenceError::JsonValue {
+                context: "history.compare shaped data",
+                source,
+            }
+        })?;
     }
     Ok(output)
 }

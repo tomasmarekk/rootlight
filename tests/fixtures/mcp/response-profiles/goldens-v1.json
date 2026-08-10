@@ -73,7 +73,8 @@
           "recommended_actions": [],
           "repository_state": "ready",
           "requested_generation": null,
-          "resolved_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by"
+          "resolved_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "retained_durable_bytes": 0
         },
         "generation": {
           "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
@@ -86,14 +87,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 335,
-          "json_bytes": 1340,
+          "estimated_tokens": 342,
+          "json_bytes": 1367,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-status-1",
@@ -178,6 +179,7 @@
               "peak_rss_bytes": 0,
               "referenced_bytes": 0,
               "reserved_memory_bytes": 0,
+              "retained_durable_bytes": 0,
               "written_bytes": 0
             },
             "revision": 1,
@@ -189,7 +191,7 @@
           "retry_after_ms": null,
           "semantic_operation_id": null
         },
-        "schema_version": "1.1"
+        "schema_version": "1.2"
       }
     },
     {
@@ -534,7 +536,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -635,7 +637,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -750,7 +752,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -828,7 +830,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -932,7 +934,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -1058,7 +1060,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -1510,7 +1512,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -1605,7 +1607,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -1702,7 +1704,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -1735,6 +1737,7 @@
         },
         "data": {
           "coverage_strategy": {
+            "build_target_signals": false,
             "direct_edges": true,
             "file_colocation_signals": true,
             "history_signals": false,
@@ -1763,14 +1766,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 234,
-          "json_bytes": 935,
+          "estimated_tokens": 241,
+          "json_bytes": 964,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-tests-select-1",
@@ -1796,6 +1799,7 @@
         },
         "data": {
           "coverage_strategy": {
+            "build_target_signals": false,
             "direct_edges": true,
             "file_colocation_signals": true,
             "history_signals": false,
@@ -1830,14 +1834,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 269,
-          "json_bytes": 1075,
+          "estimated_tokens": 276,
+          "json_bytes": 1104,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-tests-select-1",
@@ -1863,6 +1867,7 @@
         },
         "data": {
           "coverage_strategy": {
+            "build_target_signals": false,
             "direct_edges": true,
             "file_colocation_signals": true,
             "history_signals": false,
@@ -1899,14 +1904,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 275,
-          "json_bytes": 1097,
+          "estimated_tokens": 282,
+          "json_bytes": 1126,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-tests-select-1",
@@ -1934,11 +1939,98 @@
           "components": [
             {
               "confidence": 940,
+              "file_count": 1,
               "id": "component-a",
               "kind": "crate",
               "name": "agent",
               "responsibility_evidence": [
                 "responsibility-0"
+              ],
+              "source_refs": [
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                }
               ],
               "symbol_count": 17,
               "trust": "untrusted_repository_data"
@@ -1958,7 +2050,9 @@
               "component_id": "component-a",
               "fan_in": 8,
               "fan_out": 13,
-              "score": 915
+              "ownership_signal": 8,
+              "score": 915,
+              "test_signal": 5
             }
           ],
           "views": [
@@ -1979,14 +2073,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 291,
-          "json_bytes": 1164,
+          "estimated_tokens": 803,
+          "json_bytes": 3212,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-architecture-overview-1",
@@ -2014,6 +2108,7 @@
           "components": [
             {
               "confidence": 940,
+              "file_count": 1,
               "id": "component-a",
               "kind": "crate",
               "name": "agent",
@@ -2022,6 +2117,92 @@
                 "responsibility-1",
                 "responsibility-2",
                 "responsibility-3"
+              ],
+              "source_refs": [
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                }
               ],
               "symbol_count": 17,
               "trust": "untrusted_repository_data"
@@ -2043,7 +2224,9 @@
               "component_id": "component-a",
               "fan_in": 8,
               "fan_out": 13,
-              "score": 915
+              "ownership_signal": 8,
+              "score": 915,
+              "test_signal": 5
             }
           ],
           "views": [
@@ -2064,14 +2247,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 315,
-          "json_bytes": 1259,
+          "estimated_tokens": 827,
+          "json_bytes": 3307,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-architecture-overview-1",
@@ -2099,6 +2282,7 @@
           "components": [
             {
               "confidence": 940,
+              "file_count": 1,
               "id": "component-a",
               "kind": "crate",
               "name": "agent",
@@ -2110,6 +2294,92 @@
                 "responsibility-4",
                 "responsibility-5"
               ],
+              "source_refs": [
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                },
+                {
+                  "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                  "line_hint": {
+                    "end_line": 1,
+                    "start_line": 1
+                  },
+                  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                  "span": {
+                    "end_byte": 10,
+                    "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                    "start_byte": 0
+                  }
+                }
+              ],
               "symbol_count": 17,
               "trust": "untrusted_repository_data"
             }
@@ -2130,7 +2400,9 @@
               "component_id": "component-a",
               "fan_in": 8,
               "fan_out": 13,
-              "score": 915
+              "ownership_signal": 8,
+              "score": 915,
+              "test_signal": 5
             }
           ],
           "views": [
@@ -2151,14 +2423,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 325,
-          "json_bytes": 1297,
+          "estimated_tokens": 837,
+          "json_bytes": 3345,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-architecture-overview-1",
@@ -2205,6 +2477,9 @@
           ],
           "components": [
             {
+              "break_cost": 420,
+              "change_risk": 4,
+              "edge_weight": 2700,
               "internal_edges": 3,
               "members": [
                 "component-a",
@@ -2234,7 +2509,16 @@
                 "component-a"
               ]
             }
-          ]
+          ],
+          "projection": {
+            "level": "symbol",
+            "min_confidence": 700,
+            "omitted_nodes": 0,
+            "rank_by": "size",
+            "relations": [
+              "imports"
+            ]
+          }
         },
         "generation": {
           "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
@@ -2247,14 +2531,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 400,
-          "json_bytes": 1598,
+          "estimated_tokens": 441,
+          "json_bytes": 1762,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-architecture-cycles-1",
@@ -2331,6 +2615,9 @@
           ],
           "components": [
             {
+              "break_cost": 420,
+              "change_risk": 4,
+              "edge_weight": 2700,
               "internal_edges": 3,
               "members": [
                 "component-a",
@@ -2390,7 +2677,16 @@
                 "component-a"
               ]
             }
-          ]
+          ],
+          "projection": {
+            "level": "symbol",
+            "min_confidence": 700,
+            "omitted_nodes": 0,
+            "rank_by": "size",
+            "relations": [
+              "imports"
+            ]
+          }
         },
         "generation": {
           "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
@@ -2403,14 +2699,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 832,
-          "json_bytes": 3326,
+          "estimated_tokens": 873,
+          "json_bytes": 3490,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-architecture-cycles-1",
@@ -2531,6 +2827,9 @@
           ],
           "components": [
             {
+              "break_cost": 420,
+              "change_risk": 4,
+              "edge_weight": 2700,
               "internal_edges": 3,
               "members": [
                 "component-a",
@@ -2634,7 +2933,16 @@
                 "component-a"
               ]
             }
-          ]
+          ],
+          "projection": {
+            "level": "symbol",
+            "min_confidence": 700,
+            "omitted_nodes": 0,
+            "rank_by": "size",
+            "relations": [
+              "imports"
+            ]
+          }
         },
         "generation": {
           "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
@@ -2647,14 +2955,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 1246,
-          "json_bytes": 4983,
+          "estimated_tokens": 1287,
+          "json_bytes": 5147,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-architecture-cycles-1",
@@ -2689,6 +2997,11 @@
             {
               "classification": "not_observed_from_entry_points_strong_references",
               "confidence": 900,
+              "reachability": {
+                "incoming_edges": 1,
+                "reached_from_entry_points": false,
+                "strongest_incoming_confidence": 700
+              },
               "source_refs": [
                 {
                   "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
@@ -2708,14 +3021,23 @@
               ],
               "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
               "trust": "untrusted_repository_data",
+              "uncertainty": [
+                "dynamic-dispatch"
+              ],
               "why": [
                 "reason-0"
               ]
             }
           ],
+          "coverage_caveats": [
+            "runtime-dispatch-is-not-observed"
+          ],
           "entry_points": {
             "complete": false,
             "entry_point_count": 7,
+            "entry_symbols": [
+              "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            ],
             "policy": "standard"
           },
           "false_positive_controls": [
@@ -2736,14 +3058,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 382,
-          "json_bytes": 1526,
+          "estimated_tokens": 447,
+          "json_bytes": 1788,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-code-dead-1",
@@ -2778,6 +3100,11 @@
             {
               "classification": "not_observed_from_entry_points_strong_references",
               "confidence": 900,
+              "reachability": {
+                "incoming_edges": 1,
+                "reached_from_entry_points": false,
+                "strongest_incoming_confidence": 700
+              },
               "source_refs": [
                 {
                   "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
@@ -2827,6 +3154,9 @@
               ],
               "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
               "trust": "untrusted_repository_data",
+              "uncertainty": [
+                "dynamic-dispatch"
+              ],
               "why": [
                 "reason-0",
                 "reason-1",
@@ -2835,9 +3165,15 @@
               ]
             }
           ],
+          "coverage_caveats": [
+            "runtime-dispatch-is-not-observed"
+          ],
           "entry_points": {
             "complete": false,
             "entry_point_count": 7,
+            "entry_symbols": [
+              "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            ],
             "policy": "standard"
           },
           "false_positive_controls": [
@@ -2858,14 +3194,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 606,
-          "json_bytes": 2423,
+          "estimated_tokens": 672,
+          "json_bytes": 2685,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-code-dead-1",
@@ -2900,6 +3236,11 @@
             {
               "classification": "not_observed_from_entry_points_strong_references",
               "confidence": 900,
+              "reachability": {
+                "incoming_edges": 1,
+                "reached_from_entry_points": false,
+                "strongest_incoming_confidence": 700
+              },
               "source_refs": [
                 {
                   "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
@@ -2993,6 +3334,9 @@
               ],
               "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
               "trust": "untrusted_repository_data",
+              "uncertainty": [
+                "dynamic-dispatch"
+              ],
               "why": [
                 "reason-0",
                 "reason-1",
@@ -3003,9 +3347,15 @@
               ]
             }
           ],
+          "coverage_caveats": [
+            "runtime-dispatch-is-not-observed"
+          ],
           "entry_points": {
             "complete": false,
             "entry_point_count": 7,
+            "entry_symbols": [
+              "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            ],
             "policy": "standard"
           },
           "false_positive_controls": [
@@ -3026,14 +3376,14 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 819,
-          "json_bytes": 3273,
+          "estimated_tokens": 884,
+          "json_bytes": 3535,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-code-dead-1",
@@ -3059,14 +3409,36 @@
         },
         "data": {
           "architecture_delta": {
-            "new_boundaries": 0,
-            "new_cross_service_edges": 0,
+            "new_boundaries": 1,
+            "new_cross_service_edges": 2,
             "removed_boundaries": 0,
-            "removed_cross_service_edges": 0
+            "removed_cross_service_edges": 1
           },
-          "breaking_candidates": [],
-          "changes": [],
-          "lineage": [],
+          "breaking_candidates": [
+            {
+              "consumer_count": 1,
+              "is_public_surface": true,
+              "reason": "public-consumer",
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            }
+          ],
+          "changes": [
+            {
+              "breaking_candidate": true,
+              "entity_kind": "function",
+              "kind": "signature_modified",
+              "significance": 950,
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            }
+          ],
+          "lineage": [
+            {
+              "base_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "confidence": 900,
+              "head_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "is_rename": true
+            }
+          ],
           "matched_states": {
             "base_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
             "coverage": "complete",
@@ -3084,14 +3456,270 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 267,
-          "json_bytes": 1067,
+          "estimated_tokens": 380,
+          "json_bytes": 1519,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-history-compare-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      }
+    },
+    {
+      "tool": "history.compare",
+      "profile": "standard",
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "architecture_delta": {
+            "new_boundaries": 1,
+            "new_cross_service_edges": 2,
+            "removed_boundaries": 0,
+            "removed_cross_service_edges": 1
+          },
+          "breaking_candidates": [
+            {
+              "consumer_count": 1,
+              "is_public_surface": true,
+              "reason": "public-consumer",
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            },
+            {
+              "consumer_count": 2,
+              "is_public_surface": true,
+              "reason": "public-consumer",
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            },
+            {
+              "consumer_count": 3,
+              "is_public_surface": true,
+              "reason": "public-consumer",
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            },
+            {
+              "consumer_count": 4,
+              "is_public_surface": true,
+              "reason": "public-consumer",
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            }
+          ],
+          "changes": [
+            {
+              "breaking_candidate": true,
+              "entity_kind": "function",
+              "kind": "signature_modified",
+              "significance": 950,
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            }
+          ],
+          "lineage": [
+            {
+              "base_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "confidence": 900,
+              "head_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "is_rename": true
+            },
+            {
+              "base_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "confidence": 899,
+              "head_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "is_rename": false
+            },
+            {
+              "base_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "confidence": 898,
+              "head_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "is_rename": true
+            },
+            {
+              "base_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "confidence": 897,
+              "head_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "is_rename": false
+            }
+          ],
+          "matched_states": {
+            "base_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+            "coverage": "complete",
+            "head_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by"
+          }
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.1",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 603,
+          "json_bytes": 2409,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-history-compare-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      }
+    },
+    {
+      "tool": "history.compare",
+      "profile": "evidence",
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "architecture_delta": {
+            "new_boundaries": 1,
+            "new_cross_service_edges": 2,
+            "removed_boundaries": 0,
+            "removed_cross_service_edges": 1
+          },
+          "breaking_candidates": [
+            {
+              "consumer_count": 1,
+              "is_public_surface": true,
+              "reason": "public-consumer",
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            },
+            {
+              "consumer_count": 2,
+              "is_public_surface": true,
+              "reason": "public-consumer",
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            },
+            {
+              "consumer_count": 3,
+              "is_public_surface": true,
+              "reason": "public-consumer",
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            },
+            {
+              "consumer_count": 4,
+              "is_public_surface": true,
+              "reason": "public-consumer",
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            },
+            {
+              "consumer_count": 5,
+              "is_public_surface": true,
+              "reason": "public-consumer",
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            },
+            {
+              "consumer_count": 6,
+              "is_public_surface": true,
+              "reason": "public-consumer",
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            }
+          ],
+          "changes": [
+            {
+              "breaking_candidate": true,
+              "entity_kind": "function",
+              "kind": "signature_modified",
+              "significance": 950,
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            }
+          ],
+          "lineage": [
+            {
+              "base_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "confidence": 900,
+              "head_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "is_rename": true
+            },
+            {
+              "base_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "confidence": 899,
+              "head_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "is_rename": false
+            },
+            {
+              "base_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "confidence": 898,
+              "head_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "is_rename": true
+            },
+            {
+              "base_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "confidence": 897,
+              "head_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "is_rename": false
+            },
+            {
+              "base_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "confidence": 896,
+              "head_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "is_rename": true
+            },
+            {
+              "base_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "confidence": 895,
+              "head_symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey",
+              "is_rename": false
+            }
+          ],
+          "matched_states": {
+            "base_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+            "coverage": "complete",
+            "head_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by"
+          }
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.1",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 751,
+          "json_bytes": 3002,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-history-compare-1",
@@ -3170,7 +3798,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -3261,7 +3889,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -3354,7 +3982,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -3508,7 +4136,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -3683,7 +4311,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -3858,7 +4486,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {

@@ -109,7 +109,7 @@ jobs:
               "sourceRevision": revision,
               "status": "passed",
               "toolCount": 19,
-              "reviewedInputFields": 535,
+              "reviewedInputFields": 542,
               "schemaGoldenPairs": 19,
               "profileCounts": {
                   "scout": 6,

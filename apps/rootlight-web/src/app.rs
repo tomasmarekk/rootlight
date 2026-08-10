@@ -1366,6 +1366,7 @@ mod tests {
                     semantic_freshness: "current".to_owned(),
                     state: "ready".to_owned(),
                     publication_state: "published".to_owned(),
+                    retained_durable_bytes: 0,
                     coverage: vec![RepositoryCoverageEntry {
                         language: "rust".to_owned(),
                         tier: "tier_b".to_owned(),

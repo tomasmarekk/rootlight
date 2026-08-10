@@ -3312,7 +3312,7 @@ fn execute_journal_request(
     match request {
         ControlRequest::Health
         | ControlRequest::DiagnosticsQuick
-        | ControlRequest::SupportBundle(_) => Ok(ControlResponse::Error(invalid_argument(
+        | ControlRequest::SupportBundle(_, _) => Ok(ControlResponse::Error(invalid_argument(
             "request is served outside the journal actor",
         ))),
         ControlRequest::OperationSubmit(_) => Ok(ControlResponse::Error(invalid_argument(
@@ -3616,8 +3616,8 @@ pub enum ControlRequest {
     Health,
     /// Execute the bounded catalog quick check.
     DiagnosticsQuick,
-    /// Build a bounded source-free support archive.
-    SupportBundle(SupportBundleSchema),
+    /// Build a bounded source-free support archive with an optional repository scope.
+    SupportBundle(SupportBundleSchema, Option<RepositoryId>),
     /// Submit one durable operation for admission.
     OperationSubmit(OperationSubmission),
     /// Read one durable operation status.
@@ -5522,7 +5522,7 @@ impl DaemonOrchestrator {
 #[derive(Debug, Clone, Copy)]
 enum DiagnosticKind {
     Quick,
-    SupportBundle(SupportBundleSchema),
+    SupportBundle(SupportBundleSchema, Option<RepositoryId>),
 }
 
 enum DiagnosticCommand {
@@ -5672,7 +5672,9 @@ fn diagnostic_actor_loop(
         }
         let response = match kind {
             DiagnosticKind::Quick => service.diagnostics_quick_until(deadline),
-            DiagnosticKind::SupportBundle(schema) => service.support_bundle_until(schema, deadline),
+            DiagnosticKind::SupportBundle(schema, repository) => {
+                service.support_bundle_until(schema, repository, deadline)
+            }
         };
         state.busy.store(false, Ordering::Release);
         let _ = reply.send(response);
@@ -6138,24 +6140,37 @@ impl ControlService {
             HealthStatus::from_u8(self.state.endpoint_status.load(Ordering::Acquire));
         let generation_status =
             HealthStatus::from_u8(self.state.generation_status.load(Ordering::Acquire));
+        let adapter_status =
+            HealthStatus::from_u8(self.state.adapter_status.load(Ordering::Acquire));
+        let watcher_status =
+            HealthStatus::from_u8(self.state.watcher_status.load(Ordering::Acquire));
+        let resource_pressure =
+            ResourcePressure::from_u8(self.state.resource_pressure.load(Ordering::Acquire));
         let endpoint_ready = matches!(
             endpoint_status,
             HealthStatus::Healthy | HealthStatus::NotConfigured
         );
-        let generation_ready = matches!(
+        let generation_available = matches!(
             generation_status,
             HealthStatus::Healthy | HealthStatus::Degraded | HealthStatus::NotConfigured
         );
+        let operational_status = aggregate_health_status([
+            generation_status,
+            adapter_status,
+            watcher_status,
+            resource_pressure_health_status(resource_pressure),
+        ]);
         let accepting_operations = self.state.accepting_operations.load(Ordering::Acquire)
             && journal_healthy
             && catalog_status == HealthStatus::Healthy
-            && generation_ready
-            && endpoint_ready;
+            && generation_available
+            && endpoint_ready
+            && resource_pressure != ResourcePressure::Critical;
         Health {
             ready: lifecycle == DaemonLifecycle::Ready
                 && journal_healthy
                 && catalog_status == HealthStatus::Healthy
-                && generation_ready
+                && operational_status == HealthStatus::Healthy
                 && endpoint_ready,
             active_operations: admitted_operations,
             admitted_operations,
@@ -6171,15 +6186,9 @@ impl ControlService {
             catalog_status,
             catalog_schema_version: rootlight_operations::OPERATION_SCHEMA_VERSION,
             generation_status,
-            adapter_status: HealthStatus::from_u8(
-                self.state.adapter_status.load(Ordering::Acquire),
-            ),
-            watcher_status: HealthStatus::from_u8(
-                self.state.watcher_status.load(Ordering::Acquire),
-            ),
-            resource_pressure: ResourcePressure::from_u8(
-                self.state.resource_pressure.load(Ordering::Acquire),
-            ),
+            adapter_status,
+            watcher_status,
+            resource_pressure,
             endpoint_status,
             endpoint_schema_version: 2,
         }
@@ -6210,7 +6219,7 @@ impl ControlService {
                 self.update_catalog_status_from_diagnostic(HealthStatus::Healthy);
                 ControlResponse::DiagnosticsQuick(DiagnosticsQuick {
                     schema_version: 1,
-                    overall_status: HealthStatus::Healthy,
+                    overall_status: self.quick_diagnostic_status(HealthStatus::Healthy),
                     catalog: DiagnosticResult {
                         outcome: DiagnosticOutcome::Passed,
                         duration_ms,
@@ -6225,7 +6234,7 @@ impl ControlService {
                 }
                 ControlResponse::DiagnosticsQuick(DiagnosticsQuick {
                     schema_version: 1,
-                    overall_status: status,
+                    overall_status: self.quick_diagnostic_status(status),
                     catalog: DiagnosticResult {
                         outcome: diagnostic_outcome_for_error(&error),
                         duration_ms,
@@ -6245,6 +6254,18 @@ impl ControlService {
         }
     }
 
+    fn quick_diagnostic_status(&self, catalog_result: HealthStatus) -> HealthStatus {
+        let health = self.health();
+        aggregate_health_status([
+            catalog_result,
+            health.catalog_status,
+            health.generation_status,
+            health.adapter_status,
+            health.watcher_status,
+            resource_pressure_health_status(health.resource_pressure),
+        ])
+    }
+
     fn diagnostics_quick_path(&self, path: &std::path::Path, timeout: Duration) -> ControlResponse {
         let started = Instant::now();
         let checked = OperationJournal::quick_check_path_with_timeout(path, timeout);
@@ -6254,7 +6275,7 @@ impl ControlService {
                 self.update_catalog_status_from_diagnostic(HealthStatus::Healthy);
                 ControlResponse::DiagnosticsQuick(DiagnosticsQuick {
                     schema_version: 1,
-                    overall_status: HealthStatus::Healthy,
+                    overall_status: self.quick_diagnostic_status(HealthStatus::Healthy),
                     catalog: DiagnosticResult {
                         outcome: DiagnosticOutcome::Passed,
                         duration_ms,
@@ -6269,7 +6290,7 @@ impl ControlService {
                 }
                 ControlResponse::DiagnosticsQuick(DiagnosticsQuick {
                     schema_version: 1,
-                    overall_status: status,
+                    overall_status: self.quick_diagnostic_status(status),
                     catalog: DiagnosticResult {
                         outcome: diagnostic_outcome_for_error(&error),
                         duration_ms,
@@ -6280,16 +6301,22 @@ impl ControlService {
         }
     }
 
-    fn support_bundle(&self, schema: SupportBundleSchema, timeout: Duration) -> ControlResponse {
+    fn support_bundle(
+        &self,
+        schema: SupportBundleSchema,
+        repository: Option<RepositoryId>,
+        timeout: Duration,
+    ) -> ControlResponse {
         let Some(deadline) = Instant::now().checked_add(timeout) else {
             return ControlResponse::Error(request_timed_out());
         };
-        self.support_bundle_until(schema, deadline)
+        self.support_bundle_until(schema, repository, deadline)
     }
 
     fn support_bundle_until(
         &self,
         schema: SupportBundleSchema,
+        repository: Option<RepositoryId>,
         deadline: Instant,
     ) -> ControlResponse {
         let diagnostics = match self.diagnostics_quick_until(deadline) {
@@ -6311,7 +6338,7 @@ impl ControlService {
                 rootlight_observability::CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
             }
         };
-        let (terminal_operations, inventory) = if schema == SupportBundleSchema::V4 {
+        let (mut terminal_operations, mut inventory) = if schema == SupportBundleSchema::V4 {
             let terminal_records =
                 match self.journal.recent_terminal(MAX_RECENT_TERMINAL_OPERATIONS) {
                     Ok(records) => records,
@@ -6333,6 +6360,38 @@ impl ControlService {
         } else {
             (Vec::new(), None)
         };
+        if let Some(repository) = repository {
+            let repository_id = support_id(repository.as_bytes());
+            let Some(inventory) = inventory.as_mut() else {
+                return ControlResponse::Error(protocol_mismatch(
+                    "repository scoped support needs protocol minor eight",
+                ));
+            };
+            if !inventory
+                .repositories
+                .iter()
+                .any(|entry| entry.repository_id == repository_id)
+            {
+                return ControlResponse::Error(repository_not_found(repository));
+            }
+            inventory
+                .repositories
+                .retain(|entry| entry.repository_id == repository_id);
+            inventory
+                .generations
+                .retain(|entry| entry.repository_id == repository_id);
+            let Some(generation_disk_bytes) = inventory
+                .generations
+                .iter()
+                .try_fold(0_u64, |total, entry| total.checked_add(entry.disk_bytes))
+            else {
+                return ControlResponse::Error(internal_error());
+            };
+            inventory.storage.generation_disk_bytes = generation_disk_bytes;
+            terminal_operations.retain(|operation| {
+                operation.repository_id.as_deref() == Some(repository_id.as_str())
+            });
+        }
         if Instant::now() >= deadline {
             return ControlResponse::Error(request_timed_out());
         }
@@ -6393,8 +6452,8 @@ impl ControlService {
             ControlRequest::DiagnosticsQuick => {
                 self.diagnostics_quick(self.limits.request_timeout())
             }
-            ControlRequest::SupportBundle(schema) => {
-                self.support_bundle(schema, self.limits.request_timeout())
+            ControlRequest::SupportBundle(schema, repository) => {
+                self.support_bundle(schema, repository, self.limits.request_timeout())
             }
             ControlRequest::OperationSubmit(submission)
                 if !self.state.accepting_operations.load(Ordering::Acquire) =>
@@ -6872,10 +6931,13 @@ async fn dispatch_async(
                         )
                         .await
                     }
-                    Ok(DecodedRequest::Control(ControlRequest::SupportBundle(schema))) => {
+                    Ok(DecodedRequest::Control(ControlRequest::SupportBundle(
+                        schema,
+                        repository,
+                    ))) => {
                         run_diagnostic_request(
                             service.clone(),
-                            DiagnosticKind::SupportBundle(schema),
+                            DiagnosticKind::SupportBundle(schema, repository),
                             envelope.timeout_ms,
                         )
                         .await
@@ -8134,17 +8196,16 @@ fn first_slice_response_correlates(
             let Some(architecture_delta) = response.architecture_delta.as_ref() else {
                 return false;
             };
-            let Some(head_selector) = revision_generation_selector(request.head.as_ref()) else {
-                return false;
-            };
-            let Some(request_base) = revision_generation_id(request.base.as_ref()) else {
-                return false;
-            };
             let Some(base_generation) = matched_states.base_generation.as_ref() else {
                 return false;
             };
             let Some(head_generation) = matched_states.head_generation.as_ref() else {
                 return false;
+            };
+            let head_selector = daemon::GenerationSelector {
+                selector: Some(daemon::generation_selector::Selector::Generation(
+                    head_generation.clone(),
+                )),
             };
             first_slice_schema_matches(response.schema_version.as_ref())
                 && query_context_correlates(
@@ -8156,7 +8217,8 @@ fn first_slice_response_correlates(
                     Some(&head_generation.value),
                     context.generation.as_ref().map(|id| &id.value),
                 )
-                && wire_id_equals(Some(&base_generation.value), Some(&request_base.value))
+                && history_revision_correlates(request.base.as_ref(), base_generation)
+                && history_revision_correlates(request.head.as_ref(), head_generation)
                 && wire_id_has_len(Some(&base_generation.value), 20)
                 && wire_id_has_len(Some(&head_generation.value), 20)
                 && !matched_states.coverage.is_empty()
@@ -8569,32 +8631,23 @@ fn wire_id_equals(left: Option<&Vec<u8>>, right: Option<&Vec<u8>>) -> bool {
     left.is_some() && left == right
 }
 
-/// Builds a generation selector from a revision selector naming a generation.
-///
-/// Git revision selectors return `None` because the first-slice daemon maps no
-/// git ref to a retained generation.
-fn revision_generation_selector(
+fn history_revision_correlates(
     selector: Option<&daemon::FirstSliceRevisionSelector>,
-) -> Option<daemon::GenerationSelector> {
-    match selector.and_then(|selector| selector.selector.as_ref())? {
+    matched_generation: &common::GenerationId,
+) -> bool {
+    let Some(selector) = selector.and_then(|selector| selector.selector.as_ref()) else {
+        return false;
+    };
+    match selector {
         daemon::first_slice_revision_selector::Selector::Generation(generation) => {
-            Some(daemon::GenerationSelector {
-                selector: Some(daemon::generation_selector::Selector::Generation(
-                    generation.clone(),
-                )),
-            })
+            wire_id_equals(Some(&generation.value), Some(&matched_generation.value))
         }
-        daemon::first_slice_revision_selector::Selector::Git(_) => None,
-    }
-}
-
-/// Returns the generation identity named by a revision selector, if any.
-fn revision_generation_id(
-    selector: Option<&daemon::FirstSliceRevisionSelector>,
-) -> Option<&common::GenerationId> {
-    match selector.and_then(|selector| selector.selector.as_ref())? {
-        daemon::first_slice_revision_selector::Selector::Generation(generation) => Some(generation),
-        daemon::first_slice_revision_selector::Selector::Git(_) => None,
+        daemon::first_slice_revision_selector::Selector::Git(git) => {
+            !git.is_empty()
+                && git.len() <= 512
+                && !git.starts_with('-')
+                && !git.bytes().any(|byte| byte == 0 || byte.is_ascii_control())
+        }
     }
 }
 
@@ -9863,7 +9916,9 @@ async fn run_diagnostic_request(
     let started = Instant::now();
     let (method, span_kind) = match kind {
         DiagnosticKind::Quick => (ControlMethod::DiagnosticsQuick, SpanKind::DiagnosticsQuick),
-        DiagnosticKind::SupportBundle(_) => (ControlMethod::SupportBundle, SpanKind::SupportBundle),
+        DiagnosticKind::SupportBundle(_, _) => {
+            (ControlMethod::SupportBundle, SpanKind::SupportBundle)
+        }
     };
     let span = service.state.telemetry.start_span(span_kind);
     let timeout = bounded_request_timeout(&service, requested_timeout_ms);
@@ -9875,7 +9930,7 @@ async fn run_diagnostic_request(
     };
     let receiver = match actor.request(kind, deadline) {
         Ok(receiver) => receiver,
-        Err(ServiceError::QueueFull) if matches!(kind, DiagnosticKind::SupportBundle(_)) => {
+        Err(ServiceError::QueueFull) if matches!(kind, DiagnosticKind::SupportBundle(_, _)) => {
             return response_to_wire(ControlResponse::Error(queue_full(1)));
         }
         Err(ServiceError::QueueFull) => {
@@ -9996,6 +10051,35 @@ fn diagnostic_health_status(error: &OperationError) -> HealthStatus {
         | OperationError::UnsupportedLegacySchema
         | OperationError::UnsupportedSchemaVersion { .. } => HealthStatus::Failed,
         _ => HealthStatus::Unavailable,
+    }
+}
+
+fn aggregate_health_status(statuses: impl IntoIterator<Item = HealthStatus>) -> HealthStatus {
+    statuses
+        .into_iter()
+        .fold(HealthStatus::Healthy, |current, candidate| {
+            if health_status_severity(candidate) > health_status_severity(current) {
+                candidate
+            } else {
+                current
+            }
+        })
+}
+
+const fn health_status_severity(status: HealthStatus) -> u8 {
+    match status {
+        HealthStatus::Healthy | HealthStatus::NotConfigured => 0,
+        HealthStatus::Degraded => 1,
+        HealthStatus::Unavailable => 2,
+        HealthStatus::Failed => 3,
+    }
+}
+
+const fn resource_pressure_health_status(pressure: ResourcePressure) -> HealthStatus {
+    match pressure {
+        ResourcePressure::Normal | ResourcePressure::Unknown => HealthStatus::Healthy,
+        ResourcePressure::Elevated | ResourcePressure::High => HealthStatus::Degraded,
+        ResourcePressure::Critical => HealthStatus::Unavailable,
     }
 }
 
@@ -10204,12 +10288,18 @@ fn request_from_wire(
             }
             Ok(DecodedRequest::Control(ControlRequest::DiagnosticsQuick))
         }
-        Some(daemon::request_envelope::Request::SupportBundle(_)) => {
+        Some(daemon::request_envelope::Request::SupportBundle(request)) => {
             if selected_protocol_minor < 3 {
                 return Err(Box::new(protocol_mismatch(
                     "support bundle needs protocol minor three",
                 )));
             }
+            if request.repository.is_some() && selected_protocol_minor < 8 {
+                return Err(Box::new(protocol_mismatch(
+                    "repository scoped support needs protocol minor eight",
+                )));
+            }
+            let repository = request.repository.map(parse_repository_id).transpose()?;
             Ok(DecodedRequest::Control(ControlRequest::SupportBundle(
                 if selected_protocol_minor >= 8 {
                     SupportBundleSchema::V4
@@ -10220,6 +10310,7 @@ fn request_from_wire(
                 } else {
                     SupportBundleSchema::V1
                 },
+                repository,
             )))
         }
         Some(daemon::request_envelope::Request::OperationSubmit(request)) => {
@@ -10430,6 +10521,14 @@ fn parse_operation(
         .try_into()
         .map_err(|_| Box::new(invalid_argument("operation identifier is invalid")))?;
     Ok(OperationId::from_bytes(bytes))
+}
+
+fn parse_repository_id(repository: common::RepositoryId) -> Result<RepositoryId, Box<PublicError>> {
+    let bytes: [u8; 16] = repository
+        .value
+        .try_into()
+        .map_err(|_| Box::new(invalid_argument("repository identifier is invalid")))?;
+    Ok(RepositoryId::from_bytes(bytes))
 }
 
 fn response_to_wire(response: ControlResponse) -> daemon::response_envelope::Response {
@@ -10843,6 +10942,17 @@ fn request_timed_out() -> PublicError {
     PublicError::builder(ErrorCode::Busy, "daemon request timed out")
         .retryable()
         .next_action(NextAction::Retry)
+        .build()
+        .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
+}
+
+fn repository_not_found(repository: RepositoryId) -> PublicError {
+    PublicError::builder(ErrorCode::NotFound, "repository was not found")
+        .repository(repository)
+        .next_action(NextAction::CorrectField {
+            field: DetailKey::parse("repository")
+                .unwrap_or_else(|_| unreachable!("hard-coded detail key is valid")),
+        })
         .build()
         .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
 }
@@ -12128,7 +12238,7 @@ mod tests {
         assert_eq!(diagnostics.catalog.outcome, DiagnosticOutcome::Passed);
         assert!(diagnostics.catalog.error.is_none());
 
-        let bundle = service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V1));
+        let bundle = service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V1, None));
         let ControlResponse::SupportBundle(bundle) = bundle else {
             panic!("support bundle response expected");
         };
@@ -12150,12 +12260,53 @@ mod tests {
     }
 
     #[test]
+    fn quick_diagnostics_report_the_worst_live_subsystem_status() {
+        let service = service();
+        let state = service.state();
+        state.set_generation_status(HealthStatus::Degraded);
+        state.set_adapter_status(HealthStatus::Healthy);
+        state.set_watcher_status(HealthStatus::Healthy);
+        state.set_resource_pressure(ResourcePressure::Normal);
+
+        let ControlResponse::DiagnosticsQuick(degraded) =
+            service.execute(ControlRequest::DiagnosticsQuick)
+        else {
+            panic!("diagnostics response expected");
+        };
+        assert_eq!(degraded.catalog.outcome, DiagnosticOutcome::Passed);
+        assert_eq!(degraded.overall_status, HealthStatus::Degraded);
+
+        state.set_generation_status(HealthStatus::Healthy);
+        state.set_watcher_status(HealthStatus::Unavailable);
+        state.set_resource_pressure(ResourcePressure::Critical);
+        let ControlResponse::DiagnosticsQuick(unavailable) =
+            service.execute(ControlRequest::DiagnosticsQuick)
+        else {
+            panic!("diagnostics response expected");
+        };
+        assert_eq!(unavailable.catalog.outcome, DiagnosticOutcome::Passed);
+        assert_eq!(unavailable.overall_status, HealthStatus::Unavailable);
+
+        state.set_watcher_status(HealthStatus::Healthy);
+        state.set_adapter_status(HealthStatus::Failed);
+        let ControlResponse::DiagnosticsQuick(failed) =
+            service.execute(ControlRequest::DiagnosticsQuick)
+        else {
+            panic!("diagnostics response expected");
+        };
+        assert_eq!(failed.catalog.outcome, DiagnosticOutcome::Passed);
+        assert_eq!(failed.overall_status, HealthStatus::Failed);
+    }
+
+    #[test]
     fn production_support_bundle_contains_terminal_error_and_index_inventory() {
         let service = service();
         service.state().set_catalog_status(HealthStatus::Healthy);
         let operation = OperationId::from_bytes([41; 16]);
         let succeeded_operation = OperationId::from_bytes([44; 16]);
+        let other_operation = OperationId::from_bytes([45; 16]);
         let repository = RepositoryId::from_bytes([42; 16]);
+        let other_repository = RepositoryId::from_bytes([46; 16]);
         let limit = DetailKey::parse("limit").expect("detail key is valid");
         let provider = DetailKey::parse("provider").expect("detail key is valid");
         let error = PublicError::builder(ErrorCode::ResourceExhausted, "resource limit exceeded")
@@ -12199,6 +12350,23 @@ mod tests {
             RepositoryIndexProvider::ProjectAnalyzer,
         );
         service
+            .journal
+            .enqueue(other_operation)
+            .expect("other operation enqueues");
+        service
+            .journal
+            .start_execution(other_operation)
+            .expect("other operation starts");
+        service
+            .journal
+            .transition(other_operation, OperationState::Succeeded, None)
+            .expect("other operation completes");
+        service.state().record_repository_index_context(
+            other_operation,
+            other_repository,
+            RepositoryIndexProvider::ProjectAnalyzer,
+        );
+        service
             .state()
             .replace_index_support_inventory(IndexSupportInventory {
                 adapters: vec![SupportAdapterInventory {
@@ -12210,33 +12378,56 @@ mod tests {
                     binary_sha256: None,
                     artifact_sha256: None,
                 }],
-                repositories: vec![SupportRepositoryInventory {
-                    repository_id: support_id(repository.as_bytes()),
-                    root_fingerprint_sha256: None,
-                    languages: vec!["rust".to_owned()],
-                    tiers: vec!["structural".to_owned()],
-                    state: "ready".to_owned(),
-                    file_count: 12,
-                    symbol_count: 40,
-                    relationship_count: 75,
-                    generation_count: 1,
-                }],
-                generations: vec![SupportGenerationInventory {
-                    repository_id: support_id(repository.as_bytes()),
-                    generation_id: support_id(&[43; 20]),
-                    format_version: "1.2".to_owned(),
-                    checksum_status: rootlight_observability::SupportChecksumStatus::Verified,
-                    disk_bytes: 4096,
-                    state: "active".to_owned(),
-                }],
+                repositories: vec![
+                    SupportRepositoryInventory {
+                        repository_id: support_id(repository.as_bytes()),
+                        root_fingerprint_sha256: None,
+                        languages: vec!["rust".to_owned()],
+                        tiers: vec!["structural".to_owned()],
+                        state: "ready".to_owned(),
+                        file_count: 12,
+                        symbol_count: 40,
+                        relationship_count: 75,
+                        generation_count: 1,
+                    },
+                    SupportRepositoryInventory {
+                        repository_id: support_id(other_repository.as_bytes()),
+                        root_fingerprint_sha256: None,
+                        languages: vec!["go".to_owned()],
+                        tiers: vec!["structural".to_owned()],
+                        state: "ready".to_owned(),
+                        file_count: 4,
+                        symbol_count: 8,
+                        relationship_count: 6,
+                        generation_count: 1,
+                    },
+                ],
+                generations: vec![
+                    SupportGenerationInventory {
+                        repository_id: support_id(repository.as_bytes()),
+                        generation_id: support_id(&[43; 20]),
+                        format_version: "1.2".to_owned(),
+                        checksum_status: rootlight_observability::SupportChecksumStatus::Verified,
+                        disk_bytes: 4096,
+                        state: "active".to_owned(),
+                    },
+                    SupportGenerationInventory {
+                        repository_id: support_id(other_repository.as_bytes()),
+                        generation_id: support_id(&[47; 20]),
+                        format_version: "1.2".to_owned(),
+                        checksum_status: rootlight_observability::SupportChecksumStatus::Verified,
+                        disk_bytes: 2048,
+                        state: "active".to_owned(),
+                    },
+                ],
                 generation_format_version: Some("1.2".to_owned()),
-                generation_disk_bytes: 4096,
+                generation_disk_bytes: 6144,
                 unreclaimed_temporary_bytes: 0,
                 disk_margin_bytes: Some(1024 * 1024),
             })
             .expect("index support inventory publishes");
 
-        let bundle = service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V4));
+        let bundle = service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V4, None));
         let ControlResponse::SupportBundle(bundle) = bundle else {
             panic!("production support bundle response expected");
         };
@@ -12257,7 +12448,7 @@ mod tests {
         .expect("operations entry reads");
         let operations: rootlight_observability::SupportOperationsV4 =
             serde_json::from_slice(&operation_bytes).expect("operations entry decodes");
-        assert_eq!(operations.recent_terminal.len(), 2);
+        assert_eq!(operations.recent_terminal.len(), 3);
         let failed = operations
             .recent_terminal
             .iter()
@@ -12293,10 +12484,64 @@ mod tests {
         let inventory: SupportInventory =
             serde_json::from_slice(&inventory_bytes).expect("inventory entry decodes");
         assert_eq!(inventory.adapters.len(), 1);
-        assert_eq!(inventory.repositories.len(), 1);
-        assert_eq!(inventory.generations.len(), 1);
-        assert_eq!(inventory.storage.generation_disk_bytes, 4096);
+        assert_eq!(inventory.repositories.len(), 2);
+        assert_eq!(inventory.generations.len(), 2);
+        assert_eq!(inventory.storage.generation_disk_bytes, 6144);
         assert_eq!(inventory.runtime.protocol_minor, PROTOCOL_MINOR);
+
+        let scoped = service.execute(ControlRequest::SupportBundle(
+            SupportBundleSchema::V4,
+            Some(repository),
+        ));
+        let ControlResponse::SupportBundle(scoped) = scoped else {
+            panic!("repository-scoped support bundle response expected");
+        };
+        let mut scoped_archive = zip::ZipArchive::new(std::io::Cursor::new(scoped.archive))
+            .expect("scoped support ZIP opens");
+        let mut scoped_inventory_bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut scoped_archive
+                .by_name("inventory.json")
+                .expect("scoped inventory entry opens"),
+            &mut scoped_inventory_bytes,
+        )
+        .expect("scoped inventory entry reads");
+        let scoped_inventory: SupportInventory =
+            serde_json::from_slice(&scoped_inventory_bytes).expect("scoped inventory decodes");
+        assert_eq!(scoped_inventory.repositories.len(), 1);
+        assert_eq!(
+            scoped_inventory.repositories[0].repository_id,
+            support_id(repository.as_bytes())
+        );
+        assert!(
+            scoped_inventory
+                .generations
+                .iter()
+                .all(|generation| generation.repository_id == support_id(repository.as_bytes()))
+        );
+        let mut scoped_operation_bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut scoped_archive
+                .by_name("operations-summary.json")
+                .expect("scoped operations entry opens"),
+            &mut scoped_operation_bytes,
+        )
+        .expect("scoped operations entry reads");
+        let scoped_operations: rootlight_observability::SupportOperationsV4 =
+            serde_json::from_slice(&scoped_operation_bytes).expect("scoped operations decode");
+        assert_eq!(scoped_operations.recent_terminal.len(), 2);
+        assert!(scoped_operations.recent_terminal.iter().all(|operation| {
+            operation.repository_id.as_deref() == Some(support_id(repository.as_bytes()).as_str())
+        }));
+
+        let missing = service.execute(ControlRequest::SupportBundle(
+            SupportBundleSchema::V4,
+            Some(RepositoryId::from_bytes([99; 16])),
+        ));
+        let ControlResponse::Error(missing) = missing else {
+            panic!("unknown support scope must fail");
+        };
+        assert_eq!(missing.code(), ErrorCode::NotFound);
     }
 
     #[test]
@@ -12917,7 +13162,8 @@ mod tests {
         assert_eq!(healthy.adapter_status, HealthStatus::Healthy);
         assert_eq!(healthy.watcher_status, HealthStatus::Healthy);
         assert_eq!(healthy.resource_pressure, ResourcePressure::High);
-        assert!(healthy.ready);
+        assert!(!healthy.ready);
+        assert!(healthy.accepting_operations);
 
         service
             .state()
@@ -12962,6 +13208,10 @@ mod tests {
         assert!(!service.health().ready);
         assert!(!service.health().accepting_operations);
         state.set_endpoint_status(HealthStatus::NotConfigured);
+        state.set_generation_status(HealthStatus::Degraded);
+        let degraded = service.health();
+        assert!(!degraded.ready);
+        assert!(degraded.accepting_operations);
         state.set_generation_status(HealthStatus::Unavailable);
         assert!(!service.health().ready);
         assert!(!service.health().accepting_operations);
@@ -17592,6 +17842,52 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn history_correlation_accepts_checked_git_selectors_and_binds_resolved_generations() {
+        let schema = common::ContractVersion { major: 1, minor: 0 };
+        let repository = common::RepositoryId { value: vec![1; 16] };
+        let base_generation = common::GenerationId { value: vec![2; 20] };
+        let head_generation = common::GenerationId { value: vec![3; 20] };
+        let git_selector = |git: &str| daemon::FirstSliceRevisionSelector {
+            selector: Some(daemon::first_slice_revision_selector::Selector::Git(
+                git.to_owned(),
+            )),
+        };
+        let request = FirstSliceIpcRequest::HistoryCompare(daemon::HistoryCompareRequest {
+            schema_version: Some(schema),
+            repository: Some(repository.clone()),
+            base: Some(git_selector("refs/heads/main")),
+            head: Some(git_selector("HEAD")),
+            max_results: Some(20),
+            ..Default::default()
+        });
+        let response = daemon::HistoryCompareResponse {
+            schema_version: Some(schema),
+            context: Some(correlation_context(&repository, &head_generation, 0, 0)),
+            matched_states: Some(daemon::FirstSliceMatchedStates {
+                base_generation: Some(base_generation),
+                head_generation: Some(head_generation),
+                coverage: "complete".to_owned(),
+            }),
+            architecture_delta: Some(daemon::FirstSliceArchitectureDelta::default()),
+            ..Default::default()
+        };
+        assert!(first_slice_response_correlates(
+            &request,
+            &FirstSliceIpcResponse::HistoryCompare(response.clone())
+        ));
+
+        let mut unsafe_request = request;
+        let FirstSliceIpcRequest::HistoryCompare(request) = &mut unsafe_request else {
+            unreachable!("fixture request is history.compare");
+        };
+        request.head = Some(git_selector("--upload-pack=unsafe"));
+        assert!(!first_slice_response_correlates(
+            &unsafe_request,
+            &FirstSliceIpcResponse::HistoryCompare(response)
+        ));
+    }
+
     fn correlation_source(
         repository: &common::RepositoryId,
         generation: &common::GenerationId,
@@ -17703,6 +17999,8 @@ mod tests {
             include_tests: None,
             min_confidence: None,
             max_candidates: None,
+            explicit_entry_points: Vec::new(),
+            scope: None,
         });
         let classification = "not_observed_from_entry_points_strong_references";
         assert!(classification.len() <= MAX_CODE_DEAD_CLASSIFICATION_BYTES);
@@ -17712,19 +18010,27 @@ mod tests {
             candidates: vec![daemon::FirstSliceDeadCandidate {
                 symbol_id: Some(common::SymbolId { value: vec![3; 20] }),
                 classification: classification.to_owned(),
-                confidence: 1_000,
+                confidence: 850,
                 why: vec!["reachability".to_owned()],
                 suppressions_checked: Vec::new(),
                 source_refs: Vec::new(),
+                reachability: Some(daemon::FirstSliceDeadReachability {
+                    reached_from_entry_points: false,
+                    incoming_edges: 0,
+                    strongest_incoming_confidence: 0,
+                }),
+                uncertainty: Vec::new(),
             }],
             entry_points: Some(daemon::FirstSliceEntryPointSummary {
                 policy: "standard".to_owned(),
                 entry_point_count: 1,
                 complete: true,
+                entry_symbols: Vec::new(),
             }),
             blind_spots: Vec::new(),
             false_positive_controls: Vec::new(),
             completeness: None,
+            coverage_caveats: Vec::new(),
         });
 
         assert!(first_slice_response_correlates(&request, &response));
@@ -18114,6 +18420,10 @@ mod tests {
                 selector: Some(daemon::generation_selector::Selector::Active(true)),
             }),
             symbols: symbols.to_vec(),
+            sections: Vec::new(),
+            relation_sample_limit: None,
+            source_preview_lines: None,
+            include_provenance: "compact".to_owned(),
         });
         let explain_response = daemon::SymbolExplainResponse {
             schema_version: schema,
@@ -18122,6 +18432,7 @@ mod tests {
                 symbol: Some(symbols[0].clone()),
                 kind: "function".to_owned(),
                 display_name: "answer".to_owned(),
+                qualified_name: "answer".to_owned(),
                 signature: None,
                 definition: Some(first_source.clone()),
                 outbound_exact: 0,
@@ -18134,6 +18445,12 @@ mod tests {
                 confidence: 1_000,
                 language: "rust".to_owned(),
                 tier: daemon::FirstSliceAnalysisTier::FirstSliceTierB as i32,
+                container: None,
+                relation_samples: Vec::new(),
+                source_preview: None,
+                section_gaps: Vec::new(),
+                provenance_frontend_version: None,
+                provenance_rule: None,
             }],
             unresolved_symbols: vec![symbols[1].clone()],
             truncated: false,

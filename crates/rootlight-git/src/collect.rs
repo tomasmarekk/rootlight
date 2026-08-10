@@ -114,6 +114,9 @@ pub enum GitCollectOperation {
     /// Resolve HEAD.
     #[error("head")]
     Head,
+    /// Resolve an explicit revision.
+    #[error("revision")]
+    Revision,
     /// Read source-free worktree status.
     #[error("worktree status")]
     Status,
@@ -304,6 +307,144 @@ pub fn collect_repository(
         lineage_candidates: Vec::new(),
     };
     canonicalize_snapshot(input, contract_limits, cancellation).map_err(GitCollectError::from)
+}
+
+/// Collects bounded worktree status without importing history or file diffs.
+///
+/// This focused probe is intended for admission checks that only need to know
+/// whether tracked, untracked, or conflicted paths are present. It applies the
+/// same command hardening and output bounds as a full repository collection.
+///
+/// # Errors
+///
+/// Returns [`GitCollectError`] when the root is not a readable Git worktree,
+/// the status command fails, its output is invalid or exceeds a bound, or
+/// cancellation is requested.
+pub fn collect_worktree_status(
+    repository_root: &Path,
+    contract_limits: &GitLimits,
+    collect_limits: GitCollectLimits,
+    cancellation: &Cancellation,
+) -> Result<WorktreeStatus, GitCollectError> {
+    cancellation.check()?;
+    let runner = GitRunner::new(repository_root, collect_limits);
+    collect_status(&runner, contract_limits, cancellation).map(|(status, _)| status)
+}
+
+/// Checks whether one bounded revision expression resolves to the current HEAD.
+///
+/// Both expressions are peeled to commits by one hardened `rev-parse`
+/// invocation. The result is identity-based rather than diff-based, so an
+/// unrelated commit with an identical tree is not associated with the active
+/// generation.
+///
+/// # Errors
+///
+/// Returns [`GitCollectError`] when the revision is malformed or unavailable,
+/// Git fails, its output is invalid or exceeds a bound, or cancellation is
+/// requested.
+pub fn revision_resolves_to_head(
+    repository_root: &Path,
+    revision: &str,
+    collect_limits: GitCollectLimits,
+    cancellation: &Cancellation,
+) -> Result<bool, GitCollectError> {
+    cancellation.check()?;
+    if !valid_revision(revision) || revision.contains("..") {
+        return Err(GitCollectError::InvalidOutput {
+            operation: GitCollectOperation::Revision,
+        });
+    }
+    let peeled = format!("{revision}^{{commit}}");
+    let runner = GitRunner::new(repository_root, collect_limits);
+    let output = runner.required(
+        GitCollectOperation::Revision,
+        [
+            "rev-parse",
+            "--revs-only",
+            "--end-of-options",
+            peeled.as_str(),
+            "HEAD^{commit}",
+        ],
+        cancellation,
+    )?;
+    let mut object_ids = output
+        .split(|byte| *byte == b'\n')
+        .map(trim_ascii)
+        .filter(|line| !line.is_empty());
+    let revision_id = object_ids.next().ok_or(GitCollectError::InvalidOutput {
+        operation: GitCollectOperation::Revision,
+    })?;
+    let head_id = object_ids.next().ok_or(GitCollectError::InvalidOutput {
+        operation: GitCollectOperation::Revision,
+    })?;
+    if object_ids.next().is_some()
+        || !valid_hex_object_id(revision_id)
+        || !valid_hex_object_id(head_id)
+    {
+        return Err(GitCollectError::InvalidOutput {
+            operation: GitCollectOperation::Revision,
+        });
+    }
+    Ok(revision_id == head_id)
+}
+
+/// Collects one bounded read-only diff between two explicit Git revisions.
+///
+/// Each revision is passed as a separate Git argument after validation, then
+/// the diff uses the resolved immutable object identifiers. Hooks, filters,
+/// prompts, optional locks, external diff drivers, text conversion, and lazy
+/// object fetches remain disabled by [`GitRunner`].
+///
+/// # Errors
+///
+/// Returns [`GitCollectError`] when either revision is malformed or cannot be
+/// resolved locally, Git collection fails, a configured bound is exceeded, or
+/// cancellation is requested.
+pub fn collect_revision_range(
+    repository_root: &Path,
+    base_revision: &str,
+    head_revision: &str,
+    contract_limits: &GitLimits,
+    collect_limits: GitCollectLimits,
+    cancellation: &Cancellation,
+) -> Result<ChangeSet, GitCollectError> {
+    cancellation.check()?;
+    if !valid_revision(base_revision) || !valid_revision(head_revision) {
+        return Err(GitCollectError::InvalidOutput {
+            operation: GitCollectOperation::Revision,
+        });
+    }
+    let runner = GitRunner::new(repository_root, collect_limits);
+    let detected = runner.run(
+        GitCollectOperation::DetectRepository,
+        ["rev-parse", "--is-inside-work-tree"],
+        cancellation,
+    )?;
+    if !detected.status.success() || trim_ascii(&detected.stdout) != b"true" {
+        return Err(GitCollectError::CommandFailed {
+            operation: GitCollectOperation::DetectRepository,
+            exit_code: detected.status.code(),
+        });
+    }
+    let runner = runner.with_disabled_filters(cancellation)?;
+    let format = collect_object_format(&runner, cancellation)?;
+    let base = resolve_revision(&runner, base_revision, format, cancellation)?;
+    let head = resolve_revision(&runner, head_revision, format, cancellation)?;
+    let base_object_name = object_id_hex(base);
+    let head_object_name = object_id_hex(head);
+    collect_diff(
+        &runner,
+        [
+            OsString::from("diff"),
+            OsString::from(base_object_name),
+            OsString::from(head_object_name),
+        ],
+        RevisionSelector::Commit(base),
+        RevisionSelector::Commit(head),
+        contract_limits,
+        cancellation,
+    )
 }
 
 struct GitRunner<'a> {
@@ -1000,15 +1141,19 @@ fn collect_changes(
     Ok((change_sets, candidates))
 }
 
-fn collect_diff<const N: usize>(
+fn collect_diff<I, S>(
     runner: &GitRunner<'_>,
-    prefix: [&str; N],
+    prefix: I,
     base: RevisionSelector,
     head: RevisionSelector,
     limits: &GitLimits,
     cancellation: &Cancellation,
-) -> Result<ChangeSet, GitCollectError> {
-    let mut arguments = prefix.into_iter().map(OsString::from).collect::<Vec<_>>();
+) -> Result<ChangeSet, GitCollectError>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<OsString>,
+{
+    let mut arguments = prefix.into_iter().map(Into::into).collect::<Vec<_>>();
     arguments.extend([
         OsString::from("--name-status"),
         OsString::from("-z"),
@@ -1016,6 +1161,7 @@ fn collect_diff<const N: usize>(
         OsString::from("--no-ext-diff"),
         OsString::from("--no-textconv"),
         OsString::from("--ignore-submodules=all"),
+        OsString::from("--"),
     ]);
     let output = runner.required(GitCollectOperation::Diff, arguments, cancellation)?;
     let changes = parse_name_status(&output, limits, cancellation)?;
@@ -1024,6 +1170,48 @@ fn collect_diff<const N: usize>(
         head,
         changes,
     })
+}
+
+fn valid_revision(revision: &str) -> bool {
+    !revision.is_empty()
+        && revision.len() <= 512
+        && !revision.starts_with('-')
+        && !revision
+            .bytes()
+            .any(|byte| byte == 0 || byte.is_ascii_control())
+}
+
+fn valid_hex_object_id(object_id: &[u8]) -> bool {
+    matches!(object_id.len(), 40 | 64) && object_id.iter().all(u8::is_ascii_hexdigit)
+}
+
+fn resolve_revision(
+    runner: &GitRunner<'_>,
+    revision: &str,
+    format: ObjectFormat,
+    cancellation: &Cancellation,
+) -> Result<ObjectId, GitCollectError> {
+    let peeled = format!("{revision}^{{commit}}");
+    let output = runner.required(
+        GitCollectOperation::Revision,
+        ["rev-parse", "--verify", "--end-of-options", peeled.as_str()],
+        cancellation,
+    )?;
+    parse_object_id(trim_ascii(&output), format, GitCollectOperation::Revision)
+}
+
+fn object_id_hex(object: ObjectId) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = match &object {
+        ObjectId::Sha1(bytes) => bytes.as_slice(),
+        ObjectId::Sha256(bytes) => bytes.as_slice(),
+    };
+    let mut encoded = String::with_capacity(64);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn parse_name_status(

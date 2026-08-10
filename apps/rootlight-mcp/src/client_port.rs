@@ -13,17 +13,19 @@ use std::{
 };
 
 use rootlight_client::{
-    AdvancedQuery, AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview,
-    ChangeImpact, Client, ClientError, CodeDead, CodeLocate, CoverageStatus, FlowTrace,
-    GenerationSelector, HistoryCompare, LocateMode, OperationKind, OperationState, PlanChange,
-    QueryFreshness, RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryIndex,
+    AdvancedQuery, AnalysisTier as ClientAnalysisTier, ArchitectureCycles,
+    ArchitectureCyclesOptions, ArchitectureOverview, ArchitectureOverviewOptions, ChangeImpact,
+    ChangeImpactOptions, Client, ClientError, CodeDead, CodeDeadOptions, CodeLocate,
+    CoverageStatus, FlowTrace, GenerationSelector, HistoryCompare, LocateMode, OperationKind,
+    OperationState, PlanChange, QueryFreshness, RepositoryCatalogPage,
+    RepositoryCatalogPageRequest, RepositoryIndex,
     RepositoryIndexMode as ClientRepositoryIndexMode, RepositoryOperationAction,
     RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
     RequestTimeout, SourceEncoding as ClientSourceEncoding, SourceRead,
     SourceReadOptions as ClientSourceReadOptions, SourceReference, SymbolExplain,
-    SymbolRelationships, TestsSelect,
+    SymbolExplainProjection, SymbolRelationships, TestsSelect, TestsSelectFilters,
 };
-use rootlight_ids::{FileId, GenerationId, OperationId, RepositoryId, SymbolId};
+use rootlight_ids::{FileId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::CoverageStatus as IrCoverageStatus;
 use rootlight_mcp_contract::{
     ErrorCode, NextAction, PublicError, SafeLabel,
@@ -49,6 +51,16 @@ use crate::{
 };
 
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+const fn provenance_label(
+    level: rootlight_mcp_contract::vertical::ProvenanceLevel,
+) -> &'static str {
+    match level {
+        rootlight_mcp_contract::vertical::ProvenanceLevel::None => "none",
+        rootlight_mcp_contract::vertical::ProvenanceLevel::Compact => "compact",
+        rootlight_mcp_contract::vertical::ProvenanceLevel::Full => "full",
+    }
+}
 const FIRST_SLICE_PROVIDER: &str = "rootlight-first-slice-treesitter";
 const PROJECT_SEMANTICS_PROVIDER: &str = "rootlight-project-semantics";
 const BRIDGE_TRACE_PREFIX: &str = "bridge-";
@@ -97,6 +109,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         repository: RepositoryId,
         generation: GenerationSelector,
         symbols: Vec<SymbolId>,
+        projection: SymbolExplainProjection,
         options: RequestOptions,
     ) -> AsyncClientFuture<SymbolExplain>;
 
@@ -169,6 +182,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         min_size: Option<u8>,
         max_cycles: Option<u16>,
         include_self_cycles: Option<bool>,
+        contract: ArchitectureCyclesOptions,
         options: RequestOptions,
     ) -> AsyncClientFuture<ArchitectureCycles>;
 
@@ -185,6 +199,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         include_tests: Option<bool>,
         min_confidence: Option<u16>,
         max_candidates: Option<u16>,
+        contract: CodeDeadOptions,
         options: RequestOptions,
     ) -> AsyncClientFuture<CodeDead>;
 
@@ -200,6 +215,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         max_components: Option<u16>,
         include_edges: Option<bool>,
         min_confidence: Option<u16>,
+        contract: ArchitectureOverviewOptions,
         options: RequestOptions,
     ) -> AsyncClientFuture<ArchitectureOverview>;
 
@@ -213,6 +229,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         generation: GenerationSelector,
         seeds: Vec<SymbolId>,
         test_kinds: Vec<String>,
+        filters: TestsSelectFilters,
         max_tests: Option<u16>,
         include_commands: Option<bool>,
         options: RequestOptions,
@@ -228,6 +245,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         generation: GenerationSelector,
         changed_symbols: Vec<SymbolId>,
         changed_paths: Vec<String>,
+        impact_options: ChangeImpactOptions,
         max_depth: Option<u8>,
         min_confidence: Option<u16>,
         include_tests: Option<bool>,
@@ -247,16 +265,24 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         objective_text: String,
         target_symbols: Vec<SymbolId>,
         target_files: Vec<FileId>,
+        constraints: Vec<String>,
+        change_context: Option<rootlight_client::PlanChangeContext>,
         max_steps: Option<u8>,
         options: RequestOptions,
     ) -> AsyncClientFuture<PlanChange>;
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded history comparison dimension"
+    )]
     fn history_compare(
         &self,
         repository: RepositoryId,
-        base: GenerationId,
-        head: GenerationId,
+        base: rootlight_client::HistoryRevisionSelector,
+        head: rootlight_client::HistoryRevisionSelector,
+        scope: rootlight_client::HistoryCompareScope,
         change_kinds: Vec<String>,
+        include_unchanged_context: bool,
         max_results: Option<u16>,
         options: RequestOptions,
     ) -> AsyncClientFuture<HistoryCompare>;
@@ -428,13 +454,20 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         repository: RepositoryId,
         generation: GenerationSelector,
         symbols: Vec<SymbolId>,
+        projection: SymbolExplainProjection,
         options: RequestOptions,
     ) -> AsyncClientFuture<SymbolExplain> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             let client = client.resolve().await?;
             client
-                .symbol_explain_async_with_options(repository, generation, &symbols, options)
+                .symbol_explain_async_with_projection_and_options(
+                    repository,
+                    generation,
+                    &symbols,
+                    &projection,
+                    options,
+                )
                 .await
         })
     }
@@ -564,19 +597,21 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         min_size: Option<u8>,
         max_cycles: Option<u16>,
         include_self_cycles: Option<bool>,
+        contract: ArchitectureCyclesOptions,
         options: RequestOptions,
     ) -> AsyncClientFuture<ArchitectureCycles> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             let client = client.resolve().await?;
             client
-                .architecture_cycles_async_with_options(
+                .architecture_cycles_async_with_contract_options(
                     repository,
                     generation,
                     &relations,
                     min_size,
                     max_cycles,
                     include_self_cycles,
+                    &contract,
                     options,
                 )
                 .await
@@ -592,13 +627,14 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         include_tests: Option<bool>,
         min_confidence: Option<u16>,
         max_candidates: Option<u16>,
+        contract: CodeDeadOptions,
         options: RequestOptions,
     ) -> AsyncClientFuture<CodeDead> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             let client = client.resolve().await?;
             client
-                .code_dead_async_with_options(
+                .code_dead_async_with_contract_options(
                     repository,
                     generation,
                     entry_point_policy.as_deref(),
@@ -606,6 +642,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     include_tests,
                     min_confidence,
                     max_candidates,
+                    &contract,
                     options,
                 )
                 .await
@@ -620,19 +657,21 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         max_components: Option<u16>,
         include_edges: Option<bool>,
         min_confidence: Option<u16>,
+        contract: ArchitectureOverviewOptions,
         options: RequestOptions,
     ) -> AsyncClientFuture<ArchitectureOverview> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             let client = client.resolve().await?;
             client
-                .architecture_overview_async_with_options(
+                .architecture_overview_async_with_contract_options(
                     repository,
                     generation,
                     &views,
                     max_components,
                     include_edges,
                     min_confidence,
+                    &contract,
                     options,
                 )
                 .await
@@ -645,6 +684,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         generation: GenerationSelector,
         seeds: Vec<SymbolId>,
         test_kinds: Vec<String>,
+        filters: TestsSelectFilters,
         max_tests: Option<u16>,
         include_commands: Option<bool>,
         options: RequestOptions,
@@ -653,13 +693,14 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         Box::pin(async move {
             let client = client.resolve().await?;
             client
-                .tests_select_async_with_options(
+                .tests_select_async_with_filters_and_options(
                     repository,
                     generation,
                     &seeds,
                     &test_kinds,
                     max_tests,
                     include_commands,
+                    &filters,
                     options,
                 )
                 .await
@@ -672,6 +713,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         generation: GenerationSelector,
         changed_symbols: Vec<SymbolId>,
         changed_paths: Vec<String>,
+        impact_options: ChangeImpactOptions,
         max_depth: Option<u8>,
         min_confidence: Option<u16>,
         include_tests: Option<bool>,
@@ -682,7 +724,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         Box::pin(async move {
             let client = client.resolve().await?;
             client
-                .change_impact_async_with_options(
+                .change_impact_async_with_policy_and_options(
                     repository,
                     generation,
                     &changed_symbols,
@@ -691,6 +733,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     min_confidence,
                     include_tests,
                     max_dependents,
+                    &impact_options,
                     options,
                 )
                 .await
@@ -705,6 +748,8 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         objective_text: String,
         target_symbols: Vec<SymbolId>,
         target_files: Vec<FileId>,
+        constraints: Vec<String>,
+        change_context: Option<rootlight_client::PlanChangeContext>,
         max_steps: Option<u8>,
         options: RequestOptions,
     ) -> AsyncClientFuture<PlanChange> {
@@ -712,13 +757,15 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         Box::pin(async move {
             let client = client.resolve().await?;
             client
-                .plan_change_async_with_options(
+                .plan_change_async_with_context_and_options(
                     repository,
                     generation,
                     &objective,
                     &objective_text,
                     &target_symbols,
                     &target_files,
+                    &constraints,
+                    change_context.as_ref(),
                     max_steps,
                     options,
                 )
@@ -729,9 +776,11 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
     fn history_compare(
         &self,
         repository: RepositoryId,
-        base: GenerationId,
-        head: GenerationId,
+        base: rootlight_client::HistoryRevisionSelector,
+        head: rootlight_client::HistoryRevisionSelector,
+        scope: rootlight_client::HistoryCompareScope,
         change_kinds: Vec<String>,
+        include_unchanged_context: bool,
         max_results: Option<u16>,
         options: RequestOptions,
     ) -> AsyncClientFuture<HistoryCompare> {
@@ -740,11 +789,13 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
             let client = client.resolve().await?;
             let kind_labels: Vec<&str> = change_kinds.iter().map(String::as_str).collect();
             client
-                .history_compare_async_with_options(
+                .history_compare_async_with_scope_and_options(
                     repository,
-                    base,
-                    head,
+                    &base,
+                    &head,
+                    &scope,
                     &kind_labels,
+                    include_unchanged_context,
                     max_results,
                     options,
                 )
@@ -1002,6 +1053,12 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.repository(),
                     request.generation(),
                     request.symbols().to_vec(),
+                    SymbolExplainProjection {
+                        sections: request.sections().to_vec(),
+                        relation_sample_limit: request.relation_sample_limit(),
+                        source_preview_lines: request.source_preview_lines(),
+                        include_provenance: provenance_label(request.provenance_level()).to_owned(),
+                    },
                     options,
                 )
                 .await
@@ -1161,6 +1218,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.min_size(),
                     request.max_cycles(),
                     request.include_self_cycles(),
+                    request.contract().clone(),
                     options,
                 )
                 .await
@@ -1187,6 +1245,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.include_tests(),
                     request.min_confidence(),
                     request.max_candidates(),
+                    request.contract().clone(),
                     options,
                 )
                 .await
@@ -1212,6 +1271,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.max_components(),
                     request.include_edges(),
                     request.min_confidence(),
+                    request.contract().clone(),
                     options,
                 )
                 .await
@@ -1235,6 +1295,15 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.generation(),
                     request.seeds().to_vec(),
                     request.test_kinds().to_vec(),
+                    TestsSelectFilters {
+                        seed_paths: request.seed_paths().to_vec(),
+                        seed_build_targets: request.seed_build_targets().to_vec(),
+                        frameworks: request.frameworks().to_vec(),
+                        max_total_ms: request.max_total_ms(),
+                        max_slow_tests: request.max_slow_tests(),
+                        change_working_tree: request.change_working_tree().map(str::to_owned),
+                        change_revision_range: request.change_revision_range().map(str::to_owned),
+                    },
                     request.max_tests(),
                     request.include_commands(),
                     options,
@@ -1260,6 +1329,15 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.generation(),
                     request.changed_symbols().to_vec(),
                     request.changed_paths().to_vec(),
+                    ChangeImpactOptions {
+                        working_tree: request.working_tree().map(str::to_owned),
+                        revision_range: request.revision_range().map(str::to_owned),
+                        scope_paths: request.scope_paths().to_vec(),
+                        scope_packages: request.scope_packages().to_vec(),
+                        scope_services: request.scope_services().to_vec(),
+                        relation_policy: request.relation_policy().to_owned(),
+                        include_history: request.include_history(),
+                    },
                     request.max_depth(),
                     request.min_confidence(),
                     request.include_tests(),
@@ -1296,6 +1374,25 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.objective_text().to_owned(),
                     request.target_symbols().to_vec(),
                     request.target_files().to_vec(),
+                    request.constraints().to_vec(),
+                    request
+                        .change_context()
+                        .map(|context| rootlight_client::PlanChangeContext {
+                            working_tree: context.working_tree.map(|value| match value {
+                                rootlight_mcp_contract::change::WorkingTreeState::Unstaged => {
+                                    "unstaged".to_owned()
+                                }
+                                rootlight_mcp_contract::change::WorkingTreeState::Staged => {
+                                    "staged".to_owned()
+                                }
+                                rootlight_mcp_contract::change::WorkingTreeState::All => {
+                                    "all".to_owned()
+                                }
+                            }),
+                            revision_range: context.revision_range.clone(),
+                            symbol_ids: context.symbol_ids.clone().unwrap_or_default(),
+                            paths: context.paths.clone().unwrap_or_default(),
+                        }),
                     request.max_steps(),
                     options,
                 )
@@ -1317,9 +1414,11 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
             let result = client
                 .history_compare(
                     request.repository(),
-                    request.base(),
-                    request.head(),
+                    request.base().clone(),
+                    request.head().clone(),
+                    request.scope().clone(),
                     request.change_kinds().to_vec(),
+                    request.include_unchanged_context(),
                     request.max_results(),
                     options,
                 )
@@ -1709,6 +1808,7 @@ fn map_client_error(error: ClientError) -> ClientPortError {
         | ClientError::InvalidPublicError => ClientPortError::InvalidResponse,
         ClientError::ResponseAllocationFailed
         | ClientError::InvalidFirstSliceRequest
+        | ClientError::InvalidDiagnosticsScope
         | ClientError::InvalidRepositoryCatalogRequest
         | ClientError::InvalidSourceReference
         | ClientError::InvalidRequestTimeout

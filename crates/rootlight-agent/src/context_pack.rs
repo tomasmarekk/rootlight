@@ -3328,6 +3328,7 @@ mod tests {
             symbol_id: symbol,
             kind: EntityKind::Function,
             display_name: "parse_request".to_owned(),
+            qualified_name: Some("crate::parse_request".to_owned()),
             signature: Some("fn parse_request(input: &str)".to_owned()),
             definition: SourceRef::new(
                 RepositoryId::from_bytes([1; 16]),
@@ -3343,9 +3344,13 @@ mod tests {
                 inbound_candidates: 0,
                 references_exact: 0,
             },
+            container: None,
+            relation_samples: Vec::new(),
+            source_preview: None,
             provenance: Vec::new(),
             confidence: 900,
             uncertainty: Vec::new(),
+            section_gaps: Vec::new(),
             trust: TrustClassification::UntrustedRepositoryData,
         }
     }

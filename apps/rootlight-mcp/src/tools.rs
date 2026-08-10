@@ -16,10 +16,26 @@ use rootlight_mcp_contract::{
         CapabilityStatus, DISCOVERY_METADATA_KEY, ToolCapability, capability_for,
         discovery_metadata,
     },
-    context::{BatchOperation, ContextPackInput, QueryAdvancedInput, QueryBatchInput},
+    change::{
+        ChangeImpactOutputV1_0, ChangeImpactOutputV1_1, HistoryCompareOutputV1_0,
+        HistoryCompareOutputV1_1, PlanChangeOutputV1_0, PlanChangeOutputV1_1,
+        TestsSelectOutputV1_0, TestsSelectOutputV1_1,
+    },
+    context::{
+        BatchOperation, ContextPackInput, ContextPackOutputV1_0, ContextPackOutputV1_1,
+        QueryAdvancedInput, QueryBatchInput,
+    },
+    intent::{
+        ArchitectureCyclesOutputV1_0, ArchitectureCyclesOutputV1_1, ArchitectureOverviewOutputV1_0,
+        ArchitectureOverviewOutputV1_1, CodeDeadOutputV1_0, CodeDeadOutputV1_1,
+        SymbolRelationshipsOutputV1_0, SymbolRelationshipsOutputV1_1,
+    },
     pagination::AuthenticatedCursor,
-    repository::RepoListInput,
-    vertical::{OperationStatusOutputV1_0, RepoIndexOutputV1_0},
+    repository::{RepoListInput, RepoStatusOutputV1_0, RepoStatusOutputV1_1},
+    vertical::{
+        OperationStatusOutputV1_0, OperationStatusOutputV1_1, RepoIndexOutputV1_0,
+        SymbolExplainOutputV1_0,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -331,20 +347,22 @@ where
             return cancel_or(&cancellation, response);
         };
         let arguments_value = Value::Object(arguments);
-        let typed_input = match validate_contract_input(contract, &arguments_value, profile) {
-            Ok(input) => input,
-            Err(error) => {
-                let error = match error {
-                    MaterializedInputError::Invalid { .. } => invalid_arguments,
-                    MaterializedInputError::Public(error) => *error,
-                };
-                return cancel_or(
-                    &cancellation,
-                    tool_error(contract, selected_version, error)
-                        .unwrap_or_else(|_| internal_tool_error("tool error validation failed")),
-                );
-            }
-        };
+        let typed_input =
+            match validate_contract_input(contract, selected_version, &arguments_value, profile) {
+                Ok(input) => input,
+                Err(error) => {
+                    let error = match error {
+                        MaterializedInputError::Invalid { .. } => invalid_arguments,
+                        MaterializedInputError::Public(error) => *error,
+                    };
+                    return cancel_or(
+                        &cancellation,
+                        tool_error(contract, selected_version, error).unwrap_or_else(|_| {
+                            internal_tool_error("tool error validation failed")
+                        }),
+                    );
+                }
+            };
         if cancellation.is_cancelled() {
             return HandlerResponse::Cancelled;
         }
@@ -486,14 +504,18 @@ struct ToolContract {
     tool: VerticalTool,
     definition: ToolDefinition,
     input_validator: Validator,
+    previous_input_validator: Option<Validator>,
+    legacy_input_validator: Option<Validator>,
     output_validator: Validator,
     previous_output_validator: Option<Validator>,
+    legacy_output_validator: Option<Validator>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContractSelection {
     Current,
     Previous,
+    Legacy,
 }
 
 impl ContractSelection {
@@ -501,23 +523,39 @@ impl ContractSelection {
         match requested {
             None => Some(Self::Current),
             Some(requested) if requested == contract.tool.contract_version() => Some(Self::Current),
-            Some("1.0") if contract.previous_output_validator.is_some() => Some(Self::Previous),
+            Some(requested)
+                if contract.tool.previous_contract_version() == Some(requested)
+                    && contract.previous_output_validator.is_some() =>
+            {
+                Some(Self::Previous)
+            }
+            Some(requested)
+                if contract.tool.legacy_contract_version() == Some(requested)
+                    && contract.legacy_output_validator.is_some() =>
+            {
+                Some(Self::Legacy)
+            }
             Some(_) => None,
         }
     }
 
     const fn schema_version(self, tool: VerticalTool) -> &'static str {
         match self {
-            Self::Previous => "1.0",
-            Self::Current
-                if matches!(
-                    tool,
-                    VerticalTool::RepoIndex | VerticalTool::OperationStatus
-                ) =>
-            {
-                rootlight_mcp_contract::MCP_OPERATION_SCHEMA_VERSION
-            }
-            Self::Current => rootlight_mcp_contract::MCP_SCHEMA_VERSION,
+            Self::Current => tool.contract_version(),
+            Self::Previous => tool
+                .previous_contract_version()
+                .expect("previous selection requires a retained version"),
+            Self::Legacy => tool
+                .legacy_contract_version()
+                .expect("legacy selection requires a retained version"),
+        }
+    }
+
+    const fn error_schema_version(self, tool: VerticalTool) -> &'static str {
+        if matches!(self, Self::Current) && matches!(tool, VerticalTool::RepoList) {
+            rootlight_mcp_contract::MCP_SCHEMA_VERSION
+        } else {
+            self.schema_version(tool)
         }
     }
 }
@@ -884,7 +922,13 @@ impl MaterializedToolValidator {
             .ok_or(MaterializedInputError::Invalid {
                 instance_path: None,
             })?;
-        validate_contract_input(contract, &Value::Object(arguments.clone()), profile).map(|_| ())
+        validate_contract_input(
+            contract,
+            ContractSelection::Current,
+            &Value::Object(arguments.clone()),
+            profile,
+        )
+        .map(|_| ())
     }
 }
 
@@ -901,6 +945,7 @@ pub(crate) enum MaterializedInputError {
 
 fn validate_contract_input(
     contract: &ToolContract,
+    selection: ContractSelection,
     arguments: &Value,
     profile: ExposureProfile,
 ) -> Result<TypedInput, MaterializedInputError> {
@@ -914,7 +959,7 @@ fn validate_contract_input(
             |error| MaterializedInputError::Public(Box::new(error)),
         ));
     }
-    if let Err(validation_error) = contract.input_validator.validate(arguments) {
+    if let Err(validation_error) = contract.input_validator(selection).validate(arguments) {
         return Err(classify_schema_error(contract.tool, arguments).map_or_else(
             || MaterializedInputError::Invalid {
                 instance_path: schema_error_instance_path(&validation_error),
@@ -1024,6 +1069,46 @@ impl ToolContract {
                 direction: "input",
                 detail: source.to_string(),
             })?;
+        let previous_input_validator = tool
+            .previous_input_schema_json()
+            .map(|schema| {
+                let schema =
+                    parse_object_schema(tool, "previous input", schema).map_err(|source| {
+                        ToolRegistryError::ParseSchema {
+                            tool,
+                            direction: "previous input",
+                            source,
+                        }
+                    })?;
+                jsonschema::draft202012::new(&Value::Object(schema)).map_err(|source| {
+                    ToolRegistryError::CompileSchema {
+                        tool,
+                        direction: "previous input",
+                        detail: source.to_string(),
+                    }
+                })
+            })
+            .transpose()?;
+        let legacy_input_validator = tool
+            .legacy_input_schema_json()
+            .map(|schema| {
+                let schema =
+                    parse_object_schema(tool, "legacy input", schema).map_err(|source| {
+                        ToolRegistryError::ParseSchema {
+                            tool,
+                            direction: "legacy input",
+                            source,
+                        }
+                    })?;
+                jsonschema::draft202012::new(&Value::Object(schema)).map_err(|source| {
+                    ToolRegistryError::CompileSchema {
+                        tool,
+                        direction: "legacy input",
+                        detail: source.to_string(),
+                    }
+                })
+            })
+            .transpose()?;
         let output_validator = jsonschema::draft202012::new(&Value::Object(output_schema.clone()))
             .map_err(|source| ToolRegistryError::CompileSchema {
                 tool,
@@ -1050,6 +1135,26 @@ impl ToolContract {
                 })
             })
             .transpose()?;
+        let legacy_output_validator = tool
+            .legacy_output_schema_json()
+            .map(|schema| {
+                let schema =
+                    parse_object_schema(tool, "legacy output", schema).map_err(|source| {
+                        ToolRegistryError::ParseSchema {
+                            tool,
+                            direction: "legacy output",
+                            source,
+                        }
+                    })?;
+                jsonschema::draft202012::new(&Value::Object(schema)).map_err(|source| {
+                    ToolRegistryError::CompileSchema {
+                        tool,
+                        direction: "legacy output",
+                        detail: source.to_string(),
+                    }
+                })
+            })
+            .transpose()?;
         Ok(Self {
             tool,
             definition: ToolDefinition {
@@ -1070,8 +1175,11 @@ impl ToolContract {
                 metadata: tool_metadata(catalog_tool),
             },
             input_validator,
+            previous_input_validator,
+            legacy_input_validator,
             output_validator,
             previous_output_validator,
+            legacy_output_validator,
         })
     }
 
@@ -1082,6 +1190,25 @@ impl ToolContract {
                 .previous_output_validator
                 .as_ref()
                 .expect("previous selection requires a compiled schema"),
+            ContractSelection::Legacy => self
+                .legacy_output_validator
+                .as_ref()
+                .expect("legacy selection requires a compiled schema"),
+        }
+    }
+
+    fn input_validator(&self, selection: ContractSelection) -> &Validator {
+        match selection {
+            ContractSelection::Current => &self.input_validator,
+            ContractSelection::Previous => self
+                .previous_input_validator
+                .as_ref()
+                .unwrap_or(&self.input_validator),
+            ContractSelection::Legacy => self
+                .legacy_input_validator
+                .as_ref()
+                .or(self.previous_input_validator.as_ref())
+                .unwrap_or(&self.input_validator),
         }
     }
 }
@@ -1552,23 +1679,29 @@ fn typed_output_is_valid(tool: VerticalTool, input: &TypedInput, output: &Value)
     // that intentionally cannot be represented by generated JSON Schema.
     match tool {
         VerticalTool::RepoIndex => RepoIndexOutput::deserialize(output).is_ok(),
-        VerticalTool::RepoStatus
-        | VerticalTool::RepoList
-        | VerticalTool::SymbolRelationships
+        VerticalTool::RepoStatus => RepoStatusOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::RepoList
         | VerticalTool::FlowTrace
-        | VerticalTool::ChangeImpact
-        | VerticalTool::TestsSelect
-        | VerticalTool::ArchitectureOverview
-        | VerticalTool::ArchitectureCycles
-        | VerticalTool::CodeDead
-        | VerticalTool::HistoryCompare
-        | VerticalTool::PlanChange
-        | VerticalTool::ContextPack
         | VerticalTool::QueryAdvanced
         | VerticalTool::QueryBatch => true,
         VerticalTool::OperationStatus => OperationStatusOutput::deserialize(output).is_ok(),
         VerticalTool::CodeLocate => CodeLocateOutput::deserialize(output).is_ok(),
         VerticalTool::SymbolExplain => SymbolExplainOutput::deserialize(output).is_ok(),
+        VerticalTool::SymbolRelationships => {
+            SymbolRelationshipsOutputV1_1::deserialize(output).is_ok()
+        }
+        VerticalTool::ChangeImpact => ChangeImpactOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::TestsSelect => TestsSelectOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::ArchitectureOverview => {
+            ArchitectureOverviewOutputV1_1::deserialize(output).is_ok()
+        }
+        VerticalTool::ArchitectureCycles => {
+            ArchitectureCyclesOutputV1_1::deserialize(output).is_ok()
+        }
+        VerticalTool::CodeDead => CodeDeadOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::HistoryCompare => HistoryCompareOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::PlanChange => PlanChangeOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::ContextPack => ContextPackOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::SourceRead => {
             let Ok(output) = SourceReadOutput::deserialize(output) else {
                 return false;
@@ -1591,6 +1724,27 @@ fn typed_selected_output_is_valid(
         ContractSelection::Current => typed_output_is_valid(tool, input, output),
         ContractSelection::Previous => match tool {
             VerticalTool::RepoIndex => RepoIndexOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::RepoStatus => RepoStatusOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::OperationStatus => OperationStatusOutputV1_1::deserialize(output).is_ok(),
+            VerticalTool::SymbolExplain => SymbolExplainOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::SymbolRelationships => {
+                SymbolRelationshipsOutputV1_0::deserialize(output).is_ok()
+            }
+            VerticalTool::ChangeImpact => ChangeImpactOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::TestsSelect => TestsSelectOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::ArchitectureOverview => {
+                ArchitectureOverviewOutputV1_0::deserialize(output).is_ok()
+            }
+            VerticalTool::ArchitectureCycles => {
+                ArchitectureCyclesOutputV1_0::deserialize(output).is_ok()
+            }
+            VerticalTool::CodeDead => CodeDeadOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::HistoryCompare => HistoryCompareOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::PlanChange => PlanChangeOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::ContextPack => ContextPackOutputV1_0::deserialize(output).is_ok(),
+            _ => false,
+        },
+        ContractSelection::Legacy => match tool {
             VerticalTool::OperationStatus => OperationStatusOutputV1_0::deserialize(output).is_ok(),
             _ => false,
         },
@@ -1735,8 +1889,9 @@ fn tool_error(
     selection: ContractSelection,
     error: PublicError,
 ) -> Result<HandlerResponse, ToolResultError> {
+    let schema_version = selection.error_schema_version(contract.tool);
     let structured = json!({
-        "schema_version": selection.schema_version(contract.tool),
+        "schema_version": schema_version,
         "error": error,
     });
     if !contract.output_validator(selection).is_valid(&structured)
@@ -1768,23 +1923,29 @@ fn unsupported_contract_version_error(
 fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
     match tool {
         VerticalTool::RepoIndex => RepoIndexOutput::deserialize(output).is_ok(),
-        VerticalTool::RepoStatus
-        | VerticalTool::RepoList
-        | VerticalTool::SymbolRelationships
+        VerticalTool::RepoStatus => RepoStatusOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::RepoList
         | VerticalTool::FlowTrace
-        | VerticalTool::ChangeImpact
-        | VerticalTool::TestsSelect
-        | VerticalTool::ArchitectureOverview
-        | VerticalTool::ArchitectureCycles
-        | VerticalTool::CodeDead
-        | VerticalTool::HistoryCompare
-        | VerticalTool::PlanChange
-        | VerticalTool::ContextPack
         | VerticalTool::QueryAdvanced
         | VerticalTool::QueryBatch => true,
         VerticalTool::OperationStatus => OperationStatusOutput::deserialize(output).is_ok(),
         VerticalTool::CodeLocate => CodeLocateOutput::deserialize(output).is_ok(),
         VerticalTool::SymbolExplain => SymbolExplainOutput::deserialize(output).is_ok(),
+        VerticalTool::SymbolRelationships => {
+            SymbolRelationshipsOutputV1_1::deserialize(output).is_ok()
+        }
+        VerticalTool::ChangeImpact => ChangeImpactOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::TestsSelect => TestsSelectOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::ArchitectureOverview => {
+            ArchitectureOverviewOutputV1_1::deserialize(output).is_ok()
+        }
+        VerticalTool::ArchitectureCycles => {
+            ArchitectureCyclesOutputV1_1::deserialize(output).is_ok()
+        }
+        VerticalTool::CodeDead => CodeDeadOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::HistoryCompare => HistoryCompareOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::PlanChange => PlanChangeOutputV1_1::deserialize(output).is_ok(),
+        VerticalTool::ContextPack => ContextPackOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::SourceRead => SourceReadOutput::deserialize(output).is_ok(),
     }
 }
@@ -1798,6 +1959,27 @@ fn typed_selected_error_output_is_valid(
         ContractSelection::Current => typed_error_output_is_valid(tool, output),
         ContractSelection::Previous => match tool {
             VerticalTool::RepoIndex => RepoIndexOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::RepoStatus => RepoStatusOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::OperationStatus => OperationStatusOutputV1_1::deserialize(output).is_ok(),
+            VerticalTool::SymbolExplain => SymbolExplainOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::SymbolRelationships => {
+                SymbolRelationshipsOutputV1_0::deserialize(output).is_ok()
+            }
+            VerticalTool::ChangeImpact => ChangeImpactOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::TestsSelect => TestsSelectOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::ArchitectureOverview => {
+                ArchitectureOverviewOutputV1_0::deserialize(output).is_ok()
+            }
+            VerticalTool::ArchitectureCycles => {
+                ArchitectureCyclesOutputV1_0::deserialize(output).is_ok()
+            }
+            VerticalTool::CodeDead => CodeDeadOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::HistoryCompare => HistoryCompareOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::PlanChange => PlanChangeOutputV1_0::deserialize(output).is_ok(),
+            VerticalTool::ContextPack => ContextPackOutputV1_0::deserialize(output).is_ok(),
+            _ => false,
+        },
+        ContractSelection::Legacy => match tool {
             VerticalTool::OperationStatus => OperationStatusOutputV1_0::deserialize(output).is_ok(),
             _ => false,
         },
@@ -1810,10 +1992,17 @@ fn select_output_version(
     mut output: Value,
 ) -> Result<Value, ()> {
     if selection == ContractSelection::Current {
+        output.as_object_mut().ok_or(())?.insert(
+            "schema_version".to_owned(),
+            Value::String(selection.schema_version(tool).to_owned()),
+        );
         return Ok(output);
     }
     let root = output.as_object_mut().ok_or(())?;
-    root.insert("schema_version".to_owned(), Value::String("1.0".to_owned()));
+    root.insert(
+        "schema_version".to_owned(),
+        Value::String(selection.schema_version(tool).to_owned()),
+    );
     let data = root
         .get_mut("data")
         .and_then(Value::as_object_mut)
@@ -1822,16 +2011,152 @@ fn select_output_version(
         VerticalTool::RepoIndex => {
             data.remove("semantic_operation_id");
         }
-        VerticalTool::OperationStatus => {
-            data.remove("semantic_operation_id");
-            data.remove("index_stage");
-            data.get_mut("operation")
-                .and_then(Value::as_object_mut)
-                .and_then(|operation| operation.get_mut("resources"))
+        VerticalTool::RepoStatus => {
+            data.remove("retained_durable_bytes");
+        }
+        VerticalTool::OperationStatus => match selection {
+            ContractSelection::Previous => {
+                let resources = data
+                    .get_mut("operation")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|operation| operation.get_mut("resources"))
+                    .and_then(Value::as_object_mut)
+                    .ok_or(())?;
+                resources.remove("retained_durable_bytes");
+            }
+            ContractSelection::Legacy => {
+                data.remove("semantic_operation_id");
+                data.remove("index_stage");
+                data.remove("incremental");
+                let resources = data
+                    .get_mut("operation")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|operation| operation.get_mut("resources"))
+                    .and_then(Value::as_object_mut)
+                    .ok_or(())?;
+                for field in [
+                    "bytes_examined",
+                    "referenced_bytes",
+                    "newly_written_bytes",
+                    "reserved_memory_bytes",
+                    "owned_memory_bytes",
+                    "retained_durable_bytes",
+                ] {
+                    resources.remove(field);
+                }
+            }
+            ContractSelection::Current => return Err(()),
+        },
+        VerticalTool::SymbolExplain => {
+            let symbols = data
+                .get_mut("symbols")
+                .and_then(Value::as_array_mut)
+                .ok_or(())?;
+            for symbol in symbols {
+                let symbol = symbol.as_object_mut().ok_or(())?;
+                symbol.remove("qualified_name");
+                symbol.remove("container");
+                symbol.remove("relation_samples");
+                symbol.remove("source_preview");
+                symbol.remove("section_gaps");
+                let provenance = symbol
+                    .get_mut("provenance")
+                    .and_then(Value::as_array_mut)
+                    .ok_or(())?;
+                for item in provenance {
+                    let item = item.as_object_mut().ok_or(())?;
+                    item.remove("frontend_version");
+                    item.remove("rule");
+                }
+            }
+        }
+        VerticalTool::SymbolRelationships => {
+            let groups = data
+                .get_mut("groups")
+                .and_then(Value::as_array_mut)
+                .ok_or(())?;
+            for group in groups {
+                let items = group
+                    .get_mut("items")
+                    .and_then(Value::as_array_mut)
+                    .ok_or(())?;
+                for item in items {
+                    let provenance = item
+                        .get_mut("provenance")
+                        .and_then(Value::as_array_mut)
+                        .ok_or(())?;
+                    for evidence in provenance {
+                        let evidence = evidence.as_object_mut().ok_or(())?;
+                        evidence.remove("frontend_version");
+                        evidence.remove("rule");
+                    }
+                }
+            }
+        }
+        VerticalTool::ChangeImpact => {}
+        VerticalTool::TestsSelect => {
+            let tests = data
+                .get_mut("tests")
+                .and_then(Value::as_array_mut)
+                .ok_or(())?;
+            for test in tests {
+                test.as_object_mut().ok_or(())?.remove("framework");
+            }
+            data.get_mut("coverage_strategy")
                 .and_then(Value::as_object_mut)
                 .ok_or(())?
-                .remove("bytes_examined");
+                .remove("build_target_signals");
         }
+        VerticalTool::ArchitectureOverview => {
+            let components = data
+                .get_mut("components")
+                .and_then(Value::as_array_mut)
+                .ok_or(())?;
+            for component in components {
+                let component = component.as_object_mut().ok_or(())?;
+                component.remove("file_count");
+                component.remove("source_refs");
+            }
+            let hotspots = data
+                .get_mut("hotspots")
+                .and_then(Value::as_array_mut)
+                .ok_or(())?;
+            for hotspot in hotspots {
+                let hotspot = hotspot.as_object_mut().ok_or(())?;
+                hotspot.remove("ownership_signal");
+                hotspot.remove("test_signal");
+            }
+        }
+        VerticalTool::ArchitectureCycles => {
+            let components = data
+                .get_mut("components")
+                .and_then(Value::as_array_mut)
+                .ok_or(())?;
+            for component in components {
+                let component = component.as_object_mut().ok_or(())?;
+                component.remove("edge_weight");
+                component.remove("change_risk");
+                component.remove("break_cost");
+            }
+            data.remove("projection");
+        }
+        VerticalTool::CodeDead => {
+            let candidates = data
+                .get_mut("candidates")
+                .and_then(Value::as_array_mut)
+                .ok_or(())?;
+            for candidate in candidates {
+                let candidate = candidate.as_object_mut().ok_or(())?;
+                candidate.remove("reachability");
+                candidate.remove("uncertainty");
+            }
+            data.get_mut("entry_points")
+                .and_then(Value::as_object_mut)
+                .ok_or(())?
+                .remove("entry_symbols");
+            data.remove("coverage_caveats");
+        }
+        VerticalTool::HistoryCompare | VerticalTool::PlanChange | VerticalTool::ContextPack => {}
         _ => return Err(()),
     }
     Ok(output)
@@ -2860,7 +3185,7 @@ mod tests {
             exclusions.is_empty(),
             "review any new generated-rule exclusion: {exclusions:?}"
         );
-        assert_eq!((declared, covered, exclusions.len()), (124, 124, 0));
+        assert_eq!((declared, covered, exclusions.len()), (52, 52, 0));
     }
 
     #[tokio::test]
@@ -2871,6 +3196,26 @@ mod tests {
         for capability in &CAPABILITIES {
             let tool = vertical_tool(capability.tool.name());
             let contract = ToolContract::compile(tool).expect("generated tool contract compiles");
+            let current_error = json!({
+                "schema_version": ContractSelection::Current.error_schema_version(tool),
+                "error": router.invalid_arguments.clone(),
+            });
+            assert!(
+                contract
+                    .output_validator(ContractSelection::Current)
+                    .is_valid(&current_error),
+                "{} current schema rejects the shared checked error",
+                capability.tool.name()
+            );
+            assert!(
+                typed_selected_error_output_is_valid(
+                    tool,
+                    ContractSelection::Current,
+                    &current_error,
+                ),
+                "{} current type rejects the shared checked error",
+                capability.tool.name()
+            );
             let retained = retained_input(capability.tool.name());
             let mut cases = Vec::with_capacity(2);
 
@@ -2907,7 +3252,13 @@ mod tests {
                         cancellation(),
                     )
                     .await;
-                let result = success(response);
+                let result = match response {
+                    HandlerResponse::Success(result) => result,
+                    other => panic!(
+                        "{} {label} expected a checked schema rejection, got {other:?}",
+                        capability.tool.name()
+                    ),
+                };
                 let error: AnyErrorResponse =
                     serde_json::from_value(result["structuredContent"].clone())
                         .expect("schema rejection uses the checked error contract");
@@ -3154,7 +3505,6 @@ mod tests {
             .expect("tools/list returns an array");
         for intent in [
             "code.locate",
-            "change.impact",
             "architecture.overview",
             "history.compare",
             "context.pack",
@@ -3166,13 +3516,21 @@ mod tests {
                 .unwrap_or_else(|| panic!("{intent} is discoverable"))["_meta"]
                 [DISCOVERY_METADATA_KEY]
                 .clone();
-            assert_eq!(metadata["status"], "fallback_limited");
+            let capability = CAPABILITIES
+                .iter()
+                .find(|capability| capability.tool.name() == intent)
+                .expect("listed tool has canonical capability metadata");
+            assert_eq!(metadata["status"], capability.status.name());
             assert!(
                 metadata["fallbackSummary"]
                     .as_str()
                     .is_some_and(|summary| summary.starts_with("bounded"))
             );
-            assert!(metadata["limitations"].as_array().is_some());
+            if capability.status == CapabilityStatus::Implemented {
+                assert_eq!(metadata["limitations"], json!([]));
+            } else {
+                assert!(metadata["limitations"].as_array().is_some());
+            }
         }
 
         let mut routed = BTreeSet::new();
@@ -3206,6 +3564,16 @@ mod tests {
                 "registry tool is unique"
             );
         }
+        for intent in ["symbol.explain", "change.impact", "tests.select"] {
+            let metadata = listed
+                .iter()
+                .find(|tool| tool["name"] == intent)
+                .unwrap_or_else(|| panic!("{intent} is discoverable"))["_meta"]
+                [DISCOVERY_METADATA_KEY]
+                .clone();
+            assert_eq!(metadata["status"], "implemented");
+            assert_eq!(metadata["limitations"], json!([]));
+        }
         assert_eq!(routed.len(), CAPABILITIES.len());
     }
 
@@ -3237,16 +3605,16 @@ mod tests {
             observed,
             [
                 (
-                    225_535,
-                    "094fe3d41cf4e67e7898fb38600add9d8bf412c838910306732038f8c2f48fce".to_owned(),
+                    225_473,
+                    "c24f5f1b2a28079ee1ff961ae9a3abeb105fa0e78cfbeab3dee768f9983a5ca0".to_owned(),
                 ),
                 (
-                    493_965,
-                    "22e3a801dcb69c3c94edd49eee3f0b340c2b7b12924e2b5dbb46fab6134c0895".to_owned(),
+                    493_575,
+                    "a6fd0375dafd929fb83d289bc9743c9f9ee09abcf0edb0bd1a75511a926fac05".to_owned(),
                 ),
                 (
-                    679_867,
-                    "ea881b4587d6c6fa23e463aaf13877f13fca4c277a033c33e82a60a734cdc065".to_owned(),
+                    678_324,
+                    "152a1da13695af14832e8f29da7c1b195cce7fafc78b0c620cfc6f8c1aa18fb9".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -3309,40 +3677,46 @@ mod tests {
                 "find an exact identifier",
                 "code.locate",
                 "exact-identifier or indexed lexical-text matching",
-                "search_modes[]",
+                CapabilityStatus::FallbackLimited,
+                Some("search_modes[]"),
             ),
             (
                 "map an explicit symbol change",
                 "change.impact",
-                "symbol-or-path change mapping",
-                "change.revision_range",
+                "read-only Git change evidence",
+                CapabilityStatus::Implemented,
+                None,
             ),
             (
                 "summarize file architecture",
                 "architecture.overview",
-                "file-granularity architecture map",
-                "views[]",
+                "generation-pinned architecture map",
+                CapabilityStatus::Implemented,
+                None,
             ),
             (
                 "compare retained generations",
                 "history.compare",
-                "retained generation identifiers",
-                "base.git",
+                "retained generations or Git refs",
+                CapabilityStatus::Implemented,
+                None,
             ),
             (
                 "assemble focused evidence",
                 "context.pack",
-                "profiled evidence assembly",
-                "seeds.paths",
+                "generation-pinned definitions",
+                CapabilityStatus::Implemented,
+                None,
             ),
             (
                 "dispatch several generation-pinned reads",
                 "query.batch",
                 "active-generation batch dispatch",
-                "generation",
+                CapabilityStatus::FallbackLimited,
+                Some("generation"),
             ),
         ];
-        for (intent, expected, routing_phrase, limitation_field) in cases {
+        for (intent, expected, routing_phrase, expected_status, limitation_field) in cases {
             let matches: Vec<&Value> = listed
                 .iter()
                 .filter(|tool| {
@@ -3362,15 +3736,23 @@ mod tests {
                 .iter()
                 .find(|capability| capability.tool.name() == expected)
                 .expect("routing tool has a capability");
-            assert_eq!(capability.status, CapabilityStatus::FallbackLimited);
-            assert!(
-                selected["_meta"][DISCOVERY_METADATA_KEY]["limitations"]
-                    .as_array()
-                    .is_some_and(|limitations| limitations
+            assert_eq!(capability.status, expected_status);
+            let limitations = selected["_meta"][DISCOVERY_METADATA_KEY]["limitations"]
+                .as_array()
+                .expect("discovery limitations are an array");
+            if let Some(limitation_field) = limitation_field {
+                assert!(
+                    limitations
                         .iter()
-                        .any(|limitation| limitation["field"] == limitation_field)),
-                "intent {intent:?} lacks a visible fallback for {limitation_field}"
-            );
+                        .any(|limitation| limitation["field"] == limitation_field),
+                    "intent {intent:?} lacks a visible fallback for {limitation_field}"
+                );
+            } else {
+                assert!(
+                    limitations.is_empty(),
+                    "implemented intent {intent:?} must not advertise fallback limitations"
+                );
+            }
         }
     }
 
@@ -3764,7 +4146,7 @@ mod tests {
             .await;
         let result = success(response);
         assert_eq!(result["isError"], true);
-        assert_eq!(result["structuredContent"]["schema_version"], "1.1");
+        assert_eq!(result["structuredContent"]["schema_version"], "1.2");
         assert_eq!(result["structuredContent"]["error"]["code"], "NOT_FOUND");
         serde_json::from_value::<OperationStatusOutput>(result["structuredContent"].clone())
             .expect("domain error uses the advertised typed envelope");
@@ -3986,7 +4368,7 @@ mod tests {
 
             assert_eq!(
                 error.schema_version,
-                ContractSelection::Current.schema_version(tool)
+                ContractSelection::Current.error_schema_version(tool)
             );
             assert_eq!(error.error.code(), ErrorCode::ProtocolMismatch);
             assert_eq!(
@@ -4009,7 +4391,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_and_previous_operation_contracts_reach_versioned_execution() {
+    async fn repo_index_current_and_previous_contracts_reach_versioned_execution() {
         let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
             .expect("registry compiles");
         let current = router
@@ -4084,6 +4466,143 @@ mod tests {
             ));
         }
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn operation_status_serves_current_and_two_retained_minor_contracts() {
+        let Value::Object(output) = json!({
+            "schema_version": "1.2",
+            "data": {
+                "operation": {
+                    "kind": "repository_index",
+                    "state": "running",
+                    "stage": "analysis",
+                    "progress": {
+                        "completed_units": 1,
+                        "total_units": 2
+                    },
+                    "revision": 7,
+                    "started_at": "2026-07-18T00:00:00Z",
+                    "resources": {
+                        "peak_rss_bytes": 1024,
+                        "written_bytes": 512,
+                        "files_examined": 3,
+                        "bytes_examined": 2048,
+                        "referenced_bytes": 256,
+                        "newly_written_bytes": 512,
+                        "reserved_memory_bytes": 4096,
+                        "owned_memory_bytes": 3072,
+                        "retained_durable_bytes": 768
+                    }
+                },
+                "published_generation": null,
+                "semantic_operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv",
+                "index_stage": "analysis",
+                "incremental": {
+                    "build_strategy": "dependency_directed",
+                    "fallback_reason": null,
+                    "invalidated_units": 1,
+                    "changed_inputs": 1,
+                    "changed_files": 1,
+                    "reused_files": 2,
+                    "rebuilt_files": 1,
+                    "reused_facts": 8,
+                    "rebuilt_facts": 4
+                },
+                "error": null,
+                "retry_after_ms": 50
+            }
+        }) else {
+            panic!("operation fixture is an object");
+        };
+        let router = ToolRouter::new(
+            StaticExecutor { result: Ok(output) },
+            ExposureProfile::Developer,
+        )
+        .expect("registry compiles");
+
+        for (version, retained_durable, incremental, referenced) in [
+            ("1.2", true, true, true),
+            ("1.1", false, true, true),
+            ("1.0", false, false, false),
+        ] {
+            let response = router
+                .handle(
+                    request(
+                        "tools/call",
+                        json!({
+                            "name": "operation.status",
+                            "arguments": {
+                                "operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv"
+                            },
+                            "_meta": {
+                                (TOOL_CONTRACT_VERSION_META_KEY): version
+                            }
+                        }),
+                    ),
+                    cancellation(),
+                )
+                .await;
+            let result = success(response);
+            assert_eq!(result["isError"], false);
+            assert_eq!(result["structuredContent"]["schema_version"], version);
+            let data = &result["structuredContent"]["data"];
+            let resources = &data["operation"]["resources"];
+            assert_eq!(
+                resources.get("retained_durable_bytes").is_some(),
+                retained_durable
+            );
+            assert_eq!(data.get("incremental").is_some(), incremental);
+            assert_eq!(resources.get("referenced_bytes").is_some(), referenced);
+        }
+    }
+
+    #[tokio::test]
+    async fn repo_status_serves_current_and_retained_minor_contracts() {
+        let mut output = retained_output("repo.status");
+        output.insert("schema_version".to_owned(), Value::String("1.1".to_owned()));
+        output
+            .get_mut("data")
+            .and_then(Value::as_object_mut)
+            .expect("repo.status fixture contains data")
+            .insert("retained_durable_bytes".to_owned(), json!(768));
+        let router = ToolRouter::new(
+            StaticExecutor { result: Ok(output) },
+            ExposureProfile::Developer,
+        )
+        .expect("registry compiles");
+
+        for (version, retained_durable) in [("1.1", true), ("1.0", false)] {
+            let response = router
+                .handle(
+                    request(
+                        "tools/call",
+                        json!({
+                            "name": "repo.status",
+                            "arguments": {
+                                "repository": {
+                                    "repository_id":
+                                        "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+                                }
+                            },
+                            "_meta": {
+                                (TOOL_CONTRACT_VERSION_META_KEY): version
+                            }
+                        }),
+                    ),
+                    cancellation(),
+                )
+                .await;
+            let result = success(response);
+            assert_eq!(result["isError"], false);
+            assert_eq!(result["structuredContent"]["schema_version"], version);
+            assert_eq!(
+                result["structuredContent"]["data"]
+                    .get("retained_durable_bytes")
+                    .is_some(),
+                retained_durable
+            );
+        }
     }
 
     #[tokio::test]
@@ -4181,7 +4700,7 @@ mod tests {
         let contract =
             ToolContract::compile(VerticalTool::OperationStatus).expect("contract compiles");
         let output = json!({
-            "schema_version": "1.1",
+            "schema_version": "1.2",
             "data": {
                 "operation": {
                     "kind": "repository_index",
@@ -4199,6 +4718,7 @@ mod tests {
                         "files_examined": 0,
                         "referenced_bytes": 0,
                         "newly_written_bytes": 0,
+                        "retained_durable_bytes": 0,
                         "reserved_memory_bytes": 0,
                         "owned_memory_bytes": 0
                     }
@@ -4605,6 +5125,47 @@ mod tests {
             &invalid,
             ExposureProfile::Developer
         ));
+    }
+
+    #[test]
+    fn dependent_batch_binding_passes_public_admission() {
+        let validator =
+            MaterializedToolValidator::compile().expect("checked contracts compile once");
+        let arguments = json!({
+            "repository": selector(),
+            "generation": "active",
+            "operations": [
+                {
+                    "id": "find",
+                    "tool": "code.locate",
+                    "arguments": {
+                        "query": "createApp",
+                        "search_modes": ["exact"]
+                    }
+                },
+                {
+                    "id": "explain",
+                    "tool": "symbol.explain",
+                    "depends_on": ["find"],
+                    "arguments": {
+                        "symbol_ids": [
+                            {"$from": "find", "source": "symbol_id", "index": 0}
+                        ]
+                    }
+                }
+            ]
+        });
+        let arguments = arguments
+            .as_object()
+            .expect("batch arguments are an object");
+
+        validator
+            .validate(
+                VerticalTool::QueryBatch,
+                arguments,
+                ExposureProfile::Developer,
+            )
+            .expect("declared typed binding passes public batch admission");
     }
 
     fn advanced_input(query: QueryAstNode) -> QueryAdvancedInput {

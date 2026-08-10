@@ -86,7 +86,82 @@ mod tests {
 fn context_contract_crosses_real_process_boundaries() {
     let mut fixture = ContextFixture::spawn();
     objective_role_truth_is_profile_invariant(&mut fixture);
+    every_context_seed_kind_resolves_across_processes(&mut fixture);
     fixture.finish();
+}
+
+fn every_context_seed_kind_resolves_across_processes(fixture: &mut ContextFixture) {
+    let cases = [
+        ("symbols", json!({"symbols": fixture.symbols})),
+        ("paths", json!({"paths": ["src/lib.rs"]})),
+        ("routes", json!({"routes": ["context_entry"]})),
+        ("tests", json!({"tests": [fixture.test_symbol]})),
+        ("located", json!({"located": "context_entry"})),
+        ("change", json!({"change": fixture.symbols[0]})),
+        ("plan", json!({"plan": "context_entry"})),
+    ];
+    for (kind, seeds) in cases {
+        if kind == "paths" {
+            let located = fixture.mcp.call(
+                "context-path-locate",
+                "code.locate",
+                json!({
+                    "repository": {"repository_id": fixture.repository_id},
+                    "generation": fixture.generation_id,
+                    "query": "src/lib.rs",
+                    "search_modes": ["path"],
+                    "max_results": 20
+                }),
+            );
+            assert_success(&located, "code.locate");
+            assert!(
+                !structured(&located)["data"]["matches"]
+                    .as_array()
+                    .expect("path locate matches are an array")
+                    .is_empty(),
+                "path locate must resolve indexed entities"
+            );
+        }
+        let arguments = json!({
+            "repository": {"repository_id": fixture.repository_id},
+            "generation": fixture.generation_id,
+            "task": format!("review the {kind} context seed"),
+            "seeds": seeds,
+            "token_budget": 2_000,
+            "source_policy": "signatures",
+            "sections": ["definitions"],
+            "diversity": "balanced",
+            "min_confidence": 0,
+            "response_profile": "compact"
+        });
+        let response = fixture.mcp.call(
+            &format!("context-seed-{kind}"),
+            "context.pack",
+            arguments.clone(),
+        );
+        assert_success(&response, "context.pack");
+        let output = structured(&response);
+        assert_context_identity(output, fixture);
+        assert!(
+            !output["data"]["items"]
+                .as_array()
+                .expect("context pack items are an array")
+                .is_empty(),
+            "{kind} seed did not resolve to bounded evidence: {output:#}"
+        );
+
+        if kind == "symbols" {
+            assert_eq!(output["schema_version"], "1.1");
+            let retained = fixture.mcp.call_version(
+                "context-seed-symbols-retained",
+                "context.pack",
+                arguments,
+                "1.0",
+            );
+            assert_success(&retained, "context.pack");
+            assert_eq!(structured(&retained)["schema_version"], "1.0");
+        }
+    }
 }
 
 fn objective_role_truth_is_profile_invariant(fixture: &mut ContextFixture) {
@@ -242,6 +317,7 @@ struct ContextFixture {
     repository_id: String,
     generation_id: String,
     symbols: Vec<Value>,
+    test_symbol: Value,
 }
 
 impl ContextFixture {
@@ -274,6 +350,16 @@ impl ContextFixture {
             "context_entry",
             &symbol_names,
         );
+        let test_symbol = locate_symbols(
+            &mut mcp,
+            &repository_id,
+            &generation_id,
+            "entry_combines_all_helpers",
+            &["entry_combines_all_helpers".to_owned()],
+        )
+        .into_iter()
+        .next()
+        .expect("test symbol lookup returns one identity");
 
         Self {
             _root: root,
@@ -282,6 +368,7 @@ impl ContextFixture {
             repository_id,
             generation_id,
             symbols,
+            test_symbol,
         }
     }
 
@@ -580,6 +667,30 @@ impl McpProcess {
                 "id": attempt_id,
                 "method": "tools/call",
                 "params": {"name": tool, "arguments": arguments.clone()}
+            }));
+            response = self.read();
+            assert_eq!(response["id"], attempt_id);
+            if response["error"]["code"] != -32603 {
+                return response;
+            }
+            thread::yield_now();
+        }
+        response
+    }
+
+    fn call_version(&mut self, id: &str, tool: &str, arguments: Value, version: &str) -> Value {
+        let mut response = Value::Null;
+        for attempt in 1..=3 {
+            let attempt_id = format!("{id}-attempt-{attempt}");
+            self.write(&json!({
+                "jsonrpc": "2.0",
+                "id": attempt_id,
+                "method": "tools/call",
+                "params": {
+                    "name": tool,
+                    "arguments": arguments.clone(),
+                    "_meta": {"rootlight/toolContractVersion": version}
+                }
             }));
             response = self.read();
             assert_eq!(response["id"], attempt_id);

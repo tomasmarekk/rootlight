@@ -1,7 +1,7 @@
 //! Public retrieval-contract evidence across real MCP and daemon processes.
 //!
-//! The fixtures exercise only advertised retrieval capabilities and verify
-//! stable rejection for schema-visible options outside the accepted surface.
+//! The fixtures exercise advertised retrieval capabilities and verify stable
+//! rejection for schema-visible options outside the accepted surface.
 
 mod process_support;
 
@@ -76,11 +76,272 @@ pub fn matrix_target_mu(value: usize) -> usize {
 fn retrieval_contract_matrix_crosses_real_process_boundaries() {
     let mut fixture = RetrievalFixture::spawn();
     supported_profiles_preserve_standalone_and_batch_semantics(&mut fixture);
+    supported_symbol_explain_projection_crosses_process_boundaries(&mut fixture);
+    supported_architecture_workflows_cross_process_boundaries(&mut fixture);
     supported_language_filters_apply_across_process_boundaries(&mut fixture);
     source_symbol_selector_resolves_the_complete_definition(&mut fixture);
     unsupported_retrieval_options_fail_with_stable_preflight_errors(&mut fixture);
     retrieval_limits_cursors_and_unresolved_ids_are_truthful(&mut fixture);
     fixture.finish();
+}
+
+fn supported_architecture_workflows_cross_process_boundaries(fixture: &mut RetrievalFixture) {
+    let overview = fixture.standalone(
+        "architecture-overview-rich",
+        "architecture.overview",
+        json!({
+            "scope": {"paths": ["src"]},
+            "views": [
+                "modules",
+                "packages",
+                "services",
+                "data",
+                "build",
+                "ownership",
+                "communities",
+                "hotspots"
+            ],
+            "detail": "detailed",
+            "include_edges": true,
+            "response_profile": "evidence"
+        }),
+    );
+    assert_success(&overview, "architecture.overview");
+    let overview = &overview["result"]["structuredContent"];
+    assert_common_read_contract(overview, &fixture.repository_id);
+    assert_eq!(overview["schema_version"], "1.1");
+    assert!(overview["data"]["components"].is_array());
+    assert!(overview["data"]["connections"].is_array());
+    assert!(
+        overview["data"]
+            .get("communities")
+            .is_none_or(Value::is_array)
+    );
+    assert!(overview["data"]["views"].is_array());
+    if let Some(component) = overview["data"]["components"]
+        .as_array()
+        .and_then(|components| components.first())
+    {
+        assert!(component["file_count"].is_number());
+        assert!(component["source_refs"].is_array());
+    }
+
+    let retained_overview = fixture.standalone_version(
+        "architecture-overview-retained",
+        "architecture.overview",
+        json!({
+            "views": ["hotspots"],
+            "include_edges": true,
+            "response_profile": "evidence"
+        }),
+        "1.0",
+    );
+    assert_success(&retained_overview, "architecture.overview");
+    let retained_overview = &retained_overview["result"]["structuredContent"];
+    assert_eq!(retained_overview["schema_version"], "1.0");
+    if let Some(component) = retained_overview["data"]["components"]
+        .as_array()
+        .and_then(|components| components.first())
+    {
+        assert!(component.get("file_count").is_none());
+        assert!(component.get("source_refs").is_none());
+    }
+    if let Some(hotspot) = retained_overview["data"]["hotspots"]
+        .as_array()
+        .and_then(|hotspots| hotspots.first())
+    {
+        assert!(hotspot.get("ownership_signal").is_none());
+        assert!(hotspot.get("test_signal").is_none());
+    }
+
+    let cycles = fixture.standalone(
+        "architecture-cycles-rich",
+        "architecture.cycles",
+        json!({
+            "scope": {"paths": ["src"]},
+            "projection": {"relations": ["calls", "imports"], "level": "module"},
+            "rank_by": "edge_weight",
+            "min_size": 2,
+            "max_cycles": 20,
+            "response_profile": "evidence"
+        }),
+    );
+    assert_success(&cycles, "architecture.cycles");
+    let cycles = &cycles["result"]["structuredContent"];
+    assert_common_read_contract(cycles, &fixture.repository_id);
+    assert_eq!(cycles["schema_version"], "1.1");
+    assert_eq!(cycles["data"]["projection"]["level"], "module");
+    assert_eq!(cycles["data"]["projection"]["rank_by"], "edge_weight");
+    assert!(cycles["data"]["projection"]["relations"].is_array());
+
+    let retained_cycles = fixture.standalone_version(
+        "architecture-cycles-retained",
+        "architecture.cycles",
+        json!({
+            "projection": {"relations": ["calls"], "level": "symbol"},
+            "max_cycles": 20,
+            "response_profile": "evidence"
+        }),
+        "1.0",
+    );
+    assert_success(&retained_cycles, "architecture.cycles");
+    let retained_cycles = &retained_cycles["result"]["structuredContent"];
+    assert_eq!(retained_cycles["schema_version"], "1.0");
+    assert!(retained_cycles["data"].get("projection").is_none());
+    for component in retained_cycles["data"]["components"]
+        .as_array()
+        .expect("retained cycle components remain an array")
+    {
+        assert!(component.get("edge_weight").is_none());
+        assert!(component.get("change_risk").is_none());
+        assert!(component.get("break_cost").is_none());
+    }
+
+    let dead = fixture.standalone(
+        "code-dead-rich",
+        "code.dead",
+        json!({
+            "scope": {"paths": ["src"]},
+            "entry_point_policy": {"entry_symbols": [fixture.symbols[0].clone()]},
+            "include_exported": true,
+            "include_tests": true,
+            "response_profile": "evidence"
+        }),
+    );
+    assert_success(&dead, "code.dead");
+    let dead = &dead["result"]["structuredContent"];
+    assert_common_read_contract(dead, &fixture.repository_id);
+    assert_eq!(dead["schema_version"], "1.1");
+    assert_eq!(dead["data"]["entry_points"]["policy"], "explicit");
+    assert!(dead["data"]["entry_points"]["entry_symbols"].is_array());
+    assert!(dead["data"]["coverage_caveats"].is_array());
+    for candidate in dead["data"]["candidates"]
+        .as_array()
+        .expect("dead-code candidates remain an array")
+    {
+        assert!(candidate["reachability"].is_object());
+        assert!(candidate["uncertainty"].is_array());
+    }
+
+    let retained_dead = fixture.standalone_version(
+        "code-dead-retained",
+        "code.dead",
+        json!({
+            "entry_point_policy": "standard",
+            "include_exported": true,
+            "include_tests": true,
+            "response_profile": "evidence"
+        }),
+        "1.0",
+    );
+    assert_success(&retained_dead, "code.dead");
+    let retained_dead = &retained_dead["result"]["structuredContent"];
+    assert_eq!(retained_dead["schema_version"], "1.0");
+    assert!(
+        retained_dead["data"]["entry_points"]
+            .get("entry_symbols")
+            .is_none()
+    );
+    assert!(retained_dead["data"].get("coverage_caveats").is_none());
+    for candidate in retained_dead["data"]["candidates"]
+        .as_array()
+        .expect("retained dead-code candidates remain an array")
+    {
+        assert!(candidate.get("reachability").is_none());
+        assert!(candidate.get("uncertainty").is_none());
+    }
+}
+
+fn supported_symbol_explain_projection_crosses_process_boundaries(fixture: &mut RetrievalFixture) {
+    let arguments = json!({
+        "symbol_ids": [fixture.symbols[0].clone()],
+        "sections": [
+            "signature",
+            "docs",
+            "containment",
+            "types",
+            "calls_summary",
+            "references_summary",
+            "history",
+            "ownership",
+            "diagnostics",
+            "source_preview"
+        ],
+        "relation_sample_limit": 1,
+        "source_preview_lines": 2,
+        "include_provenance": "full",
+        "response_profile": "evidence"
+    });
+    let response = fixture.standalone(
+        "explain-rich-projection",
+        "symbol.explain",
+        arguments.clone(),
+    );
+    assert_success(&response, "symbol.explain");
+    let output = &response["result"]["structuredContent"];
+    assert_common_read_contract(output, &fixture.repository_id);
+    assert_eq!(output["schema_version"], "1.1");
+    let explanation = &output["data"]["symbols"][0];
+    assert!(
+        explanation["qualified_name"]
+            .as_str()
+            .is_some_and(|name| !name.is_empty())
+    );
+    assert!(
+        explanation["signature"]
+            .as_str()
+            .is_some_and(|signature| signature.contains("matrix_target_alpha")),
+        "rich symbol explanation returned an unexpected signature: {explanation:#}"
+    );
+    assert!(
+        explanation["source_preview"]
+            .as_str()
+            .is_some_and(|preview| preview.contains("matrix_target_alpha"))
+    );
+    assert!(
+        explanation["relation_samples"]
+            .as_array()
+            .is_some_and(|samples| samples.len() <= 1)
+    );
+    assert!(
+        explanation["provenance"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    );
+    assert!(
+        explanation["section_gaps"].is_array(),
+        "unavailable requested evidence is disclosed as section gaps"
+    );
+
+    let retained = fixture.standalone_version(
+        "explain-rich-projection-v1",
+        "symbol.explain",
+        arguments,
+        "1.0",
+    );
+    assert_success(&retained, "symbol.explain");
+    let retained = &retained["result"]["structuredContent"];
+    assert_eq!(retained["schema_version"], "1.0");
+    let retained_explanation = &retained["data"]["symbols"][0];
+    for field in [
+        "qualified_name",
+        "container",
+        "relation_samples",
+        "source_preview",
+        "section_gaps",
+    ] {
+        assert!(
+            retained_explanation.get(field).is_none(),
+            "retained symbol.explain output exposed 1.1 field {field}"
+        );
+    }
+    for provenance in retained_explanation["provenance"]
+        .as_array()
+        .expect("retained provenance remains an array")
+    {
+        assert!(provenance.get("frontend_version").is_none());
+        assert!(provenance.get("rule").is_none());
+    }
 }
 
 fn source_symbol_selector_resolves_the_complete_definition(fixture: &mut RetrievalFixture) {
@@ -380,11 +641,6 @@ fn unsupported_retrieval_options_fail_with_stable_preflight_errors(fixture: &mut
             json!({"repository": repository(), "query": "matrix", "search_modes": ["docs"]}),
         ),
         (
-            "locate-path",
-            "code.locate",
-            json!({"repository": repository(), "query": "matrix", "search_modes": ["path"]}),
-        ),
-        (
             "locate-semantic",
             "code.locate",
             json!({"repository": repository(), "query": "matrix", "search_modes": ["semantic"]}),
@@ -398,26 +654,6 @@ fn unsupported_retrieval_options_fail_with_stable_preflight_errors(fixture: &mut
             "locate-mixed-modes",
             "code.locate",
             json!({"repository": repository(), "query": "matrix", "search_modes": ["exact", "lexical"]}),
-        ),
-        (
-            "explain-sections",
-            "symbol.explain",
-            json!({"repository": repository(), "symbol_ids": [symbol.clone()], "sections": ["signature"]}),
-        ),
-        (
-            "explain-relation-limit",
-            "symbol.explain",
-            json!({"repository": repository(), "symbol_ids": [symbol.clone()], "relation_sample_limit": 1}),
-        ),
-        (
-            "explain-source-preview",
-            "symbol.explain",
-            json!({"repository": repository(), "symbol_ids": [symbol.clone()], "source_preview_lines": 1}),
-        ),
-        (
-            "explain-full-provenance",
-            "symbol.explain",
-            json!({"repository": repository(), "symbol_ids": [symbol.clone()], "include_provenance": "full"}),
         ),
         (
             "source-standard",
@@ -757,7 +993,10 @@ fn assert_standalone_batch_parity(standalone: &Value, batch: &Value, tool: &str)
 }
 
 fn assert_common_read_contract(output: &Value, repository_id: &str) {
-    assert_eq!(output["schema_version"], "1.0");
+    assert!(
+        matches!(output["schema_version"].as_str(), Some("1.0" | "1.1")),
+        "read response uses a supported additive schema version"
+    );
     assert_eq!(output["repository"]["repository_id"], repository_id);
     assert!(output["generation"]["generation_id"].is_string());
     assert_ne!(
@@ -924,6 +1163,26 @@ impl RetrievalFixture {
         );
         arguments.insert("generation".to_owned(), json!("active"));
         self.mcp.call(id, tool, Value::Object(arguments))
+    }
+
+    fn standalone_version(
+        &mut self,
+        id: &str,
+        tool: &str,
+        arguments: Value,
+        version: &str,
+    ) -> Value {
+        let mut arguments = arguments
+            .as_object()
+            .expect("retrieval arguments are objects")
+            .clone();
+        arguments.insert(
+            "repository".to_owned(),
+            json!({"repository_id": self.repository_id}),
+        );
+        arguments.insert("generation".to_owned(), json!("active"));
+        self.mcp
+            .call_version(id, tool, Value::Object(arguments), version)
     }
 
     fn batch(&mut self, id: &str, tool: &str, arguments: Value, response_profile: &str) -> Value {
@@ -1131,6 +1390,22 @@ impl McpProcess {
             "id": id,
             "method": "tools/call",
             "params": {"name": tool, "arguments": arguments}
+        }));
+        let response = self.read();
+        assert_eq!(response["id"], id);
+        response
+    }
+
+    fn call_version(&mut self, id: &str, tool: &str, arguments: Value, version: &str) -> Value {
+        self.write(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": tool,
+                "arguments": arguments,
+                "_meta": {"rootlight/toolContractVersion": version}
+            }
         }));
         let response = self.read();
         assert_eq!(response["id"], id);

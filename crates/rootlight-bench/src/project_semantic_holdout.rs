@@ -121,6 +121,7 @@ struct ProjectSemanticLanguageEvidence {
     expected_calibration_error_milli: u16,
     capabilities: ProjectSemanticCapabilityEvidence,
     analysis_coverage_complete: bool,
+    analysis_coverage_truthful: bool,
     build_context_identity_bound: bool,
     provenance_complete: bool,
     repeated_output_identical: bool,
@@ -375,6 +376,10 @@ fn measure_language(
         provenance: validate_provenance(first.document(), scored.build_context)?,
         analysis_coverage_complete: coverage.tier() == AnalysisTier::TierB
             && coverage.status() == CoverageStatus::Complete,
+        // The holdout deliberately includes two unresolved calls, so complete
+        // relationship coverage would be a false negative claim.
+        analysis_coverage_truthful: coverage.tier() == AnalysisTier::TierB
+            && coverage.status() == CoverageStatus::Bounded,
         repeated_output_identical,
     };
     let evidence = language_evidence(
@@ -761,6 +766,7 @@ fn language_evidence(
             .ok_or_else(|| quality("calibration error is unmeasured"))?,
         capabilities: capability_evidence(manifest, answer, document, scored)?,
         analysis_coverage_complete: execution.analysis_coverage_complete,
+        analysis_coverage_truthful: execution.analysis_coverage_truthful,
         build_context_identity_bound: execution.provenance.build_context_identity_bound,
         provenance_complete: execution.provenance.complete,
         repeated_output_identical: execution.repeated_output_identical,
@@ -1133,7 +1139,8 @@ fn validate_language_evidence(
         || !capability_complete(capabilities.visibility)
         || !capability_complete(capabilities.inferred_calls)
         || !capability_complete(capabilities.dispatch_candidates)
-        || !evidence.analysis_coverage_complete
+        || evidence.analysis_coverage_complete
+        || !evidence.analysis_coverage_truthful
         || !evidence.build_context_identity_bound
         || !evidence.provenance_complete
         || !evidence.repeated_output_identical
@@ -1843,6 +1850,7 @@ struct ProvenanceEvidence {
 struct LanguageExecutionEvidence {
     provenance: ProvenanceEvidence,
     analysis_coverage_complete: bool,
+    analysis_coverage_truthful: bool,
     repeated_output_identical: bool,
 }
 
@@ -1851,7 +1859,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn production_holdout_is_deterministic_bounded_and_complete() {
+    fn production_holdout_is_deterministic_bounded_and_truthful() {
         let first = build_project_semantic_holdout().expect("project semantic holdout passes");
         let repeated = build_project_semantic_holdout().expect("project semantic holdout repeats");
         let first_bytes =

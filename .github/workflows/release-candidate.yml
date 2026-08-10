@@ -1316,6 +1316,12 @@ jobs:
       - name: Build release binaries
         shell: bash
         run: cargo build --release --locked --package rootlight-daemon --package rootlight-mcp
+      - name: Observe first bridge process latency
+        continue-on-error: true
+        shell: bash
+        run: >-
+          cargo test --release --locked --package rootlight-mcp --test startup_process
+          -- --ignored --exact first_bridge_initialization_reports_cold_telemetry --nocapture
       - name: Verify bridge startup latency
         shell: bash
         run: |

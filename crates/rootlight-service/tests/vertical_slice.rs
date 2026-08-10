@@ -12,15 +12,16 @@ use rootlight_incremental::FactDomain;
 use rootlight_ir::CoverageStatus;
 use rootlight_query::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_MAX_TRAVERSAL, AdvancedAggregateFunction, AdvancedAstNode,
-    AdvancedCompleteness, AdvancedEntityKind, LocateMode, RepositoryDataTrust,
+    AdvancedCompleteness, AdvancedEntityKind, HistoryCompareScope, LocateMode, RepositoryDataTrust,
 };
 use rootlight_service::{
     ArchitectureOverviewView, ChangeClass, ChangeImpactClassification, ChangeImpactRiskLevel,
-    CodeDeadEntryPointPolicy, FileChangeKind, FirstSliceBuildStrategy, FirstSliceError,
-    FirstSliceFreshnessStatus, FirstSliceIncrementalEvidence, FirstSliceObservedFreshness,
-    FirstSlicePublicationMode, FirstSliceService, FirstSliceTwoStageAvailability,
-    PlanChangeObjective, RUNTIME_TRACE_SCHEMA_VERSION, RelationDirection, RelationFamily,
-    RuntimeTraceLimits, SharedGenerationExpectation, SharedGenerationLimits,
+    CodeDeadEntryPointPolicy, FileChangeKind, FirstSliceBudget, FirstSliceBuildStrategy,
+    FirstSliceError, FirstSliceFreshnessStatus, FirstSliceIncrementalEvidence,
+    FirstSliceObservedFreshness, FirstSlicePublicationMode, FirstSliceService,
+    FirstSliceTwoStageAvailability, PlanChangeObjective, RUNTIME_TRACE_SCHEMA_VERSION,
+    RelationDirection, RelationFamily, RuntimeTraceLimits, SharedGenerationExpectation,
+    SharedGenerationLimits,
     catalog::{
         CatalogInstant, CatalogListFilter, CatalogPageRequest, CatalogPageSize,
         CatalogRepositoryState,
@@ -1286,12 +1287,16 @@ fn code_dead_includes_an_isolated_rust_symbol() {
             .contains(&"no_incoming_references".to_owned())
     );
     assert_eq!(isolated_candidate.confidence, 300);
-    let mut last_symbol = None;
+    let mut last_candidate = None;
     for candidate in &dead.data.candidates {
-        if let Some(previous) = last_symbol {
-            assert!(previous <= candidate.symbol_id);
+        if let Some((previous_confidence, previous_symbol)) = last_candidate {
+            assert!(
+                previous_confidence > candidate.confidence
+                    || (previous_confidence == candidate.confidence
+                        && previous_symbol <= candidate.symbol_id)
+            );
         }
-        last_symbol = Some(candidate.symbol_id);
+        last_candidate = Some((candidate.confidence, candidate.symbol_id));
         assert!(
             candidate
                 .why
@@ -1430,7 +1435,12 @@ fn tests_select_returns_a_direct_rust_test() {
     assert!(!selection.data.coverage_strategy.transitive_signals);
     assert!(!selection.data.coverage_strategy.history_signals);
     assert!(selection.data.coverage_strategy.file_colocation_signals);
-    assert!(selection.data.gaps.is_empty());
+    assert!(selection.data.gaps.iter().any(|gap| {
+        gap.scope == "history_evidence" && gap.reason == "history_signal_unavailable"
+    }));
+    assert!(selection.data.gaps.iter().any(|gap| {
+        gap.scope == "runtime_evidence" && gap.reason == "runtime_coverage_unavailable"
+    }));
     assert_eq!(
         selection.data.trust,
         RepositoryDataTrust::UntrustedRepositoryData
@@ -1506,7 +1516,7 @@ fn change_impact_returns_a_resolved_rust_caller() {
     assert!(!impact.data.risk_summary.breaking_surface);
     assert_eq!(impact.data.risk_summary.fanout, 1);
     assert_eq!(impact.data.risk_summary.level, ChangeImpactRiskLevel::Low);
-    assert_eq!(impact.data.risk_summary.coverage, CoverageStatus::Unknown);
+    assert_eq!(impact.data.risk_summary.coverage, CoverageStatus::Bounded);
     assert!(impact.data.risk_summary.dynamic_blind_spots);
     assert_eq!(
         impact.data.trust,
@@ -1675,11 +1685,14 @@ fn history_compare_reports_an_honest_empty_comparison_for_base_equal_to_head() {
     let target = located.data.hits[0].symbol;
 
     let comparison = service
-        .history_compare(
+        .history_compare_with_scope_and_budget(
             indexed.generation,
             indexed.generation,
+            HistoryCompareScope::default(),
             BTreeSet::new(),
+            true,
             100,
+            FirstSliceBudget::default(),
             &cancellation,
         )
         .expect("history compare query succeeds");

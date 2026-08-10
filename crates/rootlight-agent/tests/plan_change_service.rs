@@ -337,7 +337,9 @@ fn provider_envelope(
                 "kind": "module",
                 "name": "component a",
                 "symbol_count": 1,
+                "file_count": 1,
                 "responsibility_evidence": ["declaring_file"],
+                "source_refs": [],
                 "confidence": 900,
                 "trust": "untrusted_repository_data"
             }],

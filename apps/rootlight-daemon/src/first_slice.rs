@@ -39,8 +39,8 @@ use rootlight_ids::{
     ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId, content_hash,
 };
 use rootlight_ir::{
-    AnalysisTier, CoverageRecord, CoverageStatus, LineRange, NormalizedIrDocument, OccurrenceRole,
-    RelationEndpoint, RelationPredicate, SourceRef, SourceSpan,
+    AnalysisTier, ContainerRef, CoverageRecord, CoverageStatus, LineRange, NormalizedIrDocument,
+    OccurrenceRole, RelationEndpoint, RelationPredicate, SourceRef, SourceSpan,
 };
 use rootlight_observability::{
     SupportAdapterInventory, SupportChecksumStatus, SupportGenerationInventory,
@@ -67,21 +67,25 @@ use rootlight_protocol::{
     },
 };
 use rootlight_query::{
-    ArchitectureOverviewView, CodeDeadEntryPointPolicy, ExecutionCompletenessState, LocateMode,
-    QueryResource, QueryUsage, RelationDirection, RelationFamily, TestsSelectKind,
+    AnalysisScope, ArchitectureOverviewDetail, ArchitectureOverviewView,
+    ChangeImpactRelationPolicy, CodeDeadEntryPointPolicy, CycleProjectionLevel, CycleRankBy,
+    ExecutionCompletenessState, HistoryCompareScope, LocateMode, QueryResource, QueryUsage,
+    RelationDirection, RelationFamily, TestsSelectKind,
 };
 use rootlight_runtime::{CoordinatedStartupSignal, STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT};
 use rootlight_service::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
     AdvancedAstNode, FallbackReason as ServiceFallbackReason, FirstSliceBudget,
     FirstSliceDeferredRestore, FirstSliceDurableOperation, FirstSliceError,
-    FirstSliceGenerationContext, FirstSliceIndexAdmission, FirstSliceIndexMode,
-    FirstSliceIndexOperationEvidence, FirstSliceIndexOperationStrategy, FirstSliceIndexProgress,
-    FirstSliceIndexProvider, FirstSliceIndexReceipt, FirstSliceObservedFreshness,
-    FirstSliceOperationContext, FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError,
-    FirstSliceProjectAnalysisProgress, FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer,
-    FirstSliceRecoveryTarget, FirstSliceService, FirstSliceSupportInventory, HistoryChangeKind,
-    PlanChangeObjective, SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
+    FirstSliceGenerationContext, FirstSliceGitEvidenceError, FirstSliceIndexAdmission,
+    FirstSliceIndexMode, FirstSliceIndexOperationEvidence, FirstSliceIndexOperationStrategy,
+    FirstSliceIndexProgress, FirstSliceIndexProvider, FirstSliceIndexReceipt,
+    FirstSliceObservedFreshness, FirstSliceOperationContext, FirstSliceProjectAnalysis,
+    FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisProgress,
+    FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer, FirstSliceRecoveryTarget,
+    FirstSliceService, FirstSliceSupportInventory, FirstSliceWorkingTreeSelection,
+    HistoryChangeKind, PlanChangeObjective, SourceEncoding as ServiceSourceEncoding,
+    SourceReadOptions,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
         CatalogPageSize, CatalogRepositoryRecord, CatalogRepositoryState, CatalogSnapshotId,
@@ -104,6 +108,16 @@ const DEFAULT_CONTROL_QUEUE: usize = 32;
 const DEFAULT_OPERATION_METADATA: usize = 256;
 const MAX_PUBLIC_INVALIDATION_TRACE_ENTRIES: usize = 8;
 const RETRY_AFTER_MS: u32 = 100;
+const OPERATION_RETRY_QUEUED_MS: u32 = 250;
+const OPERATION_RETRY_DISCOVERY_MS: u32 = 200;
+const OPERATION_RETRY_SNAPSHOT_MS: u32 = 150;
+const OPERATION_RETRY_ANALYSIS_MS: u32 = 250;
+const OPERATION_RETRY_MERGE_MS: u32 = 100;
+const OPERATION_RETRY_PERSISTENCE_MS: u32 = 150;
+const OPERATION_RETRY_SEARCH_MS: u32 = 100;
+const OPERATION_RETRY_PUBLICATION_MS: u32 = 50;
+const OPERATION_RETRY_RECOVERY_MS: u32 = 250;
+const OPERATION_RETRY_CANCELLING_MS: u32 = 50;
 const MAX_OPERATION_STATUS_WAIT_MS: u32 = 30_000;
 const OPERATION_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PUBLICATION_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(2);
@@ -782,11 +796,20 @@ struct DeferredRecoveryWork {
     targets: Vec<FirstSliceRecoveryTarget>,
     #[cfg(test)]
     after_start: Option<RecoveryWorkerStartHook>,
+    #[cfg(test)]
+    after_active_restore: Option<RecoveryWorkerCheckpointHook>,
 }
 
 #[cfg(test)]
 type RecoveryWorkerStartHook =
     Box<dyn FnOnce(&Cancellation, &AtomicBool) -> Result<(), FirstSliceHostError> + Send + 'static>;
+
+#[cfg(test)]
+type RecoveryWorkerCheckpointHook = Box<
+    dyn FnOnce(&FirstSliceServiceLanes, &Cancellation) -> Result<(), FirstSliceHostError>
+        + Send
+        + 'static,
+>;
 
 struct PublicationBoundaryHook {
     boundary: PublicationBoundary,
@@ -918,6 +941,8 @@ impl FirstSliceDaemon {
                 targets: recovery_targets,
                 #[cfg(test)]
                 after_start: None,
+                #[cfg(test)]
+                after_active_restore: None,
             }),
         )
     }
@@ -2645,7 +2670,6 @@ fn durable_recovery_worker(
             let _ = cancellation.cancel(CancellationReason::Shutdown);
             return Ok(());
         }
-        lanes.recovery_ready.store(true, Ordering::Release);
         if deferred.restore_active {
             for recovery in &mut active_recoveries {
                 let target = recovery.target;
@@ -2727,20 +2751,23 @@ fn durable_recovery_worker(
                 remove_recovering_repository(&lanes, target.repository())?;
                 recovered_targets.insert(recovery.operation());
             }
-            if let Err(error) = complete_durable_recovery(&lanes, degraded) {
-                for recovery in &mut active_recoveries {
-                    if recovered_targets.contains(&recovery.operation()) {
-                        recovery.fail(&runtime, FirstSliceError::Catalog)?;
-                    }
-                }
-                return Err(error);
-            }
+        }
+        // Active generations become queryable before retained history finishes,
+        // but mutation and watcher admission remain closed until the full batch
+        // has either restored or reached a durable terminal result.
+        lanes.recovery_ready.store(true, Ordering::Release);
+        #[cfg(test)]
+        if let Some(after_active_restore) = deferred.after_active_restore.take() {
+            after_active_restore(&lanes, &cancellation)?;
         }
         for recovery in &mut active_recoveries {
             if !recovered_targets.contains(&recovery.operation()) {
                 continue;
             }
             let target = recovery.target;
+            if let Some(reason) = cancellation.reason() {
+                let _ = recovery.cancellation().cancel(reason);
+            }
             if stopping.load(Ordering::Acquire) {
                 recovery.cancel(&runtime, CancellationReason::Shutdown)?;
                 continue;
@@ -2806,19 +2833,16 @@ fn durable_recovery_worker(
                 &remaining_generations,
             )?;
             recovery.complete(&runtime)?;
-            refresh_recovery_support_inventory(&lanes)?;
-            if degraded && let Some(state) = lanes.support_state.as_deref() {
-                state.set_generation_status(HealthStatus::Degraded);
-            }
         }
         Ok(())
     })();
     let finalization_result =
         finalize_incomplete_recoveries(&mut active_recoveries, stopping.as_ref(), &cancellation);
-    match (work_result, finalization_result) {
-        (_, Err(error)) | (Err(error), Ok(())) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+    finalization_result?;
+    if !stopping.load(Ordering::Acquire) {
+        complete_durable_recovery(&lanes, degraded || work_result.is_err())?;
     }
+    work_result
 }
 
 fn finalize_incomplete_recoveries(
@@ -2911,9 +2935,6 @@ fn refresh_recovery_support_inventory(
         state
             .replace_index_support_inventory(inventory)
             .map_err(FirstSliceHostError::Journal)?;
-        if !lanes.recovery_complete.load(Ordering::Acquire) {
-            state.set_generation_status(HealthStatus::Unavailable);
-        }
     }
     Ok(())
 }
@@ -2922,11 +2943,12 @@ fn complete_durable_recovery(
     lanes: &FirstSliceServiceLanes,
     degraded: bool,
 ) -> Result<(), FirstSliceHostError> {
-    lanes.recovery_complete.store(true, Ordering::Release);
     refresh_recovery_support_inventory(lanes)?;
     if degraded && let Some(state) = lanes.support_state.as_deref() {
         state.set_generation_status(HealthStatus::Degraded);
     }
+    lanes.recovery_ready.store(true, Ordering::Release);
+    lanes.recovery_complete.store(true, Ordering::Release);
     Ok(())
 }
 
@@ -3917,11 +3939,24 @@ fn repository_index_with_intent(
     let operation = parse_operation(request.operation.as_ref())?;
     let requested_mode =
         daemon::RepositoryIndexMode::try_from(request.mode).map_err(|_| invalid_argument())?;
+    let root = PathBuf::from(&request.root);
+    let requested_repository = read_service(service)?
+        .registered_repository_for_root(&root, &context.cancellation)
+        .map_err(service_error)?;
+    let active_generation_is_deep = requested_repository
+        .map(|repository| {
+            read_service(service)?
+                .active_generation_is_deep(repository)
+                .map_err(service_error)
+        })
+        .transpose()?
+        .unwrap_or(false);
     let auto_refinement = matches!(
         intent,
         RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher
     ) && requested_mode == daemon::RepositoryIndexMode::RepositoryIndexAuto
-        && read_service(service)?.deep_analysis_available();
+        && read_service(service)?.deep_analysis_available()
+        && !active_generation_is_deep;
     let mode = match intent {
         RepositoryIndexIntent::SemanticRefinement { .. } => FirstSliceIndexMode::Deep,
         RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher => match requested_mode {
@@ -3930,8 +3965,13 @@ fn repository_index_with_intent(
                 FirstSliceIndexMode::Structural
             }
             daemon::RepositoryIndexMode::RepositoryIndexDeep => FirstSliceIndexMode::Deep,
-            // Auto publishes the interactive structural stage first. A separate
-            // journaled operation below owns the later semantic publication.
+            // An already-deep generation can prove a no-op without publishing
+            // a weaker structural generation and queueing redundant refinement.
+            daemon::RepositoryIndexMode::RepositoryIndexAuto if active_generation_is_deep => {
+                FirstSliceIndexMode::Deep
+            }
+            // Cold Auto publishes the interactive structural stage first. A
+            // separate journaled operation owns the later semantic publication.
             daemon::RepositoryIndexMode::RepositoryIndexAuto => FirstSliceIndexMode::Structural,
         },
     };
@@ -3940,10 +3980,6 @@ fn repository_index_with_intent(
     {
         return Err(invalid_argument());
     }
-    let root = PathBuf::from(&request.root);
-    let requested_repository = read_service(service)?
-        .registered_repository_for_root(&root, &context.cancellation)
-        .map_err(service_error)?;
     let detached = request.detached;
     let work_deadline = if detached {
         Instant::now()
@@ -5505,6 +5541,7 @@ fn repository_operation_evidence(
         newly_written_bytes: evidence.newly_written_bytes,
         reserved_memory_bytes: evidence.reserved_memory_bytes,
         owned_memory_bytes: evidence.owned_memory_bytes,
+        retained_durable_bytes: evidence.retained_durable_bytes,
     }
 }
 
@@ -5649,7 +5686,7 @@ fn repository_operation_status(
         peak_rss_bytes,
         written_bytes,
         files_examined: metadata.files_examined,
-        retry_after_ms: (!record.state.is_terminal()).then_some(RETRY_AFTER_MS),
+        retry_after_ms: repository_operation_retry_after_ms(&record),
         bytes_examined: metadata.bytes_examined,
         index_stage: repository_operation_stage(&record).to_owned(),
         semantic_operation: semantic_operation.map(operation_to_wire),
@@ -5711,11 +5748,24 @@ fn project_repository_operation_evidence(
     response.newly_written_bytes = evidence.newly_written_bytes;
     response.reserved_memory_bytes = evidence.reserved_memory_bytes;
     response.owned_memory_bytes = evidence.owned_memory_bytes;
+    response.retained_durable_bytes = evidence.retained_durable_bytes;
 }
 
-const fn repository_operation_stage(record: &OperationRecord) -> &'static str {
-    if matches!(record.state, OperationState::Succeeded) {
-        return "complete";
+fn repository_operation_stage(record: &OperationRecord) -> &'static str {
+    match record.state {
+        OperationState::Queued => return "queued",
+        OperationState::Cancelling => return "cancelling",
+        OperationState::Succeeded => return "complete",
+        OperationState::Running
+        | OperationState::Failed
+        | OperationState::Cancelled
+        | OperationState::Interrupted => {}
+    }
+    if record.kind == OperationKind::Recovery {
+        return "recovery";
+    }
+    if record.stage == OperationStage::Cleanup {
+        return "publication";
     }
     match record.progress.completed {
         0 => "discovery",
@@ -5725,6 +5775,31 @@ const fn repository_operation_stage(record: &OperationRecord) -> &'static str {
         4 => "persistence",
         5 => "search",
         _ => "search",
+    }
+}
+
+fn repository_operation_retry_after_ms(record: &OperationRecord) -> Option<u32> {
+    match record.state {
+        OperationState::Queued => Some(OPERATION_RETRY_QUEUED_MS),
+        OperationState::Cancelling => Some(OPERATION_RETRY_CANCELLING_MS),
+        OperationState::Succeeded
+        | OperationState::Failed
+        | OperationState::Cancelled
+        | OperationState::Interrupted => None,
+        OperationState::Running if record.kind == OperationKind::Recovery => {
+            Some(OPERATION_RETRY_RECOVERY_MS)
+        }
+        OperationState::Running if record.stage == OperationStage::Cleanup => {
+            Some(OPERATION_RETRY_PUBLICATION_MS)
+        }
+        OperationState::Running => match record.progress.completed {
+            0 => Some(OPERATION_RETRY_DISCOVERY_MS),
+            1 => Some(OPERATION_RETRY_SNAPSHOT_MS),
+            2 => Some(OPERATION_RETRY_ANALYSIS_MS),
+            3 => Some(OPERATION_RETRY_MERGE_MS),
+            4 => Some(OPERATION_RETRY_PERSISTENCE_MS),
+            _ => Some(OPERATION_RETRY_SEARCH_MS),
+        },
     }
 }
 
@@ -5859,6 +5934,92 @@ fn parse_code_locate_languages(languages: Vec<String>) -> Result<Vec<String>, Pu
     Ok(languages)
 }
 
+fn git_evidence_limits(context: &FirstSliceIpcContext) -> Result<(usize, Duration), PublicError> {
+    let maximum_output = context.effective_budget.map_or(4 * 1024 * 1024, |budget| {
+        match usize::try_from(budget.json_bytes()) {
+            Ok(maximum) => maximum.clamp(1, 4 * 1024 * 1024),
+            Err(_) => 4 * 1024 * 1024,
+        }
+    });
+    let duration = context
+        .deadline
+        .saturating_duration_since(Instant::now())
+        .min(Duration::from_secs(30));
+    if duration.is_zero() {
+        return Err(budget_exceeded());
+    }
+    Ok((maximum_output, duration))
+}
+
+fn parse_revision_range(range: &str) -> Result<(&str, &str), PublicError> {
+    if range.len() > 512
+        || range.contains("...")
+        || range
+            .bytes()
+            .any(|byte| byte == 0 || byte.is_ascii_control())
+    {
+        return Err(invalid_argument());
+    }
+    let (base, head) = range.split_once("..").ok_or_else(invalid_argument)?;
+    if base.is_empty()
+        || head.is_empty()
+        || base.starts_with('-')
+        || head.starts_with('-')
+        || base.contains("..")
+        || head.contains("..")
+    {
+        return Err(invalid_argument());
+    }
+    Ok((base, head))
+}
+
+fn collect_requested_git_paths(
+    service: &FirstSliceService,
+    repository: RepositoryId,
+    working_tree: Option<&str>,
+    revision_range: Option<&str>,
+    context: &FirstSliceIpcContext,
+) -> Result<Vec<String>, PublicError> {
+    if working_tree.is_none() && revision_range.is_none() {
+        return Ok(Vec::new());
+    }
+    let selection = working_tree
+        .map(|selection| match selection {
+            "staged" => Ok(FirstSliceWorkingTreeSelection::Staged),
+            "unstaged" => Ok(FirstSliceWorkingTreeSelection::Unstaged),
+            "all" => Ok(FirstSliceWorkingTreeSelection::All),
+            _ => Err(invalid_argument()),
+        })
+        .transpose()?;
+    let range = revision_range.map(parse_revision_range).transpose()?;
+    let (maximum_output, duration) = git_evidence_limits(context)?;
+    service
+        .collect_git_change_paths(
+            repository,
+            selection,
+            range,
+            maximum_output,
+            duration,
+            &context.cancellation,
+        )
+        .map_err(|error| git_evidence_error(error, context))
+}
+
+fn git_evidence_error(
+    error: FirstSliceGitEvidenceError,
+    context: &FirstSliceIpcContext,
+) -> PublicError {
+    match error {
+        FirstSliceGitEvidenceError::InvalidSelector => invalid_argument(),
+        FirstSliceGitEvidenceError::InvalidLimits => internal_error(),
+        FirstSliceGitEvidenceError::Cancelled => context
+            .cancellation
+            .reason()
+            .map_or_else(change_evidence_unavailable, cancellation_error),
+        FirstSliceGitEvidenceError::Unavailable => change_evidence_unavailable(),
+    }
+}
+
 fn symbol_explain(
     service: &FirstSliceService,
     request: daemon::SymbolExplainRequest,
@@ -5869,6 +6030,17 @@ fn symbol_explain(
     let generation = service
         .resolve_generation(repository, selected)
         .map_err(service_error)?;
+    let sections = explain_sections(&request.sections)?;
+    let relation_sample_limit = request.relation_sample_limit.unwrap_or(5);
+    if relation_sample_limit > 25 || request.source_preview_lines.unwrap_or(0) > 40 {
+        return Err(invalid_argument());
+    }
+    if !matches!(
+        request.include_provenance.as_str(),
+        "" | "none" | "compact" | "full"
+    ) {
+        return Err(invalid_argument());
+    }
     let mut symbols = Vec::new();
     symbols
         .try_reserve_exact(request.symbols.len())
@@ -5923,15 +6095,64 @@ fn symbol_explain(
             .ok_or_else(incomplete_coverage)?;
         let mut relations = RelationCounts::default();
         for relation in &response.data.relations {
-            relations.observe(symbol, relation);
+            relations.observe(symbol, relation)?;
         }
         for occurrence in &response.data.occurrences {
             if occurrence.role == OccurrenceRole::Reference {
-                relations.references_exact = relations.references_exact.saturating_add(1);
+                relations.references_exact = relations
+                    .references_exact
+                    .checked_add(1)
+                    .ok_or_else(resource_exhausted)?;
             }
         }
         let provider = response.data.provenance.producer.name().to_owned();
         let evidence = enum_label(response.data.provenance.producer_kind)?;
+        let relation_samples =
+            symbol_relation_samples(symbol, &response.data.relations, relation_sample_limit)?;
+        let container = entity.container.map(container_label);
+        let source_lines = u8::try_from(request.source_preview_lines.unwrap_or(0))
+            .map_err(|_| invalid_argument())?;
+        let needs_signature = sections.contains("signature");
+        let requested_source_lines = source_lines.max(u8::from(needs_signature));
+        let (signature, source_preview) = if requested_source_lines == 0 {
+            (None, None)
+        } else {
+            match remaining_service_budget(context, &usage) {
+                Ok(remaining) => {
+                    let (source, source_usage) = explain_source_projection(
+                        service,
+                        generation.generation,
+                        definition,
+                        requested_source_lines,
+                        remaining,
+                        &context.cancellation,
+                    )?;
+                    usage.add(&source_usage)?;
+                    let signature = needs_signature
+                        .then(|| compact_signature(&source))
+                        .flatten();
+                    let preview = (source_lines > 0)
+                        .then(|| first_source_lines(&source, source_lines))
+                        .filter(|preview| !preview.is_empty());
+                    (signature, preview)
+                }
+                Err(BudgetExhaustion::Resource(resource)) => {
+                    if !limiting_resources.contains(&resource) {
+                        limiting_resources.push(resource);
+                    }
+                    execution_state = execution_state.max(ExecutionCompletenessState::Truncated);
+                    (None, None)
+                }
+                Err(BudgetExhaustion::Duration) => return Err(budget_exceeded()),
+            }
+        };
+        let section_gaps = explain_section_gaps(
+            &sections,
+            signature.as_deref(),
+            container.as_deref(),
+            source_preview.as_deref(),
+            &response.data.relations,
+        );
         let (language, tier) = service
             .source_language_coverage(generation.generation, definition.span().file())
             .map_err(service_error)?;
@@ -5939,7 +6160,7 @@ fn symbol_explain(
             symbol: Some(symbol_to_wire(symbol)),
             kind: enum_label(entity.kind)?,
             display_name: entity.display_name,
-            signature: None,
+            signature,
             definition: Some(source_ref_to_wire(definition)),
             outbound_exact: relations.outbound_exact,
             outbound_candidates: 0,
@@ -5955,6 +6176,17 @@ fn symbol_explain(
             },
             language,
             tier: analysis_tier_to_wire(tier) as i32,
+            qualified_name: entity.qualified_name,
+            container,
+            relation_samples,
+            source_preview,
+            section_gaps,
+            provenance_frontend_version: matches!(request.include_provenance.as_str(), "full")
+                .then(|| response.data.provenance.frontend_version.clone())
+                .flatten(),
+            provenance_rule: matches!(request.include_provenance.as_str(), "full")
+                .then(|| response.data.provenance.rule.clone())
+                .flatten(),
         });
     }
     Ok(daemon::SymbolExplainResponse {
@@ -5975,6 +6207,246 @@ fn symbol_explain(
             daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceSplitRequest,
         )),
     })
+}
+
+fn explain_sections(requested: &[String]) -> Result<BTreeSet<String>, PublicError> {
+    let mut sections = if requested.is_empty() {
+        [
+            "signature",
+            "containment",
+            "calls_summary",
+            "references_summary",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    } else {
+        BTreeSet::new()
+    };
+    for section in requested {
+        if !matches!(
+            section.as_str(),
+            "signature"
+                | "docs"
+                | "containment"
+                | "types"
+                | "calls_summary"
+                | "references_summary"
+                | "history"
+                | "ownership"
+                | "diagnostics"
+                | "source_preview"
+        ) || !sections.insert(section.clone())
+        {
+            return Err(invalid_argument());
+        }
+    }
+    Ok(sections)
+}
+
+fn symbol_relation_samples(
+    symbol: SymbolId,
+    relations: &[rootlight_ir::RelationRecord],
+    per_kind_limit: u32,
+) -> Result<Vec<daemon::FirstSliceSymbolRelationSample>, PublicError> {
+    let mut samples = Vec::new();
+    for relation in relations {
+        let (direction, target) = if relation.subject == RelationEndpoint::Entity(symbol) {
+            (
+                "outbound",
+                match relation.object {
+                    RelationEndpoint::Entity(target) => Some(target),
+                    _ => None,
+                },
+            )
+        } else if relation.object == RelationEndpoint::Entity(symbol) {
+            (
+                "inbound",
+                match relation.subject {
+                    RelationEndpoint::Entity(target) => Some(target),
+                    _ => None,
+                },
+            )
+        } else {
+            continue;
+        };
+        let kind = enum_label(relation.predicate)?;
+        samples.push(daemon::FirstSliceSymbolRelationSample {
+            kind,
+            direction: direction.to_owned(),
+            target: target.map(symbol_to_wire),
+            source_refs: relation
+                .evidence
+                .source
+                .as_ref()
+                .map(source_ref_to_wire)
+                .into_iter()
+                .collect(),
+            confidence: u32::from(relation.confidence.get()),
+        });
+    }
+    // Fact identities are repository-scoped, so their normalized storage order
+    // cannot decide which logical samples survive a clean originless rebuild.
+    samples.sort_by(compare_symbol_relation_samples);
+    let mut counts = BTreeMap::<String, u32>::new();
+    samples.retain(|sample| {
+        let count = counts.entry(sample.kind.clone()).or_default();
+        if *count >= per_kind_limit {
+            return false;
+        }
+        *count = count.saturating_add(1);
+        true
+    });
+    Ok(samples)
+}
+
+fn compare_symbol_relation_samples(
+    left: &daemon::FirstSliceSymbolRelationSample,
+    right: &daemon::FirstSliceSymbolRelationSample,
+) -> std::cmp::Ordering {
+    left.kind
+        .cmp(&right.kind)
+        .then_with(|| left.direction.cmp(&right.direction))
+        .then_with(|| {
+            let left_source = left.source_refs.first();
+            let right_source = right.source_refs.first();
+            left_source
+                .and_then(|source| source.content_hash.as_ref())
+                .map(|hash| hash.value.as_slice())
+                .cmp(
+                    &right_source
+                        .and_then(|source| source.content_hash.as_ref())
+                        .map(|hash| hash.value.as_slice()),
+                )
+                .then_with(|| {
+                    left_source
+                        .map(|source| source.start_byte)
+                        .cmp(&right_source.map(|source| source.start_byte))
+                })
+                .then_with(|| {
+                    left_source
+                        .map(|source| source.end_byte)
+                        .cmp(&right_source.map(|source| source.end_byte))
+                })
+        })
+        .then_with(|| right.confidence.cmp(&left.confidence))
+        .then_with(|| {
+            left.target
+                .as_ref()
+                .map(|target| target.value.as_slice())
+                .cmp(&right.target.as_ref().map(|target| target.value.as_slice()))
+        })
+}
+
+fn container_label(container: ContainerRef) -> String {
+    match container {
+        ContainerRef::Repository(repository) => format!("repository:{repository}"),
+        ContainerRef::File(file) => format!("file:{file}"),
+        ContainerRef::Entity(entity) => format!("entity:{entity}"),
+    }
+}
+
+fn explain_source_projection(
+    service: &FirstSliceService,
+    generation: GenerationId,
+    definition: &SourceRef,
+    lines: u8,
+    budget: FirstSliceBudget,
+    cancellation: &Cancellation,
+) -> Result<(String, QueryUsage), PublicError> {
+    let source_budget = budget
+        .with_source_max_context_lines(u16::from(lines))
+        .map_err(service_error)?;
+    let options = SourceReadOptions::new()
+        .with_context_lines_before(0)
+        .with_context_lines_after(u16::from(lines.saturating_sub(1)));
+    let response = service
+        .source_read_with_options_and_budget(
+            generation,
+            vec![definition.clone()],
+            options,
+            source_budget,
+            cancellation,
+        )
+        .map_err(service_error)?;
+    let mut chunks = response.data.chunks;
+    if chunks.len() != 1 {
+        return Err(incomplete_coverage());
+    }
+    let chunk = chunks.pop().ok_or_else(incomplete_coverage)?;
+    let source = String::from_utf8(chunk.bytes).map_err(|_| incomplete_coverage())?;
+    Ok((first_source_lines(&source, lines), response.usage))
+}
+
+fn first_source_lines(source: &str, maximum: u8) -> String {
+    source
+        .lines()
+        .take(usize::from(maximum))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn compact_signature(source: &str) -> Option<String> {
+    let mut signature = source
+        .lines()
+        .find(|line| !line.trim().is_empty())?
+        .trim()
+        .to_owned();
+    if signature.len() > 4_096 {
+        let mut end = 4_096;
+        while end > 0 && !signature.is_char_boundary(end) {
+            end -= 1;
+        }
+        signature.truncate(end);
+    }
+    (!signature.is_empty()).then_some(signature)
+}
+
+fn explain_section_gaps(
+    sections: &BTreeSet<String>,
+    signature: Option<&str>,
+    container: Option<&str>,
+    source_preview: Option<&str>,
+    relations: &[rootlight_ir::RelationRecord],
+) -> Vec<String> {
+    let has_types = relations.iter().any(|relation| {
+        matches!(
+            relation.predicate,
+            RelationPredicate::UsesType
+                | RelationPredicate::ReturnsType
+                | RelationPredicate::ParameterType
+                | RelationPredicate::Extends
+                | RelationPredicate::Implements
+                | RelationPredicate::Satisfies
+                | RelationPredicate::Embeds
+                | RelationPredicate::MixesIn
+                | RelationPredicate::Overrides
+        )
+    });
+    let has_history = relations
+        .iter()
+        .any(|relation| relation.predicate == RelationPredicate::CoChangedWith);
+    let has_ownership = relations
+        .iter()
+        .any(|relation| relation.predicate == RelationPredicate::OwnedBy);
+    let mut gaps = Vec::new();
+    for section in sections {
+        let gap = match section.as_str() {
+            "signature" if signature.is_none() => Some("signature_unavailable"),
+            "docs" => Some("documentation_evidence_unavailable"),
+            "containment" if container.is_none() => Some("containment_evidence_unavailable"),
+            "types" if !has_types => Some("type_evidence_unavailable"),
+            "history" if !has_history => Some("history_evidence_unavailable"),
+            "ownership" if !has_ownership => Some("ownership_evidence_unavailable"),
+            "diagnostics" => Some("diagnostic_evidence_unavailable"),
+            "source_preview" if source_preview.is_none() => Some("source_preview_unavailable"),
+            _ => None,
+        };
+        if let Some(gap) = gap {
+            gaps.push(gap.to_owned());
+        }
+    }
+    gaps
 }
 
 fn symbol_relationships(
@@ -6270,13 +6742,29 @@ fn architecture_cycles(
     let max_cycles = usize::try_from(request.max_cycles.unwrap_or(DEFAULT_CYCLE_MAX_CYCLES))
         .map_err(|_| invalid_argument())?;
     let include_self_cycles = request.include_self_cycles.unwrap_or(false);
+    let scope = parse_analysis_scope(request.scope)?;
+    let level = request
+        .level
+        .as_deref()
+        .map_or(Ok(CycleProjectionLevel::Symbol), |label| {
+            CycleProjectionLevel::from_label(label).ok_or_else(invalid_argument)
+        })?;
+    let rank_by = request
+        .rank_by
+        .as_deref()
+        .map_or(Ok(CycleRankBy::Size), |label| {
+            CycleRankBy::from_label(label).ok_or_else(invalid_argument)
+        })?;
     let response = service
-        .architecture_cycles_with_budget(
+        .architecture_cycles_with_options_and_budget(
             generation.generation,
             families,
+            scope,
+            level,
             min_size,
             max_cycles,
             include_self_cycles,
+            rank_by,
             service_budget(context),
             &context.cancellation,
         )
@@ -6301,6 +6789,9 @@ fn architecture_cycles(
                 .map(symbol_to_wire)
                 .collect(),
             internal_edges: component.internal_edges,
+            edge_weight: component.edge_weight,
+            change_risk: component.change_risk,
+            break_cost: u32::from(component.break_cost),
         });
     }
     let mut cycles = Vec::new();
@@ -6345,9 +6836,53 @@ fn architecture_cycles(
                 .map(|family| family.as_str().to_owned())
                 .collect(),
             min_confidence: u32::from(projection.min_confidence),
+            level: projection.level.as_str().to_owned(),
+            rank_by: projection.rank_by.as_str().to_owned(),
+            omitted_nodes: projection.omitted_nodes,
         }),
         completeness: Some(completeness),
     })
+}
+
+fn parse_analysis_scope(
+    scope: Option<daemon::FirstSliceAnalysisScope>,
+) -> Result<Option<AnalysisScope>, PublicError> {
+    let Some(scope) = scope else {
+        return Ok(None);
+    };
+    let selector = scope.selector.ok_or_else(invalid_argument)?;
+    match selector {
+        daemon::first_slice_analysis_scope::Selector::Paths(paths) => Ok(Some(
+            AnalysisScope::Paths(normalize_scope_labels(paths.paths)?),
+        )),
+        daemon::first_slice_analysis_scope::Selector::Packages(packages) => Ok(Some(
+            AnalysisScope::Packages(normalize_scope_labels(packages.packages)?),
+        )),
+        daemon::first_slice_analysis_scope::Selector::BuildTargets(targets) => Ok(Some(
+            AnalysisScope::BuildTargets(normalize_scope_labels(targets.build_targets)?),
+        )),
+        daemon::first_slice_analysis_scope::Selector::Symbols(symbols) => {
+            if symbols.symbols.is_empty() || symbols.symbols.len() > 64 {
+                return Err(invalid_argument());
+            }
+            let mut parsed = BTreeSet::new();
+            for symbol in &symbols.symbols {
+                if !parsed.insert(parse_symbol(Some(symbol))?) {
+                    return Err(invalid_argument());
+                }
+            }
+            Ok(Some(AnalysisScope::Symbols(parsed)))
+        }
+    }
+}
+
+fn normalize_scope_labels(mut labels: Vec<String>) -> Result<Vec<String>, PublicError> {
+    if labels.is_empty() || labels.len() > 256 {
+        return Err(invalid_argument());
+    }
+    labels.sort_unstable();
+    labels.dedup();
+    Ok(labels)
 }
 
 #[cfg(feature = "process-test-hooks")]
@@ -6436,10 +6971,22 @@ fn code_dead(
             .unwrap_or(DEFAULT_CODE_DEAD_MAX_CANDIDATES),
     )
     .map_err(|_| invalid_argument())?;
+    if request.explicit_entry_points.len() > 64 {
+        return Err(invalid_argument());
+    }
+    let mut explicit_entry_points = BTreeSet::new();
+    for symbol in &request.explicit_entry_points {
+        if !explicit_entry_points.insert(parse_symbol(Some(symbol))?) {
+            return Err(invalid_argument());
+        }
+    }
+    let scope = parse_analysis_scope(request.scope)?;
     let response = service
-        .code_dead_with_budget(
+        .code_dead_with_options_and_budget(
             generation.generation,
             entry_point_policy,
+            explicit_entry_points,
+            scope,
             include_exported,
             include_tests,
             min_confidence,
@@ -6470,6 +7017,14 @@ fn code_dead(
                 .iter()
                 .map(source_ref_to_wire)
                 .collect(),
+            reachability: Some(daemon::FirstSliceDeadReachability {
+                reached_from_entry_points: candidate.reachability.reached_from_entry_points,
+                incoming_edges: candidate.reachability.incoming_edges,
+                strongest_incoming_confidence: u32::from(
+                    candidate.reachability.strongest_incoming_confidence,
+                ),
+            }),
+            uncertainty: candidate.uncertainty,
         });
     }
     let mut blind_spots = Vec::new();
@@ -6501,10 +7056,17 @@ fn code_dead(
             policy: entry_points.policy.as_str().to_owned(),
             entry_point_count: entry_points.entry_point_count,
             complete: entry_points.complete,
+            entry_symbols: entry_points
+                .entry_symbols
+                .iter()
+                .copied()
+                .map(symbol_to_wire)
+                .collect(),
         }),
         blind_spots,
         false_positive_controls,
         completeness: Some(completeness),
+        coverage_caveats: response.data.coverage_caveats,
     })
 }
 
@@ -6535,10 +7097,19 @@ fn architecture_overview(
             .unwrap_or(DEFAULT_ARCHITECTURE_OVERVIEW_MAX_COMPONENTS),
     )
     .map_err(|_| invalid_argument())?;
+    let scope = parse_analysis_scope(request.scope)?;
+    let detail = request
+        .detail
+        .as_deref()
+        .map_or(Ok(ArchitectureOverviewDetail::Standard), |label| {
+            ArchitectureOverviewDetail::from_label(label).ok_or_else(invalid_argument)
+        })?;
     let response = service
-        .architecture_overview_with_budget(
+        .architecture_overview_with_options_and_budget(
             generation.generation,
             views,
+            scope,
+            detail,
             min_confidence,
             max_components,
             include_edges,
@@ -6564,6 +7135,12 @@ fn architecture_overview(
             symbol_count: component.symbol_count,
             responsibility_evidence: component.responsibility_evidence,
             confidence: u32::from(component.confidence),
+            file_count: component.file_count,
+            source_refs: component
+                .source_refs
+                .iter()
+                .map(source_ref_to_wire)
+                .collect(),
         });
     }
     let mut connections = Vec::new();
@@ -6591,6 +7168,8 @@ fn architecture_overview(
             change_frequency: hotspot.change_frequency,
             complexity: hotspot.complexity,
             score: u32::from(hotspot.score),
+            ownership_signal: hotspot.ownership_signal,
+            test_signal: hotspot.test_signal,
         });
     }
     let mut communities = Vec::new();
@@ -6661,6 +7240,8 @@ fn graph_projection_open(
                     max_components: Some(budget.aggregate_nodes),
                     include_edges: Some(true),
                     min_confidence: Some(filters.min_confidence),
+                    scope: None,
+                    detail: None,
                 },
                 context,
             )?;
@@ -6727,6 +7308,22 @@ fn tests_select(
     for seed in &request.seeds {
         seeds.insert(parse_symbol(Some(seed))?);
     }
+    let mut seed_paths = request.seed_paths;
+    seed_paths.extend(collect_requested_git_paths(
+        service,
+        repository,
+        request.change_working_tree.as_deref(),
+        request.change_revision_range.as_deref(),
+        context,
+    )?);
+    seed_paths.sort_unstable();
+    seed_paths.dedup();
+    let mut seed_build_targets = request.seed_build_targets;
+    seed_build_targets.sort_unstable();
+    seed_build_targets.dedup();
+    let mut frameworks = request.frameworks;
+    frameworks.sort_unstable();
+    frameworks.dedup();
     let mut test_kinds = Vec::new();
     test_kinds
         .try_reserve_exact(request.test_kinds.len())
@@ -6741,11 +7338,20 @@ fn tests_select(
         .map_err(|_| invalid_argument())?;
     let include_commands = request.include_commands.unwrap_or(false);
     let response = service
-        .tests_select_with_budget(
+        .tests_select_with_filters_and_budget(
             generation.generation,
             seeds,
+            seed_paths,
+            seed_build_targets,
             test_kinds,
+            frameworks,
             max_tests,
+            request.max_total_ms,
+            request
+                .max_slow_tests
+                .map(u16::try_from)
+                .transpose()
+                .map_err(|_| invalid_argument())?,
             include_commands,
             service_budget(context),
             &context.cancellation,
@@ -6766,6 +7372,7 @@ fn tests_select(
         tests.push(daemon::FirstSliceRankedTest {
             test_id: test.test_id.to_string(),
             kind: test.kind.as_str().to_owned(),
+            framework: test.framework,
             path: test.path,
             score: u32::from(test.score),
             why: test.why,
@@ -6790,7 +7397,7 @@ fn tests_select(
             direct_edges: strategy.direct_edges,
             transitive_signals: strategy.transitive_signals,
             history_signals: strategy.history_signals,
-            build_target_signals: false,
+            build_target_signals: strategy.build_target_signals,
             file_colocation_signals: strategy.file_colocation_signals,
         }),
         gaps,
@@ -6819,14 +7426,29 @@ fn change_impact(
     for path in &request.changed_paths {
         changed_paths.push(path.clone());
     }
+    changed_paths.extend(collect_requested_git_paths(
+        service,
+        repository,
+        request.working_tree.as_deref(),
+        request.revision_range.as_deref(),
+        context,
+    )?);
+    changed_paths.sort_unstable();
+    changed_paths.dedup();
+    let relation_policy = match request.relation_policy.as_str() {
+        "" | "standard" => ChangeImpactRelationPolicy::Standard,
+        "conservative" => ChangeImpactRelationPolicy::Conservative,
+        "direct_only" => ChangeImpactRelationPolicy::DirectOnly,
+        _ => return Err(invalid_argument()),
+    };
     let max_depth = reduce_optional_u8(
         u8::try_from(request.max_depth.unwrap_or(DEFAULT_CHANGE_IMPACT_MAX_DEPTH))
             .map_err(|_| invalid_argument())?,
         context.effective_budget.and_then(|budget| budget.depth()),
     )?;
     let min_confidence =
-        u16::try_from(request.min_confidence.unwrap_or(0)).map_err(|_| invalid_argument())?;
-    let include_tests = request.include_tests.unwrap_or(false);
+        u16::try_from(request.min_confidence.unwrap_or(700)).map_err(|_| invalid_argument())?;
+    let include_tests = request.include_tests.unwrap_or(true);
     let max_dependents = usize::try_from(
         request
             .max_dependents
@@ -6834,13 +7456,18 @@ fn change_impact(
     )
     .map_err(|_| invalid_argument())?;
     let response = service
-        .change_impact_with_budget(
+        .change_impact_with_policy_and_budget(
             generation.generation,
             changed_symbols,
             changed_paths,
+            request.scope_paths,
+            request.scope_packages,
+            request.scope_services,
+            relation_policy,
             max_depth,
             min_confidence,
             include_tests,
+            request.include_history,
             max_dependents,
             service_budget(context),
             &context.cancellation,
@@ -6866,6 +7493,7 @@ fn change_impact(
         });
     }
     let mut impacted = Vec::new();
+    let mut service_impacts_by_target = BTreeMap::new();
     impacted
         .try_reserve_exact(response.data.impacted.len())
         .map_err(|_| resource_exhausted())?;
@@ -6875,6 +7503,18 @@ fn change_impact(
             .try_reserve_exact(group.dependents.len())
             .map_err(|_| resource_exhausted())?;
         for entry in group.dependents {
+            if let Some(kind) = service_impact_kind(&entry.kind) {
+                let target = entry.symbol_id.to_string();
+                let reason = service_impact_reason(&entry.kind).to_owned();
+                service_impacts_by_target
+                    .entry((target, kind.to_owned()))
+                    .and_modify(|existing: &mut (u16, String)| {
+                        if entry.confidence > existing.0 {
+                            *existing = (entry.confidence, reason.clone());
+                        }
+                    })
+                    .or_insert((entry.confidence, reason));
+            }
             dependents.push(daemon::FirstSliceImpactEntry {
                 symbol_id: Some(symbol_to_wire(entry.symbol_id)),
                 kind: entry.kind,
@@ -6901,6 +7541,18 @@ fn change_impact(
             estimated_cost_ms: test.estimated_cost_ms,
         });
     }
+    let service_impacts = service_impacts_by_target
+        .into_iter()
+        .take(128)
+        .map(
+            |((target, kind), (confidence, reason))| daemon::FirstSliceServiceImpact {
+                target,
+                kind,
+                confidence: u32::from(confidence),
+                reason,
+            },
+        )
+        .collect();
     Ok(daemon::ChangeImpactResponse {
         schema_version: Some(schema_version()),
         context: Some(query_context(service, generation, &response.usage, &[])?),
@@ -6916,7 +7568,28 @@ fn change_impact(
             dynamic_blind_spots: risk.dynamic_blind_spots,
         }),
         completeness: Some(completeness),
+        service_impacts,
     })
+}
+
+fn service_impact_kind(entity_kind: &str) -> Option<&'static str> {
+    match entity_kind {
+        "route" | "service" => Some("route_consumer"),
+        "message_topic" => Some("message_consumer"),
+        "database_object" => Some("database_schema"),
+        "external_symbol" => Some("cross_repo_symbol"),
+        _ => None,
+    }
+}
+
+fn service_impact_reason(entity_kind: &str) -> &'static str {
+    match entity_kind {
+        "route" | "service" => "affected_route_boundary",
+        "message_topic" => "affected_message_boundary",
+        "database_object" => "affected_database_boundary",
+        "external_symbol" => "affected_external_symbol",
+        _ => "affected_boundary",
+    }
 }
 
 fn plan_change(
@@ -6939,15 +7612,39 @@ fn plan_change(
     for file in &request.target_files {
         target_files.insert(parse_file(Some(file))?);
     }
+    let mut target_paths = BTreeSet::new();
+    if request.constraints.len() > 32
+        || request
+            .constraints
+            .iter()
+            .any(|constraint| constraint.is_empty() || constraint.chars().count() > 1_024)
+    {
+        return Err(invalid_argument());
+    }
+    if let Some(change_context) = request.change_context.as_ref() {
+        for symbol in &change_context.symbol_ids {
+            target_symbols.insert(parse_symbol(Some(symbol))?);
+        }
+        target_paths.extend(change_context.paths.iter().cloned());
+        target_paths.extend(collect_requested_git_paths(
+            service,
+            repository,
+            change_context.working_tree.as_deref(),
+            change_context.revision_range.as_deref(),
+            context,
+        )?);
+    }
     let max_steps = usize::try_from(request.max_steps.unwrap_or(DEFAULT_PLAN_CHANGE_MAX_STEPS))
         .map_err(|_| invalid_argument())?;
     let response = service
-        .plan_change_with_budget(
+        .plan_change_with_context_and_budget(
             generation.generation,
             objective,
             request.objective_text,
             target_symbols,
             target_files,
+            target_paths,
+            request.constraints,
             max_steps,
             service_budget(context),
             &context.cancellation,
@@ -7026,8 +7723,13 @@ fn history_compare(
     context: &FirstSliceIpcContext,
 ) -> Result<daemon::HistoryCompareResponse, PublicError> {
     let repository = parse_repository(request.repository.as_ref())?;
-    let base = parse_revision_generation(request.base.as_ref())?;
-    let head = parse_revision_generation(request.head.as_ref())?;
+    let (base, head) = resolve_history_revisions(
+        service,
+        repository,
+        request.base.as_ref(),
+        request.head.as_ref(),
+        context,
+    )?;
     // Resolve both generations against the repository: the head context drives
     // the query context while the base must also belong to the repository.
     let head_context = service
@@ -7046,11 +7748,28 @@ fn history_compare(
             .unwrap_or(DEFAULT_HISTORY_COMPARE_MAX_RESULTS),
     )
     .map_err(|_| invalid_argument())?;
+    let scope = request.scope.as_ref().map_or_else(
+        || Ok(HistoryCompareScope::default()),
+        |scope| {
+            let mut symbols = BTreeSet::new();
+            for symbol in &scope.symbols {
+                symbols.insert(parse_symbol(Some(symbol))?);
+            }
+            Ok(HistoryCompareScope {
+                paths: scope.paths.clone(),
+                packages: scope.packages.clone(),
+                services: scope.services.clone(),
+                symbols,
+            })
+        },
+    )?;
     let response = service
-        .history_compare_with_budget(
+        .history_compare_with_scope_and_budget(
             base,
             head,
+            scope,
             change_kinds,
+            request.include_unchanged_context,
             max_results,
             service_budget(context),
             &context.cancellation,
@@ -7101,9 +7820,10 @@ fn history_compare(
             is_rename: lineage_match.is_rename,
         });
     }
+    let response_context = query_context(service, head_context, &response.usage, &[])?;
     Ok(daemon::HistoryCompareResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context(service, head_context, &response.usage, &[])?),
+        context: Some(response_context),
         matched_states: Some(daemon::FirstSliceMatchedStates {
             base_generation: Some(generation_to_wire(data.base_generation)),
             head_generation: Some(generation_to_wire(data.head_generation)),
@@ -7213,21 +7933,103 @@ fn advanced_edge_work_limit(budget: FirstSliceBudget) -> Result<usize, PublicErr
     reduce_optional_usize(ADVANCED_MAX_TRAVERSAL, Some(budget.query().max_edges()))
 }
 
-/// Parses a history-compare revision selector into an explicit generation.
+/// Resolves a history selector to a retained generation when its source state matches.
 ///
-/// Git revision selectors are rejected because the first-slice daemon maps no
-/// git ref to a retained generation.
-fn parse_revision_generation(
+/// Generation selectors are exact. A Git ref is admitted when it denotes the
+/// current checked-out tree and the working tree is clean. A dirty working tree
+/// is represented only by the explicit `working_tree` selector; mapping `HEAD`
+/// to that active generation would invent an association with committed state.
+fn resolve_history_revisions(
+    service: &FirstSliceService,
+    repository: RepositoryId,
+    base: Option<&daemon::FirstSliceRevisionSelector>,
+    head: Option<&daemon::FirstSliceRevisionSelector>,
+    context: &FirstSliceIpcContext,
+) -> Result<(GenerationId, GenerationId), PublicError> {
+    let base = parse_history_revision(base)?;
+    let head = parse_history_revision(head)?;
+    let needs_active = matches!(base, ParsedHistoryRevision::Git(_))
+        || matches!(head, ParsedHistoryRevision::Git(_));
+    let active = needs_active
+        .then(|| {
+            service
+                .resolve_generation(repository, None)
+                .map_err(service_error)
+                .map(|generation| generation.generation)
+        })
+        .transpose()?;
+    let base_git = base.git_ref();
+    let head_git = head.git_ref();
+
+    if base_git.is_some() || head_git.is_some() {
+        let mut revisions = [""; 2];
+        let mut revision_count = 0;
+        if let Some(git) = base_git {
+            revisions[revision_count] = git;
+            revision_count += 1;
+        }
+        if let Some(git) = head_git.filter(|git| Some(*git) != base_git) {
+            revisions[revision_count] = git;
+            revision_count += 1;
+        }
+        let (maximum_output, duration) = git_evidence_limits(context)?;
+        let matches = service
+            .git_revisions_match_clean_head(
+                repository,
+                &revisions[..revision_count],
+                maximum_output,
+                duration,
+                &context.cancellation,
+            )
+            .map_err(|error| git_evidence_error(error, context))?;
+        if !matches {
+            return Err(change_evidence_unavailable());
+        }
+    }
+
+    Ok((base.generation(active)?, head.generation(active)?))
+}
+
+#[derive(Clone, Copy)]
+enum ParsedHistoryRevision<'a> {
+    Generation(GenerationId),
+    Git(&'a str),
+}
+
+impl<'a> ParsedHistoryRevision<'a> {
+    fn git_ref(self) -> Option<&'a str> {
+        match self {
+            Self::Generation(_) | Self::Git("working_tree") => None,
+            Self::Git(git) => Some(git),
+        }
+    }
+
+    fn generation(self, active: Option<GenerationId>) -> Result<GenerationId, PublicError> {
+        match self {
+            Self::Generation(generation) => Ok(generation),
+            Self::Git(_) => active.ok_or_else(internal_error),
+        }
+    }
+}
+
+fn parse_history_revision(
     selector: Option<&daemon::FirstSliceRevisionSelector>,
-) -> Result<GenerationId, PublicError> {
+) -> Result<ParsedHistoryRevision<'_>, PublicError> {
     match selector.and_then(|selector| selector.selector.as_ref()) {
         Some(daemon::first_slice_revision_selector::Selector::Generation(generation)) => {
-            parse_generation(Some(generation))
+            parse_generation(Some(generation)).map(ParsedHistoryRevision::Generation)
         }
-        Some(daemon::first_slice_revision_selector::Selector::Git(_)) => {
-            Err(unsupported_capability())
+        Some(daemon::first_slice_revision_selector::Selector::Git(git))
+            if !git.is_empty()
+                && git.len() <= 512
+                && !git.starts_with('-')
+                && !git.bytes().any(|byte| byte == 0 || byte.is_ascii_control()) =>
+        {
+            Ok(ParsedHistoryRevision::Git(git))
         }
-        None => Err(invalid_argument()),
+        Some(daemon::first_slice_revision_selector::Selector::Git(_)) | None => {
+            Err(invalid_argument())
+        }
     }
 }
 
@@ -7737,6 +8539,7 @@ fn repository_status(
         coverage_detail: coverage_detail.to_owned(),
         active_structural_freshness: status.active_structural_freshness,
         active_semantic_freshness: status.active_semantic_freshness,
+        retained_durable_bytes: status.retained_durable_bytes,
     })
 }
 
@@ -7748,18 +8551,32 @@ struct RelationCounts {
 }
 
 impl RelationCounts {
-    fn observe(&mut self, symbol: SymbolId, relation: &rootlight_ir::RelationRecord) {
+    fn observe(
+        &mut self,
+        symbol: SymbolId,
+        relation: &rootlight_ir::RelationRecord,
+    ) -> Result<(), PublicError> {
         if relation.predicate == RelationPredicate::Calls {
             if relation.subject == RelationEndpoint::Entity(symbol) {
-                self.outbound_exact = self.outbound_exact.saturating_add(1);
+                self.outbound_exact = self
+                    .outbound_exact
+                    .checked_add(1)
+                    .ok_or_else(resource_exhausted)?;
             }
             if relation.object == RelationEndpoint::Entity(symbol) {
-                self.inbound_exact = self.inbound_exact.saturating_add(1);
+                self.inbound_exact = self
+                    .inbound_exact
+                    .checked_add(1)
+                    .ok_or_else(resource_exhausted)?;
             }
         }
         if relation.predicate == RelationPredicate::RefersTo {
-            self.references_exact = self.references_exact.saturating_add(1);
+            self.references_exact = self
+                .references_exact
+                .checked_add(1)
+                .ok_or_else(resource_exhausted)?;
         }
+        Ok(())
     }
 }
 
@@ -7940,16 +8757,9 @@ fn aggregate_coverage(
     receipt: &FirstSliceIndexReceipt,
 ) -> (AnalysisTier, CoverageStatus, u64) {
     if coverage.is_empty() {
-        let (tier, status) = if receipt.indexed_files == 0 {
-            (AnalysisTier::TierD, CoverageStatus::Unknown)
-        } else if receipt.discovered_inputs == receipt.indexed_files {
-            (AnalysisTier::TierB, CoverageStatus::Complete)
-        } else {
-            (AnalysisTier::TierB, CoverageStatus::Bounded)
-        };
         return (
-            tier,
-            status,
+            AnalysisTier::TierD,
+            CoverageStatus::Unknown,
             receipt
                 .discovered_inputs
                 .saturating_sub(receipt.indexed_files),
@@ -8562,6 +9372,13 @@ fn build_service_error(
             "resource_limit",
             "executing",
         ),
+        FirstSliceError::GenerationMemoryLimit { .. } => (
+            ErrorCode::ResourceExhausted,
+            "generation memory limit was reached",
+            false,
+            "generation_memory_limit",
+            "admission",
+        ),
         FirstSliceError::Limits => (
             ErrorCode::ResourceExhausted,
             "first-slice safety limit was reached",
@@ -8745,6 +9562,52 @@ fn build_service_error(
                 PublicValue::Unsigned(observed),
             )
             .detail(static_detail_key("limit"), PublicValue::Unsigned(limit))
+            .next_action(NextAction::CollectSupportBundle);
+    }
+    if let FirstSliceError::GenerationMemoryLimit {
+        breakdown,
+        observed,
+        limit,
+    } = error
+    {
+        builder = builder
+            .detail(
+                static_detail_key("resource"),
+                PublicValue::Label(static_safe_label("generation_memory_bytes")),
+            )
+            .detail(
+                static_detail_key("observed"),
+                PublicValue::Unsigned(observed),
+            )
+            .detail(static_detail_key("limit"), PublicValue::Unsigned(limit))
+            .detail(
+                static_detail_key("retained_memory_bytes"),
+                PublicValue::Unsigned(breakdown.retained_bytes),
+            )
+            .detail(
+                static_detail_key("reserved_memory_bytes"),
+                PublicValue::Unsigned(breakdown.reserved_bytes),
+            )
+            .detail(
+                static_detail_key("owned_memory_bytes"),
+                PublicValue::Unsigned(breakdown.owned_bytes),
+            )
+            .detail(
+                static_detail_key("referenced_memory_bytes"),
+                PublicValue::Unsigned(breakdown.referenced_bytes),
+            )
+            .detail(
+                static_detail_key("mapped_memory_bytes"),
+                PublicValue::Unsigned(breakdown.mapped_bytes),
+            )
+            .detail(
+                static_detail_key("staged_memory_bytes"),
+                PublicValue::Unsigned(breakdown.staged_bytes),
+            )
+            .detail(
+                static_detail_key("shared_memory_bytes"),
+                PublicValue::Unsigned(breakdown.shared_bytes),
+            )
             .next_action(NextAction::CollectSupportBundle);
     }
     if let FirstSliceError::InsufficientDiskSpace {
@@ -9046,6 +9909,18 @@ fn incomplete_coverage() -> PublicError {
     .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
 }
 
+fn change_evidence_unavailable() -> PublicError {
+    match PublicError::builder(
+        ErrorCode::IncompleteCoverage,
+        "requested change evidence is unavailable",
+    )
+    .build()
+    {
+        Ok(error) => error,
+        Err(_) => unreachable!("closed public error is statically bounded"),
+    }
+}
+
 fn failed_closed_publication(operation: OperationId) -> PublicError {
     PublicError::builder(
         ErrorCode::IndexCorrupt,
@@ -9188,6 +10063,13 @@ fn internal_error() -> PublicError {
 mod tests {
     use super::*;
     use rootlight_daemon_core::{ControlService, DaemonLimits, JournalActor};
+    use rootlight_ids::FactId;
+    use rootlight_ir::{
+        BuildContextIdentity, Confidence, CoverageScope, EvidenceKind, FactDomain, FactEvidence,
+        FileIdentityClaim, FileRecord, ProducerIdentity, ProducerKind, ProvenanceRecord,
+        RelationRecord, derive_coverage_record_id, derive_provenance_record_id,
+        new_file_identity_claim_envelope,
+    };
     use rootlight_operations::{ClientInstanceId, OperationJournal, OperationStage, RecoveryClass};
     use rootlight_runtime::RuntimePaths;
     use std::{
@@ -9224,6 +10106,129 @@ mod tests {
         ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
             self.calls.fetch_add(1, AtomicOrdering::Relaxed);
             Err(self.error)
+        }
+    }
+
+    struct SuccessfulSemanticAnalyzer {
+        calls: Arc<AtomicUsize>,
+        identity: ContentHash,
+    }
+
+    impl FirstSliceProjectAnalyzer for SuccessfulSemanticAnalyzer {
+        fn provider_identity(&self) -> ContentHash {
+            self.identity
+        }
+
+        fn analyze(
+            &self,
+            request: FirstSliceProjectAnalysisRequest<'_>,
+            _cancellation: &Cancellation,
+        ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
+            self.calls.fetch_add(1, AtomicOrdering::Relaxed);
+            let mut document =
+                NormalizedIrDocument::empty(request.repository(), request.generation());
+            for input in request.inputs() {
+                let length = u64::try_from(input.source().len())
+                    .expect("test project source length is bounded");
+                let source = SourceRef::new(
+                    request.repository(),
+                    request.generation(),
+                    SourceSpan::new(input.file(), 0, length)
+                        .expect("test project source span is valid"),
+                    input.content_hash(),
+                    None,
+                );
+                let producer =
+                    ProducerIdentity::new("rootlight-test-project", "1.0", request.build_context())
+                        .expect("test project producer is valid");
+                let mut provenance = ProvenanceRecord {
+                    id: FactId::from_bytes([0; 20]),
+                    repository: request.repository(),
+                    generation: request.generation(),
+                    producer_kind: ProducerKind::Derivation,
+                    producer,
+                    binary_digest: self.identity,
+                    frontend_version: Some("test-project-1".to_owned()),
+                    language: request.language().to_owned(),
+                    tier: AnalysisTier::TierB,
+                    build_context: BuildContextIdentity::new(request.build_context()),
+                    input_sources: vec![source.clone()],
+                    evidence_sources: vec![source.clone()],
+                    derivation_parents: Vec::new(),
+                    rule: None,
+                };
+                provenance.id = derive_provenance_record_id(&provenance)
+                    .expect("test project provenance identity derives");
+                let provenance_id = provenance.id;
+                document.provenance.push(provenance);
+                document.files.push(FileRecord {
+                    id: input.file(),
+                    repository: request.repository(),
+                    generation: request.generation(),
+                    path: input.path().to_owned(),
+                    path_locator: None,
+                    content_hash: input.content_hash(),
+                    byte_length: length,
+                    language: request.language().to_owned(),
+                    encoding: "utf-8".to_owned(),
+                    generated: input.generated(),
+                    provenance: provenance_id,
+                    evidence: FactEvidence {
+                        source: Some(source.clone()),
+                        derivation: Vec::new(),
+                    },
+                });
+                let mut coverage = CoverageRecord {
+                    id: FactId::from_bytes([0; 20]),
+                    repository: request.repository(),
+                    generation: request.generation(),
+                    scope: CoverageScope::File(input.file()),
+                    domain: FactDomain::Relations,
+                    tier: AnalysisTier::TierB,
+                    status: CoverageStatus::Complete,
+                    discovered: 1,
+                    indexed: 1,
+                    skipped: 0,
+                    provenance: provenance_id,
+                    evidence: FactEvidence {
+                        source: Some(source.clone()),
+                        derivation: Vec::new(),
+                    },
+                };
+                coverage.id = derive_coverage_record_id(&coverage)
+                    .expect("test project coverage identity derives");
+                document.coverage_records.push(coverage);
+                // The deep-output fixture must carry the same component framing
+                // as VFS file identity or admission fails before exercising no-op behavior.
+                let mut path_identity = Vec::new();
+                for component in input.path().split('/') {
+                    let mut canonical = Vec::with_capacity(component.len().saturating_add(1));
+                    canonical.push(0);
+                    canonical.extend_from_slice(component.as_bytes());
+                    let component_length =
+                        u32::try_from(canonical.len()).expect("test path component is bounded");
+                    path_identity.extend_from_slice(&component_length.to_be_bytes());
+                    path_identity.extend_from_slice(&canonical);
+                }
+                let claim = FileIdentityClaim {
+                    file: input.file(),
+                    repository: request.repository(),
+                    path: input.path().to_owned(),
+                    path_identity,
+                    content_hash: input.content_hash(),
+                    byte_length: length,
+                };
+                document.extensions.push(
+                    new_file_identity_claim_envelope(
+                        &claim,
+                        request.generation(),
+                        provenance_id,
+                        source,
+                    )
+                    .expect("test file identity claim encodes"),
+                );
+            }
+            Ok(FirstSliceProjectAnalysis::new(document, true))
         }
     }
 
@@ -9272,6 +10277,67 @@ mod tests {
         assert_eq!(mapped.repositories[0].generation_count, 1);
         assert_eq!(mapped.unreclaimed_temporary_bytes, 64);
         assert_eq!(mapped.disk_margin_bytes, Some(1024));
+    }
+
+    #[test]
+    fn operation_poll_hints_follow_the_durable_stage() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = OperationId::from_bytes([40; 16]);
+        journal
+            .submit(repository_submission(operation, 40))
+            .expect("operation submits");
+        let mut record = journal.status(operation).expect("queued status exists");
+
+        assert_eq!(repository_operation_stage(&record), "queued");
+        assert_eq!(
+            repository_operation_retry_after_ms(&record),
+            Some(OPERATION_RETRY_QUEUED_MS)
+        );
+
+        record.state = OperationState::Running;
+        record.stage = OperationStage::Executing;
+        let running_stages = [
+            (0, "discovery", OPERATION_RETRY_DISCOVERY_MS),
+            (1, "snapshot", OPERATION_RETRY_SNAPSHOT_MS),
+            (2, "analysis", OPERATION_RETRY_ANALYSIS_MS),
+            (3, "merge", OPERATION_RETRY_MERGE_MS),
+            (4, "persistence", OPERATION_RETRY_PERSISTENCE_MS),
+            (5, "search", OPERATION_RETRY_SEARCH_MS),
+        ];
+        for (completed, stage, retry_after_ms) in running_stages {
+            record.progress = Progress::new(completed, 6).expect("progress is valid");
+            assert_eq!(repository_operation_stage(&record), stage);
+            assert_eq!(
+                repository_operation_retry_after_ms(&record),
+                Some(retry_after_ms)
+            );
+        }
+
+        record.stage = OperationStage::Cleanup;
+        assert_eq!(repository_operation_stage(&record), "publication");
+        assert_eq!(
+            repository_operation_retry_after_ms(&record),
+            Some(OPERATION_RETRY_PUBLICATION_MS)
+        );
+        record.kind = OperationKind::Recovery;
+        record.stage = OperationStage::Executing;
+        assert_eq!(repository_operation_stage(&record), "recovery");
+        assert_eq!(
+            repository_operation_retry_after_ms(&record),
+            Some(OPERATION_RETRY_RECOVERY_MS)
+        );
+
+        record.kind = OperationKind::RepositoryIndex;
+        for (state, stage) in [
+            (OperationState::Succeeded, "complete"),
+            (OperationState::Failed, "search"),
+            (OperationState::Cancelled, "search"),
+            (OperationState::Interrupted, "search"),
+        ] {
+            record.state = state;
+            assert_eq!(repository_operation_stage(&record), stage);
+            assert_eq!(repository_operation_retry_after_ms(&record), None);
+        }
     }
 
     #[test]
@@ -9937,6 +11003,214 @@ mod tests {
     }
 
     #[test]
+    fn generation_memory_limit_exposes_bounded_numeric_component_details() {
+        let breakdown = rootlight_service::GenerationMemoryBreakdown {
+            retained_bytes: 9,
+            reserved_bytes: 8,
+            owned_bytes: 9,
+            referenced_bytes: 0,
+            mapped_bytes: 0,
+            staged_bytes: 0,
+            shared_bytes: 0,
+        };
+        let error = build_service_error(
+            FirstSliceError::GenerationMemoryLimit {
+                breakdown,
+                observed: 17,
+                limit: 16,
+            },
+            None,
+        );
+
+        assert_eq!(error.code(), ErrorCode::ResourceExhausted);
+        assert!(!error.retryable());
+        assert_eq!(
+            error.details().get(&static_detail_key("resource")),
+            Some(&PublicValue::Label(static_safe_label(
+                "generation_memory_bytes"
+            )))
+        );
+        for (key, value) in [
+            ("observed", 17),
+            ("limit", 16),
+            ("retained_memory_bytes", breakdown.retained_bytes),
+            ("reserved_memory_bytes", breakdown.reserved_bytes),
+            ("owned_memory_bytes", breakdown.owned_bytes),
+            ("referenced_memory_bytes", breakdown.referenced_bytes),
+            ("mapped_memory_bytes", breakdown.mapped_bytes),
+            ("staged_memory_bytes", breakdown.staged_bytes),
+            ("shared_memory_bytes", breakdown.shared_bytes),
+        ] {
+            assert_eq!(
+                error.details().get(&static_detail_key(key)),
+                Some(&PublicValue::Unsigned(value))
+            );
+        }
+        assert_eq!(error.next_actions(), &[NextAction::CollectSupportBundle]);
+    }
+
+    #[test]
+    fn auto_index_reuses_unchanged_deep_generation_without_semantic_child() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn deep_noop() -> bool { true }\n",
+        )
+        .expect("fixture source writes");
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer: Arc<dyn FirstSliceProjectAnalyzer> = Arc::new(SuccessfulSemanticAnalyzer {
+            calls: Arc::clone(&calls),
+            identity: content_hash(b"daemon-successful-semantic-analyzer"),
+        });
+        let setup_deadline = Instant::now() + Duration::from_secs(30);
+        let service = Arc::new(RwLock::new(
+            FirstSliceService::new_durable_with_project_analyzer(
+                3,
+                paths.state_dir(),
+                analyzer,
+                &Cancellation::with_deadline(setup_deadline),
+            )
+            .expect("durable semantic service initializes"),
+        ));
+        let journal = Arc::new(
+            OperationJournal::open(&paths.operation_journal_path())
+                .expect("operation journal opens"),
+        );
+        let actor = JournalActor::start(Arc::clone(&journal), 8, 8).expect("journal actor starts");
+        let handle = actor.handle();
+        let metadata = Mutex::new(OperationMetadataSet::new(8));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let resources = ServiceRequestResources {
+            journal: &handle,
+            metadata: &metadata,
+            runtime: &runtime,
+            catalog_epoch: Instant::now(),
+            publication_hook: None,
+        };
+        let (refinement, refinement_receiver) = mpsc::sync_channel(1);
+        let lanes = FirstSliceServiceLanes {
+            service: Arc::clone(&service),
+            index_serialization: Arc::new(Mutex::new(())),
+            semantic_refinements: Arc::new(Mutex::new(BTreeMap::new())),
+            graph_projections: Arc::new(Mutex::new(GraphProjectionRegistry::new())),
+            refinement,
+            recovery_ready: Arc::new(AtomicBool::new(true)),
+            recovery_complete: Arc::new(AtomicBool::new(true)),
+            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
+            support_state: None,
+        };
+        let root = fixture.path().to_string_lossy().into_owned();
+        let context = |client: u8| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::from_bytes([client; 16]),
+                selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+                cancellation: Cancellation::with_deadline(deadline),
+                deadline,
+                effective_budget: None,
+                index_admission: None,
+            }
+        };
+
+        let deep_operation = OperationId::from_bytes([116; 16]);
+        let deep_context = context(116);
+        let mut no_reply = None;
+        let deep = repository_index(
+            &lanes,
+            resources,
+            daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root: root.clone(),
+                operation: Some(operation_to_wire(deep_operation)),
+                detached: false,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexDeep as i32,
+            },
+            &deep_context,
+            &mut no_reply,
+        )
+        .expect("deep generation publishes");
+        let deep_generation = parse_generation(deep.published_generation.as_ref())
+            .expect("deep generation has a stable identity");
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 1);
+
+        let auto_operation = OperationId::from_bytes([117; 16]);
+        let auto_context = context(117);
+        let auto = repository_index(
+            &lanes,
+            resources,
+            daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root,
+                operation: Some(operation_to_wire(auto_operation)),
+                detached: false,
+                mode: daemon::RepositoryIndexMode::RepositoryIndexAuto as i32,
+            },
+            &auto_context,
+            &mut no_reply,
+        )
+        .expect("unchanged Auto request retains the deep generation");
+
+        assert_eq!(
+            parse_generation(auto.published_generation.as_ref())
+                .expect("Auto generation has a stable identity"),
+            deep_generation
+        );
+        assert_eq!(
+            auto.mode,
+            daemon::RepositoryIndexMode::RepositoryIndexDeep as i32
+        );
+        assert!(auto.semantic_operation.is_none());
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 1);
+        assert!(matches!(
+            refinement_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            journal.status(semantic_refinement_operation(auto_operation)),
+            Err(OperationError::NotFound)
+        ));
+
+        let status = repository_operation_status(
+            service.as_ref(),
+            &handle,
+            &metadata,
+            &runtime,
+            daemon::RepositoryOperationStatusRequest {
+                schema_version: Some(schema_version()),
+                operation: Some(operation_to_wire(auto_operation)),
+                action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                wait_ms: None,
+                after_revision: None,
+            },
+            &auto_context,
+        )
+        .expect("retained operation status is available");
+        assert_eq!(
+            status.build_strategy,
+            daemon::RepositoryBuildStrategy::RepositoryBuildRetainedGeneration as i32
+        );
+        assert_eq!(status.changed_inputs, 0);
+        assert_eq!(status.changed_files, 0);
+        assert_eq!(status.rebuilt_files, 0);
+        assert_eq!(status.rebuilt_facts, 0);
+        assert!(status.semantic_operation.is_none());
+
+        drop(handle);
+        actor.join().expect("journal actor joins");
+    }
+
+    #[test]
     fn auto_index_keeps_the_structural_stage_when_semantic_refinement_fails() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -10513,7 +11787,7 @@ mod tests {
     }
 
     #[test]
-    fn receipt_fallback_preserves_the_rust_analysis_tier() {
+    fn receipt_fallback_does_not_invent_semantic_coverage() {
         let receipt = FirstSliceIndexReceipt {
             repository: RepositoryId::from_bytes([1; 16]),
             generation: GenerationId::from_bytes([2; 20]),
@@ -10527,13 +11801,14 @@ mod tests {
             lexical_documents: 1,
             oracle_allocated_bytes: 1,
             estimated_disk_bytes: 1,
+            retained_durable_bytes: 0,
             diagnostics: Vec::new(),
             elapsed_micros: 1,
         };
 
         assert_eq!(
             aggregate_coverage(&[], &receipt),
-            (AnalysisTier::TierB, CoverageStatus::Bounded, 1)
+            (AnalysisTier::TierD, CoverageStatus::Unknown, 1)
         );
     }
 
@@ -11271,7 +12546,7 @@ mod tests {
         fs::create_dir(fixture.path().join("src")).expect("source directory exists");
         fs::write(
             fixture.path().join("src/lib.rs"),
-            "pub fn explained_symbol() -> u32 { 42 }\n",
+            "pub fn dependency() -> u32 { 42 }\npub fn explained_symbol() -> u32 { dependency() }\n",
         )
         .expect("source writes");
         let mut service =
@@ -11316,6 +12591,24 @@ mod tests {
                     )),
                 }),
                 symbols: requested.iter().copied().map(symbol_to_wire).collect(),
+                sections: [
+                    "signature",
+                    "docs",
+                    "containment",
+                    "types",
+                    "calls_summary",
+                    "references_summary",
+                    "history",
+                    "ownership",
+                    "diagnostics",
+                    "source_preview",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+                relation_sample_limit: Some(7),
+                source_preview_lines: Some(2),
+                include_provenance: "full".to_owned(),
             },
             &context,
         )
@@ -11326,6 +12619,31 @@ mod tests {
         assert_eq!(
             parse_symbol(response.symbols[0].symbol.as_ref()).expect("resolved symbol parses"),
             resolved
+        );
+        let explanation = &response.symbols[0];
+        assert!(!explanation.qualified_name.is_empty());
+        assert!(
+            explanation
+                .signature
+                .as_deref()
+                .is_some_and(|signature| signature.contains("explained_symbol"))
+        );
+        assert!(
+            explanation
+                .source_preview
+                .as_deref()
+                .is_some_and(|preview| preview.contains("explained_symbol"))
+        );
+        assert!(explanation.relation_samples.len() <= 7);
+        assert!(
+            explanation
+                .section_gaps
+                .iter()
+                .any(|gap| gap == "documentation_evidence_unavailable")
+        );
+        assert!(
+            explanation.provenance_frontend_version.is_some()
+                || explanation.provenance_rule.is_some()
         );
         assert_eq!(
             response
@@ -11342,6 +12660,86 @@ mod tests {
             .expect("completeness state is valid"),
             daemon::FirstSliceCompletenessState::FirstSliceCompletenessComplete
         );
+    }
+
+    #[test]
+    fn symbol_relation_samples_sort_by_logical_evidence_before_limiting() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let symbol = SymbolId::from_bytes([3; 20]);
+        let file = FileId::from_bytes([4; 20]);
+        let evidence = FactEvidence {
+            source: Some(SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, 4, 12).expect("source span is bounded"),
+                content_hash(b"relation-source"),
+                None,
+            )),
+            derivation: Vec::new(),
+        };
+        let relation = |id, subject, predicate, object| RelationRecord {
+            id: FactId::from_bytes([id; 20]),
+            repository,
+            generation,
+            subject,
+            predicate,
+            object,
+            confidence: Confidence::new(1_000).expect("confidence is bounded"),
+            evidence_kind: EvidenceKind::Syntax,
+            provenance: FactId::from_bytes([9; 20]),
+            evidence: evidence.clone(),
+        };
+        let relations = [
+            relation(
+                1,
+                RelationEndpoint::Entity(symbol),
+                RelationPredicate::DefinesAt,
+                RelationEndpoint::File(file),
+            ),
+            relation(
+                2,
+                RelationEndpoint::File(file),
+                RelationPredicate::Declares,
+                RelationEndpoint::Entity(symbol),
+            ),
+        ];
+
+        let samples =
+            symbol_relation_samples(symbol, &relations, 1).expect("relation samples materialize");
+
+        assert_eq!(
+            samples
+                .iter()
+                .map(|sample| sample.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["declares", "defines_at"]
+        );
+    }
+
+    #[test]
+    fn revision_range_parser_accepts_one_bounded_pair_and_rejects_ambiguous_syntax() {
+        assert_eq!(
+            parse_revision_range("HEAD~1..HEAD").expect("bounded range parses"),
+            ("HEAD~1", "HEAD")
+        );
+        for invalid in [
+            "",
+            "HEAD",
+            "..HEAD",
+            "HEAD..",
+            "HEAD...HEAD",
+            "--help..HEAD",
+            "HEAD..--help",
+            "HEAD\n..HEAD",
+        ] {
+            let error = parse_revision_range(invalid).expect_err("ambiguous range is rejected");
+            assert_eq!(error.code(), ErrorCode::InvalidArgument);
+        }
+        let oversized = "a".repeat(513);
+        let error =
+            parse_revision_range(&oversized).expect_err("oversized revision input is rejected");
+        assert_eq!(error.code(), ErrorCode::InvalidArgument);
     }
 
     #[test]
@@ -12457,6 +13855,7 @@ mod tests {
             lexical_documents: 3,
             oracle_allocated_bytes: 4_096,
             estimated_disk_bytes: 64 * 1024 * 1024,
+            retained_durable_bytes: 0,
             diagnostics: Vec::new(),
             elapsed_micros: 10,
         };
@@ -12918,7 +14317,14 @@ mod tests {
     fn run_recovery_worker_with_start_hook(
         repository_count: usize,
         after_start: RecoveryWorkerStartHook,
-    ) -> (Result<(), FirstSliceHostError>, Vec<OperationRecord>) {
+        after_active_restore: Option<RecoveryWorkerCheckpointHook>,
+    ) -> (
+        Result<(), FirstSliceHostError>,
+        Vec<OperationRecord>,
+        bool,
+        bool,
+        HealthStatus,
+    ) {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("runtime paths are valid");
@@ -12951,16 +14357,19 @@ mod tests {
         assert_eq!(targets.len(), repository_count);
         let recovering_repositories = targets.iter().map(|target| target.repository()).collect();
         let (refinement, _refinement_receiver) = mpsc::sync_channel(1);
+        let recovery_ready = Arc::new(AtomicBool::new(false));
+        let recovery_complete = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(DaemonState::starting());
         let lanes = FirstSliceServiceLanes {
             service: Arc::new(RwLock::new(service)),
             index_serialization: Arc::new(Mutex::new(())),
             semantic_refinements: Arc::new(Mutex::new(BTreeMap::new())),
             graph_projections: Arc::new(Mutex::new(GraphProjectionRegistry::new())),
             refinement,
-            recovery_ready: Arc::new(AtomicBool::new(false)),
-            recovery_complete: Arc::new(AtomicBool::new(false)),
+            recovery_ready: Arc::clone(&recovery_ready),
+            recovery_complete: Arc::clone(&recovery_complete),
             recovering_repositories: Arc::new(RwLock::new(recovering_repositories)),
-            support_state: None,
+            support_state: Some(Arc::clone(&state)),
         };
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
         let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("journal actor starts");
@@ -12975,6 +14384,7 @@ mod tests {
                 restore_active: true,
                 targets,
                 after_start: Some(after_start),
+                after_active_restore,
             },
             lanes,
             actor.handle(),
@@ -12995,16 +14405,32 @@ mod tests {
                     .expect("recovery operation remains queryable")
             })
             .collect();
+        let generation_status = ControlService::with_state(
+            Arc::clone(&journal),
+            [104; 16],
+            state,
+            DaemonLimits::default(),
+        )
+        .health()
+        .generation_status;
         actor.join().expect("journal actor joins");
-        (result, records)
+        (
+            result,
+            records,
+            recovery_ready.load(Ordering::Acquire),
+            recovery_complete.load(Ordering::Acquire),
+            generation_status,
+        )
     }
 
     #[test]
     fn worker_failure_terminalizes_started_recovery() {
-        let (result, records) = run_recovery_worker_with_start_hook(
-            1,
-            Box::new(|_, _| Err(FirstSliceHostError::ThreadPanicked)),
-        );
+        let (result, records, recovery_ready, recovery_complete, generation_status) =
+            run_recovery_worker_with_start_hook(
+                1,
+                Box::new(|_, _| Err(FirstSliceHostError::ThreadPanicked)),
+                None,
+            );
         let [record] = records.as_slice() else {
             panic!("one recovery operation expected");
         };
@@ -13020,17 +14446,21 @@ mod tests {
                 .code(),
             ErrorCode::Internal
         );
+        assert!(recovery_ready);
+        assert!(recovery_complete);
+        assert_eq!(generation_status, HealthStatus::Degraded);
     }
 
     #[test]
     fn shutdown_terminalizes_started_recovery_as_cancelled() {
-        let (result, records) = run_recovery_worker_with_start_hook(
+        let (result, records, _, _, _) = run_recovery_worker_with_start_hook(
             2,
             Box::new(|cancellation, stopping| {
                 stopping.store(true, Ordering::Release);
                 let _ = cancellation.cancel(CancellationReason::Shutdown);
                 Ok(())
             }),
+            None,
         );
 
         result.expect("shutdown drains recovery worker");
@@ -13039,6 +14469,82 @@ mod tests {
                 && record.state == OperationState::Cancelled
                 && record.cancellation_reason == Some(CancellationReason::Shutdown)
         }));
+    }
+
+    #[test]
+    fn retained_restore_interruption_terminalizes_before_recovery_completes() {
+        let (result, records, recovery_ready, recovery_complete, generation_status) =
+            run_recovery_worker_with_start_hook(
+                1,
+                Box::new(|_, _| Ok(())),
+                Some(Box::new(|lanes, cancellation| {
+                    assert!(lanes.recovery_ready.load(Ordering::Acquire));
+                    assert!(!lanes.recovery_complete.load(Ordering::Acquire));
+                    assert!(
+                        lanes
+                            .recovering_repositories
+                            .read()
+                            .expect("recovery set reads")
+                            .is_empty(),
+                        "the last-good active generation is serviceable during retained restore"
+                    );
+                    let repositories = lanes
+                        .service
+                        .read()
+                        .expect("recovered service reads")
+                        .list_repositories();
+                    assert_eq!(repositories.len(), 1);
+                    assert!(cancellation.cancel(CancellationReason::ClientRequest));
+                    Ok(())
+                })),
+            );
+
+        result.expect("retained interruption is a terminal degraded outcome");
+        let [record] = records.as_slice() else {
+            panic!("one recovery operation expected");
+        };
+        assert_eq!(record.state, OperationState::Cancelled);
+        assert_eq!(
+            record.cancellation_reason,
+            Some(CancellationReason::ClientRequest)
+        );
+        assert!(recovery_ready);
+        assert!(recovery_complete);
+        assert_eq!(generation_status, HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn recovery_failure_after_active_restore_keeps_last_good_generation_available() {
+        let (result, records, recovery_ready, recovery_complete, generation_status) =
+            run_recovery_worker_with_start_hook(
+                1,
+                Box::new(|_, _| Ok(())),
+                Some(Box::new(|lanes, _| {
+                    assert!(!lanes.recovery_complete.load(Ordering::Acquire));
+                    assert_eq!(
+                        lanes
+                            .service
+                            .read()
+                            .expect("recovered service reads")
+                            .list_repositories()
+                            .len(),
+                        1
+                    );
+                    Err(FirstSliceHostError::Service(FirstSliceError::Catalog))
+                })),
+            );
+
+        assert!(matches!(
+            result,
+            Err(FirstSliceHostError::Service(FirstSliceError::Catalog))
+        ));
+        let [record] = records.as_slice() else {
+            panic!("one recovery operation expected");
+        };
+        assert_eq!(record.state, OperationState::Failed);
+        assert!(recovery_ready);
+        assert!(recovery_complete);
+        assert_eq!(generation_status, HealthStatus::Degraded);
     }
 
     #[test]

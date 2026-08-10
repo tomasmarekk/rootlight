@@ -176,6 +176,7 @@ mod tests {
             reserved_memory_bytes: 15,
             owned_memory_bytes: 16,
             invalidation_trace_json: Some(br#"{"version":"1.0"}"#.to_vec()),
+            retained_durable_bytes: 17,
         };
 
         let decoded =

@@ -20,24 +20,30 @@ use rootlight_ir::{
     decode_lexical_evidence, decode_lexical_evidence_envelope,
 };
 use rootlight_mcp_contract::{
-    CodeLocateInput, CodeLocateOutput, ErrorResponse, OperationStatusInput, OperationStatusOutput,
-    RepoIndexInput, RepoIndexOutput, ResponseMetadata, SourceReadInput, SourceReadOutput,
-    SymbolExplainInput, SymbolExplainOutput,
+    CodeLocateInput, CodeLocateOutput, ErrorResponse, OperationStatusInput, RepoIndexInput,
+    RepoIndexOutput, ResponseMetadata, SourceReadInput, SourceReadOutput, SymbolExplainInput,
     change::{
-        ChangeImpactInput, ChangeImpactOutput, HistoryCompareInput, HistoryCompareOutput,
-        PlanChangeInput, PlanChangeOutput, TestsSelectInput, TestsSelectOutput,
+        ChangeImpactInput, ChangeImpactOutputV1_0, ChangeImpactOutputV1_1, HistoryCompareInput,
+        HistoryCompareInputV1_0, HistoryCompareOutputV1_0, HistoryCompareOutputV1_1,
+        PlanChangeInput, PlanChangeInputV1_0, PlanChangeOutputV1_0, PlanChangeOutputV1_1,
+        TestsSelectInput, TestsSelectOutputV1_1,
     },
     context::{
-        ContextPackInput, ContextPackOutput, QueryAdvancedInput, QueryAdvancedOutput,
-        QueryBatchInput, QueryBatchOutput,
+        ContextPackInput, ContextPackOutputV1_0, ContextPackOutputV1_1, QueryAdvancedInput,
+        QueryAdvancedOutput, QueryBatchInput, QueryBatchOutput,
     },
     intent::{
-        ArchitectureCyclesInput, ArchitectureCyclesOutput, ArchitectureOverviewInput,
-        ArchitectureOverviewOutput, CodeDeadInput, CodeDeadOutput, FlowTraceInput, FlowTraceOutput,
-        SymbolRelationshipsInput, SymbolRelationshipsOutput,
+        ArchitectureCyclesInput, ArchitectureCyclesOutputV1_1, ArchitectureOverviewInput,
+        ArchitectureOverviewOutputV1_1, CodeDeadInput, CodeDeadOutputV1_1, FlowTraceInput,
+        FlowTraceOutput, SymbolRelationshipsInput, SymbolRelationshipsOutputV1_1,
     },
-    repository::{RepoListInput, RepoListOutput, RepoStatusInput, RepoStatusOutput},
-    vertical::{OperationStatusOutputV1_0, RepoIndexOutputV1_0},
+    repository::{
+        RepoListInput, RepoListOutput, RepoStatusInput, RepoStatusOutputV1_0, RepoStatusOutputV1_1,
+    },
+    vertical::{
+        OperationStatusOutputV1_0, OperationStatusOutputV1_1, OperationStatusOutputV1_2,
+        RepoIndexOutputV1_0, SymbolExplainOutputV1_1,
+    },
 };
 use rootlight_protocol::CURRENT_PROTOCOL_MINOR;
 use rootlight_protocol::generated::common::v1::ContractVersion as ProtocolContractVersion;
@@ -841,6 +847,23 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
             .join(name);
         write_bytes(&schema_root.join(name), &read_bytes(&fixture)?)?;
     }
+    for name in [
+        "mcp-architecture-overview-input-1.0.schema.json",
+        "mcp-architecture-overview-output-1.0.schema.json",
+        "mcp-architecture-cycles-input-1.0.schema.json",
+        "mcp-architecture-cycles-output-1.0.schema.json",
+        "mcp-code-dead-input-1.0.schema.json",
+        "mcp-code-dead-output-1.0.schema.json",
+        "mcp-symbol-explain-input-1.0.schema.json",
+        "mcp-symbol-explain-output-1.0.schema.json",
+        "mcp-symbol-relationships-input-1.0.schema.json",
+        "mcp-symbol-relationships-output-1.0.schema.json",
+        "mcp-tests-select-input-1.0.schema.json",
+        "mcp-tests-select-output-1.0.schema.json",
+    ] {
+        let retained = workspace_root.join(SCHEMA_ROOT).join("json").join(name);
+        write_bytes(&schema_root.join(name), &read_bytes(&retained)?)?;
+    }
     write_schema::<ConfigDocumentSchema>(&schema_root.join("config-1.0.schema.json"))?;
     write_schema::<ConfigDocumentSchemaV1_1>(&schema_root.join("config-1.1.schema.json"))?;
     write_schema::<IrDocumentSchema>(&schema_root.join("ir-1.0.schema.json"))?;
@@ -862,7 +885,7 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "input",
         "1.1",
     )?;
-    write_mcp_tool_schema_version::<OperationStatusOutput>(
+    write_mcp_tool_schema_version::<OperationStatusOutputV1_1>(
         &schema_root,
         "operation.status",
         "output",
@@ -870,54 +893,151 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     )?;
     write_mcp_tool_schema::<CodeLocateInput>(&schema_root, "code.locate", "input")?;
     write_mcp_tool_schema::<CodeLocateOutput>(&schema_root, "code.locate", "output")?;
-    write_mcp_tool_schema::<SymbolExplainInput>(&schema_root, "symbol.explain", "input")?;
-    write_mcp_tool_schema::<SymbolExplainOutput>(&schema_root, "symbol.explain", "output")?;
+    write_mcp_tool_schema_version::<SymbolExplainInput>(
+        &schema_root,
+        "symbol.explain",
+        "input",
+        "1.1",
+    )?;
+    write_mcp_tool_schema_version::<SymbolExplainOutputV1_1>(
+        &schema_root,
+        "symbol.explain",
+        "output",
+        "1.1",
+    )?;
     write_mcp_tool_schema::<SourceReadInput>(&schema_root, "source.read", "input")?;
     write_mcp_tool_schema::<SourceReadOutput>(&schema_root, "source.read", "output")?;
+    write_mcp_tool_schema_version::<OperationStatusInput>(
+        &schema_root,
+        "operation.status",
+        "input",
+        "1.2",
+    )?;
+    write_mcp_tool_schema_version::<OperationStatusOutputV1_2>(
+        &schema_root,
+        "operation.status",
+        "output",
+        "1.2",
+    )?;
     write_mcp_tool_schema::<RepoStatusInput>(&schema_root, "repo.status", "input")?;
-    write_mcp_tool_schema::<RepoStatusOutput>(&schema_root, "repo.status", "output")?;
+    write_mcp_tool_schema::<RepoStatusOutputV1_0>(&schema_root, "repo.status", "output")?;
+    write_mcp_tool_schema_version::<RepoStatusInput>(&schema_root, "repo.status", "input", "1.1")?;
+    write_mcp_tool_schema_version::<RepoStatusOutputV1_1>(
+        &schema_root,
+        "repo.status",
+        "output",
+        "1.1",
+    )?;
     write_mcp_tool_schema_version::<RepoListInput>(&schema_root, "repo.list", "input", "2.0")?;
     write_mcp_tool_schema_version::<RepoListOutput>(&schema_root, "repo.list", "output", "2.0")?;
-    write_mcp_tool_schema::<SymbolRelationshipsInput>(
+    write_mcp_tool_schema_version::<SymbolRelationshipsInput>(
         &schema_root,
         "symbol.relationships",
         "input",
+        "1.1",
     )?;
-    write_mcp_tool_schema::<SymbolRelationshipsOutput>(
+    write_mcp_tool_schema_version::<SymbolRelationshipsOutputV1_1>(
         &schema_root,
         "symbol.relationships",
         "output",
+        "1.1",
     )?;
     write_mcp_tool_schema::<FlowTraceInput>(&schema_root, "flow.trace", "input")?;
     write_mcp_tool_schema::<FlowTraceOutput>(&schema_root, "flow.trace", "output")?;
     write_mcp_tool_schema::<ChangeImpactInput>(&schema_root, "change.impact", "input")?;
-    write_mcp_tool_schema::<ChangeImpactOutput>(&schema_root, "change.impact", "output")?;
-    write_mcp_tool_schema::<TestsSelectInput>(&schema_root, "tests.select", "input")?;
-    write_mcp_tool_schema::<TestsSelectOutput>(&schema_root, "tests.select", "output")?;
-    write_mcp_tool_schema::<ArchitectureOverviewInput>(
+    write_mcp_tool_schema::<ChangeImpactOutputV1_0>(&schema_root, "change.impact", "output")?;
+    write_mcp_tool_schema_version::<ChangeImpactInput>(
+        &schema_root,
+        "change.impact",
+        "input",
+        "1.1",
+    )?;
+    write_mcp_tool_schema_version::<ChangeImpactOutputV1_1>(
+        &schema_root,
+        "change.impact",
+        "output",
+        "1.1",
+    )?;
+    write_mcp_tool_schema_version::<TestsSelectInput>(
+        &schema_root,
+        "tests.select",
+        "input",
+        "1.1",
+    )?;
+    write_mcp_tool_schema_version::<TestsSelectOutputV1_1>(
+        &schema_root,
+        "tests.select",
+        "output",
+        "1.1",
+    )?;
+    write_mcp_tool_schema_version::<ArchitectureOverviewInput>(
         &schema_root,
         "architecture.overview",
         "input",
+        "1.1",
     )?;
-    write_mcp_tool_schema::<ArchitectureOverviewOutput>(
+    write_mcp_tool_schema_version::<ArchitectureOverviewOutputV1_1>(
         &schema_root,
         "architecture.overview",
         "output",
+        "1.1",
     )?;
-    write_mcp_tool_schema::<ArchitectureCyclesInput>(&schema_root, "architecture.cycles", "input")?;
-    write_mcp_tool_schema::<ArchitectureCyclesOutput>(
+    write_mcp_tool_schema_version::<ArchitectureCyclesInput>(
+        &schema_root,
+        "architecture.cycles",
+        "input",
+        "1.1",
+    )?;
+    write_mcp_tool_schema_version::<ArchitectureCyclesOutputV1_1>(
         &schema_root,
         "architecture.cycles",
         "output",
+        "1.1",
     )?;
-    write_mcp_tool_schema::<CodeDeadInput>(&schema_root, "code.dead", "input")?;
-    write_mcp_tool_schema::<CodeDeadOutput>(&schema_root, "code.dead", "output")?;
-    write_mcp_tool_schema::<HistoryCompareInput>(&schema_root, "history.compare", "input")?;
-    write_mcp_tool_schema::<HistoryCompareOutput>(&schema_root, "history.compare", "output")?;
-    write_mcp_tool_schema::<PlanChangeInput>(&schema_root, "plan.change", "input")?;
-    write_mcp_tool_schema::<PlanChangeOutput>(&schema_root, "plan.change", "output")?;
+    write_mcp_tool_schema_version::<CodeDeadInput>(&schema_root, "code.dead", "input", "1.1")?;
+    write_mcp_tool_schema_version::<CodeDeadOutputV1_1>(
+        &schema_root,
+        "code.dead",
+        "output",
+        "1.1",
+    )?;
+    write_mcp_tool_schema::<HistoryCompareInputV1_0>(&schema_root, "history.compare", "input")?;
+    write_mcp_tool_schema::<HistoryCompareOutputV1_0>(&schema_root, "history.compare", "output")?;
+    write_mcp_tool_schema_version::<HistoryCompareInput>(
+        &schema_root,
+        "history.compare",
+        "input",
+        "1.1",
+    )?;
+    write_mcp_tool_schema_version::<HistoryCompareOutputV1_1>(
+        &schema_root,
+        "history.compare",
+        "output",
+        "1.1",
+    )?;
+    write_mcp_tool_schema::<PlanChangeInputV1_0>(&schema_root, "plan.change", "input")?;
+    write_mcp_tool_schema::<PlanChangeOutputV1_0>(&schema_root, "plan.change", "output")?;
+    write_mcp_tool_schema_version::<PlanChangeInput>(&schema_root, "plan.change", "input", "1.1")?;
+    write_mcp_tool_schema_version::<PlanChangeOutputV1_1>(
+        &schema_root,
+        "plan.change",
+        "output",
+        "1.1",
+    )?;
     write_mcp_tool_schema::<ContextPackInput>(&schema_root, "context.pack", "input")?;
-    write_mcp_tool_schema::<ContextPackOutput>(&schema_root, "context.pack", "output")?;
+    write_mcp_tool_schema::<ContextPackOutputV1_0>(&schema_root, "context.pack", "output")?;
+    write_mcp_tool_schema_version::<ContextPackInput>(
+        &schema_root,
+        "context.pack",
+        "input",
+        "1.1",
+    )?;
+    write_mcp_tool_schema_version::<ContextPackOutputV1_1>(
+        &schema_root,
+        "context.pack",
+        "output",
+        "1.1",
+    )?;
     write_mcp_tool_schema::<QueryAdvancedInput>(&schema_root, "query.advanced", "input")?;
     write_mcp_tool_schema::<QueryAdvancedOutput>(&schema_root, "query.advanced", "output")?;
     write_mcp_tool_schema::<QueryBatchInput>(&schema_root, "query.batch", "input")?;
@@ -2025,38 +2145,62 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.2.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-read-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-read-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-status-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-status-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-repo-status-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-repo-status-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-list-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-list-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-list-input-2.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-list-output-2.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-relationships-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-relationships-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-relationships-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-relationships-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-flow-trace-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-flow-trace-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-change-impact-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-change-impact-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-change-impact-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-change-impact-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-tests-select-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-tests-select-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-tests-select-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-tests-select-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-architecture-overview-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-architecture-overview-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-architecture-overview-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-architecture-overview-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-architecture-cycles-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-architecture-cycles-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-architecture-cycles-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-architecture-cycles-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-dead-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-dead-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-dead-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-dead-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-history-compare-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-history-compare-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-history-compare-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-history-compare-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-plan-change-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-plan-change-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-plan-change-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-plan-change-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-context-pack-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-context-pack-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-context-pack-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-context-pack-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-query-advanced-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-query-advanced-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-query-batch-input-1.0.schema.json"),

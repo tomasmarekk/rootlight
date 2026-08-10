@@ -52,16 +52,18 @@ use rootlight_mcp_contract::change::{
     HistoryCompareInput, ImpactEntry, ImpactGroup, ImpactRiskSummary, LineageMatch, MatchedStates,
     PlanChangeInput, PlanDecision, PlanObjective, PlanSymbolTarget, PlanTargetSelector, RankedTest,
     RelationPolicy, ResolvedChange, RevisionSelector, RiskLevel, SemanticChange,
-    SemanticChangeKind, TestCandidate, TestCoverageStrategy, TestGap, TestKind, TestsSelectData,
-    TestsSelectInput,
+    SemanticChangeKind, ServiceImpact, ServiceImpactKind, TestCandidate, TestCoverageStrategy,
+    TestGap, TestKind, TestsSelectData, TestsSelectInput,
 };
 use rootlight_mcp_contract::intent::{
     ArchitectureCommunity, ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesData,
-    ArchitectureCyclesInput, ArchitectureOverviewData, ArchitectureOverviewInput, ArchitectureView,
-    BlindSpot, CodeDeadData, CodeDeadInput, CycleBreakCandidate, DeadCandidate, DeadClassification,
-    DerivedViewInfo, Direction, EntryPointPolicy, EntryPointSummary, FlowTraceData, FlowTraceInput,
-    FrontierSummary, Hotspot, MinimalCycle, RelationKind, RelationProjection, RelationshipGroup,
-    RelationshipTarget, RelationshipTotals, RuleSummary, StronglyConnectedComponent,
+    ArchitectureCyclesInput, ArchitectureDetail, ArchitectureOverviewData,
+    ArchitectureOverviewInput, ArchitectureView, BlindSpot, CodeDeadData, CodeDeadInput,
+    CycleBreakCandidate, CycleLevel, CycleRankBy, DeadCandidate, DeadClassification,
+    DeadReachabilitySummary, DerivedViewInfo, Direction, EntryPointPolicy, EntryPointPolicyKind,
+    EntryPointSummary, FlowTraceData, FlowTraceInput, FrontierSummary, Hotspot, MinimalCycle,
+    NamedEntryPointPolicy, RelationKind, RelationProjection, RelationshipGroup, RelationshipTarget,
+    RelationshipTotals, RuleSummary, ServedCycleProjection, StronglyConnectedComponent,
     SymbolRelationshipsData, SymbolRelationshipsInput, TraceEdge, TracePath,
 };
 use rootlight_mcp_contract::{
@@ -89,21 +91,22 @@ use rootlight_mcp_contract::{
         RepositoryState,
     },
     vertical::{
-        ActiveGeneration, AnalysisTier, CacheStatus, CodeLocateData, CodeLocateInput,
-        ContinuationCursor, CoverageSummary, DetailHandle, Diagnostic, EntityKind, Freshness,
-        GenerationSummary, IndexMode, IndexPlanScope, IndexPlanSummary, LanguageCoverage,
-        LocateReason, LocatedItem, OperationAction, OperationBuildStrategy,
-        OperationDetailV1_1 as OperationDetail, OperationFallbackReason,
+        ActiveGeneration, AnalysisReadEnvelope, AnalysisSchemaVersion, AnalysisTier, CacheStatus,
+        CodeLocateData, CodeLocateInput, ContinuationCursor, CoverageSummary, DetailHandle,
+        Diagnostic, EntityKind, Freshness, GenerationSummary, IndexMode, IndexPlanScope,
+        IndexPlanSummary, LanguageCoverage, LocateReason, LocatedItem, OperationAction,
+        OperationBuildStrategy, OperationDetailV1_2 as OperationDetail, OperationFallbackReason,
         OperationIncrementalEvidenceV1_1 as OperationIncrementalEvidence,
         OperationInvalidationTraceV1_1 as OperationInvalidationTrace, OperationProgress,
-        OperationResourcesV1_1 as OperationResources, OperationSchemaVersion, OperationState,
-        OperationStatusDataV1_1 as OperationStatusData, OperationStatusInput,
-        OperationStatusSuccessV1_1 as OperationStatusSuccess, ProvenanceLevel, ProvenanceSummary,
-        QueryInterpretation, ReadEnvelope, RepoIndexDataV1_1 as RepoIndexData,
-        RepoIndexSuccessV1_1 as RepoIndexSuccess, RequiredNullable, ResolvedRepository,
-        ResponseBudget, ResponseProfile, ResponseWarning, SearchMode, SourceChunk, SourceElision,
-        SourceEncoding, SourceEncodingRequest, SourceReadData, SourceReadSelector,
-        StaleSourceReference, SymbolExplainData, SymbolExplanation, UsageSummary,
+        OperationResourcesV1_2 as OperationResources, OperationSchemaVersion, OperationState,
+        OperationStatusDataV1_2 as OperationStatusData, OperationStatusInput,
+        OperationStatusSchemaVersion, OperationStatusSuccessV1_2 as OperationStatusSuccess,
+        ProvenanceLevel, ProvenanceSummary, QueryInterpretation, ReadEnvelope,
+        RepoIndexDataV1_1 as RepoIndexData, RepoIndexSuccessV1_1 as RepoIndexSuccess,
+        RequiredNullable, ResolvedRepository, ResponseBudget, ResponseProfile, ResponseWarning,
+        ScopeSelector, SearchMode, SourceChunk, SourceElision, SourceEncoding,
+        SourceEncodingRequest, SourceReadData, SourceReadSelector, StaleSourceReference,
+        SymbolExplainData, SymbolExplanation, UsageSummary,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -669,6 +672,9 @@ pub struct SymbolExplainPortRequest {
     repository: RepositoryId,
     generation: client::GenerationSelector,
     symbols: Vec<SymbolId>,
+    sections: Vec<String>,
+    relation_sample_limit: Option<u8>,
+    source_preview_lines: Option<u8>,
     include_provenance: ProvenanceLevel,
 }
 
@@ -689,6 +695,24 @@ impl SymbolExplainPortRequest {
     #[must_use]
     pub fn symbols(&self) -> &[SymbolId] {
         &self.symbols
+    }
+
+    /// Returns the requested section labels.
+    #[must_use]
+    pub fn sections(&self) -> &[String] {
+        &self.sections
+    }
+
+    /// Returns the per-relation sample ceiling.
+    #[must_use]
+    pub const fn relation_sample_limit(&self) -> Option<u8> {
+        self.relation_sample_limit
+    }
+
+    /// Returns the source-preview line ceiling.
+    #[must_use]
+    pub const fn source_preview_lines(&self) -> Option<u8> {
+        self.source_preview_lines
     }
 
     /// Reports whether provenance was requested.
@@ -898,6 +922,7 @@ pub struct ArchitectureCyclesPortRequest {
     min_size: Option<u8>,
     max_cycles: Option<u16>,
     include_self_cycles: Option<bool>,
+    contract: client::ArchitectureCyclesOptions,
 }
 
 impl ArchitectureCyclesPortRequest {
@@ -936,6 +961,12 @@ impl ArchitectureCyclesPortRequest {
     pub const fn include_self_cycles(&self) -> Option<bool> {
         self.include_self_cycles
     }
+
+    /// Returns the typed scope, projection level, and ranking contract.
+    #[must_use]
+    pub const fn contract(&self) -> &client::ArchitectureCyclesOptions {
+        &self.contract
+    }
 }
 
 /// Detected daemon data plus mandatory MCP read metadata.
@@ -963,6 +994,7 @@ pub struct CodeDeadPortRequest {
     include_tests: Option<bool>,
     min_confidence: Option<u16>,
     max_candidates: Option<u16>,
+    contract: client::CodeDeadOptions,
 }
 
 impl CodeDeadPortRequest {
@@ -1007,6 +1039,12 @@ impl CodeDeadPortRequest {
     pub const fn max_candidates(&self) -> Option<u16> {
         self.max_candidates
     }
+
+    /// Returns the typed scope and explicit entry roots.
+    #[must_use]
+    pub const fn contract(&self) -> &client::CodeDeadOptions {
+        &self.contract
+    }
 }
 
 /// Detected daemon data plus mandatory MCP read metadata.
@@ -1034,6 +1072,7 @@ pub struct ArchitectureOverviewPortRequest {
     max_components: Option<u16>,
     include_edges: Option<bool>,
     min_confidence: Option<u16>,
+    contract: client::ArchitectureOverviewOptions,
 }
 
 impl ArchitectureOverviewPortRequest {
@@ -1072,6 +1111,12 @@ impl ArchitectureOverviewPortRequest {
     pub const fn min_confidence(&self) -> Option<u16> {
         self.min_confidence
     }
+
+    /// Returns the typed scope and detail contract.
+    #[must_use]
+    pub const fn contract(&self) -> &client::ArchitectureOverviewOptions {
+        &self.contract
+    }
 }
 
 /// Detected daemon data plus mandatory MCP read metadata.
@@ -1095,6 +1140,13 @@ pub struct TestsSelectPortRequest {
     repository: RepositoryId,
     generation: client::GenerationSelector,
     seeds: Vec<SymbolId>,
+    seed_paths: Vec<String>,
+    seed_build_targets: Vec<String>,
+    frameworks: Vec<String>,
+    max_total_ms: Option<u32>,
+    max_slow_tests: Option<u16>,
+    change_working_tree: Option<String>,
+    change_revision_range: Option<String>,
     test_kinds: Vec<String>,
     max_tests: Option<u16>,
     include_commands: Option<bool>,
@@ -1117,6 +1169,48 @@ impl TestsSelectPortRequest {
     #[must_use]
     pub fn seeds(&self) -> &[SymbolId] {
         &self.seeds
+    }
+
+    /// Returns repository-relative path seeds.
+    #[must_use]
+    pub fn seed_paths(&self) -> &[String] {
+        &self.seed_paths
+    }
+
+    /// Returns build-target identity seeds.
+    #[must_use]
+    pub fn seed_build_targets(&self) -> &[String] {
+        &self.seed_build_targets
+    }
+
+    /// Returns framework filters.
+    #[must_use]
+    pub fn frameworks(&self) -> &[String] {
+        &self.frameworks
+    }
+
+    /// Returns the aggregate estimated execution-time ceiling.
+    #[must_use]
+    pub const fn max_total_ms(&self) -> Option<u32> {
+        self.max_total_ms
+    }
+
+    /// Returns the slow-test ceiling.
+    #[must_use]
+    pub const fn max_slow_tests(&self) -> Option<u16> {
+        self.max_slow_tests
+    }
+
+    /// Returns the requested working-tree change selector.
+    #[must_use]
+    pub fn change_working_tree(&self) -> Option<&str> {
+        self.change_working_tree.as_deref()
+    }
+
+    /// Returns the requested revision-range change selector.
+    #[must_use]
+    pub fn change_revision_range(&self) -> Option<&str> {
+        self.change_revision_range.as_deref()
     }
 
     /// Returns the requested test-kind labels.
@@ -1160,6 +1254,13 @@ pub struct ChangeImpactPortRequest {
     generation: client::GenerationSelector,
     changed_symbols: Vec<SymbolId>,
     changed_paths: Vec<String>,
+    working_tree: Option<String>,
+    revision_range: Option<String>,
+    scope_paths: Vec<String>,
+    scope_packages: Vec<String>,
+    scope_services: Vec<String>,
+    relation_policy: String,
+    include_history: bool,
     max_depth: Option<u8>,
     min_confidence: Option<u16>,
     include_tests: Option<bool>,
@@ -1189,6 +1290,48 @@ impl ChangeImpactPortRequest {
     #[must_use]
     pub fn changed_paths(&self) -> &[String] {
         &self.changed_paths
+    }
+
+    /// Returns the requested working-tree selector.
+    #[must_use]
+    pub fn working_tree(&self) -> Option<&str> {
+        self.working_tree.as_deref()
+    }
+
+    /// Returns the requested revision range.
+    #[must_use]
+    pub fn revision_range(&self) -> Option<&str> {
+        self.revision_range.as_deref()
+    }
+
+    /// Returns repository-relative impact-scope paths.
+    #[must_use]
+    pub fn scope_paths(&self) -> &[String] {
+        &self.scope_paths
+    }
+
+    /// Returns package impact-scope identities.
+    #[must_use]
+    pub fn scope_packages(&self) -> &[String] {
+        &self.scope_packages
+    }
+
+    /// Returns service impact-scope identities.
+    #[must_use]
+    pub fn scope_services(&self) -> &[String] {
+        &self.scope_services
+    }
+
+    /// Returns the selected relation-policy label.
+    #[must_use]
+    pub fn relation_policy(&self) -> &str {
+        &self.relation_policy
+    }
+
+    /// Reports whether bounded historical signals were requested.
+    #[must_use]
+    pub const fn include_history(&self) -> bool {
+        self.include_history
     }
 
     /// Returns the optional transitive depth bound.
@@ -1250,9 +1393,11 @@ impl PlanChangePortResponse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryComparePortRequest {
     repository: RepositoryId,
-    base: GenerationId,
-    head: GenerationId,
+    base: client::HistoryRevisionSelector,
+    head: client::HistoryRevisionSelector,
+    scope: client::HistoryCompareScope,
     change_kinds: Vec<String>,
+    include_unchanged_context: bool,
     max_results: Option<u16>,
 }
 
@@ -1265,20 +1410,32 @@ impl HistoryComparePortRequest {
 
     /// Returns the resolved base generation.
     #[must_use]
-    pub const fn base(&self) -> GenerationId {
-        self.base
+    pub const fn base(&self) -> &client::HistoryRevisionSelector {
+        &self.base
     }
 
     /// Returns the resolved head generation.
     #[must_use]
-    pub const fn head(&self) -> GenerationId {
-        self.head
+    pub const fn head(&self) -> &client::HistoryRevisionSelector {
+        &self.head
+    }
+
+    /// Returns the combined structural scope.
+    #[must_use]
+    pub const fn scope(&self) -> &client::HistoryCompareScope {
+        &self.scope
     }
 
     /// Returns the change-kind filter labels.
     #[must_use]
     pub fn change_kinds(&self) -> &[String] {
         &self.change_kinds
+    }
+
+    /// Reports whether unchanged lineage context was requested.
+    #[must_use]
+    pub const fn include_unchanged_context(&self) -> bool {
+        self.include_unchanged_context
     }
 
     /// Returns the optional result cap.
@@ -2334,13 +2491,11 @@ fn apply_child_budget(
     }
     if tool != BatchTool::ContextPack {
         let mut transported = budget.clone();
-        if matches!(tool, BatchTool::CodeLocate | BatchTool::SymbolExplain) {
-            // The batch ledger accounts public estimated tokens after the
-            // canonical child envelope is mapped. Applying that aggregate
-            // limit to the daemon's larger internal response would reject
-            // retrievals whose public representation still fits.
-            transported.max_tokens = None;
-        }
+        // The batch ledger accounts public estimated tokens after the
+        // canonical child envelope is mapped. Applying that aggregate limit
+        // to a daemon's richer internal DTO would reject child results whose
+        // public representation still fits the authoritative parent budget.
+        transported.max_tokens = None;
         if tool == BatchTool::CodeLocate {
             let requested_max_results = arguments
                 .get("max_results")
@@ -3666,6 +3821,7 @@ where
         resolved_generation: status.resolved_generation,
         active_generation: RequiredNullable(Some(active_generation_summary)),
         publication_state,
+        retained_durable_bytes: status.retained_durable_bytes,
         alias: RequiredNullable(status.alias.clone()),
         coverage: CoverageReport {
             languages: if matches!(
@@ -3687,8 +3843,8 @@ where
             )
         }),
     };
-    let envelope = ReadEnvelope {
-        schema_version: SchemaVersion::V1_0,
+    let envelope = AnalysisReadEnvelope {
+        schema_version: AnalysisSchemaVersion::V1_1,
         repository: ResolvedRepository {
             repository_id: status.repository_id,
             display_name: status.display_name,
@@ -3718,7 +3874,7 @@ where
         warnings,
         trust: TrustClassification::UntrustedRepositoryData,
     };
-    serialize_measured_read_success(envelope, started_at, BudgetLimits::server_ceiling())
+    serialize_measured_analysis_read_success(envelope, started_at, BudgetLimits::server_ceiling())
 }
 
 fn status_coverage_report(entries: &[client::RepositoryCoverageEntry]) -> CoverageReport {
@@ -3977,7 +4133,8 @@ where
     let mode = match request.mode {
         LocateMode::Exact => SearchMode::Exact,
         LocateMode::Text => SearchMode::Lexical,
-        LocateMode::Prefix | LocateMode::SafeRegex | LocateMode::Glob => {
+        LocateMode::Prefix => SearchMode::Path,
+        LocateMode::SafeRegex | LocateMode::Glob => {
             return Err(internal(ToolExecutionFailure::InvalidResponse));
         }
     };
@@ -4194,8 +4351,22 @@ async fn execute_symbol_explain<P>(
 where
     P: FirstSliceClientPort,
 {
-    let input: SymbolExplainInput = decode_input(arguments)?;
-    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
+    let mut input: SymbolExplainInput = decode_input(arguments)?;
+    let requested_evidence = input
+        .budget
+        .as_ref()
+        .and_then(|budget| budget.evidence_level);
+    if let Some(ceiling) = requested_evidence {
+        input.include_provenance = Some(provenance_ceiling(
+            input.include_provenance.unwrap_or(ProvenanceLevel::Compact),
+            ceiling,
+        ));
+    }
+    let mut execution_budget = input.budget.clone();
+    if let Some(budget) = &mut execution_budget {
+        budget.evidence_level = None;
+    }
+    let budget = AnalyticalBudget::new(execution_budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_symbol_explain(input, unsupported)?;
@@ -4432,6 +4603,60 @@ fn relation_kind_label(kind: RelationKind) -> Result<String, ToolExecutionError>
 fn relation_kind_from_label(label: &str) -> Result<RelationKind, ToolExecutionError> {
     serde_json::from_value(Value::String(label.to_owned()))
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+fn client_analysis_scope(scope: Option<ScopeSelector>) -> Option<client::AnalysisScope> {
+    scope.map(|scope| match scope {
+        ScopeSelector::Paths(scope) => {
+            client::AnalysisScope::Paths(scope.paths.into_iter().collect())
+        }
+        ScopeSelector::Packages(scope) => {
+            client::AnalysisScope::Packages(scope.packages.into_iter().collect())
+        }
+        ScopeSelector::BuildTargets(scope) => {
+            client::AnalysisScope::BuildTargets(scope.build_targets.into_iter().collect())
+        }
+        ScopeSelector::Symbols(scope) => {
+            client::AnalysisScope::Symbols(scope.symbols.into_iter().collect())
+        }
+    })
+}
+
+const fn cycle_level_label(level: CycleLevel) -> &'static str {
+    match level {
+        CycleLevel::Symbol => "symbol",
+        CycleLevel::Module => "module",
+        CycleLevel::Package => "package",
+        CycleLevel::BuildTarget => "build_target",
+        CycleLevel::Service => "service",
+    }
+}
+
+fn cycle_level_from_label(label: &str) -> Result<CycleLevel, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+const fn cycle_rank_label(rank: CycleRankBy) -> &'static str {
+    match rank {
+        CycleRankBy::Size => "size",
+        CycleRankBy::EdgeWeight => "edge_weight",
+        CycleRankBy::ChangeRisk => "change_risk",
+        CycleRankBy::BreakCost => "break_cost",
+    }
+}
+
+fn cycle_rank_from_label(label: &str) -> Result<CycleRankBy, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+const fn architecture_detail_label(detail: ArchitectureDetail) -> &'static str {
+    match detail {
+        ArchitectureDetail::Summary => "summary",
+        ArchitectureDetail::Standard => "standard",
+        ArchitectureDetail::Detailed => "detailed",
+    }
 }
 
 const fn symbol_relationship_kind_is_supported(kind: RelationKind) -> bool {
@@ -4702,6 +4927,17 @@ where
         components: Vec::new(),
         cycles: Vec::new(),
         break_candidates: Vec::new(),
+        projection: ServedCycleProjection {
+            relations: request
+                .relations
+                .iter()
+                .map(|relation| relation_kind_from_label(relation))
+                .collect::<Result<_, _>>()?,
+            min_confidence: 0,
+            level: cycle_level_from_label(&request.contract.level)?,
+            rank_by: cycle_rank_from_label(&request.contract.rank_by)?,
+            omitted_nodes: 0,
+        },
         explanation: Some(explanation),
     };
     explain_envelope_from_status(status, data)
@@ -4718,7 +4954,11 @@ where
     P: FirstSliceClientPort,
 {
     let input: ArchitectureCyclesInput = decode_input(arguments)?;
-    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
+    let mut execution_budget = input.budget.clone();
+    if let Some(budget) = &mut execution_budget {
+        budget.evidence_level = None;
+    }
+    let budget = AnalyticalBudget::new(execution_budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_architecture_cycles(input, unsupported)?;
@@ -4745,19 +4985,6 @@ fn normalize_architecture_cycles(
     unsupported: &PublicError,
 ) -> Result<ArchitectureCyclesPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Structural scope and ranking strategies are not served by this slice.
-    // The projection level is accepted as a descriptive label;
-    // detection runs at symbol granularity.
-    if input.scope.is_some()
-        || input.rank_by.is_some()
-        || input
-            .projection
-            .relations
-            .iter()
-            .any(|kind| !directed_graph_kind_is_supported(*kind))
-    {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
     let mut relations = Vec::new();
     relations
         .try_reserve_exact(input.projection.relations.len())
@@ -4772,6 +4999,11 @@ fn normalize_architecture_cycles(
         min_size: input.min_size,
         max_cycles: input.max_cycles,
         include_self_cycles: input.include_self_cycles,
+        contract: client::ArchitectureCyclesOptions {
+            scope: client_analysis_scope(input.scope),
+            level: cycle_level_label(input.projection.level).to_owned(),
+            rank_by: cycle_rank_label(input.rank_by.unwrap_or(CycleRankBy::Size)).to_owned(),
+        },
     })
 }
 
@@ -4800,6 +5032,9 @@ fn map_architecture_cycles(
             size: component.size,
             members,
             internal_edges: component.internal_edges,
+            edge_weight: component.edge_weight,
+            change_risk: component.change_risk,
+            break_cost: component.break_cost,
         });
     }
     let mut cycles = Vec::new();
@@ -4852,6 +5087,19 @@ fn map_architecture_cycles(
         components,
         cycles,
         break_candidates,
+        projection: ServedCycleProjection {
+            relations: response
+                .result
+                .projection
+                .relations
+                .iter()
+                .map(|relation| relation_kind_from_label(relation))
+                .collect::<Result<_, _>>()?,
+            min_confidence: response.result.projection.min_confidence,
+            level: cycle_level_from_label(&response.result.projection.level)?,
+            rank_by: cycle_rank_from_label(&response.result.projection.rank_by)?,
+            omitted_nodes: response.result.projection.omitted_nodes,
+        },
         explanation: None,
     };
     push_completeness_warning(
@@ -4864,6 +5112,13 @@ fn map_architecture_cycles(
         "dynamic_edges_unobserved",
         "dynamic runtime edges may be unobserved",
     )?;
+    if data.projection.omitted_nodes > 0 {
+        push_completeness_warning(
+            &mut response.metadata.warnings,
+            "projection_containers_unavailable",
+            "some scoped endpoints had no requested projection container",
+        )?;
+    }
     // The requested cycle cap is an explicit bound honored by the daemon; this
     // slice does not surface separate budget-truncation through the wire.
     map_read_envelope(
@@ -4900,12 +5155,16 @@ where
     let data = CodeDeadData {
         candidates: Vec::new(),
         entry_points: EntryPointSummary {
-            policy: EntryPointPolicy::Standard,
+            policy: entry_point_policy_kind_from_label(
+                request.entry_point_policy.as_deref().unwrap_or("standard"),
+            )?,
             entry_point_count: 0,
+            entry_symbols: request.contract.explicit_entry_points.clone(),
             complete: false,
         },
         blind_spots: Vec::new(),
         false_positive_controls: Vec::new(),
+        coverage_caveats: vec!["analysis_not_executed".to_owned()],
         explanation: Some(explanation),
     };
     explain_envelope_from_status(status, data)
@@ -4922,7 +5181,11 @@ where
     P: FirstSliceClientPort,
 {
     let input: CodeDeadInput = decode_input(arguments)?;
-    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
+    let mut execution_budget = input.budget.clone();
+    if let Some(budget) = &mut execution_budget {
+        budget.evidence_level = None;
+    }
+    let budget = AnalyticalBudget::new(execution_budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_code_dead(input, unsupported)?;
@@ -4949,22 +5212,36 @@ fn normalize_code_dead(
     unsupported: &PublicError,
 ) -> Result<CodeDeadPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Structural scope and alternate entry-point models are not served by this slice.
-    if input.scope.is_some()
-        || input
-            .entry_point_policy
-            .is_some_and(|policy| policy != EntryPointPolicy::Standard)
-    {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
+    let (entry_point_policy, explicit_entry_points) = match input.entry_point_policy {
+        None | Some(EntryPointPolicy::Named(NamedEntryPointPolicy::Standard)) => {
+            (Some("standard".to_owned()), Vec::new())
+        }
+        Some(EntryPointPolicy::Named(NamedEntryPointPolicy::Library)) => {
+            (Some("library".to_owned()), Vec::new())
+        }
+        Some(EntryPointPolicy::Named(NamedEntryPointPolicy::Application)) => {
+            (Some("application".to_owned()), Vec::new())
+        }
+        Some(EntryPointPolicy::Named(NamedEntryPointPolicy::FrameworkSpecific)) => {
+            (Some("framework_specific".to_owned()), Vec::new())
+        }
+        Some(EntryPointPolicy::Explicit(explicit)) => (
+            Some("explicit".to_owned()),
+            explicit.entry_symbols.into_iter().collect(),
+        ),
+    };
     Ok(CodeDeadPortRequest {
         repository,
         generation: client_generation(input.generation),
-        entry_point_policy: None,
+        entry_point_policy,
         include_exported: input.include_exported,
         include_tests: input.include_tests,
         min_confidence: input.min_confidence,
         max_candidates: input.max_candidates,
+        contract: client::CodeDeadOptions {
+            scope: client_analysis_scope(input.scope),
+            explicit_entry_points,
+        },
     })
 }
 
@@ -4996,12 +5273,18 @@ fn map_code_dead(
             confidence: candidate.confidence,
             why: candidate.why,
             suppressions_checked: candidate.suppressions_checked,
+            reachability: DeadReachabilitySummary {
+                reached_from_entry_points: candidate.reachability.reached_from_entry_points,
+                incoming_edges: candidate.reachability.incoming_edges,
+                strongest_incoming_confidence: candidate.reachability.strongest_incoming_confidence,
+            },
+            uncertainty: candidate.uncertainty,
             source_refs,
             trust: TrustClassification::UntrustedRepositoryData,
         });
     }
     let entry_points = response.result.entry_points;
-    let policy = entry_point_policy_from_label(&entry_points.policy)?;
+    let policy = entry_point_policy_kind_from_label(&entry_points.policy)?;
     let mut blind_spots = Vec::new();
     blind_spots
         .try_reserve_exact(response.result.blind_spots.len())
@@ -5027,10 +5310,12 @@ fn map_code_dead(
         entry_points: EntryPointSummary {
             policy,
             entry_point_count: entry_points.entry_point_count,
+            entry_symbols: entry_points.entry_symbols,
             complete: entry_points.complete,
         },
         blind_spots,
         false_positive_controls,
+        coverage_caveats: response.result.coverage_caveats,
         explanation: None,
     };
     // The requested candidate cap is an explicit bound honored by the daemon;
@@ -5044,7 +5329,9 @@ fn map_code_dead(
     )
 }
 
-fn entry_point_policy_from_label(label: &str) -> Result<EntryPointPolicy, ToolExecutionError> {
+fn entry_point_policy_kind_from_label(
+    label: &str,
+) -> Result<EntryPointPolicyKind, ToolExecutionError> {
     serde_json::from_value(Value::String(label.to_owned()))
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
@@ -5098,7 +5385,11 @@ where
     P: FirstSliceClientPort,
 {
     let input: ArchitectureOverviewInput = decode_input(arguments)?;
-    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
+    let mut execution_budget = input.budget.clone();
+    if let Some(budget) = &mut execution_budget {
+        budget.evidence_level = None;
+    }
+    let budget = AnalyticalBudget::new(execution_budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_architecture_overview(input, unsupported)?;
@@ -5125,21 +5416,9 @@ fn normalize_architecture_overview(
     unsupported: &PublicError,
 ) -> Result<ArchitectureOverviewPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Structural scope and explicit detail levels are not served by this
-    // slice. The base file-granularity model is always returned;
-    // only the hotspot derived view is honored.
-    if input.scope.is_some() || input.detail.is_some() {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
     let mut views = Vec::new();
     if let Some(requested) = input.views {
         for view in requested {
-            if !matches!(
-                view,
-                ArchitectureView::Communities | ArchitectureView::Hotspots
-            ) {
-                return Err(ToolExecutionError::new(unsupported.clone()));
-            }
             views.push(architecture_view_label(view)?);
         }
     }
@@ -5150,6 +5429,11 @@ fn normalize_architecture_overview(
         max_components: input.max_components,
         include_edges: input.include_edges,
         min_confidence: input.min_confidence,
+        contract: client::ArchitectureOverviewOptions {
+            scope: client_analysis_scope(input.scope),
+            detail: architecture_detail_label(input.detail.unwrap_or(ArchitectureDetail::Standard))
+                .to_owned(),
+        },
     })
 }
 
@@ -5172,7 +5456,13 @@ fn map_architecture_overview(
             kind: component.kind,
             name: component.name,
             symbol_count: component.symbol_count,
+            file_count: component.file_count,
             responsibility_evidence: component.responsibility_evidence,
+            source_refs: component
+                .source_refs
+                .iter()
+                .map(client_source_ref)
+                .collect::<Result<_, _>>()?,
             confidence: component.confidence,
             trust: TrustClassification::UntrustedRepositoryData,
         });
@@ -5202,6 +5492,8 @@ fn map_architecture_overview(
             fan_out: hotspot.fan_out,
             change_frequency: hotspot.change_frequency,
             complexity: hotspot.complexity,
+            ownership_signal: hotspot.ownership_signal,
+            test_signal: hotspot.test_signal,
             score: hotspot.score,
         });
     }
@@ -5288,6 +5580,7 @@ where
             direct_edges: false,
             transitive_signals: false,
             history_signals: false,
+            build_target_signals: false,
             file_colocation_signals: false,
         },
         gaps: Vec::new(),
@@ -5307,7 +5600,11 @@ where
     P: FirstSliceClientPort,
 {
     let input: TestsSelectInput = decode_input(arguments)?;
-    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
+    let mut execution_budget = input.budget.clone();
+    if let Some(budget) = &mut execution_budget {
+        budget.evidence_level = None;
+    }
+    let budget = AnalyticalBudget::new(execution_budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_tests_select(input, unsupported)?;
@@ -5334,35 +5631,67 @@ fn normalize_tests_select(
     unsupported: &PublicError,
 ) -> Result<TestsSelectPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Execution budgets and framework filters are not served by this slice.
-    if input.execution_budget.is_some() || input.frameworks.is_some() {
-        return Err(ToolExecutionError::new(unsupported.clone()));
+    let mut seeds = input.seeds.symbols.unwrap_or_default();
+    let mut seed_paths = input.seeds.paths.unwrap_or_default();
+    let mut change_working_tree = None;
+    let mut change_revision_range = None;
+    if let Some(change) = input.seeds.change {
+        seeds.extend(change.symbol_ids.unwrap_or_default());
+        seed_paths.extend(change.paths.unwrap_or_default());
+        change_working_tree = change.working_tree.map(contract_enum_label).transpose()?;
+        change_revision_range = change.revision_range;
     }
-    // Only explicit symbol seeds are served; path, change, and build-target
-    // seeds require capabilities this slice does not provide.
-    if input.seeds.paths.is_some()
-        || input.seeds.change.is_some()
-        || input.seeds.build_targets.is_some()
+    if seed_paths
+        .iter()
+        .any(|path| !safe_repository_relative_path(path))
     {
-        return Err(ToolExecutionError::new(unsupported.clone()));
+        return Err(invalid_input());
     }
-    let seeds = match input.seeds.symbols {
-        Some(symbols) if !symbols.is_empty() => symbols,
-        _ => return Err(ToolExecutionError::new(unsupported.clone())),
-    };
+    seeds.sort_unstable();
+    seeds.dedup();
+    seed_paths.sort_unstable();
+    seed_paths.dedup();
+    let mut seed_build_targets = input.seeds.build_targets.unwrap_or_default();
+    seed_build_targets.sort_unstable();
+    seed_build_targets.dedup();
+    let mut frameworks = input
+        .frameworks
+        .unwrap_or_default()
+        .into_iter()
+        .map(|framework| framework.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    frameworks.sort_unstable();
+    frameworks.dedup();
+    if seeds.is_empty()
+        && seed_paths.is_empty()
+        && seed_build_targets.is_empty()
+        && change_working_tree.is_none()
+        && change_revision_range.is_none()
+    {
+        return Err(invalid_input());
+    }
     let mut test_kinds = Vec::new();
     if let Some(requested) = input.test_kinds {
         for kind in requested {
-            if kind != TestKind::Unit {
-                return Err(ToolExecutionError::new(unsupported.clone()));
-            }
             test_kinds.push(test_kind_label(kind)?);
         }
     }
+    test_kinds.sort_unstable();
+    test_kinds.dedup();
+    let execution_budget = input.execution_budget;
     Ok(TestsSelectPortRequest {
         repository,
         generation: client_generation(input.generation),
         seeds,
+        seed_paths,
+        seed_build_targets,
+        frameworks,
+        max_total_ms: execution_budget
+            .as_ref()
+            .and_then(|budget| budget.max_total_ms),
+        max_slow_tests: execution_budget.and_then(|budget| budget.max_slow_tests),
+        change_working_tree,
+        change_revision_range,
         test_kinds,
         max_tests: input.max_tests,
         include_commands: input.include_commands,
@@ -5387,6 +5716,7 @@ fn map_tests_select(
         tests.push(RankedTest {
             test_id: test.test_id,
             kind,
+            framework: Some(test.framework),
             path: test.path,
             score: test.score,
             why: test.why,
@@ -5412,6 +5742,7 @@ fn map_tests_select(
             direct_edges: strategy.direct_edges,
             transitive_signals: strategy.transitive_signals,
             history_signals: strategy.history_signals,
+            build_target_signals: strategy.build_target_signals,
             file_colocation_signals: strategy.file_colocation_signals,
         },
         gaps,
@@ -5429,7 +5760,13 @@ fn map_tests_select(
 }
 
 fn test_kind_label(kind: TestKind) -> Result<String, ToolExecutionError> {
-    match serde_json::to_value(kind).map_err(|_| internal(ToolExecutionFailure::InvalidResponse))? {
+    contract_enum_label(kind)
+}
+
+fn contract_enum_label<T: Serialize>(value: T) -> Result<String, ToolExecutionError> {
+    match serde_json::to_value(value)
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?
+    {
         Value::String(label) => Ok(label),
         _ => Err(internal(ToolExecutionFailure::InvalidResponse)),
     }
@@ -5495,7 +5832,11 @@ where
     P: FirstSliceClientPort,
 {
     let input: ChangeImpactInput = decode_input(arguments)?;
-    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
+    let mut execution_budget = input.budget.clone();
+    if let Some(budget) = &mut execution_budget {
+        budget.evidence_level = None;
+    }
+    let budget = AnalyticalBudget::new(execution_budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_change_impact(input, unsupported)?;
@@ -5522,40 +5863,70 @@ fn normalize_change_impact(
     unsupported: &PublicError,
 ) -> Result<ChangeImpactPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Scope bounding is not served by this slice.
-    if input.scope.is_some() {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
-    // Working-tree and revision-range changes require a git diff this slice does
-    // not compute.
-    if input.change.working_tree.is_some() || input.change.revision_range.is_some() {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
-    // History signals are not served by this slice.
-    if input.include_history == Some(true) {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
-    // The standard and direct-only policies are served; the conservative
-    // over-approximation needs relation families this slice cannot provide.
     let mut max_depth = input.max_depth;
-    match input.relation_policy {
-        None | Some(RelationPolicy::Standard) => {}
-        Some(RelationPolicy::DirectOnly) => max_depth = Some(1),
-        Some(RelationPolicy::Conservative) => {
-            return Err(ToolExecutionError::new(unsupported.clone()));
-        }
+    let relation_policy = input.relation_policy.unwrap_or(RelationPolicy::Standard);
+    if relation_policy == RelationPolicy::DirectOnly {
+        max_depth = Some(1);
     }
-    let changed_symbols = input.change.symbol_ids.unwrap_or_default();
-    let changed_paths = input.change.paths.unwrap_or_default();
-    // An empty change set carries no resolvable change.
-    if changed_symbols.is_empty() && changed_paths.is_empty() {
-        return Err(ToolExecutionError::new(unsupported.clone()));
+    let mut changed_symbols = input.change.symbol_ids.unwrap_or_default();
+    changed_symbols.sort_unstable();
+    changed_symbols.dedup();
+    let mut changed_paths = input.change.paths.unwrap_or_default();
+    if changed_paths
+        .iter()
+        .any(|path| !safe_repository_relative_path(path))
+    {
+        return Err(invalid_input());
     }
+    changed_paths.sort_unstable();
+    changed_paths.dedup();
+    let working_tree = input
+        .change
+        .working_tree
+        .map(contract_enum_label)
+        .transpose()?;
+    let revision_range = input.change.revision_range;
+    if changed_symbols.is_empty()
+        && changed_paths.is_empty()
+        && working_tree.is_none()
+        && revision_range.is_none()
+    {
+        return Err(invalid_input());
+    }
+    let scope = input.scope;
+    let mut scope_paths = scope
+        .as_ref()
+        .and_then(|scope| scope.paths.clone())
+        .unwrap_or_default();
+    if scope_paths
+        .iter()
+        .any(|path| !safe_repository_relative_path(path))
+    {
+        return Err(invalid_input());
+    }
+    scope_paths.sort_unstable();
+    scope_paths.dedup();
+    let mut scope_packages = scope
+        .as_ref()
+        .and_then(|scope| scope.packages.clone())
+        .unwrap_or_default();
+    scope_packages.sort_unstable();
+    scope_packages.dedup();
+    let mut scope_services = scope.and_then(|scope| scope.services).unwrap_or_default();
+    scope_services.sort_unstable();
+    scope_services.dedup();
     Ok(ChangeImpactPortRequest {
         repository,
         generation: client_generation(input.generation),
         changed_symbols,
         changed_paths,
+        working_tree,
+        revision_range,
+        scope_paths,
+        scope_packages,
+        scope_services,
+        relation_policy: contract_enum_label(relation_policy)?,
+        include_history: input.include_history.unwrap_or(true),
         max_depth,
         min_confidence: input.min_confidence,
         include_tests: input.include_tests,
@@ -5631,8 +6002,20 @@ fn map_change_impact(
     let data = ChangeImpactData {
         resolved_changes,
         impacted,
-        // This slice models no service or cross-repository boundary.
-        service_impacts: Vec::new(),
+        service_impacts: response
+            .result
+            .service_impacts
+            .into_iter()
+            .map(|impact| {
+                Ok(ServiceImpact {
+                    target: impact.target,
+                    kind: service_impact_kind_from_label(&impact.kind)?,
+                    confidence: impact.confidence,
+                    reason: SafeLabel::parse(&impact.reason)
+                        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
+                })
+            })
+            .collect::<Result<Vec<_>, ToolExecutionError>>()?,
         tests,
         risk_summary: ImpactRiskSummary {
             level: risk_level_from_label(&risk.level)?,
@@ -5661,6 +6044,11 @@ fn change_classification_from_label(
 }
 
 fn risk_level_from_label(label: &str) -> Result<RiskLevel, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+fn service_impact_kind_from_label(label: &str) -> Result<ServiceImpactKind, ToolExecutionError> {
     serde_json::from_value(Value::String(label.to_owned()))
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
@@ -5892,7 +6280,12 @@ where
 {
     let status_request = RepositoryStatusPortRequest::new(
         request.repository,
-        client::GenerationSelector::Generation(request.head),
+        match &request.head {
+            client::HistoryRevisionSelector::Generation(generation) => {
+                client::GenerationSelector::Generation(*generation)
+            }
+            client::HistoryRevisionSelector::Git(_) => client::GenerationSelector::Active,
+        },
     );
     let status = await_port(
         port.repository_status(status_request, cancellation.clone()),
@@ -5905,8 +6298,14 @@ where
     );
     let data = HistoryCompareData {
         matched_states: MatchedStates {
-            base_generation: request.base,
-            head_generation: request.head,
+            base_generation: match &request.base {
+                client::HistoryRevisionSelector::Generation(generation) => *generation,
+                client::HistoryRevisionSelector::Git(_) => status.resolved_generation,
+            },
+            head_generation: match &request.head {
+                client::HistoryRevisionSelector::Generation(generation) => *generation,
+                client::HistoryRevisionSelector::Git(_) => status.resolved_generation,
+            },
             coverage: rootlight_ir::CoverageStatus::Unknown,
         },
         changes: Vec::new(),
@@ -5934,18 +6333,31 @@ where
 {
     let input: HistoryCompareInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(input.budget.as_ref())?;
+    let response_profile = input.profile.unwrap_or(ResponseProfile::Compact);
     let explain_only = input.explain == Some(true);
     let request = normalize_history_compare(input, unsupported)?;
     let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_history_compare(port, request, cancellation).await?;
-        return serialize_measured_read_success(output, started_at, budget.limits);
+        return serialize_profiled_read_success(
+            output,
+            response_profile,
+            started_at,
+            ResponseShaping::Public,
+            budget.limits,
+        );
     }
     let expected = request.clone();
     let future = port.history_compare(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_history_compare(response, &expected)?;
-    serialize_measured_read_success(output, started_at, budget.limits)
+    serialize_profiled_read_success(
+        output,
+        response_profile,
+        started_at,
+        ResponseShaping::Public,
+        budget.limits,
+    )
 }
 
 fn normalize_history_compare(
@@ -5953,42 +6365,41 @@ fn normalize_history_compare(
     unsupported: &PublicError,
 ) -> Result<HistoryComparePortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Scope bounding, unchanged-context inclusion, and expanded profiles are
-    // not served by this slice.
-    if input.scope.is_some()
-        || input.include_unchanged_context == Some(true)
-        || !is_compact_profile(input.profile)
-    {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
-    // Git revision selectors require a git-ref to generation mapping this slice
-    // does not maintain.
-    let RevisionSelector::Generation(base) = input.base else {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    };
-    let RevisionSelector::Generation(head) = input.head else {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    };
+    let base = history_revision_selector(input.base);
+    let head = history_revision_selector(input.head);
     let requested_change_kinds = input.change_kinds.unwrap_or_default();
-    if requested_change_kinds.iter().any(|kind| {
-        !matches!(
-            kind,
-            CompareChangeKind::Entities | CompareChangeKind::Signatures
-        )
-    }) {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
     let change_kinds = requested_change_kinds
         .iter()
         .map(|kind| compare_change_kind_label(*kind).to_owned())
         .collect();
+    let scope = input
+        .scope
+        .map_or_else(client::HistoryCompareScope::default, |scope| {
+            client::HistoryCompareScope {
+                paths: scope.paths.unwrap_or_default(),
+                packages: scope.packages.unwrap_or_default(),
+                services: scope.services.unwrap_or_default(),
+                symbols: scope.symbols.unwrap_or_default(),
+            }
+        });
     Ok(HistoryComparePortRequest {
         repository,
         base,
         head,
+        scope,
         change_kinds,
+        include_unchanged_context: input.include_unchanged_context.unwrap_or(false),
         max_results: input.max_results,
     })
+}
+
+fn history_revision_selector(selector: RevisionSelector) -> client::HistoryRevisionSelector {
+    match selector {
+        RevisionSelector::Generation(generation) => {
+            client::HistoryRevisionSelector::Generation(generation)
+        }
+        RevisionSelector::Git(git) => client::HistoryRevisionSelector::Git(git.git),
+    }
 }
 
 /// Returns the stable wire label for one typed compare change kind.
@@ -6012,10 +6423,18 @@ fn map_history_compare(
     validate_query_context(
         &response.result.context,
         request.repository,
-        client::GenerationSelector::Generation(request.head),
+        client::GenerationSelector::Generation(response.result.matched_states.head_generation),
     )?;
     let states = response.result.matched_states;
-    if states.base_generation != request.base || states.head_generation != request.head {
+    if matches!(
+        &request.base,
+        client::HistoryRevisionSelector::Generation(expected)
+            if states.base_generation != *expected
+    ) || matches!(
+        &request.head,
+        client::HistoryRevisionSelector::Generation(expected)
+            if states.head_generation != *expected
+    ) {
         return Err(internal(ToolExecutionFailure::InvalidResponse));
     }
     let delta = response.result.architecture_delta;
@@ -6499,20 +6918,33 @@ fn normalize_symbol_explain(
     unsupported: &PublicError,
 ) -> Result<SymbolExplainPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    if input.sections.is_some()
-        || input.relation_sample_limit.is_some()
-        || input.source_preview_lines.is_some()
-        || matches!(input.include_provenance, Some(ProvenanceLevel::Full))
-    {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
+    let sections = input
+        .sections
+        .unwrap_or_default()
+        .into_iter()
+        .map(contract_enum_label)
+        .collect::<Result<Vec<_>, ToolExecutionError>>()?;
     let include_provenance = input.include_provenance.unwrap_or(ProvenanceLevel::Compact);
     Ok(SymbolExplainPortRequest {
         repository,
         generation: client_generation(input.generation),
         symbols: input.symbol_ids.into_iter().collect(),
+        sections,
+        relation_sample_limit: input.relation_sample_limit,
+        source_preview_lines: input.source_preview_lines,
         include_provenance,
     })
+}
+
+const fn provenance_ceiling(
+    requested: ProvenanceLevel,
+    ceiling: ProvenanceLevel,
+) -> ProvenanceLevel {
+    match (requested, ceiling) {
+        (ProvenanceLevel::None, _) | (_, ProvenanceLevel::None) => ProvenanceLevel::None,
+        (ProvenanceLevel::Compact, _) | (_, ProvenanceLevel::Compact) => ProvenanceLevel::Compact,
+        (ProvenanceLevel::Full, ProvenanceLevel::Full) => ProvenanceLevel::Full,
+    }
 }
 
 fn normalize_source_read(
@@ -6657,6 +7089,9 @@ where
             repository: request.repository,
             generation: request.generation,
             symbols,
+            sections: Vec::new(),
+            relation_sample_limit: Some(0),
+            source_preview_lines: Some(0),
             include_provenance: ProvenanceLevel::None,
         };
         let response = await_port(
@@ -6751,6 +7186,9 @@ fn locate_mode(
         Some(modes) if modes.len() == 1 && modes.contains(&SearchMode::Lexical) => {
             Ok(LocateMode::Text)
         }
+        Some(modes) if modes.len() == 1 && modes.contains(&SearchMode::Path) => {
+            Ok(LocateMode::Prefix)
+        }
         Some(_) => Err(ToolExecutionError::new(unsupported.clone())),
     }
 }
@@ -6822,7 +7260,7 @@ fn map_operation_status(
     let error = operation_status_error(&operation)?;
     let total_units = (operation.total_units != 0).then_some(u64::from(operation.total_units));
     Ok(OperationStatusSuccess {
-        schema_version: OperationSchemaVersion::V1_1,
+        schema_version: OperationStatusSchemaVersion::V1_2,
         data: OperationStatusData {
             operation: OperationDetail {
                 kind: kind.to_owned(),
@@ -6855,6 +7293,10 @@ fn map_operation_status(
                         .evidence
                         .as_ref()
                         .map_or(0, |evidence| evidence.owned_memory_bytes),
+                    retained_durable_bytes: response
+                        .evidence
+                        .as_ref()
+                        .map_or(0, |evidence| evidence.retained_durable_bytes),
                 },
             },
             published_generation: RequiredNullable(response.published_generation),
@@ -6997,7 +7439,8 @@ fn map_code_locate(
     let reason = match request.mode {
         LocateMode::Exact => LocateReason::Identifier,
         LocateMode::Text => LocateReason::Lexical,
-        LocateMode::Prefix | LocateMode::SafeRegex | LocateMode::Glob => {
+        LocateMode::Prefix => LocateReason::Path,
+        LocateMode::SafeRegex | LocateMode::Glob => {
             return Err(internal(ToolExecutionFailure::InvalidResponse));
         }
     };
@@ -7039,7 +7482,8 @@ fn map_code_locate(
     let mode = match request.mode {
         LocateMode::Exact => SearchMode::Exact,
         LocateMode::Text => SearchMode::Lexical,
-        LocateMode::Prefix | LocateMode::SafeRegex | LocateMode::Glob => {
+        LocateMode::Prefix => SearchMode::Path,
+        LocateMode::SafeRegex | LocateMode::Glob => {
             return Err(internal(ToolExecutionFailure::InvalidResponse));
         }
     };
@@ -7105,10 +7549,16 @@ fn map_symbol_explain(
     for explanation in response.result.symbols {
         if explanation.display_name.is_empty()
             || explanation.display_name.len() > 1_024
+            || explanation.qualified_name.is_empty()
+            || explanation.qualified_name.len() > 4_096
             || explanation
                 .signature
                 .as_ref()
                 .is_some_and(|signature| signature.len() > 4_096)
+            || explanation
+                .source_preview
+                .as_ref()
+                .is_some_and(|preview| preview.is_empty() || preview.len() > 65_536)
             || !safe_label(&explanation.provider, 128)
             || !safe_label(&explanation.evidence, 128)
             || !safe_label(&explanation.language, 64)
@@ -7124,14 +7574,50 @@ fn map_symbol_explain(
                 provider: explanation.provider,
                 evidence: explanation.evidence,
                 confidence,
+                frontend_version: matches!(request.provenance_level(), ProvenanceLevel::Full)
+                    .then_some(explanation.provenance_frontend_version)
+                    .flatten(),
+                rule: matches!(request.provenance_level(), ProvenanceLevel::Full)
+                    .then_some(explanation.provenance_rule)
+                    .flatten(),
             }]
         } else {
             Vec::new()
         };
+        let relation_samples = explanation
+            .relation_samples
+            .into_iter()
+            .map(|sample| {
+                let source_refs = sample
+                    .source_refs
+                    .iter()
+                    .map(client_source_ref)
+                    .collect::<Result<Vec<_>, ToolExecutionError>>()?;
+                Ok(rootlight_mcp_contract::vertical::SymbolRelationSample {
+                    kind: sample.kind,
+                    direction: sample.direction,
+                    target: sample.target,
+                    source_refs,
+                    confidence: sample.confidence,
+                })
+            })
+            .collect::<Result<Vec<_>, ToolExecutionError>>()?;
+        let section_gaps = explanation
+            .section_gaps
+            .into_iter()
+            .map(|gap| {
+                Ok(ResponseWarning {
+                    code: SafeLabel::parse(&gap)
+                        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
+                    message: source_free_message("requested section evidence is unavailable")?,
+                })
+            })
+            .collect::<Result<Vec<_>, ToolExecutionError>>()?;
         symbols.push(SymbolExplanation {
             symbol_id: explanation.symbol,
             kind: entity_kind(&explanation.kind)?,
             display_name: explanation.display_name,
+            qualified_name: Some(explanation.qualified_name),
             signature: explanation.signature,
             definition: client_source_ref(&explanation.definition)?,
             relations: rootlight_mcp_contract::vertical::RelationSummary {
@@ -7141,9 +7627,13 @@ fn map_symbol_explain(
                 inbound_candidates: explanation.inbound_candidates,
                 references_exact: explanation.references_exact,
             },
+            container: explanation.container,
+            relation_samples,
+            source_preview: explanation.source_preview,
             provenance,
             confidence,
             uncertainty: Vec::new(),
+            section_gaps,
             trust: TrustClassification::UntrustedRepositoryData,
         });
     }
@@ -7846,6 +8336,17 @@ fn serialize_context_pack_success(
 
 fn serialize_measured_read_success<T>(
     output: ReadEnvelope<T>,
+    started_at: Instant,
+    limits: BudgetLimits,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    T: Serialize,
+{
+    serialize_measured_success(output, started_at, limits, |output| &mut output.usage)
+}
+
+fn serialize_measured_analysis_read_success<T>(
+    output: AnalysisReadEnvelope<T>,
     started_at: Instant,
     limits: BudgetLimits,
 ) -> Result<Map<String, Value>, ToolExecutionError>

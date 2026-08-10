@@ -484,12 +484,20 @@ const CODE_LOCATE_TARGETS: &[BatchBindingTargetSlot] = &[
     ),
     SYMBOL_SCOPE_TARGET,
 ];
-const SYMBOL_EXPLAIN_TARGETS: &[BatchBindingTargetSlot] = &[target_slot(
-    &[Field("symbol_ids")],
-    SymbolIdsValue,
-    Collection { min: 1, max: 16 },
-    IDENTITY_TRUST,
-)];
+const SYMBOL_EXPLAIN_TARGETS: &[BatchBindingTargetSlot] = &[
+    target_slot(
+        &[Field("symbol_ids")],
+        SymbolIdsValue,
+        Collection { min: 1, max: 16 },
+        IDENTITY_TRUST,
+    ),
+    target_slot(
+        &[Field("symbol_ids"), Index { max_exclusive: 16 }],
+        SymbolIdValue,
+        Scalar,
+        IDENTITY_TRUST,
+    ),
+];
 const SYMBOL_RELATIONSHIPS_TARGETS: &[BatchBindingTargetSlot] = &[
     target_slot(
         &[Field("symbol_ids")],

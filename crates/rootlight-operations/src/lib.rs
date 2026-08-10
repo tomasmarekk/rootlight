@@ -86,14 +86,16 @@ const VERSION_TWO_MIGRATION_CHECKSUM: [u8; 32] = [
 // safely ignore this namespaced retry intent without a rollback-breaking DDL change.
 const RELATIVE_TIMEOUT_META_PREFIX: &str = "operation_relative_timeout/";
 const REPOSITORY_OPERATION_META_PREFIX: &str = "operation_repository_context/";
-const REPOSITORY_OPERATION_CONTEXT_VERSION: u8 = 4;
+const REPOSITORY_OPERATION_CONTEXT_VERSION: u8 = 5;
 const LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES: usize = 71;
 const VERSION_TWO_REPOSITORY_OPERATION_CONTEXT_BYTES: usize =
     LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES + 32;
 const VERSION_THREE_REPOSITORY_OPERATION_CONTEXT_BYTES: usize =
     LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES + 1 + 32 + 1 + 20;
-const REPOSITORY_OPERATION_CONTEXT_BYTES: usize =
+const VERSION_FOUR_REPOSITORY_OPERATION_CONTEXT_BYTES: usize =
     VERSION_THREE_REPOSITORY_OPERATION_CONTEXT_BYTES + 2 + (11 * size_of::<u64>());
+const REPOSITORY_OPERATION_CONTEXT_BYTES: usize =
+    VERSION_FOUR_REPOSITORY_OPERATION_CONTEXT_BYTES + size_of::<u64>();
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const SYSTEM_CLIENT_INSTANCE_ID: [u8; 16] = [0; 16];
 const CATALOG_MUTATION_BATCH: usize = 256;
@@ -352,6 +354,8 @@ pub struct RepositoryOperationEvidence {
     pub reserved_memory_bytes: u64,
     /// Retained generation-memory charge owned after successful publication.
     pub owned_memory_bytes: u64,
+    /// Durable bytes retained for the resulting immutable generation.
+    pub retained_durable_bytes: u64,
 }
 
 /// Immutable repository context submitted atomically with repository-scoped work.
@@ -4327,6 +4331,7 @@ fn encode_repository_operation_context(context: RepositoryOperationContext) -> V
             evidence.newly_written_bytes,
             evidence.reserved_memory_bytes,
             evidence.owned_memory_bytes,
+            evidence.retained_durable_bytes,
         ]
         .into_iter()
         .enumerate()
@@ -4347,6 +4352,7 @@ fn decode_repository_operation_context(
         (Some(&1), LEGACY_REPOSITORY_OPERATION_CONTEXT_BYTES)
             | (Some(&2), VERSION_TWO_REPOSITORY_OPERATION_CONTEXT_BYTES)
             | (Some(&3), VERSION_THREE_REPOSITORY_OPERATION_CONTEXT_BYTES)
+            | (Some(&4), VERSION_FOUR_REPOSITORY_OPERATION_CONTEXT_BYTES)
             | (
                 Some(&REPOSITORY_OPERATION_CONTEXT_VERSION),
                 REPOSITORY_OPERATION_CONTEXT_BYTES
@@ -4414,7 +4420,7 @@ fn decode_repository_operation_context(
     let published_generation = if encoded.len() >= VERSION_THREE_REPOSITORY_OPERATION_CONTEXT_BYTES
     {
         match encoded[104] {
-            0 if encoded.len() == REPOSITORY_OPERATION_CONTEXT_BYTES
+            0 if encoded.len() >= VERSION_FOUR_REPOSITORY_OPERATION_CONTEXT_BYTES
                 && encoded[105..125].iter().all(|byte| *byte == 0) =>
             {
                 None
@@ -4429,13 +4435,18 @@ fn decode_repository_operation_context(
     } else {
         None
     };
-    let evidence = if encoded.len() == REPOSITORY_OPERATION_CONTEXT_BYTES {
+    let evidence = if encoded.len() >= VERSION_FOUR_REPOSITORY_OPERATION_CONTEXT_BYTES {
         let fallback_reason = match encoded[126] {
             0 => None,
             tag => Some(RepositoryFallbackReason::from_tag(tag)?),
         };
-        let mut values = [0_u64; 11];
-        for (index, value) in values.iter_mut().enumerate() {
+        let value_count = if encoded.len() == REPOSITORY_OPERATION_CONTEXT_BYTES {
+            12
+        } else {
+            11
+        };
+        let mut values = [0_u64; 12];
+        for (index, value) in values.iter_mut().take(value_count).enumerate() {
             let start = 127 + (index * size_of::<u64>());
             *value = u64::from_be_bytes(
                 encoded[start..start + size_of::<u64>()]
@@ -4457,6 +4468,7 @@ fn decode_repository_operation_context(
             newly_written_bytes: values[8],
             reserved_memory_bytes: values[9],
             owned_memory_bytes: values[10],
+            retained_durable_bytes: values[11],
         })
     } else {
         None
@@ -6072,6 +6084,7 @@ mod tests {
             newly_written_bytes: 8_192,
             reserved_memory_bytes: 16_384,
             owned_memory_bytes: 12_288,
+            retained_durable_bytes: 6_144,
         };
         {
             let journal = OperationJournal::open(&path).expect("journal opens");

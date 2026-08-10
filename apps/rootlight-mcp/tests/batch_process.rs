@@ -84,6 +84,90 @@ fn every_advertised_batch_subtool_reaches_its_production_adapter() {
         source_ref.is_object(),
         "fixture locate returns a generation-pinned source reference"
     );
+    let dependent = mcp.call(
+        "dependent-binding",
+        "query.batch",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "generation": "active",
+            "operations": [
+                {
+                    "id": "find",
+                    "tool": "code.locate",
+                    "arguments": {
+                        "query": "batch_process_fixture",
+                        "search_modes": ["exact"]
+                    }
+                },
+                {
+                    "id": "explain",
+                    "tool": "symbol.explain",
+                    "depends_on": ["find"],
+                    "arguments": {
+                        "symbol_ids": [{
+                            "$from": "find",
+                            "source": "symbol_id",
+                            "index": 0
+                        }]
+                    }
+                }
+            ],
+            "failure_policy": "continue_independent"
+        }),
+    );
+    assert_success(&dependent, "dependent query.batch");
+    let dependent_results = dependent["result"]["structuredContent"]["data"]["operation_results"]
+        .as_array()
+        .expect("dependent query.batch returns operation results");
+    assert_eq!(dependent_results.len(), 2);
+    assert_eq!(dependent_results[0]["status"], "ok");
+    assert_eq!(dependent_results[1]["status"], "ok");
+
+    for (request_id, query, index) in [
+        ("missing-binding", "absent_batch_process_symbol", 0),
+        ("out-of-range-binding", "batch_process_fixture", 15),
+    ] {
+        let response = mcp.call(
+            request_id,
+            "query.batch",
+            json!({
+                "repository": {"repository_id": repository_id},
+                "generation": "active",
+                "operations": [
+                    {
+                        "id": "find",
+                        "tool": "code.locate",
+                        "arguments": {
+                            "query": query,
+                            "search_modes": ["exact"]
+                        }
+                    },
+                    {
+                        "id": "explain",
+                        "tool": "symbol.explain",
+                        "depends_on": ["find"],
+                        "arguments": {
+                            "symbol_ids": [{
+                                "$from": "find",
+                                "source": "symbol_id",
+                                "index": index
+                            }]
+                        }
+                    }
+                ],
+                "failure_policy": "continue_independent"
+            }),
+        );
+        assert_success(&response, "invalid dependent query.batch");
+        let results = response["result"]["structuredContent"]["data"]["operation_results"]
+            .as_array()
+            .expect("invalid dependent query.batch returns operation results");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["status"], "ok");
+        assert_eq!(results[1]["status"], "error");
+        assert_eq!(results[1]["error"]["code"], "BINDING_INVALID");
+    }
+
     assert_eq!(BATCH_TOOL_REGISTRY.len(), BatchTool::ALL.len());
     let mut failures = Vec::new();
     for (index, descriptor) in BATCH_TOOL_REGISTRY.iter().enumerate() {
@@ -439,22 +523,6 @@ fn process_preflight_rejects_non_subtools_and_profile_hidden_members() {
                 "repository": {"repository_id": RepositoryId::from_bytes([3; 16])},
                 "from": {"symbol_id": SymbolId::from_bytes([7; 20])},
                 "relations": ["called_by"]
-            }),
-        ),
-        (
-            "cycles-messaging",
-            "architecture.cycles",
-            json!({
-                "repository": {"repository_id": RepositoryId::from_bytes([3; 16])},
-                "projection": {"relations": ["messaging"], "level": "symbol"}
-            }),
-        ),
-        (
-            "dead-library-policy",
-            "code.dead",
-            json!({
-                "repository": {"repository_id": RepositoryId::from_bytes([3; 16])},
-                "entry_point_policy": "library"
             }),
         ),
     ] {

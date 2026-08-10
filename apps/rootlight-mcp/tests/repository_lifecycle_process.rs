@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const NOOP_METADATA_WRITE_CEILING_BYTES: u64 = 4 * 1024;
 const UNINDEXED_REPOSITORY: &str = "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v";
 
 #[test]
@@ -190,6 +191,87 @@ fn repository_generation_and_source_queries_survive_daemon_restart() {
     assert!(operations.iter().any(|operation| {
         operation["operation_id"].as_str() == Some(successor_operation_id.as_str())
     }));
+
+    mcp.finish();
+    daemon.finish();
+}
+
+#[test]
+fn incremental_sequence_reports_noop_edit_revert_and_reedit_truthfully() {
+    let fixture = process_support::private_process_tempdir("rl-incremental-sequence-");
+    let repository_root = fixture.path().join("repository");
+    write_repository(&repository_root, 1);
+    let state_dir = fixture.path().join("state");
+    let runtime_dir = fixture.path().join("runtime");
+    let daemon_binary = build_default_daemon();
+
+    let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
+    daemon.wait_until_ready(&runtime_dir);
+    let mut mcp = McpProcess::spawn(&state_dir, &runtime_dir);
+
+    let initial = index_repository(&mut mcp, "incremental-initial", &repository_root);
+    let initial_generation = published_generation(&initial);
+
+    let unchanged = index_repository(&mut mcp, "incremental-unchanged", &repository_root);
+    assert_eq!(published_generation(&unchanged), initial_generation);
+    let unchanged_evidence =
+        operation_incremental_evidence(&mut mcp, "incremental-unchanged-status", &unchanged);
+    assert_eq!(unchanged_evidence["build_strategy"], "retained_generation");
+    assert_eq!(unchanged_evidence["changed_inputs"], 0);
+    assert_eq!(unchanged_evidence["changed_files"], 0);
+    assert_eq!(unchanged_evidence["invalidated_units"], 0);
+    assert_eq!(unchanged_evidence["rebuilt_files"], 0);
+    assert_eq!(unchanged_evidence["rebuilt_facts"], 0);
+    assert!(
+        unchanged_evidence["reused_files"]
+            .as_u64()
+            .is_some_and(|files| files > 0)
+    );
+    assert!(
+        unchanged_evidence["reused_facts"]
+            .as_u64()
+            .is_some_and(|facts| facts > 0)
+    );
+    let unchanged_writes = operation_resources(
+        &mut mcp,
+        "incremental-unchanged-resources",
+        &unchanged,
+    )["newly_written_bytes"]
+        .as_u64()
+        .expect("no-op operation reports durable write traffic");
+    assert!(
+        unchanged_writes <= NOOP_METADATA_WRITE_CEILING_BYTES,
+        "no-op write traffic {unchanged_writes} exceeded the metadata-only ceiling"
+    );
+
+    write_repository(&repository_root, 2);
+    let edited = index_repository(&mut mcp, "incremental-edit", &repository_root);
+    let edited_generation = published_generation(&edited);
+    assert_ne!(edited_generation, initial_generation);
+    assert_single_file_rebuild(operation_incremental_evidence(
+        &mut mcp,
+        "incremental-edit-status",
+        &edited,
+    ));
+
+    write_repository(&repository_root, 1);
+    let reverted = index_repository(&mut mcp, "incremental-revert", &repository_root);
+    let reverted_generation = published_generation(&reverted);
+    assert_ne!(reverted_generation, edited_generation);
+    assert_single_file_rebuild(operation_incremental_evidence(
+        &mut mcp,
+        "incremental-revert-status",
+        &reverted,
+    ));
+
+    write_repository(&repository_root, 2);
+    let reedited = index_repository(&mut mcp, "incremental-reedit", &repository_root);
+    assert_ne!(published_generation(&reedited), reverted_generation);
+    assert_single_file_rebuild(operation_incremental_evidence(
+        &mut mcp,
+        "incremental-reedit-status",
+        &reedited,
+    ));
 
     mcp.finish();
     daemon.finish();
@@ -511,11 +593,14 @@ fn repository_status_distinguishes_empty_missing_unsupported_and_unavailable_res
 
 fn write_repository(root: &Path, value: u32) {
     fs::create_dir_all(root.join("src")).expect("fixture source directory is created");
-    fs::write(
-        root.join("Cargo.toml"),
-        "[package]\nname = \"repository_lifecycle_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-    )
-    .expect("fixture manifest is written");
+    let manifest = root.join("Cargo.toml");
+    if !manifest.exists() {
+        fs::write(
+            manifest,
+            "[package]\nname = \"repository_lifecycle_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .expect("fixture manifest is written");
+    }
     fs::write(
         root.join("src").join("lib.rs"),
         format!("pub fn answer() -> u32 {{ {value} }}\n"),
@@ -534,6 +619,58 @@ fn index_repository(mcp: &mut McpProcess, id: &str, root: &Path) -> Value {
     });
     assert_success(&response, "repo.index");
     response
+}
+
+fn published_generation(response: &Value) -> String {
+    required_text(
+        response,
+        &[
+            "result",
+            "structuredContent",
+            "data",
+            "published_generation",
+        ],
+    )
+}
+
+fn operation_status(mcp: &mut McpProcess, id: &str, indexed: &Value) -> Value {
+    let operation_id = required_text(
+        indexed,
+        &["result", "structuredContent", "data", "operation_id"],
+    );
+    let response = mcp.call(
+        id,
+        "operation.status",
+        json!({"operation_id": operation_id}),
+    );
+    assert_success(&response, "operation.status");
+    response
+}
+
+fn operation_incremental_evidence(mcp: &mut McpProcess, id: &str, indexed: &Value) -> Value {
+    let status = operation_status(mcp, id, indexed);
+    status["result"]["structuredContent"]["data"]["incremental"].clone()
+}
+
+fn operation_resources(mcp: &mut McpProcess, id: &str, indexed: &Value) -> Value {
+    let status = operation_status(mcp, id, indexed);
+    status["result"]["structuredContent"]["data"]["operation"]["resources"].clone()
+}
+
+fn assert_single_file_rebuild(evidence: Value) {
+    assert_eq!(evidence["build_strategy"], "dependency_directed");
+    assert_eq!(evidence["changed_files"], 1);
+    assert_eq!(evidence["rebuilt_files"], 1);
+    assert!(
+        evidence["changed_inputs"]
+            .as_u64()
+            .is_some_and(|inputs| inputs > 0)
+    );
+    assert!(
+        evidence["rebuilt_facts"]
+            .as_u64()
+            .is_some_and(|facts| facts > 0)
+    );
 }
 
 fn required_text(response: &Value, path: &[&str]) -> String {

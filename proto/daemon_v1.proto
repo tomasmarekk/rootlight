@@ -295,8 +295,10 @@ message DiagnosticsQuickResponse {
   repeated DiagnosticResult results = 3;
 }
 
-// Requests a bounded source-free support bundle.
-message SupportBundleRequest {}
+// Requests a bounded source-free support bundle, optionally scoped to one repository.
+message SupportBundleRequest {
+  optional rootlight.common.v1.RepositoryId repository = 1;
+}
 
 // Returns one validated in-memory support archive.
 message SupportBundleResponse {
@@ -519,6 +521,8 @@ message RepositoryOperationStatusResponse {
   uint64 owned_memory_bytes = 24;
   // Bounded canonical JSON for the source-free invalidation trace.
   optional bytes invalidation_trace_json = 25;
+  // Durable state retained for the resulting immutable generation.
+  uint64 retained_durable_bytes = 26;
 }
 
 // Operation-local construction strategy retained with the durable receipt.
@@ -707,6 +711,19 @@ message SymbolExplainRequest {
   rootlight.common.v1.RepositoryId repository = 2;
   GenerationSelector generation = 3;
   repeated rootlight.common.v1.SymbolId symbols = 4;
+  repeated string sections = 5;
+  optional uint32 relation_sample_limit = 6;
+  optional uint32 source_preview_lines = 7;
+  string include_provenance = 8;
+}
+
+// One bounded typed relation sample attached to a symbol explanation.
+message FirstSliceSymbolRelationSample {
+  string kind = 1;
+  string direction = 2;
+  optional rootlight.common.v1.SymbolId target = 3;
+  repeated FirstSliceSourceRef source_refs = 4;
+  uint32 confidence = 5;
 }
 
 // One typed, compact symbol explanation.
@@ -726,6 +743,13 @@ message FirstSliceSymbolExplanation {
   uint32 confidence = 13;
   string language = 14;
   FirstSliceAnalysisTier tier = 15;
+  string qualified_name = 16;
+  optional string container = 17;
+  repeated FirstSliceSymbolRelationSample relation_samples = 18;
+  optional string source_preview = 19;
+  repeated string section_gaps = 20;
+  optional string provenance_frontend_version = 21;
+  optional string provenance_rule = 22;
 }
 
 // Returns explanations in request order and unresolved stable identities.
@@ -924,6 +948,7 @@ message RepositoryStatusResponse {
   string coverage_detail = 14;
   string active_structural_freshness = 15;
   string active_semantic_freshness = 16;
+  uint64 retained_durable_bytes = 17;
 }
 
 // Requests bounded typed relation neighborhoods for stable symbols.
@@ -1022,6 +1047,36 @@ message FlowTraceResponse {
   FirstSliceCompleteness completeness = 6;
 }
 
+// Repository-relative path scope for bounded analysis tools.
+message FirstSlicePathAnalysisScope {
+  repeated string paths = 1;
+}
+
+// Package scope for bounded analysis tools.
+message FirstSlicePackageAnalysisScope {
+  repeated string packages = 1;
+}
+
+// Build-target scope for bounded analysis tools.
+message FirstSliceBuildTargetAnalysisScope {
+  repeated string build_targets = 1;
+}
+
+// Stable-symbol scope for bounded analysis tools.
+message FirstSliceSymbolAnalysisScope {
+  repeated rootlight.common.v1.SymbolId symbols = 1;
+}
+
+// Typed structural scope shared by architecture and reachability tools.
+message FirstSliceAnalysisScope {
+  oneof selector {
+    FirstSlicePathAnalysisScope paths = 1;
+    FirstSlicePackageAnalysisScope packages = 2;
+    FirstSliceBuildTargetAnalysisScope build_targets = 3;
+    FirstSliceSymbolAnalysisScope symbols = 4;
+  }
+}
+
 // Requests bounded architecture cycle detection over a relation projection.
 message ArchitectureCyclesRequest {
   rootlight.common.v1.ContractVersion schema_version = 1;
@@ -1031,6 +1086,9 @@ message ArchitectureCyclesRequest {
   optional uint32 min_size = 5;
   optional uint32 max_cycles = 6;
   optional bool include_self_cycles = 7;
+  FirstSliceAnalysisScope scope = 8;
+  optional string level = 9;
+  optional string rank_by = 10;
 }
 
 // One strongly connected component containing cycles.
@@ -1038,6 +1096,9 @@ message FirstSliceCycleComponent {
   uint32 size = 1;
   repeated rootlight.common.v1.SymbolId members = 2;
   uint32 internal_edges = 3;
+  uint64 edge_weight = 4;
+  uint32 change_risk = 5;
+  uint32 break_cost = 6;
 }
 
 // One bounded representative minimal cycle with evidence.
@@ -1060,6 +1121,9 @@ message FirstSliceCycleBreak {
 message FirstSliceCycleProjection {
   repeated string relations = 1;
   uint32 min_confidence = 2;
+  string level = 3;
+  string rank_by = 4;
+  uint32 omitted_nodes = 5;
 }
 
 // Returns bounded architecture cycles and generation correlation.
@@ -1083,6 +1147,15 @@ message CodeDeadRequest {
   optional bool include_tests = 6;
   optional uint32 min_confidence = 7;
   optional uint32 max_candidates = 8;
+  repeated rootlight.common.v1.SymbolId explicit_entry_points = 9;
+  FirstSliceAnalysisScope scope = 10;
+}
+
+// Static reachability measurements for one dead-code candidate.
+message FirstSliceDeadReachability {
+  bool reached_from_entry_points = 1;
+  uint32 incoming_edges = 2;
+  uint32 strongest_incoming_confidence = 3;
 }
 
 // One dead-code candidate with classification and source-free evidence.
@@ -1093,6 +1166,8 @@ message FirstSliceDeadCandidate {
   repeated string why = 4;
   repeated string suppressions_checked = 5;
   repeated FirstSliceSourceRef source_refs = 6;
+  FirstSliceDeadReachability reachability = 7;
+  repeated string uncertainty = 8;
 }
 
 // Summary of the entry-point model used for reachability.
@@ -1100,6 +1175,7 @@ message FirstSliceEntryPointSummary {
   string policy = 1;
   uint32 entry_point_count = 2;
   bool complete = 3;
+  repeated rootlight.common.v1.SymbolId entry_symbols = 4;
 }
 
 // One known blind spot in the reachability analysis.
@@ -1123,6 +1199,7 @@ message CodeDeadResponse {
   repeated FirstSliceBlindSpot blind_spots = 5;
   repeated FirstSliceSuppressionRule false_positive_controls = 6;
   FirstSliceCompleteness completeness = 7;
+  repeated string coverage_caveats = 8;
 }
 
 // Requests a bounded file-granularity architecture overview over one generation.
@@ -1134,6 +1211,8 @@ message ArchitectureOverviewRequest {
   optional uint32 max_components = 5;
   optional bool include_edges = 6;
   optional uint32 min_confidence = 7;
+  FirstSliceAnalysisScope scope = 8;
+  optional string detail = 9;
 }
 
 // One aggregated architecture component keyed by its containing file.
@@ -1144,6 +1223,8 @@ message FirstSliceArchitectureComponent {
   uint32 symbol_count = 4;
   repeated string responsibility_evidence = 5;
   uint32 confidence = 6;
+  uint32 file_count = 7;
+  repeated FirstSliceSourceRef source_refs = 8;
 }
 
 // One aggregated typed connection between two architecture components.
@@ -1163,6 +1244,8 @@ message FirstSliceHotspot {
   optional uint32 change_frequency = 4;
   optional uint32 complexity = 5;
   uint32 score = 6;
+  optional uint32 ownership_signal = 7;
+  optional uint32 test_signal = 8;
 }
 
 // One deterministic structural-affinity community over reported components.
@@ -1201,6 +1284,13 @@ message TestsSelectRequest {
   repeated string test_kinds = 5;
   optional uint32 max_tests = 6;
   optional bool include_commands = 7;
+  repeated string seed_paths = 8;
+  repeated string seed_build_targets = 9;
+  repeated string frameworks = 10;
+  optional uint32 max_total_ms = 11;
+  optional uint32 max_slow_tests = 12;
+  optional string change_working_tree = 13;
+  optional string change_revision_range = 14;
 }
 
 // One ranked test selected for relevance to the seed set.
@@ -1212,6 +1302,7 @@ message FirstSliceRankedTest {
   repeated string why = 5;
   optional uint32 estimated_cost_ms = 6;
   optional string command_hint = 7;
+  string framework = 8;
 }
 
 // Coverage signals actually used by a test selection.
@@ -1251,6 +1342,13 @@ message ChangeImpactRequest {
   optional uint32 min_confidence = 7;
   optional bool include_tests = 8;
   optional uint32 max_dependents = 9;
+  optional string working_tree = 10;
+  optional string revision_range = 11;
+  repeated string scope_paths = 12;
+  repeated string scope_packages = 13;
+  repeated string scope_services = 14;
+  string relation_policy = 15;
+  bool include_history = 16;
 }
 
 // One resolved change from the input change set.
@@ -1295,6 +1393,14 @@ message FirstSliceImpactRiskSummary {
   bool dynamic_blind_spots = 6;
 }
 
+// One cross-boundary impact derived from an affected service entity.
+message FirstSliceServiceImpact {
+  string target = 1;
+  string kind = 2;
+  uint32 confidence = 3;
+  string reason = 4;
+}
+
 // Returns bounded resolved changes, impact groups, tests, and a risk summary.
 message ChangeImpactResponse {
   rootlight.common.v1.ContractVersion schema_version = 1;
@@ -1304,6 +1410,7 @@ message ChangeImpactResponse {
   repeated FirstSliceChangeImpactTest tests = 5;
   FirstSliceImpactRiskSummary risk_summary = 6;
   FirstSliceCompleteness completeness = 7;
+  repeated FirstSliceServiceImpact service_impacts = 8;
 }
 
 // Requests a bounded ordered change plan for one generation and target set.
@@ -1316,6 +1423,16 @@ message PlanChangeRequest {
   repeated rootlight.common.v1.SymbolId target_symbols = 6;
   repeated rootlight.common.v1.FileId target_files = 7;
   optional uint32 max_steps = 8;
+  repeated string constraints = 9;
+  FirstSlicePlanChangeContext change_context = 10;
+}
+
+// Existing or hypothetical change facts used to expand a plan's explicit targets.
+message FirstSlicePlanChangeContext {
+  optional string working_tree = 1;
+  optional string revision_range = 2;
+  repeated rootlight.common.v1.SymbolId symbol_ids = 3;
+  repeated string paths = 4;
 }
 
 // One ordered step in a change plan.
@@ -1377,6 +1494,16 @@ message HistoryCompareRequest {
   FirstSliceRevisionSelector head = 4;
   repeated string change_kinds = 5;
   optional uint32 max_results = 6;
+  FirstSliceHistoryCompareScope scope = 7;
+  bool include_unchanged_context = 8;
+}
+
+// Combined structural scope for one semantic history comparison.
+message FirstSliceHistoryCompareScope {
+  repeated string paths = 1;
+  repeated string packages = 2;
+  repeated string services = 3;
+  repeated rootlight.common.v1.SymbolId symbols = 4;
 }
 
 // Resolved state pair for the comparison.

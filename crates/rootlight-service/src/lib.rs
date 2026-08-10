@@ -52,6 +52,11 @@ use rootlight_discovery::{
     InputClass, LanguageEvidence, ManifestInput, correlate_incremental_manifest,
     discover_incremental_with_progress, discover_with_snapshots,
 };
+use rootlight_git::{
+    ChangeSet as GitChangeSet, GitCollectErrorCode, GitCollectLimits, GitLimits,
+    RevisionSelector as GitRevisionSelector, collect_repository, collect_revision_range,
+    collect_worktree_status, revision_resolves_to_head,
+};
 use rootlight_ids::{
     ContentHash, FactId, FileId, GenerationId, GenerationIdentity, OperationId, RepositoryId,
     SymbolId, content_hash, derive_fact, derive_generation, derive_repository,
@@ -77,14 +82,15 @@ use rootlight_ir::{
 pub use rootlight_query::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
     AdvancedAstNode, AdvancedColumnSchema, AdvancedColumnType, AdvancedCompleteness,
-    AdvancedPlanExplanation, AdvancedQueryResult, ArchitectureCommunity, ArchitectureComponent,
-    ArchitectureConnection, ArchitectureCyclesResult, ArchitectureHotspot,
-    ArchitectureOverviewDerivedView, ArchitectureOverviewResult, ArchitectureOverviewView,
-    BreakingCandidateRecord, ChangeImpactClassification, ChangeImpactResult, ChangeImpactRiskLevel,
-    ChangeImpactRiskSummary, ChangeImpactTestCandidate, CodeDeadEntryPointPolicy, CodeDeadResult,
-    CodeLocateResult, FlowTraceResult, HistoryArchitectureDelta, HistoryChangeKind,
-    HistoryCompareResult, HistorySemanticChangeKind, ImpactEntryRecord, ImpactGroupRecord,
-    LineageMatchRecord, LocateMode, PlanChangeContextPack, PlanChangeDecision,
+    AdvancedPlanExplanation, AdvancedQueryResult, AnalysisScope, ArchitectureCommunity,
+    ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesResult, ArchitectureHotspot,
+    ArchitectureOverviewDerivedView, ArchitectureOverviewDetail, ArchitectureOverviewResult,
+    ArchitectureOverviewView, BreakingCandidateRecord, ChangeImpactClassification,
+    ChangeImpactRelationPolicy, ChangeImpactResult, ChangeImpactRiskLevel, ChangeImpactRiskSummary,
+    ChangeImpactTestCandidate, CodeDeadEntryPointPolicy, CodeDeadResult, CodeLocateResult,
+    CycleProjectionLevel, CycleRankBy, FlowTraceResult, HistoryArchitectureDelta,
+    HistoryChangeKind, HistoryCompareResult, HistorySemanticChangeKind, ImpactEntryRecord,
+    ImpactGroupRecord, LineageMatchRecord, LocateMode, PlanChangeContextPack, PlanChangeDecision,
     PlanChangeImpactSummary, PlanChangeObjective, PlanChangeResult, PlanChangeStepRecord,
     QueryResponse, RankedTestSelection, RelationDirection, RelationFamily, ResolvedChangeRecord,
     SemanticChangeRecord, SourceReadQueryResult, SymbolExplainResult, SymbolRelationshipsResult,
@@ -129,9 +135,6 @@ const DURABLE_SOURCE_WRITE_AMPLIFICATION_FACTOR: u64 = 25;
 // SQLite stores normalized fields across tables and indexes, so the streaming
 // JSON size is multiplied before any durable file is created.
 const DURABLE_ORACLE_SERIALIZED_EXPANSION_FACTOR: u64 = 8;
-// Finalization owns the normalized document while canonical verification and
-// one verified catalog readback materialize bounded working state.
-const GENERATION_MEMORY_SERIALIZED_EXPANSION_FACTOR: u64 = 3;
 // The measured clean deep-analysis peak reached 45.97 bytes per source byte.
 // A 48x preflight plus fixed small-repository overhead leaves bounded headroom
 // before any parser or lowerer runs.
@@ -139,6 +142,8 @@ const GENERATION_MEMORY_SOURCE_PREFLIGHT_FACTOR: u64 = 48;
 const GENERATION_MEMORY_FIXED_OVERHEAD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_FIRST_SLICE_REPOSITORIES: usize = 128;
+const MAX_FIRST_SLICE_GIT_CHANGE_PATHS: usize = 1_000;
+const MAX_FIRST_SLICE_GIT_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const HARD_MAX_FIRST_SLICE_GENERATIONS: usize = 8_193;
 const MAX_SYNTAX_NODES: usize = 1_048_576;
 const MAX_SYNTAX_DEPTH: usize = 128;
@@ -238,6 +243,9 @@ pub struct FirstSliceIndexReceipt {
     /// Conservative staging and publication reservation, including safety margin.
     #[serde(default)]
     pub estimated_disk_bytes: u64,
+    /// Durable bytes retained for this generation after atomic publication.
+    #[serde(default)]
+    pub retained_durable_bytes: u64,
     /// Distinct source-free diagnostics retained in deterministic order.
     #[serde(default)]
     pub diagnostics: Vec<FirstSliceIndexDiagnostic>,
@@ -307,9 +315,9 @@ pub struct FirstSliceIndexOperationEvidence {
     pub changed_files: u64,
     /// Source files whose immutable parser artifacts were reused.
     pub reused_files: u64,
-    /// Source files lowered into fresh generation-bound facts.
+    /// Source files parsed into fresh immutable parser artifacts.
     pub rebuilt_files: u64,
-    /// Generation-bound normalized facts reused without rewriting.
+    /// Normalized facts reconstructed from exact parent parser artifacts.
     pub reused_facts: u64,
     /// Normalized facts rebuilt for the published generation.
     pub rebuilt_facts: u64,
@@ -321,6 +329,8 @@ pub struct FirstSliceIndexOperationEvidence {
     pub reserved_memory_bytes: u64,
     /// Retained generation-memory charge owned after successful publication.
     pub owned_memory_bytes: u64,
+    /// Durable bytes retained for the resulting immutable generation.
+    pub retained_durable_bytes: u64,
 }
 
 /// Opaque durable recovery work split between startup-active and retained-history phases.
@@ -784,9 +794,7 @@ impl FirstSliceFileChangeCount {
 /// Source-free incremental planning evidence retained with one generation.
 ///
 /// The evidence records exact parser-artifact actions separately from fresh
-/// lowering and preserves the bounded source-free invalidation trace. It does
-/// not claim normalized-fact reuse because fact identities remain
-/// generation-bound.
+/// lowering and preserves the bounded source-free invalidation trace.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FirstSliceIncrementalEvidence {
@@ -807,6 +815,8 @@ pub struct FirstSliceIncrementalEvidence {
     #[serde(default)]
     reused_durable_artifact_bytes: u64,
     lowered_files: u64,
+    #[serde(default)]
+    reused_normalized_facts: u64,
     #[serde(default)]
     rebuilt_normalized_facts: u64,
     structural_cache_retained: bool,
@@ -943,6 +953,12 @@ impl FirstSliceIncrementalEvidence {
     #[must_use]
     pub const fn lowered_files(&self) -> u64 {
         self.lowered_files
+    }
+
+    /// Returns normalized records reconstructed from exact parent artifacts.
+    #[must_use]
+    pub const fn reused_normalized_facts(&self) -> u64 {
+        self.reused_normalized_facts
     }
 
     /// Returns fresh normalized records built for this generation.
@@ -1092,6 +1108,34 @@ impl FirstSliceRepositoryRoot {
     }
 }
 
+/// Working-tree portion selected for bounded Git change evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstSliceWorkingTreeSelection {
+    /// Changes recorded in the index relative to `HEAD`.
+    Staged,
+    /// Changes in the working tree relative to the index.
+    Unstaged,
+    /// Both staged and unstaged changes.
+    All,
+}
+
+/// Stable source-free failures from service-owned Git evidence collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum FirstSliceGitEvidenceError {
+    /// A revision selector violates the bounded Git evidence contract.
+    #[error("first-slice Git selector is invalid")]
+    InvalidSelector,
+    /// A caller-supplied resource bound is invalid.
+    #[error("first-slice Git evidence limits are invalid")]
+    InvalidLimits,
+    /// Cooperative cancellation stopped collection.
+    #[error("first-slice Git evidence collection was cancelled")]
+    Cancelled,
+    /// The requested evidence cannot be established safely.
+    #[error("first-slice Git evidence is unavailable")]
+    Unavailable,
+}
+
 /// One repository's resolved and active generation status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryStatusDto {
@@ -1121,6 +1165,8 @@ pub struct RepositoryStatusDto {
     pub state: String,
     /// Publication relationship of the selected generation.
     pub publication_state: String,
+    /// Durable bytes retained for the selected immutable generation.
+    pub retained_durable_bytes: u64,
     /// Language-scoped coverage entries.
     pub coverage: Vec<RepositoryCoverageEntryDto>,
 }
@@ -2139,6 +2185,18 @@ impl FirstSliceBudget {
         self.source
     }
 
+    /// Replaces the source context-line ceiling for a bounded presentation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::Query`] when the requested source policy
+    /// exceeds the source service's hard bounds.
+    pub fn with_source_max_context_lines(mut self, maximum: u16) -> Result<Self, FirstSliceError> {
+        self.source.max_context_lines = maximum;
+        self.source.validate().map_err(|_| FirstSliceError::Query)?;
+        Ok(self)
+    }
+
     /// Reduces the logical-row ceiling.
     #[must_use]
     pub const fn reduce_max_rows(mut self, maximum: u64) -> Self {
@@ -2987,6 +3045,105 @@ impl FirstSliceService {
         Ok(roots)
     }
 
+    /// Collects bounded changed paths from the selected working-tree states and
+    /// optional two-dot revision range.
+    ///
+    /// Collection is read-only and uses the canonical root retained by the
+    /// service. Repository hooks, filters, prompts, lazy fetches, and writes
+    /// remain disabled by the Git evidence boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceGitEvidenceError`] for an unknown repository,
+    /// invalid selector or limits, unavailable Git evidence, or cancellation.
+    pub fn collect_git_change_paths(
+        &self,
+        repository: RepositoryId,
+        working_tree: Option<FirstSliceWorkingTreeSelection>,
+        revision_range: Option<(&str, &str)>,
+        maximum_output_bytes: usize,
+        command_timeout: Duration,
+        cancellation: &Cancellation,
+    ) -> Result<Vec<String>, FirstSliceGitEvidenceError> {
+        if working_tree.is_none() && revision_range.is_none() {
+            return Ok(Vec::new());
+        }
+        let root = self.git_repository_root(repository)?;
+        let (limits, collect_limits) =
+            first_slice_git_limits(maximum_output_bytes, command_timeout)?;
+        let mut paths = BTreeSet::new();
+        if let Some(selection) = working_tree {
+            let snapshot =
+                collect_repository(&root, repository, &limits, collect_limits, cancellation)
+                    .map_err(|error| first_slice_git_error(error.code()))?;
+            for change_set in &snapshot.as_input().change_sets {
+                if first_slice_working_tree_change_matches(selection, change_set) {
+                    collect_first_slice_git_change_paths(change_set, &mut paths);
+                }
+            }
+        }
+        if let Some((base, head)) = revision_range {
+            validate_first_slice_git_revision(base)?;
+            validate_first_slice_git_revision(head)?;
+            let change_set =
+                collect_revision_range(&root, base, head, &limits, collect_limits, cancellation)
+                    .map_err(|error| first_slice_git_error(error.code()))?;
+            collect_first_slice_git_change_paths(&change_set, &mut paths);
+        }
+        if paths.len() > MAX_FIRST_SLICE_GIT_CHANGE_PATHS {
+            return Err(FirstSliceGitEvidenceError::Unavailable);
+        }
+        Ok(paths.into_iter().collect())
+    }
+
+    /// Verifies that up to two Git revisions denote the clean checked-out
+    /// state represented by the active generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceGitEvidenceError`] for an unknown repository,
+    /// invalid selector or limits, unavailable Git evidence, or cancellation.
+    pub fn git_revisions_match_clean_head(
+        &self,
+        repository: RepositoryId,
+        revisions: &[&str],
+        maximum_output_bytes: usize,
+        command_timeout: Duration,
+        cancellation: &Cancellation,
+    ) -> Result<bool, FirstSliceGitEvidenceError> {
+        if revisions.len() > 2 {
+            return Err(FirstSliceGitEvidenceError::InvalidSelector);
+        }
+        let root = self.git_repository_root(repository)?;
+        let (limits, collect_limits) =
+            first_slice_git_limits(maximum_output_bytes, command_timeout)?;
+        for revision in revisions {
+            validate_first_slice_git_revision(revision)?;
+            if *revision != "HEAD"
+                && !revision_resolves_to_head(&root, revision, collect_limits, cancellation)
+                    .map_err(|error| first_slice_git_error(error.code()))?
+            {
+                return Ok(false);
+            }
+        }
+        let status = collect_worktree_status(&root, &limits, collect_limits, cancellation)
+            .map_err(|error| first_slice_git_error(error.code()))?;
+        Ok(status.tracked_changes == 0 && status.untracked_paths == 0 && status.conflicts == 0)
+    }
+
+    fn git_repository_root(
+        &self,
+        repository: RepositoryId,
+    ) -> Result<PathBuf, FirstSliceGitEvidenceError> {
+        if !self.active_by_repository.contains_key(&repository) {
+            return Err(FirstSliceGitEvidenceError::Unavailable);
+        }
+        self.repository_root_paths
+            .get(&repository)
+            .map(PathBuf::from)
+            .ok_or(FirstSliceGitEvidenceError::Unavailable)
+    }
+
     /// Reserves a repository identity and worst-case durable capacity.
     ///
     /// This admission intentionally precedes source discovery and parsing. A
@@ -3344,21 +3501,9 @@ impl FirstSliceService {
             check_cancellation(cancellation)?;
             let receipt = restored.receipt;
             let language_coverage = language_coverage(restored.verified.document());
-            let source_bytes =
-                restored
-                    .verified
-                    .document()
-                    .files
-                    .iter()
-                    .try_fold(0_u64, |total, file| {
-                        total
-                            .checked_add(file.byte_length)
-                            .ok_or(FirstSliceError::Limits)
-                    })?;
             let serialized_document_bytes =
                 normalized_document_serialized_bytes(restored.verified.document())?;
-            let memory_bytes =
-                ensure_generation_memory_admission(source_bytes, serialized_document_bytes)?;
+            let memory_bytes = ensure_generation_memory_admission(serialized_document_bytes)?;
             if self.receipts.contains_key(&receipt.generation)
                 || self
                     .repositories
@@ -3962,7 +4107,10 @@ impl FirstSliceService {
         }
         let reserved_memory_bytes =
             ensure_generation_memory_preflight(source_preflight.source_bytes)?;
-        self.preflight_generation_memory_capacity(reserved_memory_bytes)?;
+        self.preflight_generation_memory_capacity(
+            reserved_memory_bytes,
+            PendingGenerationMemory::Reserved,
+        )?;
         let reclaimable_generations = self.inactive_generation_ids();
         self.source_snapshots.preflight_admission_after_reclaim(
             generation,
@@ -4012,6 +4160,7 @@ impl FirstSliceService {
         let mut parsed_files = 0usize;
         let mut reused_parser_artifacts = 0usize;
         let mut reused_parser_artifact_bytes = 0usize;
+        let mut reused_normalized_facts = 0usize;
         let mut analyzed_files = 0_u64;
         let mut analyzed_bytes = 0_u64;
         let mut last_reported_analyzed_files = 0_u64;
@@ -4077,6 +4226,9 @@ impl FirstSliceService {
                             .ok_or(FirstSliceError::Limits)?;
                         reused_parser_artifact_bytes = reused_parser_artifact_bytes
                             .checked_add(entry.artifact.accounted_bytes())
+                            .ok_or(FirstSliceError::Limits)?;
+                        reused_normalized_facts = reused_normalized_facts
+                            .checked_add(normalized_record_count(output.document())?)
                             .ok_or(FirstSliceError::Limits)?;
                         (output, Some(Arc::clone(&entry.artifact)))
                     }
@@ -4243,15 +4395,22 @@ impl FirstSliceService {
                 cancellation,
             )
             .map_err(|error| map_resolution_error(error, cancellation))?;
-        incremental_plan.state.evidence.rebuilt_normalized_facts =
-            u64::try_from(normalized_record_count(&document)?)
-                .map_err(|_| FirstSliceError::Limits)?;
+        let normalized_facts = normalized_record_count(&document)?;
+        let reused_normalized_facts = reused_normalized_facts.min(normalized_facts);
+        incremental_plan.state.evidence.reused_normalized_facts =
+            u64::try_from(reused_normalized_facts).map_err(|_| FirstSliceError::Limits)?;
+        incremental_plan.state.evidence.rebuilt_normalized_facts = u64::try_from(
+            normalized_facts
+                .checked_sub(reused_normalized_facts)
+                .ok_or(FirstSliceError::Incremental)?,
+        )
+        .map_err(|_| FirstSliceError::Limits)?;
         let mut incremental = incremental_plan.state;
         let serialized_document_bytes = normalized_document_serialized_bytes(&document)?;
-        let memory_bytes = ensure_generation_memory_admission(
-            source_preflight.source_bytes,
-            serialized_document_bytes,
-        )?;
+        let memory_bytes = ensure_generation_memory_admission(serialized_document_bytes)?;
+        // The measured document charge can exceed the source-based reservation.
+        // Re-run aggregate admission before any durable generation output exists.
+        self.preflight_generation_memory_capacity(memory_bytes, PendingGenerationMemory::Staged)?;
         let metadata = GenerationMetadata::new(
             repository,
             generation,
@@ -4368,7 +4527,7 @@ impl FirstSliceService {
             u64::try_from(verified.document().files.len()).map_err(|_| FirstSliceError::Limits)?;
         let entities = u64::try_from(verified.document().entities.len())
             .map_err(|_| FirstSliceError::Limits)?;
-        let receipt = FirstSliceIndexReceipt {
+        let mut receipt = FirstSliceIndexReceipt {
             repository,
             generation,
             parent,
@@ -4387,12 +4546,13 @@ impl FirstSliceService {
             lexical_documents,
             oracle_allocated_bytes,
             estimated_disk_bytes,
+            retained_durable_bytes: 0,
             diagnostics: index_diagnostic_summaries(verified.document())?,
             elapsed_micros: elapsed_micros(started),
         };
         if let Some(durable) = &durable {
             let manifest_written_bytes =
-                durable.finish(root_identity, &display_name, &root_path, receipt.clone())?;
+                durable.finish(root_identity, &display_name, &root_path, &mut receipt)?;
             written_bytes = written_bytes
                 .checked_add(manifest_written_bytes)
                 .ok_or(FirstSliceError::Limits)?;
@@ -4806,6 +4966,7 @@ impl FirstSliceService {
     fn preflight_generation_memory_capacity(
         &self,
         required_memory_bytes: u64,
+        pending: PendingGenerationMemory,
     ) -> Result<(), FirstSliceError> {
         let reclaimable = self.inactive_generation_ids();
         let retained_after_reclaim =
@@ -4822,11 +4983,11 @@ impl FirstSliceService {
             .checked_add(required_memory_bytes)
             .ok_or(FirstSliceError::Limits)?;
         if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES {
-            return Err(FirstSliceError::ResourceLimit {
-                resource: FirstSliceResource::GenerationMemoryBytes,
-                observed,
-                limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
-            });
+            return Err(generation_memory_limit(
+                retained_after_reclaim,
+                required_memory_bytes,
+                pending,
+            ));
         }
         Ok(())
     }
@@ -4852,14 +5013,12 @@ impl FirstSliceService {
             .is_none_or(|total| total > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES)
         {
             let Some(generation) = self.oldest_inactive_generation_global() else {
-                let observed = self
-                    .retained_generation_memory_bytes()?
-                    .saturating_add(required_memory_bytes);
-                return Err(FirstSliceError::ResourceLimit {
-                    resource: FirstSliceResource::GenerationMemoryBytes,
-                    observed,
-                    limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
-                });
+                let retained_memory_bytes = self.retained_generation_memory_bytes()?;
+                return Err(generation_memory_limit(
+                    retained_memory_bytes,
+                    required_memory_bytes,
+                    PendingGenerationMemory::Staged,
+                ));
             };
             self.evict_generation(generation)?;
         }
@@ -5135,88 +5294,93 @@ impl FirstSliceService {
         self.retry_pending_durable_compactions()?;
         let receipt = staged.receipt;
         let mut written_bytes = staged.written_bytes;
-        let mut operation_evidence =
-            match &staged.publication {
-                FirstSlicePublication::Retained { .. } => {
-                    let document = self
-                        .generations
-                        .generation(receipt.generation)
-                        .map_err(|_| FirstSliceError::Retention)?
-                        .document();
-                    FirstSliceIndexOperationEvidence {
-                        strategy: FirstSliceIndexOperationStrategy::RetainedGeneration,
-                        fallback_reason: None,
-                        invalidated_units: 0,
-                        changed_inputs: 0,
-                        changed_files: 0,
-                        reused_files: receipt.indexed_files,
-                        rebuilt_files: 0,
-                        reused_facts: u64::try_from(normalized_record_count(document)?)
-                            .map_err(|_| FirstSliceError::Limits)?,
-                        rebuilt_facts: 0,
-                        referenced_bytes: self
-                            .generation_memory_bytes
-                            .get(&receipt.generation)
-                            .copied()
-                            .ok_or(FirstSliceError::Retention)?,
-                        newly_written_bytes: 0,
-                        reserved_memory_bytes: 0,
-                        owned_memory_bytes: 0,
-                    }
+        let mut operation_evidence = match &staged.publication {
+            FirstSlicePublication::Retained { .. } => {
+                let document = self
+                    .generations
+                    .generation(receipt.generation)
+                    .map_err(|_| FirstSliceError::Retention)?
+                    .document();
+                FirstSliceIndexOperationEvidence {
+                    strategy: FirstSliceIndexOperationStrategy::RetainedGeneration,
+                    fallback_reason: None,
+                    invalidated_units: 0,
+                    changed_inputs: 0,
+                    changed_files: 0,
+                    reused_files: receipt.indexed_files,
+                    rebuilt_files: 0,
+                    reused_facts: u64::try_from(normalized_record_count(document)?)
+                        .map_err(|_| FirstSliceError::Limits)?,
+                    rebuilt_facts: 0,
+                    referenced_bytes: self
+                        .generation_memory_bytes
+                        .get(&receipt.generation)
+                        .copied()
+                        .ok_or(FirstSliceError::Retention)?,
+                    newly_written_bytes: 0,
+                    reserved_memory_bytes: 0,
+                    owned_memory_bytes: 0,
+                    retained_durable_bytes: receipt.retained_durable_bytes,
                 }
-                FirstSlicePublication::Pending {
-                    incremental,
-                    reserved_memory_bytes,
-                    memory_bytes,
-                    ..
-                } => {
-                    let changed_inputs = incremental.evidence.input_changes.iter().try_fold(
-                        0_u64,
-                        |total, change| {
-                            total
-                                .checked_add(change.inputs)
-                                .ok_or(FirstSliceError::Limits)
-                        },
-                    )?;
-                    let changed_files = incremental.evidence.file_changes.iter().try_fold(
-                        0_u64,
-                        |total, change| {
-                            total
-                                .checked_add(change.files)
-                                .ok_or(FirstSliceError::Limits)
-                        },
-                    )?;
-                    FirstSliceIndexOperationEvidence {
-                        strategy: match incremental.evidence.strategy {
-                            FirstSliceBuildStrategy::Initial => {
-                                FirstSliceIndexOperationStrategy::Initial
-                            }
-                            FirstSliceBuildStrategy::DependencyDirected => {
-                                FirstSliceIndexOperationStrategy::DependencyDirected
-                            }
-                            FirstSliceBuildStrategy::ConservativeRepositoryRebuild => {
-                                FirstSliceIndexOperationStrategy::ConservativeRepositoryRebuild
-                            }
-                        },
-                        fallback_reason: incremental.evidence.fallback_reason,
-                        invalidated_units: incremental.evidence.invalidated_units,
-                        changed_inputs,
-                        changed_files,
-                        reused_files: incremental.evidence.reused_parser_artifacts,
-                        rebuilt_files: incremental.evidence.lowered_files,
-                        reused_facts: 0,
-                        rebuilt_facts: incremental.evidence.rebuilt_normalized_facts,
-                        referenced_bytes: incremental
-                            .evidence
-                            .reused_parser_artifact_bytes
-                            .checked_add(incremental.evidence.reused_durable_artifact_bytes)
-                            .ok_or(FirstSliceError::Limits)?,
-                        newly_written_bytes: 0,
-                        reserved_memory_bytes: *reserved_memory_bytes,
-                        owned_memory_bytes: *memory_bytes,
-                    }
+            }
+            FirstSlicePublication::Pending {
+                incremental,
+                reserved_memory_bytes,
+                memory_bytes,
+                ..
+            } => {
+                let changed_inputs = incremental
+                    .evidence
+                    .input_changes
+                    .iter()
+                    .filter(|change| change.class != ChangeClass::NoChange)
+                    .try_fold(0_u64, |total, change| {
+                        total
+                            .checked_add(change.inputs)
+                            .ok_or(FirstSliceError::Limits)
+                    })?;
+                let changed_files = incremental
+                    .evidence
+                    .file_changes
+                    .iter()
+                    .filter(|change| change.kind != FileChangeKind::NoChange)
+                    .try_fold(0_u64, |total, change| {
+                        total
+                            .checked_add(change.files)
+                            .ok_or(FirstSliceError::Limits)
+                    })?;
+                FirstSliceIndexOperationEvidence {
+                    strategy: match incremental.evidence.strategy {
+                        FirstSliceBuildStrategy::Initial => {
+                            FirstSliceIndexOperationStrategy::Initial
+                        }
+                        FirstSliceBuildStrategy::DependencyDirected => {
+                            FirstSliceIndexOperationStrategy::DependencyDirected
+                        }
+                        FirstSliceBuildStrategy::ConservativeRepositoryRebuild => {
+                            FirstSliceIndexOperationStrategy::ConservativeRepositoryRebuild
+                        }
+                    },
+                    fallback_reason: incremental.evidence.fallback_reason,
+                    invalidated_units: incremental.evidence.invalidated_units,
+                    changed_inputs,
+                    changed_files,
+                    reused_files: incremental.evidence.reused_parser_artifacts,
+                    rebuilt_files: incremental.evidence.parsed_files,
+                    reused_facts: incremental.evidence.reused_normalized_facts,
+                    rebuilt_facts: incremental.evidence.rebuilt_normalized_facts,
+                    referenced_bytes: incremental
+                        .evidence
+                        .reused_parser_artifact_bytes
+                        .checked_add(incremental.evidence.reused_durable_artifact_bytes)
+                        .ok_or(FirstSliceError::Limits)?,
+                    newly_written_bytes: 0,
+                    reserved_memory_bytes: *reserved_memory_bytes,
+                    owned_memory_bytes: *memory_bytes,
+                    retained_durable_bytes: receipt.retained_durable_bytes,
                 }
-            };
+            }
+        };
         let repository_activation_sequence = self
             .activation_sequences
             .get(&receipt.repository)
@@ -5660,8 +5824,14 @@ impl FirstSliceService {
                 FirstSliceTwoStageAvailability::StructuralPublished,
             )
         } else if self.durable.is_some() {
+            // A durable structural snapshot cannot claim semantic freshness
+            // when no semantic refinement provider is installed.
             (
-                observed,
+                if generation.active {
+                    FirstSliceObservedFreshness::PendingSemanticRefinement
+                } else {
+                    FirstSliceObservedFreshness::Superseded
+                },
                 FirstSlicePublicationMode::DurableSingleStage,
                 FirstSliceTwoStageAvailability::UnavailableWithoutSemanticRefinement,
             )
@@ -5696,6 +5866,27 @@ impl FirstSliceService {
     #[must_use]
     pub fn active_generation_for(&self, repository: RepositoryId) -> Option<GenerationId> {
         self.active_by_repository.get(&repository).copied()
+    }
+
+    /// Reports whether the active generation already carries deep project facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the active generation cannot be opened or the
+    /// configured provider identity cannot be derived.
+    pub fn active_generation_is_deep(
+        &self,
+        repository: RepositoryId,
+    ) -> Result<bool, FirstSliceError> {
+        let Some(generation) = self.active_generation_for(repository) else {
+            return Ok(false);
+        };
+        let snapshot = self
+            .generations
+            .generation(generation)
+            .map_err(|_| FirstSliceError::Retention)?;
+        Ok(snapshot.metadata().provider_set_hash()
+            == self.provider_set_hash(FirstSliceIndexMode::Deep)?)
     }
 
     /// Exports one retained immutable generation as a portable source-free
@@ -6058,10 +6249,16 @@ impl FirstSliceService {
             .query(generation)
             .map_err(|_| FirstSliceError::Query)?;
         let query_budget = budget.query();
-        let search_budget = budget.search();
+        let mut search_budget = budget.search();
         let mut effective_maximum_results = maximum_results.min(search_budget.max_results);
         if let Ok(query_maximum_results) = usize::try_from(query_budget.max_results()) {
             effective_maximum_results = effective_maximum_results.min(query_maximum_results);
+        }
+        let result_rows = u64::try_from(effective_maximum_results)
+            .map_err(|_| FirstSliceError::BudgetExceeded)?;
+        let candidate_rows = query_budget.max_rows().saturating_sub(result_rows);
+        if let Ok(candidate_rows) = usize::try_from(candidate_rows) {
+            search_budget.max_candidates = search_budget.max_candidates.min(candidate_rows);
         }
         let plan = service
             .plan_code_locate_with_languages(
@@ -6449,18 +6646,58 @@ impl FirstSliceService {
         budget: FirstSliceBudget,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<ArchitectureCyclesResult>, FirstSliceError> {
+        self.architecture_cycles_with_options_and_budget(
+            generation,
+            families,
+            None,
+            CycleProjectionLevel::Symbol,
+            min_size,
+            max_cycles,
+            include_self_cycles,
+            CycleRankBy::Size,
+            budget,
+            cancellation,
+        )
+    }
+
+    /// Executes `architecture.cycles` with the complete scoped projection contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid scope or
+    /// projection, invalid plan, or bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded architecture-cycle dimension"
+    )]
+    pub fn architecture_cycles_with_options_and_budget(
+        &self,
+        generation: GenerationId,
+        families: Vec<RelationFamily>,
+        scope: Option<AnalysisScope>,
+        level: CycleProjectionLevel,
+        min_size: u8,
+        max_cycles: usize,
+        include_self_cycles: bool,
+        rank_by: CycleRankBy,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<ArchitectureCyclesResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
             .query(generation)
             .map_err(|_| FirstSliceError::Query)?;
         let plan = service
-            .plan_architecture_cycles(
+            .plan_architecture_cycles_with_options(
                 families,
+                scope,
+                level,
                 0,
                 min_size,
                 max_cycles,
                 include_self_cycles,
+                rank_by,
                 budget.query(),
             )
             .map_err(|error| map_query_error(error, cancellation))?;
@@ -6527,14 +6764,53 @@ impl FirstSliceService {
         budget: FirstSliceBudget,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<CodeDeadResult>, FirstSliceError> {
+        self.code_dead_with_options_and_budget(
+            generation,
+            entry_point_policy,
+            BTreeSet::new(),
+            None,
+            include_exported,
+            include_tests,
+            min_confidence,
+            max_candidates,
+            budget,
+            cancellation,
+        )
+    }
+
+    /// Executes `code.dead` with a complete typed entry model and scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid scope or
+    /// entry model, invalid plan, or bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded dead-code dimension"
+    )]
+    pub fn code_dead_with_options_and_budget(
+        &self,
+        generation: GenerationId,
+        entry_point_policy: CodeDeadEntryPointPolicy,
+        explicit_entry_points: BTreeSet<SymbolId>,
+        scope: Option<AnalysisScope>,
+        include_exported: bool,
+        include_tests: bool,
+        min_confidence: u16,
+        max_candidates: usize,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<CodeDeadResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
             .query(generation)
             .map_err(|_| FirstSliceError::Query)?;
         let plan = service
-            .plan_code_dead(
+            .plan_code_dead_with_options(
                 entry_point_policy,
+                explicit_entry_points,
+                scope,
                 include_exported,
                 include_tests,
                 min_confidence,
@@ -6598,14 +6874,51 @@ impl FirstSliceService {
         budget: FirstSliceBudget,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<ArchitectureOverviewResult>, FirstSliceError> {
+        self.architecture_overview_with_options_and_budget(
+            generation,
+            views,
+            None,
+            ArchitectureOverviewDetail::Standard,
+            min_confidence,
+            max_components,
+            include_edges,
+            budget,
+            cancellation,
+        )
+    }
+
+    /// Executes `architecture.overview` with complete typed scope and detail.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid scope or
+    /// view, invalid plan, or bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded architecture-overview dimension"
+    )]
+    pub fn architecture_overview_with_options_and_budget(
+        &self,
+        generation: GenerationId,
+        views: Vec<ArchitectureOverviewView>,
+        scope: Option<AnalysisScope>,
+        detail: ArchitectureOverviewDetail,
+        min_confidence: u16,
+        max_components: usize,
+        include_edges: bool,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<ArchitectureOverviewResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
             .query(generation)
             .map_err(|_| FirstSliceError::Query)?;
         let plan = service
-            .plan_architecture_overview(
+            .plan_architecture_overview_with_options(
                 views,
+                scope,
+                detail,
                 min_confidence,
                 max_components,
                 include_edges,
@@ -6668,16 +6981,62 @@ impl FirstSliceService {
         budget: FirstSliceBudget,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<TestsSelectResult>, FirstSliceError> {
+        self.tests_select_with_filters_and_budget(
+            generation,
+            seeds,
+            Vec::new(),
+            Vec::new(),
+            test_kinds,
+            Vec::new(),
+            max_tests,
+            None,
+            None,
+            include_commands,
+            budget,
+            cancellation,
+        )
+    }
+
+    /// Executes `tests.select` with bounded seed, framework, and cost filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid filter,
+    /// invalid plan, cancellation, or bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded public test-selection dimension"
+    )]
+    pub fn tests_select_with_filters_and_budget(
+        &self,
+        generation: GenerationId,
+        seeds: BTreeSet<SymbolId>,
+        seed_paths: Vec<String>,
+        seed_build_targets: Vec<String>,
+        test_kinds: Vec<TestsSelectKind>,
+        frameworks: Vec<String>,
+        max_tests: usize,
+        max_total_ms: Option<u32>,
+        max_slow_tests: Option<u16>,
+        include_commands: bool,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<TestsSelectResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
             .query(generation)
             .map_err(|_| FirstSliceError::Query)?;
         let plan = service
-            .plan_tests_select(
+            .plan_tests_select_with_filters(
                 seeds,
+                seed_paths,
+                seed_build_targets,
                 test_kinds,
+                frameworks,
                 max_tests,
+                max_total_ms,
+                max_slow_tests,
                 include_commands,
                 budget.query(),
             )
@@ -6748,18 +7107,68 @@ impl FirstSliceService {
         budget: FirstSliceBudget,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<ChangeImpactResult>, FirstSliceError> {
+        self.change_impact_with_policy_and_budget(
+            generation,
+            changed_symbols,
+            changed_paths,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            ChangeImpactRelationPolicy::Standard,
+            max_depth,
+            min_confidence,
+            include_tests,
+            false,
+            max_dependents,
+            budget,
+            cancellation,
+        )
+    }
+
+    /// Executes `change.impact` with bounded scope and relation policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid scope or
+    /// plan, cancellation, or bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded public impact-analysis dimension"
+    )]
+    pub fn change_impact_with_policy_and_budget(
+        &self,
+        generation: GenerationId,
+        changed_symbols: BTreeSet<SymbolId>,
+        changed_paths: Vec<String>,
+        scope_paths: Vec<String>,
+        scope_packages: Vec<String>,
+        scope_services: Vec<String>,
+        relation_policy: ChangeImpactRelationPolicy,
+        max_depth: u8,
+        min_confidence: u16,
+        include_tests: bool,
+        include_history: bool,
+        max_dependents: usize,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<ChangeImpactResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
             .query(generation)
             .map_err(|_| FirstSliceError::Query)?;
         let plan = service
-            .plan_change_impact(
+            .plan_change_impact_with_policy(
                 changed_symbols,
                 changed_paths,
+                scope_paths,
+                scope_packages,
+                scope_services,
+                relation_policy,
                 max_depth,
                 min_confidence,
                 include_tests,
+                include_history,
                 max_dependents,
                 budget.query(),
             )
@@ -6822,17 +7231,56 @@ impl FirstSliceService {
         budget: FirstSliceBudget,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<PlanChangeResult>, FirstSliceError> {
+        self.plan_change_with_context_and_budget(
+            generation,
+            objective,
+            objective_text,
+            target_symbols,
+            target_files,
+            BTreeSet::new(),
+            Vec::new(),
+            max_steps,
+            budget,
+            cancellation,
+        )
+    }
+
+    /// Executes `plan.change` with bounded path context and caller constraints.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "change context and constraints remain explicit across the daemon boundary"
+    )]
+    pub fn plan_change_with_context_and_budget(
+        &self,
+        generation: GenerationId,
+        objective: PlanChangeObjective,
+        objective_text: String,
+        target_symbols: BTreeSet<SymbolId>,
+        target_files: BTreeSet<FileId>,
+        target_paths: BTreeSet<String>,
+        constraints: Vec<String>,
+        max_steps: usize,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<PlanChangeResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
             .query(generation)
             .map_err(|_| FirstSliceError::Query)?;
         let plan = service
-            .plan_plan_change(
+            .plan_plan_change_with_context(
                 objective,
                 objective_text,
                 target_symbols,
                 target_files,
+                target_paths,
+                constraints,
                 max_steps,
                 budget.query(),
             )
@@ -6888,6 +7336,39 @@ impl FirstSliceService {
         budget: FirstSliceBudget,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<HistoryCompareResult>, FirstSliceError> {
+        self.history_compare_with_scope_and_budget(
+            base,
+            head,
+            rootlight_query::HistoryCompareScope::default(),
+            change_kinds,
+            false,
+            max_results,
+            budget,
+            cancellation,
+        )
+    }
+
+    /// Executes `history.compare` with combined structural scope and context projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "scope and unchanged-context projection are independent comparison dimensions"
+    )]
+    pub fn history_compare_with_scope_and_budget(
+        &self,
+        base: GenerationId,
+        head: GenerationId,
+        scope: rootlight_query::HistoryCompareScope,
+        change_kinds: BTreeSet<HistoryChangeKind>,
+        include_unchanged_context: bool,
+        max_results: usize,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<HistoryCompareResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
@@ -6899,7 +7380,14 @@ impl FirstSliceService {
             .map_err(|_| FirstSliceError::Query)?
             .document();
         let plan = service
-            .plan_history_compare(base, change_kinds, max_results, budget.query())
+            .plan_history_compare_with_scope(
+                base,
+                scope,
+                change_kinds,
+                include_unchanged_context,
+                max_results,
+                budget.query(),
+            )
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_history_compare(&plan, base_document, cancellation)
@@ -7453,6 +7941,11 @@ impl FirstSliceService {
             .language_coverage_by_generation
             .get(&context.generation)
             .ok_or(FirstSliceError::CatalogCorrupt)?;
+        let retained_durable_bytes = self
+            .receipts
+            .get(&context.generation)
+            .ok_or(FirstSliceError::CatalogCorrupt)?
+            .retained_durable_bytes;
         let display_name = self
             .repository_display_names
             .get(&repository)
@@ -7478,6 +7971,7 @@ impl FirstSliceService {
             } else {
                 "retained".to_owned()
             },
+            retained_durable_bytes,
             coverage: coverage_from_summaries(coverage),
         })
     }
@@ -7651,6 +8145,25 @@ impl FirstSliceIdentityFailure {
     }
 }
 
+/// Source-free component accounting for one failed generation-memory admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenerationMemoryBreakdown {
+    /// Total memory retained by already admitted generations.
+    pub retained_bytes: u64,
+    /// Conservative capacity reserved before generation construction.
+    pub reserved_bytes: u64,
+    /// Retained memory backed by generation-owned allocations.
+    pub owned_bytes: u64,
+    /// Retained memory referenced without transferring ownership.
+    pub referenced_bytes: u64,
+    /// Retained memory backed by file mappings.
+    pub mapped_bytes: u64,
+    /// Memory held by the candidate generation awaiting admission.
+    pub staged_bytes: u64,
+    /// Retained memory charged to shared allocations.
+    pub shared_bytes: u64,
+}
+
 /// Stable source-redacted first-slice service failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -7762,6 +8275,16 @@ pub enum FirstSliceError {
         /// Safe observed count or byte total.
         observed: u64,
         /// Configured count or byte ceiling.
+        limit: u64,
+    },
+    /// Aggregate generation memory cannot admit the pending generation.
+    #[error("generation memory observed {observed} bytes above limit {limit} bytes")]
+    GenerationMemoryLimit {
+        /// Source-free component accounting for the failed admission.
+        breakdown: GenerationMemoryBreakdown,
+        /// Retained plus pending bytes counted once for admission.
+        observed: u64,
+        /// Configured generation-memory ceiling.
         limit: u64,
     },
     /// Durable staging cannot preserve its required free-space margin.
@@ -8766,6 +9289,7 @@ fn summarize_incremental_evidence(
         reused_parser_artifact_bytes: 0,
         reused_durable_artifact_bytes: 0,
         lowered_files: 0,
+        reused_normalized_facts: 0,
         rebuilt_normalized_facts: 0,
         structural_cache_retained: false,
     })
@@ -9305,39 +9829,61 @@ fn normalized_document_serialized_bytes(
     Ok(serialized.bytes)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingGenerationMemory {
+    Reserved,
+    Staged,
+}
+
+fn generation_memory_limit(
+    retained_bytes: u64,
+    pending_bytes: u64,
+    pending: PendingGenerationMemory,
+) -> FirstSliceError {
+    let (reserved_bytes, staged_bytes) = match pending {
+        PendingGenerationMemory::Reserved => (pending_bytes, 0),
+        PendingGenerationMemory::Staged => (0, pending_bytes),
+    };
+    FirstSliceError::GenerationMemoryLimit {
+        breakdown: GenerationMemoryBreakdown {
+            retained_bytes,
+            reserved_bytes,
+            owned_bytes: retained_bytes,
+            referenced_bytes: 0,
+            mapped_bytes: 0,
+            staged_bytes,
+            shared_bytes: 0,
+        },
+        observed: retained_bytes.saturating_add(pending_bytes),
+        limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+    }
+}
+
 fn ensure_generation_memory_preflight(source_bytes: u64) -> Result<u64, FirstSliceError> {
     let observed = source_bytes
         .checked_mul(GENERATION_MEMORY_SOURCE_PREFLIGHT_FACTOR)
         .and_then(|bytes| bytes.checked_add(GENERATION_MEMORY_FIXED_OVERHEAD_BYTES))
         .ok_or(FirstSliceError::Limits)?;
     if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES {
-        return Err(FirstSliceError::ResourceLimit {
-            resource: FirstSliceResource::GenerationMemoryBytes,
+        return Err(generation_memory_limit(
+            0,
             observed,
-            limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
-        });
+            PendingGenerationMemory::Reserved,
+        ));
     }
     Ok(observed)
 }
 
 fn ensure_generation_memory_admission(
-    source_bytes: u64,
     serialized_document_bytes: u64,
 ) -> Result<u64, FirstSliceError> {
-    let observed = source_bytes
-        .checked_mul(2)
-        .and_then(|bytes| {
-            serialized_document_bytes
-                .checked_mul(GENERATION_MEMORY_SERIALIZED_EXPANSION_FACTOR)
-                .and_then(|document_bytes| bytes.checked_add(document_bytes))
-        })
-        .ok_or(FirstSliceError::Limits)?;
+    let observed = serialized_document_bytes;
     if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES {
-        return Err(FirstSliceError::ResourceLimit {
-            resource: FirstSliceResource::GenerationMemoryBytes,
+        return Err(generation_memory_limit(
+            0,
             observed,
-            limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
-        });
+            PendingGenerationMemory::Staged,
+        ));
     }
     Ok(observed)
 }
@@ -11075,6 +11621,83 @@ fn repository_path_hash(path: &Path) -> Result<ContentHash, FirstSliceError> {
     }
 }
 
+fn first_slice_git_limits(
+    maximum_output_bytes: usize,
+    command_timeout: Duration,
+) -> Result<(GitLimits, GitCollectLimits), FirstSliceGitEvidenceError> {
+    if maximum_output_bytes == 0
+        || maximum_output_bytes > MAX_FIRST_SLICE_GIT_OUTPUT_BYTES
+        || command_timeout.is_zero()
+        || command_timeout > Duration::from_secs(30)
+    {
+        return Err(FirstSliceGitEvidenceError::InvalidLimits);
+    }
+    let limits = GitLimits::new(
+        1,
+        MAX_FIRST_SLICE_GIT_CHANGE_PATHS,
+        4_000,
+        1,
+        4_096,
+        MAX_FIRST_SLICE_GIT_OUTPUT_BYTES,
+    )
+    .map_err(|_| FirstSliceGitEvidenceError::InvalidLimits)?;
+    let collect_limits = GitCollectLimits::new(1, maximum_output_bytes, command_timeout)
+        .map_err(|_| FirstSliceGitEvidenceError::InvalidLimits)?;
+    Ok((limits, collect_limits))
+}
+
+fn validate_first_slice_git_revision(revision: &str) -> Result<(), FirstSliceGitEvidenceError> {
+    if revision.is_empty()
+        || revision.len() > 512
+        || revision.starts_with('-')
+        || revision.contains("..")
+        || revision
+            .bytes()
+            .any(|byte| byte == 0 || byte.is_ascii_control())
+    {
+        return Err(FirstSliceGitEvidenceError::InvalidSelector);
+    }
+    Ok(())
+}
+
+fn first_slice_working_tree_change_matches(
+    selection: FirstSliceWorkingTreeSelection,
+    change_set: &GitChangeSet,
+) -> bool {
+    let base_is_index = matches!(change_set.base, GitRevisionSelector::Index { .. });
+    let head_is_index = matches!(change_set.head, GitRevisionSelector::Index { .. });
+    let head_is_working = matches!(change_set.head, GitRevisionSelector::WorkingTree { .. });
+    match selection {
+        FirstSliceWorkingTreeSelection::Staged => head_is_index,
+        FirstSliceWorkingTreeSelection::Unstaged => base_is_index && head_is_working,
+        FirstSliceWorkingTreeSelection::All => head_is_working || head_is_index,
+    }
+}
+
+fn collect_first_slice_git_change_paths(change_set: &GitChangeSet, paths: &mut BTreeSet<String>) {
+    for change in &change_set.changes {
+        if let Some(path) = &change.before_path {
+            paths.insert(path.clone());
+        }
+        if let Some(path) = &change.after_path {
+            paths.insert(path.clone());
+        }
+    }
+}
+
+const fn first_slice_git_error(code: GitCollectErrorCode) -> FirstSliceGitEvidenceError {
+    match code {
+        GitCollectErrorCode::InvalidLimits => FirstSliceGitEvidenceError::InvalidLimits,
+        GitCollectErrorCode::Cancelled => FirstSliceGitEvidenceError::Cancelled,
+        GitCollectErrorCode::CommandIo
+        | GitCollectErrorCode::CommandTimedOut
+        | GitCollectErrorCode::CommandOutputLimit
+        | GitCollectErrorCode::CommandFailed
+        | GitCollectErrorCode::InvalidOutput
+        | GitCollectErrorCode::Contract => FirstSliceGitEvidenceError::Unavailable,
+    }
+}
+
 fn generation_format_version() -> u32 {
     (u32::from(GENERATION_CONTRACT_VERSION.major()) << 16)
         | u32::from(GENERATION_CONTRACT_VERSION.minor())
@@ -11090,7 +11713,9 @@ mod tests {
         collections::BTreeSet,
         ffi::OsStr,
         fs,
+        io::Read as _,
         path::Path,
+        process::Command,
         sync::{
             Mutex,
             atomic::{AtomicUsize, Ordering},
@@ -11150,6 +11775,79 @@ mod tests {
                 .registered_repository_for_root(root.root(), &deadline())
                 .expect("retained root resolves"),
             Some(receipt.repository)
+        );
+    }
+
+    #[test]
+    fn service_owned_git_evidence_uses_the_registered_repository_root() {
+        let fixture = TempDir::new().expect("repository root exists");
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn value() -> usize { 1 }\n",
+        )
+        .expect("fixture source writes");
+        for arguments in [
+            &["init", "--quiet"][..],
+            &["config", "user.email", "rootlight@example.invalid"][..],
+            &["config", "user.name", "Rootlight Test"][..],
+            &["add", "."][..],
+            &["commit", "--quiet", "-m", "base"][..],
+        ] {
+            let output = Command::new("git")
+                .args(arguments)
+                .current_dir(fixture.path())
+                .output()
+                .expect("Git fixture command starts");
+            assert!(
+                output.status.success(),
+                "Git fixture command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let mut service = FirstSliceService::new(4).expect("service starts");
+        let cancellation = deadline();
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("fixture indexes");
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn value() -> usize { 2 }\n",
+        )
+        .expect("working-tree change writes");
+
+        let paths = service
+            .collect_git_change_paths(
+                receipt.repository,
+                Some(FirstSliceWorkingTreeSelection::All),
+                None,
+                1024 * 1024,
+                Duration::from_secs(5),
+                &cancellation,
+            )
+            .expect("working-tree evidence collects");
+        assert_eq!(paths, vec!["lib.rs"]);
+        assert!(
+            !service
+                .git_revisions_match_clean_head(
+                    receipt.repository,
+                    &["HEAD"],
+                    1024 * 1024,
+                    Duration::from_secs(5),
+                    &cancellation,
+                )
+                .expect("dirty status collects")
+        );
+        assert_eq!(
+            service.collect_git_change_paths(
+                receipt.repository,
+                None,
+                Some(("HEAD..invalid", "HEAD")),
+                1024 * 1024,
+                Duration::from_secs(5),
+                &cancellation,
+            ),
+            Err(FirstSliceGitEvidenceError::InvalidSelector)
         );
     }
 
@@ -11749,6 +12447,56 @@ mod tests {
         assert_public_language_repository(
             &[("src/value.py", "def python_value():\n    return 1\n")],
             &[("python", "python_value")],
+        );
+    }
+
+    #[test]
+    fn javascript_implementation_ranks_ahead_of_typescript_declaration() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[
+                (
+                    "packages/react/index.d.ts",
+                    "export declare function createElement(type: unknown): unknown;\n",
+                ),
+                (
+                    "packages/react/src/jsx/ReactJSXElement.js",
+                    "export function createElement(type) { return { type }; }\n",
+                ),
+            ],
+        );
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &cancellation)
+            .expect("mixed declaration and implementation repository publishes");
+
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "createElement".to_owned(),
+                LocateMode::Exact,
+                10,
+                0,
+                &cancellation,
+            )
+            .expect("duplicate declaration and implementation are queryable");
+        let matching_paths = located
+            .data
+            .hits
+            .iter()
+            .filter(|hit| hit.identifier == "createElement")
+            .map(|hit| hit.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            matching_paths.first().copied(),
+            Some("packages/react/src/jsx/ReactJSXElement.js")
+        );
+        assert!(
+            matching_paths.contains(&"packages/react/index.d.ts"),
+            "the declaration remains available alongside the implementation"
         );
     }
 
@@ -12698,7 +13446,7 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
-    fn durable_restore_accepts_legacy_inline_source_storage() {
+    fn durable_restore_accepts_legacy_inline_source_and_recovery_storage() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("test runtime paths are valid");
@@ -12769,6 +13517,37 @@ mod tests {
             serde_json::to_vec(&manifest).expect("legacy manifest serializes"),
         )
         .expect("legacy generation manifest writes");
+        let mut legacy_recovery = Vec::new();
+        flate2::read::GzDecoder::new(
+            fs::File::open(generation_directory.join("recovery.json.gz"))
+                .expect("compressed recovery snapshot opens"),
+        )
+        .read_to_end(&mut legacy_recovery)
+        .expect("compressed recovery snapshot decodes");
+        fs::write(generation_directory.join("recovery.json"), &legacy_recovery)
+            .expect("legacy recovery snapshot writes");
+        let recovery_manifest_path = generation_directory.join("recovery-manifest.json");
+        let mut recovery_manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(&recovery_manifest_path).expect("recovery manifest reads"),
+        )
+        .expect("recovery manifest is valid JSON");
+        recovery_manifest["version"] = serde_json::json!(1);
+        recovery_manifest["bytes"] = serde_json::json!(
+            u64::try_from(legacy_recovery.len()).expect("legacy recovery length fits u64")
+        );
+        recovery_manifest["digest"] = serde_json::to_value(content_hash(&legacy_recovery))
+            .expect("legacy recovery digest serializes");
+        let recovery_manifest = recovery_manifest
+            .as_object_mut()
+            .expect("recovery manifest is an object");
+        recovery_manifest.remove("encoding");
+        recovery_manifest.remove("decoded_bytes");
+        recovery_manifest.remove("decoded_digest");
+        fs::write(
+            &recovery_manifest_path,
+            serde_json::to_vec(recovery_manifest).expect("legacy recovery manifest serializes"),
+        )
+        .expect("legacy recovery manifest writes");
 
         let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
             .expect("legacy generation restores");
@@ -12931,8 +13710,20 @@ mod tests {
         assert_eq!(generation_manifest["version"], 2);
         assert!(generation_manifest.get("recovery").is_none());
         assert_eq!(generation_manifest["source_storage"]["version"], 1);
-        assert!(active_directory.join("recovery-manifest.json").is_file());
-        assert!(active_directory.join("recovery.json").is_file());
+        let recovery_manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(active_directory.join("recovery-manifest.json"))
+                .expect("recovery manifest remains readable"),
+        )
+        .expect("recovery manifest is valid JSON");
+        assert_eq!(recovery_manifest["version"], 2);
+        assert_eq!(recovery_manifest["encoding"], "gzip");
+        assert!(
+            recovery_manifest["bytes"].as_u64().expect("encoded size")
+                < recovery_manifest["decoded_bytes"]
+                    .as_u64()
+                    .expect("decoded size")
+        );
+        assert!(active_directory.join("recovery.json.gz").is_file());
         assert!(active_directory.join("incremental.json").is_file());
 
         let (mut restored, deferred) =
@@ -13035,6 +13826,46 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
+    fn durable_structural_generation_without_semantic_provider_is_semantically_stale() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn durable_answer() -> u32 { 1 }\n",
+        )
+        .expect("fixture source writes");
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        let generation = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("durable structural generation publishes");
+
+        assert_eq!(
+            service
+                .generation_freshness(generation.repository, generation.generation)
+                .expect("generation freshness resolves"),
+            FirstSliceFreshnessStatus {
+                structural: FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
+                semantic: FirstSliceObservedFreshness::PendingSemanticRefinement,
+                publication: FirstSlicePublicationMode::DurableSingleStage,
+                two_stage: FirstSliceTwoStageAvailability::UnavailableWithoutSemanticRefinement,
+            }
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
     fn durable_disk_admission_preserves_the_active_generation() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -13127,18 +13958,112 @@ mod tests {
     #[test]
     fn generation_memory_admission_rejects_oversized_finalization() {
         let serialized_bytes = MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
-            .checked_div(GENERATION_MEMORY_SERIALIZED_EXPANSION_FACTOR)
-            .and_then(|bytes| bytes.checked_add(1))
+            .checked_add(1)
             .expect("test observation is representable");
 
         assert!(matches!(
-            ensure_generation_memory_admission(0, serialized_bytes),
-            Err(FirstSliceError::ResourceLimit {
-                resource: FirstSliceResource::GenerationMemoryBytes,
+            ensure_generation_memory_admission(serialized_bytes),
+            Err(FirstSliceError::GenerationMemoryLimit {
+                breakdown: GenerationMemoryBreakdown {
+                    retained_bytes: 0,
+                    reserved_bytes: 0,
+                    owned_bytes: 0,
+                    referenced_bytes: 0,
+                    mapped_bytes: 0,
+                    staged_bytes,
+                    shared_bytes: 0,
+                },
                 observed,
                 limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
-            }) if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+            }) if observed == serialized_bytes && staged_bytes == serialized_bytes
         ));
+    }
+
+    #[test]
+    fn generation_memory_breakdown_distinguishes_reservation_from_retained_ownership() {
+        let retained = 9 * 1024_u64.pow(3);
+        let reserved = 8 * 1024_u64.pow(3);
+
+        assert_eq!(
+            generation_memory_limit(retained, reserved, PendingGenerationMemory::Reserved),
+            FirstSliceError::GenerationMemoryLimit {
+                breakdown: GenerationMemoryBreakdown {
+                    retained_bytes: retained,
+                    reserved_bytes: reserved,
+                    owned_bytes: retained,
+                    referenced_bytes: 0,
+                    mapped_bytes: 0,
+                    staged_bytes: 0,
+                    shared_bytes: 0,
+                },
+                observed: retained + reserved,
+                limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+            }
+        );
+    }
+
+    #[test]
+    fn retained_generation_charge_does_not_multiply_serialized_storage() {
+        let serialized_bytes = 6 * 1024_u64.pow(3);
+
+        assert_eq!(
+            ensure_generation_memory_admission(serialized_bytes)
+                .expect("large normalized generation remains admissible"),
+            serialized_bytes
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn durable_status_reports_bytes_within_cold_index_verifier_ratios() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        let mut source = String::with_capacity(64 * 1024);
+        source.push_str("/*");
+        source.push_str(&"retained-durable-state-ratio ".repeat(2_048));
+        source.push_str("*/\n");
+        source.push_str("pub fn durable_ratio_fixture() -> bool { true }\n");
+        fs::write(fixture.path().join("src/lib.rs"), &source).expect("fixture source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("durable generation publishes");
+        let status = service
+            .repository_status(receipt.repository, Some(receipt.generation))
+            .expect("published generation status resolves");
+        let source_bytes = u64::try_from(source.len()).expect("fixture length fits u64");
+        let byte_ratio_limit = source_bytes
+            .checked_mul(512)
+            .expect("source-byte ratio limit is representable");
+        let file_ratio_limit = receipt
+            .indexed_files
+            .checked_mul(4 * 1024 * 1024)
+            .expect("file ratio limit is representable");
+
+        assert_eq!(
+            status.retained_durable_bytes,
+            receipt.retained_durable_bytes
+        );
+        assert!(status.retained_durable_bytes > 0);
+        assert!(
+            status.retained_durable_bytes <= byte_ratio_limit,
+            "retained={} byte_limit={byte_ratio_limit}",
+            status.retained_durable_bytes
+        );
+        assert!(
+            status.retained_durable_bytes <= file_ratio_limit,
+            "retained={} file_limit={file_ratio_limit}",
+            status.retained_durable_bytes
+        );
     }
 
     #[test]
@@ -13222,11 +14147,21 @@ mod tests {
 
         assert!(matches!(
             service.make_room_for_generation(first.repository, 1),
-            Err(FirstSliceError::ResourceLimit {
-                resource: FirstSliceResource::GenerationMemoryBytes,
+            Err(FirstSliceError::GenerationMemoryLimit {
+                breakdown: GenerationMemoryBreakdown {
+                    retained_bytes,
+                    reserved_bytes: 0,
+                    owned_bytes,
+                    referenced_bytes: 0,
+                    mapped_bytes: 0,
+                    staged_bytes: 1,
+                    shared_bytes: 0,
+                },
                 observed,
                 limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
-            }) if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+            }) if retained_bytes == 16 * gibibyte
+                && owned_bytes == retained_bytes
+                && observed == retained_bytes + 1
         ));
         assert!(service.receipts.contains_key(&first.generation));
         assert!(service.receipts.contains_key(&second.generation));
@@ -13271,11 +14206,20 @@ mod tests {
             .expect("over-limit source size is representable");
         assert!(matches!(
             ensure_generation_memory_preflight(over_limit_source),
-            Err(FirstSliceError::ResourceLimit {
-                resource: FirstSliceResource::GenerationMemoryBytes,
+            Err(FirstSliceError::GenerationMemoryLimit {
+                breakdown: GenerationMemoryBreakdown {
+                    retained_bytes: 0,
+                    reserved_bytes,
+                    owned_bytes: 0,
+                    referenced_bytes: 0,
+                    mapped_bytes: 0,
+                    staged_bytes: 0,
+                    shared_bytes: 0,
+                },
                 observed,
                 limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
             }) if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+                && reserved_bytes == observed
         ));
         assert_eq!(
             ensure_generation_memory_preflight(u64::MAX),
@@ -14680,6 +15624,7 @@ mod tests {
         assert_eq!(evidence.reused_parser_artifacts(), 1);
         assert!(evidence.reused_parser_artifact_bytes() > 0);
         assert_eq!(evidence.lowered_files(), 2);
+        assert!(evidence.reused_normalized_facts() > 0);
         assert!(evidence.rebuilt_normalized_facts() > 0);
         assert!(evidence.structural_cache_retained());
 
@@ -15034,6 +15979,22 @@ mod tests {
         assert_eq!(first.plan.estimate.results, 1);
         assert_eq!(first.data.hits.len(), 1);
         assert!(first.data.execution.is_truncated());
+
+        let tightly_bounded = service
+            .code_locate_with_budget(
+                receipt.generation,
+                "item".to_owned(),
+                LocateMode::Prefix,
+                1,
+                0,
+                FirstSliceBudget::default()
+                    .reduce_max_rows(224)
+                    .reduce_max_results(4),
+                &cancellation,
+            )
+            .expect("row reduction also narrows the search candidate plan");
+        assert_eq!(tightly_bounded.plan.estimate.rows, 224);
+        assert_eq!(tightly_bounded.data.hits.len(), 1);
 
         assert!(matches!(
             service.code_locate_with_budget(

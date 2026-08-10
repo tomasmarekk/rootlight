@@ -293,11 +293,15 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
             )
         })?;
     tools[repo_list] = v2;
-    upgrade_operation_success_example(&mut tools, "repo.index", |data| {
+    upgrade_additive_success_example(&mut tools, "repo.index", "1.1", |data| {
         data.insert("semantic_operation_id".to_owned(), Value::Null);
         Ok(())
     })?;
-    upgrade_operation_success_example(&mut tools, "operation.status", |data| {
+    upgrade_additive_success_example(&mut tools, "repo.status", "1.1", |data| {
+        data.insert("retained_durable_bytes".to_owned(), json!(0));
+        Ok(())
+    })?;
+    upgrade_additive_success_example(&mut tools, "operation.status", "1.2", |data| {
         data.insert("semantic_operation_id".to_owned(), Value::Null);
         data.insert("index_stage".to_owned(), json!("analysis"));
         let resources = data
@@ -315,8 +319,52 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
         resources.insert("newly_written_bytes".to_owned(), json!(0));
         resources.insert("reserved_memory_bytes".to_owned(), json!(0));
         resources.insert("owned_memory_bytes".to_owned(), json!(0));
+        resources.insert("retained_durable_bytes".to_owned(), json!(0));
         Ok(())
     })?;
+    upgrade_additive_success_example(&mut tools, "symbol.explain", "1.1", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "symbol.relationships", "1.1", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "change.impact", "1.1", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "tests.select", "1.1", |data| {
+        data.get_mut("coverage_strategy")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                CompatibilityError::FixtureContract(
+                    "tests.select coverage strategy must be an object".into(),
+                )
+            })?
+            .insert("build_target_signals".to_owned(), json!(false));
+        Ok(())
+    })?;
+    upgrade_additive_success_example(&mut tools, "architecture.overview", "1.1", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "architecture.cycles", "1.1", |data| {
+        data.insert(
+            "projection".to_owned(),
+            json!({
+                "relations": ["calls"],
+                "min_confidence": 0,
+                "level": "module",
+                "rank_by": "size",
+                "omitted_nodes": 0
+            }),
+        );
+        Ok(())
+    })?;
+    upgrade_additive_success_example(&mut tools, "code.dead", "1.1", |data| {
+        data.insert("coverage_caveats".to_owned(), json!([]));
+        data.get_mut("entry_points")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                CompatibilityError::FixtureContract(
+                    "code.dead entry point summary must be an object".into(),
+                )
+            })?
+            .insert("entry_symbols".to_owned(), json!([]));
+        Ok(())
+    })?;
+    upgrade_additive_success_example(&mut tools, "history.compare", "1.1", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "plan.change", "1.1", |_| Ok(()))?;
+    upgrade_additive_success_example(&mut tools, "context.pack", "1.1", |_| Ok(()))?;
     validate_examples(&tools)?;
     Ok(json!({
         "schema": CURRENT_SCHEMA,
@@ -327,9 +375,11 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
 fn validate_retained_output_projections(tools: &[Value]) -> Result<(), CompatibilityError> {
     let mut observed = BTreeSet::new();
     for tool in VerticalTool::ALL {
-        let Some(schema) = tool.previous_output_schema_json() else {
+        if tool.previous_output_schema_json().is_none()
+            && tool.legacy_output_schema_json().is_none()
+        {
             continue;
-        };
+        }
         let example = tools
             .iter()
             .find(|entry| entry.get("tool") == Some(&Value::String(tool.name().into())))
@@ -345,12 +395,28 @@ fn validate_retained_output_projections(tools: &[Value]) -> Result<(), Compatibi
                 tool.name()
             ))
         })?;
-        if output.get("schema_version") != Some(&Value::String("1.0".into())) {
-            return Err(CompatibilityError::FixtureContract(format!(
-                "retained output projection {} must select schema 1.0",
-                tool.name()
-            )));
+        let output_version = output
+            .get("schema_version")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                CompatibilityError::FixtureContract(format!(
+                    "retained output projection {} has no schema version",
+                    tool.name()
+                ))
+            })?;
+        let schema = if tool.previous_contract_version() == Some(output_version) {
+            tool.previous_output_schema_json()
+        } else if tool.legacy_contract_version() == Some(output_version) {
+            tool.legacy_output_schema_json()
+        } else {
+            None
         }
+        .ok_or_else(|| {
+            CompatibilityError::FixtureContract(format!(
+                "retained output projection {} selects an unretained schema version",
+                tool.name()
+            ))
+        })?;
         validate_instance(tool, "retained output projection", schema, output)?;
         observed.insert(tool.name());
     }
@@ -373,9 +439,10 @@ fn retained_output_projection_tools() -> Vec<VerticalTool> {
         .collect()
 }
 
-fn upgrade_operation_success_example(
+fn upgrade_additive_success_example(
     tools: &mut [Value],
     tool: &'static str,
+    version: &'static str,
     upgrade_data: impl FnOnce(&mut serde_json::Map<String, Value>) -> Result<(), CompatibilityError>,
 ) -> Result<(), CompatibilityError> {
     let example = tools
@@ -390,7 +457,10 @@ fn upgrade_operation_success_example(
         .ok_or_else(|| {
             CompatibilityError::FixtureContract(format!("{tool} success output must be an object"))
         })?;
-    output.insert("schema_version".to_owned(), json!("1.1"));
+    output.insert(
+        "schema_version".to_owned(),
+        Value::String(version.to_owned()),
+    );
     let data = output
         .get_mut("data")
         .and_then(Value::as_object_mut)
@@ -446,13 +516,10 @@ fn validate_examples(tools: &[Value]) -> Result<(), CompatibilityError> {
 fn error_examples() -> Result<Value, CompatibilityError> {
     let mut examples = Vec::with_capacity(VerticalTool::ALL.len());
     for tool in VerticalTool::ALL {
-        let schema_version = if matches!(
-            tool,
-            VerticalTool::RepoIndex | VerticalTool::OperationStatus
-        ) {
-            "1.1"
+        let schema_version = if tool == VerticalTool::RepoList {
+            rootlight_mcp_contract::MCP_SCHEMA_VERSION
         } else {
-            "1.0"
+            tool.contract_version()
         };
         let output = json!({
             "schema_version": schema_version,
@@ -1281,7 +1348,62 @@ mod tests {
                     "projected_version": "1.0",
                 },
                 {
+                    "tool": "repo.status",
+                    "current_version": "1.1",
+                    "projected_version": "1.0",
+                },
+                {
                     "tool": "operation.status",
+                    "current_version": "1.2",
+                    "projected_version": "1.0",
+                },
+                {
+                    "tool": "symbol.explain",
+                    "current_version": "1.1",
+                    "projected_version": "1.0",
+                },
+                {
+                    "tool": "symbol.relationships",
+                    "current_version": "1.1",
+                    "projected_version": "1.0",
+                },
+                {
+                    "tool": "change.impact",
+                    "current_version": "1.1",
+                    "projected_version": "1.0",
+                },
+                {
+                    "tool": "tests.select",
+                    "current_version": "1.1",
+                    "projected_version": "1.0",
+                },
+                {
+                    "tool": "architecture.overview",
+                    "current_version": "1.1",
+                    "projected_version": "1.0",
+                },
+                {
+                    "tool": "architecture.cycles",
+                    "current_version": "1.1",
+                    "projected_version": "1.0",
+                },
+                {
+                    "tool": "code.dead",
+                    "current_version": "1.1",
+                    "projected_version": "1.0",
+                },
+                {
+                    "tool": "history.compare",
+                    "current_version": "1.1",
+                    "projected_version": "1.0",
+                },
+                {
+                    "tool": "plan.change",
+                    "current_version": "1.1",
+                    "projected_version": "1.0",
+                },
+                {
+                    "tool": "context.pack",
                     "current_version": "1.1",
                     "projected_version": "1.0",
                 },

@@ -384,6 +384,7 @@ allowed_internal_dependencies = [
   "rootlight-catalog",
   "rootlight-config",
   "rootlight-discovery",
+  "rootlight-git",
   "rootlight-ids",
   "rootlight-incremental",
   "rootlight-ir",

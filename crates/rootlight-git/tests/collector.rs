@@ -9,7 +9,7 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_git::{
     FileChangeKind, GitCollectErrorCode, GitCollectLimits, GitLimits, HeadState, HistoryState,
     HistoryTruncation, ObjectFormat, RenameEvidenceKind, RepositoryState, SubmoduleCheckoutState,
-    collect_repository,
+    collect_repository, collect_revision_range, collect_worktree_status, revision_resolves_to_head,
 };
 use rootlight_ids::{RepositoryId, derive_repository};
 use tempfile::TempDir;
@@ -70,6 +70,130 @@ fn write_and_commit(root: &Path, path: &str, body: &str, message: &str) {
 fn collection_limits(history_commits: usize) -> GitCollectLimits {
     GitCollectLimits::new(history_commits, 2 * 1024 * 1024, Duration::from_secs(10))
         .expect("fixture collection limits are valid")
+}
+
+#[test]
+fn revision_range_collection_is_pinned_bounded_and_rejects_option_injection() {
+    let directory = initialized_repository();
+    write_and_commit(
+        directory.path(),
+        "tracked.rs",
+        "pub fn answer() -> u32 { 41 }\n",
+        "base",
+    );
+    let base = git_stdout(directory.path(), &["rev-parse", "HEAD"]);
+    write_and_commit(
+        directory.path(),
+        "tracked.rs",
+        "pub fn answer() -> u32 { 42 }\n",
+        "head",
+    );
+    let head = git_stdout(directory.path(), &["rev-parse", "HEAD"]);
+    assert!(
+        revision_resolves_to_head(
+            directory.path(),
+            &head,
+            collection_limits(2),
+            &Cancellation::new(),
+        )
+        .expect("current revision is resolved")
+    );
+    assert!(
+        !revision_resolves_to_head(
+            directory.path(),
+            &base,
+            collection_limits(2),
+            &Cancellation::new(),
+        )
+        .expect("prior revision is resolved")
+    );
+
+    let change_set = collect_revision_range(
+        directory.path(),
+        &base,
+        &head,
+        &GitLimits::default(),
+        collection_limits(2),
+        &Cancellation::new(),
+    )
+    .expect("a locally available revision range is collected");
+    assert!(change_set.changes.iter().any(|change| {
+        change.kind == FileChangeKind::Modified
+            && change.after_path.as_deref() == Some("tracked.rs")
+    }));
+
+    for invalid_revision in ["", "--help", "HEAD\n--output=outside"] {
+        let error = revision_resolves_to_head(
+            directory.path(),
+            invalid_revision,
+            collection_limits(2),
+            &Cancellation::new(),
+        )
+        .expect_err("malformed revision identity checks fail before Git execution");
+        assert_eq!(error.code(), GitCollectErrorCode::InvalidOutput);
+        let error = collect_revision_range(
+            directory.path(),
+            invalid_revision,
+            &head,
+            &GitLimits::default(),
+            collection_limits(2),
+            &Cancellation::new(),
+        )
+        .expect_err("malformed revisions fail before Git diff execution");
+        assert_eq!(error.code(), GitCollectErrorCode::InvalidOutput);
+    }
+
+    let cancellation = Cancellation::new();
+    cancellation.cancel(CancellationReason::ClientRequest);
+    let error = collect_revision_range(
+        directory.path(),
+        &base,
+        &head,
+        &GitLimits::default(),
+        collection_limits(2),
+        &cancellation,
+    )
+    .expect_err("pre-cancelled revision collection fails before Git execution");
+    assert_eq!(error.code(), GitCollectErrorCode::Cancelled);
+}
+
+#[test]
+fn focused_worktree_status_distinguishes_clean_and_dirty_without_history_collection() {
+    let directory = initialized_repository();
+    write_and_commit(
+        directory.path(),
+        "tracked.rs",
+        "pub fn answer() -> u32 { 42 }\n",
+        "initial",
+    );
+    let clean = collect_worktree_status(
+        directory.path(),
+        &GitLimits::default(),
+        collection_limits(1),
+        &Cancellation::new(),
+    )
+    .expect("clean worktree status is collected");
+    assert_eq!(clean.tracked_changes, 0);
+    assert_eq!(clean.untracked_paths, 0);
+    assert_eq!(clean.conflicts, 0);
+
+    fs::write(
+        directory.path().join("tracked.rs"),
+        "pub fn answer() -> u32 { 43 }\n",
+    )
+    .expect("tracked fixture is modified");
+    fs::write(directory.path().join("untracked.rs"), "fn untracked() {}\n")
+        .expect("untracked fixture is written");
+    let dirty = collect_worktree_status(
+        directory.path(),
+        &GitLimits::default(),
+        collection_limits(1),
+        &Cancellation::new(),
+    )
+    .expect("dirty worktree status is collected");
+    assert_eq!(dirty.tracked_changes, 1);
+    assert_eq!(dirty.untracked_paths, 1);
+    assert_eq!(dirty.conflicts, 0);
 }
 
 #[test]

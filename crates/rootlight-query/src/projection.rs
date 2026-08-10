@@ -93,7 +93,7 @@ pub fn project_lexical_documents(
             generated: file.generated,
             test: matches!(entity.kind, EntityKind::Test)
                 || entity.flags.contains(&EntityFlag::Test),
-            declaration_only: entity_is_declaration_only(document, entity),
+            declaration_only: entity_is_declaration_only(document, entity, &file.path),
         });
     }
     cancellation
@@ -102,7 +102,14 @@ pub fn project_lexical_documents(
     Ok(projected)
 }
 
-fn entity_is_declaration_only(document: &NormalizedIrDocument, entity: &EntityRecord) -> bool {
+fn entity_is_declaration_only(
+    document: &NormalizedIrDocument,
+    entity: &EntityRecord,
+    path: &str,
+) -> bool {
+    if path_is_declaration_only(path) {
+        return true;
+    }
     if matches!(
         entity.kind,
         EntityKind::Interface | EntityKind::Trait | EntityKind::Protocol | EntityKind::TypeAlias
@@ -125,6 +132,10 @@ fn entity_is_declaration_only(document: &NormalizedIrDocument, entity: &EntityRe
         })
 }
 
+fn path_is_declaration_only(path: &str) -> bool {
+    path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")
+}
+
 fn serialized_label(value: &impl Serialize) -> Result<String, QueryError> {
     let encoded = serde_json::to_string(value).map_err(|_| QueryError::ResultEncoding)?;
     encoded
@@ -141,4 +152,19 @@ fn try_clone(value: &str) -> Result<String, QueryError> {
         .map_err(|_| QueryError::MemoryUnavailable)?;
     cloned.push_str(value);
     Ok(cloned)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn typescript_declaration_file_suffixes_are_unambiguous() {
+        for path in ["index.d.ts", "index.d.mts", "index.d.cts"] {
+            assert!(super::path_is_declaration_only(path));
+        }
+        assert!(
+            !["index.ts", "index.mts", "index.cts"]
+                .iter()
+                .any(|path| super::path_is_declaration_only(path))
+        );
+    }
 }

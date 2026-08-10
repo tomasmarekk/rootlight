@@ -1,0 +1,1517 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/repo.status/output/1.1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AnalysisToolResponse",
+  "description": "Success-or-error response for analysis schema 1.1.",
+  "type": "object",
+  "anyOf": [
+    {
+      "description": "Tool-specific successful response.",
+      "$ref": "#/$defs/AnalysisReadEnvelope"
+    },
+    {
+      "description": "Checked source-redacted domain error.",
+      "$ref": "#/$defs/AnalysisErrorResponse"
+    }
+  ],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "AnalysisErrorResponse": {
+      "description": "Checked error response for analysis schema 1.1.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "description": "Stable source-redacted error.",
+          "$ref": "#/$defs/PublicError"
+        },
+        "schema_version": {
+          "description": "Tool error schema version.",
+          "$ref": "#/$defs/AnalysisSchemaVersion"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "error"
+      ]
+    },
+    "AnalysisReadEnvelope": {
+      "description": "Common strict response envelope for additive analysis-tool responses.",
+      "type": "object",
+      "properties": {
+        "completeness": {
+          "description": "Authoritative execution completeness and safe continuation semantics.",
+          "$ref": "#/$defs/ResultCompleteness"
+        },
+        "coverage": {
+          "description": "Relevant coverage.",
+          "$ref": "#/$defs/CoverageSummary"
+        },
+        "data": {
+          "description": "Tool-specific result.",
+          "$ref": "#/$defs/RepoStatusData"
+        },
+        "generation": {
+          "description": "Pinned generation and freshness.",
+          "$ref": "#/$defs/GenerationSummary"
+        },
+        "next_cursor": {
+          "description": "Safe continuation cursor, when the result is pageable.",
+          "$ref": "#/$defs/RequiredNullable4"
+        },
+        "repository": {
+          "description": "Resolved repository.",
+          "$ref": "#/$defs/ResolvedRepository"
+        },
+        "schema_version": {
+          "description": "Tool response schema version.",
+          "$ref": "#/$defs/AnalysisSchemaVersion"
+        },
+        "truncated": {
+          "description": "Whether any hard or requested limit stopped completion.",
+          "type": "boolean"
+        },
+        "trust": {
+          "description": "Response-level classification for all repository-derived content.",
+          "$ref": "#/$defs/TrustClassification"
+        },
+        "usage": {
+          "description": "Runtime resource accounting.",
+          "$ref": "#/$defs/UsageSummary"
+        },
+        "warnings": {
+          "description": "Source-free warnings.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResponseWarning"
+          },
+          "maxItems": 100
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "repository",
+        "generation",
+        "coverage",
+        "data",
+        "truncated",
+        "completeness",
+        "next_cursor",
+        "usage",
+        "warnings",
+        "trust"
+      ]
+    },
+    "AnalysisSchemaVersion": {
+      "description": "Version marker carried by additive analysis responses.",
+      "oneOf": [
+        {
+          "description": "Tool contract version 1.1.",
+          "type": "string",
+          "const": "1.1"
+        }
+      ]
+    },
+    "AnalysisTier": {
+      "description": "Requested or observed language support tier.",
+      "oneOf": [
+        {
+          "description": "Compiler-quality or equivalent semantic evidence.",
+          "type": "string",
+          "const": "A"
+        },
+        {
+          "description": "High-confidence partial semantic evidence.",
+          "type": "string",
+          "const": "B"
+        },
+        {
+          "description": "Generic structural extraction.",
+          "type": "string",
+          "const": "C"
+        },
+        {
+          "description": "Lexical-only support.",
+          "type": "string",
+          "const": "D"
+        }
+      ]
+    },
+    "CacheStatus": {
+      "description": "Cache classification for usage reporting.",
+      "oneOf": [
+        {
+          "description": "No cache entry was used.",
+          "type": "string",
+          "const": "miss"
+        },
+        {
+          "description": "A verified generation-bound cache entry was used.",
+          "type": "string",
+          "const": "hit"
+        },
+        {
+          "description": "The operator does not use a cache.",
+          "type": "string",
+          "const": "not_applicable"
+        }
+      ]
+    },
+    "CompletenessState": {
+      "description": "Authoritative execution state for one bounded analytical result.",
+      "oneOf": [
+        {
+          "description": "The producer authoritatively completed the supported execution domain.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "A known resource limit stopped an otherwise supported execution.",
+          "type": "string",
+          "const": "truncated"
+        },
+        {
+          "description": "A known part of the requested semantic domain is unsupported.",
+          "type": "string",
+          "const": "unsupported_partial"
+        },
+        {
+          "description": "The producer cannot establish what portion of the domain was evaluated.",
+          "type": "string",
+          "const": "indeterminate"
+        }
+      ]
+    },
+    "ContinuationAvailability": {
+      "description": "Whether an incomplete result exposes a safe continuation.",
+      "oneOf": [
+        {
+          "description": "Continuation does not apply to a complete or atomic result.",
+          "type": "string",
+          "const": "not_applicable"
+        },
+        {
+          "description": "A checked continuation is present at the public boundary.",
+          "type": "string",
+          "const": "available"
+        },
+        {
+          "description": "The result is incomplete and cannot be continued directly.",
+          "type": "string",
+          "const": "unavailable"
+        }
+      ]
+    },
+    "ContinuationCursor": {
+      "description": "A bounded opaque continuation cursor.",
+      "type": "string",
+      "maxLength": 4096,
+      "minLength": 1
+    },
+    "ContinuationGuidance": {
+      "description": "Typed source-free follow-up guidance for an incomplete result.",
+      "oneOf": [
+        {
+          "description": "Continue with the authenticated cursor.",
+          "type": "string",
+          "const": "use_cursor"
+        },
+        {
+          "description": "Narrow the requested scope.",
+          "type": "string",
+          "const": "narrow_scope"
+        },
+        {
+          "description": "Split the request into independently bounded requests.",
+          "type": "string",
+          "const": "split_request"
+        },
+        {
+          "description": "Reduce traversal depth.",
+          "type": "string",
+          "const": "reduce_depth"
+        },
+        {
+          "description": "Reduce the relation projection.",
+          "type": "string",
+          "const": "reduce_relations"
+        },
+        {
+          "description": "Request source separately from analytical evidence.",
+          "type": "string",
+          "const": "request_source"
+        },
+        {
+          "description": "Increase a caller-controlled budget without exceeding server policy.",
+          "type": "string",
+          "const": "increase_budget_within_limit"
+        },
+        {
+          "description": "Refresh or expand indexed coverage.",
+          "type": "string",
+          "const": "refresh_coverage"
+        },
+        {
+          "description": "The unsupported or unknown portion has no continuation.",
+          "type": "string",
+          "const": "unsupported_no_continuation"
+        }
+      ]
+    },
+    "CoverageReport": {
+      "description": "Coverage report at the requested granularity.",
+      "type": "object",
+      "properties": {
+        "indexed_files": {
+          "description": "Total files indexed.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "languages": {
+          "description": "Per-language breakdown, deterministically ordered.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LanguageCoverageReport"
+          },
+          "maxItems": 64
+        },
+        "skipped_files": {
+          "description": "Total files skipped by policy or capability.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "status": {
+          "description": "Aggregate coverage status.",
+          "$ref": "#/$defs/CoverageStatus"
+        },
+        "total_files": {
+          "description": "Total files discovered in the repository scope.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "languages",
+        "total_files",
+        "indexed_files",
+        "skipped_files"
+      ]
+    },
+    "CoverageStatus": {
+      "description": "Completeness of a bounded fact or result set.",
+      "oneOf": [
+        {
+          "description": "The declared domain was completely analyzed.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "A documented bound truncated the domain.",
+          "type": "string",
+          "const": "bounded"
+        },
+        {
+          "description": "A representative sample was analyzed.",
+          "type": "string",
+          "const": "sampled"
+        },
+        {
+          "description": "Completeness could not be established.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "CoverageSummary": {
+      "description": "Coverage metadata relevant to one query.",
+      "type": "object",
+      "properties": {
+        "languages": {
+          "description": "Deterministically ordered language coverage.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LanguageCoverage"
+          },
+          "maxItems": 64
+        },
+        "skipped_inputs": {
+          "description": "Inputs skipped by policy, limits, or capability.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "status": {
+          "description": "Aggregate query-domain coverage.",
+          "$ref": "#/$defs/CoverageStatus"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "languages",
+        "skipped_inputs"
+      ]
+    },
+    "DetailKey": {
+      "description": "A validated key for a bounded public error detail.",
+      "type": "string",
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z0-9_]+$"
+    },
+    "ErrorCode": {
+      "description": "Stable public error families shared by all Rootlight boundaries.",
+      "oneOf": [
+        {
+          "description": "The caller supplied an invalid value.",
+          "type": "string",
+          "const": "INVALID_ARGUMENT"
+        },
+        {
+          "description": "The requested entity does not exist.",
+          "type": "string",
+          "const": "NOT_FOUND"
+        },
+        {
+          "description": "The request conflicts with current state.",
+          "type": "string",
+          "const": "CONFLICT"
+        },
+        {
+          "description": "The selected generation is no longer valid for this operation.",
+          "type": "string",
+          "const": "STALE_GENERATION"
+        },
+        {
+          "description": "The requested capability is unavailable.",
+          "type": "string",
+          "const": "UNSUPPORTED_CAPABILITY"
+        },
+        {
+          "description": "The result is incomplete for the requested coverage.",
+          "type": "string",
+          "const": "INCOMPLETE_COVERAGE"
+        },
+        {
+          "description": "The operation exceeded an explicit work budget.",
+          "type": "string",
+          "const": "BUDGET_EXCEEDED"
+        },
+        {
+          "description": "A bounded resource is exhausted.",
+          "type": "string",
+          "const": "RESOURCE_EXHAUSTED"
+        },
+        {
+          "description": "The operation was cancelled before completion.",
+          "type": "string",
+          "const": "CANCELLED"
+        },
+        {
+          "description": "An isolated adapter failed.",
+          "type": "string",
+          "const": "ADAPTER_FAILED"
+        },
+        {
+          "description": "An index failed integrity checks.",
+          "type": "string",
+          "const": "INDEX_CORRUPT"
+        },
+        {
+          "description": "Stored data requires a supported migration.",
+          "type": "string",
+          "const": "MIGRATION_REQUIRED"
+        },
+        {
+          "description": "Policy denied the requested operation.",
+          "type": "string",
+          "const": "PERMISSION_DENIED"
+        },
+        {
+          "description": "A protocol or contract version is incompatible.",
+          "type": "string",
+          "const": "PROTOCOL_MISMATCH"
+        },
+        {
+          "description": "A conflicting operation temporarily owns the resource.",
+          "type": "string",
+          "const": "BUSY"
+        },
+        {
+          "description": "An internal failure cannot be safely disclosed.",
+          "type": "string",
+          "const": "INTERNAL"
+        },
+        {
+          "description": "A pagination cursor is invalid, expired, forged, or context-mismatched.",
+          "type": "string",
+          "const": "INVALID_CURSOR"
+        },
+        {
+          "description": "A supplied value has the wrong type for its target field.",
+          "type": "string",
+          "const": "TYPE_MISMATCH"
+        },
+        {
+          "description": "The request exceeded a cost limit before execution.",
+          "type": "string",
+          "const": "COST_LIMIT"
+        },
+        {
+          "description": "The query uses an operator outside the documented allowlist.",
+          "type": "string",
+          "const": "OPERATOR_FORBIDDEN"
+        },
+        {
+          "description": "A batch binding reference is malformed or unresolved.",
+          "type": "string",
+          "const": "BINDING_INVALID"
+        },
+        {
+          "description": "A batch binding produced a value of the wrong type for its target.",
+          "type": "string",
+          "const": "BINDING_TYPE_MISMATCH"
+        }
+      ]
+    },
+    "Freshness": {
+      "description": "Freshness of one immutable generation.",
+      "oneOf": [
+        {
+          "description": "Matches the currently observed repository snapshot.",
+          "type": "string",
+          "const": "current"
+        },
+        {
+          "description": "Queryable but a newer generation exists.",
+          "type": "string",
+          "const": "superseded"
+        },
+        {
+          "description": "Queryable with a known stale source snapshot.",
+          "type": "string",
+          "const": "stale"
+        }
+      ]
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "GenerationPublicationState": {
+      "description": "Publication relationship of the selected generation.",
+      "oneOf": [
+        {
+          "description": "The selected generation is the active published generation.",
+          "type": "string",
+          "const": "published"
+        },
+        {
+          "description": "The selected generation is retained but no longer active.",
+          "type": "string",
+          "const": "retained"
+        }
+      ]
+    },
+    "GenerationSummary": {
+      "description": "Generation metadata carried by each read response.",
+      "type": "object",
+      "properties": {
+        "generation_id": {
+          "description": "Pinned generation.",
+          "$ref": "#/$defs/GenerationId"
+        },
+        "parent_generation": {
+          "description": "Parent generation, if any.",
+          "$ref": "#/$defs/RequiredNullable"
+        },
+        "semantic_freshness": {
+          "description": "Semantic freshness.",
+          "$ref": "#/$defs/Freshness"
+        },
+        "structural_freshness": {
+          "description": "Structural freshness.",
+          "$ref": "#/$defs/Freshness"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "generation_id",
+        "parent_generation",
+        "structural_freshness",
+        "semantic_freshness"
+      ]
+    },
+    "LanguageCoverage": {
+      "description": "Per-language coverage summary.",
+      "type": "object",
+      "properties": {
+        "language": {
+          "description": "Language identity.",
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "status": {
+          "description": "Coverage state for this language.",
+          "$ref": "#/$defs/CoverageStatus"
+        },
+        "tier": {
+          "description": "Observed support tier.",
+          "$ref": "#/$defs/AnalysisTier"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "language",
+        "tier",
+        "status"
+      ]
+    },
+    "LanguageCoverageReport": {
+      "description": "Per-language coverage report entry.",
+      "type": "object",
+      "properties": {
+        "files_indexed": {
+          "description": "Number of files indexed for this language.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "files_skipped": {
+          "description": "Number of files skipped or unresolved.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "language": {
+          "description": "Language identifier.",
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "missing_build_context": {
+          "description": "Number of files requiring build context not available.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "tier": {
+          "description": "Observed analysis tier.",
+          "type": "string",
+          "maxLength": 2,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "language",
+        "tier",
+        "files_indexed",
+        "files_skipped",
+        "missing_build_context"
+      ]
+    },
+    "LimitingResource": {
+      "description": "One source-free limiting-resource observation.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "Stable limiting-resource family.",
+          "$ref": "#/$defs/LimitingResourceKind"
+        },
+        "limit": {
+          "description": "Effective ceiling, when the producer measured it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "observed": {
+          "description": "Observed value at the stop boundary, when available.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ]
+    },
+    "LimitingResourceKind": {
+      "description": "Stable resource family that limited an analytical result.",
+      "oneOf": [
+        {
+          "description": "Logical row limit.",
+          "type": "string",
+          "const": "rows"
+        },
+        {
+          "description": "Traversed edge limit.",
+          "type": "string",
+          "const": "edges"
+        },
+        {
+          "description": "Returned result limit.",
+          "type": "string",
+          "const": "results"
+        },
+        {
+          "description": "Traversal depth limit.",
+          "type": "string",
+          "const": "depth"
+        },
+        {
+          "description": "Returned path limit.",
+          "type": "string",
+          "const": "paths"
+        },
+        {
+          "description": "Returned source-byte limit.",
+          "type": "string",
+          "const": "source_bytes"
+        },
+        {
+          "description": "Serialized response-byte limit.",
+          "type": "string",
+          "const": "response_bytes"
+        },
+        {
+          "description": "Owned response-memory limit.",
+          "type": "string",
+          "const": "memory_bytes"
+        },
+        {
+          "description": "Monotonic deadline.",
+          "type": "string",
+          "const": "deadline"
+        },
+        {
+          "description": "Estimated output-token limit.",
+          "type": "string",
+          "const": "estimated_tokens"
+        },
+        {
+          "description": "Cooperative cancellation.",
+          "type": "string",
+          "const": "cancellation"
+        },
+        {
+          "description": "Unavailable requested capability.",
+          "type": "string",
+          "const": "capability"
+        },
+        {
+          "description": "Incomplete index or semantic coverage.",
+          "type": "string",
+          "const": "coverage"
+        },
+        {
+          "description": "Requested or effective page-size limit.",
+          "type": "string",
+          "const": "page_size"
+        }
+      ]
+    },
+    "NextAction": {
+      "description": "Stable remediation hints generated from a closed set of templates.",
+      "oneOf": [
+        {
+          "description": "Correct one named input field.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "correct_field"
+            },
+            "field": {
+              "description": "Stable name of the invalid field.",
+              "$ref": "#/$defs/DetailKey"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "field"
+          ]
+        },
+        {
+          "description": "Retry after the bounded delay in the envelope.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "retry"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Select a compatible contract version.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "select_supported_version"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Inspect the associated operation status.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "inspect_operation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Rebuild the affected repository generation.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "rebuild_repository"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Collect a protected source-free support bundle.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "collect_support_bundle"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Restart the enumeration or query from the beginning after an invalid\ncontinuation cursor.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "restart_enumeration"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        }
+      ]
+    },
+    "OperationId": {
+      "type": "string",
+      "pattern": "^op1_[a-z2-7]{32}$"
+    },
+    "OperationState": {
+      "description": "Durable operation state.",
+      "oneOf": [
+        {
+          "description": "Accepted but not started.",
+          "type": "string",
+          "const": "queued"
+        },
+        {
+          "description": "Actively running.",
+          "type": "string",
+          "const": "running"
+        },
+        {
+          "description": "Published an immutable generation.",
+          "type": "string",
+          "const": "published"
+        },
+        {
+          "description": "Failed without publishing partial state.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Cancelled without publishing partial state.",
+          "type": "string",
+          "const": "cancelled"
+        },
+        {
+          "description": "Waiting for explicit build or environment context.",
+          "type": "string",
+          "const": "waiting_for_context"
+        }
+      ]
+    },
+    "OperationSummary": {
+      "description": "Compact operation summary for repository status reporting.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "Operation kind label.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "operation_id": {
+          "description": "Stable operation identity.",
+          "$ref": "#/$defs/OperationId"
+        },
+        "owned_by_session": {
+          "description": "Whether this operation was started by the current session.",
+          "type": "boolean"
+        },
+        "progress_permille": {
+          "description": "Completion fraction, zero to one thousand.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 0
+        },
+        "state": {
+          "description": "Current operation state.",
+          "$ref": "#/$defs/OperationState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "kind",
+        "state",
+        "progress_permille",
+        "owned_by_session"
+      ]
+    },
+    "PlanExplanation": {
+      "description": "Explainable cost and plan for an advanced query execution.",
+      "type": "object",
+      "properties": {
+        "applied_limits": {
+          "description": "Applied limit descriptions.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1
+          },
+          "maxItems": 16
+        },
+        "estimated_cost": {
+          "description": "Estimated total cost units for the query plan.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 10000000,
+          "minimum": 0
+        },
+        "fingerprint": {
+          "description": "Stable physical-plan fingerprint bound to the plan and pinned generation.",
+          "type": "string",
+          "maxLength": 128
+        },
+        "operators": {
+          "description": "Ordered operator names in the physical plan.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "maxItems": 64
+        },
+        "planner_version": {
+          "description": "Planner version that produced the plan; part of the fingerprint input.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 1000,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "estimated_cost",
+        "operators",
+        "applied_limits",
+        "planner_version",
+        "fingerprint"
+      ]
+    },
+    "PublicError": {
+      "description": "A stable source-redacted failure safe to serialize across public boundaries.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[a-z0-9_]+$": {
+              "$ref": "#/$defs/PublicValue"
+            }
+          }
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GenerationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "next_actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NextAction"
+          },
+          "maxItems": 8
+        },
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repository": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepositoryId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retry_after_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 86400000,
+          "minimum": 0
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details",
+        "next_actions"
+      ]
+    },
+    "PublicValue": {
+      "description": "Bounded primitive values permitted in public error details.",
+      "oneOf": [
+        {
+          "description": "A boolean property.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "boolean"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "A signed integer property.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "integer"
+            },
+            "value": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "An unsigned integer property.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "unsigned"
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint64",
+              "maximum": 18446744073709551615,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "A repository identity.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "repository"
+            },
+            "value": {
+              "$ref": "#/$defs/RepositoryId"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "A generation identity.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "generation"
+            },
+            "value": {
+              "$ref": "#/$defs/GenerationId"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "An operation identity.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "operation"
+            },
+            "value": {
+              "$ref": "#/$defs/OperationId"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "A validated source-free label.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "label"
+            },
+            "value": {
+              "$ref": "#/$defs/SafeLabel"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        }
+      ]
+    },
+    "RepoStatusData": {
+      "description": "`repo.status` result data.",
+      "type": "object",
+      "properties": {
+        "active_generation": {
+          "description": "Active generation summary, null when no generation is published.",
+          "$ref": "#/$defs/RequiredNullable2"
+        },
+        "alias": {
+          "description": "Registered repository alias, when configured.",
+          "$ref": "#/$defs/RequiredNullable3"
+        },
+        "coverage": {
+          "description": "Coverage at the requested granularity.",
+          "$ref": "#/$defs/CoverageReport"
+        },
+        "explanation": {
+          "description": "Bounded source-free plan present when explain was requested.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanExplanation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operations": {
+          "description": "Bounded operation list, most recent first.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OperationSummary"
+          },
+          "maxItems": 100
+        },
+        "publication_state": {
+          "description": "Publication relationship of the selected generation.",
+          "$ref": "#/$defs/GenerationPublicationState"
+        },
+        "recommended_actions": {
+          "description": "Recommended next actions for the agent.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceFreeMessage"
+          },
+          "maxItems": 8
+        },
+        "repository_state": {
+          "description": "Overall repository health.",
+          "$ref": "#/$defs/RepositoryState"
+        },
+        "requested_generation": {
+          "description": "Explicit generation requested by the caller, null for the active selector.",
+          "$ref": "#/$defs/RequiredNullable"
+        },
+        "resolved_generation": {
+          "description": "Exact immutable generation resolved for this response.",
+          "$ref": "#/$defs/GenerationId"
+        },
+        "retained_durable_bytes": {
+          "description": "Durable bytes retained for the selected immutable generation.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository_state",
+        "requested_generation",
+        "resolved_generation",
+        "active_generation",
+        "publication_state",
+        "retained_durable_bytes",
+        "alias",
+        "coverage",
+        "operations",
+        "recommended_actions"
+      ]
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "RepositoryState": {
+      "description": "Overall repository health state.",
+      "oneOf": [
+        {
+          "description": "Repository is indexed and queryable.",
+          "type": "string",
+          "const": "ready"
+        },
+        {
+          "description": "An indexing operation is in progress.",
+          "type": "string",
+          "const": "indexing"
+        },
+        {
+          "description": "Repository is queryable but some capabilities are reduced.",
+          "type": "string",
+          "const": "degraded"
+        },
+        {
+          "description": "Index integrity checks failed.",
+          "type": "string",
+          "const": "corrupt"
+        },
+        {
+          "description": "A schema migration is required before use.",
+          "type": "string",
+          "const": "migration_required"
+        },
+        {
+          "description": "A full rebuild is required.",
+          "type": "string",
+          "const": "rebuild_required"
+        }
+      ]
+    },
+    "RequiredNullable": {
+      "description": "A property that must be present and may contain JSON `null`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GenerationId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "RequiredNullable2": {
+      "description": "A property that must be present and may contain JSON `null`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GenerationSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "RequiredNullable3": {
+      "description": "A property that must be present and may contain JSON `null`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "RequiredNullable4": {
+      "description": "A property that must be present and may contain JSON `null`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContinuationCursor"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ResolvedRepository": {
+      "description": "Resolved repository metadata.",
+      "type": "object",
+      "properties": {
+        "display_name": {
+          "description": "Rootlight-owned display label.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "repository_id": {
+          "description": "Stable repository identity.",
+          "$ref": "#/$defs/RepositoryId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository_id",
+        "display_name"
+      ]
+    },
+    "ResponseWarning": {
+      "description": "Source-free response warning.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Stable warning code.",
+          "$ref": "#/$defs/SafeLabel"
+        },
+        "message": {
+          "description": "Rootlight-generated source-free explanation.",
+          "$ref": "#/$defs/SourceFreeMessage"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "ResultCompleteness": {
+      "description": "Checked completeness, limiting resources, and continuation semantics.",
+      "type": "object",
+      "properties": {
+        "continuation": {
+          "$ref": "#/$defs/ContinuationAvailability"
+        },
+        "guidance": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContinuationGuidance"
+          },
+          "maxItems": 9
+        },
+        "limiting_resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LimitingResource"
+          },
+          "maxItems": 14
+        },
+        "state": {
+          "$ref": "#/$defs/CompletenessState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "limiting_resources",
+        "continuation",
+        "guidance"
+      ]
+    },
+    "SafeLabel": {
+      "description": "A short source-free label permitted in public diagnostics.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_.:-]+$"
+    },
+    "SourceFreeMessage": {
+      "description": "A checked Rootlight-generated message that cannot contain paths or source.",
+      "type": "string",
+      "maxLength": 1024,
+      "minLength": 1,
+      "pattern": "^[a-z0-9 -]+$"
+    },
+    "TrustClassification": {
+      "description": "Trust classification attached to every future source-bearing value.",
+      "oneOf": [
+        {
+          "description": "Content originated in a repository and must be treated as data.",
+          "type": "string",
+          "const": "untrusted_repository_data"
+        }
+      ]
+    },
+    "UsageSummary": {
+      "description": "Bounded counters returned by each read tool.",
+      "type": "object",
+      "properties": {
+        "cache_status": {
+          "description": "Cache outcome.",
+          "$ref": "#/$defs/CacheStatus"
+        },
+        "edges": {
+          "description": "Relationship edges examined.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "estimated_tokens": {
+          "description": "Deterministic token estimate.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "json_bytes": {
+          "description": "Encoded structured result bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "rows": {
+          "description": "Storage rows examined.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "source_bytes": {
+          "description": "Raw source bytes returned.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "trace_id": {
+          "description": "Source-free trace identity.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "wall_time_ms": {
+          "description": "Cooperative wall time in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rows",
+        "edges",
+        "source_bytes",
+        "json_bytes",
+        "estimated_tokens",
+        "wall_time_ms",
+        "cache_status",
+        "trace_id"
+      ]
+    }
+  }
+}

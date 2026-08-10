@@ -11,6 +11,7 @@ publish = false
 blake3.workspace = true
 cap-std.workspace = true
 getrandom.workspace = true
+flate2.workspace = true
 fs2.workspace = true
 rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
 rootlight-adapter-treesitter = { path = "../rootlight-adapter-treesitter" }
@@ -19,6 +20,7 @@ rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-catalog = { path = "../rootlight-catalog" }
 rootlight-config = { path = "../rootlight-config" }
 rootlight-discovery = { path = "../rootlight-discovery" }
+rootlight-git = { path = "../rootlight-git" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-incremental = { path = "../rootlight-incremental" }
 rootlight-ir = { path = "../rootlight-ir" }

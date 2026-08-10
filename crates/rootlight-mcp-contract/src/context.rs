@@ -17,9 +17,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use crate::vertical::{
-    ContinuationCursor, EntityKind, GenerationSelector, ReadEnvelope, RepositorySelector,
-    RequiredNullable, ResponseBudget, ResponseProfile, ResponseWarning, SourceFreeMessage,
-    ToolResponse, UsageSummary,
+    AnalysisReadEnvelope, AnalysisToolResponse, ContinuationCursor, EntityKind, GenerationSelector,
+    ReadEnvelope, RepositorySelector, RequiredNullable, ResponseBudget, ResponseProfile,
+    ResponseWarning, SourceFreeMessage, ToolResponse, UsageSummary,
 };
 use crate::{TrustClassification, batch::BatchBindingSource, completeness::LimitingResource};
 
@@ -704,6 +704,12 @@ pub struct ContextPackData {
 
 /// Checked success-or-error output for `context.pack`.
 pub type ContextPackOutput = ToolResponse<ReadEnvelope<ContextPackData>>;
+
+/// Checked `context.pack` output retained for explicit 1.0 callers.
+pub type ContextPackOutputV1_0 = ContextPackOutput;
+
+/// Current checked `context.pack` output.
+pub type ContextPackOutputV1_1 = AnalysisToolResponse<AnalysisReadEnvelope<ContextPackData>>;
 
 // ---------------------------------------------------------------------------
 // query.batch

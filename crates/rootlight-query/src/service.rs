@@ -8,7 +8,7 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, SymbolId, content_hash};
 use rootlight_ir::{
     AnalysisTier, ContainerRef, CoverageRecord, CoverageScope, CoverageStatus, EntityFlag,
-    EntityKind, EntityVisibility, FactDomain, NormalizedIrDocument, OccurrenceTarget,
+    EntityKind, EntityVisibility, FactDomain, NormalizedIrDocument, OccurrenceTarget, ProducerKind,
     RelationEndpoint, RelationPredicate, SourceRef,
 };
 use rootlight_search::{
@@ -25,29 +25,30 @@ use crate::model::{
     ADVANCED_MAX_DEPTH, AdvancedAggregateFunction, AdvancedAstNode, AdvancedColumnSchema,
     AdvancedColumnType, AdvancedCompleteness, AdvancedEntityKind, AdvancedPlanExplanation,
     AdvancedPredicate, AdvancedQueryPlan, AdvancedQueryResult, AdvancedRelationKind,
-    AdvancedSortKey, AdvancedTraverseDirection, AdvancedValue, ArchitectureCommunity,
-    ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesPlan,
+    AdvancedSortKey, AdvancedTraverseDirection, AdvancedValue, AnalysisScope,
+    ArchitectureCommunity, ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesPlan,
     ArchitectureCyclesProjection, ArchitectureCyclesResult, ArchitectureHotspot,
-    ArchitectureOverviewDerivedView, ArchitectureOverviewPlan, ArchitectureOverviewResult,
-    ArchitectureOverviewView, BreakingCandidateRecord, ChangeImpactClassification,
-    ChangeImpactPlan, ChangeImpactResult, ChangeImpactRiskLevel, ChangeImpactRiskSummary,
-    ChangeImpactTestCandidate, CodeDeadBlindSpot, CodeDeadEntryPointPolicy,
-    CodeDeadEntryPointSummary, CodeDeadPlan, CodeDeadResult, CodeDeadSuppressionRule,
-    CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent, CyclePath, DeadCodeCandidate,
-    DeadCodeClassification, ExecutionCompleteness, FlowTraceEdge, FlowTraceFrontier, FlowTracePath,
-    FlowTracePlan, FlowTraceProjection, FlowTraceResult, HistoryArchitectureDelta,
-    HistoryChangeKind, HistoryComparePlan, HistoryCompareResult, HistorySemanticChangeKind,
-    ImpactEntryRecord, ImpactGroupRecord, LineageMatchRecord, LocateHit, LocateMode,
-    PlanChangeContextPack, PlanChangeDecision, PlanChangeImpactSummary, PlanChangeObjective,
-    PlanChangePlan, PlanChangeResult, PlanChangeStepRecord, PlanEstimate, PlanExplanation,
-    PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage,
-    RankedTestSelection, RelationDirection, RelationFamily, RelationshipEdgeTarget,
-    RelationshipGroup, RepositoryDataTrust, ResolvedChangeRecord, SemanticChangeRecord,
-    SourceChunkEncoding, SourceChunkResult, SourceReadPlan, SourceReadQueryResult,
-    SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult,
-    TestsSelectCoverage, TestsSelectGap, TestsSelectKind, TestsSelectPlan, TestsSelectResult,
-    TokenAccountingProfile, checked_add, checked_u128_to_u64, checked_usize_to_u64,
-    ensure_estimate, search_mode,
+    ArchitectureOverviewDerivedView, ArchitectureOverviewDetail, ArchitectureOverviewPlan,
+    ArchitectureOverviewResult, ArchitectureOverviewView, BreakingCandidateRecord,
+    ChangeImpactClassification, ChangeImpactPlan, ChangeImpactRelationPolicy, ChangeImpactResult,
+    ChangeImpactRiskLevel, ChangeImpactRiskSummary, ChangeImpactTestCandidate, CodeDeadBlindSpot,
+    CodeDeadEntryPointPolicy, CodeDeadEntryPointSummary, CodeDeadPlan, CodeDeadResult,
+    CodeDeadSuppressionRule, CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent,
+    CyclePath, CycleProjectionLevel, CycleRankBy, DeadCodeCandidate, DeadCodeClassification,
+    DeadCodeReachabilitySummary, ExecutionCompleteness, FlowTraceEdge, FlowTraceFrontier,
+    FlowTracePath, FlowTracePlan, FlowTraceProjection, FlowTraceResult, HistoryArchitectureDelta,
+    HistoryChangeKind, HistoryComparePlan, HistoryCompareResult, HistoryCompareScope,
+    HistorySemanticChangeKind, ImpactEntryRecord, ImpactGroupRecord, LineageMatchRecord, LocateHit,
+    LocateMode, PlanChangeContextPack, PlanChangeDecision, PlanChangeImpactSummary,
+    PlanChangeObjective, PlanChangePlan, PlanChangeResult, PlanChangeStepRecord, PlanEstimate,
+    PlanExplanation, PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource,
+    QueryResponse, QueryUsage, RankedTestSelection, RelationDirection, RelationFamily,
+    RelationshipEdgeTarget, RelationshipGroup, RepositoryDataTrust, ResolvedChangeRecord,
+    SemanticChangeRecord, SourceChunkEncoding, SourceChunkResult, SourceReadPlan,
+    SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
+    SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap, TestsSelectKind,
+    TestsSelectPlan, TestsSelectResult, TokenAccountingProfile, checked_add, checked_u128_to_u64,
+    checked_usize_to_u64, ensure_estimate, search_mode,
 };
 
 /// Daemon-independent typed query service pinned to normalized IR and lexical data.
@@ -894,14 +895,50 @@ where
     /// admitted.
     pub fn plan_architecture_cycles(
         &self,
-        mut families: Vec<RelationFamily>,
+        families: Vec<RelationFamily>,
         min_confidence: u16,
         min_size: u8,
         max_cycles: usize,
         include_self_cycles: bool,
         budget: QueryBudget,
     ) -> Result<ArchitectureCyclesPlan, QueryError> {
+        self.plan_architecture_cycles_with_options(
+            families,
+            None,
+            CycleProjectionLevel::Symbol,
+            min_confidence,
+            min_size,
+            max_cycles,
+            include_self_cycles,
+            CycleRankBy::Size,
+            budget,
+        )
+    }
+
+    /// Builds a deterministic bounded cycle plan with scope, aggregation, and ranking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for an invalid scope, budget, relation family,
+    /// projection level, confidence, component-size, or cycle bound.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded cycle-analysis dimension"
+    )]
+    pub fn plan_architecture_cycles_with_options(
+        &self,
+        mut families: Vec<RelationFamily>,
+        scope: Option<AnalysisScope>,
+        level: CycleProjectionLevel,
+        min_confidence: u16,
+        min_size: u8,
+        max_cycles: usize,
+        include_self_cycles: bool,
+        rank_by: CycleRankBy,
+        budget: QueryBudget,
+    ) -> Result<ArchitectureCyclesPlan, QueryError> {
         budget.validate()?;
+        validate_analysis_scope(scope.as_ref())?;
         if families.is_empty() || families.len() > 8 {
             return Err(QueryError::PlanRejected {
                 resource: QueryResource::Results,
@@ -952,10 +989,13 @@ where
         };
         Ok(ArchitectureCyclesPlan {
             families,
+            scope,
+            level,
             min_confidence,
             min_size,
             max_cycles,
             include_self_cycles,
+            rank_by,
             budget,
             explanation,
         })
@@ -987,7 +1027,7 @@ where
         let mut tracker = UsageTracker::new(plan.budget);
         let mut limiting_resources = Vec::new();
 
-        let adjacency = build_cycle_adjacency(
+        let (adjacency, omitted_nodes) = build_cycle_adjacency(
             document,
             plan,
             &control,
@@ -1010,7 +1050,10 @@ where
             break_candidates,
             projection: ArchitectureCyclesProjection {
                 families: plan.families.clone(),
+                level: plan.level,
                 min_confidence: plan.min_confidence,
+                rank_by: plan.rank_by,
+                omitted_nodes,
             },
             execution,
             limiting_resources,
@@ -1035,7 +1078,49 @@ where
         max_candidates: usize,
         budget: QueryBudget,
     ) -> Result<CodeDeadPlan, QueryError> {
+        self.plan_code_dead_with_options(
+            entry_point_policy,
+            BTreeSet::new(),
+            None,
+            include_exported,
+            include_tests,
+            min_confidence,
+            max_candidates,
+            budget,
+        )
+    }
+
+    /// Builds a deterministic bounded dead-code plan with a typed entry model and scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for invalid scope, explicit-entry, confidence,
+    /// candidate, budget, arithmetic, or admission bounds.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded reachability-analysis dimension"
+    )]
+    pub fn plan_code_dead_with_options(
+        &self,
+        entry_point_policy: CodeDeadEntryPointPolicy,
+        explicit_entry_points: BTreeSet<SymbolId>,
+        scope: Option<AnalysisScope>,
+        include_exported: bool,
+        include_tests: bool,
+        min_confidence: u16,
+        max_candidates: usize,
+        budget: QueryBudget,
+    ) -> Result<CodeDeadPlan, QueryError> {
         budget.validate()?;
+        validate_analysis_scope(scope.as_ref())?;
+        if explicit_entry_points.len() > 64
+            || (matches!(entry_point_policy, CodeDeadEntryPointPolicy::Explicit)
+                != !explicit_entry_points.is_empty())
+        {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
         if min_confidence > 1_000 {
             return Err(QueryError::PlanRejected {
                 resource: QueryResource::Results,
@@ -1075,6 +1160,8 @@ where
         };
         Ok(CodeDeadPlan {
             entry_point_policy,
+            explicit_entry_points,
+            scope,
             include_exported,
             include_tests,
             min_confidence,
@@ -1133,6 +1220,7 @@ where
             entry_points: analysis.entry_points,
             blind_spots: analysis.blind_spots,
             suppression_rules: analysis.suppression_rules,
+            coverage_caveats: analysis.coverage_caveats,
             execution,
             limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
@@ -1154,13 +1242,45 @@ where
     /// estimate that cannot be admitted.
     pub fn plan_architecture_overview(
         &self,
+        views: Vec<ArchitectureOverviewView>,
+        min_confidence: u16,
+        max_components: usize,
+        include_edges: bool,
+        budget: QueryBudget,
+    ) -> Result<ArchitectureOverviewPlan, QueryError> {
+        self.plan_architecture_overview_with_options(
+            views,
+            None,
+            ArchitectureOverviewDetail::Standard,
+            min_confidence,
+            max_components,
+            include_edges,
+            budget,
+        )
+    }
+
+    /// Builds a deterministic bounded architecture plan with typed scope and detail.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for invalid scope, budget, confidence, component,
+    /// view, arithmetic, or admission bounds.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded architecture-overview dimension"
+    )]
+    pub fn plan_architecture_overview_with_options(
+        &self,
         mut views: Vec<ArchitectureOverviewView>,
+        scope: Option<AnalysisScope>,
+        detail: ArchitectureOverviewDetail,
         min_confidence: u16,
         max_components: usize,
         include_edges: bool,
         budget: QueryBudget,
     ) -> Result<ArchitectureOverviewPlan, QueryError> {
         budget.validate()?;
+        validate_analysis_scope(scope.as_ref())?;
         if views.len() > 8 {
             return Err(QueryError::PlanRejected {
                 resource: QueryResource::Results,
@@ -1215,6 +1335,8 @@ where
         };
         Ok(ArchitectureOverviewPlan {
             views,
+            scope,
+            detail,
             min_confidence,
             max_components,
             include_edges,
@@ -1284,18 +1406,71 @@ where
     pub fn plan_tests_select(
         &self,
         seeds: BTreeSet<SymbolId>,
-        mut test_kinds: Vec<TestsSelectKind>,
+        test_kinds: Vec<TestsSelectKind>,
         max_tests: usize,
         include_commands: bool,
         budget: QueryBudget,
     ) -> Result<TestsSelectPlan, QueryError> {
+        self.plan_tests_select_with_filters(
+            seeds,
+            Vec::new(),
+            Vec::new(),
+            test_kinds,
+            Vec::new(),
+            max_tests,
+            None,
+            None,
+            include_commands,
+            budget,
+        )
+    }
+
+    /// Builds a deterministic bounded `tests.select` plan with every public filter.
+    ///
+    /// Path and build-target seeds are resolved only inside the pinned
+    /// generation. Framework and execution-budget filters affect deterministic
+    /// candidate admission but never execute a command.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for invalid bounds, an empty or oversized
+    /// aggregate seed selector, invalid filter cardinality, arithmetic
+    /// overflow, or a conservative estimate that cannot be admitted.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded public test-selection dimension"
+    )]
+    pub fn plan_tests_select_with_filters(
+        &self,
+        seeds: BTreeSet<SymbolId>,
+        mut seed_paths: Vec<String>,
+        mut seed_build_targets: Vec<String>,
+        mut test_kinds: Vec<TestsSelectKind>,
+        mut frameworks: Vec<String>,
+        max_tests: usize,
+        max_total_ms: Option<u32>,
+        max_slow_tests: Option<u16>,
+        include_commands: bool,
+        budget: QueryBudget,
+    ) -> Result<TestsSelectPlan, QueryError> {
         budget.validate()?;
-        if seeds.is_empty() || seeds.len() > 64 {
+        let aggregate_seed_count = seeds
+            .len()
+            .checked_add(seed_paths.len())
+            .and_then(|count| count.checked_add(seed_build_targets.len()))
+            .ok_or(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            })?;
+        if aggregate_seed_count == 0
+            || seeds.len() > 64
+            || seed_paths.len() > 256
+            || seed_build_targets.len() > 128
+        {
             return Err(QueryError::PlanRejected {
                 resource: QueryResource::Results,
             });
         }
-        if test_kinds.len() > 6 {
+        if test_kinds.len() > 6 || frameworks.len() > 32 {
             return Err(QueryError::PlanRejected {
                 resource: QueryResource::Results,
             });
@@ -1308,8 +1483,14 @@ where
                 resource: QueryResource::Results,
             });
         }
+        seed_paths.sort();
+        seed_paths.dedup();
+        seed_build_targets.sort();
+        seed_build_targets.dedup();
         test_kinds.sort();
         test_kinds.dedup();
+        frameworks.sort();
+        frameworks.dedup();
         let estimate = PlanEstimate {
             rows: budget.max_rows,
             edges: budget.max_edges,
@@ -1336,8 +1517,13 @@ where
         };
         Ok(TestsSelectPlan {
             seeds,
+            seed_paths,
+            seed_build_targets,
             test_kinds,
+            frameworks,
             max_tests,
+            max_total_ms,
+            max_slow_tests,
             include_commands,
             budget,
             explanation,
@@ -1409,14 +1595,61 @@ where
     pub fn plan_change_impact(
         &self,
         changed_symbols: BTreeSet<SymbolId>,
-        mut changed_paths: Vec<String>,
+        changed_paths: Vec<String>,
         max_depth: u8,
         min_confidence: u16,
         include_tests: bool,
         max_dependents: usize,
         budget: QueryBudget,
     ) -> Result<ChangeImpactPlan, QueryError> {
+        self.plan_change_impact_with_policy(
+            changed_symbols,
+            changed_paths,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            ChangeImpactRelationPolicy::Standard,
+            max_depth,
+            min_confidence,
+            include_tests,
+            false,
+            max_dependents,
+            budget,
+        )
+    }
+
+    /// Builds a deterministic bounded `change.impact` plan with scope and policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for an invalid budget, empty or oversized change
+    /// set, invalid scope, out-of-range depth, confidence, or dependent bounds,
+    /// arithmetic overflow, or an estimate that cannot be admitted.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded public impact-analysis dimension"
+    )]
+    pub fn plan_change_impact_with_policy(
+        &self,
+        changed_symbols: BTreeSet<SymbolId>,
+        mut changed_paths: Vec<String>,
+        mut scope_paths: Vec<String>,
+        mut scope_packages: Vec<String>,
+        mut scope_services: Vec<String>,
+        relation_policy: ChangeImpactRelationPolicy,
+        max_depth: u8,
+        min_confidence: u16,
+        include_tests: bool,
+        include_history: bool,
+        max_dependents: usize,
+        budget: QueryBudget,
+    ) -> Result<ChangeImpactPlan, QueryError> {
         budget.validate()?;
+        let max_depth = if relation_policy == ChangeImpactRelationPolicy::DirectOnly {
+            1
+        } else {
+            max_depth
+        };
         // The first slice maps only an explicit change set; an empty selector
         // carries no resolvable change.
         if changed_symbols.is_empty() && changed_paths.is_empty() {
@@ -1425,6 +1658,11 @@ where
             });
         }
         if changed_symbols.len() > 256 || changed_paths.len() > 1_000 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if scope_paths.len() > 256 || scope_packages.len() > 128 || scope_services.len() > 64 {
             return Err(QueryError::PlanRejected {
                 resource: QueryResource::Results,
             });
@@ -1449,6 +1687,12 @@ where
         }
         changed_paths.sort();
         changed_paths.dedup();
+        scope_paths.sort();
+        scope_paths.dedup();
+        scope_packages.sort();
+        scope_packages.dedup();
+        scope_services.sort();
+        scope_services.dedup();
         let estimate = PlanEstimate {
             rows: budget.max_rows,
             edges: budget.max_edges,
@@ -1476,9 +1720,14 @@ where
         Ok(ChangeImpactPlan {
             changed_symbols,
             changed_paths,
+            scope_paths,
+            scope_packages,
+            scope_services,
+            relation_policy,
             max_depth,
             min_confidence,
             include_tests,
+            include_history,
             max_dependents,
             budget,
             explanation,
@@ -1538,9 +1787,9 @@ where
     /// An explicit target set of stable symbols and files drives the analysis;
     /// the objective class colors the source-free step text, and the step cap
     /// bounds the emitted plan. The transitive closure reuses the change.impact
-    /// depth and dependent bounds. Change context, user constraints, custom
-    /// budgets, and non-compact profiles are not modeled here and must be
-    /// rejected by the caller before planning.
+    /// depth and dependent bounds. The context-aware entry point additionally
+    /// resolves repository-relative paths and carries caller constraints into
+    /// an explicit final verification step.
     ///
     /// # Errors
     ///
@@ -1556,15 +1805,53 @@ where
         max_steps: usize,
         budget: QueryBudget,
     ) -> Result<PlanChangePlan, QueryError> {
+        self.plan_plan_change_with_context(
+            objective,
+            objective_text,
+            target_symbols,
+            target_files,
+            BTreeSet::new(),
+            Vec::new(),
+            max_steps,
+            budget,
+        )
+    }
+
+    /// Builds a deterministic change plan with admitted path context and constraints.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] under the same admission and budget conditions as
+    /// [`Self::plan_plan_change`].
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "change context and caller constraints are independent bounded plan dimensions"
+    )]
+    pub fn plan_plan_change_with_context(
+        &self,
+        objective: PlanChangeObjective,
+        objective_text: String,
+        target_symbols: BTreeSet<SymbolId>,
+        target_files: BTreeSet<FileId>,
+        target_paths: BTreeSet<String>,
+        constraints: Vec<String>,
+        max_steps: usize,
+        budget: QueryBudget,
+    ) -> Result<PlanChangePlan, QueryError> {
         budget.validate()?;
-        // The first slice plans only an explicit target set; an empty selector
-        // carries no resolvable target.
-        if target_symbols.is_empty() && target_files.is_empty() {
+        if target_symbols.is_empty() && target_files.is_empty() && target_paths.is_empty() {
             return Err(QueryError::PlanRejected {
                 resource: QueryResource::Results,
             });
         }
-        if target_symbols.len() > 64 || target_files.len() > 64 {
+        if target_symbols.len() > 64
+            || target_files.len() > 64
+            || target_paths.len() > 1_000
+            || constraints.len() > 32
+            || constraints
+                .iter()
+                .any(|constraint| constraint.is_empty() || constraint.chars().count() > 1_024)
+        {
             return Err(QueryError::PlanRejected {
                 resource: QueryResource::Results,
             });
@@ -1615,6 +1902,8 @@ where
             objective_text,
             target_symbols,
             target_files,
+            target_paths,
+            constraints,
             max_steps,
             max_depth: PLAN_CHANGE_DEFAULT_DEPTH,
             max_dependents,
@@ -1676,9 +1965,9 @@ where
     ///
     /// The plan pins the head generation to this service and carries the base
     /// generation identity explicitly. The optional change-kind filter and the
-    /// result cap are validated here; scope bounding, unchanged-context
-    /// inclusion, custom budgets, and non-compact profiles are not modeled and
-    /// must be rejected by the caller before planning.
+    /// result cap are validated here. Call
+    /// [`Self::plan_history_compare_with_scope`] when the request includes
+    /// structural scope or unchanged-lineage context.
     ///
     /// # Errors
     ///
@@ -1692,6 +1981,30 @@ where
         max_results: usize,
         budget: QueryBudget,
     ) -> Result<HistoryComparePlan, QueryError> {
+        self.plan_history_compare_with_scope(
+            base_generation,
+            HistoryCompareScope::default(),
+            change_kinds,
+            false,
+            max_results,
+            budget,
+        )
+    }
+
+    /// Builds a bounded comparison plan with combined structural scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for invalid scope, budget, or result bounds.
+    pub fn plan_history_compare_with_scope(
+        &self,
+        base_generation: GenerationId,
+        scope: HistoryCompareScope,
+        change_kinds: BTreeSet<HistoryChangeKind>,
+        include_unchanged_context: bool,
+        max_results: usize,
+        budget: QueryBudget,
+    ) -> Result<HistoryComparePlan, QueryError> {
         budget.validate()?;
         if max_results == 0 || max_results > HISTORY_COMPARE_MAX_RESULTS {
             return Err(QueryError::PlanRejected {
@@ -1699,6 +2012,18 @@ where
             });
         }
         if change_kinds.len() > HISTORY_COMPARE_MAX_CHANGE_KINDS {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if scope.paths.len() > 256
+            || scope.packages.len() > 128
+            || scope.services.len() > 64
+            || scope.symbols.len() > 256
+            || scope.paths.iter().any(|path| path.is_empty())
+            || scope.packages.iter().any(|package| package.is_empty())
+            || scope.services.iter().any(|service| service.is_empty())
+        {
             return Err(QueryError::PlanRejected {
                 resource: QueryResource::Results,
             });
@@ -1734,7 +2059,9 @@ where
         };
         Ok(HistoryComparePlan {
             base_generation,
+            scope,
             change_kinds,
+            include_unchanged_context,
             max_results,
             budget,
             explanation,
@@ -1748,8 +2075,9 @@ where
     /// entity sets by stable identity into added, removed, and modified changes,
     /// records identity-preserved lineage matches, ranks breaking public-surface
     /// removals and modifications by their base-generation consumer count, and
-    /// reports an honest zero architecture delta. Rows, results, and memory are
-    /// measured exactly like `change.impact`.
+    /// reports scoped component-boundary and cross-service dependency deltas.
+    /// Rows, edges, results, and memory are measured exactly like
+    /// `change.impact`.
     ///
     /// # Errors
     ///
@@ -3229,6 +3557,157 @@ fn find_file(document: &NormalizedIrDocument, file: FileId) -> Option<&rootlight
         .and_then(|index| document.files.get(index))
 }
 
+fn validate_analysis_scope(scope: Option<&AnalysisScope>) -> Result<(), QueryError> {
+    let invalid_label = |value: &str, maximum: usize| {
+        value.is_empty() || value.len() > maximum || value.as_bytes().contains(&0)
+    };
+    let valid = match scope {
+        None => true,
+        Some(AnalysisScope::Paths(paths)) => {
+            !paths.is_empty()
+                && paths.len() <= 256
+                && paths.iter().all(|path| {
+                    !invalid_label(path, 8_192)
+                        && !path.starts_with('/')
+                        && !path.starts_with('\\')
+                        && !matches!(path.get(1..3), Some(":\\") | Some(":/"))
+                        && !path.split(['/', '\\']).any(|component| component == "..")
+                })
+        }
+        Some(AnalysisScope::Packages(packages)) => {
+            !packages.is_empty()
+                && packages.len() <= 256
+                && packages.iter().all(|package| !invalid_label(package, 512))
+        }
+        Some(AnalysisScope::BuildTargets(targets)) => {
+            !targets.is_empty()
+                && targets.len() <= 256
+                && targets.iter().all(|target| !invalid_label(target, 512))
+        }
+        Some(AnalysisScope::Symbols(symbols)) => !symbols.is_empty() && symbols.len() <= 64,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(QueryError::PlanRejected {
+            resource: QueryResource::Results,
+        })
+    }
+}
+
+fn path_matches_scope(path: &str, prefixes: &[String]) -> bool {
+    prefixes.iter().any(|prefix| {
+        let normalized = prefix.trim_end_matches(['/', '\\']);
+        path == normalized
+            || path
+                .strip_prefix(normalized)
+                .is_some_and(|suffix| suffix.starts_with('/') || suffix.starts_with('\\'))
+    })
+}
+
+fn entity_matches_label(entity: &rootlight_ir::EntityRecord, labels: &[String]) -> bool {
+    labels.iter().any(|label| {
+        label == &entity.id.to_string()
+            || label == &entity.canonical_name
+            || label == &entity.display_name
+            || label == &entity.qualified_name
+    })
+}
+
+fn entity_parent_map(document: &NormalizedIrDocument) -> BTreeMap<SymbolId, SymbolId> {
+    let mut parents = BTreeMap::new();
+    for entity in &document.entities {
+        if let Some(ContainerRef::Entity(parent)) = entity.container {
+            parents.insert(entity.id, parent);
+        }
+    }
+    for relation in &document.relations {
+        if relation.predicate == RelationPredicate::Contains
+            && let (RelationEndpoint::Entity(parent), RelationEndpoint::Entity(child)) =
+                (relation.subject, relation.object)
+        {
+            parents.entry(child).or_insert(parent);
+        }
+    }
+    parents
+}
+
+fn entity_descends_from(
+    symbol: SymbolId,
+    roots: &BTreeSet<SymbolId>,
+    parents: &BTreeMap<SymbolId, SymbolId>,
+) -> bool {
+    let mut cursor = symbol;
+    let mut visited = BTreeSet::new();
+    loop {
+        if roots.contains(&cursor) {
+            return true;
+        }
+        if !visited.insert(cursor) {
+            return false;
+        }
+        let Some(parent) = parents.get(&cursor).copied() else {
+            return false;
+        };
+        cursor = parent;
+    }
+}
+
+fn analysis_scope_entities(
+    document: &NormalizedIrDocument,
+    scope: Option<&AnalysisScope>,
+) -> BTreeSet<SymbolId> {
+    let Some(scope) = scope else {
+        return document.entities.iter().map(|entity| entity.id).collect();
+    };
+    match scope {
+        AnalysisScope::Paths(prefixes) => document
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .and_then(|source| find_file(document, source.span().file()))
+                    .is_some_and(|file| path_matches_scope(&file.path, prefixes))
+            })
+            .map(|entity| entity.id)
+            .collect(),
+        AnalysisScope::Symbols(symbols) => {
+            let parents = entity_parent_map(document);
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity_descends_from(entity.id, symbols, &parents))
+                .map(|entity| entity.id)
+                .collect()
+        }
+        AnalysisScope::Packages(labels) | AnalysisScope::BuildTargets(labels) => {
+            let expected_kind = if matches!(scope, AnalysisScope::Packages(_)) {
+                EntityKind::Package
+            } else {
+                EntityKind::BuildTarget
+            };
+            let roots: BTreeSet<SymbolId> = document
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.kind == expected_kind && entity_matches_label(entity, labels)
+                })
+                .map(|entity| entity.id)
+                .collect();
+            let parents = entity_parent_map(document);
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity_descends_from(entity.id, &roots, &parents))
+                .map(|entity| entity.id)
+                .collect()
+        }
+    }
+}
+
 fn serialized_label(value: &impl Serialize) -> Result<String, QueryError> {
     let encoded = serde_json::to_string(value).map_err(|_| QueryError::ResultEncoding)?;
     encoded
@@ -3790,6 +4269,15 @@ const ARCHITECTURE_OVERVIEW_FAMILIES: &[RelationFamily] = &[
     RelationFamily::Types,
     RelationFamily::Implements,
     RelationFamily::Imports,
+    RelationFamily::Tests,
+    RelationFamily::Ownership,
+    RelationFamily::ServiceCall,
+    RelationFamily::Messaging,
+    RelationFamily::ReadsTable,
+    RelationFamily::WritesTable,
+    RelationFamily::BuildDependency,
+    RelationFamily::DataFlow,
+    RelationFamily::History,
 ];
 
 /// Aggregated architecture overview assembled before bounded result emission.
@@ -3807,6 +4295,12 @@ const ARCHITECTURE_COMMUNITY_MAX_ITERATIONS: usize = 8;
 /// Returns the stable algorithm-version label for one derived view.
 const fn architecture_overview_algorithm_version(view: ArchitectureOverviewView) -> &'static str {
     match view {
+        ArchitectureOverviewView::Modules
+        | ArchitectureOverviewView::Packages
+        | ArchitectureOverviewView::Services
+        | ArchitectureOverviewView::Data
+        | ArchitectureOverviewView::Build => "typed_entity_aggregation_v1",
+        ArchitectureOverviewView::Ownership => "normalized_ownership_projection_v1",
         ArchitectureOverviewView::Communities => "weighted_label_propagation_v1",
         ArchitectureOverviewView::Hotspots => "fan_in_out_v1",
     }
@@ -3814,6 +4308,37 @@ const fn architecture_overview_algorithm_version(view: ArchitectureOverviewView)
 
 fn architecture_overview_parameters(view: ArchitectureOverviewView) -> BTreeMap<String, String> {
     match view {
+        ArchitectureOverviewView::Modules => {
+            BTreeMap::from([("entity_kinds".to_owned(), "module,namespace".to_owned())])
+        }
+        ArchitectureOverviewView::Packages => {
+            BTreeMap::from([("entity_kinds".to_owned(), "package".to_owned())])
+        }
+        ArchitectureOverviewView::Services => {
+            BTreeMap::from([("entity_kinds".to_owned(), "service,route".to_owned())])
+        }
+        ArchitectureOverviewView::Data => BTreeMap::from([(
+            "entity_kinds".to_owned(),
+            "database_object,message_topic".to_owned(),
+        )]),
+        ArchitectureOverviewView::Build => {
+            BTreeMap::from([("entity_kinds".to_owned(), "build_target".to_owned())])
+        }
+        ArchitectureOverviewView::Ownership => BTreeMap::from([
+            (
+                "relation_family".to_owned(),
+                RelationFamily::Ownership.as_str().to_owned(),
+            ),
+            (
+                "coverage".to_owned(),
+                if RelationFamily::Ownership.predicates().is_empty() {
+                    "unavailable"
+                } else {
+                    "served"
+                }
+                .to_owned(),
+            ),
+        ]),
         ArchitectureOverviewView::Communities => BTreeMap::from([
             (
                 "graph".to_owned(),
@@ -3839,21 +4364,26 @@ fn architecture_overview_parameters(view: ArchitectureOverviewView) -> BTreeMap<
     }
 }
 
-fn seeded_community_rank(file: FileId) -> u64 {
+fn seeded_community_rank(component: &str) -> u64 {
+    let digest = content_hash(component.as_bytes());
     let mut prefix = [0_u8; size_of::<u64>()];
-    prefix.copy_from_slice(&file.as_bytes()[..size_of::<u64>()]);
+    prefix.copy_from_slice(&digest.as_bytes()[..size_of::<u64>()]);
     u64::from_be_bytes(prefix) ^ ARCHITECTURE_COMMUNITY_SEED
 }
 
-fn architecture_community_id(members: &[FileId]) -> Result<String, QueryError> {
+fn architecture_community_id(members: &[String]) -> Result<String, QueryError> {
     const IDENTITY_CONTEXT: &[u8] =
         b"rootlight/architecture-community/weighted-label-propagation/v1";
 
-    let member_bytes = members
-        .len()
-        .checked_mul(size_of::<FileId>())
-        .and_then(|bytes| bytes.checked_add(IDENTITY_CONTEXT.len() + size_of::<u64>()))
-        .ok_or(QueryError::MemoryUnavailable)?;
+    let member_bytes = members.iter().try_fold(
+        IDENTITY_CONTEXT.len() + size_of::<u64>(),
+        |bytes, member| {
+            bytes
+                .checked_add(member.len())
+                .and_then(|bytes| bytes.checked_add(1))
+                .ok_or(QueryError::MemoryUnavailable)
+        },
+    )?;
     let mut identity = Vec::new();
     identity
         .try_reserve_exact(member_bytes)
@@ -3862,49 +4392,56 @@ fn architecture_community_id(members: &[FileId]) -> Result<String, QueryError> {
     identity.extend_from_slice(&ARCHITECTURE_COMMUNITY_SEED.to_be_bytes());
     for member in members {
         identity.extend_from_slice(member.as_bytes());
+        identity.push(0);
     }
     Ok(format!("community:{}", content_hash(&identity)))
 }
 
 fn build_architecture_communities(
-    component_files: &[FileId],
-    aggregated: &BTreeMap<(FileId, FileId, RelationFamily), (u32, u16)>,
+    component_ids: &[String],
+    aggregated: &BTreeMap<(String, String, RelationFamily), (u32, u16)>,
     control: &QueryControl<'_>,
 ) -> Result<Vec<ArchitectureCommunity>, QueryError> {
-    let mut adjacency: BTreeMap<FileId, BTreeMap<FileId, u64>> = component_files
+    let mut adjacency: BTreeMap<String, BTreeMap<String, u64>> = component_ids
         .iter()
-        .copied()
-        .map(|file| (file, BTreeMap::new()))
+        .cloned()
+        .map(|component| (component, BTreeMap::new()))
         .collect();
     for ((from, to, _family), (weight, _confidence)) in aggregated {
         control.check()?;
         if let Some(neighbors) = adjacency.get_mut(from) {
-            let entry = neighbors.entry(*to).or_insert(0);
+            let entry = neighbors.entry(to.clone()).or_insert(0);
             *entry = entry.saturating_add(u64::from(*weight));
         }
         if let Some(neighbors) = adjacency.get_mut(to) {
-            let entry = neighbors.entry(*from).or_insert(0);
+            let entry = neighbors.entry(from.clone()).or_insert(0);
             *entry = entry.saturating_add(u64::from(*weight));
         }
     }
 
-    let mut labels: BTreeMap<FileId, FileId> = component_files
+    let mut labels: BTreeMap<String, String> = component_ids
         .iter()
-        .copied()
-        .map(|file| (file, file))
+        .cloned()
+        .map(|component| (component.clone(), component))
         .collect();
     for _ in 0..ARCHITECTURE_COMMUNITY_MAX_ITERATIONS {
         control.check()?;
         let mut next = labels.clone();
-        for file in component_files {
+        for component in component_ids {
             control.check()?;
-            let current = labels.get(file).copied().unwrap_or(*file);
-            let mut scores = BTreeMap::from([(current, 1_u64)]);
-            if let Some(neighbors) = adjacency.get(file) {
+            let current = labels
+                .get(component)
+                .cloned()
+                .unwrap_or_else(|| component.clone());
+            let mut scores = BTreeMap::from([(current.clone(), 1_u64)]);
+            if let Some(neighbors) = adjacency.get(component) {
                 for (neighbor, weight) in neighbors {
                     // Canonical file order makes this in-place propagation
                     // deterministic while preventing two-node label swapping.
-                    let label = next.get(neighbor).copied().unwrap_or(*neighbor);
+                    let label = next
+                        .get(neighbor)
+                        .cloned()
+                        .unwrap_or_else(|| neighbor.clone());
                     let score = scores.entry(label).or_insert(0);
                     *score = score.saturating_add(*weight);
                 }
@@ -3913,13 +4450,13 @@ fn build_architecture_communities(
                 .into_iter()
                 .max_by(|(left_label, left_score), (right_label, right_score)| {
                     left_score.cmp(right_score).then_with(|| {
-                        seeded_community_rank(*right_label)
-                            .cmp(&seeded_community_rank(*left_label))
+                        seeded_community_rank(right_label)
+                            .cmp(&seeded_community_rank(left_label))
                             .then_with(|| right_label.cmp(left_label))
                     })
                 })
                 .map_or(current, |(label, _score)| label);
-            next.insert(*file, selected);
+            next.insert(component.clone(), selected);
         }
         if next == labels {
             break;
@@ -3927,18 +4464,23 @@ fn build_architecture_communities(
         labels = next;
     }
 
-    let mut grouped: BTreeMap<FileId, Vec<FileId>> = BTreeMap::new();
-    for file in component_files {
+    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for component in component_ids {
         grouped
-            .entry(labels.get(file).copied().unwrap_or(*file))
+            .entry(
+                labels
+                    .get(component)
+                    .cloned()
+                    .unwrap_or_else(|| component.clone()),
+            )
             .or_default()
-            .push(*file);
+            .push(component.clone());
     }
     let mut communities = Vec::new();
     for (_label, mut members) in grouped {
         control.check()?;
         members.sort();
-        let member_set: BTreeSet<FileId> = members.iter().copied().collect();
+        let member_set: BTreeSet<String> = members.iter().cloned().collect();
         let internal_connection_weight = aggregated
             .iter()
             .filter(|((from, to, _family), _)| member_set.contains(from) && member_set.contains(to))
@@ -3947,10 +4489,7 @@ fn build_architecture_communities(
             });
         communities.push(ArchitectureCommunity {
             id: architecture_community_id(&members)?,
-            members: members
-                .into_iter()
-                .map(|member| member.to_string())
-                .collect(),
+            members,
             internal_connection_weight,
             ownership_truth: false,
         });
@@ -3973,14 +4512,66 @@ fn architecture_file_name(document: &NormalizedIrDocument, file: FileId) -> Stri
         .unwrap_or_else(|| file.to_string())
 }
 
-/// Builds a bounded file-granularity architecture overview.
+fn architecture_view_kinds(view: ArchitectureOverviewView) -> &'static [EntityKind] {
+    match view {
+        ArchitectureOverviewView::Modules => &[EntityKind::Module, EntityKind::Namespace],
+        ArchitectureOverviewView::Packages => &[EntityKind::Package],
+        ArchitectureOverviewView::Services => &[EntityKind::Service, EntityKind::Route],
+        ArchitectureOverviewView::Data => &[EntityKind::DatabaseObject, EntityKind::MessageTopic],
+        ArchitectureOverviewView::Build => &[EntityKind::BuildTarget],
+        ArchitectureOverviewView::Ownership
+        | ArchitectureOverviewView::Communities
+        | ArchitectureOverviewView::Hotspots => &[],
+    }
+}
+
+fn architecture_component_root(
+    document: &NormalizedIrDocument,
+    parents: &BTreeMap<SymbolId, SymbolId>,
+    symbol: SymbolId,
+    views: &[ArchitectureOverviewView],
+) -> Option<SymbolId> {
+    let mut cursor = symbol;
+    let mut visited = BTreeSet::new();
+    loop {
+        let entity = find_entity(document, cursor)?;
+        if views
+            .iter()
+            .flat_map(|view| architecture_view_kinds(*view))
+            .any(|kind| *kind == entity.kind)
+        {
+            return Some(cursor);
+        }
+        if !visited.insert(cursor) {
+            return None;
+        }
+        cursor = parents.get(&cursor).copied()?;
+    }
+}
+
+const fn architecture_tier_confidence(tier: AnalysisTier) -> u16 {
+    match tier {
+        AnalysisTier::TierA => 1_000,
+        AnalysisTier::TierB => 850,
+        AnalysisTier::TierC => 600,
+        AnalysisTier::TierD => 300,
+        _ => 0,
+    }
+}
+
+fn architecture_detail_limits(detail: ArchitectureOverviewDetail) -> (usize, usize) {
+    match detail {
+        ArchitectureOverviewDetail::Summary => (2, 0),
+        ArchitectureOverviewDetail::Standard => (8, 4),
+        ArchitectureOverviewDetail::Detailed => (16, 16),
+    }
+}
+
+/// Builds a bounded typed architecture overview.
 ///
-/// Symbols are grouped into one component per containing file, resolved from
-/// recorded `Contains` relations with a source-evidence fallback. Served
-/// entity-level relations are aggregated into typed connections between
-/// distinct components, and components are ranked by structural fan-in and
-/// fan-out. The component list is capped deterministically by symbol count and
-/// identity; connections and hotspots reference only reported components.
+/// Requested structural views select module, package, service, data, or build
+/// roots. When no structural view is requested, file components preserve the
+/// compact default. Relations aggregate only between reported components.
 fn build_architecture_overview(
     document: &NormalizedIrDocument,
     plan: &ArchitectureOverviewPlan,
@@ -3988,8 +4579,15 @@ fn build_architecture_overview(
     tracker: &mut UsageTracker,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<ArchitectureOverviewAnalysis, QueryError> {
-    // Assign each entity to its declaring file from immutable source evidence
-    // and record its closed kind label for responsibility evidence.
+    let scoped_entities = analysis_scope_entities(document, plan.scope.as_ref());
+    let structural_views: Vec<ArchitectureOverviewView> = plan
+        .views
+        .iter()
+        .copied()
+        .filter(|view| !architecture_view_kinds(*view).is_empty())
+        .collect();
+    let file_granularity = structural_views.is_empty();
+
     let mut entity_evidence_file: BTreeMap<SymbolId, FileId> = BTreeMap::new();
     let mut entity_kind: BTreeMap<SymbolId, String> = BTreeMap::new();
     for entity in &document.entities {
@@ -3999,15 +4597,15 @@ fn build_architecture_overview(
             break;
         }
         tracker.add_rows(1)?;
+        if !scoped_entities.contains(&entity.id) {
+            continue;
+        }
         if let Some(source) = entity.evidence.source.as_ref() {
             entity_evidence_file.insert(entity.id, source.span().file());
         }
         entity_kind.insert(entity.id, serialized_label(&entity.kind)?);
     }
 
-    // Single bounded relation scan: `Contains` relations confirm the owning
-    // file of each entity and supply containment confidence, while served
-    // family relations contribute raw entity-to-entity edges for aggregation.
     let allowed: BTreeSet<RelationPredicate> = ARCHITECTURE_OVERVIEW_FAMILIES
         .iter()
         .flat_map(|family| family.predicates().iter().copied())
@@ -4025,6 +4623,7 @@ fn build_architecture_overview(
         if relation.predicate == RelationPredicate::Contains {
             if let (RelationEndpoint::File(file), RelationEndpoint::Entity(symbol)) =
                 (relation.subject, relation.object)
+                && scoped_entities.contains(&symbol)
             {
                 entity_contains_file.insert(symbol, file);
                 let confidence = relation.confidence.get();
@@ -4035,8 +4634,16 @@ fn build_architecture_overview(
             }
             continue;
         }
-        let communities_requested = plan.views.contains(&ArchitectureOverviewView::Communities);
-        if (!plan.include_edges && !communities_requested) || !allowed.contains(&relation.predicate)
+        let derived_graph_requested = plan.views.iter().any(|view| {
+            matches!(
+                view,
+                ArchitectureOverviewView::Communities
+                    | ArchitectureOverviewView::Hotspots
+                    | ArchitectureOverviewView::Ownership
+            )
+        });
+        if (!plan.include_edges && !derived_graph_requested)
+            || !allowed.contains(&relation.predicate)
         {
             continue;
         }
@@ -4054,7 +4661,10 @@ fn build_architecture_overview(
         let Some(object) = endpoint_entity(document, relation.object) else {
             continue;
         };
-        if subject == object {
+        if subject == object
+            || !scoped_entities.contains(&subject)
+            || !scoped_entities.contains(&object)
+        {
             continue;
         }
         if !tracker.can_add(QueryResource::Edges, 1) {
@@ -4065,42 +4675,94 @@ fn build_architecture_overview(
         try_push(&mut raw_edges, (subject, object, family, confidence))?;
     }
 
-    // Resolve the authoritative entity-to-file assignment, preferring an
-    // explicit `Contains` relation and falling back to source evidence.
     let mut entity_file: BTreeMap<SymbolId, FileId> = entity_evidence_file;
     for (symbol, file) in entity_contains_file {
         entity_file.insert(symbol, file);
     }
 
-    // Group symbols into file-granularity components.
-    let mut file_members: BTreeMap<FileId, BTreeSet<SymbolId>> = BTreeMap::new();
-    for (symbol, file) in &entity_file {
-        file_members.entry(*file).or_default().insert(*symbol);
+    let parents = entity_parent_map(document);
+    let mut entity_component: BTreeMap<SymbolId, String> = BTreeMap::new();
+    let mut component_members: BTreeMap<String, BTreeSet<SymbolId>> = BTreeMap::new();
+    let mut component_kind: BTreeMap<String, String> = BTreeMap::new();
+    let mut component_name: BTreeMap<String, String> = BTreeMap::new();
+    for symbol in &scoped_entities {
+        if file_granularity {
+            let Some(file) = entity_file.get(symbol).copied() else {
+                continue;
+            };
+            let id = file.to_string();
+            entity_component.insert(*symbol, id.clone());
+            component_members
+                .entry(id.clone())
+                .or_default()
+                .insert(*symbol);
+            component_kind
+                .entry(id.clone())
+                .or_insert_with(|| "file".to_owned());
+            component_name
+                .entry(id)
+                .or_insert_with(|| architecture_file_name(document, file));
+            continue;
+        }
+        let Some(root) =
+            architecture_component_root(document, &parents, *symbol, &structural_views)
+        else {
+            continue;
+        };
+        let Some(root_entity) = find_entity(document, root) else {
+            continue;
+        };
+        let id = root.to_string();
+        entity_component.insert(*symbol, id.clone());
+        component_members
+            .entry(id.clone())
+            .or_default()
+            .insert(*symbol);
+        component_kind
+            .entry(id.clone())
+            .or_insert(serialized_label(&root_entity.kind)?);
+        component_name
+            .entry(id)
+            .or_insert_with(|| root_entity.qualified_name.clone());
     }
 
-    // Order components deterministically by symbol count then file identity and
-    // apply the requested component cap.
-    let mut component_files: Vec<FileId> = file_members.keys().copied().collect();
-    component_files.sort_by(|left, right| {
-        let left_count = file_members.get(left).map_or(0, BTreeSet::len);
-        let right_count = file_members.get(right).map_or(0, BTreeSet::len);
+    let mut component_ids: Vec<String> = component_members.keys().cloned().collect();
+    component_ids.sort_by(|left, right| {
+        let left_count = component_members.get(left).map_or(0, BTreeSet::len);
+        let right_count = component_members.get(right).map_or(0, BTreeSet::len);
         right_count.cmp(&left_count).then_with(|| left.cmp(right))
     });
-    if component_files.len() > plan.max_components {
+    if component_ids.len() > plan.max_components {
         record_limit(limiting_resources, QueryResource::Results)?;
     }
-    component_files.truncate(plan.max_components);
-    let reported: BTreeSet<FileId> = component_files.iter().copied().collect();
+    component_ids.truncate(plan.max_components);
+    let reported: BTreeSet<String> = component_ids.iter().cloned().collect();
 
+    let (max_responsibility_evidence, max_source_refs) = architecture_detail_limits(plan.detail);
     let mut components: Vec<ArchitectureComponent> = Vec::new();
-    for file in &component_files {
-        let Some(members) = file_members.get(file) else {
+    for id in &component_ids {
+        let Some(members) = component_members.get(id) else {
             continue;
         };
         let mut kinds: BTreeSet<String> = BTreeSet::new();
+        let mut files = BTreeSet::new();
+        let mut source_refs = Vec::new();
+        let mut confidence = 1_000_u16;
         for symbol in members {
             if let Some(kind) = entity_kind.get(symbol) {
                 kinds.insert(kind.clone());
+            }
+            if let Some(file) = entity_file.get(symbol) {
+                files.insert(*file);
+            }
+            if let Some(entity) = find_entity(document, *symbol) {
+                confidence = confidence.min(architecture_tier_confidence(entity.tier));
+                if source_refs.len() < max_source_refs
+                    && let Some(source) = entity.evidence.source.as_ref()
+                    && !source_refs.contains(source)
+                {
+                    source_refs.push(source.clone());
+                }
             }
         }
         let mut responsibility_evidence: Vec<String> = Vec::new();
@@ -4108,14 +4770,30 @@ fn build_architecture_overview(
         for kind in &kinds {
             responsibility_evidence.push(format!("entity_kind:{kind}"));
         }
-        responsibility_evidence.truncate(16);
+        responsibility_evidence.truncate(max_responsibility_evidence);
         let component = ArchitectureComponent {
-            id: file.to_string(),
-            kind: "file".to_owned(),
-            name: architecture_file_name(document, *file),
+            id: id.clone(),
+            kind: component_kind
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_owned()),
+            name: component_name
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| id.clone()),
             symbol_count: u32::try_from(members.len()).unwrap_or(u32::MAX),
+            file_count: u32::try_from(files.len()).unwrap_or(u32::MAX),
             responsibility_evidence,
-            confidence: file_confidence.get(file).copied().unwrap_or(0),
+            source_refs,
+            confidence: if file_granularity {
+                files
+                    .iter()
+                    .filter_map(|file| file_confidence.get(file).copied())
+                    .max()
+                    .unwrap_or(confidence)
+            } else {
+                confidence
+            },
         };
         emit_cycle_value(
             &mut components,
@@ -4126,17 +4804,18 @@ fn build_architecture_overview(
         )?;
     }
 
-    // Aggregate served entity edges into connections between distinct reported
-    // components, keyed by source file, target file, and relation family.
-    let mut aggregated: BTreeMap<(FileId, FileId, RelationFamily), (u32, u16)> = BTreeMap::new();
+    let mut aggregated: BTreeMap<(String, String, RelationFamily), (u32, u16)> = BTreeMap::new();
     for (subject, object, family, confidence) in &raw_edges {
-        let (Some(from), Some(to)) = (entity_file.get(subject), entity_file.get(object)) else {
+        let (Some(from), Some(to)) = (entity_component.get(subject), entity_component.get(object))
+        else {
             continue;
         };
         if from == to || !reported.contains(from) || !reported.contains(to) {
             continue;
         }
-        let entry = aggregated.entry((*from, *to, *family)).or_insert((0, 0));
+        let entry = aggregated
+            .entry((from.clone(), to.clone(), *family))
+            .or_insert((0, 0));
         entry.0 = entry.0.saturating_add(1);
         if *confidence > entry.1 {
             entry.1 = *confidence;
@@ -4165,29 +4844,46 @@ fn build_architecture_overview(
 
     // Rank reported components by structural fan-in and fan-out, normalizing
     // the score so the busiest component scores 1000.
-    let mut fan_in: BTreeMap<FileId, u32> = BTreeMap::new();
-    let mut fan_out: BTreeMap<FileId, u32> = BTreeMap::new();
+    let mut fan_in: BTreeMap<String, u32> = BTreeMap::new();
+    let mut fan_out: BTreeMap<String, u32> = BTreeMap::new();
+    let mut history_signal: BTreeMap<String, u32> = BTreeMap::new();
+    let mut ownership_signal: BTreeMap<String, u32> = BTreeMap::new();
+    let mut test_signal: BTreeMap<String, u32> = BTreeMap::new();
     for (from, to, _family) in aggregated.keys() {
-        let outbound = fan_out.entry(*from).or_insert(0);
+        let outbound = fan_out.entry(from.clone()).or_insert(0);
         *outbound = outbound.saturating_add(1);
-        let inbound = fan_in.entry(*to).or_insert(0);
+        let inbound = fan_in.entry(to.clone()).or_insert(0);
         *inbound = inbound.saturating_add(1);
     }
-    let max_total = component_files
+    for ((from, to, family), (weight, _confidence)) in &aggregated {
+        let signals = match family {
+            RelationFamily::History => Some(&mut history_signal),
+            RelationFamily::Ownership => Some(&mut ownership_signal),
+            RelationFamily::Tests => Some(&mut test_signal),
+            _ => None,
+        };
+        if let Some(signals) = signals {
+            for component in [from, to] {
+                let signal = signals.entry(component.clone()).or_insert(0);
+                *signal = signal.saturating_add(*weight);
+            }
+        }
+    }
+    let max_total = component_ids
         .iter()
-        .map(|file| {
+        .map(|component| {
             fan_in
-                .get(file)
+                .get(component)
                 .copied()
                 .unwrap_or(0)
-                .saturating_add(fan_out.get(file).copied().unwrap_or(0))
+                .saturating_add(fan_out.get(component).copied().unwrap_or(0))
         })
         .max()
         .unwrap_or(0);
-    let mut ranked: Vec<(FileId, u32, u32, u16)> = Vec::new();
-    for file in &component_files {
-        let inbound = fan_in.get(file).copied().unwrap_or(0);
-        let outbound = fan_out.get(file).copied().unwrap_or(0);
+    let mut ranked: Vec<(String, u32, u32, u16)> = Vec::new();
+    for component in &component_ids {
+        let inbound = fan_in.get(component).copied().unwrap_or(0);
+        let outbound = fan_out.get(component).copied().unwrap_or(0);
         let total = inbound.saturating_add(outbound);
         if total == 0 {
             continue;
@@ -4197,7 +4893,7 @@ fn build_architecture_overview(
         } else {
             u16::try_from(u64::from(total) * 1_000 / u64::from(max_total)).unwrap_or(1_000)
         };
-        ranked.push((*file, inbound, outbound, score));
+        ranked.push((component.clone(), inbound, outbound, score));
     }
     ranked.sort_by(|left, right| {
         right
@@ -4208,13 +4904,15 @@ fn build_architecture_overview(
             .then_with(|| left.0.cmp(&right.0))
     });
     let mut hotspots: Vec<ArchitectureHotspot> = Vec::new();
-    for (file, inbound, outbound, score) in ranked {
+    for (component, inbound, outbound, score) in ranked {
         let hotspot = ArchitectureHotspot {
-            component_id: file.to_string(),
+            component_id: component.clone(),
             fan_in: inbound,
             fan_out: outbound,
-            change_frequency: None,
+            change_frequency: history_signal.get(&component).copied(),
             complexity: None,
+            ownership_signal: ownership_signal.get(&component).copied(),
+            test_signal: test_signal.get(&component).copied(),
             score,
         };
         emit_cycle_value(&mut hotspots, hotspot, tracker, limiting_resources, control)?;
@@ -4222,7 +4920,7 @@ fn build_architecture_overview(
 
     let mut communities = Vec::new();
     if plan.views.contains(&ArchitectureOverviewView::Communities) {
-        for community in build_architecture_communities(&component_files, &aggregated, control)? {
+        for community in build_architecture_communities(&component_ids, &aggregated, control)? {
             emit_cycle_value(
                 &mut communities,
                 community,
@@ -4258,13 +4956,38 @@ fn build_architecture_overview(
 /// contributes to exactly one direct-edge rationale. `CalledBy` is intentionally
 /// omitted because it shares the `Calls` predicate and would double-count the
 /// same directed edge.
-const TESTS_SELECT_FAMILIES: &[RelationFamily] = &[
-    RelationFamily::Calls,
-    RelationFamily::References,
-    RelationFamily::Types,
-    RelationFamily::Implements,
-    RelationFamily::Imports,
-];
+#[derive(Clone, Copy)]
+struct TestsSelectSignal {
+    label: &'static str,
+    history: bool,
+    build: bool,
+}
+
+fn tests_select_signal(predicate: RelationPredicate) -> Option<TestsSelectSignal> {
+    let (label, history, build) = match predicate {
+        RelationPredicate::Calls | RelationPredicate::DispatchCandidate => ("calls", false, false),
+        RelationPredicate::RefersTo => ("references", false, false),
+        RelationPredicate::UsesType
+        | RelationPredicate::ReturnsType
+        | RelationPredicate::ParameterType => ("types", false, false),
+        RelationPredicate::Implements
+        | RelationPredicate::Satisfies
+        | RelationPredicate::Extends
+        | RelationPredicate::Embeds
+        | RelationPredicate::MixesIn
+        | RelationPredicate::Overrides => ("implements", false, false),
+        RelationPredicate::Imports => ("imports", false, false),
+        RelationPredicate::Tests => ("tests", false, false),
+        RelationPredicate::DependsOn => ("build_dependency", false, true),
+        RelationPredicate::CoChangedWith => ("history", true, false),
+        _ => return None,
+    };
+    Some(TestsSelectSignal {
+        label,
+        history,
+        build,
+    })
+}
 
 /// Maximum honest coverage gaps reported by one `tests.select`.
 const TESTS_SELECT_MAX_GAPS: usize = 128;
@@ -4280,17 +5003,70 @@ struct TestsSelectAnalysis {
 struct TestsSelectScored {
     test_id: SymbolId,
     kind: TestsSelectKind,
+    framework: String,
     score: u16,
     why: Vec<String>,
+    estimated_cost_ms: u32,
 }
 
-/// Returns the honest test granularity for one normalized test entity.
-///
-/// The first-slice lexical oracle records a test as an entity kind or flag but
-/// cannot distinguish integration, end-to-end, or contract tests, so every
-/// detected test entity is reported as unit-level.
-fn test_kind_for_entity(_entity: &rootlight_ir::EntityRecord) -> TestsSelectKind {
-    TestsSelectKind::Unit
+struct TestsSelectCandidate {
+    kind: TestsSelectKind,
+    framework: String,
+    estimated_cost_ms: u32,
+}
+
+fn test_candidate(entity: &rootlight_ir::EntityRecord, path: Option<&str>) -> TestsSelectCandidate {
+    let path = path.unwrap_or_default().to_ascii_lowercase();
+    let name = entity.display_name.to_ascii_lowercase();
+    let joined = format!("{path}/{name}");
+    let kind = if joined.contains("e2e") || joined.contains("end_to_end") {
+        TestsSelectKind::E2e
+    } else if joined.contains("contract") || joined.contains("schema") {
+        TestsSelectKind::Contract
+    } else if joined.contains("integration")
+        || path.contains("/tests/")
+        || path.starts_with("tests/")
+    {
+        TestsSelectKind::Integration
+    } else if joined.contains("lint") || joined.contains("clippy") || joined.contains("static") {
+        TestsSelectKind::Static
+    } else if joined.contains("build") || joined.contains("compile") {
+        TestsSelectKind::Build
+    } else {
+        TestsSelectKind::Unit
+    };
+    let language = entity.language.to_ascii_lowercase();
+    let framework = if joined.contains("vitest") {
+        "vitest"
+    } else if joined.contains("jest") {
+        "jest"
+    } else if language == "rust" {
+        "rust_test"
+    } else if language == "python" {
+        "pytest"
+    } else if language == "go" {
+        "go_test"
+    } else if matches!(
+        language.as_str(),
+        "javascript" | "typescript" | "tsx" | "jsx"
+    ) {
+        "javascript_test"
+    } else {
+        language.as_str()
+    }
+    .to_owned();
+    let estimated_cost_ms = match kind {
+        TestsSelectKind::Unit => 1_000,
+        TestsSelectKind::Integration | TestsSelectKind::Contract => 5_000,
+        TestsSelectKind::Static => 10_000,
+        TestsSelectKind::E2e => 30_000,
+        TestsSelectKind::Build => 60_000,
+    };
+    TestsSelectCandidate {
+        kind,
+        framework,
+        estimated_cost_ms,
+    }
 }
 
 /// Computes a deterministic relevance score from the served signals.
@@ -4330,8 +5106,19 @@ fn build_tests_select(
 ) -> Result<TestsSelectAnalysis, QueryError> {
     // Identify test entities and resolve each entity's declaring file from
     // immutable source evidence.
+    let file_paths: BTreeMap<FileId, String> = document
+        .files
+        .iter()
+        .map(|file| (file.id, file.path.clone()))
+        .collect();
+    let requested_seed_paths: BTreeSet<&str> = plan.seed_paths.iter().map(String::as_str).collect();
+    let requested_build_targets: BTreeSet<&str> =
+        plan.seed_build_targets.iter().map(String::as_str).collect();
+    let mut effective_seeds = plan.seeds.clone();
+    let mut resolved_seed_paths = BTreeSet::new();
+    let mut resolved_build_targets = BTreeSet::new();
     let mut entity_file: BTreeMap<SymbolId, FileId> = BTreeMap::new();
-    let mut tests: BTreeMap<SymbolId, TestsSelectKind> = BTreeMap::new();
+    let mut tests: BTreeMap<SymbolId, TestsSelectCandidate> = BTreeMap::new();
     let mut scan_truncated = false;
     for entity in &document.entities {
         control.check()?;
@@ -4341,24 +5128,46 @@ fn build_tests_select(
             break;
         }
         tracker.add_rows(1)?;
-        if let Some(source) = entity.evidence.source.as_ref() {
-            entity_file.insert(entity.id, source.span().file());
+        let source_file = entity
+            .evidence
+            .source
+            .as_ref()
+            .map(|source| source.span().file());
+        if let Some(file) = source_file {
+            entity_file.insert(entity.id, file);
+            if let Some(path) = file_paths.get(&file)
+                && requested_seed_paths.contains(path.as_str())
+            {
+                effective_seeds.insert(entity.id);
+                resolved_seed_paths.insert(path.clone());
+            }
+        }
+        if entity.kind == EntityKind::BuildTarget {
+            for target in &requested_build_targets {
+                if entity.canonical_name == *target
+                    || entity.display_name == *target
+                    || entity.qualified_name == *target
+                {
+                    effective_seeds.insert(entity.id);
+                    resolved_build_targets.insert((*target).to_owned());
+                }
+            }
         }
         if entity_is_test(entity) {
-            tests.insert(entity.id, test_kind_for_entity(entity));
+            let path = source_file
+                .and_then(|file| file_paths.get(&file))
+                .map(String::as_str);
+            tests.insert(entity.id, test_candidate(entity, path));
         }
     }
 
-    // Single bounded relation scan: `Contains` relations confirm the owning file
-    // of each entity, while served family relations contribute the outbound
-    // adjacency used for the direct and transitive signals.
-    let allowed: BTreeSet<RelationPredicate> = TESTS_SELECT_FAMILIES
-        .iter()
-        .flat_map(|family| family.predicates().iter().copied())
-        .collect();
-    let mut out_adj: BTreeMap<SymbolId, Vec<(SymbolId, RelationFamily, u16, bool)>> =
+    // A single bounded relation scan contributes explicit test, semantic,
+    // build-target, and bounded historical signals without a second graph walk.
+    let mut out_adj: BTreeMap<SymbolId, Vec<(SymbolId, TestsSelectSignal, u16, bool)>> =
         BTreeMap::new();
     let mut saw_dispatch_candidate = false;
+    let mut observed_history_evidence = false;
+    let mut observed_build_evidence = false;
     for relation in &document.relations {
         control.check()?;
         if !tracker.can_add(QueryResource::Rows, 1) {
@@ -4375,14 +5184,13 @@ fn build_tests_select(
             }
             continue;
         }
-        if !allowed.contains(&relation.predicate) {
-            continue;
-        }
         let dispatch_candidate = relation.predicate == RelationPredicate::DispatchCandidate;
         saw_dispatch_candidate |= dispatch_candidate;
-        let Some(family) = predicate_family(TESTS_SELECT_FAMILIES, relation.predicate) else {
+        let Some(signal) = tests_select_signal(relation.predicate) else {
             continue;
         };
+        observed_history_evidence |= signal.history;
+        observed_build_evidence |= signal.build;
         let Some(subject) = endpoint_entity(document, relation.subject) else {
             continue;
         };
@@ -4402,7 +5210,7 @@ fn build_tests_select(
         out_adj
             .entry(subject)
             .or_default()
-            .push((object, family, confidence, dispatch_candidate));
+            .push((object, signal, confidence, dispatch_candidate));
     }
     let coverage = repository_coverage_summary(document, control, tracker, limiting_resources)?;
     scan_truncated |= coverage.truncated;
@@ -4413,7 +5221,7 @@ fn build_tests_select(
 
     // Resolve the file set occupied by the seeds for the co-location signal.
     let mut seed_files: BTreeSet<FileId> = BTreeSet::new();
-    for seed in &plan.seeds {
+    for seed in &effective_seeds {
         if let Some(file) = entity_file.get(seed) {
             seed_files.insert(*file);
         }
@@ -4425,22 +5233,28 @@ fn build_tests_select(
     let mut scored: Vec<TestsSelectScored> = Vec::new();
     let mut any_direct = false;
     let mut any_transitive = false;
+    let mut any_history = false;
+    let mut any_build = false;
     let mut any_colocated = false;
     let mut covered_seeds: BTreeSet<SymbolId> = BTreeSet::new();
-    for (test_id, kind) in &tests {
+    let requested_frameworks: BTreeSet<&str> = plan.frameworks.iter().map(String::as_str).collect();
+    for (test_id, candidate) in &tests {
         control.check()?;
-        if !requested_kinds.is_empty() && !requested_kinds.contains(kind) {
+        if (!requested_kinds.is_empty() && !requested_kinds.contains(&candidate.kind))
+            || (!requested_frameworks.is_empty()
+                && !requested_frameworks.contains(candidate.framework.as_str()))
+        {
             continue;
         }
         let edges = out_adj.get(test_id).map(Vec::as_slice).unwrap_or(&[]);
         // Direct signal: strongest outbound edge into a seed.
         let mut direct_confidence = 0_u16;
-        let mut direct_family: Option<RelationFamily> = None;
+        let mut direct_signal: Option<TestsSelectSignal> = None;
         let mut direct_candidate = false;
-        for (target, family, confidence, candidate) in edges {
-            if plan.seeds.contains(target) && *confidence > direct_confidence {
+        for (target, signal, confidence, candidate) in edges {
+            if effective_seeds.contains(target) && *confidence > direct_confidence {
                 direct_confidence = *confidence;
-                direct_family = Some(*family);
+                direct_signal = Some(*signal);
                 direct_candidate = *candidate;
                 covered_seeds.insert(*target);
             }
@@ -4449,22 +5263,26 @@ fn build_tests_select(
         // weighted by the weakest edge on the path.
         let mut transitive_confidence = 0_u16;
         let mut transitive_candidate = false;
+        let mut transitive_history = false;
+        let mut transitive_build = false;
         if direct_confidence == 0 {
-            for (mid, _family, first_confidence, first_candidate) in edges {
-                if plan.seeds.contains(mid) {
+            for (mid, first_signal, first_confidence, first_candidate) in edges {
+                if effective_seeds.contains(mid) {
                     continue;
                 }
                 let Some(second_hop) = out_adj.get(mid) else {
                     continue;
                 };
-                for (target, _second_family, second_confidence, second_candidate) in second_hop {
-                    if !plan.seeds.contains(target) {
+                for (target, second_signal, second_confidence, second_candidate) in second_hop {
+                    if !effective_seeds.contains(target) {
                         continue;
                     }
                     let path_confidence = (*first_confidence).min(*second_confidence);
                     if path_confidence > transitive_confidence {
                         transitive_confidence = path_confidence;
                         transitive_candidate = *first_candidate || *second_candidate;
+                        transitive_history = first_signal.history || second_signal.history;
+                        transitive_build = first_signal.build || second_signal.build;
                         covered_seeds.insert(*target);
                     }
                 }
@@ -4475,7 +5293,7 @@ fn build_tests_select(
             .get(test_id)
             .is_some_and(|file| seed_files.contains(file));
         if colocated && let Some(test_file) = entity_file.get(test_id) {
-            for seed in &plan.seeds {
+            for seed in &effective_seeds {
                 if entity_file.get(seed) == Some(test_file) {
                     covered_seeds.insert(*seed);
                 }
@@ -4486,9 +5304,15 @@ fn build_tests_select(
         let transitive = transitive_confidence > 0 && !direct;
         if direct {
             any_direct = true;
+            if let Some(signal) = direct_signal {
+                any_history |= signal.history;
+                any_build |= signal.build;
+            }
         }
         if transitive {
             any_transitive = true;
+            any_history |= transitive_history;
+            any_build |= transitive_build;
         }
         if colocated {
             any_colocated = true;
@@ -4501,8 +5325,8 @@ fn build_tests_select(
         let mut why = Vec::new();
         if direct {
             why.push("direct_test_edge".to_owned());
-            if let Some(family) = direct_family {
-                why.push(format!("via:{}", family.as_str()));
+            if let Some(signal) = direct_signal {
+                why.push(format!("via:{}", signal.label));
             }
         }
         if transitive {
@@ -4517,9 +5341,11 @@ fn build_tests_select(
         why.truncate(8);
         scored.push(TestsSelectScored {
             test_id: *test_id,
-            kind: *kind,
+            kind: candidate.kind,
+            framework: candidate.framework.clone(),
             score,
             why,
+            estimated_cost_ms: candidate.estimated_cost_ms,
         });
     }
 
@@ -4531,25 +5357,52 @@ fn build_tests_select(
             .then_with(|| left.test_id.cmp(&right.test_id))
     });
     let mut ranked_tests: Vec<RankedTestSelection> = Vec::new();
+    let mut selected_cost_ms = 0_u32;
+    let mut selected_slow_tests = 0_u16;
+    let mut execution_budget_excluded = false;
     for entry in scored {
         if ranked_tests.len() >= plan.max_tests {
             record_limit(limiting_resources, QueryResource::Results)?;
             break;
         }
+        let next_cost_ms = selected_cost_ms
+            .checked_add(entry.estimated_cost_ms)
+            .ok_or(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            })?;
+        let is_slow = entry.estimated_cost_ms >= 10_000;
+        let next_slow_tests = selected_slow_tests.checked_add(u16::from(is_slow)).ok_or(
+            QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            },
+        )?;
+        if plan
+            .max_total_ms
+            .is_some_and(|maximum| next_cost_ms > maximum)
+            || plan
+                .max_slow_tests
+                .is_some_and(|maximum| next_slow_tests > maximum)
+        {
+            execution_budget_excluded = true;
+            continue;
+        }
+        selected_cost_ms = next_cost_ms;
+        selected_slow_tests = next_slow_tests;
         let path = entity_file
             .get(&entry.test_id)
             .and_then(|file| find_file(document, *file))
             .map(|record| record.path.clone());
         let command_hint = plan
             .include_commands
-            .then(|| format!("test:{}", entry.kind.as_str()));
+            .then(|| format!("test:{}:{}", entry.framework, entry.test_id));
         let ranked = RankedTestSelection {
             test_id: entry.test_id,
             kind: entry.kind,
+            framework: entry.framework,
             path,
             score: entry.score,
             why: entry.why,
-            estimated_cost_ms: None,
+            estimated_cost_ms: Some(entry.estimated_cost_ms),
             command_hint,
         };
         emit_cycle_value(
@@ -4581,13 +5434,133 @@ fn build_tests_select(
         };
         emit_cycle_value(&mut gaps, gap, tracker, limiting_resources, control)?;
     }
+    for path in &plan.seed_paths {
+        if resolved_seed_paths.contains(path) {
+            continue;
+        }
+        if gaps.len() >= TESTS_SELECT_MAX_GAPS {
+            record_limit(limiting_resources, QueryResource::Results)?;
+            break;
+        }
+        emit_cycle_value(
+            &mut gaps,
+            TestsSelectGap {
+                scope: path.clone(),
+                reason: "seed_path_not_indexed".to_owned(),
+            },
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+    for target in &plan.seed_build_targets {
+        if resolved_build_targets.contains(target) {
+            continue;
+        }
+        if gaps.len() >= TESTS_SELECT_MAX_GAPS {
+            record_limit(limiting_resources, QueryResource::Results)?;
+            break;
+        }
+        emit_cycle_value(
+            &mut gaps,
+            TestsSelectGap {
+                scope: target.clone(),
+                reason: "build_target_not_indexed".to_owned(),
+            },
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+    let observed_frameworks: BTreeSet<&str> = tests
+        .values()
+        .map(|candidate| candidate.framework.as_str())
+        .collect();
+    for framework in &plan.frameworks {
+        if observed_frameworks.contains(framework.as_str()) {
+            continue;
+        }
+        if gaps.len() >= TESTS_SELECT_MAX_GAPS {
+            record_limit(limiting_resources, QueryResource::Results)?;
+            break;
+        }
+        emit_cycle_value(
+            &mut gaps,
+            TestsSelectGap {
+                scope: framework.clone(),
+                reason: "framework_not_observed".to_owned(),
+            },
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+    if execution_budget_excluded && gaps.len() < TESTS_SELECT_MAX_GAPS {
+        emit_cycle_value(
+            &mut gaps,
+            TestsSelectGap {
+                scope: "execution_budget".to_owned(),
+                reason: "execution_budget_excluded_candidates".to_owned(),
+            },
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+    if !observed_history_evidence && gaps.len() < TESTS_SELECT_MAX_GAPS {
+        emit_cycle_value(
+            &mut gaps,
+            TestsSelectGap {
+                scope: "history_evidence".to_owned(),
+                reason: "history_signal_unavailable".to_owned(),
+            },
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+    let build_evidence_requested =
+        !plan.seed_build_targets.is_empty() || plan.test_kinds.contains(&TestsSelectKind::Build);
+    if build_evidence_requested && !observed_build_evidence && gaps.len() < TESTS_SELECT_MAX_GAPS {
+        emit_cycle_value(
+            &mut gaps,
+            TestsSelectGap {
+                scope: "build_evidence".to_owned(),
+                reason: "build_target_signal_unavailable".to_owned(),
+            },
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+    let runtime_evidence_observed = document
+        .provenance
+        .iter()
+        .any(|provenance| provenance.producer_kind == ProducerKind::RuntimeTrace);
+    if !runtime_evidence_observed && gaps.len() < TESTS_SELECT_MAX_GAPS {
+        emit_cycle_value(
+            &mut gaps,
+            TestsSelectGap {
+                scope: "runtime_evidence".to_owned(),
+                reason: if saw_dispatch_candidate {
+                    "dynamic_dispatch_runtime_evidence_unavailable".to_owned()
+                } else {
+                    "runtime_coverage_unavailable".to_owned()
+                },
+            },
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
 
     Ok(TestsSelectAnalysis {
         tests: ranked_tests,
         coverage_strategy: TestsSelectCoverage {
             direct_edges: any_direct,
             transitive_signals: any_transitive,
-            history_signals: false,
+            history_signals: any_history,
+            build_target_signals: any_build,
             file_colocation_signals: any_colocated,
         },
         gaps,
@@ -4607,6 +5580,79 @@ const CHANGE_IMPACT_FAMILIES: &[RelationFamily] = &[
     RelationFamily::Implements,
     RelationFamily::Imports,
 ];
+
+fn change_impact_family(
+    policy: ChangeImpactRelationPolicy,
+    include_history: bool,
+    predicate: RelationPredicate,
+) -> Option<RelationFamily> {
+    if include_history && predicate == RelationPredicate::CoChangedWith {
+        return Some(RelationFamily::History);
+    }
+    if let Some(family) = predicate_family(CHANGE_IMPACT_FAMILIES, predicate) {
+        return Some(family);
+    }
+    if policy != ChangeImpactRelationPolicy::Conservative {
+        return None;
+    }
+    match predicate {
+        RelationPredicate::Tests => Some(RelationFamily::Tests),
+        RelationPredicate::DependsOn => Some(RelationFamily::BuildDependency),
+        RelationPredicate::CallsRoute | RelationPredicate::ServesRoute => {
+            Some(RelationFamily::CallsRoute)
+        }
+        RelationPredicate::Publishes | RelationPredicate::Consumes => {
+            Some(RelationFamily::Messaging)
+        }
+        RelationPredicate::ReadsTable => Some(RelationFamily::ReadsTable),
+        RelationPredicate::WritesTable => Some(RelationFamily::WritesTable),
+        RelationPredicate::Reads | RelationPredicate::Writes => Some(RelationFamily::DataFlow),
+        RelationPredicate::OwnedBy => Some(RelationFamily::Ownership),
+        RelationPredicate::ChangedIn => Some(RelationFamily::History),
+        _ => None,
+    }
+}
+
+fn path_is_in_scope(path: &str, scope_paths: &[String]) -> bool {
+    scope_paths.is_empty()
+        || scope_paths.iter().any(|scope| {
+            path == scope
+                || path
+                    .strip_prefix(scope)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+}
+
+fn label_is_in_scope(label: &str, scopes: &[String]) -> bool {
+    scopes.is_empty()
+        || scopes.iter().any(|scope| {
+            label == scope
+                || label
+                    .strip_prefix(scope)
+                    .is_some_and(|suffix| suffix.starts_with("::"))
+        })
+}
+
+fn impact_symbol_in_scope(
+    plan: &ChangeImpactPlan,
+    symbol: SymbolId,
+    entity_file: &BTreeMap<SymbolId, FileId>,
+    file_path_by_id: &BTreeMap<FileId, String>,
+    entity_label: &BTreeMap<SymbolId, String>,
+) -> bool {
+    let path_matches = plan.scope_paths.is_empty()
+        || entity_file
+            .get(&symbol)
+            .and_then(|file| file_path_by_id.get(file))
+            .is_some_and(|path| path_is_in_scope(path, &plan.scope_paths));
+    let label = entity_label
+        .get(&symbol)
+        .map(String::as_str)
+        .unwrap_or_default();
+    path_matches
+        && label_is_in_scope(label, &plan.scope_packages)
+        && label_is_in_scope(label, &plan.scope_services)
+}
 
 /// Maximum resolved changes reported by one `change.impact`.
 const CHANGE_IMPACT_MAX_RESOLVED: usize = 1_256;
@@ -4640,8 +5686,14 @@ fn build_change_impact(
     // Resolve per-entity metadata: declaring file, kind label, and public
     // surface membership, plus the path-to-file map used to resolve explicit
     // path changes.
+    let file_path_by_id: BTreeMap<FileId, String> = document
+        .files
+        .iter()
+        .map(|file| (file.id, file.path.clone()))
+        .collect();
     let mut entity_file: BTreeMap<SymbolId, FileId> = BTreeMap::new();
     let mut entity_kind: BTreeMap<SymbolId, String> = BTreeMap::new();
+    let mut entity_label: BTreeMap<SymbolId, String> = BTreeMap::new();
     let mut entity_public: BTreeSet<SymbolId> = BTreeSet::new();
     for entity in &document.entities {
         control.check()?;
@@ -4654,6 +5706,7 @@ fn build_change_impact(
             entity_file.insert(entity.id, source.span().file());
         }
         entity_kind.insert(entity.id, serialized_label(&entity.kind)?);
+        entity_label.insert(entity.id, entity.qualified_name.clone());
         if entity_is_exported(entity) {
             entity_public.insert(entity.id);
         }
@@ -4664,15 +5717,11 @@ fn build_change_impact(
         path_to_file.insert(file.path.clone(), file.id);
     }
 
-    // Single bounded relation scan: `Contains` relations confirm the owning file
-    // of each entity, while served family relations contribute the reverse
-    // dependent adjacency (a subject edge into an object makes the subject a
-    // dependent of the object).
-    let allowed: BTreeSet<RelationPredicate> = CHANGE_IMPACT_FAMILIES
-        .iter()
-        .flat_map(|family| family.predicates().iter().copied())
-        .collect();
+    // A single bounded relation scan selects the requested propagation policy
+    // and contributes the reverse dependent adjacency.
     let mut dependents: BTreeMap<SymbolId, Vec<(SymbolId, RelationFamily, u16)>> = BTreeMap::new();
+    let mut saw_dispatch_candidate = false;
+    let mut saw_history_signal = false;
     for relation in &document.relations {
         control.check()?;
         if !tracker.can_add(QueryResource::Rows, 1) {
@@ -4688,16 +5737,20 @@ fn build_change_impact(
             }
             continue;
         }
-        if !allowed.contains(&relation.predicate) {
+        saw_dispatch_candidate |= relation.predicate == RelationPredicate::DispatchCandidate;
+        saw_history_signal |=
+            plan.include_history && relation.predicate == RelationPredicate::CoChangedWith;
+        let Some(family) = change_impact_family(
+            plan.relation_policy,
+            plan.include_history,
+            relation.predicate,
+        ) else {
             continue;
-        }
+        };
         let confidence = effective_relation_confidence(document, relation);
         if confidence < plan.min_confidence {
             continue;
         }
-        let Some(family) = predicate_family(CHANGE_IMPACT_FAMILIES, relation.predicate) else {
-            continue;
-        };
         let Some(subject) = endpoint_entity(document, relation.subject) else {
             continue;
         };
@@ -4705,6 +5758,9 @@ fn build_change_impact(
             continue;
         };
         if subject == object {
+            continue;
+        }
+        if !impact_symbol_in_scope(plan, subject, &entity_file, &file_path_by_id, &entity_label) {
             continue;
         }
         if !tracker.can_add(QueryResource::Edges, 1) {
@@ -4725,6 +5781,7 @@ fn build_change_impact(
                 .then_with(|| right.2.cmp(&left.2))
         });
     }
+    let coverage = repository_coverage_summary(document, control, tracker, limiting_resources)?;
 
     // Build the file-to-entity map after containment is fully resolved.
     let mut file_entities: BTreeMap<FileId, BTreeSet<SymbolId>> = BTreeMap::new();
@@ -4794,7 +5851,14 @@ fn build_change_impact(
         Vec::new()
     };
 
-    let risk_summary = change_impact_risk_summary(&resolved_changes, &impacted);
+    let risk_summary = change_impact_risk_summary(
+        &resolved_changes,
+        &impacted,
+        coverage.entities_complete && coverage.relations_semantic_complete && !coverage.truncated,
+        saw_dispatch_candidate,
+        plan.include_history,
+        saw_history_signal,
+    );
 
     Ok(ChangeImpactAnalysis {
         resolved_changes,
@@ -5023,8 +6087,13 @@ fn build_change_impact_tests(
     }
     let selection_plan = TestsSelectPlan {
         seeds,
+        seed_paths: Vec::new(),
+        seed_build_targets: Vec::new(),
         test_kinds: Vec::new(),
+        frameworks: Vec::new(),
         max_tests: CHANGE_IMPACT_MAX_TESTS,
+        max_total_ms: None,
+        max_slow_tests: None,
         include_commands: false,
         budget: plan.budget,
         explanation: plan.explanation.clone(),
@@ -5063,6 +6132,10 @@ fn build_change_impact_tests(
 fn change_impact_risk_summary(
     resolved_changes: &[ResolvedChangeRecord],
     impacted: &[ImpactGroupRecord],
+    coverage_complete: bool,
+    saw_dispatch_candidate: bool,
+    history_requested: bool,
+    history_observed: bool,
 ) -> ChangeImpactRiskSummary {
     let fanout = u32::try_from(
         impacted
@@ -5098,17 +6171,34 @@ fn change_impact_risk_summary(
     } else {
         reasons.push("no_measured_impact".to_owned());
     }
-    // The lexical oracle never resolves dynamic dispatch or reflection, so every
-    // result carries an honest blind-spot caveat.
-    reasons.push("dynamic_dispatch_blind_spot".to_owned());
+    if saw_dispatch_candidate || !coverage_complete {
+        reasons.push("dynamic_dispatch_blind_spot".to_owned());
+    }
+    if history_requested {
+        reasons.push(
+            if history_observed {
+                "bounded_history_signal_observed"
+            } else {
+                "history_signal_unavailable"
+            }
+            .to_owned(),
+        );
+    }
+    if !coverage_complete {
+        reasons.push("impact_coverage_incomplete".to_owned());
+    }
     reasons.truncate(16);
     ChangeImpactRiskSummary {
         level,
         reasons,
-        coverage: CoverageStatus::Unknown,
+        coverage: if coverage_complete {
+            CoverageStatus::Complete
+        } else {
+            CoverageStatus::Bounded
+        },
         breaking_surface,
         fanout,
-        dynamic_blind_spots: true,
+        dynamic_blind_spots: saw_dispatch_candidate || !coverage_complete,
     }
 }
 
@@ -5185,6 +6275,18 @@ fn build_plan_change(
     for file in &plan.target_files {
         resolved_target_files.insert(*file);
     }
+    for file in &document.files {
+        control.check()?;
+        if plan.target_paths.iter().any(|path| {
+            file.path == *path
+                || file
+                    .path
+                    .strip_prefix(path)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        }) {
+            resolved_target_files.insert(file.id);
+        }
+    }
     if !resolved_target_files.is_empty() {
         let mut scanned_rows = 0_u64;
         for entity in &document.entities {
@@ -5255,6 +6357,10 @@ fn build_plan_change(
         }
     }
 
+    if resolved_targets.is_empty() {
+        return Err(QueryError::SymbolNotFound);
+    }
+
     let closure = plan_change_impact_closure(
         document,
         &resolved_targets,
@@ -5309,20 +6415,21 @@ fn build_plan_change(
     let affected_scope =
         plan_change_impact_summary(&resolved_targets, &closure, &entity_file, &entity_public);
 
-    let (plan_steps, steps_truncated) = build_plan_change_steps(
-        plan.objective,
-        &plan.objective_text,
-        &resolved_targets,
-        &closure,
-        &test_symbols,
-        &affected_scope,
-        plan.max_steps,
-    );
+    let step_inputs = PlanChangeStepInputs {
+        objective_text: &plan.objective_text,
+        resolved_targets: &resolved_targets,
+        closure: &closure,
+        test_symbols: &test_symbols,
+        affected_scope: &affected_scope,
+        constraints: &plan.constraints,
+        max_steps: plan.max_steps,
+    };
+    let (plan_steps, steps_truncated) = build_plan_change_steps(plan.objective, &step_inputs);
     if steps_truncated {
         record_limit(limiting_resources, QueryResource::Results)?;
     }
 
-    let open_decisions = plan_change_decisions(plan.objective, &affected_scope);
+    let open_decisions = plan_change_decisions(plan.objective, &affected_scope, &plan.constraints);
 
     let (context_pack_request, context_pack_truncated) = plan_change_context_pack(
         &resolved_targets,
@@ -5536,6 +6643,7 @@ fn build_plan_change_tests(
                 direct_edges: false,
                 transitive_signals: false,
                 history_signals: false,
+                build_target_signals: false,
                 file_colocation_signals: false,
             },
             gaps: Vec::new(),
@@ -5564,6 +6672,7 @@ fn build_plan_change_tests(
                 direct_edges: false,
                 transitive_signals: false,
                 history_signals: false,
+                build_target_signals: false,
                 file_colocation_signals: false,
             },
             gaps: Vec::new(),
@@ -5571,8 +6680,13 @@ fn build_plan_change_tests(
     }
     let selection_plan = TestsSelectPlan {
         seeds,
+        seed_paths: Vec::new(),
+        seed_build_targets: Vec::new(),
         test_kinds: Vec::new(),
+        frameworks: Vec::new(),
         max_tests: PLAN_CHANGE_MAX_TESTS,
+        max_total_ms: None,
+        max_slow_tests: None,
         include_commands: false,
         budget: plan.budget,
         explanation: plan.explanation.clone(),
@@ -5634,24 +6748,39 @@ fn plan_change_impact_summary(
     }
 }
 
+struct PlanChangeStepInputs<'a> {
+    objective_text: &'a str,
+    resolved_targets: &'a BTreeSet<SymbolId>,
+    closure: &'a [ImpactEntryRecord],
+    test_symbols: &'a [SymbolId],
+    affected_scope: &'a PlanChangeImpactSummary,
+    constraints: &'a [String],
+    max_steps: usize,
+}
+
 /// Builds the deterministic ordered plan steps from the objective and impact.
 ///
 /// Modification objectives emit inspect, modify, update-dependents, and
 /// run-tests steps plus a public-surface confirmation when public surface is
 /// touched; explanation and review objectives emit read-only inspect, trace or
 /// assess, and report steps. The first action identifies the caller-authored
-/// requested outcome as something to validate; risks and verification hints
-/// remain source-free. The sequence is capped at `max_steps`, and every step
-/// only depends on earlier ordinals so truncation keeps dependencies valid.
+/// requested outcome and caller constraints as instructions to validate; risk
+/// codes and verification hints remain source-free. The sequence is capped at
+/// `max_steps`, and every step only depends on earlier ordinals so truncation
+/// keeps dependencies valid.
 fn build_plan_change_steps(
     objective: PlanChangeObjective,
-    objective_text: &str,
-    resolved_targets: &BTreeSet<SymbolId>,
-    closure: &[ImpactEntryRecord],
-    test_symbols: &[SymbolId],
-    affected_scope: &PlanChangeImpactSummary,
-    max_steps: usize,
+    inputs: &PlanChangeStepInputs<'_>,
 ) -> (Vec<PlanChangeStepRecord>, bool) {
+    let PlanChangeStepInputs {
+        objective_text,
+        resolved_targets,
+        closure,
+        test_symbols,
+        affected_scope,
+        constraints,
+        max_steps,
+    } = inputs;
     let target_symbols_truncated = resolved_targets.len() > PLAN_CHANGE_MAX_STEP_TARGETS;
     let direct_dependents_truncated =
         closure.iter().filter(|entry| entry.distance == 1).count() > PLAN_CHANGE_MAX_STEP_TARGETS;
@@ -5796,11 +6925,31 @@ fn build_plan_change_steps(
             }
         }
     }
-    let truncated = steps.len() > max_steps
+    if !constraints.is_empty() {
+        let step = u8::try_from(steps.len().saturating_add(1)).unwrap_or(100);
+        let depends_on = steps
+            .last()
+            .map(|previous| vec![previous.step])
+            .unwrap_or_default();
+        let mut summary = constraints.join("; ");
+        if summary.chars().count() > 768 {
+            summary = summary.chars().take(765).collect::<String>();
+            summary.push_str("...");
+        }
+        steps.push(plan_step(
+            step,
+            &format!("Verify the planned change against caller constraints: {summary}"),
+            target_symbols.clone(),
+            depends_on,
+            &["constraint_violation"],
+            Some("verify every caller-provided constraint before completion"),
+        ));
+    }
+    let truncated = steps.len() > *max_steps
         || target_symbols_truncated
         || direct_dependents_truncated
         || test_targets_truncated;
-    steps.truncate(max_steps);
+    steps.truncate(*max_steps);
     (steps, truncated)
 }
 
@@ -5831,6 +6980,7 @@ fn plan_step(
 fn plan_change_decisions(
     objective: PlanChangeObjective,
     affected_scope: &PlanChangeImpactSummary,
+    _constraints: &[String],
 ) -> Vec<PlanChangeDecision> {
     let mut decisions: Vec<PlanChangeDecision> = Vec::new();
     if affected_scope.touches_public_surface {
@@ -6103,8 +7253,8 @@ fn history_source_snapshots_match(
 /// added, removed, modified, moved, and renamed changes. Identity-preserved
 /// symbols and uniquely proven moves or renames form lineage matches. Removed,
 /// renamed, or modified public-surface symbols become breaking candidates ranked
-/// by their base-generation consumer count. The architecture delta is an honest
-/// zero because this slice models no service or boundary graph. Rows, edges,
+/// by their base-generation consumer count. Component-boundary and cross-service
+/// relation changes contribute an aggregate architecture delta. Rows, edges,
 /// results, and memory are bounded exactly like `change.impact`.
 fn build_history_compare(
     base_document: &NormalizedIrDocument,
@@ -6115,8 +7265,20 @@ fn build_history_compare(
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<HistoryCompareAnalysis, QueryError> {
     let source_snapshots_match = history_source_snapshots_match(base_document, head_document);
-    let base_entities = history_entity_index(base_document, control, tracker, limiting_resources)?;
-    let head_entities = history_entity_index(head_document, control, tracker, limiting_resources)?;
+    let base_entities = history_entity_index(
+        base_document,
+        &plan.scope,
+        control,
+        tracker,
+        limiting_resources,
+    )?;
+    let head_entities = history_entity_index(
+        head_document,
+        &plan.scope,
+        control,
+        tracker,
+        limiting_resources,
+    )?;
 
     // Union of every observed identity in deterministic order.
     let mut identities: BTreeSet<SymbolId> = BTreeSet::new();
@@ -6142,21 +7304,6 @@ fn build_history_compare(
                 unmatched_base.insert(symbol);
             }
             (Some(base), Some(head)) => {
-                // Identity preservation is stronger evidence than any heuristic.
-                if lineage.len() < plan.max_results {
-                    emit_cycle_value(
-                        &mut lineage,
-                        LineageMatchRecord {
-                            base_symbol_id: symbol,
-                            head_symbol_id: symbol,
-                            confidence: 1_000,
-                            is_rename: false,
-                        },
-                        tracker,
-                        limiting_resources,
-                        control,
-                    )?;
-                }
                 if !source_snapshots_match && base.surface_differs(head) {
                     let kind = HistorySemanticChangeKind::SignatureModified;
                     let breaking_candidate = base.is_public;
@@ -6480,6 +7627,43 @@ fn build_history_compare(
         }
     }
 
+    let relation_change_inputs = HistoryRelationChangeInputs {
+        base_document,
+        head_document,
+        base_entities: &base_entities,
+        head_entities: &head_entities,
+        plan,
+    };
+    append_history_relation_changes(
+        &relation_change_inputs,
+        &mut changes,
+        control,
+        tracker,
+        limiting_resources,
+    )?;
+    let architecture_delta = if plan.change_kinds.is_empty()
+        || plan.change_kinds.contains(&HistoryChangeKind::Architecture)
+    {
+        let base_scope: BTreeSet<SymbolId> = base_entities.keys().copied().collect();
+        let head_scope: BTreeSet<SymbolId> = head_entities.keys().copied().collect();
+        history_architecture_delta(
+            base_document,
+            head_document,
+            &base_scope,
+            &head_scope,
+            control,
+            tracker,
+            limiting_resources,
+        )?
+    } else {
+        HistoryArchitectureDelta {
+            new_cross_service_edges: 0,
+            removed_cross_service_edges: 0,
+            new_boundaries: 0,
+            removed_boundaries: 0,
+        }
+    };
+
     // Fill base-generation consumer counts for the breaking candidates.
     let incoming = count_history_incoming(
         base_document,
@@ -6494,7 +7678,9 @@ fn build_history_compare(
 
     // Apply the optional change-kind filter.
     if !plan.change_kinds.is_empty() {
-        changes.retain(|change| history_change_matches_filter(change.kind, &plan.change_kinds));
+        changes.retain(|change| {
+            history_change_matches_filter(change.kind, &change.entity_kind, &plan.change_kinds)
+        });
     }
 
     // Deterministic significance ordering under the result cap.
@@ -6508,6 +7694,62 @@ fn build_history_compare(
         record_limit(limiting_resources, QueryResource::Results)?;
     }
     changes.truncate(plan.max_results);
+
+    // Changed identities are relevant lineage even when the caller omits
+    // unchanged context. Populate those first so a broad unchanged set cannot
+    // consume the bounded lineage page before an actual change is represented.
+    let changed_identities: BTreeSet<SymbolId> = changes
+        .iter()
+        .map(|change| change.symbol_id)
+        .filter(|symbol| base_entities.contains_key(symbol) && head_entities.contains_key(symbol))
+        .collect();
+    for symbol in changed_identities {
+        if lineage.len() >= plan.max_results
+            || lineage
+                .iter()
+                .any(|match_| match_.base_symbol_id == symbol && match_.head_symbol_id == symbol)
+        {
+            continue;
+        }
+        emit_cycle_value(
+            &mut lineage,
+            LineageMatchRecord {
+                base_symbol_id: symbol,
+                head_symbol_id: symbol,
+                confidence: 1_000,
+                is_rename: false,
+            },
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+    if plan.include_unchanged_context {
+        for symbol in base_entities
+            .keys()
+            .filter(|symbol| head_entities.contains_key(symbol))
+        {
+            if lineage.len() >= plan.max_results
+                || lineage.iter().any(|match_| {
+                    match_.base_symbol_id == *symbol && match_.head_symbol_id == *symbol
+                })
+            {
+                continue;
+            }
+            emit_cycle_value(
+                &mut lineage,
+                LineageMatchRecord {
+                    base_symbol_id: *symbol,
+                    head_symbol_id: *symbol,
+                    confidence: 1_000,
+                    is_rename: false,
+                },
+                tracker,
+                limiting_resources,
+                control,
+            )?;
+        }
+    }
 
     breaking.sort_by(|left, right| {
         right
@@ -6541,24 +7783,299 @@ fn build_history_compare(
     } else if limits_optional_results(limiting_resources) {
         CoverageStatus::Sampled
     } else {
-        // Exact one-to-one moves and local renames are modeled. Combined
-        // rename-plus-move, split, merge, and architecture detection remain
-        // documented bounds.
+        // Exact one-to-one moves, local renames, relation deltas, and observed
+        // architecture changes are modeled. Dynamic behavior and ambiguous
+        // identity changes remain explicit structural-analysis bounds.
         CoverageStatus::Bounded
     };
 
     Ok(HistoryCompareAnalysis {
         coverage,
         changes,
-        architecture_delta: HistoryArchitectureDelta {
-            new_cross_service_edges: 0,
-            removed_cross_service_edges: 0,
-            new_boundaries: 0,
-            removed_boundaries: 0,
-        },
+        architecture_delta,
         breaking_candidates,
         lineage,
     })
+}
+
+struct HistoryRelationChangeInputs<'a> {
+    base_document: &'a NormalizedIrDocument,
+    head_document: &'a NormalizedIrDocument,
+    base_entities: &'a BTreeMap<SymbolId, HistoryEntityFingerprint>,
+    head_entities: &'a BTreeMap<SymbolId, HistoryEntityFingerprint>,
+    plan: &'a HistoryComparePlan,
+}
+
+fn append_history_relation_changes(
+    inputs: &HistoryRelationChangeInputs<'_>,
+    changes: &mut Vec<SemanticChangeRecord>,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<(), QueryError> {
+    let base_scope: BTreeSet<SymbolId> = inputs.base_entities.keys().copied().collect();
+    let head_scope: BTreeSet<SymbolId> = inputs.head_entities.keys().copied().collect();
+    let base_relations = history_relation_index(
+        inputs.base_document,
+        &base_scope,
+        &inputs.plan.change_kinds,
+        control,
+        tracker,
+        limiting_resources,
+    )?;
+    let head_relations = history_relation_index(
+        inputs.head_document,
+        &head_scope,
+        &inputs.plan.change_kinds,
+        control,
+        tracker,
+        limiting_resources,
+    )?;
+    let mut emitted = BTreeSet::new();
+    for relation in base_relations
+        .difference(&head_relations)
+        .chain(head_relations.difference(&base_relations))
+    {
+        control.check()?;
+        let symbol = match relation.1 {
+            RelationEndpoint::Entity(symbol) => symbol,
+            _ => match relation.2 {
+                RelationEndpoint::Entity(symbol) => symbol,
+                _ => continue,
+            },
+        };
+        let entity = inputs
+            .head_entities
+            .get(&symbol)
+            .or_else(|| inputs.base_entities.get(&symbol));
+        let Some(entity) = entity else {
+            continue;
+        };
+        let kind = history_relation_change_kind(relation.0);
+        if !emitted.insert((kind, symbol)) {
+            continue;
+        }
+        emit_cycle_value(
+            changes,
+            SemanticChangeRecord {
+                kind,
+                symbol_id: symbol,
+                entity_kind: entity.kind_label.clone(),
+                breaking_candidate: false,
+                significance: history_significance(kind, false),
+            },
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+    Ok(())
+}
+
+fn history_relation_index(
+    document: &NormalizedIrDocument,
+    scoped_entities: &BTreeSet<SymbolId>,
+    change_kinds: &BTreeSet<HistoryChangeKind>,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<BTreeSet<(RelationPredicate, RelationEndpoint, RelationEndpoint)>, QueryError> {
+    let mut relations = BTreeSet::new();
+    for relation in &document.relations {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Edges, 1) {
+            record_limit(limiting_resources, QueryResource::Edges)?;
+            break;
+        }
+        tracker.add_edges(1)?;
+        if !history_relation_matches_filter(relation.predicate, change_kinds) {
+            continue;
+        }
+        let subject_scoped = endpoint_entity(document, relation.subject)
+            .is_some_and(|symbol| scoped_entities.contains(&symbol));
+        let object_scoped = endpoint_entity(document, relation.object)
+            .is_some_and(|symbol| scoped_entities.contains(&symbol));
+        if subject_scoped || object_scoped {
+            relations.insert((relation.predicate, relation.subject, relation.object));
+        }
+    }
+    Ok(relations)
+}
+
+fn history_relation_matches_filter(
+    predicate: RelationPredicate,
+    filter: &BTreeSet<HistoryChangeKind>,
+) -> bool {
+    if filter.is_empty() || filter.contains(&HistoryChangeKind::Relations) {
+        return true;
+    }
+    (filter.contains(&HistoryChangeKind::Architecture)
+        && matches!(
+            predicate,
+            RelationPredicate::DependsOn
+                | RelationPredicate::CallsRoute
+                | RelationPredicate::ServesRoute
+                | RelationPredicate::Publishes
+                | RelationPredicate::Consumes
+                | RelationPredicate::MemberOfView
+        ))
+        || (filter.contains(&HistoryChangeKind::Ownership)
+            && predicate == RelationPredicate::OwnedBy)
+        || (filter.contains(&HistoryChangeKind::Tests) && predicate == RelationPredicate::Tests)
+        || (filter.contains(&HistoryChangeKind::Routes)
+            && matches!(
+                predicate,
+                RelationPredicate::CallsRoute | RelationPredicate::ServesRoute
+            ))
+        || (filter.contains(&HistoryChangeKind::Data)
+            && matches!(
+                predicate,
+                RelationPredicate::ReadsTable | RelationPredicate::WritesTable
+            ))
+}
+
+const fn history_relation_change_kind(predicate: RelationPredicate) -> HistorySemanticChangeKind {
+    match predicate {
+        RelationPredicate::LineageSplitFrom => HistorySemanticChangeKind::Split,
+        RelationPredicate::LineageMergedFrom => HistorySemanticChangeKind::Merged,
+        RelationPredicate::DependsOn
+        | RelationPredicate::CallsRoute
+        | RelationPredicate::ServesRoute
+        | RelationPredicate::Publishes
+        | RelationPredicate::Consumes
+        | RelationPredicate::MemberOfView => HistorySemanticChangeKind::ArchitectureChanged,
+        _ => HistorySemanticChangeKind::RelationChanged,
+    }
+}
+
+fn history_architecture_delta(
+    base_document: &NormalizedIrDocument,
+    head_document: &NormalizedIrDocument,
+    base_scope: &BTreeSet<SymbolId>,
+    head_scope: &BTreeSet<SymbolId>,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<HistoryArchitectureDelta, QueryError> {
+    let base_boundaries = history_boundaries(base_document, base_scope);
+    let head_boundaries = history_boundaries(head_document, head_scope);
+    let base_edges = history_cross_service_edges(
+        base_document,
+        base_scope,
+        control,
+        tracker,
+        limiting_resources,
+    )?;
+    let head_edges = history_cross_service_edges(
+        head_document,
+        head_scope,
+        control,
+        tracker,
+        limiting_resources,
+    )?;
+    Ok(HistoryArchitectureDelta {
+        new_cross_service_edges: bounded_history_count(head_edges.difference(&base_edges).count()),
+        removed_cross_service_edges: bounded_history_count(
+            base_edges.difference(&head_edges).count(),
+        ),
+        new_boundaries: bounded_history_count(head_boundaries.difference(&base_boundaries).count()),
+        removed_boundaries: bounded_history_count(
+            base_boundaries.difference(&head_boundaries).count(),
+        ),
+    })
+}
+
+fn history_boundaries(
+    document: &NormalizedIrDocument,
+    scoped_entities: &BTreeSet<SymbolId>,
+) -> BTreeSet<(EntityKind, String)> {
+    document
+        .entities
+        .iter()
+        .filter(|entity| {
+            scoped_entities.contains(&entity.id)
+                && matches!(
+                    entity.kind,
+                    EntityKind::Module
+                        | EntityKind::Namespace
+                        | EntityKind::Package
+                        | EntityKind::BuildTarget
+                        | EntityKind::Service
+                        | EntityKind::CommunityView
+                )
+        })
+        .map(|entity| (entity.kind, entity.qualified_name.clone()))
+        .collect()
+}
+
+fn history_cross_service_edges(
+    document: &NormalizedIrDocument,
+    scoped_entities: &BTreeSet<SymbolId>,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<BTreeSet<(String, String, RelationPredicate)>, QueryError> {
+    let parents = entity_parent_map(document);
+    let services: BTreeMap<SymbolId, &str> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Service)
+        .map(|entity| (entity.id, entity.qualified_name.as_str()))
+        .collect();
+    let mut edges = BTreeSet::new();
+    for relation in &document.relations {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Edges, 1) {
+            record_limit(limiting_resources, QueryResource::Edges)?;
+            break;
+        }
+        tracker.add_edges(1)?;
+        let Some(subject) = endpoint_entity(document, relation.subject) else {
+            continue;
+        };
+        let Some(object) = endpoint_entity(document, relation.object) else {
+            continue;
+        };
+        if !scoped_entities.contains(&subject) && !scoped_entities.contains(&object) {
+            continue;
+        }
+        let Some(subject_service) = history_containing_service(subject, &parents, &services) else {
+            continue;
+        };
+        let Some(object_service) = history_containing_service(object, &parents, &services) else {
+            continue;
+        };
+        if subject_service != object_service {
+            edges.insert((
+                subject_service.to_owned(),
+                object_service.to_owned(),
+                relation.predicate,
+            ));
+        }
+    }
+    Ok(edges)
+}
+
+fn history_containing_service<'a>(
+    symbol: SymbolId,
+    parents: &BTreeMap<SymbolId, SymbolId>,
+    services: &'a BTreeMap<SymbolId, &'a str>,
+) -> Option<&'a str> {
+    let mut current = symbol;
+    let mut visited = BTreeSet::new();
+    loop {
+        if let Some(service) = services.get(&current) {
+            return Some(*service);
+        }
+        if !visited.insert(current) {
+            return None;
+        }
+        current = parents.get(&current).copied()?;
+    }
+}
+
+fn bounded_history_count(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX).min(10_000)
 }
 
 /// Returns only bidirectionally unique matches for a deterministic key.
@@ -6694,10 +8211,12 @@ fn emit_history_lineage_change(
 /// Indexes one generation's entities by stable identity under the row budget.
 fn history_entity_index(
     document: &NormalizedIrDocument,
+    scope: &HistoryCompareScope,
     control: &QueryControl<'_>,
     tracker: &mut UsageTracker,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<BTreeMap<SymbolId, HistoryEntityFingerprint>, QueryError> {
+    let scoped = history_scope_entities(document, scope);
     let entities: BTreeMap<SymbolId, &rootlight_ir::EntityRecord> = document
         .entities
         .iter()
@@ -6711,6 +8230,9 @@ fn history_entity_index(
     let mut index: BTreeMap<SymbolId, HistoryEntityFingerprint> = BTreeMap::new();
     for entity in &document.entities {
         control.check()?;
+        if !scoped.contains(&entity.id) {
+            continue;
+        }
         if !tracker.can_add(QueryResource::Rows, 1) {
             record_limit(limiting_resources, QueryResource::Rows)?;
             break;
@@ -6722,6 +8244,45 @@ fn history_entity_index(
         );
     }
     Ok(index)
+}
+
+fn history_scope_entities(
+    document: &NormalizedIrDocument,
+    scope: &HistoryCompareScope,
+) -> BTreeSet<SymbolId> {
+    if scope.paths.is_empty()
+        && scope.packages.is_empty()
+        && scope.services.is_empty()
+        && scope.symbols.is_empty()
+    {
+        return document.entities.iter().map(|entity| entity.id).collect();
+    }
+
+    let parents = entity_parent_map(document);
+    let mut roots = scope.symbols.clone();
+    for entity in &document.entities {
+        let package_match =
+            entity.kind == EntityKind::Package && entity_matches_label(entity, &scope.packages);
+        let service_match =
+            entity.kind == EntityKind::Service && entity_matches_label(entity, &scope.services);
+        if package_match || service_match {
+            roots.insert(entity.id);
+        }
+    }
+    document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity_descends_from(entity.id, &roots, &parents)
+                || entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .and_then(|source| find_file(document, source.span().file()))
+                    .is_some_and(|file| path_matches_scope(&file.path, &scope.paths))
+        })
+        .map(|entity| entity.id)
+        .collect()
 }
 
 /// Counts incoming entity-to-entity relations for the breaking symbols in base.
@@ -6772,6 +8333,8 @@ const fn history_significance(kind: HistorySemanticChangeKind, breaking_candidat
         HistorySemanticChangeKind::SignatureModified => 600,
         HistorySemanticChangeKind::Moved => 500,
         HistorySemanticChangeKind::Modified => 400,
+        HistorySemanticChangeKind::ArchitectureChanged => 550,
+        HistorySemanticChangeKind::Split | HistorySemanticChangeKind::Merged => 650,
         HistorySemanticChangeKind::RelationChanged => 300,
         HistorySemanticChangeKind::Added => 200,
     };
@@ -6782,6 +8345,7 @@ const fn history_significance(kind: HistorySemanticChangeKind, breaking_candidat
 /// Returns whether one semantic change kind satisfies the change-kind filter.
 fn history_change_matches_filter(
     kind: HistorySemanticChangeKind,
+    entity_kind: &str,
     filter: &BTreeSet<HistoryChangeKind>,
 ) -> bool {
     match kind {
@@ -6789,14 +8353,80 @@ fn history_change_matches_filter(
         | HistorySemanticChangeKind::Removed
         | HistorySemanticChangeKind::Moved
         | HistorySemanticChangeKind::Renamed
-        | HistorySemanticChangeKind::Modified => filter.contains(&HistoryChangeKind::Entities),
+        | HistorySemanticChangeKind::Modified => {
+            filter.contains(&HistoryChangeKind::Entities)
+                || (filter.contains(&HistoryChangeKind::Tests) && entity_kind == "test")
+                || (filter.contains(&HistoryChangeKind::Routes)
+                    && matches!(entity_kind, "route" | "service" | "message_topic"))
+                || (filter.contains(&HistoryChangeKind::Data) && entity_kind == "database_object")
+                || (filter.contains(&HistoryChangeKind::Architecture)
+                    && matches!(
+                        entity_kind,
+                        "module"
+                            | "namespace"
+                            | "package"
+                            | "build_target"
+                            | "service"
+                            | "community_view"
+                    ))
+        }
         HistorySemanticChangeKind::SignatureModified => {
             filter.contains(&HistoryChangeKind::Entities)
                 || filter.contains(&HistoryChangeKind::Signatures)
+                || (filter.contains(&HistoryChangeKind::Tests) && entity_kind == "test")
+                || (filter.contains(&HistoryChangeKind::Routes)
+                    && matches!(entity_kind, "route" | "service" | "message_topic"))
+                || (filter.contains(&HistoryChangeKind::Data) && entity_kind == "database_object")
         }
         HistorySemanticChangeKind::RelationChanged => {
             filter.contains(&HistoryChangeKind::Relations)
+                || filter.contains(&HistoryChangeKind::Ownership)
+                || filter.contains(&HistoryChangeKind::Tests)
+                || filter.contains(&HistoryChangeKind::Routes)
+                || filter.contains(&HistoryChangeKind::Data)
         }
+        HistorySemanticChangeKind::ArchitectureChanged => {
+            filter.contains(&HistoryChangeKind::Relations)
+                || filter.contains(&HistoryChangeKind::Architecture)
+                || filter.contains(&HistoryChangeKind::Routes)
+        }
+        HistorySemanticChangeKind::Split | HistorySemanticChangeKind::Merged => {
+            filter.contains(&HistoryChangeKind::Entities)
+                || filter.contains(&HistoryChangeKind::Relations)
+        }
+    }
+}
+
+fn cycle_level_entity_kind(level: CycleProjectionLevel) -> Option<&'static [EntityKind]> {
+    match level {
+        CycleProjectionLevel::Symbol => None,
+        CycleProjectionLevel::Module => Some(&[EntityKind::Module, EntityKind::Namespace]),
+        CycleProjectionLevel::Package => Some(&[EntityKind::Package]),
+        CycleProjectionLevel::BuildTarget => Some(&[EntityKind::BuildTarget]),
+        CycleProjectionLevel::Service => Some(&[EntityKind::Service]),
+    }
+}
+
+fn cycle_projection_node(
+    document: &NormalizedIrDocument,
+    parents: &BTreeMap<SymbolId, SymbolId>,
+    symbol: SymbolId,
+    level: CycleProjectionLevel,
+) -> Option<SymbolId> {
+    let Some(kinds) = cycle_level_entity_kind(level) else {
+        return Some(symbol);
+    };
+    let mut cursor = symbol;
+    let mut visited = BTreeSet::new();
+    loop {
+        let entity = find_entity(document, cursor)?;
+        if kinds.contains(&entity.kind) {
+            return Some(cursor);
+        }
+        if !visited.insert(cursor) {
+            return None;
+        }
+        cursor = parents.get(&cursor).copied()?;
     }
 }
 
@@ -6813,7 +8443,7 @@ fn build_cycle_adjacency(
     control: &QueryControl<'_>,
     tracker: &mut UsageTracker,
     limiting_resources: &mut Vec<QueryResource>,
-) -> Result<BTreeMap<SymbolId, Vec<CycleAdjEdge>>, QueryError> {
+) -> Result<(BTreeMap<SymbolId, Vec<CycleAdjEdge>>, u32), QueryError> {
     let allowed: BTreeSet<RelationPredicate> = plan
         .families
         .iter()
@@ -6821,8 +8451,11 @@ fn build_cycle_adjacency(
         .collect();
     let mut adjacency: BTreeMap<SymbolId, Vec<CycleAdjEdge>> = BTreeMap::new();
     if allowed.is_empty() {
-        return Ok(adjacency);
+        return Ok((adjacency, 0));
     }
+    let scoped_entities = analysis_scope_entities(document, plan.scope.as_ref());
+    let parents = entity_parent_map(document);
+    let mut omitted = BTreeSet::new();
     for relation in &document.relations {
         control.check()?;
         if !tracker.can_add(QueryResource::Rows, 1) {
@@ -6845,12 +8478,31 @@ fn build_cycle_adjacency(
         let Some(family) = predicate_family(&plan.families, relation.predicate) else {
             continue;
         };
-        let Some(subject) = endpoint_entity(document, relation.subject) else {
+        let Some(mut subject_entity) = endpoint_entity(document, relation.subject) else {
             continue;
         };
-        let Some(object) = endpoint_entity(document, relation.object) else {
+        let Some(mut object_entity) = endpoint_entity(document, relation.object) else {
             continue;
         };
+        if family == RelationFamily::CalledBy {
+            std::mem::swap(&mut subject_entity, &mut object_entity);
+        }
+        if !scoped_entities.contains(&subject_entity) || !scoped_entities.contains(&object_entity) {
+            continue;
+        }
+        let Some(subject) = cycle_projection_node(document, &parents, subject_entity, plan.level)
+        else {
+            omitted.insert(subject_entity);
+            continue;
+        };
+        let Some(object) = cycle_projection_node(document, &parents, object_entity, plan.level)
+        else {
+            omitted.insert(object_entity);
+            continue;
+        };
+        if plan.level != CycleProjectionLevel::Symbol && subject == object {
+            continue;
+        }
         let source_refs: Vec<SourceRef> = relation.evidence.source.iter().cloned().collect();
         adjacency.entry(subject).or_default().push(CycleAdjEdge {
             target: object,
@@ -6867,7 +8519,7 @@ fn build_cycle_adjacency(
                 .then_with(|| right.confidence.cmp(&left.confidence))
         });
     }
-    Ok(adjacency)
+    Ok((adjacency, u32::try_from(omitted.len()).unwrap_or(u32::MAX)))
 }
 
 /// Detects strongly connected components, representative cycles, and break
@@ -6895,7 +8547,16 @@ fn detect_cycles(
     }
     let raw_components = strongly_connected_components(adjacency, &nodes);
 
-    let mut selected: Vec<Vec<SymbolId>> = Vec::new();
+    #[derive(Debug)]
+    struct RankedCycleComponent {
+        members: Vec<SymbolId>,
+        internal_edges: u32,
+        edge_weight: u64,
+        change_risk: u32,
+        break_cost: u16,
+    }
+
+    let mut selected: Vec<RankedCycleComponent> = Vec::new();
     for mut component in raw_components {
         component.sort();
         let size = component.len();
@@ -6905,14 +8566,47 @@ fn detect_cycles(
                 .first()
                 .is_some_and(|node| best_edge(adjacency, *node, *node).is_some());
         if (size >= 2 && size >= usize::from(plan.min_size)) || self_cycle {
-            selected.push(component);
+            let member_set: BTreeSet<SymbolId> = component.iter().copied().collect();
+            let mut internal_edges = 0_u32;
+            let mut edge_weight = 0_u64;
+            let mut change_risk = 0_u32;
+            let mut minimum_confidence = u16::MAX;
+            for member in &member_set {
+                if let Some(edges) = adjacency.get(member) {
+                    for edge in edges {
+                        if member_set.contains(&edge.target) {
+                            internal_edges = internal_edges.saturating_add(1);
+                            edge_weight = edge_weight.saturating_add(u64::from(edge.confidence));
+                            change_risk = change_risk
+                                .saturating_add(u32::from(edge.family == RelationFamily::History));
+                            minimum_confidence = minimum_confidence.min(edge.confidence);
+                        }
+                    }
+                }
+            }
+            selected.push(RankedCycleComponent {
+                members: component,
+                internal_edges,
+                edge_weight,
+                change_risk,
+                break_cost: if minimum_confidence == u16::MAX {
+                    0
+                } else {
+                    minimum_confidence
+                },
+            });
         }
     }
     selected.sort_by(|left, right| {
-        right
-            .len()
-            .cmp(&left.len())
-            .then_with(|| left[0].cmp(&right[0]))
+        let primary = match plan.rank_by {
+            CycleRankBy::Size => right.members.len().cmp(&left.members.len()),
+            CycleRankBy::EdgeWeight => right.edge_weight.cmp(&left.edge_weight),
+            CycleRankBy::ChangeRisk => right.change_risk.cmp(&left.change_risk),
+            CycleRankBy::BreakCost => right.break_cost.cmp(&left.break_cost),
+        };
+        primary
+            .then_with(|| right.members.len().cmp(&left.members.len()))
+            .then_with(|| left.members[0].cmp(&right.members[0]))
     });
     if selected.len() > plan.max_cycles {
         selected.truncate(plan.max_cycles);
@@ -6925,21 +8619,14 @@ fn detect_cycles(
 
     for component in &selected {
         control.check()?;
-        let member_set: BTreeSet<SymbolId> = component.iter().copied().collect();
-        let mut internal_edges = 0_u32;
-        for member in &member_set {
-            if let Some(edges) = adjacency.get(member) {
-                for edge in edges {
-                    if member_set.contains(&edge.target) {
-                        internal_edges = internal_edges.saturating_add(1);
-                    }
-                }
-            }
-        }
+        let member_set: BTreeSet<SymbolId> = component.members.iter().copied().collect();
         let component_record = CycleComponent {
-            size: u32::try_from(component.len()).unwrap_or(u32::MAX),
-            members: component.clone(),
-            internal_edges,
+            size: u32::try_from(component.members.len()).unwrap_or(u32::MAX),
+            members: component.members.clone(),
+            internal_edges: component.internal_edges,
+            edge_weight: component.edge_weight,
+            change_risk: component.change_risk,
+            break_cost: component.break_cost,
         };
         emit_cycle_value(
             &mut components,
@@ -6949,11 +8636,11 @@ fn detect_cycles(
             control,
         )?;
 
-        let cycle_nodes = if component.len() == 1 {
-            let node = component[0];
+        let cycle_nodes = if component.members.len() == 1 {
+            let node = component.members[0];
             vec![node, node]
         } else {
-            match representative_cycle(adjacency, &member_set, component[0]) {
+            match representative_cycle(adjacency, &member_set, component.members[0]) {
                 Some(path) => path,
                 None => continue,
             }
@@ -7260,6 +8947,7 @@ struct DeadAnalysis {
     entry_points: CodeDeadEntryPointSummary,
     blind_spots: Vec<CodeDeadBlindSpot>,
     suppression_rules: Vec<CodeDeadSuppressionRule>,
+    coverage_caveats: Vec<String>,
 }
 
 /// Builds a directed call/use graph over the served reachability predicates.
@@ -7281,6 +8969,7 @@ fn build_dead_graph(
         .collect();
 
     let mut graph = DeadGraph::default();
+    let scoped_entities = analysis_scope_entities(document, plan.scope.as_ref());
     let mut saw_dispatch_candidate = false;
     for entity in &document.entities {
         control.check()?;
@@ -7290,7 +8979,9 @@ fn build_dead_graph(
             break;
         }
         tracker.add_rows(1)?;
-        graph.nodes.insert(entity.id);
+        if scoped_entities.contains(&entity.id) {
+            graph.nodes.insert(entity.id);
+        }
     }
     for relation in &document.relations {
         control.check()?;
@@ -7320,6 +9011,9 @@ fn build_dead_graph(
         let Some(object) = endpoint_entity(document, relation.object) else {
             continue;
         };
+        if !scoped_entities.contains(&subject) || !scoped_entities.contains(&object) {
+            continue;
+        }
         graph.nodes.insert(subject);
         graph.nodes.insert(object);
         graph
@@ -7369,6 +9063,10 @@ fn analyze_dead_code(
 ) -> Result<DeadAnalysis, QueryError> {
     let mut exported: BTreeSet<SymbolId> = BTreeSet::new();
     let mut tests: BTreeSet<SymbolId> = BTreeSet::new();
+    let mut generated: BTreeSet<SymbolId> = BTreeSet::new();
+    let mut external: BTreeSet<SymbolId> = BTreeSet::new();
+    let mut application: BTreeSet<SymbolId> = BTreeSet::new();
+    let mut framework: BTreeSet<SymbolId> = BTreeSet::new();
     for entity in &document.entities {
         control.check()?;
         if !tracker.can_add(QueryResource::Rows, 1) {
@@ -7376,11 +9074,28 @@ fn analyze_dead_code(
             break;
         }
         tracker.add_rows(1)?;
+        if !graph.nodes.contains(&entity.id) {
+            continue;
+        }
         if entity_is_exported(entity) {
             exported.insert(entity.id);
         }
         if entity_is_test(entity) {
             tests.insert(entity.id);
+        }
+        if entity.flags.contains(&EntityFlag::Generated) {
+            generated.insert(entity.id);
+        }
+        if entity.flags.contains(&EntityFlag::External)
+            || matches!(entity.kind, EntityKind::ExternalSymbol)
+        {
+            external.insert(entity.id);
+        }
+        if entity_is_application_entry_point(entity) {
+            application.insert(entity.id);
+        }
+        if entity_is_framework_entry_point(entity) {
+            framework.insert(entity.id);
         }
     }
     for relation in &document.relations {
@@ -7391,6 +9106,24 @@ fn analyze_dead_code(
         }
         tracker.add_rows(1)?;
         if relation.predicate != RelationPredicate::Exports {
+            if matches!(
+                relation.predicate,
+                RelationPredicate::ServesRoute
+                    | RelationPredicate::CallsRoute
+                    | RelationPredicate::Publishes
+                    | RelationPredicate::Consumes
+            ) {
+                if let Some(subject) = endpoint_entity(document, relation.subject)
+                    && graph.nodes.contains(&subject)
+                {
+                    framework.insert(subject);
+                }
+                if let Some(object) = endpoint_entity(document, relation.object)
+                    && graph.nodes.contains(&object)
+                {
+                    framework.insert(object);
+                }
+            }
             continue;
         }
         if let Some(symbol) = endpoint_entity(document, relation.object) {
@@ -7401,6 +9134,30 @@ fn analyze_dead_code(
     let mut entry_points: BTreeSet<SymbolId> = BTreeSet::new();
     let mut exported_suppressed = 0_u32;
     let mut test_suppressed = 0_u32;
+    let mut generated_suppressed = 0_u32;
+    let mut external_suppressed = 0_u32;
+    match plan.entry_point_policy {
+        CodeDeadEntryPointPolicy::Standard => {
+            entry_points.extend(application.iter().copied());
+            entry_points.extend(framework.iter().copied());
+        }
+        CodeDeadEntryPointPolicy::Library => {}
+        CodeDeadEntryPointPolicy::Application => {
+            entry_points.extend(application.iter().copied());
+        }
+        CodeDeadEntryPointPolicy::FrameworkSpecific => {
+            entry_points.extend(framework.iter().copied());
+        }
+        CodeDeadEntryPointPolicy::Explicit => {
+            entry_points.extend(
+                plan.explicit_entry_points
+                    .iter()
+                    .copied()
+                    .filter(|symbol| graph.nodes.contains(symbol)),
+            );
+        }
+    }
+    let policy_entry_points = entry_points.clone();
     if !plan.include_exported {
         for symbol in &exported {
             if entry_points.insert(*symbol) {
@@ -7415,6 +9172,16 @@ fn analyze_dead_code(
             }
         }
     }
+    for symbol in &generated {
+        if entry_points.insert(*symbol) {
+            generated_suppressed = generated_suppressed.saturating_add(1);
+        }
+    }
+    for symbol in &external {
+        if entry_points.insert(*symbol) {
+            external_suppressed = external_suppressed.saturating_add(1);
+        }
+    }
 
     let candidates = detect_dead_candidates(
         document,
@@ -7422,18 +9189,22 @@ fn analyze_dead_code(
         &entry_points,
         &exported,
         &tests,
+        &generated,
+        &external,
         plan.max_candidates,
         tracker,
         limiting_resources,
         control,
     )?;
 
-    let entry_point_count = u32::try_from(entry_points.len()).unwrap_or(u32::MAX);
+    let entry_point_count = u32::try_from(policy_entry_points.len()).unwrap_or(u32::MAX);
+    let entry_symbols: Vec<SymbolId> = policy_entry_points.iter().copied().take(64).collect();
     let analysis = DeadAnalysis {
         candidates,
         entry_points: CodeDeadEntryPointSummary {
             policy: plan.entry_point_policy,
             entry_point_count,
+            entry_symbols,
             // The first-slice entry-point model is always partial: dynamic
             // dispatch, reflection, and unindexed entry points are not provably
             // resolved.
@@ -7443,8 +9214,11 @@ fn analyze_dead_code(
         suppression_rules: dead_suppression_rules(
             exported_suppressed,
             test_suppressed,
+            generated_suppressed,
+            external_suppressed,
             entry_point_count,
         ),
+        coverage_caveats: dead_coverage_caveats(document, graph),
     };
     Ok(analysis)
 }
@@ -7492,6 +9266,8 @@ fn detect_dead_candidates(
     entry_points: &BTreeSet<SymbolId>,
     exported: &BTreeSet<SymbolId>,
     tests: &BTreeSet<SymbolId>,
+    generated: &BTreeSet<SymbolId>,
+    external: &BTreeSet<SymbolId>,
     max_candidates: usize,
     tracker: &mut UsageTracker,
     limiting_resources: &mut Vec<QueryResource>,
@@ -7504,7 +9280,12 @@ fn detect_dead_candidates(
         .copied()
         .filter(|symbol| !reached.contains(symbol) && !entry_points.contains(symbol))
         .collect();
-    candidate_symbols.sort();
+    candidate_symbols.sort_by(|left, right| {
+        dead_candidate_classification(graph, *right)
+            .1
+            .cmp(&dead_candidate_classification(graph, *left).1)
+            .then_with(|| left.cmp(right))
+    });
 
     let mut candidates: Vec<DeadCodeCandidate> = Vec::new();
     for symbol in candidate_symbols {
@@ -7519,21 +9300,7 @@ fn detect_dead_candidates(
             .get(&symbol)
             .copied()
             .unwrap_or(0);
-        let classification = if incoming == 0 {
-            DeadCodeClassification::NoObservedIncomingReferences
-        } else if max_confidence >= 500 {
-            DeadCodeClassification::NotObservedFromEntryPointsStrongReferences
-        } else {
-            DeadCodeClassification::NotObservedFromEntryPointsWeakReferences
-        };
-        let confidence = match (classification, graph.relationship_coverage_complete) {
-            (DeadCodeClassification::NoObservedIncomingReferences, true) => 1_000,
-            (DeadCodeClassification::NoObservedIncomingReferences, false) => 300,
-            (DeadCodeClassification::NotObservedFromEntryPointsStrongReferences, true) => 700,
-            (DeadCodeClassification::NotObservedFromEntryPointsStrongReferences, false) => 500,
-            (DeadCodeClassification::NotObservedFromEntryPointsWeakReferences, true) => 400,
-            (DeadCodeClassification::NotObservedFromEntryPointsWeakReferences, false) => 250,
-        };
+        let (classification, confidence) = dead_candidate_classification(graph, symbol);
         let mut why = Vec::new();
         if incoming == 0 {
             why.push("no_incoming_references".to_owned());
@@ -7542,12 +9309,25 @@ fn detect_dead_candidates(
         if !graph.relationship_coverage_complete {
             why.push("incoming_relation_coverage_incomplete".to_owned());
         }
+        let mut uncertainty =
+            vec!["static_reachability_does_not_prove_runtime_liveness".to_owned()];
+        if !graph.relationship_coverage_complete {
+            uncertainty.push("relationship_coverage_incomplete".to_owned());
+        }
         let candidate = DeadCodeCandidate {
             symbol_id: symbol,
             classification,
             confidence,
             why,
-            suppressions_checked: suppressions_checked_for(symbol, exported, tests),
+            suppressions_checked: suppressions_checked_for(
+                symbol, exported, tests, generated, external,
+            ),
+            reachability: DeadCodeReachabilitySummary {
+                reached_from_entry_points: false,
+                incoming_edges: incoming,
+                strongest_incoming_confidence: max_confidence,
+            },
+            uncertainty,
             source_refs: entity_source_refs(document, symbol),
         };
         emit_dead_candidate(
@@ -7561,6 +9341,34 @@ fn detect_dead_candidates(
     Ok(candidates)
 }
 
+fn dead_candidate_classification(
+    graph: &DeadGraph,
+    symbol: SymbolId,
+) -> (DeadCodeClassification, u16) {
+    let incoming = graph.incoming_count.get(&symbol).copied().unwrap_or(0);
+    let strongest = graph
+        .incoming_max_confidence
+        .get(&symbol)
+        .copied()
+        .unwrap_or(0);
+    let classification = if incoming == 0 {
+        DeadCodeClassification::NoObservedIncomingReferences
+    } else if strongest >= 500 {
+        DeadCodeClassification::NotObservedFromEntryPointsStrongReferences
+    } else {
+        DeadCodeClassification::NotObservedFromEntryPointsWeakReferences
+    };
+    let confidence = match (classification, graph.relationship_coverage_complete) {
+        (DeadCodeClassification::NoObservedIncomingReferences, true) => 850,
+        (DeadCodeClassification::NoObservedIncomingReferences, false) => 300,
+        (DeadCodeClassification::NotObservedFromEntryPointsStrongReferences, true) => 700,
+        (DeadCodeClassification::NotObservedFromEntryPointsStrongReferences, false) => 500,
+        (DeadCodeClassification::NotObservedFromEntryPointsWeakReferences, true) => 400,
+        (DeadCodeClassification::NotObservedFromEntryPointsWeakReferences, false) => 250,
+    };
+    (classification, confidence)
+}
+
 /// Returns whether one normalized entity belongs to the exported surface.
 fn entity_is_exported(entity: &rootlight_ir::EntityRecord) -> bool {
     matches!(entity.kind, EntityKind::Export)
@@ -7571,6 +9379,20 @@ fn entity_is_exported(entity: &rootlight_ir::EntityRecord) -> bool {
 /// Returns whether one normalized entity is test-only or test-related.
 fn entity_is_test(entity: &rootlight_ir::EntityRecord) -> bool {
     matches!(entity.kind, EntityKind::Test) || entity.flags.contains(&EntityFlag::Test)
+}
+
+fn entity_is_application_entry_point(entity: &rootlight_ir::EntityRecord) -> bool {
+    matches!(
+        entity.kind,
+        EntityKind::Service | EntityKind::Route | EntityKind::BuildTarget
+    ) || matches!(entity.canonical_name.as_str(), "main" | "__main__" | "Main")
+}
+
+fn entity_is_framework_entry_point(entity: &rootlight_ir::EntityRecord) -> bool {
+    matches!(
+        entity.kind,
+        EntityKind::Service | EntityKind::Route | EntityKind::MessageTopic
+    )
 }
 
 /// Returns bounded direct source evidence for one entity definition.
@@ -7588,14 +9410,27 @@ fn suppressions_checked_for(
     symbol: SymbolId,
     exported: &BTreeSet<SymbolId>,
     tests: &BTreeSet<SymbolId>,
+    generated: &BTreeSet<SymbolId>,
+    external: &BTreeSet<SymbolId>,
 ) -> Vec<String> {
-    let mut checked = Vec::new();
-    checked.push("entry_point".to_owned());
+    let mut checked = vec![
+        "entry_point".to_owned(),
+        "exported".to_owned(),
+        "test".to_owned(),
+        "generated".to_owned(),
+        "external".to_owned(),
+    ];
     if exported.contains(&symbol) {
-        checked.push("exported".to_owned());
+        checked.push("exported_match_included".to_owned());
     }
     if tests.contains(&symbol) {
-        checked.push("test".to_owned());
+        checked.push("test_match_included".to_owned());
+    }
+    if generated.contains(&symbol) {
+        checked.push("generated_match_included".to_owned());
+    }
+    if external.contains(&symbol) {
+        checked.push("external_match_included".to_owned());
     }
     checked
 }
@@ -7624,6 +9459,33 @@ fn dead_blind_spots(
     blind_spots.push(CodeDeadBlindSpot {
         category: "incomplete_language_coverage".to_owned(),
         affected_count: incomplete_coverage,
+    });
+    blind_spots.push(CodeDeadBlindSpot {
+        category: "reflection".to_owned(),
+        affected_count: 0,
+    });
+    blind_spots.push(CodeDeadBlindSpot {
+        category: "dynamic_loading".to_owned(),
+        affected_count: 0,
+    });
+    blind_spots.push(CodeDeadBlindSpot {
+        category: "macros".to_owned(),
+        affected_count: 0,
+    });
+    blind_spots.push(CodeDeadBlindSpot {
+        category: "excluded_generated_code".to_owned(),
+        affected_count: u32::try_from(
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.flags.contains(&EntityFlag::Generated))
+                .count(),
+        )
+        .unwrap_or(u32::MAX),
+    });
+    blind_spots.push(CodeDeadBlindSpot {
+        category: "runtime_registration".to_owned(),
+        affected_count: 0,
     });
     blind_spots.push(CodeDeadBlindSpot {
         category: "partial_entry_point_model".to_owned(),
@@ -7657,6 +9519,8 @@ fn dead_blind_spots(
 fn dead_suppression_rules(
     exported_suppressed: u32,
     test_suppressed: u32,
+    generated_suppressed: u32,
+    external_suppressed: u32,
     entry_point_count: u32,
 ) -> Vec<CodeDeadSuppressionRule> {
     vec![
@@ -7672,7 +9536,33 @@ fn dead_suppression_rules(
             rule: "test".to_owned(),
             suppressed_count: test_suppressed,
         },
+        CodeDeadSuppressionRule {
+            rule: "generated".to_owned(),
+            suppressed_count: generated_suppressed,
+        },
+        CodeDeadSuppressionRule {
+            rule: "external".to_owned(),
+            suppressed_count: external_suppressed,
+        },
     ]
+}
+
+fn dead_coverage_caveats(document: &NormalizedIrDocument, graph: &DeadGraph) -> Vec<String> {
+    let mut caveats = vec!["runtime_reachability_unobserved".to_owned()];
+    if document
+        .entities
+        .iter()
+        .any(|entity| matches!(entity.tier, AnalysisTier::TierC | AnalysisTier::TierD))
+    {
+        caveats.push("bounded_or_syntax_only_language_tiers".to_owned());
+    }
+    if !graph.relationship_coverage_complete {
+        caveats.push("relationship_coverage_incomplete".to_owned());
+    }
+    if graph.truncated {
+        caveats.push("budget_truncated_scan".to_owned());
+    }
+    caveats
 }
 
 /// Records one emitted reachability observation under the result and memory budgets.
@@ -8427,10 +10317,13 @@ mod tests {
     ) -> ArchitectureCyclesPlan {
         ArchitectureCyclesPlan {
             families: vec![RelationFamily::Calls],
+            scope: None,
+            level: CycleProjectionLevel::Symbol,
             min_confidence: 0,
             min_size,
             max_cycles,
             include_self_cycles,
+            rank_by: CycleRankBy::Size,
             budget: QueryBudget::new(),
             explanation: PlanExplanation {
                 generation: GenerationId::from_bytes([0; 20]),
@@ -8693,6 +10586,8 @@ mod tests {
         );
         let exported = BTreeSet::new();
         let tests = BTreeSet::new();
+        let generated = BTreeSet::new();
+        let external = BTreeSet::new();
         let budget = QueryBudget::new();
         let mut tracker = UsageTracker::new(budget);
         let mut limiting_resources = Vec::new();
@@ -8708,6 +10603,8 @@ mod tests {
             entry_points,
             &exported,
             &tests,
+            &generated,
+            &external,
             max_candidates,
             &mut tracker,
             &mut limiting_resources,
@@ -8727,14 +10624,14 @@ mod tests {
         let candidates = run_dead(&graph, &entry_points, 50);
 
         let ids: Vec<SymbolId> = candidates.iter().map(|c| c.symbol_id).collect();
-        assert_eq!(ids, vec![c, d]);
+        assert_eq!(ids, vec![d, c]);
         assert_eq!(
             candidates[0].classification,
-            DeadCodeClassification::NoObservedIncomingReferences
+            DeadCodeClassification::NotObservedFromEntryPointsStrongReferences
         );
         assert_eq!(
             candidates[1].classification,
-            DeadCodeClassification::NotObservedFromEntryPointsStrongReferences
+            DeadCodeClassification::NoObservedIncomingReferences
         );
     }
 
@@ -8773,7 +10670,7 @@ mod tests {
     }
 
     #[test]
-    fn code_dead_reserves_exact_negative_confidence_for_complete_relationship_coverage() {
+    fn code_dead_keeps_complete_relationship_negatives_below_exact_confidence() {
         let (entry, reached, candidate, referenced) = (symbol(1), symbol(2), symbol(3), symbol(4));
         let mut graph = dead_graph(&[(entry, reached, 900), (candidate, referenced, 900)]);
         graph.relationship_coverage_complete = true;
@@ -8788,7 +10685,7 @@ mod tests {
             observation.classification,
             DeadCodeClassification::NoObservedIncomingReferences
         );
-        assert_eq!(observation.confidence, 1_000);
+        assert_eq!(observation.confidence, 850);
         assert!(
             !observation
                 .why
@@ -8824,7 +10721,7 @@ mod tests {
         // With only `a` protected, the d -> e island is dead.
         let without = run_dead(&graph, &BTreeSet::from([a]), 50);
         let ids: Vec<SymbolId> = without.iter().map(|c| c.symbol_id).collect();
-        assert_eq!(ids, vec![d, e]);
+        assert_eq!(ids, vec![e, d]);
 
         // Protecting `d` as an entry point reaches both d and its callee e.
         let with = run_dead(&graph, &BTreeSet::from([a, d]), 50);
@@ -8845,7 +10742,11 @@ mod tests {
         let entry_points = BTreeSet::from([a]);
         let (candidates, execution) = run_dead_with_execution(&graph, &entry_points, 1);
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].symbol_id, c);
+        assert_eq!(
+            candidates[0].symbol_id,
+            d.min(f),
+            "equally ranked candidates use stable identity as the tie-breaker"
+        );
         assert!(execution.is_truncated());
         assert_eq!(execution.limiting_resources(), &[QueryResource::Results]);
     }
@@ -8865,10 +10766,11 @@ mod tests {
         let first = run_dead(&graph, &entry_points, 50);
         let second = run_dead(&graph, &entry_points, 50);
         assert_eq!(first, second);
-        let ids: Vec<SymbolId> = first.iter().map(|candidate| candidate.symbol_id).collect();
-        let mut sorted = ids.clone();
-        sorted.sort();
-        assert_eq!(ids, sorted);
+        assert!(first.windows(2).all(|pair| {
+            pair[0].confidence > pair[1].confidence
+                || (pair[0].confidence == pair[1].confidence
+                    && pair[0].symbol_id < pair[1].symbol_id)
+        }));
     }
 
     // -----------------------------------------------------------------
@@ -9125,6 +11027,8 @@ mod tests {
     ) -> ArchitectureOverviewPlan {
         ArchitectureOverviewPlan {
             views,
+            scope: None,
+            detail: ArchitectureOverviewDetail::Standard,
             min_confidence,
             max_components,
             include_edges,
@@ -9515,8 +11419,13 @@ mod tests {
     ) -> TestsSelectPlan {
         TestsSelectPlan {
             seeds,
+            seed_paths: Vec::new(),
+            seed_build_targets: Vec::new(),
             test_kinds,
+            frameworks: Vec::new(),
             max_tests,
+            max_total_ms: None,
+            max_slow_tests: None,
             include_commands,
             budget: QueryBudget::new(),
             explanation: PlanExplanation {
@@ -9568,6 +11477,10 @@ mod tests {
         (selection, execution)
     }
 
+    fn has_test_gap(selection: &TestsSelectAnalysis, reason: &str) -> bool {
+        selection.gaps.iter().any(|gap| gap.reason == reason)
+    }
+
     #[test]
     fn tests_select_ranks_a_direct_edge_test_above_colocation() {
         let mut document = overview_document();
@@ -9596,9 +11509,9 @@ mod tests {
         assert!(selection.tests[0].why.contains(&"via:calls".to_owned()));
         assert_eq!(
             selection.tests[0].command_hint.as_deref(),
-            Some("test:unit")
+            Some(format!("test:rust_test:{}", symbol(21)).as_str())
         );
-        assert_eq!(selection.tests[0].estimated_cost_ms, None);
+        assert_eq!(selection.tests[0].estimated_cost_ms, Some(1_000));
         // The co-located test ranks second on the fixed co-location floor.
         assert_eq!(selection.tests[1].test_id, symbol(22));
         assert_eq!(selection.tests[1].score, 150);
@@ -9608,13 +11521,13 @@ mod tests {
                 .why
                 .contains(&"shared_file_with_seed".to_owned())
         );
-        // Both signals are reported used; history is never served in this slice.
+        // Both static signals are reported used; unavailable evidence remains explicit.
         assert!(selection.coverage_strategy.direct_edges);
         assert!(selection.coverage_strategy.file_colocation_signals);
         assert!(!selection.coverage_strategy.transitive_signals);
         assert!(!selection.coverage_strategy.history_signals);
-        // The seed is covered, so no gap is reported.
-        assert!(selection.gaps.is_empty());
+        assert!(has_test_gap(&selection, "history_signal_unavailable"));
+        assert!(has_test_gap(&selection, "runtime_coverage_unavailable"));
     }
 
     #[test]
@@ -9645,7 +11558,8 @@ mod tests {
         assert!(!selection.coverage_strategy.direct_edges);
         assert!(selection.coverage_strategy.transitive_signals);
         assert!(!selection.coverage_strategy.file_colocation_signals);
-        assert!(selection.gaps.is_empty());
+        assert!(has_test_gap(&selection, "history_signal_unavailable"));
+        assert!(has_test_gap(&selection, "runtime_coverage_unavailable"));
     }
 
     #[test]
@@ -9682,7 +11596,11 @@ mod tests {
                 .contains(&"dispatch_candidate".to_owned())
         );
         assert!(selection.coverage_strategy.direct_edges);
-        assert!(selection.gaps.is_empty());
+        assert!(has_test_gap(&selection, "history_signal_unavailable"));
+        assert!(has_test_gap(
+            &selection,
+            "dynamic_dispatch_runtime_evidence_unavailable"
+        ));
     }
 
     #[test]
@@ -9727,9 +11645,12 @@ mod tests {
         assert_eq!(selection.tests[0].test_id, symbol(21));
         // The relation/test domains have no repository-wide completeness
         // evidence, so the absent edge is qualified rather than exhaustive.
-        assert_eq!(selection.gaps.len(), 1);
-        assert_eq!(selection.gaps[0].scope, symbol(12).to_string());
-        assert_eq!(selection.gaps[0].reason, "related_test_coverage_incomplete");
+        assert_eq!(selection.gaps.len(), 3);
+        assert!(selection.gaps.iter().any(|gap| {
+            gap.scope == symbol(12).to_string() && gap.reason == "related_test_coverage_incomplete"
+        }));
+        assert!(has_test_gap(&selection, "history_signal_unavailable"));
+        assert!(has_test_gap(&selection, "runtime_coverage_unavailable"));
     }
 
     #[test]
@@ -9749,9 +11670,12 @@ mod tests {
         let selection = run_tests_select(&document, &plan);
 
         assert!(selection.tests.is_empty());
-        assert_eq!(selection.gaps.len(), 1);
-        assert_eq!(selection.gaps[0].scope, symbol(11).to_string());
-        assert_eq!(selection.gaps[0].reason, "no_related_test_observed");
+        assert_eq!(selection.gaps.len(), 3);
+        assert!(selection.gaps.iter().any(|gap| {
+            gap.scope == symbol(11).to_string() && gap.reason == "no_related_test_observed"
+        }));
+        assert!(has_test_gap(&selection, "history_signal_unavailable"));
+        assert!(has_test_gap(&selection, "runtime_coverage_unavailable"));
     }
 
     #[test]
@@ -9773,7 +11697,11 @@ mod tests {
         );
         let unit_selection = run_tests_select(&document, &unit_plan);
         assert_eq!(unit_selection.tests.len(), 1);
-        assert!(unit_selection.gaps.is_empty());
+        assert!(has_test_gap(&unit_selection, "history_signal_unavailable"));
+        assert!(has_test_gap(
+            &unit_selection,
+            "runtime_coverage_unavailable"
+        ));
 
         let integration_plan = tests_select_plan(
             BTreeSet::from([symbol(11)]),
@@ -9783,8 +11711,119 @@ mod tests {
         );
         let integration_selection = run_tests_select(&document, &integration_plan);
         assert!(integration_selection.tests.is_empty());
-        assert_eq!(integration_selection.gaps.len(), 1);
-        assert_eq!(integration_selection.gaps[0].scope, symbol(11).to_string());
+        assert_eq!(integration_selection.gaps.len(), 3);
+        assert!(
+            integration_selection
+                .gaps
+                .iter()
+                .any(|gap| gap.scope == symbol(11).to_string())
+        );
+    }
+
+    #[test]
+    fn tests_select_classifies_every_declared_test_kind() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/lib.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        let cases = [
+            (TestsSelectKind::Unit, 21, 2, "src/unit_test.rs"),
+            (
+                TestsSelectKind::Integration,
+                22,
+                3,
+                "tests/integration_case.rs",
+            ),
+            (TestsSelectKind::E2e, 23, 4, "tests/e2e_case.rs"),
+            (TestsSelectKind::Contract, 24, 5, "tests/contract_case.rs"),
+            (TestsSelectKind::Static, 25, 6, "src/static_lint.rs"),
+            (TestsSelectKind::Build, 26, 7, "src/build_case.rs"),
+        ];
+        for (_, symbol_byte, file_byte, path) in cases {
+            add_file(&mut document, file_byte, path);
+            add_entity(&mut document, symbol_byte, file_byte, EntityKind::Test);
+            add_calls(&mut document, symbol_byte + 100, symbol_byte, 11, 900);
+        }
+
+        for (kind, symbol_byte, _, _) in cases {
+            let plan = tests_select_plan(BTreeSet::from([symbol(11)]), vec![kind], 20, false);
+            let selection = run_tests_select(&document, &plan);
+            assert_eq!(selection.tests.len(), 1);
+            assert_eq!(selection.tests[0].test_id, symbol(symbol_byte));
+            assert_eq!(selection.tests[0].kind, kind);
+        }
+    }
+
+    #[test]
+    fn tests_select_uses_path_build_framework_history_and_execution_budget_signals() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/lib.rs");
+        add_file(&mut document, 2, "tests/integration_python.py");
+        add_file(&mut document, 3, "tests/integration_history.py");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::BuildTarget);
+        let build_target = document
+            .entities
+            .last_mut()
+            .expect("build target was just pushed");
+        build_target.canonical_name = "rootlight-query".to_owned();
+        build_target.display_name = "rootlight-query".to_owned();
+        build_target.qualified_name = "rootlight-query".to_owned();
+        add_entity(&mut document, 21, 2, EntityKind::Test);
+        document
+            .entities
+            .last_mut()
+            .expect("test entity was just pushed")
+            .language = "python".to_owned();
+        add_entity(&mut document, 22, 3, EntityKind::Test);
+        document
+            .entities
+            .last_mut()
+            .expect("history test entity was just pushed")
+            .language = "python".to_owned();
+        add_calls(&mut document, 110, 21, 11, 900);
+        add_relation(
+            &mut document,
+            111,
+            RelationEndpoint::Entity(symbol(21)),
+            RelationPredicate::DependsOn,
+            RelationEndpoint::Entity(symbol(12)),
+            950,
+        );
+        add_relation(
+            &mut document,
+            112,
+            RelationEndpoint::Entity(symbol(22)),
+            RelationPredicate::CoChangedWith,
+            RelationEndpoint::Entity(symbol(11)),
+            800,
+        );
+
+        let mut plan = tests_select_plan(BTreeSet::new(), Vec::new(), 20, true);
+        plan.seed_paths = vec!["src/lib.rs".to_owned()];
+        plan.seed_build_targets = vec!["rootlight-query".to_owned()];
+        plan.frameworks = vec!["pytest".to_owned()];
+        plan.max_total_ms = Some(10_000);
+        let selection = run_tests_select(&document, &plan);
+
+        assert_eq!(selection.tests.len(), 2);
+        assert_eq!(selection.tests[0].test_id, symbol(21));
+        assert_eq!(selection.tests[0].kind, TestsSelectKind::Integration);
+        assert_eq!(selection.tests[0].framework, "pytest");
+        assert_eq!(selection.tests[0].estimated_cost_ms, Some(5_000));
+        assert!(selection.coverage_strategy.build_target_signals);
+        assert!(selection.coverage_strategy.history_signals);
+        assert!(!has_test_gap(&selection, "history_signal_unavailable"));
+        assert!(!has_test_gap(&selection, "seed_path_not_indexed"));
+        assert!(!has_test_gap(&selection, "build_target_not_indexed"));
+        assert!(!has_test_gap(&selection, "framework_not_observed"));
+
+        plan.max_total_ms = Some(4_999);
+        let constrained = run_tests_select(&document, &plan);
+        assert!(constrained.tests.is_empty());
+        assert!(has_test_gap(
+            &constrained,
+            "execution_budget_excluded_candidates"
+        ));
     }
 
     #[test]
@@ -9838,9 +11877,14 @@ mod tests {
         ChangeImpactPlan {
             changed_symbols,
             changed_paths,
+            scope_paths: Vec::new(),
+            scope_packages: Vec::new(),
+            scope_services: Vec::new(),
+            relation_policy: ChangeImpactRelationPolicy::Standard,
             max_depth,
             min_confidence,
             include_tests,
+            include_history: false,
             max_dependents,
             budget: QueryBudget::new(),
             explanation: PlanExplanation {
@@ -9937,7 +11981,7 @@ mod tests {
         assert!(!analysis.risk_summary.breaking_surface);
         assert_eq!(analysis.risk_summary.level, ChangeImpactRiskLevel::Low);
         assert!(analysis.risk_summary.dynamic_blind_spots);
-        assert_eq!(analysis.risk_summary.coverage, CoverageStatus::Unknown);
+        assert_eq!(analysis.risk_summary.coverage, CoverageStatus::Bounded);
         assert!(analysis.tests.is_empty());
     }
 
@@ -9962,6 +12006,72 @@ mod tests {
         assert_eq!(analysis.risk_summary.fanout, 1);
         assert!(execution.is_truncated());
         assert_eq!(execution.limiting_resources(), &[QueryResource::Depth]);
+    }
+
+    #[test]
+    fn change_impact_conservative_history_and_scope_change_observable_results() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/core.rs");
+        add_file(&mut document, 2, "src/service/handler.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 2, EntityKind::Service);
+        document
+            .entities
+            .last_mut()
+            .expect("service entity was just pushed")
+            .qualified_name = "rootlight-query::query-service::handler".to_owned();
+        add_relation(
+            &mut document,
+            110,
+            RelationEndpoint::Entity(symbol(12)),
+            RelationPredicate::CallsRoute,
+            RelationEndpoint::Entity(symbol(11)),
+            900,
+        );
+        add_relation(
+            &mut document,
+            111,
+            RelationEndpoint::Entity(symbol(12)),
+            RelationPredicate::CoChangedWith,
+            RelationEndpoint::Entity(symbol(11)),
+            850,
+        );
+
+        let standard =
+            change_impact_plan(BTreeSet::from([symbol(11)]), Vec::new(), 3, 0, false, 20);
+        assert!(
+            run_change_impact(&document, &standard).impacted[0]
+                .dependents
+                .is_empty()
+        );
+
+        let mut conservative = standard.clone();
+        conservative.relation_policy = ChangeImpactRelationPolicy::Conservative;
+        conservative.include_history = true;
+        conservative.scope_paths = vec!["src/service".to_owned()];
+        conservative.scope_packages = vec!["rootlight-query".to_owned()];
+        conservative.scope_services = vec!["rootlight-query::query-service".to_owned()];
+        let analysis = run_change_impact(&document, &conservative);
+        assert_eq!(analysis.impacted[0].dependents.len(), 1);
+        assert_eq!(analysis.impacted[0].dependents[0].symbol_id, symbol(12));
+        assert!(
+            analysis.impacted[0].dependents[0]
+                .via
+                .contains(&"calls_route".to_owned())
+        );
+        assert!(
+            analysis
+                .risk_summary
+                .reasons
+                .contains(&"bounded_history_signal_observed".to_owned())
+        );
+
+        conservative.scope_paths = vec!["src/other".to_owned()];
+        assert!(
+            run_change_impact(&document, &conservative).impacted[0]
+                .dependents
+                .is_empty()
+        );
     }
 
     #[test]
@@ -10098,6 +12208,8 @@ mod tests {
             objective_text: "change the selected targets".to_owned(),
             target_symbols,
             target_files,
+            target_paths: BTreeSet::new(),
+            constraints: Vec::new(),
             max_steps,
             max_depth: 3,
             max_dependents: 100,
@@ -10346,6 +12458,45 @@ mod tests {
     }
 
     #[test]
+    fn plan_change_resolves_path_context_and_verifies_constraints() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/payments/api.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+
+        let mut plan = plan_change_plan(
+            PlanChangeObjective::Migration,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            8,
+        );
+        plan.target_paths.insert("src/payments".to_owned());
+        plan.constraints = vec![
+            "preserve the existing REST route".to_owned(),
+            "avoid a schema change".to_owned(),
+        ];
+        let analysis = run_plan_change(&document, &plan);
+
+        assert_eq!(analysis.plan[0].targets, vec![symbol(11)]);
+        let constraint_step = analysis
+            .plan
+            .last()
+            .expect("caller constraints produce a final verification step");
+        assert!(
+            constraint_step
+                .action
+                .contains("preserve the existing REST route")
+        );
+        assert!(constraint_step.action.contains("avoid a schema change"));
+        assert_eq!(constraint_step.risks, vec!["constraint_violation"]);
+        assert_eq!(
+            constraint_step.verification.as_deref(),
+            Some("verify every caller-provided constraint before completion")
+        );
+        assert_eq!(analysis.context_pack_request.symbols, vec![symbol(11)]);
+        assert_eq!(analysis.context_pack_request.files, vec![file_id(1)]);
+    }
+
+    #[test]
     fn plan_change_explanation_objective_emits_read_only_steps() {
         let mut document = overview_document();
         add_file(&mut document, 1, "src/a.rs");
@@ -10416,7 +12567,9 @@ mod tests {
     ) -> HistoryComparePlan {
         HistoryComparePlan {
             base_generation,
+            scope: HistoryCompareScope::default(),
             change_kinds,
+            include_unchanged_context: false,
             max_results,
             budget: QueryBudget::new(),
             explanation: PlanExplanation {
@@ -10484,12 +12637,13 @@ mod tests {
         add_entity(&mut head, 11, 1, EntityKind::Function);
         add_entity(&mut head, 13, 2, EntityKind::Function);
 
-        let plan = history_compare_plan(
+        let mut plan = history_compare_plan(
             history_generation(1),
             history_generation(2),
             BTreeSet::new(),
             100,
         );
+        plan.include_unchanged_context = true;
         let analysis = run_history_compare(&base, &head, &plan);
 
         // The removed entity (significance 700) ranks before the addition (200).
@@ -10783,12 +12937,13 @@ mod tests {
         add_entity(&mut document, 11, 1, EntityKind::Function);
         add_entity(&mut document, 12, 1, EntityKind::Function);
 
-        let plan = history_compare_plan(
+        let mut plan = history_compare_plan(
             history_generation(1),
             history_generation(1),
             BTreeSet::new(),
             100,
         );
+        plan.include_unchanged_context = true;
         let (analysis, execution) = run_history_compare_with_execution(&document, &document, &plan);
 
         assert!(analysis.changes.is_empty());
@@ -10809,6 +12964,24 @@ mod tests {
     }
 
     #[test]
+    fn history_compare_excludes_unchanged_lineage_by_default() {
+        let mut document = history_document(1);
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+
+        let plan = history_compare_plan(
+            history_generation(1),
+            history_generation(1),
+            BTreeSet::new(),
+            100,
+        );
+        let analysis = run_history_compare(&document, &document, &plan);
+
+        assert!(analysis.changes.is_empty());
+        assert!(analysis.lineage.is_empty());
+    }
+
+    #[test]
     fn history_compare_reports_no_changes_for_equivalent_source_snapshots() {
         let mut base = history_document(1);
         add_file_with_content(&mut base, 1, 9, "src/a.rs");
@@ -10818,12 +12991,13 @@ mod tests {
         add_file_with_content(&mut head, 1, 9, "src/a.rs");
         add_history_entity(&mut head, 82, 1, 9, 5, 25, "stable", EntityKind::Function);
 
-        let plan = history_compare_plan(
+        let mut plan = history_compare_plan(
             history_generation(1),
             history_generation(2),
             BTreeSet::new(),
             100,
         );
+        plan.include_unchanged_context = true;
         let analysis = run_history_compare(&base, &head, &plan);
 
         assert!(analysis.changes.is_empty());
@@ -10906,12 +13080,13 @@ mod tests {
             scope.flags.push(EntityFlag::Synthetic);
         }
 
-        let plan = history_compare_plan(
+        let mut plan = history_compare_plan(
             history_generation(1),
             history_generation(2),
             BTreeSet::new(),
             100,
         );
+        plan.include_unchanged_context = true;
         let analysis = run_history_compare(&base, &head, &plan);
 
         assert!(analysis.changes.is_empty());
@@ -10951,6 +13126,165 @@ mod tests {
         );
         let analysis = run_history_compare(&base, &head, &signatures);
         assert!(analysis.changes.is_empty());
+    }
+
+    #[test]
+    fn history_compare_applies_path_scope_to_both_generations() {
+        let mut base = history_document(1);
+        add_file_with_content(&mut base, 1, 1, "src/api.rs");
+        add_file_with_content(&mut base, 2, 2, "vendor/other.rs");
+
+        let mut head = history_document(2);
+        add_file_with_content(&mut head, 1, 3, "src/api.rs");
+        add_file_with_content(&mut head, 2, 4, "vendor/other.rs");
+        add_history_entity(&mut head, 11, 1, 3, 0, 10, "in_scope", EntityKind::Function);
+        add_history_entity(
+            &mut head,
+            12,
+            2,
+            4,
+            0,
+            10,
+            "outside_scope",
+            EntityKind::Function,
+        );
+
+        let mut plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::from([HistoryChangeKind::Entities]),
+            100,
+        );
+        plan.scope.paths = vec!["src".to_owned()];
+        let analysis = run_history_compare(&base, &head, &plan);
+
+        assert_eq!(analysis.changes.len(), 1);
+        assert_eq!(analysis.changes[0].symbol_id, symbol(11));
+        assert_eq!(analysis.changes[0].kind, HistorySemanticChangeKind::Added);
+    }
+
+    #[test]
+    fn history_compare_projects_relation_domains_split_and_merge() {
+        let cases = [
+            (
+                RelationPredicate::OwnedBy,
+                HistoryChangeKind::Ownership,
+                HistorySemanticChangeKind::RelationChanged,
+            ),
+            (
+                RelationPredicate::Tests,
+                HistoryChangeKind::Tests,
+                HistorySemanticChangeKind::RelationChanged,
+            ),
+            (
+                RelationPredicate::CallsRoute,
+                HistoryChangeKind::Routes,
+                HistorySemanticChangeKind::ArchitectureChanged,
+            ),
+            (
+                RelationPredicate::ReadsTable,
+                HistoryChangeKind::Data,
+                HistorySemanticChangeKind::RelationChanged,
+            ),
+            (
+                RelationPredicate::LineageSplitFrom,
+                HistoryChangeKind::Relations,
+                HistorySemanticChangeKind::Split,
+            ),
+            (
+                RelationPredicate::LineageMergedFrom,
+                HistoryChangeKind::Relations,
+                HistorySemanticChangeKind::Merged,
+            ),
+        ];
+        for (index, (predicate, filter, expected)) in cases.into_iter().enumerate() {
+            let mut base = history_document(1);
+            add_file(&mut base, 1, "src/a.rs");
+            add_entity(&mut base, 11, 1, EntityKind::Function);
+            add_entity(&mut base, 12, 1, EntityKind::Function);
+
+            let mut head = history_document(2);
+            add_file(&mut head, 1, "src/a.rs");
+            add_entity(&mut head, 11, 1, EntityKind::Function);
+            add_entity(&mut head, 12, 1, EntityKind::Function);
+            add_relation(
+                &mut head,
+                u8::try_from(index + 1).expect("fixture index fits"),
+                RelationEndpoint::Entity(symbol(11)),
+                predicate,
+                RelationEndpoint::Entity(symbol(12)),
+                900,
+            );
+
+            let plan = history_compare_plan(
+                history_generation(1),
+                history_generation(2),
+                BTreeSet::from([filter]),
+                100,
+            );
+            let analysis = run_history_compare(&base, &head, &plan);
+            assert_eq!(
+                analysis.changes.len(),
+                1,
+                "relation domain {predicate:?} emits one change"
+            );
+            assert_eq!(analysis.changes[0].kind, expected);
+            assert_eq!(
+                analysis.lineage.len(),
+                1,
+                "the changed stable identity is retained as lineage"
+            );
+        }
+    }
+
+    #[test]
+    fn history_compare_reports_scoped_architecture_deltas() {
+        let mut base = history_document(1);
+        add_file(&mut base, 1, "src/services.rs");
+        add_entity(&mut base, 10, 1, EntityKind::Service);
+        add_entity(&mut base, 20, 1, EntityKind::Service);
+        add_entity(&mut base, 11, 1, EntityKind::Function);
+        add_entity(&mut base, 21, 1, EntityKind::Function);
+        base.entities[2].container = Some(ContainerRef::Entity(symbol(10)));
+        base.entities[3].container = Some(ContainerRef::Entity(symbol(20)));
+
+        let mut head = history_document(2);
+        add_file(&mut head, 1, "src/services.rs");
+        add_entity(&mut head, 10, 1, EntityKind::Service);
+        add_entity(&mut head, 20, 1, EntityKind::Service);
+        add_entity(&mut head, 30, 1, EntityKind::Service);
+        add_entity(&mut head, 11, 1, EntityKind::Function);
+        add_entity(&mut head, 21, 1, EntityKind::Function);
+        head.entities[3].container = Some(ContainerRef::Entity(symbol(10)));
+        head.entities[4].container = Some(ContainerRef::Entity(symbol(20)));
+        add_relation(
+            &mut head,
+            90,
+            RelationEndpoint::Entity(symbol(11)),
+            RelationPredicate::DependsOn,
+            RelationEndpoint::Entity(symbol(21)),
+            900,
+        );
+
+        let mut plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::from([HistoryChangeKind::Architecture]),
+            100,
+        );
+        plan.scope.paths = vec!["src".to_owned()];
+        let analysis = run_history_compare(&base, &head, &plan);
+
+        assert_eq!(analysis.architecture_delta.new_boundaries, 1);
+        assert_eq!(analysis.architecture_delta.removed_boundaries, 0);
+        assert_eq!(analysis.architecture_delta.new_cross_service_edges, 1);
+        assert_eq!(analysis.architecture_delta.removed_cross_service_edges, 0);
+        assert!(
+            analysis
+                .changes
+                .iter()
+                .any(|change| change.kind == HistorySemanticChangeKind::ArchitectureChanged)
+        );
     }
 
     #[test]

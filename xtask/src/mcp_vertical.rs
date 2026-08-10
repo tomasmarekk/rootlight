@@ -2134,7 +2134,7 @@ fn query_snapshot(
     require_tool_success(&source, "source.read")?;
     require_trust_labels(&source.structured)?;
     assert_read_correlation(&source.structured, repository, expected_generation)?;
-    assert_complete_tier_b_rust_coverage(&source.structured)?;
+    assert_complete_source_read_with_unknown_tier_b_coverage(&source.structured)?;
     assert_absent(&source.structured, IGNORED_SENTINEL)?;
     assert_absent(&source.structured, OUTSIDE_SENTINEL)?;
     let chunks = source.structured["data"]["chunks"]
@@ -3012,30 +3012,6 @@ fn exercise_matrix_unsupported(
                 "relations": ["called_by"]
             }),
         ),
-        (
-            "architecture.overview",
-            json!({
-                "repository": {"repository_id": head.repository},
-                "generation": head.generation,
-                "views": ["services"]
-            }),
-        ),
-        (
-            "architecture.cycles",
-            json!({
-                "repository": {"repository_id": head.repository},
-                "generation": head.generation,
-                "projection": {"relations": ["messaging"], "level": "symbol"}
-            }),
-        ),
-        (
-            "code.dead",
-            json!({
-                "repository": {"repository_id": head.repository},
-                "generation": head.generation,
-                "entry_point_policy": "library"
-            }),
-        ),
     ];
     for (index, (tool, arguments)) in cases.into_iter().enumerate() {
         let outcome = call_tool(
@@ -3238,15 +3214,9 @@ fn matrix_not_applicable_reason(tool: &str, state: &str) -> Option<&'static str>
         "missing_repository" | "missing_generation" | "stale_retained_generation" => {
             REPOSITORY_READ_TOOLS.contains(&tool)
         }
-        "unsupported_capability" => matches!(
-            tool,
-            "repo.status"
-                | "symbol.relationships"
-                | "flow.trace"
-                | "architecture.overview"
-                | "architecture.cycles"
-                | "code.dead"
-        ),
+        "unsupported_capability" => {
+            matches!(tool, "repo.status" | "symbol.relationships" | "flow.trace")
+        }
         "truncated" => matches!(tool, "repo.list" | "architecture.overview"),
         "cancelled" => tool == "repo.index",
         "restart_recovered" => matches!(tool, "operation.status" | "code.locate"),
@@ -3386,7 +3356,7 @@ fn exercise_nested_ignore_policy(
     require_tool_success(&kept_source, "source.read")?;
     require_trust_labels(&kept_source.structured)?;
     assert_read_correlation(&kept_source.structured, repository, generation)?;
-    assert_complete_tier_b_rust_coverage(&kept_source.structured)?;
+    assert_complete_source_read_with_unknown_tier_b_coverage(&kept_source.structured)?;
     assert_control_value_omits_sentinels(&kept_source.structured)?;
     let chunks =
         kept_source.structured["data"]["chunks"]
@@ -3833,6 +3803,27 @@ fn assert_complete_tier_b_rust_coverage(structured: &Value) -> Result<(), Vertic
     )
 }
 
+fn assert_complete_source_read_with_unknown_tier_b_coverage(
+    structured: &Value,
+) -> Result<(), VerticalError> {
+    // Reading all requested bytes is complete retrieval, but it does not establish
+    // semantic coverage for negative or exhaustive claims about those bytes.
+    assert_tier_b_rust_coverage(
+        structured,
+        "unknown",
+        "source.read did not retain unknown Tier-B Rust semantic coverage",
+    )?;
+    if structured["completeness"]["state"] == "complete"
+        && diagnostic_code_is_present(&structured["warnings"], "negative_claims_inconclusive")
+    {
+        Ok(())
+    } else {
+        Err(VerticalError::Invariant(
+            "source.read did not report complete retrieval with an inconclusive semantic claim warning",
+        ))
+    }
+}
+
 fn assert_tier_b_rust_coverage(
     structured: &Value,
     expected_status: &str,
@@ -4230,7 +4221,7 @@ fn exercise_incremental_lineage(
             "base": base.generation,
             "head": head.generation,
             "max_results": 100,
-            "profile": "compact"
+            "profile": "evidence"
         }),
     )?;
     require_tool_success(&comparison, "history.compare")?;
@@ -5555,11 +5546,13 @@ impl SnapshotEvidence {
             .ok_or(VerticalError::Invariant(
                 "source reference omitted its file identity",
             ))?;
+        let file_container = format!("file:{file}");
         let replacements = [
             (index.repository.as_str(), "$repository"),
             (index.generation.as_str(), "$generation"),
             (self.symbol.as_str(), "$symbol"),
             (file, "$file"),
+            (file_container.as_str(), "file:$file"),
         ];
         Ok(CanonicalSnapshot {
             exact_locate: canonicalize_known_identities(
@@ -6735,6 +6728,7 @@ mod tests {
     use super::{
         CANCELLATION_FIXTURE_FILES, EXPECTED_TOOLS, MATRIX_STATES, Options, ToolMatrixCell,
         ToolOutcome, VerticalError, assert_active_generation_lineage,
+        assert_complete_source_read_with_unknown_tier_b_coverage,
         assert_complete_tier_b_rust_coverage, assert_generation_relationship,
         canonicalize_known_identities, diagnostic_code_is_present, estimated_tokens,
         matrix_not_applicable_reason, modify_fixture_to_v2, nearest_rank, normalize_read_response,
@@ -7131,6 +7125,28 @@ mod tests {
             }
         });
         assert!(assert_complete_tier_b_rust_coverage(&semantic).is_err());
+        let source_read = json!({
+            "coverage": {
+                "status": "unknown",
+                "languages": [
+                    {"language": "rust", "tier": "B", "status": "unknown"}
+                ]
+            },
+            "completeness": {"state": "complete"},
+            "warnings": [
+                {
+                    "code": "negative_claims_inconclusive",
+                    "message": "negative and exhaustive claims are inconclusive"
+                }
+            ]
+        });
+        assert!(assert_complete_source_read_with_unknown_tier_b_coverage(&source_read).is_ok());
+        let mut source_read_without_warning = source_read;
+        source_read_without_warning["warnings"] = json!([]);
+        assert!(
+            assert_complete_source_read_with_unknown_tier_b_coverage(&source_read_without_warning)
+                .is_err()
+        );
         let observed = observe_rust_coverage(&json!({
             "coverage": {
                 "status": "unknown",

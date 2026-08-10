@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::TrustClassification;
 use crate::vertical::{
-    ContinuationCursor, Freshness, GenerationSelector, GenerationSummary, OperationState,
-    ReadEnvelope, RepositorySelector, RequiredNullable, ResponseBudget, ResponseProfile,
-    ResponseWarning, ToolResponse, UsageSummary,
+    AnalysisReadEnvelope, AnalysisToolResponse, ContinuationCursor, Freshness, GenerationSelector,
+    GenerationSummary, OperationState, ReadEnvelope, RepositorySelector, RequiredNullable,
+    ResponseBudget, ResponseProfile, ResponseWarning, ToolResponse, UsageSummary,
 };
 use rootlight_ir::CoverageStatus;
 
@@ -186,6 +186,8 @@ pub struct RepoStatusData {
     pub active_generation: RequiredNullable<GenerationSummary>,
     /// Publication relationship of the selected generation.
     pub publication_state: GenerationPublicationState,
+    /// Durable bytes retained for the selected immutable generation.
+    pub retained_durable_bytes: u64,
     /// Registered repository alias, when configured.
     pub alias: RequiredNullable<String>,
     /// Coverage at the requested granularity.
@@ -201,8 +203,44 @@ pub struct RepoStatusData {
     pub explanation: Option<crate::context::PlanExplanation>,
 }
 
-/// Checked success-or-error output for `repo.status`.
-pub type RepoStatusOutput = ToolResponse<ReadEnvelope<RepoStatusData>>;
+/// `repo.status` result data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "RepoStatusData")]
+pub struct RepoStatusDataV1_0 {
+    /// Overall repository health.
+    pub repository_state: RepositoryState,
+    /// Explicit generation requested by the caller, null for the active selector.
+    pub requested_generation: RequiredNullable<GenerationId>,
+    /// Exact immutable generation resolved for this response.
+    pub resolved_generation: GenerationId,
+    /// Active generation summary, null when no generation is published.
+    pub active_generation: RequiredNullable<GenerationSummary>,
+    /// Publication relationship of the selected generation.
+    pub publication_state: GenerationPublicationState,
+    /// Registered repository alias, when configured.
+    pub alias: RequiredNullable<String>,
+    /// Coverage at the requested granularity.
+    pub coverage: CoverageReport,
+    /// Bounded operation list, most recent first.
+    #[schemars(length(max = 100))]
+    pub operations: Vec<OperationSummary>,
+    /// Recommended next actions for the agent.
+    #[schemars(length(max = 8))]
+    pub recommended_actions: Vec<crate::vertical::SourceFreeMessage>,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
+}
+
+/// Checked `repo.status` output retained for explicit 1.0 callers.
+pub type RepoStatusOutputV1_0 = ToolResponse<ReadEnvelope<RepoStatusDataV1_0>>;
+
+/// Checked `repo.status` output for additive schema 1.1.
+pub type RepoStatusOutputV1_1 = AnalysisToolResponse<AnalysisReadEnvelope<RepoStatusData>>;
+
+/// Current checked success-or-error output for `repo.status`.
+pub type RepoStatusOutput = RepoStatusOutputV1_1;
 
 /// Strict input for `repo.list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

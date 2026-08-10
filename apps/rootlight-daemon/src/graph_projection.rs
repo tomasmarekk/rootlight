@@ -1039,6 +1039,8 @@ mod tests {
                         symbol_count: 1,
                         responsibility_evidence: vec!["contains_symbols".to_owned()],
                         confidence: 1_000,
+                        file_count: 1,
+                        source_refs: Vec::new(),
                     })
                     .collect(),
                 connections: vec![daemon::FirstSliceArchitectureConnection {

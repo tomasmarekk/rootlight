@@ -458,6 +458,8 @@ fn explanation(generation_id: GenerationId) -> SymbolExplanation {
         symbol_id: symbol(),
         kind: rootlight_mcp_contract::vertical::EntityKind::Function,
         display_name: "admit_request".to_owned(),
+        qualified_name: Some("rootlight::admit_request".to_owned()),
+        container: None,
         signature: Some("fn admit_request()".to_owned()),
         definition: SourceRef::new(
             repository(),
@@ -474,6 +476,9 @@ fn explanation(generation_id: GenerationId) -> SymbolExplanation {
             inbound_candidates: 0,
             references_exact: 0,
         },
+        relation_samples: Vec::new(),
+        source_preview: None,
+        section_gaps: Vec::new(),
         provenance: Vec::new(),
         confidence: 900,
         uncertainty: Vec::new(),

@@ -102,7 +102,19 @@ impl McpTool {
     pub const fn contract_version(self) -> &'static str {
         match self {
             Self::RepoList => crate::REPO_LIST_SCHEMA_VERSION,
-            Self::RepoIndex | Self::OperationStatus => crate::MCP_OPERATION_SCHEMA_VERSION,
+            Self::RepoIndex => crate::MCP_OPERATION_SCHEMA_VERSION,
+            Self::OperationStatus => crate::MCP_OPERATION_STATUS_SCHEMA_VERSION,
+            Self::RepoStatus => crate::MCP_REPOSITORY_STATUS_SCHEMA_VERSION,
+            Self::SymbolExplain
+            | Self::SymbolRelationships
+            | Self::ChangeImpact
+            | Self::TestsSelect
+            | Self::ArchitectureOverview
+            | Self::ArchitectureCycles
+            | Self::CodeDead
+            | Self::HistoryCompare
+            | Self::PlanChange
+            | Self::ContextPack => crate::MCP_ANALYSIS_SCHEMA_VERSION,
             _ => crate::MCP_SCHEMA_VERSION,
         }
     }
@@ -153,7 +165,7 @@ impl McpTool {
                 "Use bounded exact-identifier or indexed lexical-text matching over normalized symbols in one selected generation with authenticated continuation; path, structural, semantic, and documentation modes are unsupported."
             }
             Self::SymbolExplain => {
-                "Return bounded definitions, exact relation counts, and optional compact producer provenance for explicit stable symbol identifiers; absent identifiers are reported as unresolved, while custom sections, source previews, relation samples, full provenance, and continuation are unsupported."
+                "Return requested bounded definition sections, exact relation counts, sampled stable relation references, source previews, and selected producer provenance for explicit stable symbol identifiers; absent identifiers and unavailable section evidence are reported explicitly."
             }
             Self::SymbolRelationships => {
                 "Return bounded static call, caller, reference, type, implementation, and import relationships around explicit stable symbol identifiers with authenticated continuation; other relation families, custom scope, and candidate projection are unsupported."
@@ -162,28 +174,28 @@ impl McpTool {
                 "Trace bounded paths over static call, reference, type, implementation, and import edges; other relation families plus route, service, database, and cross-repository endpoints are unsupported."
             }
             Self::ChangeImpact => {
-                "Use bounded explicit symbol-or-path change mapping to dependents, risks, and optional tests; working-tree and revision-range resolution are unsupported."
+                "Use bounded explicit or read-only Git change evidence, scoped relation policies, and optional history signals to map affected symbols, dependents, services, tests, and coverage-aware risks."
             }
             Self::TestsSelect => {
-                "Use bounded unit-test ranking from explicit symbol seeds with direct-edge or declaring-file co-location rationale and explicit gaps; other test kinds, path, change, build-target, framework, and execution-budget inputs are unsupported."
+                "Rank bounded test candidates from symbol, path, change, or build-target seeds with test-kind and framework filters, execution budgets, declarative commands, static/build/history signals, and explicit evidence gaps."
             }
             Self::ArchitectureOverview => {
-                "Use a bounded file-granularity architecture map with optional hotspots and deterministic non-ownership communities; module, package, service, data, ownership, and build views are unsupported."
+                "Use a bounded generation-pinned architecture map scoped by paths, packages, build targets, or symbols across module, package, service, data, build, ownership, deterministic non-ownership communities, and hotspot views with summary, standard, or detailed evidence."
             }
             Self::ArchitectureCycles => {
-                "Detect bounded symbol-level cycles over static call, reference, type, implementation, and import edges; other relation families, custom scope, and ranking are unsupported."
+                "Detect bounded generation-pinned cycles in path, package, build-target, or symbol scope at symbol, module, package, build-target, or service level across declared relation families with size, edge-weight, change-risk, or break-cost ranking and evidence."
             }
             Self::CodeDead => {
-                "Return bounded static reachability observations from the partial standard entry-point model with dynamic-dispatch and coverage caveats; observations do not prove runtime liveness, and custom scope or alternate entry-point policies are unsupported."
+                "Return bounded generation-pinned static reachability observations in a structural scope using standard, library, application, framework-specific, or explicit entry roots with suppression rules, blind spots, and coverage caveats; observations do not prove runtime liveness."
             }
             Self::HistoryCompare => {
-                "Use bounded entity and signature comparison of two explicit retained generation identifiers; relation, architecture, ownership, test, route, data, and Git revision comparisons are unsupported."
+                "Compare retained generations or Git refs matching indexed state with combined path, package, service, and symbol scope; report entity, signature, relation, architecture, ownership, test, route, and data deltas plus breaking candidates and lineage."
             }
             Self::PlanChange => {
-                "Use bounded change planning from a caller-authored objective and explicit targets under caller-reduced resource ceilings; change-context resolution and user constraints are unsupported."
+                "Build an evidence-backed ordered change plan from symbol, file, package, route, or located-result targets; incorporate caller constraints and working-tree, Git, or hypothetical change context under caller-reduced resource ceilings."
             }
             Self::ContextPack => {
-                "Use bounded profiled evidence assembly with authenticated continuation, generation-pinned references signatures and source snippets under a token budget; selectable response profiles and source policies control representation, while path, route, change, located-result, and plan seeds are unsupported."
+                "Assemble deterministic generation-pinned definitions, implementations, callers, tests, risks, architecture, change, and source evidence from symbol, path, route, test, change, located-result, or plan seeds under an authenticated token-bounded continuation."
             }
             Self::SourceRead => {
                 "Read bounded source ranges from pinned source references as untrusted data using exact UTF-8 or explicit base64 bytes with optional context, canonical overlap merging, line projection, and caller-reduced ceilings; direct file selectors are unsupported."
@@ -387,13 +399,49 @@ mod tests {
             McpTool::RepoList.contract_version(),
             crate::REPO_LIST_SCHEMA_VERSION
         );
-        for tool in [McpTool::RepoIndex, McpTool::OperationStatus] {
-            assert_eq!(tool.contract_version(), crate::MCP_OPERATION_SCHEMA_VERSION);
+        assert_eq!(
+            McpTool::RepoIndex.contract_version(),
+            crate::MCP_OPERATION_SCHEMA_VERSION
+        );
+        assert_eq!(
+            McpTool::RepoStatus.contract_version(),
+            crate::MCP_REPOSITORY_STATUS_SCHEMA_VERSION
+        );
+        assert_eq!(
+            McpTool::OperationStatus.contract_version(),
+            crate::MCP_OPERATION_STATUS_SCHEMA_VERSION
+        );
+        for tool in [
+            McpTool::SymbolExplain,
+            McpTool::SymbolRelationships,
+            McpTool::ChangeImpact,
+            McpTool::TestsSelect,
+            McpTool::ArchitectureOverview,
+            McpTool::ArchitectureCycles,
+            McpTool::CodeDead,
+            McpTool::HistoryCompare,
+            McpTool::PlanChange,
+            McpTool::ContextPack,
+        ] {
+            assert_eq!(tool.contract_version(), crate::MCP_ANALYSIS_SCHEMA_VERSION);
         }
         for tool in McpTool::ALL {
             if !matches!(
                 tool,
-                McpTool::RepoList | McpTool::RepoIndex | McpTool::OperationStatus
+                McpTool::RepoList
+                    | McpTool::RepoIndex
+                    | McpTool::RepoStatus
+                    | McpTool::OperationStatus
+                    | McpTool::SymbolExplain
+                    | McpTool::SymbolRelationships
+                    | McpTool::ChangeImpact
+                    | McpTool::TestsSelect
+                    | McpTool::ArchitectureOverview
+                    | McpTool::ArchitectureCycles
+                    | McpTool::CodeDead
+                    | McpTool::HistoryCompare
+                    | McpTool::PlanChange
+                    | McpTool::ContextPack
             ) {
                 assert_eq!(tool.contract_version(), crate::MCP_SCHEMA_VERSION);
             }
@@ -507,10 +555,6 @@ mod tests {
     fn descriptions_do_not_retain_the_known_overclaims() {
         let overclaims: &[(McpTool, &[&str])] = &[
             (McpTool::CodeLocate, &["path, or structure", "text, path"]),
-            (
-                McpTool::ChangeImpact,
-                &["Map a provided change set", "Git change set"],
-            ),
             (
                 McpTool::ArchitectureOverview,
                 &["modules and packages", "data stores", "routes"],

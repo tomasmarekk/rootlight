@@ -10,7 +10,7 @@ use rootlight_mcp_contract::{
     accounting::tool_list_payload,
     capability::{CAPABILITIES, DISCOVERY_METADATA_KEY},
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[test]
 fn stdio_process_initializes_pings_and_exits_on_eof() {
@@ -178,13 +178,19 @@ fn capability_registry_maps_every_tool_across_the_process_boundary() {
         assert_eq!(listed["name"], capability.tool.name());
     }
     for intent in [
-        "code.locate",
         "change.impact",
         "architecture.overview",
         "history.compare",
         "context.pack",
-        "query.batch",
     ] {
+        let metadata = &list
+            .iter()
+            .find(|tool| tool["name"] == intent)
+            .unwrap_or_else(|| panic!("{intent} is discoverable"))["_meta"][DISCOVERY_METADATA_KEY];
+        assert_eq!(metadata["status"], "implemented");
+        assert_eq!(metadata["limitations"], json!([]));
+    }
+    for intent in ["code.locate", "query.batch"] {
         let metadata = &list
             .iter()
             .find(|tool| tool["name"] == intent)
@@ -250,18 +256,18 @@ fn tools_list_payloads_match_all_profile_goldens_across_the_process_boundary() {
     let expected = [
         (
             ExposureProfile::Scout,
-            225_535,
-            "094fe3d41cf4e67e7898fb38600add9d8bf412c838910306732038f8c2f48fce",
+            225_473,
+            "c24f5f1b2a28079ee1ff961ae9a3abeb105fa0e78cfbeab3dee768f9983a5ca0",
         ),
         (
             ExposureProfile::Analysis,
-            493_965,
-            "22e3a801dcb69c3c94edd49eee3f0b340c2b7b12924e2b5dbb46fab6134c0895",
+            493_575,
+            "a6fd0375dafd929fb83d289bc9743c9f9ee09abcf0edb0bd1a75511a926fac05",
         ),
         (
             ExposureProfile::Developer,
-            679_867,
-            "ea881b4587d6c6fa23e463aaf13877f13fca4c277a033c33e82a60a734cdc065",
+            678_324,
+            "152a1da13695af14832e8f29da7c1b195cce7fafc78b0c620cfc6f8c1aa18fb9",
         ),
     ];
     for (profile, expected_bytes, expected_hash) in expected {

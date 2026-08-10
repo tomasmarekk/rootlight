@@ -1,7 +1,7 @@
 //! Production-process evidence for change, test, history, and planning tools.
 //!
-//! The matrix crosses MCP stdio and the supervised daemon while keeping
-//! unsupported Git and selector dimensions in preflight.
+//! The matrix crosses MCP stdio and the supervised daemon, including every
+//! public history and planning selector.
 
 mod process_support;
 
@@ -15,27 +15,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rootlight_ids::{GenerationId, RepositoryId, SymbolId};
+use rootlight_ids::GenerationId;
 use serde_json::{Value, json};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
-const CHANGE_TOOLS: [&str; 4] = [
-    "change.impact",
-    "tests.select",
-    "history.compare",
-    "plan.change",
-];
-
 #[test]
 fn change_tools_preserve_truthful_contracts_across_processes() {
     let fixture = process_support::private_process_tempdir("rl-change-");
     let state_dir = fixture.path().join("state");
     let runtime_dir = fixture.path().join("runtime");
-    assert_unsupported_selectors_are_rejected_before_daemon(&state_dir, &runtime_dir);
-
     let repository_root = fixture.path().join("repository");
     write_repository_revision(&repository_root, false);
+    initialize_git_repository(&repository_root);
+    commit_repository(&repository_root, "base");
+    let base_revision = git_stdout(&repository_root, &["rev-parse", "HEAD"]);
     let daemon_binary = ensure_daemon_binary();
     let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
@@ -43,7 +37,20 @@ fn change_tools_preserve_truthful_contracts_across_processes() {
 
     let first = index_repository(&mut mcp, &repository_root, "first");
     write_repository_revision(&repository_root, true);
+    commit_repository(&repository_root, "head");
+    let head_revision = git_stdout(&repository_root, &["rev-parse", "HEAD"]);
     let second = index_repository(&mut mcp, &repository_root, "second");
+    let symbol_id = locate_symbol(&mut mcp, &second, "change_target");
+    assert_git_history_selectors_are_admitted(&mut mcp, &second, &base_revision, &head_revision);
+    fs::write(
+        repository_root.join("src/lib.rs"),
+        concat!(
+            "pub fn change_target() -> usize { change_helper() }\n",
+            "fn change_helper() -> usize { 3 }\n",
+            "pub fn added_surface() -> usize { change_target() }\n",
+        ),
+    )
+    .expect("working-tree fixture change is written");
     assert_eq!(
         first.repository_id, second.repository_id,
         "reindexing the same root preserves repository identity"
@@ -52,22 +59,28 @@ fn change_tools_preserve_truthful_contracts_across_processes() {
         first.generation_id, second.generation_id,
         "the changed repository publishes a distinct generation"
     );
-    let symbol_id = locate_symbol(&mut mcp, &second, "change_target");
+    assert_dirty_head_requires_indexed_history(&mut mcp, &second);
 
     let descriptions = tool_descriptions(&mut mcp);
-    for tool in CHANGE_TOOLS {
+    for tool in [
+        "change.impact",
+        "tests.select",
+        "history.compare",
+        "plan.change",
+    ] {
         let description = descriptions
             .iter()
             .find(|candidate| candidate["name"] == tool)
             .and_then(|candidate| candidate["description"].as_str())
             .unwrap_or_else(|| panic!("{tool} is absent from tools/list"));
         assert!(
-            description.contains("unsupported"),
-            "{tool} must disclose unsupported dimensions"
+            !description.contains("unsupported"),
+            "{tool} still advertises an implemented selector as unsupported"
         );
     }
 
-    let calls = change_tool_calls(&first, &second, &symbol_id);
+    let revision_range = format!("{base_revision}..{head_revision}");
+    let calls = change_tool_calls(&first, &second, &symbol_id, &revision_range);
     for (call_index, (tool, arguments)) in calls.iter().enumerate() {
         let first_response = mcp.call(
             &format!("change-{call_index}-first"),
@@ -88,7 +101,6 @@ fn change_tools_preserve_truthful_contracts_across_processes() {
         let repeated = &repeated["result"]["structuredContent"];
         for field in [
             "repository",
-            "generation",
             "data",
             "coverage",
             "completeness",
@@ -101,10 +113,49 @@ fn change_tools_preserve_truthful_contracts_across_processes() {
                 "{tool} changed deterministic field {field}"
             );
         }
+        assert_generation_identity_and_monotone_freshness(tool, output, repeated);
+
+        if matches!(*tool, "change.impact" | "tests.select") {
+            let retained = mcp.call_version(
+                &format!("change-{call_index}-retained"),
+                tool,
+                arguments.clone(),
+                "1.0",
+            );
+            assert_success(&retained, tool);
+            let retained = &retained["result"]["structuredContent"];
+            assert_eq!(retained["schema_version"], "1.0");
+            if *tool == "tests.select" {
+                assert!(
+                    retained["data"]["coverage_strategy"]
+                        .get("build_target_signals")
+                        .is_none()
+                );
+                for test in retained["data"]["tests"]
+                    .as_array()
+                    .expect("retained tests.select returns ranked tests")
+                {
+                    assert!(test.get("framework").is_none());
+                }
+            }
+        }
+        if matches!(*tool, "history.compare" | "plan.change") {
+            let retained = mcp.call_version(
+                &format!("change-{call_index}-retained"),
+                tool,
+                retained_analysis_arguments(tool, arguments.clone()),
+                "1.0",
+            );
+            assert_success(&retained, tool);
+            assert_eq!(
+                retained["result"]["structuredContent"]["schema_version"],
+                "1.0"
+            );
+        }
     }
 
-    assert_supported_profiles(&mut mcp, &first, &second, &symbol_id);
-    assert_hard_budgets_are_public(&mut mcp, &first, &second, &symbol_id);
+    assert_supported_profiles(&mut mcp, &first, &second, &symbol_id, &revision_range);
+    assert_hard_budgets_are_public(&mut mcp, &first, &second, &symbol_id, &revision_range);
     assert_plan_objectives_are_served(&mut mcp, &second, &symbol_id);
     assert_history_absence_is_distinct_from_empty(&mut mcp, &second);
 
@@ -112,10 +163,25 @@ fn change_tools_preserve_truthful_contracts_across_processes() {
     daemon.finish();
 }
 
+fn assert_dirty_head_requires_indexed_history(mcp: &mut McpProcess, second: &IndexReceipt) {
+    let response = mcp.call(
+        "change-dirty-git-head",
+        "history.compare",
+        json!({
+            "repository": {"repository_id": second.repository_id},
+            "base": {"git": "HEAD"},
+            "head": {"git": "working_tree"},
+            "max_results": 20
+        }),
+    );
+    assert_public_error(&response, "INCOMPLETE_COVERAGE");
+}
+
 fn change_tool_calls(
     first: &IndexReceipt,
     second: &IndexReceipt,
     symbol_id: &str,
+    revision_range: &str,
 ) -> [(&'static str, Value); 4] {
     let repository = || json!({"repository_id": second.repository_id});
     let generation = || Value::String(second.generation_id.clone());
@@ -127,9 +193,17 @@ fn change_tool_calls(
                 "generation": generation(),
                 "change": {
                     "symbol_ids": [symbol_id],
-                    "paths": ["src/lib.rs"]
+                    "paths": ["src/lib.rs"],
+                    "working_tree": "all",
+                    "revision_range": revision_range
                 },
-                "relation_policy": "standard",
+                "scope": {
+                    "paths": ["src"],
+                    "packages": ["change_process_fixture"],
+                    "services": ["change_process_fixture"]
+                },
+                "relation_policy": "conservative",
+                "include_history": true,
                 "max_depth": 3,
                 "include_tests": true,
                 "min_confidence": 0
@@ -140,9 +214,22 @@ fn change_tool_calls(
             json!({
                 "repository": repository(),
                 "generation": generation(),
-                "seeds": {"symbols": [symbol_id]},
-                "test_kinds": ["unit"],
+                "seeds": {
+                    "symbols": [symbol_id],
+                    "paths": ["src/lib.rs"],
+                    "change": {
+                        "working_tree": "all",
+                        "revision_range": revision_range
+                    },
+                    "build_targets": ["change_process_fixture"]
+                },
+                "test_kinds": ["unit", "integration", "e2e", "contract", "static", "build"],
+                "frameworks": ["rust-test"],
                 "max_tests": 20,
+                "execution_budget": {
+                    "max_total_ms": 120_000,
+                    "max_slow_tests": 10
+                },
                 "include_commands": true
             }),
         ),
@@ -152,8 +239,25 @@ fn change_tool_calls(
                 "repository": repository(),
                 "base": first.generation_id,
                 "head": second.generation_id,
-                "change_kinds": ["entities", "signatures"],
-                "max_results": 100
+                "scope": {
+                    "paths": ["src"],
+                    "packages": ["change_process_fixture"],
+                    "services": ["change_process_fixture"],
+                    "symbols": [symbol_id]
+                },
+                "change_kinds": [
+                    "entities",
+                    "signatures",
+                    "relations",
+                    "architecture",
+                    "ownership",
+                    "tests",
+                    "routes",
+                    "data"
+                ],
+                "include_unchanged_context": true,
+                "max_results": 100,
+                "profile": "evidence"
             }),
         ),
         (
@@ -163,11 +267,93 @@ fn change_tool_calls(
                 "generation": generation(),
                 "objective": "bug_fix",
                 "objective_text": "preserve the public result while correcting the helper",
-                "targets": [{"symbol_id": symbol_id}],
+                "targets": [
+                    {"symbol_id": symbol_id},
+                    {"package": "change_process_fixture"},
+                    {"route": "change_target"},
+                    {"located": "change_target"}
+                ],
+                "constraints": [
+                    "preserve public behavior",
+                    "avoid a schema change"
+                ],
+                "change_context": {
+                    "symbol_ids": [symbol_id],
+                    "paths": ["src/lib.rs"],
+                    "revision_range": revision_range
+                },
                 "max_steps": 12
             }),
         ),
     ]
+}
+
+fn assert_generation_identity_and_monotone_freshness(tool: &str, first: &Value, repeated: &Value) {
+    for field in ["generation_id", "parent_generation"] {
+        assert_eq!(
+            first["generation"][field], repeated["generation"][field],
+            "{tool} changed generation identity field {field}"
+        );
+    }
+    for field in ["structural_freshness", "semantic_freshness"] {
+        let before = &first["generation"][field];
+        let after = &repeated["generation"][field];
+        assert!(
+            before == after
+                || ((before == "current" || before == "stale") && after == "superseded"),
+            "{tool} reported a non-monotone generation freshness transition for {field}: \
+             {before:?} -> {after:?}"
+        );
+    }
+}
+
+fn retained_analysis_arguments(tool: &str, mut arguments: Value) -> Value {
+    if tool == "history.compare" {
+        arguments["scope"]
+            .as_object_mut()
+            .expect("history scope is an object")
+            .remove("services");
+    } else {
+        arguments["targets"] = json!([{
+            "symbol_id": arguments["change_context"]["symbol_ids"][0].clone()
+        }]);
+    }
+    arguments
+}
+
+fn assert_git_history_selectors_are_admitted(
+    mcp: &mut McpProcess,
+    second: &IndexReceipt,
+    base_revision: &str,
+    head_revision: &str,
+) {
+    let current = mcp.call(
+        "change-current-git-history",
+        "history.compare",
+        json!({
+            "repository": {"repository_id": second.repository_id},
+            "base": {"git": head_revision},
+            "head": {"git": "HEAD"},
+            "max_results": 20
+        }),
+    );
+    assert_success(&current, "history.compare");
+    let current = &current["result"]["structuredContent"];
+    assert_common_read_contract("history.compare", current, second);
+    assert_eq!(current["data"]["changes"], json!([]));
+    assert_eq!(current["data"]["lineage"], json!([]));
+
+    let unavailable = mcp.call(
+        "change-unindexed-git-history",
+        "history.compare",
+        json!({
+            "repository": {"repository_id": second.repository_id},
+            "base": {"git": base_revision},
+            "head": {"git": "HEAD"},
+            "max_results": 20
+        }),
+    );
+    assert_public_error(&unavailable, "INCOMPLETE_COVERAGE");
 }
 
 fn assert_tool_data(tool: &str, output: &Value, first: &IndexReceipt, second: &IndexReceipt) {
@@ -191,6 +377,7 @@ fn assert_tool_data(tool: &str, output: &Value, first: &IndexReceipt, second: &I
                 "transitive_signals",
                 "history_signals",
                 "file_colocation_signals",
+                "build_target_signals",
             ] {
                 assert!(
                     output["data"]["coverage_strategy"][signal]
@@ -281,13 +468,12 @@ fn assert_tool_data(tool: &str, output: &Value, first: &IndexReceipt, second: &I
                     Some("ownership"),
                 ]
             );
-            for provider in ["history", "source", "ownership"] {
-                let coverage = provider_coverage
-                    .iter()
-                    .find(|coverage| coverage["provider"] == provider)
-                    .expect("bounded unsupported provider is present");
-                assert_eq!(coverage["state"], "unsupported");
-                assert!(coverage["omission"]["reason"].is_string());
+            for coverage in provider_coverage {
+                assert!(coverage["state"].is_string());
+                assert!(coverage["evidence"].is_array());
+                if matches!(coverage["state"].as_str(), Some("unsupported" | "omitted")) {
+                    assert!(coverage["omission"]["reason"].is_string());
+                }
             }
             assert!(output["data"]["affected_scope"]["affected_symbols"].is_number());
             assert!(output["data"]["test_plan"].is_array());
@@ -303,15 +489,14 @@ fn assert_supported_profiles(
     first: &IndexReceipt,
     second: &IndexReceipt,
     symbol_id: &str,
+    revision_range: &str,
 ) {
     for profile in ["compact", "standard", "evidence"] {
-        for (case_index, (tool, mut arguments)) in change_tool_calls(first, second, symbol_id)
-            .into_iter()
-            .enumerate()
+        for (case_index, (tool, mut arguments)) in
+            change_tool_calls(first, second, symbol_id, revision_range)
+                .into_iter()
+                .enumerate()
         {
-            if tool == "history.compare" && profile != "compact" {
-                continue;
-            }
             arguments["profile"] = json!(profile);
             let response = mcp.call(
                 &format!("change-profile-{profile}-{case_index}"),
@@ -331,10 +516,12 @@ fn assert_hard_budgets_are_public(
     first: &IndexReceipt,
     second: &IndexReceipt,
     symbol_id: &str,
+    revision_range: &str,
 ) {
-    for (case_index, (tool, mut arguments)) in change_tool_calls(first, second, symbol_id)
-        .into_iter()
-        .enumerate()
+    for (case_index, (tool, mut arguments)) in
+        change_tool_calls(first, second, symbol_id, revision_range)
+            .into_iter()
+            .enumerate()
     {
         arguments["budget"] = json!({"max_tokens": 100});
         if matches!(tool, "change.impact" | "tests.select") {
@@ -413,130 +600,6 @@ fn assert_history_absence_is_distinct_from_empty(mcp: &mut McpProcess, second: &
     );
 }
 
-fn assert_unsupported_selectors_are_rejected_before_daemon(state_dir: &Path, runtime_dir: &Path) {
-    let repository_id = RepositoryId::from_bytes([3; 16]);
-    let symbol_id = SymbolId::from_bytes([7; 20]);
-    let generation = GenerationId::from_bytes([11; 20]);
-    let mut mcp = McpProcess::spawn(true, state_dir, runtime_dir);
-    for (case, tool, arguments) in [
-        (
-            "change-working-tree",
-            "change.impact",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "change": {"working_tree": "all"}
-            }),
-        ),
-        (
-            "change-revision-range",
-            "change.impact",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "change": {"revision_range": "HEAD~1..HEAD"}
-            }),
-        ),
-        (
-            "change-scope",
-            "change.impact",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "change": {"symbol_ids": [symbol_id]},
-                "scope": {"paths": ["src"]}
-            }),
-        ),
-        (
-            "change-history-signals",
-            "change.impact",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "change": {"symbol_ids": [symbol_id]},
-                "include_history": true
-            }),
-        ),
-        (
-            "tests-path-seed",
-            "tests.select",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "seeds": {"paths": ["src/lib.rs"]}
-            }),
-        ),
-        (
-            "tests-framework",
-            "tests.select",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "seeds": {"symbols": [symbol_id]},
-                "frameworks": ["cargo-nextest"]
-            }),
-        ),
-        (
-            "tests-integration-kind",
-            "tests.select",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "seeds": {"symbols": [symbol_id]},
-                "test_kinds": ["integration"]
-            }),
-        ),
-        (
-            "history-git-base",
-            "history.compare",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "base": {"git": "main"},
-                "head": generation
-            }),
-        ),
-        (
-            "history-relations",
-            "history.compare",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "base": generation,
-                "head": generation,
-                "change_kinds": ["relations"]
-            }),
-        ),
-        (
-            "history-expanded-profile",
-            "history.compare",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "base": generation,
-                "head": generation,
-                "profile": "evidence"
-            }),
-        ),
-        (
-            "plan-constraints",
-            "plan.change",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "objective": "bug_fix",
-                "objective_text": "fixture",
-                "targets": [{"symbol_id": symbol_id}],
-                "constraints": ["preserve public behavior"]
-            }),
-        ),
-        (
-            "plan-change-context",
-            "plan.change",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "objective": "bug_fix",
-                "objective_text": "fixture",
-                "targets": [{"symbol_id": symbol_id}],
-                "change_context": {"symbol_ids": [symbol_id]}
-            }),
-        ),
-    ] {
-        let response = mcp.call(case, tool, arguments);
-        assert_public_error(&response, "UNSUPPORTED_CAPABILITY");
-    }
-    mcp.finish();
-}
-
 fn write_repository_revision(root: &Path, changed: bool) {
     fs::create_dir_all(root.join("src")).expect("fixture source directory is created");
     fs::create_dir_all(root.join("tests")).expect("fixture test directory is created");
@@ -563,6 +626,58 @@ fn write_repository_revision(root: &Path, changed: bool) {
         "#[test]\nfn change_target_regression() { assert_eq!(change_process_fixture::change_target(), 2); }\n",
     )
     .expect("fixture test is written");
+}
+
+fn initialize_git_repository(root: &Path) {
+    run_git(root, &["init", "--quiet"]);
+    run_git(root, &["config", "user.name", "Rootlight Test"]);
+    run_git(root, &["config", "user.email", "rootlight@example.invalid"]);
+}
+
+fn commit_repository(root: &Path, message: &str) {
+    run_git(
+        root,
+        &[
+            "add",
+            "--",
+            "Cargo.toml",
+            "src/lib.rs",
+            "tests/regression.rs",
+        ],
+    );
+    run_git(root, &["commit", "--quiet", "-m", message]);
+}
+
+fn run_git(root: &Path, arguments: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(arguments)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("test Git command starts");
+    assert!(
+        output.status.success(),
+        "test Git command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_stdout(root: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(arguments)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("test Git command starts");
+    assert!(
+        output.status.success(),
+        "test Git command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("test Git output is UTF-8")
+        .trim()
+        .to_owned()
 }
 
 fn index_repository(mcp: &mut McpProcess, root: &Path, case: &str) -> IndexReceipt {
@@ -666,9 +781,14 @@ fn assert_common_read_contract(tool: &str, output: &Value, index: &IndexReceipt)
             "{tool} omitted usage.{counter}"
         );
     }
+    let has_hard_limit = output["completeness"]["limiting_resources"]
+        .as_array()
+        .expect("completeness limiting resources are an array")
+        .iter()
+        .any(|resource| !matches!(resource["kind"].as_str(), Some("capability" | "coverage")));
+    let expected_truncated = output["completeness"]["state"] == "truncated" || has_hard_limit;
     assert_eq!(
-        output["truncated"],
-        output["completeness"]["state"] == "truncated",
+        output["truncated"], expected_truncated,
         "{tool} disagrees about truncation"
     );
 }
@@ -875,6 +995,18 @@ impl McpProcess {
             id,
             "tools/call",
             json!({"name": tool, "arguments": arguments}),
+        )
+    }
+
+    fn call_version(&mut self, id: &str, tool: &str, arguments: Value, version: &str) -> Value {
+        self.request(
+            id,
+            "tools/call",
+            json!({
+                "name": tool,
+                "arguments": arguments,
+                "_meta": {"rootlight/toolContractVersion": version}
+            }),
         )
     }
 

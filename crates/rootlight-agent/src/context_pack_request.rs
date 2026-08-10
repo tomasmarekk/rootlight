@@ -267,7 +267,6 @@ impl CanonicalContextPackRequest {
         }
 
         let source_policy = input.source_policy.unwrap_or(DEFAULT_SOURCE_POLICY);
-        let explicit_sections = input.sections.is_some();
         let mut sections = input
             .sections
             .clone()
@@ -275,15 +274,6 @@ impl CanonicalContextPackRequest {
         sections.sort_unstable_by_key(|section| context_section_tag(*section));
         sections.dedup_by_key(|section| context_section_tag(*section));
         if sections.is_empty() {
-            return Err(CanonicalContextPackRequestError::InvalidField("sections"));
-        }
-        let requested_roles = roles_for_sections(&sections);
-        if explicit_sections
-            && objective
-                .required_roles()
-                .iter()
-                .any(|required| !requested_roles.contains(required))
-        {
             return Err(CanonicalContextPackRequestError::InvalidField("sections"));
         }
         let source_policy_is_compatible = match source_policy {
@@ -664,6 +654,7 @@ mod tests {
         ALL_CONTEXT_SECTIONS, CanonicalContextPackRequest, CanonicalContextPackRequestError,
         ContextPackObjective, MAX_CONTEXT_PACK_SEEDS, normalize_task,
     };
+    use crate::context_pack::EvidenceRole;
     use rootlight_ids::{GenerationId, RepositoryId, SymbolId};
 
     const REPOSITORY: RepositoryId = RepositoryId::from_bytes([1; 16]);
@@ -927,13 +918,13 @@ mod tests {
     }
 
     #[test]
-    fn incompatible_sections_and_source_policies_fail_before_retrieval() {
-        let mut missing_required_role = input();
-        missing_required_role.sections = Some(vec![ContextSection::Definitions]);
-        assert_eq!(
-            CanonicalContextPackRequest::new(&missing_required_role, REPOSITORY, GENERATION),
-            Err(CanonicalContextPackRequestError::InvalidField("sections"))
-        );
+    fn explicit_section_subsets_are_admitted_but_source_policies_remain_compatible() {
+        let mut definitions_only = input();
+        definitions_only.sections = Some(vec![ContextSection::Definitions]);
+        let canonical = CanonicalContextPackRequest::new(&definitions_only, REPOSITORY, GENERATION)
+            .expect("an explicit bounded section subset is valid");
+        assert_eq!(canonical.sections(), [ContextSection::Definitions]);
+        assert_eq!(canonical.requested_roles(), [EvidenceRole::Definition]);
 
         let mut snippets_without_source = input();
         snippets_without_source.task = "explain parser".to_owned();

@@ -1695,6 +1695,28 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         let mut covered_source_bytes = self.request.total_source_bytes();
         let mut skipped_regions = 0_usize;
         let mut totals = BTreeMap::<FactDomain, (CoverageStatus, usize, usize, usize)>::new();
+        let mut incomplete_relations_by_file = BTreeMap::<FileId, usize>::new();
+        for record in &self.records {
+            let IrRecord::Occurrence(occurrence) = record else {
+                continue;
+            };
+            let relationship_is_incomplete = occurrence.role == OccurrenceRole::CallSite
+                && match &occurrence.target {
+                    OccurrenceTarget::Resolved { .. } => false,
+                    OccurrenceTarget::Candidates { completeness, .. } => {
+                        *completeness != CoverageStatus::Complete
+                    }
+                    OccurrenceTarget::Unresolved { .. } => true,
+                };
+            if relationship_is_incomplete {
+                let count = incomplete_relations_by_file
+                    .entry(occurrence.file)
+                    .or_default();
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| provider_failure("project-accounting"))?;
+            }
+        }
 
         let files = self.states.keys().copied().collect::<Vec<_>>();
         for (file_index, file) in files.iter().enumerate() {
@@ -1710,8 +1732,18 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .ok_or_else(|| provider_failure("project-accounting"))?;
             for domain in ALL_DOMAINS {
                 let indexed = state.domain_counts.get(&domain).copied().unwrap_or(0);
+                let incomplete_relations = if domain == FactDomain::Relations {
+                    incomplete_relations_by_file
+                        .get(&state.file)
+                        .copied()
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
                 let domain_status = if domain == FactDomain::SourceMappings {
                     generated_mapping_coverage(self.input_for_file(state.file)?)
+                } else if incomplete_relations > 0 {
+                    CoverageStatus::Bounded
                 } else if state.status == CoverageStatus::Complete
                     || matches!(domain, FactDomain::Files | FactDomain::Provenance)
                 {
@@ -1720,7 +1752,13 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     CoverageStatus::Bounded
                 };
                 overall_status = merge_status(overall_status, domain_status);
-                let skipped = usize::from(domain_status != CoverageStatus::Complete);
+                let skipped = if domain == FactDomain::Relations {
+                    incomplete_relations
+                        .checked_add(usize::from(state.status != CoverageStatus::Complete))
+                        .ok_or_else(|| provider_failure("project-accounting"))?
+                } else {
+                    usize::from(domain_status != CoverageStatus::Complete)
+                };
                 let discovered = indexed
                     .checked_add(skipped)
                     .ok_or_else(|| provider_failure("project-accounting"))?;

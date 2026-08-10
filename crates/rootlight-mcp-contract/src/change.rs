@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::completeness::ResultCompleteness;
 use crate::vertical::{
-    GenerationSelector, ReadEnvelope, RepositorySelector, RequiredNullable, ResponseBudget,
-    ResponseProfile, ToolResponse,
+    AnalysisReadEnvelope, AnalysisToolResponse, ContinuationCursor, GenerationSelector,
+    ReadEnvelope, RepositorySelector, RequiredNullable, ResponseBudget, ResponseProfile,
+    ToolResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -366,6 +367,12 @@ pub struct ChangeImpactData {
 /// Checked success-or-error output for `change.impact`.
 pub type ChangeImpactOutput = ToolResponse<ReadEnvelope<ChangeImpactData>>;
 
+/// Checked `change.impact` output retained for explicit 1.0 callers.
+pub type ChangeImpactOutputV1_0 = ChangeImpactOutput;
+
+/// Current checked `change.impact` output.
+pub type ChangeImpactOutputV1_1 = AnalysisToolResponse<AnalysisReadEnvelope<ChangeImpactData>>;
+
 // ---------------------------------------------------------------------------
 // tests.select
 // ---------------------------------------------------------------------------
@@ -454,6 +461,39 @@ pub struct RankedTest {
     pub test_id: String,
     /// Test kind.
     pub kind: TestKind,
+    /// Framework classification used for filtering, when observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub framework: Option<String>,
+    /// Repository-relative path to the test.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 8192))]
+    pub path: Option<String>,
+    /// Relevance score, 0 through 1000.
+    #[schemars(range(max = 1000))]
+    pub score: u16,
+    /// Source-free rationale codes.
+    #[schemars(length(min = 1, max = 8), inner(length(min = 1, max = 128)))]
+    pub why: Vec<String>,
+    /// Estimated execution cost in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(max = 3_600_000))]
+    pub estimated_cost_ms: Option<u32>,
+    /// Declarative test command metadata, inert and untrusted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 1024))]
+    pub command_hint: Option<String>,
+}
+
+/// One ranked test retained for explicit 1.0 callers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RankedTestV1_0 {
+    /// Test identity.
+    #[schemars(length(min = 1, max = 512))]
+    pub test_id: String,
+    /// Test kind.
+    pub kind: TestKind,
     /// Repository-relative path to the test.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 8192))]
@@ -478,6 +518,23 @@ pub struct RankedTest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TestCoverageStrategy {
+    /// Whether direct test edges were used.
+    pub direct_edges: bool,
+    /// Whether transitive dependency signals were used.
+    pub transitive_signals: bool,
+    /// Whether historical co-change signals were used.
+    pub history_signals: bool,
+    /// Whether build-target dependency signals were used.
+    #[serde(default)]
+    pub build_target_signals: bool,
+    /// Whether declaring-file co-location with a seed was used.
+    pub file_colocation_signals: bool,
+}
+
+/// Strategy summary retained for explicit 1.0 callers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TestCoverageStrategyV1_0 {
     /// Whether direct test edges were used.
     pub direct_edges: bool,
     /// Whether transitive dependency signals were used.
@@ -516,8 +573,31 @@ pub struct TestsSelectData {
     pub explanation: Option<crate::context::PlanExplanation>,
 }
 
+/// `tests.select` result data retained for explicit 1.0 callers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TestsSelectDataV1_0 {
+    /// Ranked tests.
+    #[schemars(length(max = 500))]
+    pub tests: Vec<RankedTestV1_0>,
+    /// Coverage strategy summary.
+    pub coverage_strategy: TestCoverageStrategyV1_0,
+    /// Identified coverage gaps.
+    #[schemars(length(max = 128))]
+    pub gaps: Vec<TestGap>,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
+}
+
 /// Checked success-or-error output for `tests.select`.
 pub type TestsSelectOutput = ToolResponse<ReadEnvelope<TestsSelectData>>;
+
+/// Checked `tests.select` output retained for explicit 1.0 callers.
+pub type TestsSelectOutputV1_0 = ToolResponse<ReadEnvelope<TestsSelectDataV1_0>>;
+
+/// Current checked `tests.select` output.
+pub type TestsSelectOutputV1_1 = AnalysisToolResponse<AnalysisReadEnvelope<TestsSelectData>>;
 
 // ---------------------------------------------------------------------------
 // history.compare
@@ -554,6 +634,10 @@ pub struct CompareScope {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 128), inner(length(min = 1, max = 512)))]
     pub packages: Option<Vec<String>>,
+    /// Restrict to these service identities.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 64), inner(length(min = 1, max = 512)))]
+    pub services: Option<Vec<String>>,
     /// Restrict to these symbol identifiers.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 256))]
@@ -719,6 +803,67 @@ pub struct HistoryCompareData {
 /// Checked success-or-error output for `history.compare`.
 pub type HistoryCompareOutput = ToolResponse<ReadEnvelope<HistoryCompareData>>;
 
+/// Strict input for `history.compare`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "HistoryCompareInput")]
+pub struct HistoryCompareInputV1_0 {
+    /// Repository or workspace selector.
+    pub repository: RepositorySelector,
+    /// Base revision or generation.
+    pub base: RevisionSelector,
+    /// Head revision or generation.
+    pub head: RevisionSelector,
+    /// Optional scope bounding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<CompareScopeV1_0>,
+    /// Filter to specific change kinds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 8))]
+    pub change_kinds: Option<Vec<CompareChangeKind>>,
+    /// Maximum results per page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 1000))]
+    pub max_results: Option<u16>,
+    /// Whether to include unchanged context entities.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_unchanged_context: Option<bool>,
+    /// Response budget overrides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget: Option<ResponseBudget>,
+    /// Requested response profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ResponseProfile>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
+}
+
+/// Scope bounding for history comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "CompareScope")]
+pub struct CompareScopeV1_0 {
+    /// Restrict to these repository-relative paths.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256), inner(length(min = 1, max = 8192)))]
+    pub paths: Option<Vec<String>>,
+    /// Restrict to these package identities.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 128), inner(length(min = 1, max = 512)))]
+    pub packages: Option<Vec<String>>,
+    /// Restrict to these symbol identifiers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub symbols: Option<Vec<SymbolId>>,
+}
+
+/// Checked `history.compare` output retained for explicit 1.0 callers.
+pub type HistoryCompareOutputV1_0 = HistoryCompareOutput;
+
+/// Current checked `history.compare` output.
+pub type HistoryCompareOutputV1_1 = AnalysisToolResponse<AnalysisReadEnvelope<HistoryCompareData>>;
+
 // ---------------------------------------------------------------------------
 // plan.change
 // ---------------------------------------------------------------------------
@@ -731,6 +876,12 @@ pub enum PlanTargetSelector {
     Symbol(PlanSymbolTarget),
     /// Select by file identity.
     File(PlanFileTarget),
+    /// Select by package identity.
+    Package(PlanPackageTarget),
+    /// Select by route or service identity.
+    Route(PlanRouteTarget),
+    /// Select by an opaque prior located-result handle.
+    Located(PlanLocatedTarget),
 }
 
 /// Symbol-based plan target.
@@ -747,6 +898,32 @@ pub struct PlanSymbolTarget {
 pub struct PlanFileTarget {
     /// Stable file identity.
     pub file_id: FileId,
+}
+
+/// Package-based plan target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanPackageTarget {
+    /// Package identity or name.
+    #[schemars(length(min = 1, max = 512))]
+    pub package: String,
+}
+
+/// Route- or service-based plan target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanRouteTarget {
+    /// Route or service identity.
+    #[schemars(length(min = 1, max = 512))]
+    pub route: String,
+}
+
+/// Located-result plan target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanLocatedTarget {
+    /// Opaque handle from a prior bounded locate result.
+    pub located: ContinuationCursor,
 }
 
 /// Strict input for `plan.change`.
@@ -1008,3 +1185,60 @@ pub struct PlanChangeData {
 
 /// Checked success-or-error output for `plan.change`.
 pub type PlanChangeOutput = ToolResponse<ReadEnvelope<PlanChangeData>>;
+
+/// Strict input for `plan.change`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "PlanChangeInput")]
+pub struct PlanChangeInputV1_0 {
+    /// Repository or workspace selector.
+    pub repository: RepositorySelector,
+    /// Generation to plan against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<GenerationSelector>,
+    /// Typed objective class.
+    pub objective: PlanObjective,
+    /// Concrete objective description, treated as user instruction.
+    #[schemars(length(min = 1, max = 4096))]
+    pub objective_text: String,
+    /// Target symbols or files.
+    #[schemars(length(min = 1, max = 64))]
+    pub targets: Vec<PlanTargetSelectorV1_0>,
+    /// User-provided constraints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 32), inner(length(min = 1, max = 1024)))]
+    pub constraints: Option<Vec<String>>,
+    /// Existing working-tree or hypothetical change context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_context: Option<ChangeSelector>,
+    /// Maximum plan steps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 100))]
+    pub max_steps: Option<u8>,
+    /// Response budget overrides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget: Option<ResponseBudget>,
+    /// Requested response profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ResponseProfile>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
+}
+
+/// Target selector for a change plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+#[schemars(rename = "PlanTargetSelector")]
+pub enum PlanTargetSelectorV1_0 {
+    /// Select by symbol identity.
+    Symbol(PlanSymbolTarget),
+    /// Select by file identity.
+    File(PlanFileTarget),
+}
+
+/// Checked `plan.change` output retained for explicit 1.0 callers.
+pub type PlanChangeOutputV1_0 = PlanChangeOutput;
+
+/// Current checked `plan.change` output.
+pub type PlanChangeOutputV1_1 = AnalysisToolResponse<AnalysisReadEnvelope<PlanChangeData>>;

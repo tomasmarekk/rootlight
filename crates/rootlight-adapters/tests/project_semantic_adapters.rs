@@ -275,6 +275,88 @@ fn call_occurrences_are_owned_by_the_declaring_function() {
 }
 
 #[test]
+fn python_same_module_calls_resolve_to_the_declared_function() {
+    let fixture = ProjectFixture::new(
+        ["Lib/bisect.py", "Lib/__init__.py"],
+        [
+            concat!(
+                "def bisect_left(a, x, lo=0, hi=None, *, key=None):\n",
+                "    return lo\n\n",
+                "def insort_left(a, x, lo=0, hi=None, *, key=None):\n",
+                "    lo = bisect_left(a, x, lo, hi, key=key)\n",
+                "    a.insert(lo, x)\n",
+            ),
+            "",
+        ],
+        SemanticProjectLanguage::Python,
+    );
+    let output = analyze_with_real_parser(&fixture);
+    let caller = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "insort_left")
+        .expect("caller function is materialized");
+    let callee = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "bisect_left")
+        .expect("callee function is materialized");
+
+    assert!(output.document().occurrences.iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::CallSite
+            && occurrence.enclosing == Some(caller.id)
+            && matches!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { symbol } if symbol == callee.id
+            )
+    }));
+    assert!(output.document().relations.iter().any(|relation| {
+        relation.subject
+            == rootlight_ir::RelationEndpoint::Occurrence(
+                output
+                    .document()
+                    .occurrences
+                    .iter()
+                    .find(|occurrence| {
+                        occurrence.role == OccurrenceRole::CallSite
+                            && occurrence.enclosing == Some(caller.id)
+                            && matches!(
+                                occurrence.target,
+                                OccurrenceTarget::Resolved { symbol } if symbol == callee.id
+                            )
+                    })
+                    .expect("resolved call occurrence is materialized")
+                    .id,
+            )
+            && relation.predicate == RelationPredicate::Calls
+            && relation.object == rootlight_ir::RelationEndpoint::Entity(callee.id)
+    }));
+    let file = output
+        .document()
+        .files
+        .iter()
+        .find(|file| file.path == "Lib/bisect.py")
+        .expect("Python source file is materialized");
+    let relationship_coverage = output
+        .document()
+        .coverage_records
+        .iter()
+        .find(|coverage| {
+            coverage.scope == rootlight_ir::CoverageScope::File(file.id)
+                && coverage.domain == FactDomain::Relations
+        })
+        .expect("relationship coverage is materialized");
+    assert_eq!(relationship_coverage.status, CoverageStatus::Bounded);
+    assert!(relationship_coverage.skipped >= 1);
+    assert_eq!(
+        output.report().work().coverage().status(),
+        CoverageStatus::Bounded
+    );
+}
+
+#[test]
 fn project_semantics_preserve_test_classification() {
     let fixture = ProjectFixture::new(
         ["src/lib.rs", "tests/semantic.rs"],

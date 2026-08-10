@@ -57,8 +57,9 @@ use rootlight_observability::{
     RECENT_LOG_CAPACITY, RECENT_TRACE_CAPACITY, RedactionReport, SUPPORT_BUNDLE_SCHEMA_VERSION,
     SUPPORT_BUNDLE_SCHEMA_VERSION_V3, SUPPORT_ENTRY_NAMES, SUPPORT_ENTRY_NAMES_V2,
     SUPPORT_ENTRY_NAMES_V3, SUPPORT_ENTRY_NAMES_V4, SupportBundleInput, SupportBundleSchema,
-    SupportInventory, SupportManifest, SupportOperationsV4, SupportTerminalOperation,
-    TELEMETRY_SCHEMA_VERSION, TelemetrySnapshot, build_support_bundle_for_schema,
+    SupportChecksumStatus, SupportInventory, SupportManifest, SupportOperationKind,
+    SupportOperationState, SupportOperationsV4, SupportTerminalOperation, TELEMETRY_SCHEMA_VERSION,
+    TelemetrySnapshot, build_support_bundle_for_schema,
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
@@ -253,6 +254,88 @@ pub struct DiagnosticsQuick {
     pub overall_status: HealthStatus,
     /// Current catalog quick-check result.
     pub catalog: DiagnosticResult,
+}
+
+/// Closed extended diagnostic mode exposed by the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticsMode {
+    /// Repository, recovery, coverage, storage, adapter, and watcher checks.
+    Full,
+    /// Catalog, immutable-generation, and temporary-storage checks.
+    Storage,
+    /// One language adapter capability check.
+    Adapter,
+    /// Local endpoint ownership and outbound-network policy checks.
+    NetworkAudit,
+}
+
+/// Closed extended diagnostic check identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticsCheck {
+    /// Durable catalog integrity.
+    Catalog,
+    /// Immutable generation availability.
+    Generation,
+    /// Recent durable recovery outcomes.
+    Recovery,
+    /// Repository language coverage.
+    Coverage,
+    /// Incremental watcher commitment health.
+    Watcher,
+    /// Defensive catalog configuration.
+    StoragePolicy,
+    /// Immutable generation manifest checksums.
+    GenerationChecksums,
+    /// Unreclaimed transactional storage.
+    TemporaryStorage,
+    /// Requested language adapter availability.
+    AdapterAvailability,
+    /// Requested language adapter isolation.
+    AdapterIsolation,
+    /// Private local endpoint ownership.
+    EndpointOwnership,
+    /// Default-deny outbound network policy.
+    OutboundNetworkPolicy,
+}
+
+/// One bounded source-redacted extended diagnostic observation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DiagnosticsObservation {
+    /// Stable check identifier.
+    pub check: DiagnosticsCheck,
+    /// Severity contributed to the aggregate result.
+    pub status: HealthStatus,
+    /// Closed execution outcome.
+    pub outcome: DiagnosticOutcome,
+    /// Bounded numeric evidence with hard-coded keys.
+    pub measurements: BTreeMap<&'static str, u64>,
+    /// Stable source-free failure from an underlying checked boundary.
+    pub error: Option<PublicError>,
+}
+
+/// Bounded source-free report composed from validated daemon snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DiagnosticsReport {
+    /// Extended diagnostics schema version.
+    pub schema_version: u32,
+    /// Executed closed diagnostic mode.
+    pub mode: DiagnosticsMode,
+    /// Worst status across every emitted observation.
+    pub overall_status: HealthStatus,
+    /// Repository scope for repository and storage modes.
+    pub repository: Option<RepositoryId>,
+    /// Validated normalized language scope for adapter mode.
+    pub language: Option<String>,
+    /// Whether storage mode required every retained checksum to be verified.
+    pub scrub: bool,
+    /// Always true because the emitted check set and measurements are fixed.
+    pub bounded: bool,
+    /// Always false because source, paths, symbols, queries, and free text are excluded.
+    pub contains_source: bool,
+    /// Deterministically ordered observations.
+    pub observations: Vec<DiagnosticsObservation>,
 }
 
 /// Validated bounded source-free support archive.
@@ -804,6 +887,8 @@ pub struct RepositoryOperationEvidence {
     pub reserved_memory_bytes: u64,
     /// Retained generation-memory charge owned after successful publication.
     pub owned_memory_bytes: u64,
+    /// Durable bytes retained for the resulting immutable generation.
+    pub retained_durable_bytes: u64,
     /// Bounded canonical JSON for the source-free invalidation trace.
     pub invalidation_trace_json: Option<Vec<u8>>,
 }
@@ -902,6 +987,8 @@ pub struct SymbolExplanation {
     pub kind: String,
     /// Untrusted repository display name.
     pub display_name: String,
+    /// Untrusted repository qualified display name.
+    pub qualified_name: String,
     /// Optional untrusted repository signature.
     pub signature: Option<String>,
     /// Immutable definition selection.
@@ -916,6 +1003,14 @@ pub struct SymbolExplanation {
     pub inbound_candidates: u64,
     /// Exact reference count.
     pub references_exact: u64,
+    /// Semantic container label when available.
+    pub container: Option<String>,
+    /// Bounded typed relation samples.
+    pub relation_samples: Vec<SymbolRelationSample>,
+    /// Bounded untrusted source preview when requested.
+    pub source_preview: Option<String>,
+    /// Explicit source-free gaps for requested sections.
+    pub section_gaps: Vec<String>,
     /// Stable provider label.
     pub provider: String,
     /// Stable evidence label.
@@ -926,6 +1021,49 @@ pub struct SymbolExplanation {
     pub tier: AnalysisTier,
     /// Fixed-point confidence in the range 0 through 1000.
     pub confidence: u32,
+    /// Frontend version when full provenance was requested.
+    pub provenance_frontend_version: Option<String>,
+    /// Resolver rule when full provenance was requested.
+    pub provenance_rule: Option<String>,
+}
+
+/// One typed relation sample attached to a symbol explanation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SymbolRelationSample {
+    /// Stable relation predicate label.
+    pub kind: String,
+    /// Direction relative to the explained symbol.
+    pub direction: String,
+    /// Related symbol when the endpoint is an indexed entity.
+    pub target: Option<SymbolId>,
+    /// Direct immutable evidence.
+    pub source_refs: Vec<SourceReference>,
+    /// Fixed-point confidence from 0 through 1000.
+    pub confidence: u16,
+}
+
+/// Bounded presentation controls for one symbol explanation request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolExplainProjection {
+    /// Requested section labels in deterministic order.
+    pub sections: Vec<String>,
+    /// Per-relation sample ceiling.
+    pub relation_sample_limit: Option<u8>,
+    /// Source preview line ceiling.
+    pub source_preview_lines: Option<u8>,
+    /// Stable provenance level label.
+    pub include_provenance: String,
+}
+
+impl Default for SymbolExplainProjection {
+    fn default() -> Self {
+        Self {
+            sections: Vec::new(),
+            relation_sample_limit: None,
+            source_preview_lines: None,
+            include_provenance: "compact".to_owned(),
+        }
+    }
 }
 
 impl std::fmt::Debug for SymbolExplanation {
@@ -1399,6 +1537,8 @@ pub struct RepositoryStatus {
     pub state: String,
     /// Publication relationship label, such as `published` or `retained`.
     pub publication_state: String,
+    /// Durable bytes retained for the selected immutable generation.
+    pub retained_durable_bytes: u64,
     /// Language-scoped coverage entries.
     pub coverage: Vec<RepositoryCoverageEntry>,
     /// Bounded current and recent repository-index operations.
@@ -1654,6 +1794,68 @@ pub struct FlowTrace {
     pub execution_completeness: ResultCompleteness,
 }
 
+/// Typed structural scope shared by architecture and reachability requests.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "values", rename_all = "snake_case")]
+pub enum AnalysisScope {
+    /// Repository-relative path prefixes.
+    Paths(Vec<String>),
+    /// Package identities or canonical names.
+    Packages(Vec<String>),
+    /// Build-target identities or canonical names.
+    BuildTargets(Vec<String>),
+    /// Stable symbol identities.
+    Symbols(Vec<SymbolId>),
+}
+
+/// Complete architecture-cycle request dimensions beyond the legacy slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchitectureCyclesOptions {
+    /// Optional structural scope.
+    pub scope: Option<AnalysisScope>,
+    /// Aggregation level label.
+    pub level: String,
+    /// Ranking strategy label.
+    pub rank_by: String,
+}
+
+impl Default for ArchitectureCyclesOptions {
+    fn default() -> Self {
+        Self {
+            scope: None,
+            level: "symbol".to_owned(),
+            rank_by: "size".to_owned(),
+        }
+    }
+}
+
+/// Complete dead-code request dimensions beyond the legacy slice.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodeDeadOptions {
+    /// Optional structural scope.
+    pub scope: Option<AnalysisScope>,
+    /// Caller-supplied stable roots for the explicit entry-point policy.
+    pub explicit_entry_points: Vec<SymbolId>,
+}
+
+/// Complete architecture-overview request dimensions beyond the legacy slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchitectureOverviewOptions {
+    /// Optional structural scope.
+    pub scope: Option<AnalysisScope>,
+    /// Requested detail label.
+    pub detail: String,
+}
+
+impl Default for ArchitectureOverviewOptions {
+    fn default() -> Self {
+        Self {
+            scope: None,
+            detail: "standard".to_owned(),
+        }
+    }
+}
+
 /// One strongly connected component containing cycles.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CycleComponent {
@@ -1663,6 +1865,12 @@ pub struct CycleComponent {
     pub members: Vec<SymbolId>,
     /// Count of served edges whose endpoints both lie in the component.
     pub internal_edges: u32,
+    /// Sum of effective confidence across internal edges.
+    pub edge_weight: u64,
+    /// Bounded count of internal history edges.
+    pub change_risk: u32,
+    /// Cost of the least expensive candidate break edge.
+    pub break_cost: u16,
 }
 
 /// One bounded representative minimal cycle with evidence.
@@ -1698,6 +1906,12 @@ pub struct CycleProjection {
     pub relations: Vec<String>,
     /// Minimum confidence threshold applied.
     pub min_confidence: u16,
+    /// Aggregation level applied before cycle detection.
+    pub level: String,
+    /// Ranking strategy applied to cyclic components.
+    pub rank_by: String,
+    /// Scoped endpoints omitted because no requested-level container exists.
+    pub omitted_nodes: u32,
 }
 
 /// Bounded architecture cycles among stable symbols for one generation.
@@ -1731,8 +1945,23 @@ pub struct CodeDeadCandidate {
     pub why: Vec<String>,
     /// Suppression rules checked for this candidate.
     pub suppressions_checked: Vec<String>,
+    /// Static reachability measurements supporting the classification.
+    pub reachability: CodeDeadReachabilitySummary,
+    /// Source-free uncertainty conditions.
+    pub uncertainty: Vec<String>,
     /// Direct immutable source evidence for the candidate definition.
     pub source_refs: Vec<SourceReference>,
+}
+
+/// Static reachability measurements for one dead-code candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct CodeDeadReachabilitySummary {
+    /// Whether the selected entry-point closure reached the symbol.
+    pub reached_from_entry_points: bool,
+    /// Number of admitted incoming edges.
+    pub incoming_edges: u32,
+    /// Strongest admitted incoming edge confidence.
+    pub strongest_incoming_confidence: u16,
 }
 
 /// Summary of the entry-point model used for reachability.
@@ -1742,6 +1971,8 @@ pub struct CodeDeadEntryPointSummary {
     pub policy: String,
     /// Number of resolved entry points.
     pub entry_point_count: u32,
+    /// Bounded stable entry symbols used as reachability roots.
+    pub entry_symbols: Vec<SymbolId>,
     /// Whether the model is complete for the scope.
     pub complete: bool,
 }
@@ -1777,11 +2008,13 @@ pub struct CodeDead {
     pub blind_spots: Vec<CodeDeadBlindSpot>,
     /// Applied false-positive suppression rules.
     pub false_positive_controls: Vec<CodeDeadSuppressionRule>,
+    /// Source-free coverage caveats governing negative conclusions.
+    pub coverage_caveats: Vec<String>,
     /// Authoritative execution-completeness diagnostics.
     pub execution_completeness: ResultCompleteness,
 }
 
-/// One aggregated architecture component keyed by its containing file.
+/// One aggregated architecture component.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ArchitectureOverviewComponent {
     /// Stable component identity derived from the containing file identity.
@@ -1792,8 +2025,12 @@ pub struct ArchitectureOverviewComponent {
     pub name: String,
     /// Number of contained symbols.
     pub symbol_count: u32,
+    /// Number of distinct source files represented by the component.
+    pub file_count: u32,
     /// Source-free evidence categories supporting the responsibility claim.
     pub responsibility_evidence: Vec<String>,
+    /// Direct immutable source anchors.
+    pub source_refs: Vec<SourceReference>,
     /// Aggregate containment confidence from 0 through 1000.
     pub confidence: u16,
 }
@@ -1826,6 +2063,10 @@ pub struct ArchitectureOverviewHotspot {
     pub change_frequency: Option<u32>,
     /// Complexity signal when available.
     pub complexity: Option<u32>,
+    /// Ownership-edge signal when available.
+    pub ownership_signal: Option<u32>,
+    /// Test-edge signal when available.
+    pub test_signal: Option<u32>,
     /// Aggregate hotspot score from 0 through 1000.
     pub score: u16,
 }
@@ -1880,6 +2121,8 @@ pub struct TestsSelectRankedTest {
     pub test_id: String,
     /// Test granularity label, such as `unit`.
     pub kind: String,
+    /// Source-free framework classification.
+    pub framework: String,
     /// Repository-controlled display path to the test, when served.
     pub path: Option<String>,
     /// Relevance score from 0 through 1000.
@@ -1901,6 +2144,8 @@ pub struct TestsSelectCoverageStrategy {
     pub transitive_signals: bool,
     /// Whether historical co-change signals were used.
     pub history_signals: bool,
+    /// Whether build-target dependency signals were used.
+    pub build_target_signals: bool,
     /// Whether declaring-file co-location with a seed was used.
     pub file_colocation_signals: bool,
 }
@@ -2007,12 +2252,79 @@ pub struct ChangeImpact {
     pub resolved_changes: Vec<ChangeImpactResolvedChange>,
     /// Ranked impact groups, one per resolved change.
     pub impacted: Vec<ChangeImpactGroup>,
+    /// Cross-boundary service impacts.
+    pub service_impacts: Vec<ChangeImpactServiceImpact>,
     /// Test candidates when requested.
     pub tests: Vec<ChangeImpactTest>,
     /// Aggregate risk summary.
     pub risk_summary: ChangeImpactRiskSummary,
     /// Authoritative execution-completeness diagnostics.
     pub execution_completeness: ResultCompleteness,
+}
+
+/// One cross-boundary service impact.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ChangeImpactServiceImpact {
+    /// Stable source-free target label.
+    pub target: String,
+    /// Stable cross-boundary effect label.
+    pub kind: String,
+    /// Fixed-point confidence from 0 through 1000.
+    pub confidence: u16,
+    /// Stable source-free rationale.
+    pub reason: String,
+}
+
+/// Additional bounded selectors and filters for `tests.select`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TestsSelectFilters {
+    /// Repository-relative path seeds.
+    pub seed_paths: Vec<String>,
+    /// Build-target identity seeds.
+    pub seed_build_targets: Vec<String>,
+    /// Framework filters.
+    pub frameworks: Vec<String>,
+    /// Maximum estimated aggregate execution time.
+    pub max_total_ms: Option<u32>,
+    /// Maximum slow candidates.
+    pub max_slow_tests: Option<u16>,
+    /// Working-tree selector label for change-derived seeds.
+    pub change_working_tree: Option<String>,
+    /// Explicit Git revision range for change-derived seeds.
+    pub change_revision_range: Option<String>,
+}
+
+/// Additional bounded selectors and policies for `change.impact`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeImpactOptions {
+    /// Working-tree selector label.
+    pub working_tree: Option<String>,
+    /// Explicit Git revision range.
+    pub revision_range: Option<String>,
+    /// Repository-relative impact scope.
+    pub scope_paths: Vec<String>,
+    /// Package impact scope.
+    pub scope_packages: Vec<String>,
+    /// Service impact scope.
+    pub scope_services: Vec<String>,
+    /// Stable relation-policy label.
+    pub relation_policy: String,
+    /// Whether bounded historical signals should be included.
+    pub include_history: bool,
+}
+
+impl Default for ChangeImpactOptions {
+    fn default() -> Self {
+        Self {
+            working_tree: None,
+            revision_range: None,
+            scope_paths: Vec::new(),
+            scope_packages: Vec::new(),
+            scope_services: Vec::new(),
+            relation_policy: "standard".to_owned(),
+            include_history: true,
+        }
+    }
 }
 
 /// One ordered step in a change plan.
@@ -2080,6 +2392,19 @@ pub struct PlanChange {
     pub context_pack_request: PlanChangeContextPack,
     /// Authoritative execution-completeness diagnostics.
     pub execution_completeness: ResultCompleteness,
+}
+
+/// Existing or hypothetical change facts carried into `plan.change`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanChangeContext {
+    /// Working-tree selector (`staged`, `unstaged`, or `all`).
+    pub working_tree: Option<String>,
+    /// Explicit Git revision range.
+    pub revision_range: Option<String>,
+    /// Explicit changed symbols.
+    pub symbol_ids: Vec<SymbolId>,
+    /// Explicit changed repository-relative paths.
+    pub paths: Vec<String>,
 }
 
 /// Resolved state pair for a history comparison.
@@ -2164,6 +2489,28 @@ pub struct HistoryCompare {
     pub lineage: Vec<HistoryLineageMatch>,
     /// Authoritative execution-completeness diagnostics.
     pub execution_completeness: ResultCompleteness,
+}
+
+/// Revision selector accepted by `history.compare`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistoryRevisionSelector {
+    /// An immutable retained generation.
+    Generation(GenerationId),
+    /// A bounded Git ref expression.
+    Git(String),
+}
+
+/// Combined structural scope accepted by `history.compare`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistoryCompareScope {
+    /// Repository-relative path prefixes.
+    pub paths: Vec<String>,
+    /// Package identities or names.
+    pub packages: Vec<String>,
+    /// Service identities or names.
+    pub services: Vec<String>,
+    /// Stable symbol roots.
+    pub symbols: Vec<SymbolId>,
 }
 
 /// One typed column definition in an advanced query result schema.
@@ -2847,6 +3194,83 @@ impl Client {
         }
     }
 
+    /// Runs bounded repository, recovery, coverage, storage, adapter, and watcher diagnostics.
+    ///
+    /// The report is composed only from validated typed daemon responses and
+    /// privacy-checked support inventory. It never includes source, paths,
+    /// symbols, queries, or free-form diagnostic text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when any underlying bounded snapshot is
+    /// unavailable, malformed, uncorrelated, or fails privacy validation.
+    pub fn diagnostics_full(
+        &self,
+        repository: RepositoryId,
+    ) -> Result<DiagnosticsReport, ClientError> {
+        let health = self.health()?;
+        let quick = self.diagnostics_quick()?;
+        let status = self.repository_status_with_options(
+            RepositoryStatusRequest::new(repository, GenerationSelector::Active)
+                .with_coverage_detail(RepositoryStatusCoverageDetail::Language)
+                .with_operations(true),
+        )?;
+        let support = self.support_bundle_for_repository(repository)?;
+        build_full_diagnostics(repository, &health, quick, &status, &support)
+    }
+
+    /// Runs bounded repository-scoped storage diagnostics.
+    ///
+    /// When `scrub` is true, every retained generation checksum observation
+    /// for the repository must be verified; an unknown sample is degraded and
+    /// a mismatch fails the aggregate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for an unavailable repository, malformed
+    /// diagnostic response, or invalid support-bundle privacy evidence.
+    pub fn diagnostics_storage(
+        &self,
+        repository: RepositoryId,
+        scrub: bool,
+    ) -> Result<DiagnosticsReport, ClientError> {
+        let health = self.health()?;
+        let quick = self.diagnostics_quick()?;
+        let status = self.repository_status(repository, GenerationSelector::Active)?;
+        let support = self.support_bundle_for_repository(repository)?;
+        build_storage_diagnostics(
+            repository,
+            scrub,
+            health.generation_status,
+            quick,
+            &status,
+            &support,
+        )
+    }
+
+    /// Runs bounded diagnostics for one normalized language adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::InvalidDiagnosticsScope`] when `language` is
+    /// empty, oversized, or not a source-free ASCII label, and returns other
+    /// [`ClientError`] variants for unavailable or malformed daemon evidence.
+    pub fn diagnostics_adapter(&self, language: &str) -> Result<DiagnosticsReport, ClientError> {
+        let language = normalize_diagnostic_language(language)?;
+        let health = self.health()?;
+        let support = self.support_bundle()?;
+        build_adapter_diagnostics(language, &health, &support)
+    }
+
+    /// Audits private endpoint ownership and the daemon's default-deny network policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when daemon health is unavailable or malformed.
+    pub fn diagnostics_network_audit(&self) -> Result<DiagnosticsReport, ClientError> {
+        Ok(build_network_diagnostics(&self.health()?))
+    }
+
     /// Builds one bounded source-free support archive.
     ///
     /// # Errors
@@ -2854,12 +3278,43 @@ impl Client {
     /// Returns [`ClientError`] for unavailable protocol support, malformed bounds,
     /// a digest mismatch, or a response that claims to contain source.
     pub fn support_bundle(&self) -> Result<SupportBundle, ClientError> {
-        let (response, selected_protocol_minor) = self.request_with_protocol(
-            daemon::request_envelope::Request::SupportBundle(daemon::SupportBundleRequest {}),
-        )?;
+        let (response, selected_protocol_minor) =
+            self.request_with_protocol(daemon::request_envelope::Request::SupportBundle(
+                daemon::SupportBundleRequest { repository: None },
+            ))?;
         match response {
             daemon::response_envelope::Response::SupportBundle(response) => {
                 parse_support_bundle(response, selected_protocol_minor)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Builds a bounded source-free support archive scoped to one repository.
+    ///
+    /// Global daemon, runtime, configuration, and catalog-policy context
+    /// remains in the archive. Repository, generation, retained-generation
+    /// bytes, and terminal-operation evidence contains only the selected
+    /// repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for an unavailable repository or protocol
+    /// support, malformed bounds, digest mismatch, or failed privacy validation.
+    pub fn support_bundle_for_repository(
+        &self,
+        repository: RepositoryId,
+    ) -> Result<SupportBundle, ClientError> {
+        let (response, selected_protocol_minor) = self.request_with_protocol(
+            daemon::request_envelope::Request::SupportBundle(daemon::SupportBundleRequest {
+                repository: Some(repository_to_wire(repository)),
+            }),
+        )?;
+        match response {
+            daemon::response_envelope::Response::SupportBundle(response) => {
+                let bundle = parse_support_bundle(response, selected_protocol_minor)?;
+                validate_scoped_support_bundle(&bundle, repository)?;
+                Ok(bundle)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -2884,7 +3339,9 @@ impl Client {
     ) -> Result<SupportBundle, ClientError> {
         let (response, selected_protocol_minor) = self
             .request_async_with_protocol(
-                daemon::request_envelope::Request::SupportBundle(daemon::SupportBundleRequest {}),
+                daemon::request_envelope::Request::SupportBundle(daemon::SupportBundleRequest {
+                    repository: None,
+                }),
                 timeout,
             )
             .await?;
@@ -3437,7 +3894,12 @@ impl Client {
         options: RequestOptions,
     ) -> Result<SymbolExplain, ClientError> {
         match self.request_with_options(
-            build_symbol_explain_request(repository, generation, symbols)?,
+            build_symbol_explain_request(
+                repository,
+                generation,
+                symbols,
+                &SymbolExplainProjection::default(),
+            )?,
             options,
         )? {
             daemon::response_envelope::Response::SymbolExplain(response) => {
@@ -3495,9 +3957,38 @@ impl Client {
         symbols: &[SymbolId],
         options: RequestOptions,
     ) -> Result<SymbolExplain, ClientError> {
+        self.symbol_explain_async_with_projection_and_options(
+            repository,
+            generation,
+            symbols,
+            &SymbolExplainProjection::default(),
+            options,
+        )
+        .await
+    }
+
+    /// Asynchronously explains symbols with explicit presentation and transport options.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid projection or budget bounds,
+    /// unavailable protocol support, transport failure, timeout, or a malformed
+    /// response.
+    pub async fn symbol_explain_async_with_projection_and_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        symbols: &[SymbolId],
+        projection: &SymbolExplainProjection,
+        options: RequestOptions,
+    ) -> Result<SymbolExplain, ClientError> {
         match self
             .request_async_with_options(
-                build_symbol_explain_request(repository, generation, symbols)?,
+                build_symbol_explain_request(repository, generation, symbols, projection)?,
                 options,
             )
             .await?
@@ -4418,6 +4909,39 @@ impl Client {
         include_self_cycles: Option<bool>,
         options: RequestOptions,
     ) -> Result<ArchitectureCycles, ClientError> {
+        self.architecture_cycles_with_contract_options(
+            repository,
+            generation,
+            relations,
+            min_size,
+            max_cycles,
+            include_self_cycles,
+            &ArchitectureCyclesOptions::default(),
+            options,
+        )
+    }
+
+    /// Detects architecture cycles with complete projection and transport options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid scope, projection, cycle, budget,
+    /// transport, or response correlation.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the contract object groups scope, level, and ranking dimensions"
+    )]
+    pub fn architecture_cycles_with_contract_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        relations: &[String],
+        min_size: Option<u8>,
+        max_cycles: Option<u16>,
+        include_self_cycles: Option<bool>,
+        contract: &ArchitectureCyclesOptions,
+        options: RequestOptions,
+    ) -> Result<ArchitectureCycles, ClientError> {
         match self.request_with_options(
             build_architecture_cycles_request(
                 repository,
@@ -4426,11 +4950,12 @@ impl Client {
                 min_size,
                 max_cycles,
                 include_self_cycles,
+                contract,
             )?,
             options,
         )? {
             daemon::response_envelope::Response::ArchitectureCycles(response) => {
-                parse_architecture_cycles(response, repository, generation, relations)
+                parse_architecture_cycles(response, repository, generation, relations, contract)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -4503,6 +5028,44 @@ impl Client {
         include_self_cycles: Option<bool>,
         options: RequestOptions,
     ) -> Result<ArchitectureCycles, ClientError> {
+        self.architecture_cycles_async_with_contract_options(
+            repository,
+            generation,
+            relations,
+            min_size,
+            max_cycles,
+            include_self_cycles,
+            &ArchitectureCyclesOptions::default(),
+            options,
+        )
+        .await
+    }
+
+    /// Asynchronously detects cycles with complete projection and transport options.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid scope, projection, cycle, budget,
+    /// transport, or response correlation.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the contract object groups scope, level, and ranking dimensions"
+    )]
+    pub async fn architecture_cycles_async_with_contract_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        relations: &[String],
+        min_size: Option<u8>,
+        max_cycles: Option<u16>,
+        include_self_cycles: Option<bool>,
+        contract: &ArchitectureCyclesOptions,
+        options: RequestOptions,
+    ) -> Result<ArchitectureCycles, ClientError> {
         match self
             .request_async_with_options(
                 build_architecture_cycles_request(
@@ -4512,13 +5075,14 @@ impl Client {
                     min_size,
                     max_cycles,
                     include_self_cycles,
+                    contract,
                 )?,
                 options,
             )
             .await?
         {
             daemon::response_envelope::Response::ArchitectureCycles(response) => {
-                parse_architecture_cycles(response, repository, generation, relations)
+                parse_architecture_cycles(response, repository, generation, relations, contract)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -4578,6 +5142,41 @@ impl Client {
         max_candidates: Option<u16>,
         options: RequestOptions,
     ) -> Result<CodeDead, ClientError> {
+        self.code_dead_with_contract_options(
+            repository,
+            generation,
+            entry_point_policy,
+            include_exported,
+            include_tests,
+            min_confidence,
+            max_candidates,
+            &CodeDeadOptions::default(),
+            options,
+        )
+    }
+
+    /// Reports dead-code candidates with a typed scope and explicit entry roots.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid scope, entry model, bounds,
+    /// transport, or response correlation.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the contract object groups scope and explicit entry roots"
+    )]
+    pub fn code_dead_with_contract_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        entry_point_policy: Option<&str>,
+        include_exported: Option<bool>,
+        include_tests: Option<bool>,
+        min_confidence: Option<u16>,
+        max_candidates: Option<u16>,
+        contract: &CodeDeadOptions,
+        options: RequestOptions,
+    ) -> Result<CodeDead, ClientError> {
         match self.request_with_options(
             build_code_dead_request(
                 repository,
@@ -4587,12 +5186,17 @@ impl Client {
                 include_tests,
                 min_confidence,
                 max_candidates,
+                contract,
             )?,
             options,
         )? {
-            daemon::response_envelope::Response::CodeDead(response) => {
-                parse_code_dead(response, repository, generation)
-            }
+            daemon::response_envelope::Response::CodeDead(response) => parse_code_dead(
+                response,
+                repository,
+                generation,
+                entry_point_policy.unwrap_or("standard"),
+                contract,
+            ),
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -4667,6 +5271,46 @@ impl Client {
         max_candidates: Option<u16>,
         options: RequestOptions,
     ) -> Result<CodeDead, ClientError> {
+        self.code_dead_async_with_contract_options(
+            repository,
+            generation,
+            entry_point_policy,
+            include_exported,
+            include_tests,
+            min_confidence,
+            max_candidates,
+            &CodeDeadOptions::default(),
+            options,
+        )
+        .await
+    }
+
+    /// Asynchronously reports candidates with a typed scope and explicit roots.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid scope, entry model, bounds,
+    /// transport, or response correlation.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the contract object groups scope and explicit entry roots"
+    )]
+    pub async fn code_dead_async_with_contract_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        entry_point_policy: Option<&str>,
+        include_exported: Option<bool>,
+        include_tests: Option<bool>,
+        min_confidence: Option<u16>,
+        max_candidates: Option<u16>,
+        contract: &CodeDeadOptions,
+        options: RequestOptions,
+    ) -> Result<CodeDead, ClientError> {
         match self
             .request_async_with_options(
                 build_code_dead_request(
@@ -4677,14 +5321,19 @@ impl Client {
                     include_tests,
                     min_confidence,
                     max_candidates,
+                    contract,
                 )?,
                 options,
             )
             .await?
         {
-            daemon::response_envelope::Response::CodeDead(response) => {
-                parse_code_dead(response, repository, generation)
-            }
+            daemon::response_envelope::Response::CodeDead(response) => parse_code_dead(
+                response,
+                repository,
+                generation,
+                entry_point_policy.unwrap_or("standard"),
+                contract,
+            ),
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -4737,6 +5386,39 @@ impl Client {
         min_confidence: Option<u16>,
         options: RequestOptions,
     ) -> Result<ArchitectureOverview, ClientError> {
+        self.architecture_overview_with_contract_options(
+            repository,
+            generation,
+            views,
+            max_components,
+            include_edges,
+            min_confidence,
+            &ArchitectureOverviewOptions::default(),
+            options,
+        )
+    }
+
+    /// Aggregates an architecture overview with complete scope and detail options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid scope, detail, bounds, transport,
+    /// or response correlation.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the contract object groups scope and detail dimensions"
+    )]
+    pub fn architecture_overview_with_contract_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        views: &[String],
+        max_components: Option<u16>,
+        include_edges: Option<bool>,
+        min_confidence: Option<u16>,
+        contract: &ArchitectureOverviewOptions,
+        options: RequestOptions,
+    ) -> Result<ArchitectureOverview, ClientError> {
         match self.request_with_options(
             build_architecture_overview_request(
                 repository,
@@ -4745,11 +5427,12 @@ impl Client {
                 max_components,
                 include_edges,
                 min_confidence,
+                contract,
             )?,
             options,
         )? {
             daemon::response_envelope::Response::ArchitectureOverview(response) => {
-                parse_architecture_overview(response, repository, generation)
+                parse_architecture_overview(response, repository, generation, views)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -4823,6 +5506,44 @@ impl Client {
         min_confidence: Option<u16>,
         options: RequestOptions,
     ) -> Result<ArchitectureOverview, ClientError> {
+        self.architecture_overview_async_with_contract_options(
+            repository,
+            generation,
+            views,
+            max_components,
+            include_edges,
+            min_confidence,
+            &ArchitectureOverviewOptions::default(),
+            options,
+        )
+        .await
+    }
+
+    /// Asynchronously aggregates an overview with complete scope and detail options.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid scope, detail, bounds, transport,
+    /// or response correlation.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the contract object groups scope and detail dimensions"
+    )]
+    pub async fn architecture_overview_async_with_contract_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        views: &[String],
+        max_components: Option<u16>,
+        include_edges: Option<bool>,
+        min_confidence: Option<u16>,
+        contract: &ArchitectureOverviewOptions,
+        options: RequestOptions,
+    ) -> Result<ArchitectureOverview, ClientError> {
         match self
             .request_async_with_options(
                 build_architecture_overview_request(
@@ -4832,13 +5553,14 @@ impl Client {
                     max_components,
                     include_edges,
                     min_confidence,
+                    contract,
                 )?,
                 options,
             )
             .await?
         {
             daemon::response_envelope::Response::ArchitectureOverview(response) => {
-                parse_architecture_overview(response, repository, generation)
+                parse_architecture_overview(response, repository, generation, views)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -4899,6 +5621,7 @@ impl Client {
                 test_kinds,
                 max_tests,
                 include_commands,
+                &TestsSelectFilters::default(),
             )?,
             options,
         )? {
@@ -4976,6 +5699,45 @@ impl Client {
         include_commands: Option<bool>,
         options: RequestOptions,
     ) -> Result<TestsSelect, ClientError> {
+        self.tests_select_async_with_filters_and_options(
+            repository,
+            generation,
+            seeds,
+            test_kinds,
+            max_tests,
+            include_commands,
+            &TestsSelectFilters::default(),
+            options,
+        )
+        .await
+    }
+
+    /// Asynchronously selects tests with every bounded selector and filter.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid selectors, filters, or budget
+    /// bounds, unavailable protocol support, transport failure, timeout, or a
+    /// malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded tests-select or transport dimension"
+    )]
+    pub async fn tests_select_async_with_filters_and_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: &[SymbolId],
+        test_kinds: &[String],
+        max_tests: Option<u16>,
+        include_commands: Option<bool>,
+        filters: &TestsSelectFilters,
+        options: RequestOptions,
+    ) -> Result<TestsSelect, ClientError> {
         match self
             .request_async_with_options(
                 build_tests_select_request(
@@ -4985,6 +5747,7 @@ impl Client {
                     test_kinds,
                     max_tests,
                     include_commands,
+                    filters,
                 )?,
                 options,
             )
@@ -5066,6 +5829,7 @@ impl Client {
                 min_confidence,
                 include_tests,
                 max_dependents,
+                &ChangeImpactOptions::default(),
             )?,
             options,
         )? {
@@ -5151,6 +5915,49 @@ impl Client {
         max_dependents: Option<u16>,
         options: RequestOptions,
     ) -> Result<ChangeImpact, ClientError> {
+        self.change_impact_async_with_policy_and_options(
+            repository,
+            generation,
+            changed_symbols,
+            changed_paths,
+            max_depth,
+            min_confidence,
+            include_tests,
+            max_dependents,
+            &ChangeImpactOptions::default(),
+            options,
+        )
+        .await
+    }
+
+    /// Asynchronously maps change impact with every bounded selector and policy.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid selectors, scope, policy, or budget
+    /// bounds, unavailable protocol support, transport failure, timeout, or a
+    /// malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded change-impact or transport dimension"
+    )]
+    pub async fn change_impact_async_with_policy_and_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        changed_symbols: &[SymbolId],
+        changed_paths: &[String],
+        max_depth: Option<u8>,
+        min_confidence: Option<u16>,
+        include_tests: Option<bool>,
+        max_dependents: Option<u16>,
+        impact_options: &ChangeImpactOptions,
+        options: RequestOptions,
+    ) -> Result<ChangeImpact, ClientError> {
         match self
             .request_async_with_options(
                 build_change_impact_request(
@@ -5162,6 +5969,7 @@ impl Client {
                     min_confidence,
                     include_tests,
                     max_dependents,
+                    impact_options,
                 )?,
                 options,
             )
@@ -5321,15 +6129,59 @@ impl Client {
         max_steps: Option<u8>,
         options: RequestOptions,
     ) -> Result<PlanChange, ClientError> {
+        self.plan_change_async_with_context_and_options(
+            repository,
+            generation,
+            objective,
+            objective_text,
+            target_symbols,
+            target_files,
+            &[],
+            None,
+            max_steps,
+            options,
+        )
+        .await
+    }
+
+    /// Asynchronously builds a bounded plan with constraints and change context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid bounded arguments, transport failure,
+    /// or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "change context and constraints are independent bounded transport dimensions"
+    )]
+    pub async fn plan_change_async_with_context_and_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        objective: &str,
+        objective_text: &str,
+        target_symbols: &[SymbolId],
+        target_files: &[FileId],
+        constraints: &[String],
+        change_context: Option<&PlanChangeContext>,
+        max_steps: Option<u8>,
+        options: RequestOptions,
+    ) -> Result<PlanChange, ClientError> {
         match self
             .request_async_with_options(
-                build_plan_change_request(
+                build_plan_change_request_with_context(
                     repository,
                     generation,
                     objective,
                     objective_text,
                     target_symbols,
                     target_files,
+                    constraints,
+                    change_context,
                     max_steps,
                 )?,
                 options,
@@ -5388,7 +6240,7 @@ impl Client {
             options,
         )? {
             daemon::response_envelope::Response::HistoryCompare(response) => {
-                parse_history_compare(response, repository, head)
+                parse_history_compare(response, repository, Some(head))
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -5451,15 +6303,61 @@ impl Client {
         max_results: Option<u16>,
         options: RequestOptions,
     ) -> Result<HistoryCompare, ClientError> {
+        self.history_compare_async_with_scope_and_options(
+            repository,
+            &HistoryRevisionSelector::Generation(base),
+            &HistoryRevisionSelector::Generation(head),
+            &HistoryCompareScope::default(),
+            change_kinds,
+            false,
+            max_results,
+            options,
+        )
+        .await
+    }
+
+    /// Asynchronously compares revisions with combined structural scope.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid bounded arguments, transport failure,
+    /// unavailable revision state, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "revision selectors and scope are independent bounded comparison dimensions"
+    )]
+    pub async fn history_compare_async_with_scope_and_options(
+        &self,
+        repository: RepositoryId,
+        base: &HistoryRevisionSelector,
+        head: &HistoryRevisionSelector,
+        scope: &HistoryCompareScope,
+        change_kinds: &[&str],
+        include_unchanged_context: bool,
+        max_results: Option<u16>,
+        options: RequestOptions,
+    ) -> Result<HistoryCompare, ClientError> {
         match self
             .request_async_with_options(
-                build_history_compare_request(repository, base, head, change_kinds, max_results)?,
+                build_history_compare_request_with_scope(
+                    repository,
+                    base,
+                    head,
+                    scope,
+                    change_kinds,
+                    include_unchanged_context,
+                    max_results,
+                )?,
                 options,
             )
             .await?
         {
             daemon::response_envelope::Response::HistoryCompare(response) => {
-                parse_history_compare(response, repository, head)
+                parse_history_compare(response, repository, None)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -6541,6 +7439,11 @@ fn ensure_request_supported(
         daemon::request_envelope::Request::CodeLocate(request) if !request.languages.is_empty() => {
             8
         }
+        daemon::request_envelope::Request::SupportBundle(request)
+            if request.repository.is_some() =>
+        {
+            8
+        }
         daemon::request_envelope::Request::RepositoryIndex(_)
         | daemon::request_envelope::Request::RepositoryOperationStatus(_)
         | daemon::request_envelope::Request::CodeLocate(_)
@@ -7334,6 +8237,7 @@ fn build_symbol_explain_request(
     repository: RepositoryId,
     generation: GenerationSelector,
     symbols: &[SymbolId],
+    projection: &SymbolExplainProjection,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
     if symbols.is_empty()
         || symbols.len() > 16
@@ -7344,12 +8248,34 @@ fn build_symbol_explain_request(
     {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
+    if projection.sections.len() > 10
+        || projection
+            .sections
+            .iter()
+            .any(|section| section.is_empty() || section.len() > 32)
+        || projection
+            .relation_sample_limit
+            .is_some_and(|limit| limit > 25)
+        || projection
+            .source_preview_lines
+            .is_some_and(|lines| lines > 40)
+        || !matches!(
+            projection.include_provenance.as_str(),
+            "none" | "compact" | "full"
+        )
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
     Ok(daemon::request_envelope::Request::SymbolExplain(
         daemon::SymbolExplainRequest {
             schema_version: Some(first_slice_schema()),
             repository: Some(repository_to_wire(repository)),
             generation: Some(generation_selector_to_wire(generation)),
             symbols: symbols.iter().copied().map(symbol_to_wire).collect(),
+            sections: projection.sections.clone(),
+            relation_sample_limit: projection.relation_sample_limit.map(u32::from),
+            source_preview_lines: projection.source_preview_lines.map(u32::from),
+            include_provenance: projection.include_provenance.clone(),
         },
     ))
 }
@@ -7893,6 +8819,7 @@ struct RepositoryOperationEvidenceWire {
     newly_written_bytes: u64,
     reserved_memory_bytes: u64,
     owned_memory_bytes: u64,
+    retained_durable_bytes: u64,
     invalidation_trace_json: Option<Vec<u8>>,
 }
 
@@ -7912,6 +8839,7 @@ impl From<&daemon::RepositoryOperationStatusResponse> for RepositoryOperationEvi
             newly_written_bytes: response.newly_written_bytes,
             reserved_memory_bytes: response.reserved_memory_bytes,
             owned_memory_bytes: response.owned_memory_bytes,
+            retained_durable_bytes: response.retained_durable_bytes,
             invalidation_trace_json: response.invalidation_trace_json.clone(),
         }
     }
@@ -7934,6 +8862,7 @@ fn parse_repository_operation_evidence(
         response.newly_written_bytes,
         response.reserved_memory_bytes,
         response.owned_memory_bytes,
+        response.retained_durable_bytes,
     ];
     if response.build_strategy == daemon::RepositoryBuildStrategy::Unspecified as i32 {
         return if response.fallback_reason.is_none()
@@ -8006,6 +8935,7 @@ fn parse_repository_operation_evidence(
         newly_written_bytes: response.newly_written_bytes,
         reserved_memory_bytes: response.reserved_memory_bytes,
         owned_memory_bytes: response.owned_memory_bytes,
+        retained_durable_bytes: response.retained_durable_bytes,
         invalidation_trace_json: response.invalidation_trace_json,
     }))
 }
@@ -8028,7 +8958,14 @@ fn parse_repository_index_stage(
     }
     if matches!(
         stage.as_str(),
-        "discovery" | "snapshot" | "analysis" | "merge" | "persistence" | "search" | "complete"
+        "discovery"
+            | "snapshot"
+            | "analysis"
+            | "merge"
+            | "persistence"
+            | "search"
+            | "publication"
+            | "complete"
     ) {
         Ok(stage)
     } else {
@@ -8499,6 +9436,7 @@ fn parse_repository_status(
         semantic_freshness: response.semantic_freshness,
         state: response.state,
         publication_state: publication_state.to_owned(),
+        retained_durable_bytes: response.retained_durable_bytes,
         coverage,
         operations,
     })
@@ -8777,6 +9715,78 @@ fn parse_flow_trace(
     })
 }
 
+fn analysis_scope_to_wire(
+    scope: Option<&AnalysisScope>,
+) -> Result<Option<daemon::FirstSliceAnalysisScope>, ClientError> {
+    let selector = match scope {
+        None => return Ok(None),
+        Some(AnalysisScope::Paths(paths)) => {
+            if paths.is_empty()
+                || paths.len() > 256
+                || paths.iter().any(|path| {
+                    path.is_empty() || path.len() > 8_192 || path.as_bytes().contains(&0)
+                })
+            {
+                return Err(ClientError::InvalidFirstSliceRequest);
+            }
+            daemon::first_slice_analysis_scope::Selector::Paths(
+                daemon::FirstSlicePathAnalysisScope {
+                    paths: paths.clone(),
+                },
+            )
+        }
+        Some(AnalysisScope::Packages(packages)) => {
+            if packages.is_empty()
+                || packages.len() > 256
+                || packages.iter().any(|package| {
+                    package.is_empty() || package.len() > 512 || package.as_bytes().contains(&0)
+                })
+            {
+                return Err(ClientError::InvalidFirstSliceRequest);
+            }
+            daemon::first_slice_analysis_scope::Selector::Packages(
+                daemon::FirstSlicePackageAnalysisScope {
+                    packages: packages.clone(),
+                },
+            )
+        }
+        Some(AnalysisScope::BuildTargets(targets)) => {
+            if targets.is_empty()
+                || targets.len() > 256
+                || targets.iter().any(|target| {
+                    target.is_empty() || target.len() > 512 || target.as_bytes().contains(&0)
+                })
+            {
+                return Err(ClientError::InvalidFirstSliceRequest);
+            }
+            daemon::first_slice_analysis_scope::Selector::BuildTargets(
+                daemon::FirstSliceBuildTargetAnalysisScope {
+                    build_targets: targets.clone(),
+                },
+            )
+        }
+        Some(AnalysisScope::Symbols(symbols)) => {
+            if symbols.is_empty()
+                || symbols.len() > 64
+                || symbols
+                    .iter()
+                    .enumerate()
+                    .any(|(index, symbol)| symbols[..index].contains(symbol))
+            {
+                return Err(ClientError::InvalidFirstSliceRequest);
+            }
+            daemon::first_slice_analysis_scope::Selector::Symbols(
+                daemon::FirstSliceSymbolAnalysisScope {
+                    symbols: symbols.iter().copied().map(symbol_to_wire).collect(),
+                },
+            )
+        }
+    };
+    Ok(Some(daemon::FirstSliceAnalysisScope {
+        selector: Some(selector),
+    }))
+}
+
 fn build_architecture_cycles_request(
     repository: RepositoryId,
     generation: GenerationSelector,
@@ -8784,6 +9794,7 @@ fn build_architecture_cycles_request(
     min_size: Option<u8>,
     max_cycles: Option<u16>,
     include_self_cycles: Option<bool>,
+    contract: &ArchitectureCyclesOptions,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
     if relations.is_empty()
         || relations.len() > 8
@@ -8803,6 +9814,15 @@ fn build_architecture_cycles_request(
     if max_cycles.is_some_and(|max| !(1..=200).contains(&max)) {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
+    if !matches!(
+        contract.level.as_str(),
+        "symbol" | "module" | "package" | "build_target" | "service"
+    ) || !matches!(
+        contract.rank_by.as_str(),
+        "size" | "edge_weight" | "change_risk" | "break_cost"
+    ) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
     Ok(daemon::request_envelope::Request::ArchitectureCycles(
         daemon::ArchitectureCyclesRequest {
             schema_version: Some(first_slice_schema()),
@@ -8812,6 +9832,9 @@ fn build_architecture_cycles_request(
             min_size: min_size.map(u32::from),
             max_cycles: max_cycles.map(u32::from),
             include_self_cycles,
+            scope: analysis_scope_to_wire(contract.scope.as_ref())?,
+            level: Some(contract.level.clone()),
+            rank_by: Some(contract.rank_by.clone()),
         },
     ))
 }
@@ -8821,6 +9844,7 @@ fn parse_architecture_cycles(
     repository: RepositoryId,
     selector: GenerationSelector,
     relations: &[String],
+    contract: &ArchitectureCyclesOptions,
 ) -> Result<ArchitectureCycles, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let execution_completeness = parse_result_completeness(response.completeness, None, false)?;
@@ -8834,6 +9858,14 @@ fn parse_architecture_cycles(
         || wire_projection.relations.is_empty()
         || wire_projection.relations.len() > 8
         || wire_projection.min_confidence > 1_000
+        || !matches!(
+            wire_projection.level.as_str(),
+            "symbol" | "module" | "package" | "build_target" | "service"
+        )
+        || !matches!(
+            wire_projection.rank_by.as_str(),
+            "size" | "edge_weight" | "change_risk" | "break_cost"
+        )
     {
         return Err(ClientError::InvalidResponseCorrelation);
     }
@@ -8844,6 +9876,8 @@ fn parse_architecture_cycles(
             .relations
             .iter()
             .any(|relation| !relations.contains(relation))
+        || wire_projection.level != contract.level
+        || wire_projection.rank_by != contract.rank_by
     {
         return Err(ClientError::InvalidResponseCorrelation);
     }
@@ -8854,6 +9888,7 @@ fn parse_architecture_cycles(
     for component in response.components {
         if component.size < 1
             || usize::try_from(component.size).is_ok_and(|size| component.members.len() != size)
+            || component.break_cost > 1_000
         {
             return Err(ClientError::InvalidResponseCorrelation);
         }
@@ -8868,6 +9903,10 @@ fn parse_architecture_cycles(
             size: component.size,
             members,
             internal_edges: component.internal_edges,
+            edge_weight: component.edge_weight,
+            change_risk: component.change_risk,
+            break_cost: u16::try_from(component.break_cost)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
         });
     }
     let mut cycles = Vec::new();
@@ -8951,11 +9990,18 @@ fn parse_architecture_cycles(
             relations: projection_relations,
             min_confidence: u16::try_from(wire_projection.min_confidence)
                 .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+            level: wire_projection.level,
+            rank_by: wire_projection.rank_by,
+            omitted_nodes: wire_projection.omitted_nodes,
         },
         execution_completeness,
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the helper mirrors the stable public request shape while the contract carries additive options"
+)]
 fn build_code_dead_request(
     repository: RepositoryId,
     generation: GenerationSelector,
@@ -8964,6 +10010,7 @@ fn build_code_dead_request(
     include_tests: Option<bool>,
     min_confidence: Option<u16>,
     max_candidates: Option<u16>,
+    contract: &CodeDeadOptions,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
     if entry_point_policy.is_some_and(|policy| {
         policy.is_empty() || policy.len() > 32 || policy.as_bytes().contains(&0)
@@ -8976,6 +10023,16 @@ fn build_code_dead_request(
     if max_candidates.is_some_and(|max| !(1..=500).contains(&max)) {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
+    if contract.explicit_entry_points.len() > 64
+        || contract
+            .explicit_entry_points
+            .iter()
+            .enumerate()
+            .any(|(index, symbol)| contract.explicit_entry_points[..index].contains(symbol))
+        || (entry_point_policy == Some("explicit")) != !contract.explicit_entry_points.is_empty()
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
     Ok(daemon::request_envelope::Request::CodeDead(
         daemon::CodeDeadRequest {
             schema_version: Some(first_slice_schema()),
@@ -8986,6 +10043,13 @@ fn build_code_dead_request(
             include_tests,
             min_confidence: min_confidence.map(u32::from),
             max_candidates: max_candidates.map(u32::from),
+            explicit_entry_points: contract
+                .explicit_entry_points
+                .iter()
+                .copied()
+                .map(symbol_to_wire)
+                .collect(),
+            scope: analysis_scope_to_wire(contract.scope.as_ref())?,
         },
     ))
 }
@@ -8994,6 +10058,8 @@ fn parse_code_dead(
     response: daemon::CodeDeadResponse,
     repository: RepositoryId,
     selector: GenerationSelector,
+    expected_policy: &str,
+    contract: &CodeDeadOptions,
 ) -> Result<CodeDead, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let execution_completeness = parse_result_completeness(response.completeness, None, false)?;
@@ -9004,8 +10070,13 @@ fn parse_code_dead(
     if response.candidates.len() > 500
         || response.blind_spots.len() > 32
         || response.false_positive_controls.len() > 32
+        || response.coverage_caveats.len() > 32
         || wire_entry_points.policy.is_empty()
         || wire_entry_points.policy.len() > 32
+        || wire_entry_points.entry_symbols.len() > 64
+        || wire_entry_points.policy != expected_policy
+        || usize::try_from(wire_entry_points.entry_point_count)
+            .is_ok_and(|count| count < wire_entry_points.entry_symbols.len())
     {
         return Err(ClientError::InvalidResponseCorrelation);
     }
@@ -9020,6 +10091,7 @@ fn parse_code_dead(
             || candidate.why.is_empty()
             || candidate.why.len() > 16
             || candidate.suppressions_checked.len() > 16
+            || candidate.uncertainty.len() > 16
             || candidate.source_refs.len() > 8
         {
             return Err(ClientError::InvalidResponseCorrelation);
@@ -9032,6 +10104,9 @@ fn parse_code_dead(
         for source in candidate.source_refs {
             source_refs.push(parse_source_reference(source, &context)?);
         }
+        let reachability = candidate
+            .reachability
+            .ok_or(ClientError::InvalidResponseCorrelation)?;
         candidates.push(CodeDeadCandidate {
             symbol_id,
             classification: candidate.classification,
@@ -9039,6 +10114,15 @@ fn parse_code_dead(
                 .map_err(|_| ClientError::InvalidResponseCorrelation)?,
             why: candidate.why,
             suppressions_checked: candidate.suppressions_checked,
+            reachability: CodeDeadReachabilitySummary {
+                reached_from_entry_points: reachability.reached_from_entry_points,
+                incoming_edges: reachability.incoming_edges,
+                strongest_incoming_confidence: u16::try_from(
+                    reachability.strongest_incoming_confidence,
+                )
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+            },
+            uncertainty: candidate.uncertainty,
             source_refs,
         });
     }
@@ -9068,16 +10152,46 @@ fn parse_code_dead(
             suppressed_count: rule.suppressed_count,
         });
     }
+    let mut entry_symbols = Vec::new();
+    entry_symbols
+        .try_reserve_exact(wire_entry_points.entry_symbols.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for symbol in wire_entry_points.entry_symbols {
+        let symbol = parse_symbol(Some(symbol))?;
+        if entry_symbols.contains(&symbol) {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        entry_symbols.push(symbol);
+    }
+    if expected_policy == "explicit"
+        && (usize::try_from(wire_entry_points.entry_point_count)
+            .is_ok_and(|count| count != entry_symbols.len())
+            || entry_symbols.len() != contract.explicit_entry_points.len()
+            || entry_symbols
+                .iter()
+                .any(|symbol| !contract.explicit_entry_points.contains(symbol)))
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    if response
+        .coverage_caveats
+        .iter()
+        .any(|caveat| caveat.is_empty() || caveat.len() > 256 || caveat.as_bytes().contains(&0))
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
     Ok(CodeDead {
         context,
         candidates,
         entry_points: CodeDeadEntryPointSummary {
             policy: wire_entry_points.policy,
             entry_point_count: wire_entry_points.entry_point_count,
+            entry_symbols,
             complete: wire_entry_points.complete,
         },
         blind_spots,
         false_positive_controls,
+        coverage_caveats: response.coverage_caveats,
         execution_completeness,
     })
 }
@@ -9089,6 +10203,7 @@ fn build_architecture_overview_request(
     max_components: Option<u16>,
     include_edges: Option<bool>,
     min_confidence: Option<u16>,
+    contract: &ArchitectureOverviewOptions,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
     if views.len() > 8
         || views
@@ -9103,6 +10218,12 @@ fn build_architecture_overview_request(
     if max_components.is_some_and(|max| !(1..=250).contains(&max)) {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
+    if !matches!(
+        contract.detail.as_str(),
+        "summary" | "standard" | "detailed"
+    ) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
     Ok(daemon::request_envelope::Request::ArchitectureOverview(
         daemon::ArchitectureOverviewRequest {
             schema_version: Some(first_slice_schema()),
@@ -9112,6 +10233,8 @@ fn build_architecture_overview_request(
             max_components: max_components.map(u32::from),
             include_edges,
             min_confidence: min_confidence.map(u32::from),
+            scope: analysis_scope_to_wire(contract.scope.as_ref())?,
+            detail: Some(contract.detail.clone()),
         },
     ))
 }
@@ -9120,6 +10243,7 @@ fn parse_architecture_overview(
     response: daemon::ArchitectureOverviewResponse,
     repository: RepositoryId,
     selector: GenerationSelector,
+    requested_views: &[String],
 ) -> Result<ArchitectureOverview, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let execution_completeness = parse_result_completeness(response.completeness, None, false)?;
@@ -9144,16 +10268,26 @@ fn parse_architecture_overview(
             || component.name.is_empty()
             || component.name.len() > 1_024
             || component.responsibility_evidence.len() > 16
+            || component.source_refs.len() > 16
             || component.confidence > 1_000
         {
             return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let mut source_refs = Vec::new();
+        source_refs
+            .try_reserve_exact(component.source_refs.len())
+            .map_err(|_| ClientError::ResponseAllocationFailed)?;
+        for source in component.source_refs {
+            source_refs.push(parse_source_reference(source, &context)?);
         }
         components.push(ArchitectureOverviewComponent {
             id: component.id,
             kind: component.kind,
             name: component.name,
             symbol_count: component.symbol_count,
+            file_count: component.file_count,
             responsibility_evidence: component.responsibility_evidence,
+            source_refs,
             confidence: u16::try_from(component.confidence)
                 .map_err(|_| ClientError::InvalidResponseCorrelation)?,
         });
@@ -9199,6 +10333,8 @@ fn parse_architecture_overview(
             fan_out: hotspot.fan_out,
             change_frequency: hotspot.change_frequency,
             complexity: hotspot.complexity,
+            ownership_signal: hotspot.ownership_signal,
+            test_signal: hotspot.test_signal,
             score: u16::try_from(hotspot.score)
                 .map_err(|_| ClientError::InvalidResponseCorrelation)?,
         });
@@ -9259,6 +10395,24 @@ fn parse_architecture_overview(
             parameters: view.parameters.into_iter().collect(),
         });
     }
+    let requested_views: BTreeSet<&str> = requested_views.iter().map(String::as_str).collect();
+    let response_views: BTreeSet<&str> = views.iter().map(|view| view.view.as_str()).collect();
+    if response_views.len() != views.len()
+        || !response_views.is_subset(&requested_views)
+        || (execution_completeness.state == ResultCompletenessState::Complete
+            && requested_views != response_views)
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    if connections.iter().any(|connection| {
+        !component_ids.contains(connection.from.as_str())
+            || !component_ids.contains(connection.to.as_str())
+    }) || hotspots
+        .iter()
+        .any(|hotspot| !component_ids.contains(hotspot.component_id.as_str()))
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
     Ok(ArchitectureOverview {
         context,
         components,
@@ -9277,8 +10431,18 @@ fn build_tests_select_request(
     test_kinds: &[String],
     max_tests: Option<u16>,
     include_commands: Option<bool>,
+    filters: &TestsSelectFilters,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
-    if seeds.is_empty() || seeds.len() > 64 {
+    if (seeds.is_empty()
+        && filters.seed_paths.is_empty()
+        && filters.seed_build_targets.is_empty()
+        && filters.change_working_tree.is_none()
+        && filters.change_revision_range.is_none())
+        || seeds.len() > 64
+        || filters.seed_paths.len() > 256
+        || filters.seed_build_targets.len() > 128
+        || filters.frameworks.len() > 32
+    {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
     if test_kinds.len() > 6
@@ -9291,6 +10455,32 @@ fn build_tests_select_request(
     if max_tests.is_some_and(|max| !(1..=500).contains(&max)) {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
+    if filters
+        .seed_paths
+        .iter()
+        .any(|value| value.is_empty() || value.len() > 8_192 || value.as_bytes().contains(&0))
+        || filters
+            .seed_build_targets
+            .iter()
+            .any(|value| value.is_empty() || value.len() > 512 || value.as_bytes().contains(&0))
+        || filters
+            .frameworks
+            .iter()
+            .any(|value| value.is_empty() || value.len() > 256 || value.as_bytes().contains(&0))
+        || filters
+            .max_total_ms
+            .is_some_and(|value| value == 0 || value > 3_600_000)
+        || filters.max_slow_tests.is_some_and(|value| value > 500)
+        || filters
+            .change_working_tree
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "unstaged" | "staged" | "all"))
+        || filters.change_revision_range.as_ref().is_some_and(|value| {
+            value.is_empty() || value.len() > 512 || value.as_bytes().contains(&0)
+        })
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
     Ok(daemon::request_envelope::Request::TestsSelect(
         daemon::TestsSelectRequest {
             schema_version: Some(first_slice_schema()),
@@ -9300,6 +10490,13 @@ fn build_tests_select_request(
             test_kinds: test_kinds.to_vec(),
             max_tests: max_tests.map(u32::from),
             include_commands,
+            seed_paths: filters.seed_paths.clone(),
+            seed_build_targets: filters.seed_build_targets.clone(),
+            frameworks: filters.frameworks.clone(),
+            max_total_ms: filters.max_total_ms,
+            max_slow_tests: filters.max_slow_tests.map(u32::from),
+            change_working_tree: filters.change_working_tree.clone(),
+            change_revision_range: filters.change_revision_range.clone(),
         },
     ))
 }
@@ -9327,6 +10524,8 @@ fn parse_tests_select(
             || test.test_id.len() > 512
             || test.kind.is_empty()
             || test.kind.len() > 32
+            || test.framework.is_empty()
+            || test.framework.len() > 256
             || test
                 .path
                 .as_ref()
@@ -9348,6 +10547,7 @@ fn parse_tests_select(
         tests.push(TestsSelectRankedTest {
             test_id: test.test_id,
             kind: test.kind,
+            framework: test.framework,
             path: test.path,
             score: u16::try_from(test.score)
                 .map_err(|_| ClientError::InvalidResponseCorrelation)?,
@@ -9379,6 +10579,7 @@ fn parse_tests_select(
             direct_edges: strategy.direct_edges,
             transitive_signals: strategy.transitive_signals,
             history_signals: strategy.history_signals,
+            build_target_signals: strategy.build_target_signals,
             file_colocation_signals: strategy.file_colocation_signals,
         },
         gaps,
@@ -9399,11 +10600,21 @@ fn build_change_impact_request(
     min_confidence: Option<u16>,
     include_tests: Option<bool>,
     max_dependents: Option<u16>,
+    impact_options: &ChangeImpactOptions,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
-    if changed_symbols.is_empty() && changed_paths.is_empty() {
+    if changed_symbols.is_empty()
+        && changed_paths.is_empty()
+        && impact_options.working_tree.is_none()
+        && impact_options.revision_range.is_none()
+    {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
-    if changed_symbols.len() > 256 || changed_paths.len() > 1_000 {
+    if changed_symbols.len() > 256
+        || changed_paths.len() > 1_000
+        || impact_options.scope_paths.len() > 256
+        || impact_options.scope_packages.len() > 128
+        || impact_options.scope_services.len() > 64
+    {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
     if changed_paths
@@ -9421,6 +10632,32 @@ fn build_change_impact_request(
     if max_dependents.is_some_and(|max| !(1..=500).contains(&max)) {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
+    if impact_options
+        .working_tree
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "unstaged" | "staged" | "all"))
+        || impact_options.revision_range.as_ref().is_some_and(|value| {
+            value.is_empty() || value.len() > 512 || value.as_bytes().contains(&0)
+        })
+        || impact_options
+            .scope_paths
+            .iter()
+            .any(|value| value.is_empty() || value.len() > 8_192 || value.as_bytes().contains(&0))
+        || impact_options
+            .scope_packages
+            .iter()
+            .any(|value| value.is_empty() || value.len() > 512 || value.as_bytes().contains(&0))
+        || impact_options
+            .scope_services
+            .iter()
+            .any(|value| value.is_empty() || value.len() > 512 || value.as_bytes().contains(&0))
+        || !matches!(
+            impact_options.relation_policy.as_str(),
+            "" | "standard" | "conservative" | "direct_only"
+        )
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
     Ok(daemon::request_envelope::Request::ChangeImpact(
         daemon::ChangeImpactRequest {
             schema_version: Some(first_slice_schema()),
@@ -9436,6 +10673,17 @@ fn build_change_impact_request(
             min_confidence: min_confidence.map(u32::from),
             include_tests,
             max_dependents: max_dependents.map(u32::from),
+            working_tree: impact_options.working_tree.clone(),
+            revision_range: impact_options.revision_range.clone(),
+            scope_paths: impact_options.scope_paths.clone(),
+            scope_packages: impact_options.scope_packages.clone(),
+            scope_services: impact_options.scope_services.clone(),
+            relation_policy: if impact_options.relation_policy.is_empty() {
+                "standard".to_owned()
+            } else {
+                impact_options.relation_policy.clone()
+            },
+            include_history: impact_options.include_history,
         },
     ))
 }
@@ -9568,10 +10816,34 @@ fn parse_change_impact(
     {
         return Err(ClientError::InvalidResponseCorrelation);
     }
+    let mut service_impacts = Vec::new();
+    service_impacts
+        .try_reserve_exact(response.service_impacts.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for impact in response.service_impacts {
+        if impact.target.is_empty()
+            || impact.target.len() > 512
+            || impact.kind.is_empty()
+            || impact.kind.len() > 64
+            || impact.confidence > 1_000
+            || impact.reason.is_empty()
+            || impact.reason.len() > 128
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        service_impacts.push(ChangeImpactServiceImpact {
+            target: impact.target,
+            kind: impact.kind,
+            confidence: u16::try_from(impact.confidence)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+            reason: impact.reason,
+        });
+    }
     Ok(ChangeImpact {
         context,
         resolved_changes,
         impacted,
+        service_impacts,
         tests,
         risk_summary: ChangeImpactRiskSummary {
             level: wire_risk.level,
@@ -9594,6 +10866,34 @@ fn build_plan_change_request(
     target_files: &[FileId],
     max_steps: Option<u8>,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
+    build_plan_change_request_with_context(
+        repository,
+        generation,
+        objective,
+        objective_text,
+        target_symbols,
+        target_files,
+        &[],
+        None,
+        max_steps,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "change context and constraints are independent bounded transport dimensions"
+)]
+fn build_plan_change_request_with_context(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    objective: &str,
+    objective_text: &str,
+    target_symbols: &[SymbolId],
+    target_files: &[FileId],
+    constraints: &[String],
+    change_context: Option<&PlanChangeContext>,
+    max_steps: Option<u8>,
+) -> Result<daemon::request_envelope::Request, ClientError> {
     if objective.is_empty() || objective.len() > 32 {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
@@ -9609,6 +10909,23 @@ fn build_plan_change_request(
     if max_steps.is_some_and(|steps| !(1..=100).contains(&steps)) {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
+    if constraints.len() > 32
+        || constraints
+            .iter()
+            .any(|constraint| constraint.is_empty() || constraint.chars().count() > 1_024)
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if change_context.is_some_and(|context| {
+        context.symbol_ids.len() > 256
+            || context.paths.len() > 1_000
+            || context
+                .paths
+                .iter()
+                .any(|path| path.is_empty() || path.len() > 8_192)
+    }) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
     Ok(daemon::request_envelope::Request::PlanChange(
         daemon::PlanChangeRequest {
             schema_version: Some(first_slice_schema()),
@@ -9619,6 +10936,18 @@ fn build_plan_change_request(
             target_symbols: target_symbols.iter().copied().map(symbol_to_wire).collect(),
             target_files: target_files.iter().copied().map(file_to_wire).collect(),
             max_steps: max_steps.map(u32::from),
+            constraints: constraints.to_vec(),
+            change_context: change_context.map(|context| daemon::FirstSlicePlanChangeContext {
+                working_tree: context.working_tree.clone(),
+                revision_range: context.revision_range.clone(),
+                symbol_ids: context
+                    .symbol_ids
+                    .iter()
+                    .copied()
+                    .map(symbol_to_wire)
+                    .collect(),
+                paths: context.paths.clone(),
+            }),
         },
     ))
 }
@@ -9779,6 +11108,26 @@ fn build_history_compare_request(
     change_kinds: &[&str],
     max_results: Option<u16>,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
+    build_history_compare_request_with_scope(
+        repository,
+        &HistoryRevisionSelector::Generation(base),
+        &HistoryRevisionSelector::Generation(head),
+        &HistoryCompareScope::default(),
+        change_kinds,
+        false,
+        max_results,
+    )
+}
+
+fn build_history_compare_request_with_scope(
+    repository: RepositoryId,
+    base: &HistoryRevisionSelector,
+    head: &HistoryRevisionSelector,
+    scope: &HistoryCompareScope,
+    change_kinds: &[&str],
+    include_unchanged_context: bool,
+    max_results: Option<u16>,
+) -> Result<daemon::request_envelope::Request, ClientError> {
     if change_kinds.len() > 8 {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
@@ -9790,38 +11139,67 @@ fn build_history_compare_request(
     if max_results.is_some_and(|results| !(1..=1_000).contains(&results)) {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
+    if scope.paths.len() > 256
+        || scope.packages.len() > 128
+        || scope.services.len() > 64
+        || scope.symbols.len() > 256
+        || scope.paths.iter().any(|value| value.is_empty())
+        || scope.packages.iter().any(|value| value.is_empty())
+        || scope.services.iter().any(|value| value.is_empty())
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
     Ok(daemon::request_envelope::Request::HistoryCompare(
         daemon::HistoryCompareRequest {
             schema_version: Some(first_slice_schema()),
             repository: Some(repository_to_wire(repository)),
-            base: Some(revision_selector_to_wire(base)),
-            head: Some(revision_selector_to_wire(head)),
+            base: Some(history_revision_selector_to_wire(base)?),
+            head: Some(history_revision_selector_to_wire(head)?),
             change_kinds: change_kinds.iter().map(|kind| (*kind).to_owned()).collect(),
             max_results: max_results.map(u32::from),
+            scope: Some(daemon::FirstSliceHistoryCompareScope {
+                paths: scope.paths.clone(),
+                packages: scope.packages.clone(),
+                services: scope.services.clone(),
+                symbols: scope.symbols.iter().copied().map(symbol_to_wire).collect(),
+            }),
+            include_unchanged_context,
         },
     ))
 }
 
-fn revision_selector_to_wire(generation: GenerationId) -> daemon::FirstSliceRevisionSelector {
-    daemon::FirstSliceRevisionSelector {
-        selector: Some(daemon::first_slice_revision_selector::Selector::Generation(
-            generation_to_wire(generation),
-        )),
-    }
+fn history_revision_selector_to_wire(
+    selector: &HistoryRevisionSelector,
+) -> Result<daemon::FirstSliceRevisionSelector, ClientError> {
+    let selector = match selector {
+        HistoryRevisionSelector::Generation(generation) => {
+            daemon::first_slice_revision_selector::Selector::Generation(generation_to_wire(
+                *generation,
+            ))
+        }
+        HistoryRevisionSelector::Git(git) => {
+            if git.is_empty()
+                || git.len() > 512
+                || git.starts_with('-')
+                || git.bytes().any(|byte| byte == 0 || byte.is_ascii_control())
+            {
+                return Err(ClientError::InvalidFirstSliceRequest);
+            }
+            daemon::first_slice_revision_selector::Selector::Git(git.clone())
+        }
+    };
+    Ok(daemon::FirstSliceRevisionSelector {
+        selector: Some(selector),
+    })
 }
 
 fn parse_history_compare(
     response: daemon::HistoryCompareResponse,
     repository: RepositoryId,
-    head: GenerationId,
+    expected_head: Option<GenerationId>,
 ) -> Result<HistoryCompare, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let execution_completeness = parse_result_completeness(response.completeness, None, false)?;
-    let context = parse_query_context(
-        response.context,
-        repository,
-        GenerationSelector::Generation(head),
-    )?;
     let wire_states = response
         .matched_states
         .ok_or(ClientError::InvalidResponseCorrelation)?;
@@ -9846,6 +11224,14 @@ fn parse_history_compare(
         wire_states
             .head_generation
             .ok_or(ClientError::InvalidResponseCorrelation)?,
+    )?;
+    if expected_head.is_some_and(|expected| expected != head_generation) {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let context = parse_query_context(
+        response.context,
+        repository,
+        GenerationSelector::Generation(head_generation),
     )?;
     let mut changes = Vec::new();
     changes
@@ -10151,6 +11537,66 @@ fn parse_symbol_explain(
                 .ok_or(ClientError::InvalidResponseCorrelation)?,
             &context,
         )?;
+        if explanation.qualified_name.is_empty()
+            || explanation.qualified_name.len() > 4_096
+            || explanation
+                .container
+                .as_ref()
+                .is_some_and(|value| value.len() > 4_096)
+            || explanation
+                .source_preview
+                .as_ref()
+                .is_some_and(|value| value.len() > 262_144)
+            || explanation.relation_samples.len() > 25
+            || explanation.section_gaps.len() > 10
+            || explanation
+                .section_gaps
+                .iter()
+                .any(|gap| gap.is_empty() || gap.len() > 256)
+            || explanation
+                .provenance_frontend_version
+                .as_ref()
+                .is_some_and(|value| value.is_empty() || value.len() > 256)
+            || explanation
+                .provenance_rule
+                .as_ref()
+                .is_some_and(|value| value.is_empty() || value.len() > 256)
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let mut relation_samples = Vec::new();
+        relation_samples
+            .try_reserve_exact(explanation.relation_samples.len())
+            .map_err(|_| ClientError::ResponseAllocationFailed)?;
+        for sample in explanation.relation_samples {
+            if sample.kind.is_empty()
+                || sample.kind.len() > 256
+                || !matches!(sample.direction.as_str(), "inbound" | "outbound")
+                || sample.confidence > 1_000
+                || sample.source_refs.len() > 8
+            {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+            let target = sample
+                .target
+                .map(|target| parse_symbol(Some(target)))
+                .transpose()?;
+            let mut source_refs = Vec::new();
+            source_refs
+                .try_reserve_exact(sample.source_refs.len())
+                .map_err(|_| ClientError::ResponseAllocationFailed)?;
+            for source in sample.source_refs {
+                source_refs.push(parse_source_reference(source, &context)?);
+            }
+            relation_samples.push(SymbolRelationSample {
+                kind: sample.kind,
+                direction: sample.direction,
+                target,
+                source_refs,
+                confidence: u16::try_from(sample.confidence)
+                    .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+            });
+        }
         if explanation.confidence > 1_000
             || symbols
                 .iter()
@@ -10163,6 +11609,7 @@ fn parse_symbol_explain(
             symbol,
             kind: explanation.kind,
             display_name: explanation.display_name,
+            qualified_name: explanation.qualified_name,
             signature: explanation.signature,
             definition,
             outbound_exact: explanation.outbound_exact,
@@ -10170,11 +11617,17 @@ fn parse_symbol_explain(
             inbound_exact: explanation.inbound_exact,
             inbound_candidates: explanation.inbound_candidates,
             references_exact: explanation.references_exact,
+            container: explanation.container,
+            relation_samples,
+            source_preview: explanation.source_preview,
+            section_gaps: explanation.section_gaps,
             provider: explanation.provider,
             evidence: explanation.evidence,
             language: explanation.language,
             tier: parse_analysis_tier(explanation.tier)?,
             confidence: explanation.confidence,
+            provenance_frontend_version: explanation.provenance_frontend_version,
+            provenance_rule: explanation.provenance_rule,
         });
     }
     let mut unresolved_symbols = Vec::new();
@@ -11025,6 +12478,459 @@ fn nonce_matches(observed: &[u8], expected: [u8; 16]) -> bool {
             == 0
 }
 
+fn build_full_diagnostics(
+    repository: RepositoryId,
+    health: &Health,
+    quick: DiagnosticsQuick,
+    status: &RepositoryStatus,
+    support: &SupportBundle,
+) -> Result<DiagnosticsReport, ClientError> {
+    let inventory = support
+        .inventory
+        .as_ref()
+        .ok_or(ClientError::InvalidSupportBundle)?;
+    let observations = vec![
+        catalog_observation(quick.catalog),
+        status_observation(
+            DiagnosticsCheck::Generation,
+            health.generation_status,
+            BTreeMap::from([("retained_durable_bytes", status.retained_durable_bytes)]),
+        ),
+        recovery_observation(
+            repository,
+            health.generation_status,
+            &support.terminal_operations,
+        ),
+        coverage_observation(status),
+        status_observation(
+            DiagnosticsCheck::Watcher,
+            health.watcher_status,
+            BTreeMap::new(),
+        ),
+        status_observation(
+            DiagnosticsCheck::AdapterAvailability,
+            health.adapter_status,
+            BTreeMap::new(),
+        ),
+        storage_policy_observation(inventory),
+    ];
+    Ok(diagnostics_report(
+        DiagnosticsMode::Full,
+        Some(repository),
+        None,
+        false,
+        observations,
+    ))
+}
+
+fn validate_scoped_support_bundle(
+    bundle: &SupportBundle,
+    repository: RepositoryId,
+) -> Result<(), ClientError> {
+    let inventory = bundle
+        .inventory
+        .as_ref()
+        .ok_or(ClientError::InvalidSupportBundle)?;
+    let repository = support_evidence_id(repository.as_bytes());
+    if inventory.repositories.len() != 1
+        || inventory.repositories[0].repository_id != repository
+        || inventory
+            .generations
+            .iter()
+            .any(|generation| generation.repository_id != repository)
+        || bundle
+            .terminal_operations
+            .iter()
+            .any(|operation| operation.repository_id.as_deref() != Some(repository.as_str()))
+    {
+        return Err(ClientError::InvalidSupportBundle);
+    }
+    Ok(())
+}
+
+fn build_storage_diagnostics(
+    repository: RepositoryId,
+    scrub: bool,
+    generation_status: HealthStatus,
+    quick: DiagnosticsQuick,
+    status: &RepositoryStatus,
+    support: &SupportBundle,
+) -> Result<DiagnosticsReport, ClientError> {
+    let inventory = support
+        .inventory
+        .as_ref()
+        .ok_or(ClientError::InvalidSupportBundle)?;
+    let observations = vec![
+        catalog_observation(quick.catalog),
+        storage_policy_observation(inventory),
+        generation_checksum_observation(repository, scrub, inventory),
+        status_observation(
+            DiagnosticsCheck::Generation,
+            generation_status,
+            BTreeMap::from([("retained_durable_bytes", status.retained_durable_bytes)]),
+        ),
+        temporary_storage_observation(inventory),
+    ];
+    Ok(diagnostics_report(
+        DiagnosticsMode::Storage,
+        Some(repository),
+        None,
+        scrub,
+        observations,
+    ))
+}
+
+fn build_adapter_diagnostics(
+    language: String,
+    health: &Health,
+    support: &SupportBundle,
+) -> Result<DiagnosticsReport, ClientError> {
+    let inventory = support
+        .inventory
+        .as_ref()
+        .ok_or(ClientError::InvalidSupportBundle)?;
+    let adapters = inventory
+        .adapters
+        .iter()
+        .filter(|adapter| {
+            adapter
+                .languages
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(&language))
+        })
+        .collect::<Vec<_>>();
+    let available = adapters.iter().any(|adapter| adapter.available);
+    let isolated = adapters
+        .iter()
+        .filter(|adapter| adapter.available)
+        .all(|adapter| adapter.isolated);
+    let availability_status = if available {
+        health.adapter_status
+    } else {
+        HealthStatus::Unavailable
+    };
+    let isolation_status = if !available {
+        HealthStatus::Unavailable
+    } else if isolated {
+        HealthStatus::Healthy
+    } else {
+        HealthStatus::Degraded
+    };
+    let observations = vec![
+        status_observation(
+            DiagnosticsCheck::AdapterAvailability,
+            availability_status,
+            BTreeMap::from([
+                ("matching_adapters", usize_to_u64(adapters.len())),
+                ("available_adapters", u64::from(available)),
+            ]),
+        ),
+        status_observation(
+            DiagnosticsCheck::AdapterIsolation,
+            isolation_status,
+            BTreeMap::from([("isolated", u64::from(isolated))]),
+        ),
+    ];
+    Ok(diagnostics_report(
+        DiagnosticsMode::Adapter,
+        None,
+        Some(language),
+        false,
+        observations,
+    ))
+}
+
+fn build_network_diagnostics(health: &Health) -> DiagnosticsReport {
+    let observations = vec![
+        status_observation(
+            DiagnosticsCheck::EndpointOwnership,
+            health.endpoint_status,
+            BTreeMap::from([
+                ("active_connections", u64::from(health.active_connections)),
+                ("connection_limit", u64::from(health.connection_limit)),
+                (
+                    "endpoint_schema_version",
+                    u64::from(health.endpoint_schema_version),
+                ),
+            ]),
+        ),
+        // The core daemon has no outbound transport capability; extensions
+        // require a separately configured policy boundary.
+        status_observation(
+            DiagnosticsCheck::OutboundNetworkPolicy,
+            HealthStatus::Healthy,
+            BTreeMap::from([
+                ("default_deny", 1),
+                ("external_collectors_enabled", 0),
+                ("local_ipc_only", 1),
+            ]),
+        ),
+    ];
+    diagnostics_report(
+        DiagnosticsMode::NetworkAudit,
+        None,
+        None,
+        false,
+        observations,
+    )
+}
+
+fn diagnostics_report(
+    mode: DiagnosticsMode,
+    repository: Option<RepositoryId>,
+    language: Option<String>,
+    scrub: bool,
+    observations: Vec<DiagnosticsObservation>,
+) -> DiagnosticsReport {
+    let overall_status = observations
+        .iter()
+        .map(|observation| observation.status)
+        .fold(HealthStatus::Healthy, worst_health_status);
+    DiagnosticsReport {
+        schema_version: 1,
+        mode,
+        overall_status,
+        repository,
+        language,
+        scrub,
+        bounded: true,
+        contains_source: false,
+        observations,
+    }
+}
+
+fn catalog_observation(result: DiagnosticResult) -> DiagnosticsObservation {
+    let status = match result.outcome {
+        DiagnosticOutcome::Passed => HealthStatus::Healthy,
+        DiagnosticOutcome::Failed => HealthStatus::Failed,
+        DiagnosticOutcome::TimedOut => HealthStatus::Degraded,
+        DiagnosticOutcome::Unavailable => HealthStatus::Unavailable,
+    };
+    DiagnosticsObservation {
+        check: DiagnosticsCheck::Catalog,
+        status,
+        outcome: result.outcome,
+        measurements: BTreeMap::from([("duration_ms", u64::from(result.duration_ms))]),
+        error: result.error,
+    }
+}
+
+fn recovery_observation(
+    repository: RepositoryId,
+    generation_status: HealthStatus,
+    operations: &[SupportTerminalOperation],
+) -> DiagnosticsObservation {
+    let repository = support_evidence_id(repository.as_bytes());
+    let recoveries = operations.iter().filter(|operation| {
+        operation.kind == SupportOperationKind::Recovery
+            && operation.repository_id.as_deref() == Some(repository.as_str())
+    });
+    let mut succeeded = 0_u64;
+    let mut failed = 0_u64;
+    let mut interrupted = 0_u64;
+    for recovery in recoveries {
+        match recovery.state {
+            SupportOperationState::Succeeded => succeeded = succeeded.saturating_add(1),
+            SupportOperationState::Failed => failed = failed.saturating_add(1),
+            SupportOperationState::Interrupted | SupportOperationState::Cancelled => {
+                interrupted = interrupted.saturating_add(1);
+            }
+        }
+    }
+    let status = if failed > 0 {
+        HealthStatus::Failed
+    } else if interrupted > 0 {
+        HealthStatus::Degraded
+    } else {
+        generation_status
+    };
+    status_observation(
+        DiagnosticsCheck::Recovery,
+        status,
+        BTreeMap::from([
+            ("failed", failed),
+            ("interrupted", interrupted),
+            ("succeeded", succeeded),
+        ]),
+    )
+}
+
+fn coverage_observation(status: &RepositoryStatus) -> DiagnosticsObservation {
+    let discovered_files = status.coverage.iter().fold(0_u64, |total, entry| {
+        total.saturating_add(entry.discovered_files)
+    });
+    let indexed_files = status.coverage.iter().fold(0_u64, |total, entry| {
+        total.saturating_add(entry.indexed_files)
+    });
+    let incomplete_languages = status
+        .coverage
+        .iter()
+        .filter(|entry| entry.status != "complete" || entry.indexed_files < entry.discovered_files)
+        .count();
+    let coverage_status = if status.coverage.is_empty() {
+        HealthStatus::Unavailable
+    } else if incomplete_languages == 0 {
+        HealthStatus::Healthy
+    } else {
+        HealthStatus::Degraded
+    };
+    status_observation(
+        DiagnosticsCheck::Coverage,
+        coverage_status,
+        BTreeMap::from([
+            ("discovered_files", discovered_files),
+            ("indexed_files", indexed_files),
+            ("incomplete_languages", usize_to_u64(incomplete_languages)),
+            ("languages", usize_to_u64(status.coverage.len())),
+        ]),
+    )
+}
+
+fn storage_policy_observation(inventory: &SupportInventory) -> DiagnosticsObservation {
+    let storage = &inventory.storage;
+    let hardened =
+        storage.persistent && storage.defensive && storage.foreign_keys && !storage.trusted_schema;
+    status_observation(
+        DiagnosticsCheck::StoragePolicy,
+        if hardened {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Failed
+        },
+        BTreeMap::from([
+            ("catalog_allocated_bytes", storage.catalog_allocated_bytes),
+            ("maximum_catalog_bytes", storage.maximum_catalog_bytes),
+            ("maximum_shm_bytes", storage.maximum_shm_bytes),
+            ("maximum_wal_bytes", storage.maximum_wal_bytes),
+            ("persistent", u64::from(storage.persistent)),
+        ]),
+    )
+}
+
+fn generation_checksum_observation(
+    repository: RepositoryId,
+    scrub: bool,
+    inventory: &SupportInventory,
+) -> DiagnosticsObservation {
+    let repository = support_evidence_id(repository.as_bytes());
+    let mut verified = 0_u64;
+    let mut failed = 0_u64;
+    let mut unknown = 0_u64;
+    for generation in inventory
+        .generations
+        .iter()
+        .filter(|generation| generation.repository_id == repository)
+    {
+        match generation.checksum_status {
+            SupportChecksumStatus::Verified => verified = verified.saturating_add(1),
+            SupportChecksumStatus::Failed => failed = failed.saturating_add(1),
+            SupportChecksumStatus::Unknown => unknown = unknown.saturating_add(1),
+        }
+    }
+    let status = if failed > 0 {
+        HealthStatus::Failed
+    } else if verified == 0 || (scrub && unknown > 0) {
+        HealthStatus::Degraded
+    } else {
+        HealthStatus::Healthy
+    };
+    status_observation(
+        DiagnosticsCheck::GenerationChecksums,
+        status,
+        BTreeMap::from([
+            ("failed", failed),
+            ("unknown", unknown),
+            ("verified", verified),
+        ]),
+    )
+}
+
+fn temporary_storage_observation(inventory: &SupportInventory) -> DiagnosticsObservation {
+    let temporary_bytes = inventory.storage.unreclaimed_temporary_bytes;
+    status_observation(
+        DiagnosticsCheck::TemporaryStorage,
+        if temporary_bytes == 0 {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Degraded
+        },
+        BTreeMap::from([
+            (
+                "generation_disk_bytes",
+                inventory.storage.generation_disk_bytes,
+            ),
+            ("unreclaimed_temporary_bytes", temporary_bytes),
+        ]),
+    )
+}
+
+fn status_observation(
+    check: DiagnosticsCheck,
+    status: HealthStatus,
+    measurements: BTreeMap<&'static str, u64>,
+) -> DiagnosticsObservation {
+    DiagnosticsObservation {
+        check,
+        status,
+        outcome: health_status_outcome(status),
+        measurements,
+        error: None,
+    }
+}
+
+const fn health_status_outcome(status: HealthStatus) -> DiagnosticOutcome {
+    match status {
+        HealthStatus::Healthy | HealthStatus::NotConfigured => DiagnosticOutcome::Passed,
+        HealthStatus::Degraded | HealthStatus::Unavailable => DiagnosticOutcome::Unavailable,
+        HealthStatus::Failed => DiagnosticOutcome::Failed,
+    }
+}
+
+const fn worst_health_status(left: HealthStatus, right: HealthStatus) -> HealthStatus {
+    if health_status_severity(right) > health_status_severity(left) {
+        right
+    } else {
+        left
+    }
+}
+
+const fn health_status_severity(status: HealthStatus) -> u8 {
+    match status {
+        HealthStatus::Healthy | HealthStatus::NotConfigured => 0,
+        HealthStatus::Degraded => 1,
+        HealthStatus::Unavailable => 2,
+        HealthStatus::Failed => 3,
+    }
+}
+
+fn normalize_diagnostic_language(language: &str) -> Result<String, ClientError> {
+    let language = language.trim();
+    if language.is_empty()
+        || language.len() > MAX_CODE_LOCATE_LANGUAGE_BYTES
+        || !language
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'#' | b'-' | b'_'))
+    {
+        return Err(ClientError::InvalidDiagnosticsScope);
+    }
+    Ok(language.to_ascii_lowercase())
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn support_evidence_id(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}")
+            .unwrap_or_else(|_| unreachable!("formatting into String cannot fail"));
+    }
+    encoded
+}
+
 /// Local daemon client failures.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -11088,6 +12994,9 @@ pub enum ClientError {
     /// Quick-diagnostics wire content violated its closed schema.
     #[error("daemon diagnostics response is invalid")]
     InvalidDiagnostics,
+    /// An extended diagnostic scope violated its closed source-free label contract.
+    #[error("daemon diagnostics scope is invalid")]
+    InvalidDiagnosticsScope,
     /// Support-bundle bounds, digest, or privacy declaration was invalid.
     #[error("daemon support bundle is invalid")]
     InvalidSupportBundle,
@@ -11363,6 +13272,7 @@ mod tests {
             coverage_detail: "summary".to_owned(),
             active_structural_freshness: "current".to_owned(),
             active_semantic_freshness: "current".to_owned(),
+            retained_durable_bytes: 0,
         }
     }
 
@@ -11563,23 +13473,37 @@ mod tests {
             candidates: vec![daemon::FirstSliceDeadCandidate {
                 symbol_id: Some(symbol_to_wire(SymbolId::from_bytes([4; 20]))),
                 classification: classification.to_owned(),
-                confidence: 1_000,
+                confidence: 850,
                 why: vec!["reachability".to_owned()],
                 suppressions_checked: Vec::new(),
                 source_refs: Vec::new(),
+                reachability: Some(daemon::FirstSliceDeadReachability {
+                    reached_from_entry_points: false,
+                    incoming_edges: 0,
+                    strongest_incoming_confidence: 0,
+                }),
+                uncertainty: vec!["static_reachability_only".to_owned()],
             }],
             entry_points: Some(daemon::FirstSliceEntryPointSummary {
                 policy: "standard".to_owned(),
                 entry_point_count: 1,
                 complete: true,
+                entry_symbols: vec![symbol_to_wire(SymbolId::from_bytes([1; 20]))],
             }),
             blind_spots: Vec::new(),
             false_positive_controls: Vec::new(),
             completeness: None,
+            coverage_caveats: vec!["static_analysis_only".to_owned()],
         };
 
-        let parsed = parse_code_dead(response, test_repository(), GenerationSelector::Active)
-            .expect("the stable classification parses");
+        let parsed = parse_code_dead(
+            response,
+            test_repository(),
+            GenerationSelector::Active,
+            "standard",
+            &CodeDeadOptions::default(),
+        )
+        .expect("the stable classification parses");
         assert_eq!(parsed.candidates[0].classification, classification);
     }
 
@@ -11758,6 +13682,13 @@ mod tests {
                 confidence: 1_000,
                 language: "rust".to_owned(),
                 tier: daemon::FirstSliceAnalysisTier::FirstSliceTierB as i32,
+                qualified_name: "crate::answer".to_owned(),
+                container: None,
+                relation_samples: Vec::new(),
+                source_preview: None,
+                section_gaps: Vec::new(),
+                provenance_frontend_version: None,
+                provenance_rule: None,
             }],
             unresolved_symbols: Vec::new(),
             truncated: false,
@@ -13220,7 +15151,9 @@ mod tests {
         let diagnostics =
             daemon::request_envelope::Request::DiagnosticsQuick(daemon::DiagnosticsQuickRequest {});
         let support =
-            daemon::request_envelope::Request::SupportBundle(daemon::SupportBundleRequest {});
+            daemon::request_envelope::Request::SupportBundle(daemon::SupportBundleRequest {
+                repository: None,
+            });
         assert!(matches!(
             ensure_request_supported(&diagnostics, 2),
             Err(ClientError::ProtocolFeatureUnavailable)
@@ -13231,6 +15164,15 @@ mod tests {
         ));
         assert!(ensure_request_supported(&diagnostics, 3).is_ok());
         assert!(ensure_request_supported(&support, 3).is_ok());
+        let scoped_support =
+            daemon::request_envelope::Request::SupportBundle(daemon::SupportBundleRequest {
+                repository: Some(repository_to_wire(test_repository())),
+            });
+        assert!(matches!(
+            ensure_request_supported(&scoped_support, 7),
+            Err(ClientError::ProtocolFeatureUnavailable)
+        ));
+        assert!(ensure_request_supported(&scoped_support, 8).is_ok());
 
         let first_slice =
             daemon::request_envelope::Request::CodeLocate(daemon::CodeLocateRequest::default());
@@ -13897,6 +15839,23 @@ mod tests {
         assert!(parse_repository_operation_status(queued_without_retry.clone(), operation).is_ok());
         queued_without_retry.retry_after_ms = Some(0);
         assert!(parse_repository_operation_status(queued_without_retry, operation).is_ok());
+        let mut publishing_status = status.clone();
+        publishing_status
+            .operation
+            .as_mut()
+            .expect("operation exists")
+            .state = daemon::OperationState::Running as i32;
+        publishing_status
+            .operation
+            .as_mut()
+            .expect("operation exists")
+            .stage = daemon::OperationStage::Cleanup as i32;
+        publishing_status.published_generation = None;
+        publishing_status.index_stage = "publication".to_owned();
+        assert!(
+            parse_repository_operation_status(publishing_status, operation).is_ok(),
+            "the daemon's bounded publication stage is a valid running status"
+        );
         let mut foreign_status = status;
         foreign_status
             .operation
@@ -14046,6 +16005,13 @@ mod tests {
                 confidence: 1_000,
                 language: "rust".to_owned(),
                 tier: daemon::FirstSliceAnalysisTier::FirstSliceTierB as i32,
+                qualified_name: "crate::answer".to_owned(),
+                container: None,
+                relation_samples: Vec::new(),
+                source_preview: None,
+                section_gaps: Vec::new(),
+                provenance_frontend_version: None,
+                provenance_rule: None,
             }],
             unresolved_symbols: vec![symbol_to_wire(second_symbol)],
             truncated: false,
@@ -14383,6 +16349,124 @@ mod tests {
                 unreclaimed_temporary_bytes: 0,
                 disk_margin_bytes: None,
             },
+        }
+    }
+
+    fn diagnostic_health(endpoint_status: HealthStatus) -> Health {
+        Health {
+            ready: true,
+            active_operations: 0,
+            admitted_operations: 0,
+            protocol_version: "1.8".to_owned(),
+            lifecycle: DaemonLifecycle::Ready,
+            accepting_operations: true,
+            active_connections: 1,
+            connection_limit: 8,
+            queued_operations: 0,
+            running_operations: 0,
+            operation_queue_limit: 8,
+            journal_healthy: true,
+            catalog_status: HealthStatus::Healthy,
+            catalog_schema_version: 2,
+            generation_status: HealthStatus::Healthy,
+            adapter_status: HealthStatus::Healthy,
+            watcher_status: HealthStatus::Healthy,
+            resource_pressure: ResourcePressure::Normal,
+            endpoint_status,
+            endpoint_schema_version: 2,
+        }
+    }
+
+    fn diagnostic_quick() -> DiagnosticsQuick {
+        DiagnosticsQuick {
+            schema_version: 1,
+            overall_status: HealthStatus::Healthy,
+            catalog: DiagnosticResult {
+                outcome: DiagnosticOutcome::Passed,
+                duration_ms: 2,
+                error: None,
+            },
+        }
+    }
+
+    fn diagnostic_repository_status() -> RepositoryStatus {
+        RepositoryStatus {
+            repository_id: test_repository(),
+            display_name: "fixture".to_owned(),
+            alias: None,
+            resolved_generation: test_generation(),
+            active_generation: test_generation(),
+            parent_generation: None,
+            active_parent_generation: None,
+            active_structural_freshness: "current".to_owned(),
+            active_semantic_freshness: "current".to_owned(),
+            structural_freshness: "current".to_owned(),
+            semantic_freshness: "current".to_owned(),
+            state: "ready".to_owned(),
+            publication_state: "published".to_owned(),
+            retained_durable_bytes: 4_096,
+            coverage: vec![RepositoryCoverageEntry {
+                language: "rust".to_owned(),
+                tier: "tier_a".to_owned(),
+                status: "complete".to_owned(),
+                discovered_files: 1,
+                indexed_files: 1,
+            }],
+            operations: Vec::new(),
+        }
+    }
+
+    fn diagnostic_support(
+        checksum_status: SupportChecksumStatus,
+        terminal_operations: Vec<SupportTerminalOperation>,
+    ) -> SupportBundle {
+        let mut inventory = test_support_inventory();
+        inventory.storage.persistent = true;
+        inventory.repositories = vec![rootlight_observability::SupportRepositoryInventory {
+            repository_id: support_evidence_id(test_repository().as_bytes()),
+            root_fingerprint_sha256: None,
+            languages: vec!["rust".to_owned()],
+            tiers: vec!["tier_a".to_owned()],
+            state: "ready".to_owned(),
+            file_count: 1,
+            symbol_count: 1,
+            relationship_count: 0,
+            generation_count: 1,
+        }];
+        inventory.generations = vec![rootlight_observability::SupportGenerationInventory {
+            repository_id: support_evidence_id(test_repository().as_bytes()),
+            generation_id: support_evidence_id(test_generation().as_bytes()),
+            format_version: "1.2".to_owned(),
+            checksum_status,
+            disk_bytes: 4_096,
+            state: "published".to_owned(),
+        }];
+        SupportBundle {
+            schema_version: CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+            archive: Vec::new(),
+            sha256: [0; 32],
+            archive_bytes: 0,
+            contains_source: false,
+            telemetry: None,
+            inventory: Some(inventory),
+            terminal_operations,
+        }
+    }
+
+    fn failed_recovery() -> SupportTerminalOperation {
+        SupportTerminalOperation {
+            operation_id: support_evidence_id(OperationId::from_bytes([3; 16]).as_bytes()),
+            repository_id: Some(support_evidence_id(test_repository().as_bytes())),
+            kind: SupportOperationKind::Recovery,
+            state: SupportOperationState::Failed,
+            stage: rootlight_observability::SupportOperationStage::Executing,
+            revision: 2,
+            progress: rootlight_observability::SupportOperationProgress {
+                completed: 0,
+                total: 1,
+            },
+            provider: Some("generation-restore".to_owned()),
+            error: None,
         }
     }
 
@@ -15014,5 +17098,147 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn full_diagnostics_are_bounded_and_failed_recovery_dominates() {
+        let report = build_full_diagnostics(
+            test_repository(),
+            &diagnostic_health(HealthStatus::Healthy),
+            diagnostic_quick(),
+            &diagnostic_repository_status(),
+            &diagnostic_support(SupportChecksumStatus::Verified, vec![failed_recovery()]),
+        )
+        .expect("validated support evidence builds full diagnostics");
+
+        assert_eq!(report.mode, DiagnosticsMode::Full);
+        assert_eq!(report.overall_status, HealthStatus::Failed);
+        assert_eq!(report.repository, Some(test_repository()));
+        assert!(report.bounded);
+        assert!(!report.contains_source);
+        assert_eq!(report.observations.len(), 7);
+        let recovery = report
+            .observations
+            .iter()
+            .find(|observation| observation.check == DiagnosticsCheck::Recovery)
+            .expect("full diagnostics include recovery");
+        assert_eq!(recovery.status, HealthStatus::Failed);
+        assert_eq!(recovery.measurements.get("failed"), Some(&1));
+        let encoded = serde_json::to_vec(&report).expect("diagnostics serialize");
+        assert!(encoded.len() < 16 * 1024);
+        assert!(!encoded.windows(3).any(|window| window == br#"src"#));
+        assert!(!encoded.windows(3).any(|window| window == b":\\"));
+    }
+
+    #[test]
+    fn storage_scrub_fails_on_scoped_generation_checksum_mismatch() {
+        let report = build_storage_diagnostics(
+            test_repository(),
+            true,
+            HealthStatus::Healthy,
+            diagnostic_quick(),
+            &diagnostic_repository_status(),
+            &diagnostic_support(SupportChecksumStatus::Failed, Vec::new()),
+        )
+        .expect("validated support evidence builds storage diagnostics");
+
+        assert_eq!(report.mode, DiagnosticsMode::Storage);
+        assert_eq!(report.overall_status, HealthStatus::Failed);
+        assert!(report.scrub);
+        assert_eq!(report.observations.len(), 5);
+        let checksums = report
+            .observations
+            .iter()
+            .find(|observation| observation.check == DiagnosticsCheck::GenerationChecksums)
+            .expect("storage diagnostics include generation checksums");
+        assert_eq!(checksums.status, HealthStatus::Failed);
+        assert_eq!(checksums.measurements.get("failed"), Some(&1));
+    }
+
+    #[test]
+    fn adapter_diagnostics_use_validated_language_and_isolation_evidence() {
+        assert_eq!(
+            normalize_diagnostic_language(" C++ ").expect("language label validates"),
+            "c++"
+        );
+        assert!(matches!(
+            normalize_diagnostic_language("../rust"),
+            Err(ClientError::InvalidDiagnosticsScope)
+        ));
+
+        let mut support = diagnostic_support(SupportChecksumStatus::Verified, Vec::new());
+        support
+            .inventory
+            .as_mut()
+            .expect("diagnostic inventory exists")
+            .adapters = vec![rootlight_observability::SupportAdapterInventory {
+            name: "rootlight-adapter-treesitter".to_owned(),
+            version: Some("0.1.0".to_owned()),
+            languages: vec!["rust".to_owned()],
+            available: true,
+            isolated: false,
+            binary_sha256: None,
+            artifact_sha256: None,
+        }];
+        let report = build_adapter_diagnostics(
+            "rust".to_owned(),
+            &diagnostic_health(HealthStatus::Healthy),
+            &support,
+        )
+        .expect("validated support evidence builds adapter diagnostics");
+
+        assert_eq!(report.mode, DiagnosticsMode::Adapter);
+        assert_eq!(report.language.as_deref(), Some("rust"));
+        assert_eq!(report.overall_status, HealthStatus::Degraded);
+        assert_eq!(report.observations.len(), 2);
+        assert_eq!(
+            report.observations[1].check,
+            DiagnosticsCheck::AdapterIsolation
+        );
+        assert_eq!(report.observations[1].status, HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn network_audit_propagates_endpoint_ownership_failure() {
+        let report = build_network_diagnostics(&diagnostic_health(HealthStatus::Failed));
+
+        assert_eq!(report.mode, DiagnosticsMode::NetworkAudit);
+        assert_eq!(report.overall_status, HealthStatus::Failed);
+        assert_eq!(report.observations.len(), 2);
+        assert_eq!(
+            report.observations[0].check,
+            DiagnosticsCheck::EndpointOwnership
+        );
+        assert_eq!(
+            report.observations[1].measurements.get("default_deny"),
+            Some(&1)
+        );
+        assert!(report.bounded);
+        assert!(!report.contains_source);
+    }
+
+    #[test]
+    fn scoped_support_validation_rejects_cross_repository_evidence() {
+        let mut support = diagnostic_support(SupportChecksumStatus::Verified, Vec::new());
+        validate_scoped_support_bundle(&support, test_repository())
+            .expect("exact repository evidence validates");
+
+        support
+            .inventory
+            .as_mut()
+            .expect("diagnostic inventory exists")
+            .generations
+            .push(rootlight_observability::SupportGenerationInventory {
+                repository_id: support_evidence_id(RepositoryId::from_bytes([9; 16]).as_bytes()),
+                generation_id: support_evidence_id(GenerationId::from_bytes([9; 20]).as_bytes()),
+                format_version: "1.2".to_owned(),
+                checksum_status: SupportChecksumStatus::Verified,
+                disk_bytes: 1,
+                state: "published".to_owned(),
+            });
+        assert!(matches!(
+            validate_scoped_support_bundle(&support, test_repository()),
+            Err(ClientError::InvalidSupportBundle)
+        ));
     }
 }

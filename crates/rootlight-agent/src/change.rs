@@ -17,11 +17,11 @@ use rootlight_mcp_contract::{
     ErrorCode, GenerationSelector, PublicError, RepositorySelector, SchemaVersion,
     TrustClassification,
     change::{
-        ChangeImpactData, ChangePlanStep, ContextPackRequest, PlanChangeData, PlanChangeInput,
-        PlanDecision, PlanEvidenceKind, PlanEvidenceOmission, PlanEvidenceOmissionReason,
-        PlanEvidenceProvider, PlanEvidenceRecord, PlanImpactSummary, PlanObjective,
-        PlanProviderCoverage, PlanProviderState, PlanTargetSelector, RiskLevel, TestCandidate,
-        TestsSelectData,
+        ChangeImpactData, ChangePlanStep, ChangeSelector, ContextPackRequest, PlanChangeData,
+        PlanChangeInput, PlanDecision, PlanEvidenceKind, PlanEvidenceOmission,
+        PlanEvidenceOmissionReason, PlanEvidenceProvider, PlanEvidenceRecord, PlanImpactSummary,
+        PlanObjective, PlanProviderCoverage, PlanProviderState, PlanTargetSelector, RiskLevel,
+        TestCandidate, TestsSelectData,
     },
     completeness::{
         CompletenessState, ContinuationAvailability, ContinuationGuidance, LimitingResource,
@@ -30,8 +30,8 @@ use rootlight_mcp_contract::{
     context::{BatchTool, PlanExplanation},
     intent::{ArchitectureOverviewData, SymbolRelationshipsData},
     vertical::{
-        ReadEnvelope, RequiredNullable, ResponseBudget, ResponseProfile, ResponseWarning,
-        UsageSummary,
+        CodeLocateData, ReadEnvelope, RequiredNullable, ResponseBudget, ResponseProfile,
+        ResponseWarning, UsageSummary,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -59,6 +59,9 @@ pub struct PlanChangeRequest {
     objective_text: String,
     target_symbols: Vec<SymbolId>,
     target_files: Vec<FileId>,
+    target_queries: Vec<String>,
+    constraints: Vec<String>,
+    change_context: Option<ChangeSelector>,
     max_steps: Option<u8>,
     budget: Option<ResponseBudget>,
     response_profile: ResponseProfile,
@@ -108,6 +111,24 @@ impl PlanChangeRequest {
         &self.target_files
     }
 
+    /// Returns textual package, route, and located-result targets to resolve.
+    #[must_use]
+    pub fn target_queries(&self) -> &[String] {
+        &self.target_queries
+    }
+
+    /// Returns caller constraints in their admitted order.
+    #[must_use]
+    pub fn constraints(&self) -> &[String] {
+        &self.constraints
+    }
+
+    /// Returns the working-tree or hypothetical change used to expand targets.
+    #[must_use]
+    pub const fn change_context(&self) -> Option<&ChangeSelector> {
+        self.change_context.as_ref()
+    }
+
     /// Returns the optional plan-step ceiling.
     #[must_use]
     pub const fn max_steps(&self) -> Option<u8> {
@@ -138,6 +159,7 @@ impl PlanChangeRequest {
         self.target_symbols
             .len()
             .saturating_add(self.target_files.len())
+            .saturating_add(self.target_queries.len())
     }
 }
 
@@ -166,24 +188,26 @@ pub enum PlanChangeError {
 /// # Errors
 ///
 /// Returns [`PlanChangeError`] when the request requires alias resolution,
-/// unsupported context behavior or contains no symbol or file target.
+/// invalid bounded context behavior or contains no symbol or file target.
 pub fn normalize_plan_change(input: PlanChangeInput) -> Result<PlanChangeRequest, PlanChangeError> {
     let RepositorySelector::ById(repository) = input.repository else {
         return Err(PlanChangeError::UnsupportedRepository);
     };
-    if input.change_context.is_some() || input.constraints.is_some() {
-        return Err(PlanChangeError::UnsupportedOption);
-    }
-
     let mut target_symbols = Vec::new();
     let mut target_files = Vec::new();
+    let mut target_queries = Vec::new();
     for target in input.targets {
         match target {
             PlanTargetSelector::Symbol(symbol) => target_symbols.push(symbol.symbol_id),
             PlanTargetSelector::File(file) => target_files.push(file.file_id),
+            PlanTargetSelector::Package(package) => target_queries.push(package.package),
+            PlanTargetSelector::Route(route) => target_queries.push(route.route),
+            PlanTargetSelector::Located(located) => {
+                target_queries.push(located.located.as_str().to_owned());
+            }
         }
     }
-    if target_symbols.is_empty() && target_files.is_empty() {
+    if target_symbols.is_empty() && target_files.is_empty() && target_queries.is_empty() {
         return Err(PlanChangeError::EmptyTargets);
     }
 
@@ -196,6 +220,9 @@ pub fn normalize_plan_change(input: PlanChangeInput) -> Result<PlanChangeRequest
         objective_text: input.objective_text,
         target_symbols,
         target_files,
+        target_queries,
+        constraints: input.constraints.unwrap_or_default(),
+        change_context: input.change_context,
         max_steps: input.max_steps,
         budget: input.budget,
         response_profile: input.profile.unwrap_or(ResponseProfile::Compact),
@@ -395,6 +422,15 @@ impl PlanChangeService {
         let mut ledger = BudgetLedger::new(request.budget().cloned());
         let publication_floor = minimum_plan_publication_charge(&identity)?;
         ledger.charge(publication_floor).map_err(map_policy_error)?;
+        resolve_plan_text_targets(
+            Arc::clone(&port),
+            &mut request,
+            &identity,
+            cancellation.clone(),
+            deadline,
+            &mut ledger,
+        )
+        .await?;
 
         // Optional evidence must not consume the capacity required to publish
         // a useful structural plan. A child ledger also turns provider-local
@@ -495,6 +531,66 @@ struct CollectedPlanProvider {
     warnings: Vec<ResponseWarning>,
 }
 
+async fn resolve_plan_text_targets<P, C>(
+    port: Arc<P>,
+    request: &mut PlanChangeRequest,
+    identity: &AgentResolvedIdentity,
+    cancellation: C,
+    deadline: Instant,
+    ledger: &mut BudgetLedger,
+) -> Result<(), PlanChangeServiceError>
+where
+    P: PlanChangePort<C>,
+    C: CancellationSignal + Clone + Send + Sync + 'static,
+{
+    for query in request.target_queries.clone() {
+        plan_change_checkpoint(&cancellation, deadline)?;
+        let budget = remaining_response_budget(ledger, request.budget())?;
+        let arguments = object(json!({
+            "repository": repository_selector(request.repository()),
+            "generation": GenerationSelector::Explicit(identity.generation.generation_id),
+            "query": query,
+            "search_modes": ["lexical"],
+            "max_results": 16
+        }))?;
+        let envelope = port
+            .execute(
+                AgentToolRequest::new(BatchTool::CodeLocate, arguments),
+                AgentCallContext::new(cancellation.clone(), budget, Some(deadline))
+                    .with_response_profile(ResponseProfile::Compact)
+                    .with_pinned_identity(identity.clone()),
+            )
+            .await
+            .map_err(map_plan_port_error)?;
+        if envelope.repository.repository_id != identity.repository.repository_id
+            || envelope.generation.generation_id != identity.generation.generation_id
+        {
+            return Err(PlanChangeServiceError::InvalidResponse);
+        }
+        let data: CodeLocateData = serde_json::from_value(envelope.data.clone())
+            .map_err(|_| PlanChangeServiceError::InvalidResponse)?;
+        charge_usage(ledger, &envelope.usage, data.matches.len())?;
+        for located in data.matches {
+            if let Some(symbol) = located.symbol_id {
+                request.target_symbols.push(symbol);
+            }
+            if let Some(file) = located.file_id {
+                request.target_files.push(file);
+            }
+        }
+    }
+    request.target_symbols.sort_unstable();
+    request.target_symbols.dedup();
+    request.target_files.sort_unstable();
+    request.target_files.dedup();
+    if request.target_symbols.is_empty() && request.target_files.is_empty() {
+        return Err(PlanChangeServiceError::Admission(
+            PlanChangeError::EmptyTargets,
+        ));
+    }
+    Ok(())
+}
+
 async fn collect_plan_evidence<P, C>(
     port: Arc<P>,
     request: &PlanChangeRequest,
@@ -508,7 +604,22 @@ where
     C: CancellationSignal + Clone + Send + Sync + 'static,
 {
     let mut providers = Vec::with_capacity(PLAN_PROVIDER_COUNT);
-    if request.target_symbols().is_empty() {
+    let mut impact_change = request.change_context().cloned().unwrap_or(ChangeSelector {
+        working_tree: None,
+        revision_range: None,
+        symbol_ids: None,
+        paths: None,
+    });
+    let mut impact_symbols = impact_change.symbol_ids.take().unwrap_or_default();
+    impact_symbols.extend_from_slice(request.target_symbols());
+    impact_symbols.sort_unstable();
+    impact_symbols.dedup();
+    impact_change.symbol_ids = (!impact_symbols.is_empty()).then_some(impact_symbols);
+    let has_impact_change = impact_change.working_tree.is_some()
+        || impact_change.revision_range.is_some()
+        || impact_change.symbol_ids.is_some()
+        || impact_change.paths.is_some();
+    if !has_impact_change {
         providers.push(unsupported_provider(
             PlanEvidenceProvider::ChangeImpact,
             PlanEvidenceOmissionReason::NoCompatibleTargets,
@@ -517,7 +628,7 @@ where
         let arguments = object(json!({
             "repository": repository_selector(request.repository()),
             "generation": GenerationSelector::Explicit(identity.generation.generation_id),
-            "change": {"symbol_ids": request.target_symbols()},
+            "change": impact_change,
             "include_tests": true
         }))?;
         let mut provider = collect_typed_provider::<P, C, ChangeImpactData>(

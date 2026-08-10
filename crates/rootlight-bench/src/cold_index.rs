@@ -17,7 +17,7 @@ use crate::sha256_hex;
 /// Schema of the checked-in real-repository corpus.
 pub const COLD_INDEX_CORPUS_SCHEMA: &str = "rootlight.cold-index-corpus/1";
 /// Schema of one real-repository measurement.
-pub const COLD_INDEX_EVIDENCE_SCHEMA: &str = "rootlight.cold-index-evidence/3";
+pub const COLD_INDEX_EVIDENCE_SCHEMA: &str = "rootlight.cold-index-evidence/4";
 /// Exact repository count required by the release gate.
 pub const COLD_INDEX_REPOSITORY_COUNT: usize = 8;
 /// Maximum accepted corpus document size.
@@ -105,6 +105,11 @@ pub struct ColdIndexResourceEvidence {
     pub files_examined: u64,
     /// Source bytes examined by this operation.
     pub bytes_examined: u64,
+    /// Durable bytes retained by the published generation.
+    ///
+    /// Nonterminal observations use zero because publication has not retained
+    /// an immutable generation yet.
+    pub retained_durable_bytes: u64,
 }
 
 impl ColdIndexResourceEvidence {
@@ -266,8 +271,10 @@ pub struct ColdIndexEvidence {
     pub semantic_write_amplification_milli: u64,
     /// Total cold-index elapsed time.
     pub elapsed_ms: u64,
-    /// Durable state bytes above the measured empty-state baseline.
-    pub durable_state_bytes: u64,
+    /// Total state-root growth above the measured empty-state baseline.
+    pub state_root_delta_bytes: u64,
+    /// Exact durable bytes retained by the active immutable generation.
+    pub retained_durable_bytes: u64,
     /// Primary-language coverage after semantic completion.
     pub primary_language_tier: ColdIndexTierEvidence,
     /// Restart and durable operation recovery observations.
@@ -403,8 +410,10 @@ pub fn verify_cold_index_evidence(
         || evidence.repository_content_executed
         || evidence.elapsed_ms == 0
         || evidence.elapsed_ms > spec.maximum_elapsed_ms
-        || evidence.durable_state_bytes == 0
-        || evidence.durable_state_bytes > spec.maximum_durable_bytes
+        || evidence.state_root_delta_bytes == 0
+        || evidence.state_root_delta_bytes > spec.maximum_durable_bytes
+        || evidence.retained_durable_bytes == 0
+        || evidence.retained_durable_bytes > spec.maximum_durable_bytes
     {
         return Err(ColdIndexEvidenceError::InvalidEvidence);
     }
@@ -426,15 +435,16 @@ pub fn verify_cold_index_evidence(
         || semantic.files_examined == 0
         || semantic.bytes_examined == 0
         || semantic.written_bytes == 0
+        || evidence.retained_durable_bytes != semantic.retained_durable_bytes
         || evidence.structural_write_amplification_milli != structural_write_amplification
         || evidence.semantic_write_amplification_milli != semantic_write_amplification
         || exceeds_ratio(
-            evidence.durable_state_bytes,
+            evidence.retained_durable_bytes,
             structural.bytes_examined,
             spec.maximum_durable_bytes_per_source_byte,
         )
         || exceeds_ratio(
-            evidence.durable_state_bytes,
+            evidence.retained_durable_bytes,
             structural.files_examined,
             spec.maximum_durable_bytes_per_file,
         )
@@ -628,6 +638,7 @@ fn validate_terminal_operation(
         || operation.completed_units == 0
         || operation.completed_units != operation.total_units
         || operation.resources.peak_rss_bytes == 0
+        || operation.resources.retained_durable_bytes == 0
         || operation.progress_samples.len() < 2
         || operation.progress_samples.len() > MAX_COLD_INDEX_PROGRESS_SAMPLES
     {
@@ -677,6 +688,7 @@ const fn resources_are_monotonic(
         && previous.written_bytes <= next.written_bytes
         && previous.files_examined <= next.files_examined
         && previous.bytes_examined <= next.bytes_examined
+        && previous.retained_durable_bytes <= next.retained_durable_bytes
 }
 
 fn exceeds_ratio(value: u64, denominator: u64, maximum_ratio: u64) -> bool {
@@ -760,6 +772,7 @@ mod tests {
             written_bytes: 128 * 1024 * 1024,
             files_examined: spec.tracked_files,
             bytes_examined: 16 * 1024 * 1024,
+            retained_durable_bytes: 64 * 1024 * 1024,
         };
         let operation = |id: &str| ColdIndexOperationEvidence {
             operation_id: id.to_owned(),
@@ -779,13 +792,17 @@ mod tests {
                         written_bytes: 0,
                         files_examined: 1,
                         bytes_examined: 16,
+                        retained_durable_bytes: 0,
                     },
                 },
                 ColdIndexProgressEvidence {
                     revision: 6,
                     completed_units: 5,
                     total_units: 6,
-                    resources,
+                    resources: ColdIndexResourceEvidence {
+                        retained_durable_bytes: 0,
+                        ..resources
+                    },
                 },
             ],
         };
@@ -815,7 +832,8 @@ mod tests {
                 .write_amplification_milli()
                 .expect("fixture has examined source bytes"),
             elapsed_ms: 60_000,
-            durable_state_bytes: 64 * 1024 * 1024,
+            state_root_delta_bytes: 96 * 1024 * 1024,
+            retained_durable_bytes: resources.retained_durable_bytes,
             primary_language_tier: ColdIndexTierEvidence {
                 language: spec.primary_language.clone(),
                 tier: spec.minimum_tier.clone(),
@@ -832,6 +850,7 @@ mod tests {
                         written_bytes: 0,
                         files_examined: 1,
                         bytes_examined: 16,
+                        retained_durable_bytes: 0,
                     },
                     state_after_restart: "failed".to_owned(),
                     revision_after_restart: 3,
@@ -840,6 +859,7 @@ mod tests {
                         written_bytes: 0,
                         files_examined: 1,
                         bytes_examined: 16,
+                        retained_durable_bytes: 0,
                     },
                     repository_id_reused: true,
                 },
@@ -915,9 +935,15 @@ mod tests {
             .semantic_resources_after_restart
             .bytes_examined = 0;
         cases.push(stale_semantic_recovery);
-        let mut excessive_storage = valid.clone();
-        excessive_storage.durable_state_bytes = u64::MAX;
-        cases.push(excessive_storage);
+        let mut excessive_state_root = valid.clone();
+        excessive_state_root.state_root_delta_bytes = u64::MAX;
+        cases.push(excessive_state_root);
+        let mut excessive_retained = valid.clone();
+        excessive_retained.retained_durable_bytes = u64::MAX;
+        cases.push(excessive_retained);
+        let mut mismatched_retained = valid.clone();
+        mismatched_retained.retained_durable_bytes -= 1;
+        cases.push(mismatched_retained);
         let mut incorrect_write_amplification = valid.clone();
         incorrect_write_amplification.structural_write_amplification_milli += 1;
         cases.push(incorrect_write_amplification);

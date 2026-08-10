@@ -2227,6 +2227,65 @@ async fn pending_first_child_prevents_a_second_reservation_or_dispatch() {
 }
 
 #[tokio::test]
+async fn scalar_binding_materializes_inside_a_symbol_id_collection() {
+    let Value::Object(arguments) = json!({
+        "symbol_ids": [
+            {"$from": "find", "source": "symbol_id", "index": 0}
+        ]
+    }) else {
+        panic!("fixture arguments are objects");
+    };
+    let port = Arc::new(FakePort::with_responses([
+        Ok(typed_response(
+            BatchTool::CodeLocate,
+            generation(2),
+            100,
+            json!({
+                "matches": [{
+                    "symbol_id": symbol(3),
+                    "source_ref": source_ref_with_line(generation(2))
+                }]
+            }),
+        )),
+        Ok(typed_response(
+            BatchTool::SymbolExplain,
+            generation(2),
+            100,
+            json!({"symbols": [], "unresolved_ids": []}),
+        )),
+    ]));
+
+    BatchService
+        .execute(
+            Arc::clone(&port),
+            input(
+                vec![
+                    operation("find", BatchTool::CodeLocate, Map::new(), None, None),
+                    operation(
+                        "explain",
+                        BatchTool::SymbolExplain,
+                        arguments,
+                        Some(vec!["find"]),
+                        None,
+                    ),
+                ],
+                budget(1_000),
+            ),
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("dependent batch executes");
+
+    let calls = port.calls.lock().expect("call lock is available");
+    assert_eq!(
+        calls[1].request.clone().into_arguments()["symbol_ids"],
+        json!([symbol(3)])
+    );
+}
+
+#[tokio::test]
 async fn incompatible_binding_types_fail_before_identity_resolution() {
     let mut arguments = Map::new();
     arguments.insert(

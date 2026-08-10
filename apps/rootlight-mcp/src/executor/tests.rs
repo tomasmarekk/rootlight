@@ -62,26 +62,27 @@ use rootlight_ir::{
 };
 use rootlight_mcp_contract::{
     CodeLocateOutput, ErrorCode, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
-    SymbolExplainOutput,
+    ToolResponse,
     capability::{CapabilityStatus, capability_for, discovery_metadata},
     change::{
-        ChangeClassification, ChangeImpactOutput, HistoryCompareOutput, PlanChangeOutput,
-        PlanEvidenceOmissionReason, PlanEvidenceProvider, PlanProviderState, RiskLevel,
-        SemanticChangeKind, TestKind, TestsSelectOutput,
+        ChangeClassification, ChangeImpactOutput, ChangeImpactOutputV1_1, HistoryCompareOutput,
+        PlanChangeOutput, PlanEvidenceOmissionReason, PlanEvidenceProvider, PlanProviderState,
+        RiskLevel, SemanticChangeKind, TestKind, TestsSelectOutput, TestsSelectOutputV1_1,
     },
     context::{
         ColumnType, ContextPackOutput, QueryAdvancedOutput, QueryBatchOutput, QueryCompleteness,
     },
     intent::{
         ArchitectureCyclesOutput, ArchitectureOverviewOutput, ArchitectureView, CodeDeadOutput,
-        FlowTraceOutput, RelationKind, SymbolRelationshipsOutput,
+        FlowTraceOutput, RelationKind, SymbolRelationshipsOutputV1_0,
     },
     repository::{RepoListOutput, RepoStatusOutput, RepositoryState},
-    vertical::OperationToolResponse,
     vertical::{
-        AnalysisTier, CacheStatus, Freshness, IndexMode, IndexPlanScope, IndexPlanSummary,
-        LanguageCoverage, OperationState, RequiredNullable,
+        AnalysisReadEnvelope, AnalysisTier, AnalysisToolResponse, CacheStatus, Freshness,
+        IndexMode, IndexPlanScope, IndexPlanSummary, LanguageCoverage, OperationState,
+        OperationStatusToolResponseV1_2, RequiredNullable,
     },
+    vertical::{OperationToolResponse, SymbolExplainOutput},
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -1170,7 +1171,7 @@ fn omitted_analytical_budget_transports_the_complete_server_ceiling() {
 }
 
 #[test]
-fn batch_retrieval_budget_preserves_results_without_transporting_tokens() {
+fn batch_child_budget_preserves_results_without_transporting_public_tokens() {
     let budget = ResponseBudget {
         max_results: Some(1_000),
         max_tokens: Some(3_000),
@@ -1204,6 +1205,19 @@ fn batch_retrieval_budget_preserves_results_without_transporting_tokens() {
     apply_child_budget(BatchTool::SymbolExplain, &budget, &mut explain_arguments)
         .expect("symbol explain budget is representable");
     assert_eq!(explain_arguments["budget"].get("max_tokens"), None);
+
+    let mut architecture_arguments = Map::new();
+    apply_child_budget(
+        BatchTool::ArchitectureOverview,
+        &budget,
+        &mut architecture_arguments,
+    )
+    .expect("architecture overview budget is representable");
+    assert_eq!(
+        architecture_arguments["budget"].get("max_tokens"),
+        None,
+        "the parent ledger accounts the mapped architecture envelope"
+    );
 }
 
 #[test]
@@ -1345,6 +1359,11 @@ async fn execute_as(
 
 fn decode<T: DeserializeOwned>(output: Map<String, Value>) -> T {
     serde_json::from_value(Value::Object(output)).expect("mapped output satisfies its wire type")
+}
+
+fn decode_current_analysis<T: DeserializeOwned>(mut output: Map<String, Value>) -> T {
+    output.insert("schema_version".to_owned(), Value::String("1.1".to_owned()));
+    decode(output)
 }
 
 fn normalize_measured_usage(output: &mut Map<String, Value>) {
@@ -1619,6 +1638,26 @@ fn assert_public_truncation<T>(output: &ReadEnvelope<T>, resource: ContractLimit
     assert!(output.next_cursor.0.is_none());
 }
 
+fn assert_public_analysis_truncation<T>(
+    output: &AnalysisReadEnvelope<T>,
+    resource: ContractLimitingResourceKind,
+) {
+    assert!(output.truncated);
+    assert_eq!(output.completeness.state, CompletenessState::Truncated);
+    assert!(
+        output
+            .completeness
+            .limiting_resources
+            .iter()
+            .any(|observed| observed.kind == resource)
+    );
+    assert_eq!(
+        output.completeness.continuation,
+        ContinuationAvailability::Unavailable
+    );
+    assert!(output.next_cursor.0.is_none());
+}
+
 fn metadata(trace_id: &str) -> ReadResponseMetadata {
     ReadResponseMetadata::new(
         "fixture".to_owned(),
@@ -1775,6 +1814,7 @@ fn repository_status_response() -> RepositoryStatus {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         publication_state: "published".to_owned(),
+        retained_durable_bytes: 0,
         coverage: vec![RepositoryCoverageEntry {
             language: "rust".to_owned(),
             tier: "tier_c".to_owned(),
@@ -1858,7 +1898,9 @@ fn plan_architecture_response() -> ArchitectureOverviewPortResponse {
                 kind: "file".to_owned(),
                 name: "src/a.rs".to_owned(),
                 symbol_count: 2,
+                file_count: 1,
                 responsibility_evidence: vec!["contains_symbols".to_owned()],
+                source_refs: vec![source_reference(0, 10, 1, 1)],
                 confidence: 800,
             }],
             connections: Vec::new(),
@@ -1878,6 +1920,7 @@ fn plan_tests_response() -> TestsSelectPortResponse {
             tests: vec![ClientRankedTest {
                 test_id: "test-1".to_owned(),
                 kind: "unit".to_owned(),
+                framework: "rust_test".to_owned(),
                 path: Some("src/a.rs".to_owned()),
                 score: 970,
                 why: vec!["direct_test_edge".to_owned()],
@@ -1888,6 +1931,7 @@ fn plan_tests_response() -> TestsSelectPortResponse {
                 direct_edges: true,
                 transitive_signals: false,
                 history_signals: false,
+                build_target_signals: false,
                 file_colocation_signals: true,
             },
             gaps: Vec::new(),
@@ -1908,6 +1952,7 @@ fn plan_impact_response() -> ChangeImpactPortResponse {
                 kind: Some("function".to_owned()),
             }],
             impacted: Vec::new(),
+            service_impacts: Vec::new(),
             tests: Vec::new(),
             risk_summary: ClientRiskSummary {
                 level: "low".to_owned(),
@@ -2530,7 +2575,7 @@ async fn repository_read_pages_match_golden_sequences_without_gaps() {
     );
     let mut observed_relationships = Vec::new();
     loop {
-        let output: SymbolRelationshipsOutput = decode(
+        let output: SymbolRelationshipsOutputV1_0 = decode(
             execute(
                 &relationship_harness.executor,
                 VerticalTool::SymbolRelationships,
@@ -2667,7 +2712,7 @@ async fn hard_limits_never_masquerade_as_page_continuations() {
         client::ContinuationGuidance::ReduceRelations,
     );
     let relationship_harness = Harness::new(FakeOutcome::SymbolRelationships(Ok(relationships)));
-    let relationship_output: SymbolRelationshipsOutput = decode(
+    let relationship_output: SymbolRelationshipsOutputV1_0 = decode(
         execute(
             &relationship_harness.executor,
             VerticalTool::SymbolRelationships,
@@ -2728,7 +2773,7 @@ async fn semantic_inexactness_preserves_observed_relationship_pagination() {
     let mut relationships = relationships_page(missing_symbol(), Some(1));
     relationships.result.exact = false;
     let harness = Harness::new(FakeOutcome::SymbolRelationships(Ok(relationships)));
-    let output: SymbolRelationshipsOutput = decode(
+    let output: SymbolRelationshipsOutputV1_0 = decode(
         execute(
             &harness.executor,
             VerticalTool::SymbolRelationships,
@@ -2870,6 +2915,7 @@ fn explain_response(definition: client::SourceReference) -> SymbolExplainPortRes
                 symbol: symbol(),
                 kind: "function".to_owned(),
                 display_name: "publish".to_owned(),
+                qualified_name: "crate::publish".to_owned(),
                 signature: Some("fn publish()".to_owned()),
                 definition,
                 outbound_exact: 1,
@@ -2877,11 +2923,17 @@ fn explain_response(definition: client::SourceReference) -> SymbolExplainPortRes
                 inbound_exact: 3,
                 inbound_candidates: 4,
                 references_exact: 5,
+                container: None,
+                relation_samples: Vec::new(),
+                source_preview: None,
+                section_gaps: Vec::new(),
                 provider: "treesitter-rust".to_owned(),
                 evidence: "syntax".to_owned(),
                 language: "rust".to_owned(),
                 tier: ClientTier::TierB,
                 confidence: 950,
+                provenance_frontend_version: None,
+                provenance_rule: None,
             }],
             unresolved_symbols: vec![missing_symbol()],
             truncated: false,
@@ -3266,7 +3318,7 @@ async fn maps_operation_status_action_time_progress_and_resources() {
         .expect("operation status maps"),
     );
 
-    let OperationToolResponse::Success(output) = output else {
+    let OperationStatusToolResponseV1_2::Success(output) = output else {
         panic!("expected operation status success");
     };
     assert_eq!(output.data.operation.kind, "repository_index");
@@ -3313,6 +3365,7 @@ async fn maps_durable_incremental_and_generation_resource_evidence() {
             newly_written_bytes: 2_048,
             reserved_memory_bytes: 4_096,
             owned_memory_bytes: 3_072,
+            retained_durable_bytes: 1_536,
             invalidation_trace_json: Some(
                 br#"{"version":"1.0","entries":[],"total_entries":0,"complete":true}"#.to_vec(),
             ),
@@ -3329,7 +3382,7 @@ async fn maps_durable_incremental_and_generation_resource_evidence() {
         .expect("operation evidence maps"),
     );
 
-    let OperationToolResponse::Success(output) = output else {
+    let OperationStatusToolResponseV1_2::Success(output) = output else {
         panic!("expected operation status success");
     };
     let incremental = output
@@ -3378,7 +3431,7 @@ async fn maps_recovery_operation_status_without_index_projection() {
         .expect("recovery status maps"),
     );
 
-    let OperationToolResponse::Success(output) = output else {
+    let OperationStatusToolResponseV1_2::Success(output) = output else {
         panic!("expected recovery operation status success");
     };
     assert_eq!(output.data.operation.kind, "recovery");
@@ -3432,7 +3485,7 @@ async fn maps_interrupted_operation_status_to_typed_terminal_errors() {
             .expect("interrupted operation status maps"),
         );
 
-        let OperationToolResponse::Success(output) = output else {
+        let OperationStatusToolResponseV1_2::Success(output) = output else {
             panic!("expected interrupted operation status success");
         };
         let error = output
@@ -4958,8 +5011,9 @@ async fn query_batch_rejects_static_child_capabilities_before_identity_resolutio
         json!({
             "repository": {"repository_id": repository()},
             "operations": [
-                {"id": "unsupported", "tool": "context.pack", "arguments": {
-                    "seeds": {"paths": ["src/lib.rs"]}
+                {"id": "unsupported", "tool": "code.locate", "arguments": {
+                    "query": "publish",
+                    "kinds": ["function"]
                 }}
             ]
         }),
@@ -4969,7 +5023,7 @@ async fn query_batch_rejects_static_child_capabilities_before_identity_resolutio
     assert_capability_rejection(
         &error,
         ErrorCode::UnsupportedCapability,
-        "operations.0.arguments.seeds.paths.0",
+        "operations.0.arguments.kinds.0",
         "unsupported_field",
     );
     assert_eq!(
@@ -5248,8 +5302,11 @@ async fn query_batch_root_gate_admits_child_budget_dimensions() {
                     "repository": {"repository_id": repository()},
                     "operations": [{
                         "id": "unsupported",
-                        "tool": "context.pack",
-                        "arguments": {"seeds": {"paths": ["src/lib.rs"]}},
+                        "tool": "code.locate",
+                        "arguments": {
+                            "query": "publish",
+                            "kinds": ["function"]
+                        },
                         "local_budget": {"timeout_ms": 50}
                     }]
                 }
@@ -5263,7 +5320,7 @@ async fn query_batch_root_gate_admits_child_budget_dimensions() {
     assert_eq!(timeout_result["isError"], true);
     assert_eq!(
         timeout_result["structuredContent"]["error"]["details"]["field_path"]["value"],
-        "operations.0.arguments.seeds.paths.0",
+        "operations.0.arguments.kinds.0",
         "the implemented timeout descendant must reach child preflight"
     );
     assert_eq!(timeout_calls.load(Ordering::Relaxed), 0);
@@ -5416,6 +5473,44 @@ async fn maps_symbol_explain_with_compact_provenance_and_unresolved_ids() {
     assert!(request.include_provenance());
     assert_eq!(request.provenance_level(), ProvenanceLevel::Compact);
     assert_eq!(request.symbols, [symbol(), missing_symbol()]);
+}
+
+#[tokio::test]
+async fn symbol_explain_forwards_all_sections_samples_preview_and_full_provenance() {
+    let harness = Harness::new(FakeOutcome::SymbolExplain(Err(ClientPortError::Executor)));
+    let sections = [
+        "signature",
+        "docs",
+        "containment",
+        "types",
+        "calls_summary",
+        "references_summary",
+        "history",
+        "ownership",
+        "diagnostics",
+        "source_preview",
+    ];
+    execute(
+        &harness.executor,
+        VerticalTool::SymbolExplain,
+        json!({
+            "repository": {"repository_id": repository()},
+            "symbol_ids": [symbol()],
+            "sections": sections,
+            "relation_sample_limit": 7,
+            "source_preview_lines": 19,
+            "include_provenance": "full"
+        }),
+    )
+    .await
+    .expect_err("the fixture port returns an executor error after observing the request");
+    let ObservedCall::SymbolExplain(request) = harness.only_call() else {
+        panic!("expected symbol explain request");
+    };
+    assert_eq!(request.sections(), sections);
+    assert_eq!(request.relation_sample_limit(), Some(7));
+    assert_eq!(request.source_preview_lines(), Some(19));
+    assert_eq!(request.provenance_level(), ProvenanceLevel::Full);
 }
 
 #[tokio::test]
@@ -6474,7 +6569,7 @@ async fn repo_status_maps_active_generation_and_coverage() {
             .is_some_and(|elapsed| elapsed >= 1)
     );
     let output: RepoStatusOutput = decode(output);
-    let ToolResponse::Success(output) = output else {
+    let AnalysisToolResponse::Success(output) = output else {
         panic!("expected repo status success");
     };
     assert_eq!(output.data.repository_state, RepositoryState::Ready);
@@ -6541,7 +6636,7 @@ async fn repo_status_projects_bounded_operations_and_freshness_controls() {
         .await
         .expect("repo status maps requested operations"),
     );
-    let ToolResponse::Success(output) = output else {
+    let AnalysisToolResponse::Success(output) = output else {
         panic!("expected repository status success");
     };
 
@@ -6592,7 +6687,7 @@ async fn repo_status_preserves_exact_generation_when_active_changes() {
         .await
         .expect("retained exact generation reports status"),
     );
-    let ToolResponse::Success(output) = output else {
+    let AnalysisToolResponse::Success(output) = output else {
         panic!("expected exact repo status success");
     };
 
@@ -6715,7 +6810,7 @@ async fn repo_status_lifecycle_states_and_errors_match_the_versioned_golden() {
             .await
             .expect("golden lifecycle state maps"),
         );
-        let ToolResponse::Success(output) = output else {
+        let AnalysisToolResponse::Success(output) = output else {
             panic!("expected repository status success");
         };
         let observed = json!({
@@ -6819,7 +6914,7 @@ async fn symbol_relationships_maps_groups_and_totals() {
         metadata("trace-rel-1"),
     );
     let harness = Harness::new(FakeOutcome::SymbolRelationships(Ok(response)));
-    let output: SymbolRelationshipsOutput = decode(
+    let output: SymbolRelationshipsOutputV1_0 = decode(
         execute(
             &harness.executor,
             VerticalTool::SymbolRelationships,
@@ -6987,6 +7082,9 @@ async fn architecture_cycles_maps_components_cycles_and_breaks() {
                 size: 2,
                 members: vec![symbol(), missing_symbol()],
                 internal_edges: 2,
+                edge_weight: 1_500,
+                change_risk: 0,
+                break_cost: 700,
             }],
             cycles: vec![ClientCycle {
                 nodes: vec![symbol(), missing_symbol(), symbol()],
@@ -7003,6 +7101,9 @@ async fn architecture_cycles_maps_components_cycles_and_breaks() {
             projection: ClientCycleProjection {
                 relations: vec!["calls".to_owned()],
                 min_confidence: 0,
+                level: "symbol".to_owned(),
+                rank_by: "size".to_owned(),
+                omitted_nodes: 0,
             },
             execution_completeness: truncated_execution(
                 client::LimitingResourceKind::Results,
@@ -7012,7 +7113,7 @@ async fn architecture_cycles_maps_components_cycles_and_breaks() {
         metadata("architecture-cycles-1"),
     );
     let harness = Harness::new(FakeOutcome::ArchitectureCycles(Ok(response)));
-    let output: ArchitectureCyclesOutput = decode(
+    let output: ArchitectureCyclesOutput = decode_current_analysis(
         execute(
             &harness.executor,
             VerticalTool::ArchitectureCycles,
@@ -7024,10 +7125,10 @@ async fn architecture_cycles_maps_components_cycles_and_breaks() {
         .await
         .expect("architecture cycles maps"),
     );
-    let ToolResponse::Success(output) = output else {
+    let AnalysisToolResponse::Success(output) = output else {
         panic!("expected architecture cycles success");
     };
-    assert_public_truncation(&output, ContractLimitingResourceKind::Results);
+    assert_public_analysis_truncation(&output, ContractLimitingResourceKind::Results);
     assert_eq!(output.data.components.len(), 1);
     let component = &output.data.components[0];
     assert_eq!(component.size, 2);
@@ -7073,7 +7174,7 @@ async fn architecture_cycles_maps_components_cycles_and_breaks() {
 }
 
 #[tokio::test]
-async fn architecture_cycles_rejects_unsupported_ranking() {
+async fn architecture_cycles_forwards_nondefault_ranking() {
     let harness = Harness::new(FakeOutcome::ArchitectureCycles(Err(
         ClientPortError::Executor,
     )));
@@ -7083,21 +7184,20 @@ async fn architecture_cycles_rejects_unsupported_ranking() {
         json!({
             "repository": {"repository_id": repository()},
             "projection": {"relations": ["calls"], "level": "symbol"},
-            "rank_by": "size"
+            "rank_by": "change_risk"
         }),
     )
     .await
-    .expect_err("unsupported ranking is rejected before the port");
-    let public = error
-        .public_error()
-        .expect("unsupported option is a checked public error");
-    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
-    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+    .expect_err("accepted ranking reaches the failing fake port");
+    assert!(error.public_error().is_none());
+    let ObservedCall::ArchitectureCycles(request) = harness.only_call() else {
+        panic!("expected architecture cycles call");
+    };
+    assert_eq!(request.contract().rank_by, "change_risk");
 }
 
 #[tokio::test]
-async fn architecture_cycles_rejects_unserved_relation_before_the_port() {
+async fn architecture_cycles_forwards_declared_relation_families() {
     let harness = Harness::new(FakeOutcome::ArchitectureCycles(Err(
         ClientPortError::Executor,
     )));
@@ -7110,12 +7210,12 @@ async fn architecture_cycles_rejects_unserved_relation_before_the_port() {
         }),
     )
     .await
-    .expect_err("unserved relation is rejected before the port");
-    let public = error
-        .public_error()
-        .expect("unserved relation is a checked public error");
-    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+    .expect_err("accepted relation reaches the failing fake port");
+    assert!(error.public_error().is_none());
+    let ObservedCall::ArchitectureCycles(request) = harness.only_call() else {
+        panic!("expected architecture cycles call");
+    };
+    assert_eq!(request.relations(), &["messaging".to_owned()]);
 }
 
 #[tokio::test]
@@ -7126,17 +7226,24 @@ async fn code_dead_maps_candidates_entry_points_and_blind_spots() {
             candidates: vec![ClientDeadCandidate {
                 symbol_id: missing_symbol(),
                 classification: "no_observed_incoming_references".to_owned(),
-                confidence: 1_000,
+                confidence: 850,
                 why: vec![
                     "no_incoming_references".to_owned(),
                     "not_observed_from_partial_entry_points".to_owned(),
                 ],
                 suppressions_checked: vec!["entry_point".to_owned()],
+                reachability: client::CodeDeadReachabilitySummary {
+                    reached_from_entry_points: false,
+                    incoming_edges: 0,
+                    strongest_incoming_confidence: 0,
+                },
+                uncertainty: vec!["dynamic_dispatch_unobserved".to_owned()],
                 source_refs: vec![source_reference(0, 10, 1, 1)],
             }],
             entry_points: ClientEntryPointSummary {
                 policy: "standard".to_owned(),
                 entry_point_count: 2,
+                entry_symbols: vec![symbol(), missing_symbol()],
                 complete: false,
             },
             blind_spots: vec![ClientBlindSpot {
@@ -7147,6 +7254,7 @@ async fn code_dead_maps_candidates_entry_points_and_blind_spots() {
                 rule: "exported".to_owned(),
                 suppressed_count: 2,
             }],
+            coverage_caveats: vec!["static_analysis_only".to_owned()],
             execution_completeness: truncated_execution(
                 client::LimitingResourceKind::Rows,
                 client::ContinuationGuidance::RefreshCoverage,
@@ -7155,7 +7263,7 @@ async fn code_dead_maps_candidates_entry_points_and_blind_spots() {
         metadata("code-dead-1"),
     );
     let harness = Harness::new(FakeOutcome::CodeDead(Ok(response)));
-    let output: CodeDeadOutput = decode(
+    let output: CodeDeadOutput = decode_current_analysis(
         execute(
             &harness.executor,
             VerticalTool::CodeDead,
@@ -7166,10 +7274,10 @@ async fn code_dead_maps_candidates_entry_points_and_blind_spots() {
         .await
         .expect("code dead maps"),
     );
-    let ToolResponse::Success(output) = output else {
+    let AnalysisToolResponse::Success(output) = output else {
         panic!("expected code dead success");
     };
-    assert_public_truncation(&output, ContractLimitingResourceKind::Rows);
+    assert_public_analysis_truncation(&output, ContractLimitingResourceKind::Rows);
     assert_eq!(output.data.candidates.len(), 1);
     let candidate = &output.data.candidates[0];
     assert_eq!(candidate.symbol_id, missing_symbol());
@@ -7177,14 +7285,17 @@ async fn code_dead_maps_candidates_entry_points_and_blind_spots() {
         candidate.classification,
         DeadClassification::NoObservedIncomingReferences
     );
-    assert_eq!(candidate.confidence, 1_000);
+    assert_eq!(candidate.confidence, 850);
     assert_eq!(candidate.why, vec!["no_incoming_references".to_owned()]);
     assert_eq!(
         candidate.suppressions_checked,
         vec!["entry_point".to_owned()]
     );
     assert_eq!(candidate.source_refs.len(), 1);
-    assert_eq!(output.data.entry_points.policy, EntryPointPolicy::Standard);
+    assert_eq!(
+        output.data.entry_points.policy,
+        EntryPointPolicyKind::Standard
+    );
     assert_eq!(output.data.entry_points.entry_point_count, 2);
     assert!(!output.data.entry_points.complete);
     assert_eq!(output.data.blind_spots.len(), 1);
@@ -7195,7 +7306,7 @@ async fn code_dead_maps_candidates_entry_points_and_blind_spots() {
         panic!("expected code dead call");
     };
     assert_eq!(request.repository(), repository());
-    assert_eq!(request.entry_point_policy(), None);
+    assert_eq!(request.entry_point_policy(), Some("standard"));
     assert_eq!(request.include_exported(), None);
     assert_eq!(request.include_tests(), None);
     assert_eq!(request.min_confidence(), None);
@@ -7203,7 +7314,7 @@ async fn code_dead_maps_candidates_entry_points_and_blind_spots() {
 }
 
 #[tokio::test]
-async fn code_dead_rejects_unsupported_scope() {
+async fn code_dead_forwards_structural_scope() {
     let harness = Harness::new(FakeOutcome::CodeDead(Err(ClientPortError::Executor)));
     let error = execute(
         &harness.executor,
@@ -7214,17 +7325,19 @@ async fn code_dead_rejects_unsupported_scope() {
         }),
     )
     .await
-    .expect_err("unsupported scope is rejected before the port");
-    let public = error
-        .public_error()
-        .expect("unsupported option is a checked public error");
-    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
-    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+    .expect_err("accepted scope reaches the failing fake port");
+    assert!(error.public_error().is_none());
+    let ObservedCall::CodeDead(request) = harness.only_call() else {
+        panic!("expected code dead call");
+    };
+    assert_eq!(
+        request.contract().scope,
+        Some(client::AnalysisScope::Paths(vec!["src".to_owned()]))
+    );
 }
 
 #[tokio::test]
-async fn code_dead_rejects_unserved_entry_point_policies_before_the_port() {
+async fn code_dead_forwards_named_entry_point_policies() {
     for policy in ["library", "application"] {
         let harness = Harness::new(FakeOutcome::CodeDead(Err(ClientPortError::Executor)));
         let error = execute(
@@ -7236,13 +7349,37 @@ async fn code_dead_rejects_unserved_entry_point_policies_before_the_port() {
             }),
         )
         .await
-        .expect_err("unserved entry-point policy is rejected before the port");
-        let public = error
-            .public_error()
-            .expect("unserved policy is a checked public error");
-        assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
-        assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+        .expect_err("accepted entry-point policy reaches the failing fake port");
+        assert!(error.public_error().is_none());
+        let ObservedCall::CodeDead(request) = harness.only_call() else {
+            panic!("expected code dead call");
+        };
+        assert_eq!(request.entry_point_policy(), Some(policy));
     }
+}
+
+#[tokio::test]
+async fn code_dead_forwards_explicit_entry_symbols() {
+    let harness = Harness::new(FakeOutcome::CodeDead(Err(ClientPortError::Executor)));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::CodeDead,
+        json!({
+            "repository": {"repository_id": repository()},
+            "entry_point_policy": {"entry_symbols": [symbol(), missing_symbol()]}
+        }),
+    )
+    .await
+    .expect_err("accepted explicit roots reach the failing fake port");
+    assert!(error.public_error().is_none());
+    let ObservedCall::CodeDead(request) = harness.only_call() else {
+        panic!("expected code dead call");
+    };
+    assert_eq!(request.entry_point_policy(), Some("explicit"));
+    assert_eq!(
+        request.contract().explicit_entry_points,
+        vec![symbol(), missing_symbol()]
+    );
 }
 
 #[tokio::test]
@@ -7255,7 +7392,9 @@ async fn architecture_overview_maps_components_connections_and_hotspots() {
                 kind: "file".to_owned(),
                 name: "src/a.rs".to_owned(),
                 symbol_count: 2,
+                file_count: 1,
                 responsibility_evidence: vec!["contains_symbols".to_owned()],
+                source_refs: vec![source_reference(0, 10, 1, 1)],
                 confidence: 800,
             }],
             connections: vec![ClientArchitectureConnection {
@@ -7271,6 +7410,8 @@ async fn architecture_overview_maps_components_connections_and_hotspots() {
                 fan_out: 0,
                 change_frequency: None,
                 complexity: None,
+                ownership_signal: None,
+                test_signal: None,
                 score: 1_000,
             }],
             communities: vec![ClientArchitectureCommunity {
@@ -7305,7 +7446,7 @@ async fn architecture_overview_maps_components_connections_and_hotspots() {
         metadata("architecture-overview-1"),
     );
     let harness = Harness::new(FakeOutcome::ArchitectureOverview(Ok(response)));
-    let output: ArchitectureOverviewOutput = decode(
+    let output: ArchitectureOverviewOutput = decode_current_analysis(
         execute(
             &harness.executor,
             VerticalTool::ArchitectureOverview,
@@ -7317,10 +7458,10 @@ async fn architecture_overview_maps_components_connections_and_hotspots() {
         .await
         .expect("architecture overview maps"),
     );
-    let ToolResponse::Success(output) = output else {
+    let AnalysisToolResponse::Success(output) = output else {
         panic!("expected architecture overview success");
     };
-    assert_public_truncation(&output, ContractLimitingResourceKind::Results);
+    assert_public_analysis_truncation(&output, ContractLimitingResourceKind::Results);
     assert_eq!(output.data.components.len(), 1);
     let component = &output.data.components[0];
     assert_eq!(component.id, "file-a");
@@ -7379,7 +7520,7 @@ async fn architecture_overview_maps_components_connections_and_hotspots() {
 }
 
 #[tokio::test]
-async fn architecture_overview_rejects_unsupported_view() {
+async fn architecture_overview_forwards_all_views_scope_and_detail() {
     let harness = Harness::new(FakeOutcome::ArchitectureOverview(Err(
         ClientPortError::Executor,
     )));
@@ -7388,17 +7529,23 @@ async fn architecture_overview_rejects_unsupported_view() {
         VerticalTool::ArchitectureOverview,
         json!({
             "repository": {"repository_id": repository()},
-            "views": ["services"]
+            "views": ["services"],
+            "scope": {"paths": ["src/api"]},
+            "detail": "detailed"
         }),
     )
     .await
-    .expect_err("unsupported view is rejected before the port");
-    let public = error
-        .public_error()
-        .expect("unsupported option is a checked public error");
-    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
-    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+    .expect_err("accepted view reaches the failing fake port");
+    assert!(error.public_error().is_none());
+    let ObservedCall::ArchitectureOverview(request) = harness.only_call() else {
+        panic!("expected architecture overview call");
+    };
+    assert_eq!(request.views(), &["services".to_owned()]);
+    assert_eq!(request.contract().detail, "detailed");
+    assert_eq!(
+        request.contract().scope,
+        Some(client::AnalysisScope::Paths(vec!["src/api".to_owned()]))
+    );
 }
 
 #[tokio::test]
@@ -7409,6 +7556,7 @@ async fn tests_select_maps_ranked_tests_strategy_and_gaps() {
             tests: vec![ClientRankedTest {
                 test_id: "test-1".to_owned(),
                 kind: "unit".to_owned(),
+                framework: "rust_test".to_owned(),
                 path: Some("src/a.rs".to_owned()),
                 score: 970,
                 why: vec!["direct_test_edge".to_owned(), "via:calls".to_owned()],
@@ -7419,6 +7567,7 @@ async fn tests_select_maps_ranked_tests_strategy_and_gaps() {
                 direct_edges: true,
                 transitive_signals: false,
                 history_signals: false,
+                build_target_signals: false,
                 file_colocation_signals: true,
             },
             gaps: vec![ClientTestGap {
@@ -7433,7 +7582,7 @@ async fn tests_select_maps_ranked_tests_strategy_and_gaps() {
         metadata("tests-select-1"),
     );
     let harness = Harness::new(FakeOutcome::TestsSelect(Ok(response)));
-    let output: TestsSelectOutput = decode(
+    let output: TestsSelectOutputV1_1 = decode_current_analysis(
         execute(
             &harness.executor,
             VerticalTool::TestsSelect,
@@ -7445,10 +7594,10 @@ async fn tests_select_maps_ranked_tests_strategy_and_gaps() {
         .await
         .expect("tests select maps"),
     );
-    let ToolResponse::Success(output) = output else {
+    let AnalysisToolResponse::Success(output) = output else {
         panic!("expected tests select success");
     };
-    assert_public_truncation(&output, ContractLimitingResourceKind::Results);
+    assert_public_analysis_truncation(&output, ContractLimitingResourceKind::Results);
     assert_eq!(output.data.tests.len(), 1);
     let test = &output.data.tests[0];
     assert_eq!(test.test_id, "test-1");
@@ -7476,9 +7625,9 @@ async fn tests_select_maps_ranked_tests_strategy_and_gaps() {
 }
 
 #[tokio::test]
-async fn tests_select_rejects_unsupported_frameworks() {
+async fn tests_select_forwards_framework_filters() {
     let harness = Harness::new(FakeOutcome::TestsSelect(Err(ClientPortError::Executor)));
-    let error = execute(
+    execute(
         &harness.executor,
         VerticalTool::TestsSelect,
         json!({
@@ -7488,19 +7637,17 @@ async fn tests_select_rejects_unsupported_frameworks() {
         }),
     )
     .await
-    .expect_err("unsupported frameworks are rejected before the port");
-    let public = error
-        .public_error()
-        .expect("unsupported option is a checked public error");
-    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
-    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+    .expect_err("the fixture port returns an executor error after observing the request");
+    let ObservedCall::TestsSelect(request) = harness.only_call() else {
+        panic!("expected tests select call");
+    };
+    assert_eq!(request.frameworks(), &["cargo-nextest"]);
 }
 
 #[tokio::test]
-async fn tests_select_rejects_unobserved_test_kinds() {
+async fn tests_select_forwards_non_unit_test_kinds() {
     let harness = Harness::new(FakeOutcome::TestsSelect(Err(ClientPortError::Executor)));
-    let error = execute(
+    execute(
         &harness.executor,
         VerticalTool::TestsSelect,
         json!({
@@ -7510,13 +7657,52 @@ async fn tests_select_rejects_unobserved_test_kinds() {
         }),
     )
     .await
-    .expect_err("unobserved test kinds are rejected before the port");
-    let public = error
-        .public_error()
-        .expect("unsupported option is a checked public error");
-    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
-    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+    .expect_err("the fixture port returns an executor error after observing the request");
+    let ObservedCall::TestsSelect(request) = harness.only_call() else {
+        panic!("expected tests select call");
+    };
+    assert_eq!(request.test_kinds(), &["integration"]);
+}
+
+#[tokio::test]
+async fn tests_select_forwards_every_seed_filter_and_execution_budget() {
+    let harness = Harness::new(FakeOutcome::TestsSelect(Err(ClientPortError::Executor)));
+    execute(
+        &harness.executor,
+        VerticalTool::TestsSelect,
+        json!({
+            "repository": {"repository_id": repository()},
+            "seeds": {
+                "symbols": [symbol()],
+                "paths": ["src/lib.rs"],
+                "change": {"working_tree": "all"},
+                "build_targets": ["rootlight-query"]
+            },
+            "test_kinds": ["unit", "integration", "e2e", "contract", "static", "build"],
+            "frameworks": ["rust-test", "cargo-nextest"],
+            "max_tests": 20,
+            "execution_budget": {"max_total_ms": 12_000, "max_slow_tests": 3},
+            "include_commands": true
+        }),
+    )
+    .await
+    .expect_err("the fixture port returns an executor error after observing the request");
+    let ObservedCall::TestsSelect(request) = harness.only_call() else {
+        panic!("expected tests select call");
+    };
+    assert_eq!(request.seeds(), &[symbol()]);
+    assert_eq!(request.seed_paths(), &["src/lib.rs"]);
+    assert_eq!(request.seed_build_targets(), &["rootlight-query"]);
+    assert_eq!(request.change_working_tree(), Some("all"));
+    assert_eq!(
+        request.test_kinds(),
+        &["build", "contract", "e2e", "integration", "static", "unit"]
+    );
+    assert_eq!(request.frameworks(), &["cargo-nextest", "rust-test"]);
+    assert_eq!(request.max_tests(), Some(20));
+    assert_eq!(request.max_total_ms(), Some(12_000));
+    assert_eq!(request.max_slow_tests(), Some(3));
+    assert_eq!(request.include_commands(), Some(true));
 }
 
 #[tokio::test]
@@ -7541,6 +7727,7 @@ async fn change_impact_maps_resolved_changes_impact_groups_and_risk() {
                     is_public: false,
                 }],
             }],
+            service_impacts: Vec::new(),
             tests: Vec::new(),
             risk_summary: ClientRiskSummary {
                 level: "low".to_owned(),
@@ -7561,7 +7748,7 @@ async fn change_impact_maps_resolved_changes_impact_groups_and_risk() {
         metadata("change-impact-1"),
     );
     let harness = Harness::new(FakeOutcome::ChangeImpact(Ok(response)));
-    let output: ChangeImpactOutput = decode(
+    let output: ChangeImpactOutputV1_1 = decode_current_analysis(
         execute(
             &harness.executor,
             VerticalTool::ChangeImpact,
@@ -7573,10 +7760,10 @@ async fn change_impact_maps_resolved_changes_impact_groups_and_risk() {
         .await
         .expect("change impact maps"),
     );
-    let ToolResponse::Success(output) = output else {
+    let AnalysisToolResponse::Success(output) = output else {
         panic!("expected change impact success");
     };
-    assert_public_truncation(&output, ContractLimitingResourceKind::Depth);
+    assert_public_analysis_truncation(&output, ContractLimitingResourceKind::Depth);
     assert_eq!(output.data.resolved_changes.len(), 1);
     let change = &output.data.resolved_changes[0];
     assert_eq!(change.symbol_id, RequiredNullable(Some(symbol())));
@@ -7612,9 +7799,9 @@ async fn change_impact_maps_resolved_changes_impact_groups_and_risk() {
 }
 
 #[tokio::test]
-async fn change_impact_rejects_a_revision_range_diff() {
+async fn change_impact_forwards_a_revision_range_diff() {
     let harness = Harness::new(FakeOutcome::ChangeImpact(Err(ClientPortError::Executor)));
-    let error = execute(
+    execute(
         &harness.executor,
         VerticalTool::ChangeImpact,
         json!({
@@ -7623,13 +7810,54 @@ async fn change_impact_rejects_a_revision_range_diff() {
         }),
     )
     .await
-    .expect_err("revision range diffs are rejected before the port");
-    let public = error
-        .public_error()
-        .expect("unsupported option is a checked public error");
-    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
-    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+    .expect_err("the fixture port returns an executor error after observing the request");
+    let ObservedCall::ChangeImpact(request) = harness.only_call() else {
+        panic!("expected change impact call");
+    };
+    assert_eq!(request.revision_range(), Some("HEAD~1..HEAD"));
+}
+
+#[tokio::test]
+async fn change_impact_forwards_git_scope_conservative_history_and_limits() {
+    let harness = Harness::new(FakeOutcome::ChangeImpact(Err(ClientPortError::Executor)));
+    execute(
+        &harness.executor,
+        VerticalTool::ChangeImpact,
+        json!({
+            "repository": {"repository_id": repository()},
+            "change": {
+                "symbol_ids": [symbol()],
+                "paths": ["src/lib.rs"],
+                "working_tree": "all"
+            },
+            "scope": {
+                "paths": ["src"],
+                "packages": ["rootlight-query"],
+                "services": ["query-service"]
+            },
+            "relation_policy": "conservative",
+            "include_history": true,
+            "include_tests": true,
+            "max_depth": 6,
+            "min_confidence": 650
+        }),
+    )
+    .await
+    .expect_err("the fixture port returns an executor error after observing the request");
+    let ObservedCall::ChangeImpact(request) = harness.only_call() else {
+        panic!("expected change impact call");
+    };
+    assert_eq!(request.changed_symbols(), &[symbol()]);
+    assert_eq!(request.changed_paths(), &["src/lib.rs"]);
+    assert_eq!(request.working_tree(), Some("all"));
+    assert_eq!(request.scope_paths(), &["src"]);
+    assert_eq!(request.scope_packages(), &["rootlight-query"]);
+    assert_eq!(request.scope_services(), &["query-service"]);
+    assert_eq!(request.relation_policy(), "conservative");
+    assert!(request.include_history());
+    assert_eq!(request.include_tests(), Some(true));
+    assert_eq!(request.max_depth(), Some(6));
+    assert_eq!(request.min_confidence(), Some(650));
 }
 
 #[tokio::test]
@@ -7691,7 +7919,9 @@ async fn plan_change_maps_steps_impact_summary_decisions_and_context_pack() {
             "repository": {"repository_id": repository()},
             "objective": "bug_fix",
             "objective_text": "fix the defect",
-            "targets": [{"symbol_id": symbol()}]
+            "targets": [{"symbol_id": symbol()}],
+            "constraints": ["preserve the public API"],
+            "change_context": {"symbol_ids": [symbol()]}
         }),
     )
     .await;
@@ -7812,31 +8042,14 @@ async fn plan_change_maps_steps_impact_summary_decisions_and_context_pack() {
     assert_eq!(request.objective_text(), "fix the defect");
     assert_eq!(request.target_symbols(), &[symbol()]);
     assert_eq!(request.target_files(), &[] as &[FileId]);
+    assert_eq!(request.constraints(), &["preserve the public API"]);
+    assert_eq!(
+        request
+            .change_context()
+            .and_then(|context| context.symbol_ids.as_deref()),
+        Some([symbol()].as_slice())
+    );
     assert_eq!(request.max_steps(), None);
-}
-
-#[tokio::test]
-async fn plan_change_rejects_a_change_context() {
-    let harness = Harness::new(FakeOutcome::PlanChange(Err(ClientPortError::Executor)));
-    let error = execute(
-        &harness.executor,
-        VerticalTool::PlanChange,
-        json!({
-            "repository": {"repository_id": repository()},
-            "objective": "bug_fix",
-            "objective_text": "fix the defect",
-            "targets": [{"symbol_id": symbol()}],
-            "change_context": {"symbol_ids": [symbol()]}
-        }),
-    )
-    .await
-    .expect_err("change context is rejected before the port");
-    let public = error
-        .public_error()
-        .expect("unsupported option is a checked public error");
-    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
-    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
@@ -7888,8 +8101,25 @@ async fn history_compare_maps_changes_breaking_candidates_and_lineage() {
             VerticalTool::HistoryCompare,
             json!({
                 "repository": {"repository_id": repository()},
-                "base": parent_generation(),
-                "head": generation()
+                "base": {"git": "main"},
+                "head": generation(),
+                "scope": {
+                    "paths": ["src/api"],
+                    "packages": ["api"],
+                    "services": ["payments"],
+                    "symbols": [symbol()]
+                },
+                "change_kinds": [
+                    "entities",
+                    "signatures",
+                    "relations",
+                    "architecture",
+                    "ownership",
+                    "tests",
+                    "routes",
+                    "data"
+                ],
+                "include_unchanged_context": true
             }),
         )
         .await
@@ -7933,55 +8163,38 @@ async fn history_compare_maps_changes_breaking_candidates_and_lineage() {
         panic!("expected history compare call");
     };
     assert_eq!(request.repository(), repository());
-    assert_eq!(request.base(), parent_generation());
-    assert_eq!(request.head(), generation());
-    assert!(request.change_kinds().is_empty());
+    assert_eq!(
+        request.base(),
+        &rootlight_client::HistoryRevisionSelector::Git("main".to_owned())
+    );
+    assert_eq!(
+        request.head(),
+        &rootlight_client::HistoryRevisionSelector::Generation(generation())
+    );
+    assert_eq!(
+        request.scope(),
+        &rootlight_client::HistoryCompareScope {
+            paths: vec!["src/api".to_owned()],
+            packages: vec!["api".to_owned()],
+            services: vec!["payments".to_owned()],
+            symbols: vec![symbol()],
+        }
+    );
+    assert_eq!(
+        request.change_kinds(),
+        &[
+            "entities",
+            "signatures",
+            "relations",
+            "architecture",
+            "ownership",
+            "tests",
+            "routes",
+            "data"
+        ]
+    );
+    assert!(request.include_unchanged_context());
     assert_eq!(request.max_results(), None);
-}
-
-#[tokio::test]
-async fn history_compare_rejects_a_git_revision_selector() {
-    let harness = Harness::new(FakeOutcome::HistoryCompare(Err(ClientPortError::Executor)));
-    let error = execute(
-        &harness.executor,
-        VerticalTool::HistoryCompare,
-        json!({
-            "repository": {"repository_id": repository()},
-            "base": {"git": "main"},
-            "head": generation()
-        }),
-    )
-    .await
-    .expect_err("git revision selector is rejected before the port");
-    let public = error
-        .public_error()
-        .expect("unsupported option is a checked public error");
-    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
-    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
-}
-
-#[tokio::test]
-async fn history_compare_rejects_unobserved_change_kinds() {
-    let harness = Harness::new(FakeOutcome::HistoryCompare(Err(ClientPortError::Executor)));
-    let error = execute(
-        &harness.executor,
-        VerticalTool::HistoryCompare,
-        json!({
-            "repository": {"repository_id": repository()},
-            "base": parent_generation(),
-            "head": generation(),
-            "change_kinds": ["relations"]
-        }),
-    )
-    .await
-    .expect_err("unobserved change kinds are rejected before the port");
-    let public = error
-        .public_error()
-        .expect("unsupported option is a checked public error");
-    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
-    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
@@ -8865,10 +9078,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         ),
         (
             VerticalTool::CodeLocate,
-            json!({"repository": {"repository_id": repository()}, "query": "x", "search_modes": ["path"]}),
-        ),
-        (
-            VerticalTool::CodeLocate,
             json!({"repository": {"repository_id": repository()}, "query": "x", "search_modes": ["semantic"]}),
         ),
         (
@@ -8886,22 +9095,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         (
             VerticalTool::CodeLocate,
             json!({"repository": {"repository_id": repository()}, "query": "x", "budget": {"evidence_level": "compact"}}),
-        ),
-        (
-            VerticalTool::SymbolExplain,
-            json!({"repository": {"repository_id": repository()}, "symbol_ids": [symbol()], "sections": ["signature"]}),
-        ),
-        (
-            VerticalTool::SymbolExplain,
-            json!({"repository": {"repository_id": repository()}, "symbol_ids": [symbol()], "relation_sample_limit": 0}),
-        ),
-        (
-            VerticalTool::SymbolExplain,
-            json!({"repository": {"repository_id": repository()}, "symbol_ids": [symbol()], "source_preview_lines": 0}),
-        ),
-        (
-            VerticalTool::SymbolExplain,
-            json!({"repository": {"repository_id": repository()}, "symbol_ids": [symbol()], "include_provenance": "full"}),
         ),
         (
             VerticalTool::SourceRead,
@@ -9017,7 +9210,7 @@ async fn repo_status_explain_attaches_a_plan_to_the_metadata_read() {
     .await
     .expect("explain executes");
     let output: RepoStatusOutput = decode(output);
-    let ToolResponse::Success(output) = output else {
+    let AnalysisToolResponse::Success(output) = output else {
         panic!("expected explain success");
     };
     let explanation = output.data.explanation.expect("explain returns a plan");
@@ -9138,8 +9331,8 @@ async fn code_dead_explain_returns_a_plan_without_retrieval() {
     )
     .await
     .expect("explain executes");
-    let output: CodeDeadOutput = decode(output);
-    let ToolResponse::Success(output) = output else {
+    let output: CodeDeadOutput = decode_current_analysis(output);
+    let AnalysisToolResponse::Success(output) = output else {
         panic!("expected explain success");
     };
     assert!(
@@ -9180,8 +9373,8 @@ async fn architecture_cycles_explain_returns_a_plan_without_retrieval() {
     )
     .await
     .expect("explain executes");
-    let output: ArchitectureCyclesOutput = decode(output);
-    let ToolResponse::Success(output) = output else {
+    let output: ArchitectureCyclesOutput = decode_current_analysis(output);
+    let AnalysisToolResponse::Success(output) = output else {
         panic!("expected explain success");
     };
     assert!(
@@ -9222,8 +9415,8 @@ async fn architecture_overview_explain_returns_a_plan_without_retrieval() {
     )
     .await
     .expect("explain executes");
-    let output: ArchitectureOverviewOutput = decode(output);
-    let ToolResponse::Success(output) = output else {
+    let output: ArchitectureOverviewOutput = decode_current_analysis(output);
+    let AnalysisToolResponse::Success(output) = output else {
         panic!("expected explain success");
     };
     assert!(
@@ -9382,7 +9575,7 @@ async fn symbol_relationships_explain_returns_a_plan_without_retrieval() {
     )
     .await
     .expect("explain executes");
-    let output: SymbolRelationshipsOutput = decode(output);
+    let output: SymbolRelationshipsOutputV1_0 = decode(output);
     let ToolResponse::Success(output) = output else {
         panic!("expected explain success");
     };
@@ -10206,7 +10399,10 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         [
             "generation",
             "include_provenance",
+            "relation_sample_limit",
             "repository",
+            "sections",
+            "source_preview_lines",
             "symbol_ids"
         ]
     );
@@ -10262,27 +10458,27 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         [
             "change",
             "generation",
+            "include_history",
             "include_tests",
             "max_depth",
             "min_confidence",
             "relation_policy",
-            "repository"
+            "repository",
+            "scope"
         ],
         ["change.paths"]
     );
     group!(ChangeImpact, StructuredVariant, ["change.paths"]);
     group!(ChangeImpact, ExplainPlan, ["explain"]);
     group!(ChangeImpact, BudgetRuntime, ["budget"]);
-    group!(
-        ChangeImpact,
-        DefaultEquivalent,
-        ["include_history", "profile"]
-    );
+    group!(ChangeImpact, DefaultEquivalent, ["profile"]);
     group!(
         TestsSelect,
         NormalizedDelta,
         [
             "generation",
+            "execution_budget",
+            "frameworks",
             "include_commands",
             "max_tests",
             "repository",
@@ -10297,11 +10493,13 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         ArchitectureOverview,
         NormalizedDelta,
         [
+            "detail",
             "generation",
             "include_edges",
             "max_components",
             "min_confidence",
             "repository",
+            "scope",
             "views"
         ]
     );
@@ -10320,16 +10518,12 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
             "include_self_cycles",
             "max_cycles",
             "min_size",
-            "repository"
+            "rank_by",
+            "repository",
+            "scope"
         ]
     );
-    group_excluding!(
-        ArchitectureCycles,
-        NormalizedDelta,
-        ["projection"],
-        ["projection.level"]
-    );
-    group!(ArchitectureCycles, FixedDiscriminator, ["projection.level"]);
+    group!(ArchitectureCycles, NormalizedDelta, ["projection"]);
     group!(ArchitectureCycles, ExplainPlan, ["explain"]);
     group!(ArchitectureCycles, DefaultEquivalent, ["response_profile"]);
     group!(ArchitectureCycles, BudgetRuntime, ["budget"]);
@@ -10342,7 +10536,8 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
             "include_tests",
             "max_candidates",
             "min_confidence",
-            "repository"
+            "repository",
+            "scope"
         ]
     );
     group!(CodeDead, ExplainPlan, ["explain"]);
@@ -10355,7 +10550,14 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     group!(
         HistoryCompare,
         NormalizedDelta,
-        ["base", "change_kinds", "head", "max_results", "repository"]
+        [
+            "base",
+            "change_kinds",
+            "head",
+            "max_results",
+            "repository",
+            "scope"
+        ]
     );
     group!(HistoryCompare, ExplainPlan, ["explain"]);
     group!(HistoryCompare, BudgetRuntime, ["budget"]);
@@ -10368,6 +10570,8 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         PlanChange,
         NormalizedDelta,
         [
+            "change_context",
+            "constraints",
             "generation",
             "max_steps",
             "objective",
@@ -10511,7 +10715,7 @@ fn accepted_schema_paths_have_effect_evidence() {
     let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
     assert_eq!(
         accepted_digest.as_str(),
-        "d285be9f238ece87c7b0ee8939be12b4d8655ed3ba5c2c7eb9edfa0737b0d86a",
+        "772401a02110b94803b3f10b7ad354b1f0b60b36f45b817cbe6e95b378f5d392",
         "accepted path universe changed"
     );
     let categorized: Vec<_> = accepted
@@ -10576,8 +10780,8 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[10],
         counts[11],
     );
-    assert_eq!(counts, [133, 97, 4, 69, 28, 16, 5, 16, 25, 1, 1, 4]);
-    assert_eq!(categorized.len(), 399);
+    assert_eq!(counts, [216, 105, 4, 69, 29, 16, 5, 23, 25, 1, 0, 4]);
+    assert_eq!(categorized.len(), 497);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
@@ -10827,6 +11031,9 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
         ("generation", json!(alternate_generation()), true),
         ("symbol_ids", json!([missing_symbol()]), false),
         ("include_provenance", json!("none"), true),
+        ("sections", json!(["docs", "source_preview"]), true),
+        ("relation_sample_limit", bounded.clone(), true),
+        ("source_preview_lines", bounded.clone(), true),
     ] {
         add(VerticalTool::SymbolExplain, field, value, optional);
     }
@@ -10875,9 +11082,19 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
             false,
         ),
         ("include_tests", json!(true), true),
+        ("include_history", json!(false), true),
         ("max_depth", bounded.clone(), true),
         ("min_confidence", confidence.clone(), true),
         ("relation_policy", json!("direct_only"), true),
+        (
+            "scope",
+            json!({
+                "paths": [format!("src/scope-{seed}")],
+                "packages": [format!("package-{seed}")],
+                "services": [format!("service-{seed}")]
+            }),
+            true,
+        ),
     ] {
         add(VerticalTool::ChangeImpact, field, value, optional);
     }
@@ -10890,6 +11107,12 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
         ("generation", json!(alternate_generation()), true),
         ("seeds", json!({"symbols": [missing_symbol()]}), false),
         ("test_kinds", json!(["unit"]), true),
+        ("frameworks", json!([format!("framework-{seed}")]), true),
+        (
+            "execution_budget",
+            json!({"max_total_ms": number * 1_000, "max_slow_tests": number}),
+            true,
+        ),
         ("max_tests", bounded.clone(), true),
         ("include_commands", json!(true), true),
     ] {
@@ -10902,6 +11125,12 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
             false,
         ),
         ("generation", json!(alternate_generation()), true),
+        (
+            "scope",
+            json!({"paths": [format!("src/overview-{seed}")]}),
+            true,
+        ),
+        ("detail", json!("detailed"), true),
         ("views", json!(["hotspots"]), true),
         ("max_components", bounded.clone(), true),
         ("include_edges", json!(true), true),
@@ -10917,10 +11146,16 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
         ),
         ("generation", json!(alternate_generation()), true),
         (
+            "scope",
+            json!({"packages": [format!("package-{seed}")]}),
+            true,
+        ),
+        (
             "projection",
-            json!({"relations": ["imports"], "level": "symbol"}),
+            json!({"relations": ["imports"], "level": "module"}),
             false,
         ),
+        ("rank_by", json!("edge_weight"), true),
         ("min_size", bounded.clone(), true),
         ("max_cycles", bounded.clone(), true),
         ("include_self_cycles", json!(true), true),
@@ -10934,6 +11169,11 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
             false,
         ),
         ("generation", json!(alternate_generation()), true),
+        (
+            "scope",
+            json!({"build_targets": [format!("target-{seed}")]}),
+            true,
+        ),
         ("include_exported", json!(true), true),
         ("include_tests", json!(true), true),
         ("min_confidence", confidence.clone(), true),
@@ -10951,6 +11191,16 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
         ("head", json!(GenerationId::from_bytes([8; 20])), false),
         ("change_kinds", json!(["entities"]), true),
         ("max_results", bounded.clone(), true),
+        (
+            "scope",
+            json!({
+                "paths": [format!("src/history-{seed}")],
+                "packages": [format!("package-{seed}")],
+                "services": [format!("service-{seed}")],
+                "symbols": [missing_symbol()]
+            }),
+            true,
+        ),
     ] {
         add(VerticalTool::HistoryCompare, field, value, optional);
     }
@@ -10968,6 +11218,19 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
             false,
         ),
         ("targets", json!([{"file_id": file()}]), false),
+        (
+            "constraints",
+            json!([format!("preserve constraint {seed}")]),
+            true,
+        ),
+        (
+            "change_context",
+            json!({
+                "paths": [format!("src/change-{seed}.rs")],
+                "revision_range": format!("base-{seed}..head-{seed}")
+            }),
+            true,
+        ),
         ("max_steps", bounded.clone(), true),
     ] {
         add(VerticalTool::PlanChange, field, value, optional);
@@ -11122,7 +11385,10 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
                 "repository" => json!(request.repository()),
                 "generation" => json!(format!("{:?}", request.generation())),
                 "symbol_ids" => json!(request.symbols()),
-                "include_provenance" => json!(request.include_provenance()),
+                "include_provenance" => json!(format!("{:?}", request.provenance_level())),
+                "sections" => json!(request.sections()),
+                "relation_sample_limit" => json!(request.relation_sample_limit()),
+                "source_preview_lines" => json!(request.source_preview_lines()),
                 _ => panic!("unknown symbol.explain observation field"),
             }
         }
@@ -11164,9 +11430,18 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
                 "generation" => json!(format!("{:?}", request.generation())),
                 "change" => json!({
                     "symbols": request.changed_symbols(),
-                    "paths": request.changed_paths()
+                    "paths": request.changed_paths(),
+                    "working_tree": request.working_tree(),
+                    "revision_range": request.revision_range()
                 }),
-                "max_depth" | "relation_policy" => json!(request.max_depth()),
+                "scope" => json!({
+                    "paths": request.scope_paths(),
+                    "packages": request.scope_packages(),
+                    "services": request.scope_services()
+                }),
+                "relation_policy" => json!(request.relation_policy()),
+                "include_history" => json!(request.include_history()),
+                "max_depth" => json!(request.max_depth()),
                 "min_confidence" => json!(request.min_confidence()),
                 "include_tests" => json!(request.include_tests()),
                 _ => panic!("unknown change.impact observation field"),
@@ -11178,8 +11453,19 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
             match field {
                 "repository" => json!(request.repository()),
                 "generation" => json!(format!("{:?}", request.generation())),
-                "seeds" => json!(request.seeds()),
+                "seeds" => json!({
+                    "symbols": request.seeds(),
+                    "paths": request.seed_paths(),
+                    "build_targets": request.seed_build_targets(),
+                    "working_tree": request.change_working_tree(),
+                    "revision_range": request.change_revision_range()
+                }),
                 "test_kinds" => json!(request.test_kinds()),
+                "frameworks" => json!(request.frameworks()),
+                "execution_budget" => json!({
+                    "max_total_ms": request.max_total_ms(),
+                    "max_slow_tests": request.max_slow_tests()
+                }),
                 "max_tests" => json!(request.max_tests()),
                 "include_commands" => json!(request.include_commands()),
                 _ => panic!("unknown tests.select observation field"),
@@ -11192,6 +11478,8 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
             match field {
                 "repository" => json!(request.repository()),
                 "generation" => json!(format!("{:?}", request.generation())),
+                "scope" => json!(request.contract().scope),
+                "detail" => json!(request.contract().detail),
                 "views" => json!(request.views()),
                 "max_components" => json!(request.max_components()),
                 "include_edges" => json!(request.include_edges()),
@@ -11205,7 +11493,12 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
             match field {
                 "repository" => json!(request.repository()),
                 "generation" => json!(format!("{:?}", request.generation())),
-                "projection" => json!(request.relations()),
+                "scope" => json!(request.contract().scope),
+                "projection" => json!({
+                    "relations": request.relations(),
+                    "level": request.contract().level,
+                }),
+                "rank_by" => json!(request.contract().rank_by),
                 "min_size" => json!(request.min_size()),
                 "max_cycles" => json!(request.max_cycles()),
                 "include_self_cycles" => json!(request.include_self_cycles()),
@@ -11218,6 +11511,7 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
             match field {
                 "repository" => json!(request.repository()),
                 "generation" => json!(format!("{:?}", request.generation())),
+                "scope" => json!(request.contract().scope),
                 "entry_point_policy" => json!(request.entry_point_policy()),
                 "include_exported" => json!(request.include_exported()),
                 "include_tests" => json!(request.include_tests()),
@@ -11231,10 +11525,16 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
                 .expect("accepted history comparison fixture normalizes");
             match field {
                 "repository" => json!(request.repository()),
-                "base" => json!(request.base()),
-                "head" => json!(request.head()),
+                "base" => json!(format!("{:?}", request.base())),
+                "head" => json!(format!("{:?}", request.head())),
                 "change_kinds" => json!(request.change_kinds()),
                 "max_results" => json!(request.max_results()),
+                "scope" => json!({
+                    "paths": &request.scope().paths,
+                    "packages": &request.scope().packages,
+                    "services": &request.scope().services,
+                    "symbols": &request.scope().symbols
+                }),
                 _ => panic!("unknown history.compare observation field"),
             }
         }
@@ -11249,8 +11549,11 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
                 "objective_text" => json!(request.objective_text()),
                 "targets" => json!({
                     "symbols": request.target_symbols(),
-                    "files": request.target_files()
+                    "files": request.target_files(),
+                    "queries": request.target_queries()
                 }),
+                "constraints" => json!(request.constraints()),
+                "change_context" => json!(request.change_context()),
                 "max_steps" => json!(request.max_steps()),
                 _ => panic!("unknown plan.change observation field"),
             }
@@ -12059,6 +12362,34 @@ fn structural_change_and_plan_variants_reach_distinct_normalized_targets() {
     assert!(plan.target_symbols().is_empty());
     assert_eq!(plan.target_files(), &[file()]);
 
+    let textual_plan = rootlight_agent::change::normalize_plan_change(decode_arguments(json!({
+        "repository": {"repository_id": repository()},
+        "objective": "refactor",
+        "objective_text": "refactor the package boundary safely",
+        "targets": [
+            {"package": "payments-core"},
+            {"route": "POST /payments"},
+            {"located": "locate-result:payments"}
+        ],
+        "constraints": ["preserve the REST route"],
+        "change_context": {
+            "paths": ["src/payments.rs"],
+            "revision_range": "main..HEAD"
+        }
+    })))
+    .expect("package, route, and located targets normalize");
+    assert_eq!(
+        textual_plan.target_queries(),
+        &["payments-core", "POST /payments", "locate-result:payments"]
+    );
+    assert_eq!(textual_plan.constraints(), &["preserve the REST route"]);
+    assert_eq!(
+        textual_plan
+            .change_context()
+            .and_then(|context| context.paths.as_deref()),
+        Some(["src/payments.rs".to_owned()].as_slice())
+    );
+
     let source = normalize_source_read(
         decode_arguments(json!({
             "repository": {"repository_id": repository()},
@@ -12093,7 +12424,7 @@ fn structural_change_and_plan_variants_reach_distinct_normalized_targets() {
 }
 
 #[tokio::test]
-async fn cycle_projection_level_accepts_only_the_executable_symbol_discriminator() {
+async fn cycle_projection_levels_reach_the_exact_normalized_request() {
     let registered: std::collections::BTreeSet<_> = accepted_field_evidence()
         .into_iter()
         .filter(|evidence| evidence.oracle == AcceptedFieldOracle::FixedDiscriminator)
@@ -12105,32 +12436,20 @@ async fn cycle_projection_level_accepts_only_the_executable_symbol_discriminator
                 .map(move |field| (evidence.tool.name(), field))
         })
         .collect();
-    assert_eq!(
-        registered,
-        std::collections::BTreeSet::from([("architecture.cycles", "projection.level")])
-    );
+    assert!(registered.is_empty());
 
     let accepted = json!({
         "repository": {"repository_id": repository()},
-        "projection": {"relations": ["calls"], "level": "symbol"}
+        "scope": {"packages": ["api"]},
+        "projection": {"relations": ["calls"], "level": "module"},
+        "rank_by": "break_cost"
     });
     validate_capability_input(
         VerticalTool::ArchitectureCycles,
         &accepted,
         CapabilityBindingPolicy::Materialized,
     )
-    .expect("symbol projection is admitted");
-
-    let rejected = json!({
-        "repository": {"repository_id": repository()},
-        "projection": {"relations": ["calls"], "level": "module"}
-    });
-    validate_capability_input(
-        VerticalTool::ArchitectureCycles,
-        &rejected,
-        CapabilityBindingPolicy::Materialized,
-    )
-    .expect_err("non-symbol projection is rejected");
+    .expect("module projection is admitted");
 
     let harness = admission_harness(VerticalTool::ArchitectureCycles);
     execute(
@@ -12140,10 +12459,15 @@ async fn cycle_projection_level_accepts_only_the_executable_symbol_discriminator
     )
     .await
     .expect_err("admitted projection reaches the failing fake port");
-    assert!(matches!(
-        harness.only_call(),
-        ObservedCall::ArchitectureCycles(_)
-    ));
+    let ObservedCall::ArchitectureCycles(request) = harness.only_call() else {
+        panic!("expected architecture cycles call");
+    };
+    assert_eq!(request.contract().level, "module");
+    assert_eq!(request.contract().rank_by, "break_cost");
+    assert_eq!(
+        request.contract().scope,
+        Some(client::AnalysisScope::Packages(vec!["api".to_owned()]))
+    );
 }
 
 struct DefaultEquivalentCase {
@@ -12206,10 +12530,7 @@ fn default_equivalent_cases() -> Vec<DefaultEquivalentCase> {
         (
             VerticalTool::ChangeImpact,
             json!({"repository": repository_selector(), "change": {"symbol_ids": [symbol()]}, "explain": true}),
-            &[
-                ("include_history", json!(false)),
-                ("profile", json!("compact")),
-            ][..],
+            &[("profile", json!("compact"))][..],
         ),
         (
             VerticalTool::TestsSelect,

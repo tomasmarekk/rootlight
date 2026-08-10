@@ -618,7 +618,7 @@ fn real_repository_cold_index_is_release_bounded() {
         "candidate package path fixture must cross the legacy Windows path limit"
     );
     let elapsed_ms = duration_ms(indexing_started.elapsed());
-    let durable_state_bytes = directory_bytes(&state_dir)
+    let state_root_delta_bytes = directory_bytes(&state_dir)
         .checked_sub(empty_state_bytes)
         .expect("durable state does not shrink below its empty baseline");
 
@@ -647,6 +647,14 @@ fn real_repository_cold_index_is_release_bounded() {
     let status_data = data(&status);
     let generation_after_restart =
         required_string(&status_data["resolved_generation"], "active generation");
+    let retained_durable_bytes = required_u64(
+        &status_data["retained_durable_bytes"],
+        "active generation retained durable bytes",
+    );
+    assert_eq!(
+        retained_durable_bytes, semantic.operation.resources.retained_durable_bytes,
+        "repository status and the published semantic operation must identify the same retained bytes"
+    );
     let primary_language_tier = language_tier(status_data, &spec.primary_language);
     let recovered_structural =
         read_terminal_operation(&mut mcp, "restart-structural", &structural_id);
@@ -696,7 +704,8 @@ fn real_repository_cold_index_is_release_bounded() {
         structural_write_amplification_milli,
         semantic_write_amplification_milli,
         elapsed_ms,
-        durable_state_bytes,
+        state_root_delta_bytes,
+        retained_durable_bytes,
         primary_language_tier,
         restart: ColdIndexRestartEvidence {
             interrupted: ColdIndexInterruptedRecoveryEvidence {
@@ -1124,6 +1133,10 @@ fn operation_resources(operation: &Value) -> ColdIndexResourceEvidence {
         written_bytes: required_u64(&resources["written_bytes"], "written bytes"),
         files_examined: required_u64(&resources["files_examined"], "files examined"),
         bytes_examined: required_u64(&resources["bytes_examined"], "bytes examined"),
+        retained_durable_bytes: required_u64(
+            &resources["retained_durable_bytes"],
+            "retained durable bytes",
+        ),
     }
 }
 

@@ -68,6 +68,34 @@ fn bridge_initializes_within_release_startup_slo() {
 }
 
 #[test]
+#[ignore = "captures one first-process latency sample without enforcing a threshold"]
+fn first_bridge_initialization_reports_cold_telemetry() {
+    let isolated = process_support::private_process_tempdir("rl-startup-cold-");
+    let state_dir = isolated.path().join("state");
+    let runtime_dir = isolated.path().join("runtime");
+    fs::create_dir_all(&state_dir).expect("daemon state directory is created");
+    let (mut daemon, daemon_input, _startup, control) =
+        start_healthy_daemon(&state_dir, &runtime_dir);
+
+    let elapsed_us = initialize_process(&state_dir, &runtime_dir);
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema": "rootlight.mcp-first-process/1",
+            "phase": "cold_first_process",
+            "elapsed_us": elapsed_us,
+            "gating": false
+        })
+    );
+    assert!(elapsed_us > 0);
+    assert!(
+        control.health().is_ok_and(|health| health.ready),
+        "daemon remains health-ready after the first bridge process"
+    );
+    stop_daemon(daemon_input, &mut daemon);
+}
+
+#[test]
 #[ignore = "runs 105 fresh release daemon processes and enforces startup percentiles"]
 fn daemon_reaches_ready_within_release_startup_slo() {
     let isolated = process_support::private_process_tempdir("rl-startup-daemon-");

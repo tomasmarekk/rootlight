@@ -162,7 +162,9 @@
         "mode": "selectable",
         "wire_field": "profile",
         "supported": [
-          "compact"
+          "compact",
+          "standard",
+          "evidence"
         ],
         "default": "compact"
       }

@@ -885,7 +885,7 @@
             "batchEligible": false,
             "batchSharedBudget": false,
             "budget": "unsupported",
-            "contractVersion": "1.0",
+            "contractVersion": "1.1",
             "explainSupported": true,
             "fallbackSummary": "bounded durable active or exact-generation status with coverage, operations, and freshness conditions",
             "generation": "selects_generation",
@@ -1159,7 +1159,7 @@
               ]
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/repo.status/input/1.0",
+          "$id": "https://rootlight.local/schema/mcp/repo.status/input/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `repo.status`.",
@@ -1226,6 +1226,103 @@
         "name": "repo.status",
         "outputSchema": {
           "$defs": {
+            "AnalysisErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for analysis schema 1.1.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "AnalysisReadEnvelope": {
+              "additionalProperties": false,
+              "description": "Common strict response envelope for additive analysis-tool responses.",
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/ResultCompleteness",
+                  "description": "Authoritative execution completeness and safe continuation semantics."
+                },
+                "coverage": {
+                  "$ref": "#/$defs/CoverageSummary",
+                  "description": "Relevant coverage."
+                },
+                "data": {
+                  "$ref": "#/$defs/RepoStatusData",
+                  "description": "Tool-specific result."
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationSummary",
+                  "description": "Pinned generation and freshness."
+                },
+                "next_cursor": {
+                  "$ref": "#/$defs/RequiredNullable4",
+                  "description": "Safe continuation cursor, when the result is pageable."
+                },
+                "repository": {
+                  "$ref": "#/$defs/ResolvedRepository",
+                  "description": "Resolved repository."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool response schema version."
+                },
+                "truncated": {
+                  "description": "Whether any hard or requested limit stopped completion.",
+                  "type": "boolean"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Response-level classification for all repository-derived content."
+                },
+                "usage": {
+                  "$ref": "#/$defs/UsageSummary",
+                  "description": "Runtime resource accounting."
+                },
+                "warnings": {
+                  "description": "Source-free warnings.",
+                  "items": {
+                    "$ref": "#/$defs/ResponseWarning"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "schema_version",
+                "repository",
+                "generation",
+                "coverage",
+                "data",
+                "truncated",
+                "completeness",
+                "next_cursor",
+                "usage",
+                "warnings",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "AnalysisSchemaVersion": {
+              "description": "Version marker carried by additive analysis responses.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Tool contract version 1.1.",
+                  "type": "string"
+                }
+              ]
+            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -1596,25 +1693,6 @@
                   "type": "string"
                 }
               ]
-            },
-            "ErrorResponse": {
-              "additionalProperties": false,
-              "description": "Strict common error response for MCP contract failures.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable public error envelope."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
             },
             "Freshness": {
               "description": "Freshness of one immutable generation.",
@@ -2319,74 +2397,6 @@
                 }
               ]
             },
-            "ReadEnvelope": {
-              "additionalProperties": false,
-              "description": "Common strict response envelope for generation-pinned reads.",
-              "properties": {
-                "completeness": {
-                  "$ref": "#/$defs/ResultCompleteness",
-                  "description": "Authoritative execution completeness and safe continuation semantics."
-                },
-                "coverage": {
-                  "$ref": "#/$defs/CoverageSummary",
-                  "description": "Relevant coverage."
-                },
-                "data": {
-                  "$ref": "#/$defs/RepoStatusData",
-                  "description": "Tool-specific result."
-                },
-                "generation": {
-                  "$ref": "#/$defs/GenerationSummary",
-                  "description": "Pinned generation and freshness."
-                },
-                "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable4",
-                  "description": "Safe continuation cursor, when the result is pageable."
-                },
-                "repository": {
-                  "$ref": "#/$defs/ResolvedRepository",
-                  "description": "Resolved repository."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool response schema version."
-                },
-                "truncated": {
-                  "description": "Whether any hard or requested limit stopped completion.",
-                  "type": "boolean"
-                },
-                "trust": {
-                  "$ref": "#/$defs/TrustClassification",
-                  "description": "Response-level classification for all repository-derived content."
-                },
-                "usage": {
-                  "$ref": "#/$defs/UsageSummary",
-                  "description": "Runtime resource accounting."
-                },
-                "warnings": {
-                  "description": "Source-free warnings.",
-                  "items": {
-                    "$ref": "#/$defs/ResponseWarning"
-                  },
-                  "maxItems": 100,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "schema_version",
-                "repository",
-                "generation",
-                "coverage",
-                "data",
-                "truncated",
-                "completeness",
-                "next_cursor",
-                "usage",
-                "warnings",
-                "trust"
-              ],
-              "type": "object"
-            },
             "RepoStatusData": {
               "additionalProperties": false,
               "description": "`repo.status` result data.",
@@ -2445,6 +2455,13 @@
                 "resolved_generation": {
                   "$ref": "#/$defs/GenerationId",
                   "description": "Exact immutable generation resolved for this response."
+                },
+                "retained_durable_bytes": {
+                  "description": "Durable bytes retained for the selected immutable generation.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
                 }
               },
               "required": [
@@ -2453,6 +2470,7 @@
                 "resolved_generation",
                 "active_generation",
                 "publication_state",
+                "retained_durable_bytes",
                 "alias",
                 "coverage",
                 "operations",
@@ -2619,16 +2637,6 @@
               "pattern": "^[A-Za-z0-9_.:-]+$",
               "type": "string"
             },
-            "SchemaVersion": {
-              "description": "Version marker carried by every first-slice response.",
-              "oneOf": [
-                {
-                  "const": "1.0",
-                  "description": "Tool contract version 1.0.",
-                  "type": "string"
-                }
-              ]
-            },
             "SourceFreeMessage": {
               "description": "A checked Rootlight-generated message that cannot contain paths or source.",
               "maxLength": 1024,
@@ -2716,20 +2724,20 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/repo.status/output/1.0",
+          "$id": "https://rootlight.local/schema/mcp/repo.status/output/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadEnvelope",
-              "description": "A tool-specific successful response."
+              "$ref": "#/$defs/AnalysisReadEnvelope",
+              "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/ErrorResponse",
-              "description": "A versioned source-redacted domain error."
+              "$ref": "#/$defs/AnalysisErrorResponse",
+              "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
-          "title": "ToolResponse",
+          "description": "Success-or-error response for analysis schema 1.1.",
+          "title": "AnalysisToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },
@@ -4007,7 +4015,7 @@
             "batchEligible": false,
             "batchSharedBudget": false,
             "budget": "none",
-            "contractVersion": "1.1",
+            "contractVersion": "1.2",
             "explainSupported": false,
             "fallbackSummary": "bounded operation read and cancel",
             "generation": "none",
@@ -4056,7 +4064,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/operation.status/input/1.1",
+          "$id": "https://rootlight.local/schema/mcp/operation.status/input/1.2",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `operation.status`.",
@@ -4356,9 +4364,9 @@
                 }
               ]
             },
-            "OperationDetailV1_1": {
+            "OperationDetailV1_2": {
               "additionalProperties": false,
-              "description": "One operation journal view.",
+              "description": "One operation journal view for operation-status schema 1.2.",
               "properties": {
                 "kind": {
                   "description": "Operation kind.",
@@ -4371,7 +4379,7 @@
                   "description": "Bounded progress counters."
                 },
                 "resources": {
-                  "$ref": "#/$defs/OperationResourcesV1_1",
+                  "$ref": "#/$defs/OperationResourcesV1_2",
                   "description": "Bounded resource summary."
                 },
                 "revision": {
@@ -4406,25 +4414,6 @@
                 "revision",
                 "started_at",
                 "resources"
-              ],
-              "type": "object"
-            },
-            "OperationErrorResponse": {
-              "additionalProperties": false,
-              "description": "Checked error response for repository-operation schema 1.1.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable source-redacted error."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/OperationSchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
               ],
               "type": "object"
             },
@@ -5228,9 +5217,9 @@
               ],
               "type": "object"
             },
-            "OperationResourcesV1_1": {
+            "OperationResourcesV1_2": {
               "additionalProperties": false,
-              "description": "Bounded resource counters for one operation.",
+              "description": "Bounded resource counters for operation-status schema 1.2.",
               "properties": {
                 "bytes_examined": {
                   "description": "Source bytes examined so far.",
@@ -5284,6 +5273,13 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "retained_durable_bytes": {
+                  "description": "Durable bytes retained for the resulting immutable generation.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
                 "written_bytes": {
                   "description": "Durable bytes written so far.",
                   "format": "uint64",
@@ -5299,19 +5295,10 @@
                 "referenced_bytes",
                 "newly_written_bytes",
                 "reserved_memory_bytes",
-                "owned_memory_bytes"
+                "owned_memory_bytes",
+                "retained_durable_bytes"
               ],
               "type": "object"
-            },
-            "OperationSchemaVersion": {
-              "description": "Version marker carried by additive repository-operation responses.",
-              "oneOf": [
-                {
-                  "const": "1.1",
-                  "description": "Tool contract version 1.1.",
-                  "type": "string"
-                }
-              ]
             },
             "OperationState": {
               "description": "Durable operation state.",
@@ -5348,9 +5335,9 @@
                 }
               ]
             },
-            "OperationStatusDataV1_1": {
+            "OperationStatusDataV1_2": {
               "additionalProperties": false,
-              "description": "`operation.status` result data.",
+              "description": "`operation.status` result data for schema 1.2.",
               "properties": {
                 "error": {
                   "$ref": "#/$defs/RequiredNullable4",
@@ -5377,7 +5364,7 @@
                   ]
                 },
                 "operation": {
-                  "$ref": "#/$defs/OperationDetailV1_1",
+                  "$ref": "#/$defs/OperationDetailV1_2",
                   "description": "Current operation view."
                 },
                 "published_generation": {
@@ -5408,16 +5395,45 @@
               ],
               "type": "object"
             },
-            "OperationStatusSuccessV1_1": {
+            "OperationStatusErrorResponseV1_2": {
               "additionalProperties": false,
-              "description": "Strict output for `operation.status`.",
+              "description": "Checked error response for operation-status schema 1.2.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/OperationStatusSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "OperationStatusSchemaVersion": {
+              "description": "Version marker carried by additive operation-status responses.",
+              "oneOf": [
+                {
+                  "const": "1.2",
+                  "description": "Tool contract version 1.2.",
+                  "type": "string"
+                }
+              ]
+            },
+            "OperationStatusSuccessV1_2": {
+              "additionalProperties": false,
+              "description": "Strict output for operation-status schema 1.2.",
               "properties": {
                 "data": {
-                  "$ref": "#/$defs/OperationStatusDataV1_1",
+                  "$ref": "#/$defs/OperationStatusDataV1_2",
                   "description": "Operation result."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/OperationSchemaVersion",
+                  "$ref": "#/$defs/OperationStatusSchemaVersion",
                   "description": "Tool response schema version."
                 }
               },
@@ -5705,20 +5721,20 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/operation.status/output/1.1",
+          "$id": "https://rootlight.local/schema/mcp/operation.status/output/1.2",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/OperationStatusSuccessV1_1",
+              "$ref": "#/$defs/OperationStatusSuccessV1_2",
               "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/OperationErrorResponse",
+              "$ref": "#/$defs/OperationStatusErrorResponseV1_2",
               "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "Success-or-error response for repository-operation schema 1.1.",
-          "title": "OperationToolResponse",
+          "description": "Success-or-error response for operation-status schema 1.2.",
+          "title": "OperationStatusToolResponseV1_2",
           "type": "object",
           "unevaluatedProperties": false
         },
@@ -5772,13 +5788,6 @@
                 "status": "unsupported_stable_error",
                 "summary": "documentation search is not served",
                 "value": "docs"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "search_modes[]",
-                "status": "unsupported_stable_error",
-                "summary": "path search is not served",
-                "value": "path"
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -7960,44 +7969,12 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.0",
+            "contractVersion": "1.1",
             "explainSupported": true,
-            "fallbackSummary": "bounded definitions, exact relation counts, and optional compact producer provenance",
+            "fallbackSummary": "bounded sectioned explanations with typed evidence, source preview, and provenance",
             "generation": "selects_generation",
             "inputShapeHash": "94f736e1ad7a5cc7a6aa51f5a9ce52d23c2e912065e6403d2a194ae942d13cab",
-            "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "sections",
-                "status": "unsupported_stable_error",
-                "summary": "section selection is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "relation_sample_limit",
-                "status": "unsupported_stable_error",
-                "summary": "custom relation samples are not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "source_preview_lines",
-                "status": "unsupported_stable_error",
-                "summary": "custom source previews are not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "budget.evidence_level",
-                "status": "unsupported_stable_error",
-                "summary": "evidence projection is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "include_provenance",
-                "status": "unsupported_stable_error",
-                "summary": "full provenance projection is not served",
-                "value": "full"
-              }
-            ],
+            "limitations": [],
             "pagination": "explicit_truncation",
             "profiles": [
               "scout",
@@ -8014,7 +7991,7 @@
               ],
               "wireField": "response_profile"
             },
-            "status": "fallback_limited"
+            "status": "implemented"
           }
         },
         "annotations": {
@@ -8023,7 +8000,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Return bounded definitions, exact relation counts, and optional compact producer provenance for explicit stable symbol identifiers; absent identifiers are reported as unresolved, while custom sections, source previews, relation samples, full provenance, and continuation are unsupported.",
+        "description": "Return requested bounded definition sections, exact relation counts, sampled stable relation references, source previews, and selected producer provenance for explicit stable symbol identifiers; absent identifiers and unavailable section evidence are reported explicitly.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -8247,7 +8224,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/symbol.explain/input/1.0",
+          "$id": "https://rootlight.local/schema/mcp/symbol.explain/input/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `symbol.explain`.",
@@ -8336,6 +8313,103 @@
         "name": "symbol.explain",
         "outputSchema": {
           "$defs": {
+            "AnalysisErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for analysis schema 1.1.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "AnalysisReadEnvelope": {
+              "additionalProperties": false,
+              "description": "Common strict response envelope for additive analysis-tool responses.",
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/ResultCompleteness",
+                  "description": "Authoritative execution completeness and safe continuation semantics."
+                },
+                "coverage": {
+                  "$ref": "#/$defs/CoverageSummary",
+                  "description": "Relevant coverage."
+                },
+                "data": {
+                  "$ref": "#/$defs/SymbolExplainData",
+                  "description": "Tool-specific result."
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationSummary",
+                  "description": "Pinned generation and freshness."
+                },
+                "next_cursor": {
+                  "$ref": "#/$defs/RequiredNullable2",
+                  "description": "Safe continuation cursor, when the result is pageable."
+                },
+                "repository": {
+                  "$ref": "#/$defs/ResolvedRepository",
+                  "description": "Resolved repository."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool response schema version."
+                },
+                "truncated": {
+                  "description": "Whether any hard or requested limit stopped completion.",
+                  "type": "boolean"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Response-level classification for all repository-derived content."
+                },
+                "usage": {
+                  "$ref": "#/$defs/UsageSummary",
+                  "description": "Runtime resource accounting."
+                },
+                "warnings": {
+                  "description": "Source-free warnings.",
+                  "items": {
+                    "$ref": "#/$defs/ResponseWarning"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "schema_version",
+                "repository",
+                "generation",
+                "coverage",
+                "data",
+                "truncated",
+                "completeness",
+                "next_cursor",
+                "usage",
+                "warnings",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "AnalysisSchemaVersion": {
+              "description": "Version marker carried by additive analysis responses.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Tool contract version 1.1.",
+                  "type": "string"
+                }
+              ]
+            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -8742,25 +8816,6 @@
                 }
               ]
             },
-            "ErrorResponse": {
-              "additionalProperties": false,
-              "description": "Strict common error response for MCP contract failures.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable public error envelope."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
-            },
             "FileId": {
               "pattern": "^file1_[a-z2-7]{39}$",
               "type": "string"
@@ -9158,11 +9213,29 @@
                   "minLength": 1,
                   "type": "string"
                 },
+                "frontend_version": {
+                  "description": "Grammar, compiler, or frontend version when full provenance was requested.",
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "provider": {
                   "description": "Provider identity.",
                   "maxLength": 128,
                   "minLength": 1,
                   "type": "string"
+                },
+                "rule": {
+                  "description": "Deterministic resolver rule when full provenance was requested.",
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [
@@ -9386,74 +9459,6 @@
                 }
               ]
             },
-            "ReadEnvelope": {
-              "additionalProperties": false,
-              "description": "Common strict response envelope for generation-pinned reads.",
-              "properties": {
-                "completeness": {
-                  "$ref": "#/$defs/ResultCompleteness",
-                  "description": "Authoritative execution completeness and safe continuation semantics."
-                },
-                "coverage": {
-                  "$ref": "#/$defs/CoverageSummary",
-                  "description": "Relevant coverage."
-                },
-                "data": {
-                  "$ref": "#/$defs/SymbolExplainData",
-                  "description": "Tool-specific result."
-                },
-                "generation": {
-                  "$ref": "#/$defs/GenerationSummary",
-                  "description": "Pinned generation and freshness."
-                },
-                "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable2",
-                  "description": "Safe continuation cursor, when the result is pageable."
-                },
-                "repository": {
-                  "$ref": "#/$defs/ResolvedRepository",
-                  "description": "Resolved repository."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool response schema version."
-                },
-                "truncated": {
-                  "description": "Whether any hard or requested limit stopped completion.",
-                  "type": "boolean"
-                },
-                "trust": {
-                  "$ref": "#/$defs/TrustClassification",
-                  "description": "Response-level classification for all repository-derived content."
-                },
-                "usage": {
-                  "$ref": "#/$defs/UsageSummary",
-                  "description": "Runtime resource accounting."
-                },
-                "warnings": {
-                  "description": "Source-free warnings.",
-                  "items": {
-                    "$ref": "#/$defs/ResponseWarning"
-                  },
-                  "maxItems": 100,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "schema_version",
-                "repository",
-                "generation",
-                "coverage",
-                "data",
-                "truncated",
-                "completeness",
-                "next_cursor",
-                "usage",
-                "warnings",
-                "trust"
-              ],
-              "type": "object"
-            },
             "RelationSummary": {
               "additionalProperties": false,
               "description": "Compact relation counts for one symbol.",
@@ -9609,16 +9614,6 @@
               "pattern": "^[A-Za-z0-9_.:-]+$",
               "type": "string"
             },
-            "SchemaVersion": {
-              "description": "Version marker carried by every first-slice response.",
-              "oneOf": [
-                {
-                  "const": "1.0",
-                  "description": "Tool contract version 1.0.",
-                  "type": "string"
-                }
-              ]
-            },
             "SourceFreeMessage": {
               "description": "A checked Rootlight-generated message that cannot contain paths or source.",
               "maxLength": 1024,
@@ -9746,6 +9741,15 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "container": {
+                  "description": "Semantic container label when available.",
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "definition": {
                   "$ref": "#/$defs/SourceRef",
                   "description": "Exact definition evidence."
@@ -9768,13 +9772,47 @@
                   "maxItems": 64,
                   "type": "array"
                 },
+                "qualified_name": {
+                  "description": "Repository-controlled qualified display name.",
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "relation_samples": {
+                  "description": "Bounded typed relation evidence requested by the caller.",
+                  "items": {
+                    "$ref": "#/$defs/SymbolRelationSample"
+                  },
+                  "maxItems": 250,
+                  "type": "array"
+                },
                 "relations": {
                   "$ref": "#/$defs/RelationSummary",
                   "description": "Compact relation counts."
                 },
+                "section_gaps": {
+                  "description": "Explicit gaps for requested sections not supported by available evidence.",
+                  "items": {
+                    "$ref": "#/$defs/ResponseWarning"
+                  },
+                  "maxItems": 10,
+                  "type": "array"
+                },
                 "signature": {
                   "description": "Repository-controlled signature.",
                   "maxLength": 4096,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source_preview": {
+                  "description": "Bounded untrusted source preview when requested.",
+                  "maxLength": 65536,
+                  "minLength": 1,
                   "type": [
                     "string",
                     "null"
@@ -9813,6 +9851,57 @@
             "SymbolId": {
               "pattern": "^sym1_[a-z2-7]{39}$",
               "type": "string"
+            },
+            "SymbolRelationSample": {
+              "additionalProperties": false,
+              "description": "One bounded typed relation sample for a symbol explanation.",
+              "properties": {
+                "confidence": {
+                  "description": "Fixed-point confidence from 0 through 1000.",
+                  "format": "uint16",
+                  "maximum": 1000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "direction": {
+                  "description": "Direction relative to the explained symbol.",
+                  "maxLength": 16,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "kind": {
+                  "description": "Stable relation predicate label.",
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_refs": {
+                  "description": "Direct immutable evidence for this relation.",
+                  "items": {
+                    "$ref": "#/$defs/SourceRef"
+                  },
+                  "maxItems": 8,
+                  "type": "array"
+                },
+                "target": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/SymbolId"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Related symbol when the endpoint is an indexed entity."
+                }
+              },
+              "required": [
+                "kind",
+                "direction",
+                "source_refs",
+                "confidence"
+              ],
+              "type": "object"
             },
             "TrustClassification": {
               "description": "Trust classification attached to every future source-bearing value.",
@@ -9894,20 +9983,20 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/symbol.explain/output/1.0",
+          "$id": "https://rootlight.local/schema/mcp/symbol.explain/output/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadEnvelope",
-              "description": "A tool-specific successful response."
+              "$ref": "#/$defs/AnalysisReadEnvelope",
+              "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/ErrorResponse",
-              "description": "A versioned source-redacted domain error."
+              "$ref": "#/$defs/AnalysisErrorResponse",
+              "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
-          "title": "ToolResponse",
+          "description": "Success-or-error response for analysis schema 1.1.",
+          "title": "AnalysisToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },
@@ -9919,7 +10008,7 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.0",
+            "contractVersion": "1.1",
             "explainSupported": true,
             "fallbackSummary": "bounded static call, caller, reference, type, implementation, and import relationships",
             "generation": "selects_generation",
@@ -10426,7 +10515,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/symbol.relationships/input/1.0",
+          "$id": "https://rootlight.local/schema/mcp/symbol.relationships/input/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `symbol.relationships`.",
@@ -10537,6 +10626,103 @@
         "name": "symbol.relationships",
         "outputSchema": {
           "$defs": {
+            "AnalysisErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for analysis schema 1.1.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "AnalysisReadEnvelope": {
+              "additionalProperties": false,
+              "description": "Common strict response envelope for additive analysis-tool responses.",
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/ResultCompleteness",
+                  "description": "Authoritative execution completeness and safe continuation semantics."
+                },
+                "coverage": {
+                  "$ref": "#/$defs/CoverageSummary",
+                  "description": "Relevant coverage."
+                },
+                "data": {
+                  "$ref": "#/$defs/SymbolRelationshipsData",
+                  "description": "Tool-specific result."
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationSummary",
+                  "description": "Pinned generation and freshness."
+                },
+                "next_cursor": {
+                  "$ref": "#/$defs/RequiredNullable2",
+                  "description": "Safe continuation cursor, when the result is pageable."
+                },
+                "repository": {
+                  "$ref": "#/$defs/ResolvedRepository",
+                  "description": "Resolved repository."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool response schema version."
+                },
+                "truncated": {
+                  "description": "Whether any hard or requested limit stopped completion.",
+                  "type": "boolean"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Response-level classification for all repository-derived content."
+                },
+                "usage": {
+                  "$ref": "#/$defs/UsageSummary",
+                  "description": "Runtime resource accounting."
+                },
+                "warnings": {
+                  "description": "Source-free warnings.",
+                  "items": {
+                    "$ref": "#/$defs/ResponseWarning"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "schema_version",
+                "repository",
+                "generation",
+                "coverage",
+                "data",
+                "truncated",
+                "completeness",
+                "next_cursor",
+                "usage",
+                "warnings",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "AnalysisSchemaVersion": {
+              "description": "Version marker carried by additive analysis responses.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Tool contract version 1.1.",
+                  "type": "string"
+                }
+              ]
+            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -10884,25 +11070,6 @@
                   "type": "string"
                 }
               ]
-            },
-            "ErrorResponse": {
-              "additionalProperties": false,
-              "description": "Strict common error response for MCP contract failures.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable public error envelope."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
             },
             "FileId": {
               "pattern": "^file1_[a-z2-7]{39}$",
@@ -11301,11 +11468,29 @@
                   "minLength": 1,
                   "type": "string"
                 },
+                "frontend_version": {
+                  "description": "Grammar, compiler, or frontend version when full provenance was requested.",
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "provider": {
                   "description": "Provider identity.",
                   "maxLength": 128,
                   "minLength": 1,
                   "type": "string"
+                },
+                "rule": {
+                  "description": "Deterministic resolver rule when full provenance was requested.",
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [
@@ -11528,74 +11713,6 @@
                   "type": "object"
                 }
               ]
-            },
-            "ReadEnvelope": {
-              "additionalProperties": false,
-              "description": "Common strict response envelope for generation-pinned reads.",
-              "properties": {
-                "completeness": {
-                  "$ref": "#/$defs/ResultCompleteness",
-                  "description": "Authoritative execution completeness and safe continuation semantics."
-                },
-                "coverage": {
-                  "$ref": "#/$defs/CoverageSummary",
-                  "description": "Relevant coverage."
-                },
-                "data": {
-                  "$ref": "#/$defs/SymbolRelationshipsData",
-                  "description": "Tool-specific result."
-                },
-                "generation": {
-                  "$ref": "#/$defs/GenerationSummary",
-                  "description": "Pinned generation and freshness."
-                },
-                "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable2",
-                  "description": "Safe continuation cursor, when the result is pageable."
-                },
-                "repository": {
-                  "$ref": "#/$defs/ResolvedRepository",
-                  "description": "Resolved repository."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool response schema version."
-                },
-                "truncated": {
-                  "description": "Whether any hard or requested limit stopped completion.",
-                  "type": "boolean"
-                },
-                "trust": {
-                  "$ref": "#/$defs/TrustClassification",
-                  "description": "Response-level classification for all repository-derived content."
-                },
-                "usage": {
-                  "$ref": "#/$defs/UsageSummary",
-                  "description": "Runtime resource accounting."
-                },
-                "warnings": {
-                  "description": "Source-free warnings.",
-                  "items": {
-                    "$ref": "#/$defs/ResponseWarning"
-                  },
-                  "maxItems": 100,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "schema_version",
-                "repository",
-                "generation",
-                "coverage",
-                "data",
-                "truncated",
-                "completeness",
-                "next_cursor",
-                "usage",
-                "warnings",
-                "trust"
-              ],
-              "type": "object"
             },
             "RelationKind": {
               "description": "Typed relation families recognized across intent tools.\n\nEach tool advertises and enforces its own supported subset.",
@@ -11901,16 +12018,6 @@
               "pattern": "^[A-Za-z0-9_.:-]+$",
               "type": "string"
             },
-            "SchemaVersion": {
-              "description": "Version marker carried by every first-slice response.",
-              "oneOf": [
-                {
-                  "const": "1.0",
-                  "description": "Tool contract version 1.0.",
-                  "type": "string"
-                }
-              ]
-            },
             "SourceFreeMessage": {
               "description": "A checked Rootlight-generated message that cannot contain paths or source.",
               "maxLength": 1024,
@@ -12138,20 +12245,20 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/symbol.relationships/output/1.0",
+          "$id": "https://rootlight.local/schema/mcp/symbol.relationships/output/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadEnvelope",
-              "description": "A tool-specific successful response."
+              "$ref": "#/$defs/AnalysisReadEnvelope",
+              "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/ErrorResponse",
-              "description": "A versioned source-redacted domain error."
+              "$ref": "#/$defs/AnalysisErrorResponse",
+              "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
-          "title": "ToolResponse",
+          "description": "Success-or-error response for analysis schema 1.1.",
+          "title": "AnalysisToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },
@@ -12717,7 +12824,7 @@
               "description": "Path selection strategy."
             },
             "relations": {
-              "description": "Explicit relation allow-list.\n\nThe served set is `calls`, `references`, `types`, `implements`, and\n`imports`.",
+              "description": "Explicit relation allow-list.\n\nEvery declared relation family is admitted; missing adapter coverage is\nreported through response coverage rather than fabricated edges.",
               "items": {
                 "$ref": "#/$defs/RelationKind"
               },
@@ -14326,51 +14433,12 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.0",
+            "contractVersion": "1.1",
             "explainSupported": true,
-            "fallbackSummary": "bounded explicit symbol-or-path change mapping",
+            "fallbackSummary": "bounded explicit or Git-derived change mapping with scoped conservative coverage",
             "generation": "selects_generation",
             "inputShapeHash": "6661f5c1ce1434a50f72b7bd9b9f0fbeb473f3d9b8862b31ac57b7fad89d7c6a",
-            "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "scope",
-                "status": "unsupported_stable_error",
-                "summary": "structural scope filtering is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "budget.evidence_level",
-                "status": "unsupported_stable_error",
-                "summary": "evidence projection is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "change.working_tree",
-                "status": "unsupported_stable_error",
-                "summary": "working-tree diff resolution is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "change.revision_range",
-                "status": "unsupported_stable_error",
-                "summary": "revision-range resolution is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "include_history",
-                "status": "unsupported_stable_error",
-                "summary": "history-derived signals are not served",
-                "value": "true"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "relation_policy",
-                "status": "unsupported_stable_error",
-                "summary": "conservative relation expansion is not served",
-                "value": "conservative"
-              }
-            ],
+            "limitations": [],
             "pagination": "explicit_truncation",
             "profiles": [
               "analysis",
@@ -14386,7 +14454,7 @@
               ],
               "wireField": "profile"
             },
-            "status": "fallback_limited"
+            "status": "implemented"
           }
         },
         "annotations": {
@@ -14395,7 +14463,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded explicit symbol-or-path change mapping to dependents, risks, and optional tests; working-tree and revision-range resolution are unsupported.",
+        "description": "Use bounded explicit or read-only Git change evidence, scoped relation policies, and optional history signals to map affected symbols, dependents, services, tests, and coverage-aware risks.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -14685,7 +14753,7 @@
               ]
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/change.impact/input/1.0",
+          "$id": "https://rootlight.local/schema/mcp/change.impact/input/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `change.impact`.",
@@ -14775,6 +14843,103 @@
         "name": "change.impact",
         "outputSchema": {
           "$defs": {
+            "AnalysisErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for analysis schema 1.1.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "AnalysisReadEnvelope": {
+              "additionalProperties": false,
+              "description": "Common strict response envelope for additive analysis-tool responses.",
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/ResultCompleteness",
+                  "description": "Authoritative execution completeness and safe continuation semantics."
+                },
+                "coverage": {
+                  "$ref": "#/$defs/CoverageSummary",
+                  "description": "Relevant coverage."
+                },
+                "data": {
+                  "$ref": "#/$defs/ChangeImpactData",
+                  "description": "Tool-specific result."
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationSummary",
+                  "description": "Pinned generation and freshness."
+                },
+                "next_cursor": {
+                  "$ref": "#/$defs/RequiredNullable4",
+                  "description": "Safe continuation cursor, when the result is pageable."
+                },
+                "repository": {
+                  "$ref": "#/$defs/ResolvedRepository",
+                  "description": "Resolved repository."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool response schema version."
+                },
+                "truncated": {
+                  "description": "Whether any hard or requested limit stopped completion.",
+                  "type": "boolean"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Response-level classification for all repository-derived content."
+                },
+                "usage": {
+                  "$ref": "#/$defs/UsageSummary",
+                  "description": "Runtime resource accounting."
+                },
+                "warnings": {
+                  "description": "Source-free warnings.",
+                  "items": {
+                    "$ref": "#/$defs/ResponseWarning"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "schema_version",
+                "repository",
+                "generation",
+                "coverage",
+                "data",
+                "truncated",
+                "completeness",
+                "next_cursor",
+                "usage",
+                "warnings",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "AnalysisSchemaVersion": {
+              "description": "Version marker carried by additive analysis responses.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Tool contract version 1.1.",
+                  "type": "string"
+                }
+              ]
+            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -15385,25 +15550,6 @@
                   "type": "string"
                 }
               ]
-            },
-            "ErrorResponse": {
-              "additionalProperties": false,
-              "description": "Strict common error response for MCP contract failures.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable public error envelope."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
             },
             "FileId": {
               "pattern": "^file1_[a-z2-7]{39}$",
@@ -16102,74 +16248,6 @@
                 }
               ]
             },
-            "ReadEnvelope": {
-              "additionalProperties": false,
-              "description": "Common strict response envelope for generation-pinned reads.",
-              "properties": {
-                "completeness": {
-                  "$ref": "#/$defs/ResultCompleteness",
-                  "description": "Authoritative execution completeness and safe continuation semantics."
-                },
-                "coverage": {
-                  "$ref": "#/$defs/CoverageSummary",
-                  "description": "Relevant coverage."
-                },
-                "data": {
-                  "$ref": "#/$defs/ChangeImpactData",
-                  "description": "Tool-specific result."
-                },
-                "generation": {
-                  "$ref": "#/$defs/GenerationSummary",
-                  "description": "Pinned generation and freshness."
-                },
-                "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable4",
-                  "description": "Safe continuation cursor, when the result is pageable."
-                },
-                "repository": {
-                  "$ref": "#/$defs/ResolvedRepository",
-                  "description": "Resolved repository."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool response schema version."
-                },
-                "truncated": {
-                  "description": "Whether any hard or requested limit stopped completion.",
-                  "type": "boolean"
-                },
-                "trust": {
-                  "$ref": "#/$defs/TrustClassification",
-                  "description": "Response-level classification for all repository-derived content."
-                },
-                "usage": {
-                  "$ref": "#/$defs/UsageSummary",
-                  "description": "Runtime resource accounting."
-                },
-                "warnings": {
-                  "description": "Source-free warnings.",
-                  "items": {
-                    "$ref": "#/$defs/ResponseWarning"
-                  },
-                  "maxItems": 100,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "schema_version",
-                "repository",
-                "generation",
-                "coverage",
-                "data",
-                "truncated",
-                "completeness",
-                "next_cursor",
-                "usage",
-                "warnings",
-                "trust"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -16362,16 +16440,6 @@
               "minLength": 1,
               "pattern": "^[A-Za-z0-9_.:-]+$",
               "type": "string"
-            },
-            "SchemaVersion": {
-              "description": "Version marker carried by every first-slice response.",
-              "oneOf": [
-                {
-                  "const": "1.0",
-                  "description": "Tool contract version 1.0.",
-                  "type": "string"
-                }
-              ]
             },
             "ServiceImpact": {
               "additionalProperties": false,
@@ -16569,20 +16637,20 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/change.impact/output/1.0",
+          "$id": "https://rootlight.local/schema/mcp/change.impact/output/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadEnvelope",
-              "description": "A tool-specific successful response."
+              "$ref": "#/$defs/AnalysisReadEnvelope",
+              "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/ErrorResponse",
-              "description": "A versioned source-redacted domain error."
+              "$ref": "#/$defs/AnalysisErrorResponse",
+              "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
-          "title": "ToolResponse",
+          "description": "Success-or-error response for analysis schema 1.1.",
+          "title": "AnalysisToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },
@@ -16594,84 +16662,12 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.0",
+            "contractVersion": "1.1",
             "explainSupported": true,
-            "fallbackSummary": "bounded unit-test ranking from explicit symbol seeds",
+            "fallbackSummary": "bounded cost-aware test ranking from symbol, path, change, and build-target seeds",
             "generation": "selects_generation",
             "inputShapeHash": "c809badeeeaf4211023a6e79c6528e1107f22f1b0d5c1fabc000da9286b9715e",
-            "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "budget.evidence_level",
-                "status": "unsupported_stable_error",
-                "summary": "evidence projection is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "execution_budget",
-                "status": "unsupported_stable_error",
-                "summary": "execution-time budgeting is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "frameworks",
-                "status": "unsupported_stable_error",
-                "summary": "framework filtering is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "seeds.paths",
-                "status": "unsupported_stable_error",
-                "summary": "path seeds are not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "seeds.change",
-                "status": "unsupported_stable_error",
-                "summary": "change seeds are not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "seeds.build_targets",
-                "status": "unsupported_stable_error",
-                "summary": "build-target seeds are not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "test_kinds[]",
-                "status": "unsupported_stable_error",
-                "summary": "integration-test classification is not served",
-                "value": "integration"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "test_kinds[]",
-                "status": "unsupported_stable_error",
-                "summary": "end-to-end test classification is not served",
-                "value": "e2e"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "test_kinds[]",
-                "status": "unsupported_stable_error",
-                "summary": "contract-test classification is not served",
-                "value": "contract"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "test_kinds[]",
-                "status": "unsupported_stable_error",
-                "summary": "static-check classification is not served",
-                "value": "static"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "test_kinds[]",
-                "status": "unsupported_stable_error",
-                "summary": "build-check classification is not served",
-                "value": "build"
-              }
-            ],
+            "limitations": [],
             "pagination": "explicit_truncation",
             "profiles": [
               "analysis",
@@ -16687,7 +16683,7 @@
               ],
               "wireField": "profile"
             },
-            "status": "fallback_limited"
+            "status": "implemented"
           }
         },
         "annotations": {
@@ -16696,7 +16692,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded unit-test ranking from explicit symbol seeds with direct-edge or declaring-file co-location rationale and explicit gaps; other test kinds, path, change, build-target, framework, and execution-budget inputs are unsupported.",
+        "description": "Rank bounded test candidates from symbol, path, change, or build-target seeds with test-kind and framework filters, execution budgets, declarative commands, static/build/history signals, and explicit evidence gaps.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -17028,7 +17024,7 @@
               ]
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/tests.select/input/1.0",
+          "$id": "https://rootlight.local/schema/mcp/tests.select/input/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `tests.select`.",
@@ -17119,6 +17115,103 @@
         "name": "tests.select",
         "outputSchema": {
           "$defs": {
+            "AnalysisErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for analysis schema 1.1.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "AnalysisReadEnvelope": {
+              "additionalProperties": false,
+              "description": "Common strict response envelope for additive analysis-tool responses.",
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/ResultCompleteness",
+                  "description": "Authoritative execution completeness and safe continuation semantics."
+                },
+                "coverage": {
+                  "$ref": "#/$defs/CoverageSummary",
+                  "description": "Relevant coverage."
+                },
+                "data": {
+                  "$ref": "#/$defs/TestsSelectData",
+                  "description": "Tool-specific result."
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationSummary",
+                  "description": "Pinned generation and freshness."
+                },
+                "next_cursor": {
+                  "$ref": "#/$defs/RequiredNullable2",
+                  "description": "Safe continuation cursor, when the result is pageable."
+                },
+                "repository": {
+                  "$ref": "#/$defs/ResolvedRepository",
+                  "description": "Resolved repository."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool response schema version."
+                },
+                "truncated": {
+                  "description": "Whether any hard or requested limit stopped completion.",
+                  "type": "boolean"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Response-level classification for all repository-derived content."
+                },
+                "usage": {
+                  "$ref": "#/$defs/UsageSummary",
+                  "description": "Runtime resource accounting."
+                },
+                "warnings": {
+                  "description": "Source-free warnings.",
+                  "items": {
+                    "$ref": "#/$defs/ResponseWarning"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "schema_version",
+                "repository",
+                "generation",
+                "coverage",
+                "data",
+                "truncated",
+                "completeness",
+                "next_cursor",
+                "usage",
+                "warnings",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "AnalysisSchemaVersion": {
+              "description": "Version marker carried by additive analysis responses.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Tool contract version 1.1.",
+                  "type": "string"
+                }
+              ]
+            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -17442,25 +17535,6 @@
                   "type": "string"
                 }
               ]
-            },
-            "ErrorResponse": {
-              "additionalProperties": false,
-              "description": "Strict common error response for MCP contract failures.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable public error envelope."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
             },
             "Freshness": {
               "description": "Freshness of one immutable generation.",
@@ -18052,6 +18126,15 @@
                     "null"
                   ]
                 },
+                "framework": {
+                  "description": "Framework classification used for filtering, when observed.",
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "kind": {
                   "$ref": "#/$defs/TestKind",
                   "description": "Test kind."
@@ -18095,74 +18178,6 @@
                 "kind",
                 "score",
                 "why"
-              ],
-              "type": "object"
-            },
-            "ReadEnvelope": {
-              "additionalProperties": false,
-              "description": "Common strict response envelope for generation-pinned reads.",
-              "properties": {
-                "completeness": {
-                  "$ref": "#/$defs/ResultCompleteness",
-                  "description": "Authoritative execution completeness and safe continuation semantics."
-                },
-                "coverage": {
-                  "$ref": "#/$defs/CoverageSummary",
-                  "description": "Relevant coverage."
-                },
-                "data": {
-                  "$ref": "#/$defs/TestsSelectData",
-                  "description": "Tool-specific result."
-                },
-                "generation": {
-                  "$ref": "#/$defs/GenerationSummary",
-                  "description": "Pinned generation and freshness."
-                },
-                "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable2",
-                  "description": "Safe continuation cursor, when the result is pageable."
-                },
-                "repository": {
-                  "$ref": "#/$defs/ResolvedRepository",
-                  "description": "Resolved repository."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool response schema version."
-                },
-                "truncated": {
-                  "description": "Whether any hard or requested limit stopped completion.",
-                  "type": "boolean"
-                },
-                "trust": {
-                  "$ref": "#/$defs/TrustClassification",
-                  "description": "Response-level classification for all repository-derived content."
-                },
-                "usage": {
-                  "$ref": "#/$defs/UsageSummary",
-                  "description": "Runtime resource accounting."
-                },
-                "warnings": {
-                  "description": "Source-free warnings.",
-                  "items": {
-                    "$ref": "#/$defs/ResponseWarning"
-                  },
-                  "maxItems": 100,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "schema_version",
-                "repository",
-                "generation",
-                "coverage",
-                "data",
-                "truncated",
-                "completeness",
-                "next_cursor",
-                "usage",
-                "warnings",
-                "trust"
               ],
               "type": "object"
             },
@@ -18272,16 +18287,6 @@
               "pattern": "^[A-Za-z0-9_.:-]+$",
               "type": "string"
             },
-            "SchemaVersion": {
-              "description": "Version marker carried by every first-slice response.",
-              "oneOf": [
-                {
-                  "const": "1.0",
-                  "description": "Tool contract version 1.0.",
-                  "type": "string"
-                }
-              ]
-            },
             "SourceFreeMessage": {
               "description": "A checked Rootlight-generated message that cannot contain paths or source.",
               "maxLength": 1024,
@@ -18293,6 +18298,11 @@
               "additionalProperties": false,
               "description": "Strategy summary for test coverage signals.",
               "properties": {
+                "build_target_signals": {
+                  "default": false,
+                  "description": "Whether build-target dependency signals were used.",
+                  "type": "boolean"
+                },
                 "direct_edges": {
                   "description": "Whether direct test edges were used.",
                   "type": "boolean"
@@ -18497,20 +18507,20 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/tests.select/output/1.0",
+          "$id": "https://rootlight.local/schema/mcp/tests.select/output/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadEnvelope",
-              "description": "A tool-specific successful response."
+              "$ref": "#/$defs/AnalysisReadEnvelope",
+              "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/ErrorResponse",
-              "description": "A versioned source-redacted domain error."
+              "$ref": "#/$defs/AnalysisErrorResponse",
+              "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
-          "title": "ToolResponse",
+          "description": "Success-or-error response for analysis schema 1.1.",
+          "title": "AnalysisToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },
@@ -18522,73 +18532,12 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.0",
+            "contractVersion": "1.1",
             "explainSupported": true,
-            "fallbackSummary": "bounded file-granularity architecture map with optional hotspots",
+            "fallbackSummary": "bounded scoped multi-view architecture map with optional connections and evidence",
             "generation": "selects_generation",
             "inputShapeHash": "88a025148025aba3a15c75079c84fae1cc6279bd02fc4321c92f762cdb632676",
-            "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "scope",
-                "status": "unsupported_stable_error",
-                "summary": "structural scope filtering is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "detail",
-                "status": "unsupported_stable_error",
-                "summary": "explicit detail projection is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "budget.evidence_level",
-                "status": "unsupported_stable_error",
-                "summary": "evidence projection is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "views[]",
-                "status": "unsupported_stable_error",
-                "summary": "build view is not served",
-                "value": "build"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "views[]",
-                "status": "unsupported_stable_error",
-                "summary": "data view is not served",
-                "value": "data"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "views[]",
-                "status": "unsupported_stable_error",
-                "summary": "module view is not served",
-                "value": "modules"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "views[]",
-                "status": "unsupported_stable_error",
-                "summary": "ownership view is not served",
-                "value": "ownership"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "views[]",
-                "status": "unsupported_stable_error",
-                "summary": "package view is not served",
-                "value": "packages"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "views[]",
-                "status": "unsupported_stable_error",
-                "summary": "service view is not served",
-                "value": "services"
-              }
-            ],
+            "limitations": [],
             "pagination": "explicit_truncation",
             "profiles": [
               "analysis",
@@ -18604,7 +18553,7 @@
               ],
               "wireField": "response_profile"
             },
-            "status": "fallback_limited"
+            "status": "implemented"
           }
         },
         "annotations": {
@@ -18613,7 +18562,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use a bounded file-granularity architecture map with optional hotspots and deterministic non-ownership communities; module, package, service, data, ownership, and build views are unsupported.",
+        "description": "Use a bounded generation-pinned architecture map scoped by paths, packages, build targets, or symbols across module, package, service, data, build, ownership, deterministic non-ownership communities, and hotspot views with summary, standard, or detailed evidence.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -18954,7 +18903,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/architecture.overview/input/1.0",
+          "$id": "https://rootlight.local/schema/mcp/architecture.overview/input/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `architecture.overview`.",
@@ -19044,6 +18993,103 @@
         "name": "architecture.overview",
         "outputSchema": {
           "$defs": {
+            "AnalysisErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for analysis schema 1.1.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "AnalysisReadEnvelope": {
+              "additionalProperties": false,
+              "description": "Common strict response envelope for additive analysis-tool responses.",
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/ResultCompleteness",
+                  "description": "Authoritative execution completeness and safe continuation semantics."
+                },
+                "coverage": {
+                  "$ref": "#/$defs/CoverageSummary",
+                  "description": "Relevant coverage."
+                },
+                "data": {
+                  "$ref": "#/$defs/ArchitectureOverviewData",
+                  "description": "Tool-specific result."
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationSummary",
+                  "description": "Pinned generation and freshness."
+                },
+                "next_cursor": {
+                  "$ref": "#/$defs/RequiredNullable2",
+                  "description": "Safe continuation cursor, when the result is pageable."
+                },
+                "repository": {
+                  "$ref": "#/$defs/ResolvedRepository",
+                  "description": "Resolved repository."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool response schema version."
+                },
+                "truncated": {
+                  "description": "Whether any hard or requested limit stopped completion.",
+                  "type": "boolean"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Response-level classification for all repository-derived content."
+                },
+                "usage": {
+                  "$ref": "#/$defs/UsageSummary",
+                  "description": "Runtime resource accounting."
+                },
+                "warnings": {
+                  "description": "Source-free warnings.",
+                  "items": {
+                    "$ref": "#/$defs/ResponseWarning"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "schema_version",
+                "repository",
+                "generation",
+                "coverage",
+                "data",
+                "truncated",
+                "completeness",
+                "next_cursor",
+                "usage",
+                "warnings",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "AnalysisSchemaVersion": {
+              "description": "Version marker carried by additive analysis responses.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Tool contract version 1.1.",
+                  "type": "string"
+                }
+              ]
+            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -19119,6 +19165,12 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "file_count": {
+                  "description": "Number of distinct files represented by the component.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
                 "id": {
                   "description": "Stable component identity.",
                   "maxLength": 512,
@@ -19145,6 +19197,14 @@
                   "maxItems": 16,
                   "type": "array"
                 },
+                "source_refs": {
+                  "description": "Direct immutable evidence, bounded by the requested detail level.",
+                  "items": {
+                    "$ref": "#/$defs/SourceRef"
+                  },
+                  "maxItems": 16,
+                  "type": "array"
+                },
                 "symbol_count": {
                   "description": "Number of contained symbols.",
                   "format": "uint32",
@@ -19161,7 +19221,9 @@
                 "kind",
                 "name",
                 "symbol_count",
+                "file_count",
                 "responsibility_evidence",
+                "source_refs",
                 "confidence",
                 "trust"
               ],
@@ -19363,6 +19425,10 @@
                   "type": "string"
                 }
               ]
+            },
+            "ContentHash": {
+              "pattern": "^b3_[a-z2-7]{58}$",
+              "type": "string"
             },
             "ContinuationAvailability": {
               "description": "Whether an incomplete result exposes a safe continuation.",
@@ -19646,24 +19712,9 @@
                 }
               ]
             },
-            "ErrorResponse": {
-              "additionalProperties": false,
-              "description": "Strict common error response for MCP contract failures.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable public error envelope."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
+            "FileId": {
+              "pattern": "^file1_[a-z2-7]{39}$",
+              "type": "string"
             },
             "Freshness": {
               "description": "Freshness of one immutable generation.",
@@ -19758,12 +19809,30 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "ownership_signal": {
+                  "description": "Ownership-edge signal when available.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
                 "score": {
                   "description": "Aggregate hotspot score from 0 through 1000.",
                   "format": "uint16",
                   "maximum": 1000,
                   "minimum": 0,
                   "type": "integer"
+                },
+                "test_signal": {
+                  "description": "Test-edge signal when available.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
                 }
               },
               "required": [
@@ -19908,6 +19977,29 @@
                   "type": "string"
                 }
               ]
+            },
+            "LineRange": {
+              "additionalProperties": false,
+              "description": "A validated one-based inclusive source line range.",
+              "properties": {
+                "end_line": {
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "start_line": {
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "start_line",
+                "end_line"
+              ],
+              "type": "object"
             },
             "NextAction": {
               "description": "Stable remediation hints generated from a closed set of templates.",
@@ -20288,74 +20380,6 @@
                 }
               ]
             },
-            "ReadEnvelope": {
-              "additionalProperties": false,
-              "description": "Common strict response envelope for generation-pinned reads.",
-              "properties": {
-                "completeness": {
-                  "$ref": "#/$defs/ResultCompleteness",
-                  "description": "Authoritative execution completeness and safe continuation semantics."
-                },
-                "coverage": {
-                  "$ref": "#/$defs/CoverageSummary",
-                  "description": "Relevant coverage."
-                },
-                "data": {
-                  "$ref": "#/$defs/ArchitectureOverviewData",
-                  "description": "Tool-specific result."
-                },
-                "generation": {
-                  "$ref": "#/$defs/GenerationSummary",
-                  "description": "Pinned generation and freshness."
-                },
-                "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable2",
-                  "description": "Safe continuation cursor, when the result is pageable."
-                },
-                "repository": {
-                  "$ref": "#/$defs/ResolvedRepository",
-                  "description": "Resolved repository."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool response schema version."
-                },
-                "truncated": {
-                  "description": "Whether any hard or requested limit stopped completion.",
-                  "type": "boolean"
-                },
-                "trust": {
-                  "$ref": "#/$defs/TrustClassification",
-                  "description": "Response-level classification for all repository-derived content."
-                },
-                "usage": {
-                  "$ref": "#/$defs/UsageSummary",
-                  "description": "Runtime resource accounting."
-                },
-                "warnings": {
-                  "description": "Source-free warnings.",
-                  "items": {
-                    "$ref": "#/$defs/ResponseWarning"
-                  },
-                  "maxItems": 100,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "schema_version",
-                "repository",
-                "generation",
-                "coverage",
-                "data",
-                "truncated",
-                "completeness",
-                "next_cursor",
-                "usage",
-                "warnings",
-                "trust"
-              ],
-              "type": "object"
-            },
             "RelationKind": {
               "description": "Typed relation families recognized across intent tools.\n\nEach tool advertises and enforces its own supported subset.",
               "oneOf": [
@@ -20547,22 +20571,74 @@
               "pattern": "^[A-Za-z0-9_.:-]+$",
               "type": "string"
             },
-            "SchemaVersion": {
-              "description": "Version marker carried by every first-slice response.",
-              "oneOf": [
-                {
-                  "const": "1.0",
-                  "description": "Tool contract version 1.0.",
-                  "type": "string"
-                }
-              ]
-            },
             "SourceFreeMessage": {
               "description": "A checked Rootlight-generated message that cannot contain paths or source.",
               "maxLength": 1024,
               "minLength": 1,
               "pattern": "^[a-z0-9 -]+$",
               "type": "string"
+            },
+            "SourceRef": {
+              "additionalProperties": false,
+              "description": "A generation-bound reference to immutable repository source.",
+              "properties": {
+                "content_hash": {
+                  "$ref": "#/$defs/ContentHash"
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationId"
+                },
+                "line_hint": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/LineRange"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "repository": {
+                  "$ref": "#/$defs/RepositoryId"
+                },
+                "span": {
+                  "$ref": "#/$defs/SourceSpan"
+                }
+              },
+              "required": [
+                "repository",
+                "generation",
+                "span",
+                "content_hash"
+              ],
+              "type": "object"
+            },
+            "SourceSpan": {
+              "additionalProperties": false,
+              "description": "A validated half-open source byte span within one file.",
+              "properties": {
+                "end_byte": {
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "file": {
+                  "$ref": "#/$defs/FileId"
+                },
+                "start_byte": {
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "file",
+                "start_byte",
+                "end_byte"
+              ],
+              "type": "object"
             },
             "TrustClassification": {
               "description": "Trust classification attached to every future source-bearing value.",
@@ -20644,20 +20720,20 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/architecture.overview/output/1.0",
+          "$id": "https://rootlight.local/schema/mcp/architecture.overview/output/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadEnvelope",
-              "description": "A tool-specific successful response."
+              "$ref": "#/$defs/AnalysisReadEnvelope",
+              "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/ErrorResponse",
-              "description": "A versioned source-redacted domain error."
+              "$ref": "#/$defs/AnalysisErrorResponse",
+              "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
-          "title": "ToolResponse",
+          "description": "Success-or-error response for analysis schema 1.1.",
+          "title": "AnalysisToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },
@@ -20669,114 +20745,12 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.0",
+            "contractVersion": "1.1",
             "explainSupported": true,
-            "fallbackSummary": "bounded symbol-level cycles over static call, reference, type, implementation, and import edges",
+            "fallbackSummary": "bounded scoped ranked cycles over declared normalized relation projections and aggregation levels",
             "generation": "selects_generation",
-            "inputShapeHash": "0901c86176b3e32dfdc0db4ae60e920904f4b3ad50a4976c6f54e49262de2bfc",
-            "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "scope",
-                "status": "unsupported_stable_error",
-                "summary": "structural scope filtering is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "projection.level",
-                "status": "unsupported_stable_error",
-                "summary": "only symbol-level cycle projection is served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "rank_by",
-                "status": "unsupported_stable_error",
-                "summary": "cycle ranking strategy is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "projection.relations[]",
-                "status": "unsupported_stable_error",
-                "summary": "cycle projection requires canonical directed edges",
-                "value": "called_by"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "projection.relations[]",
-                "status": "unsupported_stable_error",
-                "summary": "test relations are not served",
-                "value": "tests"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "projection.relations[]",
-                "status": "unsupported_stable_error",
-                "summary": "ownership relations are not served",
-                "value": "ownership"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "projection.relations[]",
-                "status": "unsupported_stable_error",
-                "summary": "service-call relations are not served",
-                "value": "service_call"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "projection.relations[]",
-                "status": "unsupported_stable_error",
-                "summary": "route-call relations are not served",
-                "value": "calls_route"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "projection.relations[]",
-                "status": "unsupported_stable_error",
-                "summary": "messaging relations are not served",
-                "value": "messaging"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "projection.relations[]",
-                "status": "unsupported_stable_error",
-                "summary": "database-read relations are not served",
-                "value": "reads_table"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "projection.relations[]",
-                "status": "unsupported_stable_error",
-                "summary": "database-write relations are not served",
-                "value": "writes_table"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "projection.relations[]",
-                "status": "unsupported_stable_error",
-                "summary": "build-dependency relations are not served",
-                "value": "build_dependency"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "projection.relations[]",
-                "status": "unsupported_stable_error",
-                "summary": "data-flow relations are not served",
-                "value": "data_flow"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "projection.relations[]",
-                "status": "unsupported_stable_error",
-                "summary": "history relations are not served",
-                "value": "history"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "budget.evidence_level",
-                "status": "unsupported_stable_error",
-                "summary": "evidence projection is not served"
-              }
-            ],
+            "inputShapeHash": "c0735c083bc4237f2bdf348c9dc49eb86dd150757175b30829409069ee279adb",
+            "limitations": [],
             "pagination": "explicit_truncation",
             "profiles": [
               "analysis",
@@ -20792,7 +20766,7 @@
               ],
               "wireField": "response_profile"
             },
-            "status": "fallback_limited"
+            "status": "implemented"
           }
         },
         "annotations": {
@@ -20801,7 +20775,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Detect bounded symbol-level cycles over static call, reference, type, implementation, and import edges; other relation families, custom scope, and ranking are unsupported.",
+        "description": "Detect bounded generation-pinned cycles in path, package, build-target, or symbol scope at symbol, module, package, build-target, or service level across declared relation families with size, edge-weight, change-risk, or break-cost ranking and evidence.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -20839,15 +20813,43 @@
               ],
               "type": "object"
             },
+            "CycleLevel": {
+              "description": "Aggregation level for a cycle projection.",
+              "oneOf": [
+                {
+                  "const": "symbol",
+                  "description": "Preserve symbol-level nodes.",
+                  "type": "string"
+                },
+                {
+                  "const": "module",
+                  "description": "Aggregate through the nearest module or namespace.",
+                  "type": "string"
+                },
+                {
+                  "const": "package",
+                  "description": "Aggregate through the nearest package.",
+                  "type": "string"
+                },
+                {
+                  "const": "build_target",
+                  "description": "Aggregate through the nearest build target.",
+                  "type": "string"
+                },
+                {
+                  "const": "service",
+                  "description": "Aggregate through the nearest service.",
+                  "type": "string"
+                }
+              ]
+            },
             "CycleProjection": {
               "additionalProperties": false,
               "description": "Relation projection for cycle detection.",
               "properties": {
                 "level": {
-                  "description": "Aggregation level for the projection.",
-                  "maxLength": 64,
-                  "minLength": 1,
-                  "type": "string"
+                  "$ref": "#/$defs/CycleLevel",
+                  "description": "Aggregation level for the projection."
                 },
                 "relations": {
                   "description": "Relation families included in the projection.\n\nThe served set is `calls`, `references`, `types`, `implements`, and\n`imports`.",
@@ -21214,7 +21216,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/architecture.cycles/input/1.0",
+          "$id": "https://rootlight.local/schema/mcp/architecture.cycles/input/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `architecture.cycles`.",
@@ -21300,6 +21302,103 @@
         "name": "architecture.cycles",
         "outputSchema": {
           "$defs": {
+            "AnalysisErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for analysis schema 1.1.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "AnalysisReadEnvelope": {
+              "additionalProperties": false,
+              "description": "Common strict response envelope for additive analysis-tool responses.",
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/ResultCompleteness",
+                  "description": "Authoritative execution completeness and safe continuation semantics."
+                },
+                "coverage": {
+                  "$ref": "#/$defs/CoverageSummary",
+                  "description": "Relevant coverage."
+                },
+                "data": {
+                  "$ref": "#/$defs/ArchitectureCyclesData",
+                  "description": "Tool-specific result."
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationSummary",
+                  "description": "Pinned generation and freshness."
+                },
+                "next_cursor": {
+                  "$ref": "#/$defs/RequiredNullable2",
+                  "description": "Safe continuation cursor, when the result is pageable."
+                },
+                "repository": {
+                  "$ref": "#/$defs/ResolvedRepository",
+                  "description": "Resolved repository."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool response schema version."
+                },
+                "truncated": {
+                  "description": "Whether any hard or requested limit stopped completion.",
+                  "type": "boolean"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Response-level classification for all repository-derived content."
+                },
+                "usage": {
+                  "$ref": "#/$defs/UsageSummary",
+                  "description": "Runtime resource accounting."
+                },
+                "warnings": {
+                  "description": "Source-free warnings.",
+                  "items": {
+                    "$ref": "#/$defs/ResponseWarning"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "schema_version",
+                "repository",
+                "generation",
+                "coverage",
+                "data",
+                "truncated",
+                "completeness",
+                "next_cursor",
+                "usage",
+                "warnings",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "AnalysisSchemaVersion": {
+              "description": "Version marker carried by additive analysis responses.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Tool contract version 1.1.",
+                  "type": "string"
+                }
+              ]
+            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -21363,12 +21462,17 @@
                     }
                   ],
                   "description": "Bounded source-free plan present when explain was requested."
+                },
+                "projection": {
+                  "$ref": "#/$defs/ServedCycleProjection",
+                  "description": "Relation projection and ranking actually served."
                 }
               },
               "required": [
                 "components",
                 "cycles",
-                "break_candidates"
+                "break_candidates",
+                "projection"
               ],
               "type": "object"
             },
@@ -21598,6 +21702,61 @@
               ],
               "type": "object"
             },
+            "CycleLevel": {
+              "description": "Aggregation level for a cycle projection.",
+              "oneOf": [
+                {
+                  "const": "symbol",
+                  "description": "Preserve symbol-level nodes.",
+                  "type": "string"
+                },
+                {
+                  "const": "module",
+                  "description": "Aggregate through the nearest module or namespace.",
+                  "type": "string"
+                },
+                {
+                  "const": "package",
+                  "description": "Aggregate through the nearest package.",
+                  "type": "string"
+                },
+                {
+                  "const": "build_target",
+                  "description": "Aggregate through the nearest build target.",
+                  "type": "string"
+                },
+                {
+                  "const": "service",
+                  "description": "Aggregate through the nearest service.",
+                  "type": "string"
+                }
+              ]
+            },
+            "CycleRankBy": {
+              "description": "Cycle ranking strategy.",
+              "oneOf": [
+                {
+                  "const": "size",
+                  "description": "Rank by cycle size.",
+                  "type": "string"
+                },
+                {
+                  "const": "edge_weight",
+                  "description": "Rank by aggregate edge weight.",
+                  "type": "string"
+                },
+                {
+                  "const": "change_risk",
+                  "description": "Rank by change risk signal.",
+                  "type": "string"
+                },
+                {
+                  "const": "break_cost",
+                  "description": "Rank by estimated break cost.",
+                  "type": "string"
+                }
+              ]
+            },
             "DetailKey": {
               "description": "A validated key for a bounded public error detail.",
               "maxLength": 64,
@@ -21719,25 +21878,6 @@
                   "type": "string"
                 }
               ]
-            },
-            "ErrorResponse": {
-              "additionalProperties": false,
-              "description": "Strict common error response for MCP contract failures.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable public error envelope."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
             },
             "FileId": {
               "pattern": "^file1_[a-z2-7]{39}$",
@@ -22369,74 +22509,6 @@
                 }
               ]
             },
-            "ReadEnvelope": {
-              "additionalProperties": false,
-              "description": "Common strict response envelope for generation-pinned reads.",
-              "properties": {
-                "completeness": {
-                  "$ref": "#/$defs/ResultCompleteness",
-                  "description": "Authoritative execution completeness and safe continuation semantics."
-                },
-                "coverage": {
-                  "$ref": "#/$defs/CoverageSummary",
-                  "description": "Relevant coverage."
-                },
-                "data": {
-                  "$ref": "#/$defs/ArchitectureCyclesData",
-                  "description": "Tool-specific result."
-                },
-                "generation": {
-                  "$ref": "#/$defs/GenerationSummary",
-                  "description": "Pinned generation and freshness."
-                },
-                "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable2",
-                  "description": "Safe continuation cursor, when the result is pageable."
-                },
-                "repository": {
-                  "$ref": "#/$defs/ResolvedRepository",
-                  "description": "Resolved repository."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool response schema version."
-                },
-                "truncated": {
-                  "description": "Whether any hard or requested limit stopped completion.",
-                  "type": "boolean"
-                },
-                "trust": {
-                  "$ref": "#/$defs/TrustClassification",
-                  "description": "Response-level classification for all repository-derived content."
-                },
-                "usage": {
-                  "$ref": "#/$defs/UsageSummary",
-                  "description": "Runtime resource accounting."
-                },
-                "warnings": {
-                  "description": "Source-free warnings.",
-                  "items": {
-                    "$ref": "#/$defs/ResponseWarning"
-                  },
-                  "maxItems": 100,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "schema_version",
-                "repository",
-                "generation",
-                "coverage",
-                "data",
-                "truncated",
-                "completeness",
-                "next_cursor",
-                "usage",
-                "warnings",
-                "trust"
-              ],
-              "type": "object"
-            },
             "RelationKind": {
               "description": "Typed relation families recognized across intent tools.\n\nEach tool advertises and enforces its own supported subset.",
               "oneOf": [
@@ -22628,15 +22700,50 @@
               "pattern": "^[A-Za-z0-9_.:-]+$",
               "type": "string"
             },
-            "SchemaVersion": {
-              "description": "Version marker carried by every first-slice response.",
-              "oneOf": [
-                {
-                  "const": "1.0",
-                  "description": "Tool contract version 1.0.",
-                  "type": "string"
+            "ServedCycleProjection": {
+              "additionalProperties": false,
+              "description": "Relation projection actually served by cycle detection.",
+              "properties": {
+                "level": {
+                  "$ref": "#/$defs/CycleLevel",
+                  "description": "Aggregation level applied before SCC detection."
+                },
+                "min_confidence": {
+                  "description": "Minimum admitted edge confidence.",
+                  "format": "uint16",
+                  "maximum": 1000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "omitted_nodes": {
+                  "description": "Scoped endpoints omitted because their requested-level container was unavailable.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "rank_by": {
+                  "$ref": "#/$defs/CycleRankBy",
+                  "description": "Ranking strategy applied to cyclic components."
+                },
+                "relations": {
+                  "description": "Relation families included in the projection.",
+                  "items": {
+                    "$ref": "#/$defs/RelationKind"
+                  },
+                  "maxItems": 8,
+                  "minItems": 1,
+                  "type": "array",
+                  "uniqueItems": true
                 }
-              ]
+              },
+              "required": [
+                "relations",
+                "min_confidence",
+                "level",
+                "rank_by",
+                "omitted_nodes"
+              ],
+              "type": "object"
             },
             "SourceFreeMessage": {
               "description": "A checked Rootlight-generated message that cannot contain paths or source.",
@@ -22711,6 +22818,26 @@
               "additionalProperties": false,
               "description": "One strongly connected component containing cycles.",
               "properties": {
+                "break_cost": {
+                  "description": "Cost of the least expensive candidate break edge.",
+                  "format": "uint16",
+                  "maximum": 1000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "change_risk": {
+                  "description": "Bounded internal history-edge count.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "edge_weight": {
+                  "description": "Sum of admitted confidence across internal edges.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
                 "internal_edges": {
                   "description": "Internal edge count.",
                   "format": "uint32",
@@ -22736,7 +22863,10 @@
               "required": [
                 "size",
                 "members",
-                "internal_edges"
+                "internal_edges",
+                "edge_weight",
+                "change_risk",
+                "break_cost"
               ],
               "type": "object"
             },
@@ -22820,20 +22950,20 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/architecture.cycles/output/1.0",
+          "$id": "https://rootlight.local/schema/mcp/architecture.cycles/output/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadEnvelope",
-              "description": "A tool-specific successful response."
+              "$ref": "#/$defs/AnalysisReadEnvelope",
+              "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/ErrorResponse",
-              "description": "A versioned source-redacted domain error."
+              "$ref": "#/$defs/AnalysisErrorResponse",
+              "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
-          "title": "ToolResponse",
+          "description": "Success-or-error response for analysis schema 1.1.",
+          "title": "AnalysisToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },
@@ -22845,39 +22975,12 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.0",
+            "contractVersion": "1.1",
             "explainSupported": true,
-            "fallbackSummary": "bounded static reachability observations from the partial standard entry-point model",
+            "fallbackSummary": "bounded static reachability observations with explicit entry policies, suppressions, and coverage caveats",
             "generation": "selects_generation",
-            "inputShapeHash": "bcfeb504626e073f2ca7412e8c8c836fe63e54812c969f059cd960d01af6d8da",
-            "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "scope",
-                "status": "unsupported_stable_error",
-                "summary": "structural scope filtering is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "entry_point_policy",
-                "status": "unsupported_stable_error",
-                "summary": "library-specific entry-point resolution is not served",
-                "value": "library"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "entry_point_policy",
-                "status": "unsupported_stable_error",
-                "summary": "application-specific entry-point resolution is not served",
-                "value": "application"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "budget.evidence_level",
-                "status": "unsupported_stable_error",
-                "summary": "evidence projection is not served"
-              }
-            ],
+            "inputShapeHash": "27795802c702c0cd175cec9f563dfdcc92a9265255deaf7864c35d3ba59735ed",
+            "limitations": [],
             "pagination": "explicit_truncation",
             "profiles": [
               "analysis",
@@ -22893,7 +22996,7 @@
               ],
               "wireField": "response_profile"
             },
-            "status": "fallback_limited"
+            "status": "implemented"
           }
         },
         "annotations": {
@@ -22902,7 +23005,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Return bounded static reachability observations from the partial standard entry-point model with dynamic-dispatch and coverage caveats; observations do not prove runtime liveness, and custom scope or alternate entry-point policies are unsupported.",
+        "description": "Return bounded generation-pinned static reachability observations in a structural scope using standard, library, application, framework-specific, or explicit entry roots with suppression rules, blind spots, and coverage caveats; observations do not prove runtime liveness.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -22941,24 +23044,37 @@
               "type": "object"
             },
             "EntryPointPolicy": {
-              "description": "Entry-point model policy for bounded static reachability observations.",
-              "oneOf": [
+              "anyOf": [
                 {
-                  "const": "standard",
-                  "description": "Partial mixed entry-point model currently served by `code.dead`.",
-                  "type": "string"
+                  "$ref": "#/$defs/NamedEntryPointPolicy",
+                  "description": "One predefined bounded entry model."
                 },
                 {
-                  "const": "library",
-                  "description": "Reserved library entry-point model; currently rejected as unsupported.",
-                  "type": "string"
-                },
-                {
-                  "const": "application",
-                  "description": "Reserved application entry-point model; currently rejected as unsupported.",
-                  "type": "string"
+                  "$ref": "#/$defs/ExplicitEntryPointPolicy",
+                  "description": "A caller-supplied stable root set."
                 }
-              ]
+              ],
+              "description": "Entry-point policy accepted by `code.dead`."
+            },
+            "ExplicitEntryPointPolicy": {
+              "additionalProperties": false,
+              "description": "Caller-supplied complete static entry roots.",
+              "properties": {
+                "entry_symbols": {
+                  "description": "Distinct stable entry symbols.",
+                  "items": {
+                    "$ref": "#/$defs/SymbolId"
+                  },
+                  "maxItems": 64,
+                  "minItems": 1,
+                  "type": "array",
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "entry_symbols"
+              ],
+              "type": "object"
             },
             "GenerationId": {
               "pattern": "^gen1_[a-z2-7]{39}$",
@@ -22976,6 +23092,31 @@
                 }
               ],
               "description": "Generation selector shared by first-slice read tools."
+            },
+            "NamedEntryPointPolicy": {
+              "description": "Named entry-point model policy for bounded static reachability observations.",
+              "oneOf": [
+                {
+                  "const": "standard",
+                  "description": "Partial mixed entry-point model.",
+                  "type": "string"
+                },
+                {
+                  "const": "library",
+                  "description": "Library export surface.",
+                  "type": "string"
+                },
+                {
+                  "const": "application",
+                  "description": "Application mains and registered handlers.",
+                  "type": "string"
+                },
+                {
+                  "const": "framework_specific",
+                  "description": "Framework routes, services, and registrations.",
+                  "type": "string"
+                }
+              ]
             },
             "PackageScope": {
               "additionalProperties": false,
@@ -23198,7 +23339,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/code.dead/input/1.0",
+          "$id": "https://rootlight.local/schema/mcp/code.dead/input/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `code.dead`.",
@@ -23217,7 +23358,7 @@
                   "$ref": "#/$defs/EntryPointPolicy"
                 }
               ],
-              "description": "Entry-point model policy. Only `standard` is currently served."
+              "description": "Entry-point model policy or caller-supplied stable entry symbols."
             },
             "explain": {
               "description": "Return the bounded plan without executing retrieval.",
@@ -23283,6 +23424,103 @@
         "name": "code.dead",
         "outputSchema": {
           "$defs": {
+            "AnalysisErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for analysis schema 1.1.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "AnalysisReadEnvelope": {
+              "additionalProperties": false,
+              "description": "Common strict response envelope for additive analysis-tool responses.",
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/ResultCompleteness",
+                  "description": "Authoritative execution completeness and safe continuation semantics."
+                },
+                "coverage": {
+                  "$ref": "#/$defs/CoverageSummary",
+                  "description": "Relevant coverage."
+                },
+                "data": {
+                  "$ref": "#/$defs/CodeDeadData",
+                  "description": "Tool-specific result."
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationSummary",
+                  "description": "Pinned generation and freshness."
+                },
+                "next_cursor": {
+                  "$ref": "#/$defs/RequiredNullable2",
+                  "description": "Safe continuation cursor, when the result is pageable."
+                },
+                "repository": {
+                  "$ref": "#/$defs/ResolvedRepository",
+                  "description": "Resolved repository."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool response schema version."
+                },
+                "truncated": {
+                  "description": "Whether any hard or requested limit stopped completion.",
+                  "type": "boolean"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Response-level classification for all repository-derived content."
+                },
+                "usage": {
+                  "$ref": "#/$defs/UsageSummary",
+                  "description": "Runtime resource accounting."
+                },
+                "warnings": {
+                  "description": "Source-free warnings.",
+                  "items": {
+                    "$ref": "#/$defs/ResponseWarning"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "schema_version",
+                "repository",
+                "generation",
+                "coverage",
+                "data",
+                "truncated",
+                "completeness",
+                "next_cursor",
+                "usage",
+                "warnings",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "AnalysisSchemaVersion": {
+              "description": "Version marker carried by additive analysis responses.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Tool contract version 1.1.",
+                  "type": "string"
+                }
+              ]
+            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -23371,6 +23609,16 @@
                   "maxItems": 500,
                   "type": "array"
                 },
+                "coverage_caveats": {
+                  "description": "Source-free coverage caveats governing negative conclusions.",
+                  "items": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "maxItems": 32,
+                  "type": "array"
+                },
                 "entry_points": {
                   "$ref": "#/$defs/EntryPointSummary",
                   "description": "Entry-point model summary."
@@ -23399,7 +23647,8 @@
                 "candidates",
                 "entry_points",
                 "blind_spots",
-                "false_positive_controls"
+                "false_positive_controls",
+                "coverage_caveats"
               ],
               "type": "object"
             },
@@ -23579,6 +23828,10 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "reachability": {
+                  "$ref": "#/$defs/DeadReachabilitySummary",
+                  "description": "Static reachability measurements supporting the classification."
+                },
                 "source_refs": {
                   "description": "Source evidence for the candidate.",
                   "items": {
@@ -23603,6 +23856,16 @@
                   "$ref": "#/$defs/TrustClassification",
                   "description": "Trust classification for repository-derived content."
                 },
+                "uncertainty": {
+                  "description": "Source-free uncertainty conditions.",
+                  "items": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "maxItems": 16,
+                  "type": "array"
+                },
                 "why": {
                   "description": "Source-free reasons supporting the classification.",
                   "items": {
@@ -23619,6 +23882,8 @@
                 "confidence",
                 "why",
                 "suppressions_checked",
+                "reachability",
+                "uncertainty",
                 "source_refs",
                 "trust"
               ],
@@ -23644,6 +23909,35 @@
                 }
               ]
             },
+            "DeadReachabilitySummary": {
+              "additionalProperties": false,
+              "description": "Static reachability measurements for one dead-code candidate.",
+              "properties": {
+                "incoming_edges": {
+                  "description": "Number of admitted incoming edges.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "reached_from_entry_points": {
+                  "description": "Whether the selected entry-point closure reached the symbol.",
+                  "type": "boolean"
+                },
+                "strongest_incoming_confidence": {
+                  "description": "Strongest admitted incoming edge confidence.",
+                  "format": "uint16",
+                  "maximum": 1000,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "reached_from_entry_points",
+                "incoming_edges",
+                "strongest_incoming_confidence"
+              ],
+              "type": "object"
+            },
             "DetailKey": {
               "description": "A validated key for a bounded public error detail.",
               "maxLength": 64,
@@ -23651,22 +23945,32 @@
               "pattern": "^[a-z0-9_]+$",
               "type": "string"
             },
-            "EntryPointPolicy": {
-              "description": "Entry-point model policy for bounded static reachability observations.",
+            "EntryPointPolicyKind": {
+              "description": "Entry-point policy kind reported by `code.dead`.",
               "oneOf": [
                 {
                   "const": "standard",
-                  "description": "Partial mixed entry-point model currently served by `code.dead`.",
+                  "description": "Partial mixed entry-point model.",
                   "type": "string"
                 },
                 {
                   "const": "library",
-                  "description": "Reserved library entry-point model; currently rejected as unsupported.",
+                  "description": "Library export surface.",
                   "type": "string"
                 },
                 {
                   "const": "application",
-                  "description": "Reserved application entry-point model; currently rejected as unsupported.",
+                  "description": "Application mains and registered handlers.",
+                  "type": "string"
+                },
+                {
+                  "const": "framework_specific",
+                  "description": "Framework routes, services, and registrations.",
+                  "type": "string"
+                },
+                {
+                  "const": "explicit",
+                  "description": "Caller-supplied stable root set.",
                   "type": "string"
                 }
               ]
@@ -23685,14 +23989,23 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "entry_symbols": {
+                  "description": "Bounded stable entry symbols used as roots.",
+                  "items": {
+                    "$ref": "#/$defs/SymbolId"
+                  },
+                  "maxItems": 64,
+                  "type": "array"
+                },
                 "policy": {
-                  "$ref": "#/$defs/EntryPointPolicy",
+                  "$ref": "#/$defs/EntryPointPolicyKind",
                   "description": "Policy used for entry-point resolution."
                 }
               },
               "required": [
                 "policy",
                 "entry_point_count",
+                "entry_symbols",
                 "complete"
               ],
               "type": "object"
@@ -23811,25 +24124,6 @@
                   "type": "string"
                 }
               ]
-            },
-            "ErrorResponse": {
-              "additionalProperties": false,
-              "description": "Strict common error response for MCP contract failures.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable public error envelope."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
             },
             "FileId": {
               "pattern": "^file1_[a-z2-7]{39}$",
@@ -24425,74 +24719,6 @@
                 }
               ]
             },
-            "ReadEnvelope": {
-              "additionalProperties": false,
-              "description": "Common strict response envelope for generation-pinned reads.",
-              "properties": {
-                "completeness": {
-                  "$ref": "#/$defs/ResultCompleteness",
-                  "description": "Authoritative execution completeness and safe continuation semantics."
-                },
-                "coverage": {
-                  "$ref": "#/$defs/CoverageSummary",
-                  "description": "Relevant coverage."
-                },
-                "data": {
-                  "$ref": "#/$defs/CodeDeadData",
-                  "description": "Tool-specific result."
-                },
-                "generation": {
-                  "$ref": "#/$defs/GenerationSummary",
-                  "description": "Pinned generation and freshness."
-                },
-                "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable2",
-                  "description": "Safe continuation cursor, when the result is pageable."
-                },
-                "repository": {
-                  "$ref": "#/$defs/ResolvedRepository",
-                  "description": "Resolved repository."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool response schema version."
-                },
-                "truncated": {
-                  "description": "Whether any hard or requested limit stopped completion.",
-                  "type": "boolean"
-                },
-                "trust": {
-                  "$ref": "#/$defs/TrustClassification",
-                  "description": "Response-level classification for all repository-derived content."
-                },
-                "usage": {
-                  "$ref": "#/$defs/UsageSummary",
-                  "description": "Runtime resource accounting."
-                },
-                "warnings": {
-                  "description": "Source-free warnings.",
-                  "items": {
-                    "$ref": "#/$defs/ResponseWarning"
-                  },
-                  "maxItems": 100,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "schema_version",
-                "repository",
-                "generation",
-                "coverage",
-                "data",
-                "truncated",
-                "completeness",
-                "next_cursor",
-                "usage",
-                "warnings",
-                "trust"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -24621,16 +24847,6 @@
               "minLength": 1,
               "pattern": "^[A-Za-z0-9_.:-]+$",
               "type": "string"
-            },
-            "SchemaVersion": {
-              "description": "Version marker carried by every first-slice response.",
-              "oneOf": [
-                {
-                  "const": "1.0",
-                  "description": "Tool contract version 1.0.",
-                  "type": "string"
-                }
-              ]
             },
             "SourceFreeMessage": {
               "description": "A checked Rootlight-generated message that cannot contain paths or source.",
@@ -24785,20 +25001,20 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/code.dead/output/1.0",
+          "$id": "https://rootlight.local/schema/mcp/code.dead/output/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadEnvelope",
-              "description": "A tool-specific successful response."
+              "$ref": "#/$defs/AnalysisReadEnvelope",
+              "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/ErrorResponse",
-              "description": "A versioned source-redacted domain error."
+              "$ref": "#/$defs/AnalysisErrorResponse",
+              "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
-          "title": "ToolResponse",
+          "description": "Success-or-error response for analysis schema 1.1.",
+          "title": "AnalysisToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },
@@ -24810,100 +25026,12 @@
             "batchEligible": false,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.0",
+            "contractVersion": "1.1",
             "explainSupported": true,
-            "fallbackSummary": "bounded entity and signature comparison of two explicit retained generation identifiers",
+            "fallbackSummary": "bounded scoped semantic comparison across retained or current Git-resolved states",
             "generation": "compares_generations",
-            "inputShapeHash": "d13e631267a97376b41023ab79cdf3afbd80f8de46414857259e528bc8214f5b",
-            "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "scope",
-                "status": "unsupported_stable_error",
-                "summary": "structural scope filtering is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "include_unchanged_context",
-                "status": "unsupported_stable_error",
-                "summary": "unchanged-context projection is not served",
-                "value": "true"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "budget.evidence_level",
-                "status": "unsupported_stable_error",
-                "summary": "evidence projection is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "base.git",
-                "status": "unsupported_stable_error",
-                "summary": "git revision resolution is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "head.git",
-                "status": "unsupported_stable_error",
-                "summary": "git revision resolution is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "change_kinds[]",
-                "status": "unsupported_stable_error",
-                "summary": "relation delta comparison is not served",
-                "value": "relations"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "change_kinds[]",
-                "status": "unsupported_stable_error",
-                "summary": "architecture delta comparison is not served",
-                "value": "architecture"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "change_kinds[]",
-                "status": "unsupported_stable_error",
-                "summary": "ownership delta comparison is not served",
-                "value": "ownership"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "change_kinds[]",
-                "status": "unsupported_stable_error",
-                "summary": "test delta comparison is not served",
-                "value": "tests"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "change_kinds[]",
-                "status": "unsupported_stable_error",
-                "summary": "route delta comparison is not served",
-                "value": "routes"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "change_kinds[]",
-                "status": "unsupported_stable_error",
-                "summary": "data-schema delta comparison is not served",
-                "value": "data"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "profile",
-                "status": "unsupported_stable_error",
-                "summary": "the current output has no optional evidence representation",
-                "value": "evidence"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "profile",
-                "status": "unsupported_stable_error",
-                "summary": "the current output has no optional standard representation",
-                "value": "standard"
-              }
-            ],
+            "inputShapeHash": "af9136aed73a5347ffd2911202ad79690df87465468ba5e5379537d23097e099",
+            "limitations": [],
             "pagination": "explicit_truncation",
             "profiles": [
               "developer"
@@ -24912,11 +25040,13 @@
               "default": "compact",
               "mode": "selectable",
               "supported": [
-                "compact"
+                "compact",
+                "standard",
+                "evidence"
               ],
               "wireField": "profile"
             },
-            "status": "fallback_limited"
+            "status": "implemented"
           }
         },
         "annotations": {
@@ -24925,7 +25055,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded entity and signature comparison of two explicit retained generation identifiers; relation, architecture, ownership, test, route, data, and Git revision comparisons are unsupported.",
+        "description": "Compare retained generations or Git refs matching indexed state with combined path, package, service, and symbol scope; report entity, signature, relation, architecture, ownership, test, route, and data deltas plus breaking candidates and lineage.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -24999,6 +25129,17 @@
                     "type": "string"
                   },
                   "maxItems": 256,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "services": {
+                  "description": "Restrict to these service identities.",
+                  "items": {
+                    "maxLength": 512,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "maxItems": 64,
                   "minItems": 1,
                   "type": "array"
                 },
@@ -25183,7 +25324,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/history.compare/input/1.0",
+          "$id": "https://rootlight.local/schema/mcp/history.compare/input/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `history.compare`.",
@@ -25260,6 +25401,103 @@
         "name": "history.compare",
         "outputSchema": {
           "$defs": {
+            "AnalysisErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for analysis schema 1.1.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "AnalysisReadEnvelope": {
+              "additionalProperties": false,
+              "description": "Common strict response envelope for additive analysis-tool responses.",
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/ResultCompleteness",
+                  "description": "Authoritative execution completeness and safe continuation semantics."
+                },
+                "coverage": {
+                  "$ref": "#/$defs/CoverageSummary",
+                  "description": "Relevant coverage."
+                },
+                "data": {
+                  "$ref": "#/$defs/HistoryCompareData",
+                  "description": "Tool-specific result."
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationSummary",
+                  "description": "Pinned generation and freshness."
+                },
+                "next_cursor": {
+                  "$ref": "#/$defs/RequiredNullable2",
+                  "description": "Safe continuation cursor, when the result is pageable."
+                },
+                "repository": {
+                  "$ref": "#/$defs/ResolvedRepository",
+                  "description": "Resolved repository."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool response schema version."
+                },
+                "truncated": {
+                  "description": "Whether any hard or requested limit stopped completion.",
+                  "type": "boolean"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Response-level classification for all repository-derived content."
+                },
+                "usage": {
+                  "$ref": "#/$defs/UsageSummary",
+                  "description": "Runtime resource accounting."
+                },
+                "warnings": {
+                  "description": "Source-free warnings.",
+                  "items": {
+                    "$ref": "#/$defs/ResponseWarning"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "schema_version",
+                "repository",
+                "generation",
+                "coverage",
+                "data",
+                "truncated",
+                "completeness",
+                "next_cursor",
+                "usage",
+                "warnings",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "AnalysisSchemaVersion": {
+              "description": "Version marker carried by additive analysis responses.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Tool contract version 1.1.",
+                  "type": "string"
+                }
+              ]
+            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -25851,25 +26089,6 @@
                   "type": "string"
                 }
               ]
-            },
-            "ErrorResponse": {
-              "additionalProperties": false,
-              "description": "Strict common error response for MCP contract failures.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable public error envelope."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
             },
             "Freshness": {
               "description": "Freshness of one immutable generation.",
@@ -26551,74 +26770,6 @@
                 }
               ]
             },
-            "ReadEnvelope": {
-              "additionalProperties": false,
-              "description": "Common strict response envelope for generation-pinned reads.",
-              "properties": {
-                "completeness": {
-                  "$ref": "#/$defs/ResultCompleteness",
-                  "description": "Authoritative execution completeness and safe continuation semantics."
-                },
-                "coverage": {
-                  "$ref": "#/$defs/CoverageSummary",
-                  "description": "Relevant coverage."
-                },
-                "data": {
-                  "$ref": "#/$defs/HistoryCompareData",
-                  "description": "Tool-specific result."
-                },
-                "generation": {
-                  "$ref": "#/$defs/GenerationSummary",
-                  "description": "Pinned generation and freshness."
-                },
-                "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable2",
-                  "description": "Safe continuation cursor, when the result is pageable."
-                },
-                "repository": {
-                  "$ref": "#/$defs/ResolvedRepository",
-                  "description": "Resolved repository."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool response schema version."
-                },
-                "truncated": {
-                  "description": "Whether any hard or requested limit stopped completion.",
-                  "type": "boolean"
-                },
-                "trust": {
-                  "$ref": "#/$defs/TrustClassification",
-                  "description": "Response-level classification for all repository-derived content."
-                },
-                "usage": {
-                  "$ref": "#/$defs/UsageSummary",
-                  "description": "Runtime resource accounting."
-                },
-                "warnings": {
-                  "description": "Source-free warnings.",
-                  "items": {
-                    "$ref": "#/$defs/ResponseWarning"
-                  },
-                  "maxItems": 100,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "schema_version",
-                "repository",
-                "generation",
-                "coverage",
-                "data",
-                "truncated",
-                "completeness",
-                "next_cursor",
-                "usage",
-                "warnings",
-                "trust"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -26724,16 +26875,6 @@
               "minLength": 1,
               "pattern": "^[A-Za-z0-9_.:-]+$",
               "type": "string"
-            },
-            "SchemaVersion": {
-              "description": "Version marker carried by every first-slice response.",
-              "oneOf": [
-                {
-                  "const": "1.0",
-                  "description": "Tool contract version 1.0.",
-                  "type": "string"
-                }
-              ]
             },
             "SemanticChange": {
               "additionalProperties": false,
@@ -26918,20 +27059,20 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/history.compare/output/1.0",
+          "$id": "https://rootlight.local/schema/mcp/history.compare/output/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadEnvelope",
-              "description": "A tool-specific successful response."
+              "$ref": "#/$defs/AnalysisReadEnvelope",
+              "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/ErrorResponse",
-              "description": "A versioned source-redacted domain error."
+              "$ref": "#/$defs/AnalysisErrorResponse",
+              "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
-          "title": "ToolResponse",
+          "description": "Success-or-error response for analysis schema 1.1.",
+          "title": "AnalysisToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },
@@ -26943,31 +27084,12 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.0",
+            "contractVersion": "1.1",
             "explainSupported": true,
-            "fallbackSummary": "bounded change planning from a caller-authored objective and explicit targets",
+            "fallbackSummary": "bounded evidence-backed change planning with typed targets constraints and change context",
             "generation": "selects_generation",
-            "inputShapeHash": "90e947c75b35325cb394ddcf457016defd0ec7cd54de62c026ce5c37566c07d1",
-            "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "change_context",
-                "status": "unsupported_stable_error",
-                "summary": "change-context resolution is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "constraints",
-                "status": "unsupported_stable_error",
-                "summary": "user constraint evaluation is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "budget.evidence_level",
-                "status": "unsupported_stable_error",
-                "summary": "evidence projection is not served"
-              }
-            ],
+            "inputShapeHash": "e5f71b656fee51909c5e890683ec943cd445ba1261e4c76ba827ae51a3ae35e7",
+            "limitations": [],
             "pagination": "explicit_truncation",
             "profiles": [
               "developer"
@@ -26982,7 +27104,7 @@
               ],
               "wireField": "profile"
             },
-            "status": "fallback_limited"
+            "status": "implemented"
           }
         },
         "annotations": {
@@ -26991,7 +27113,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded change planning from a caller-authored objective and explicit targets under caller-reduced resource ceilings; change-context resolution and user constraints are unsupported.",
+        "description": "Build an evidence-backed ordered change plan from symbol, file, package, route, or located-result targets; incorporate caller constraints and working-tree, Git, or hypothetical change context under caller-reduced resource ceilings.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -27048,6 +27170,12 @@
               },
               "type": "object"
             },
+            "ContinuationCursor": {
+              "description": "A bounded opaque continuation cursor.",
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
             "FileId": {
               "pattern": "^file1_[a-z2-7]{39}$",
               "type": "string"
@@ -27083,6 +27211,20 @@
               ],
               "type": "object"
             },
+            "PlanLocatedTarget": {
+              "additionalProperties": false,
+              "description": "Located-result plan target.",
+              "properties": {
+                "located": {
+                  "$ref": "#/$defs/ContinuationCursor",
+                  "description": "Opaque handle from a prior bounded locate result."
+                }
+              },
+              "required": [
+                "located"
+              ],
+              "type": "object"
+            },
             "PlanObjective": {
               "description": "Objective class for a change plan.",
               "oneOf": [
@@ -27113,6 +27255,38 @@
                 }
               ]
             },
+            "PlanPackageTarget": {
+              "additionalProperties": false,
+              "description": "Package-based plan target.",
+              "properties": {
+                "package": {
+                  "description": "Package identity or name.",
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "package"
+              ],
+              "type": "object"
+            },
+            "PlanRouteTarget": {
+              "additionalProperties": false,
+              "description": "Route- or service-based plan target.",
+              "properties": {
+                "route": {
+                  "description": "Route or service identity.",
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "route"
+              ],
+              "type": "object"
+            },
             "PlanSymbolTarget": {
               "additionalProperties": false,
               "description": "Symbol-based plan target.",
@@ -27136,6 +27310,18 @@
                 {
                   "$ref": "#/$defs/PlanFileTarget",
                   "description": "Select by file identity."
+                },
+                {
+                  "$ref": "#/$defs/PlanPackageTarget",
+                  "description": "Select by package identity."
+                },
+                {
+                  "$ref": "#/$defs/PlanRouteTarget",
+                  "description": "Select by route or service identity."
+                },
+                {
+                  "$ref": "#/$defs/PlanLocatedTarget",
+                  "description": "Select by an opaque prior located-result handle."
                 }
               ],
               "description": "Target selector for a change plan."
@@ -27296,7 +27482,7 @@
               ]
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/plan.change/input/1.0",
+          "$id": "https://rootlight.local/schema/mcp/plan.change/input/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `plan.change`.",
@@ -27391,6 +27577,103 @@
         "name": "plan.change",
         "outputSchema": {
           "$defs": {
+            "AnalysisErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for analysis schema 1.1.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "AnalysisReadEnvelope": {
+              "additionalProperties": false,
+              "description": "Common strict response envelope for additive analysis-tool responses.",
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/ResultCompleteness",
+                  "description": "Authoritative execution completeness and safe continuation semantics."
+                },
+                "coverage": {
+                  "$ref": "#/$defs/CoverageSummary",
+                  "description": "Relevant coverage."
+                },
+                "data": {
+                  "$ref": "#/$defs/PlanChangeData",
+                  "description": "Tool-specific result."
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationSummary",
+                  "description": "Pinned generation and freshness."
+                },
+                "next_cursor": {
+                  "$ref": "#/$defs/RequiredNullable2",
+                  "description": "Safe continuation cursor, when the result is pageable."
+                },
+                "repository": {
+                  "$ref": "#/$defs/ResolvedRepository",
+                  "description": "Resolved repository."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool response schema version."
+                },
+                "truncated": {
+                  "description": "Whether any hard or requested limit stopped completion.",
+                  "type": "boolean"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Response-level classification for all repository-derived content."
+                },
+                "usage": {
+                  "$ref": "#/$defs/UsageSummary",
+                  "description": "Runtime resource accounting."
+                },
+                "warnings": {
+                  "description": "Source-free warnings.",
+                  "items": {
+                    "$ref": "#/$defs/ResponseWarning"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "schema_version",
+                "repository",
+                "generation",
+                "coverage",
+                "data",
+                "truncated",
+                "completeness",
+                "next_cursor",
+                "usage",
+                "warnings",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "AnalysisSchemaVersion": {
+              "description": "Version marker carried by additive analysis responses.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Tool contract version 1.1.",
+                  "type": "string"
+                }
+              ]
+            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -27823,25 +28106,6 @@
                   "type": "string"
                 }
               ]
-            },
-            "ErrorResponse": {
-              "additionalProperties": false,
-              "description": "Strict common error response for MCP contract failures.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable public error envelope."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
             },
             "FileId": {
               "pattern": "^file1_[a-z2-7]{39}$",
@@ -28772,74 +29036,6 @@
                 }
               ]
             },
-            "ReadEnvelope": {
-              "additionalProperties": false,
-              "description": "Common strict response envelope for generation-pinned reads.",
-              "properties": {
-                "completeness": {
-                  "$ref": "#/$defs/ResultCompleteness",
-                  "description": "Authoritative execution completeness and safe continuation semantics."
-                },
-                "coverage": {
-                  "$ref": "#/$defs/CoverageSummary",
-                  "description": "Relevant coverage."
-                },
-                "data": {
-                  "$ref": "#/$defs/PlanChangeData",
-                  "description": "Tool-specific result."
-                },
-                "generation": {
-                  "$ref": "#/$defs/GenerationSummary",
-                  "description": "Pinned generation and freshness."
-                },
-                "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable2",
-                  "description": "Safe continuation cursor, when the result is pageable."
-                },
-                "repository": {
-                  "$ref": "#/$defs/ResolvedRepository",
-                  "description": "Resolved repository."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool response schema version."
-                },
-                "truncated": {
-                  "description": "Whether any hard or requested limit stopped completion.",
-                  "type": "boolean"
-                },
-                "trust": {
-                  "$ref": "#/$defs/TrustClassification",
-                  "description": "Response-level classification for all repository-derived content."
-                },
-                "usage": {
-                  "$ref": "#/$defs/UsageSummary",
-                  "description": "Runtime resource accounting."
-                },
-                "warnings": {
-                  "description": "Source-free warnings.",
-                  "items": {
-                    "$ref": "#/$defs/ResponseWarning"
-                  },
-                  "maxItems": 100,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "schema_version",
-                "repository",
-                "generation",
-                "coverage",
-                "data",
-                "truncated",
-                "completeness",
-                "next_cursor",
-                "usage",
-                "warnings",
-                "trust"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -28975,16 +29171,6 @@
               "minLength": 1,
               "pattern": "^[A-Za-z0-9_.:-]+$",
               "type": "string"
-            },
-            "SchemaVersion": {
-              "description": "Version marker carried by every first-slice response.",
-              "oneOf": [
-                {
-                  "const": "1.0",
-                  "description": "Tool contract version 1.0.",
-                  "type": "string"
-                }
-              ]
             },
             "SourceFreeMessage": {
               "description": "A checked Rootlight-generated message that cannot contain paths or source.",
@@ -29123,20 +29309,20 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/plan.change/output/1.0",
+          "$id": "https://rootlight.local/schema/mcp/plan.change/output/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadEnvelope",
-              "description": "A tool-specific successful response."
+              "$ref": "#/$defs/AnalysisReadEnvelope",
+              "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/ErrorResponse",
-              "description": "A versioned source-redacted domain error."
+              "$ref": "#/$defs/AnalysisErrorResponse",
+              "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
-          "title": "ToolResponse",
+          "description": "Success-or-error response for analysis schema 1.1.",
+          "title": "AnalysisToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },
@@ -29148,43 +29334,12 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "token_budget",
-            "contractVersion": "1.0",
+            "contractVersion": "1.1",
             "explainSupported": true,
-            "fallbackSummary": "bounded profiled evidence assembly with authenticated continuation, generation-pinned references signatures and source snippets under a token budget",
+            "fallbackSummary": "bounded profiled multi-seed evidence assembly with authenticated continuation under a token budget",
             "generation": "selects_generation",
             "inputShapeHash": "b83aa16bc6f116cc4354fb3058f61d637090562f70f7966a9220b63db3e564fc",
-            "limitations": [
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "seeds.paths",
-                "status": "unsupported_stable_error",
-                "summary": "path seeds are not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "seeds.routes",
-                "status": "unsupported_stable_error",
-                "summary": "route seeds are not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "seeds.located",
-                "status": "unsupported_stable_error",
-                "summary": "located-result seeds are not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "seeds.change",
-                "status": "unsupported_stable_error",
-                "summary": "change seeds are not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "seeds.plan",
-                "status": "unsupported_stable_error",
-                "summary": "plan seeds are not served"
-              }
-            ],
+            "limitations": [],
             "pagination": "authenticated_cursor",
             "profiles": [
               "scout",
@@ -29201,7 +29356,7 @@
               ],
               "wireField": "response_profile"
             },
-            "status": "fallback_limited"
+            "status": "implemented"
           }
         },
         "annotations": {
@@ -29210,7 +29365,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded profiled evidence assembly with authenticated continuation, generation-pinned references signatures and source snippets under a token budget; selectable response profiles and source policies control representation, while path, route, change, located-result, and plan seeds are unsupported.",
+        "description": "Assemble deterministic generation-pinned definitions, implementations, callers, tests, risks, architecture, change, and source evidence from symbol, path, route, test, change, located-result, or plan seeds under an authenticated token-bounded continuation.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -29469,7 +29624,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/context.pack/input/1.0",
+          "$id": "https://rootlight.local/schema/mcp/context.pack/input/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict input for `context.pack`.",
@@ -29567,6 +29722,103 @@
         "name": "context.pack",
         "outputSchema": {
           "$defs": {
+            "AnalysisErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked error response for analysis schema 1.1.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Stable source-redacted error."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool error schema version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "AnalysisReadEnvelope": {
+              "additionalProperties": false,
+              "description": "Common strict response envelope for additive analysis-tool responses.",
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/ResultCompleteness",
+                  "description": "Authoritative execution completeness and safe continuation semantics."
+                },
+                "coverage": {
+                  "$ref": "#/$defs/CoverageSummary",
+                  "description": "Relevant coverage."
+                },
+                "data": {
+                  "$ref": "#/$defs/ContextPackData",
+                  "description": "Tool-specific result."
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationSummary",
+                  "description": "Pinned generation and freshness."
+                },
+                "next_cursor": {
+                  "$ref": "#/$defs/RequiredNullable2",
+                  "description": "Safe continuation cursor, when the result is pageable."
+                },
+                "repository": {
+                  "$ref": "#/$defs/ResolvedRepository",
+                  "description": "Resolved repository."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/AnalysisSchemaVersion",
+                  "description": "Tool response schema version."
+                },
+                "truncated": {
+                  "description": "Whether any hard or requested limit stopped completion.",
+                  "type": "boolean"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Response-level classification for all repository-derived content."
+                },
+                "usage": {
+                  "$ref": "#/$defs/UsageSummary",
+                  "description": "Runtime resource accounting."
+                },
+                "warnings": {
+                  "description": "Source-free warnings.",
+                  "items": {
+                    "$ref": "#/$defs/ResponseWarning"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "schema_version",
+                "repository",
+                "generation",
+                "coverage",
+                "data",
+                "truncated",
+                "completeness",
+                "next_cursor",
+                "usage",
+                "warnings",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "AnalysisSchemaVersion": {
+              "description": "Version marker carried by additive analysis responses.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Tool contract version 1.1.",
+                  "type": "string"
+                }
+              ]
+            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -30116,25 +30368,6 @@
                   "type": "string"
                 }
               ]
-            },
-            "ErrorResponse": {
-              "additionalProperties": false,
-              "description": "Strict common error response for MCP contract failures.",
-              "properties": {
-                "error": {
-                  "$ref": "#/$defs/PublicError",
-                  "description": "Stable public error envelope."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool error schema version."
-                }
-              },
-              "required": [
-                "schema_version",
-                "error"
-              ],
-              "type": "object"
             },
             "EvidenceRole": {
               "description": "Role of one evidence item within the assembled context pack.",
@@ -30878,74 +31111,6 @@
                 }
               ]
             },
-            "ReadEnvelope": {
-              "additionalProperties": false,
-              "description": "Common strict response envelope for generation-pinned reads.",
-              "properties": {
-                "completeness": {
-                  "$ref": "#/$defs/ResultCompleteness",
-                  "description": "Authoritative execution completeness and safe continuation semantics."
-                },
-                "coverage": {
-                  "$ref": "#/$defs/CoverageSummary",
-                  "description": "Relevant coverage."
-                },
-                "data": {
-                  "$ref": "#/$defs/ContextPackData",
-                  "description": "Tool-specific result."
-                },
-                "generation": {
-                  "$ref": "#/$defs/GenerationSummary",
-                  "description": "Pinned generation and freshness."
-                },
-                "next_cursor": {
-                  "$ref": "#/$defs/RequiredNullable2",
-                  "description": "Safe continuation cursor, when the result is pageable."
-                },
-                "repository": {
-                  "$ref": "#/$defs/ResolvedRepository",
-                  "description": "Resolved repository."
-                },
-                "schema_version": {
-                  "$ref": "#/$defs/SchemaVersion",
-                  "description": "Tool response schema version."
-                },
-                "truncated": {
-                  "description": "Whether any hard or requested limit stopped completion.",
-                  "type": "boolean"
-                },
-                "trust": {
-                  "$ref": "#/$defs/TrustClassification",
-                  "description": "Response-level classification for all repository-derived content."
-                },
-                "usage": {
-                  "$ref": "#/$defs/UsageSummary",
-                  "description": "Runtime resource accounting."
-                },
-                "warnings": {
-                  "description": "Source-free warnings.",
-                  "items": {
-                    "$ref": "#/$defs/ResponseWarning"
-                  },
-                  "maxItems": 100,
-                  "type": "array"
-                }
-              },
-              "required": [
-                "schema_version",
-                "repository",
-                "generation",
-                "coverage",
-                "data",
-                "truncated",
-                "completeness",
-                "next_cursor",
-                "usage",
-                "warnings",
-                "trust"
-              ],
-              "type": "object"
-            },
             "RepositoryId": {
               "pattern": "^repo1_[a-z2-7]{32}$",
               "type": "string"
@@ -31214,16 +31379,6 @@
               "pattern": "^[A-Za-z0-9_.:-]+$",
               "type": "string"
             },
-            "SchemaVersion": {
-              "description": "Version marker carried by every first-slice response.",
-              "oneOf": [
-                {
-                  "const": "1.0",
-                  "description": "Tool contract version 1.0.",
-                  "type": "string"
-                }
-              ]
-            },
             "SnippetProvenance": {
               "description": "Provenance of raw source bytes included in a context pack.",
               "oneOf": [
@@ -31445,20 +31600,20 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/context.pack/output/1.0",
+          "$id": "https://rootlight.local/schema/mcp/context.pack/output/1.1",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {
-              "$ref": "#/$defs/ReadEnvelope",
-              "description": "A tool-specific successful response."
+              "$ref": "#/$defs/AnalysisReadEnvelope",
+              "description": "Tool-specific successful response."
             },
             {
-              "$ref": "#/$defs/ErrorResponse",
-              "description": "A versioned source-redacted domain error."
+              "$ref": "#/$defs/AnalysisErrorResponse",
+              "description": "Checked source-redacted domain error."
             }
           ],
-          "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
-          "title": "ToolResponse",
+          "description": "Success-or-error response for analysis schema 1.1.",
+          "title": "AnalysisToolResponse",
           "type": "object",
           "unevaluatedProperties": false
         },

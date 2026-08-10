@@ -25,7 +25,62 @@
       {
         "current_version": "1.1",
         "projected_version": "1.0",
+        "tool": "repo.status"
+      },
+      {
+        "current_version": "1.2",
+        "projected_version": "1.0",
         "tool": "operation.status"
+      },
+      {
+        "current_version": "1.1",
+        "projected_version": "1.0",
+        "tool": "symbol.explain"
+      },
+      {
+        "current_version": "1.1",
+        "projected_version": "1.0",
+        "tool": "symbol.relationships"
+      },
+      {
+        "current_version": "1.1",
+        "projected_version": "1.0",
+        "tool": "change.impact"
+      },
+      {
+        "current_version": "1.1",
+        "projected_version": "1.0",
+        "tool": "tests.select"
+      },
+      {
+        "current_version": "1.1",
+        "projected_version": "1.0",
+        "tool": "architecture.overview"
+      },
+      {
+        "current_version": "1.1",
+        "projected_version": "1.0",
+        "tool": "architecture.cycles"
+      },
+      {
+        "current_version": "1.1",
+        "projected_version": "1.0",
+        "tool": "code.dead"
+      },
+      {
+        "current_version": "1.1",
+        "projected_version": "1.0",
+        "tool": "history.compare"
+      },
+      {
+        "current_version": "1.1",
+        "projected_version": "1.0",
+        "tool": "plan.change"
+      },
+      {
+        "current_version": "1.1",
+        "projected_version": "1.0",
+        "tool": "context.pack"
       }
     ]
   },
@@ -37,7 +92,7 @@
     },
     {
       "tool": "repo.status",
-      "version": "1.0"
+      "version": "1.1"
     },
     {
       "tool": "repo.list",
@@ -45,7 +100,7 @@
     },
     {
       "tool": "operation.status",
-      "version": "1.1"
+      "version": "1.2"
     },
     {
       "tool": "code.locate",
@@ -53,11 +108,11 @@
     },
     {
       "tool": "symbol.explain",
-      "version": "1.0"
+      "version": "1.1"
     },
     {
       "tool": "symbol.relationships",
-      "version": "1.0"
+      "version": "1.1"
     },
     {
       "tool": "flow.trace",
@@ -65,35 +120,35 @@
     },
     {
       "tool": "change.impact",
-      "version": "1.0"
+      "version": "1.1"
     },
     {
       "tool": "tests.select",
-      "version": "1.0"
+      "version": "1.1"
     },
     {
       "tool": "architecture.overview",
-      "version": "1.0"
+      "version": "1.1"
     },
     {
       "tool": "architecture.cycles",
-      "version": "1.0"
+      "version": "1.1"
     },
     {
       "tool": "code.dead",
-      "version": "1.0"
+      "version": "1.1"
     },
     {
       "tool": "history.compare",
-      "version": "1.0"
+      "version": "1.1"
     },
     {
       "tool": "plan.change",
-      "version": "1.0"
+      "version": "1.1"
     },
     {
       "tool": "context.pack",
-      "version": "1.0"
+      "version": "1.1"
     },
     {
       "tool": "source.read",

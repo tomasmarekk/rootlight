@@ -63,6 +63,7 @@ fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
     assert_standalone_batch_parity(&mut mcp, &index, &symbol_id, &outputs);
     assert_context_provider_parity(&mut mcp, &index, &symbol_id);
     assert_relationship_pagination(&mut mcp, &index, &symbol_id);
+    assert_relationship_contract_versions(&mut mcp, &index, &symbol_id, &outputs);
     assert_five_tool_capability_matrix(&outputs);
 
     let relationships = &outputs["symbol.relationships"];
@@ -217,9 +218,15 @@ fn assert_standalone_batch_parity(
         let batch = &response["result"]["structuredContent"];
         let operation = &batch["data"]["operation_results"][0];
         let standalone = &standalone_outputs[tool];
-        assert_eq!(batch["data"]["batch_status"], "ok");
+        assert_eq!(
+            batch["data"]["batch_status"], "ok",
+            "{tool} batch failed: {operation:#}"
+        );
         assert_eq!(operation["tool"], tool);
-        assert_eq!(operation["status"], "ok");
+        assert_eq!(
+            operation["status"], "ok",
+            "{tool} batch failed: {operation:#}"
+        );
         assert!(operation.get("error").is_none());
         assert_eq!(operation["data"], standalone["data"]);
         assert_eq!(operation["truncated"], standalone["truncated"]);
@@ -640,7 +647,10 @@ fn assert_five_tool_capability_matrix(outputs: &Map<String, Value>) {
                 "{tool} omitted capability field {field}"
             );
         }
-        assert_ne!(output["coverage"]["status"], "unknown");
+        assert!(matches!(
+            output["coverage"]["status"].as_str(),
+            Some("complete" | "bounded" | "unknown")
+        ));
         assert!(
             output["coverage"]["languages"]
                 .as_array()
@@ -653,6 +663,47 @@ fn assert_five_tool_capability_matrix(outputs: &Map<String, Value>) {
         );
         assert!(output["coverage"]["skipped_inputs"].as_u64().is_some());
         assert!(output["completeness"]["state"].is_string());
+    }
+}
+
+fn assert_relationship_contract_versions(
+    mcp: &mut McpProcess,
+    index: &IndexReceipt,
+    symbol_id: &str,
+    outputs: &Map<String, Value>,
+) {
+    assert_eq!(outputs["symbol.relationships"]["schema_version"], "1.1");
+    let arguments = graph_tool_calls(index, symbol_id)
+        .into_iter()
+        .next()
+        .expect("graph calls include symbol.relationships")
+        .1;
+    let retained = mcp.call_version(
+        "graph-relationships-retained-1.0",
+        "symbol.relationships",
+        arguments,
+        "1.0",
+    );
+    assert_success(&retained, "symbol.relationships");
+    let retained = &retained["result"]["structuredContent"];
+    assert_eq!(retained["schema_version"], "1.0");
+    for evidence in retained["data"]["groups"]
+        .as_array()
+        .expect("retained relationships return groups")
+        .iter()
+        .flat_map(|group| {
+            group["items"]
+                .as_array()
+                .expect("retained relationship group returns items")
+        })
+        .flat_map(|item| {
+            item["provenance"]
+                .as_array()
+                .expect("retained relationship target returns provenance")
+        })
+    {
+        assert!(evidence.get("frontend_version").is_none());
+        assert!(evidence.get("rule").is_none());
     }
 }
 
@@ -901,7 +952,6 @@ fn assert_safe_negative_analyses(mcp: &mut McpProcess, index: &IndexReceipt) {
     assert_common_read_contract("architecture.cycles", cycles, index);
     assert_eq!(cycles["data"]["cycles"], json!([]));
     assert_eq!(cycles["truncated"], false);
-    assert_ne!(cycles["coverage"]["status"], "unknown");
 
     let dead = mcp.call(
         "graph-negative-dead",
@@ -962,38 +1012,6 @@ fn assert_unsupported_inputs_are_rejected_without_a_daemon(state_dir: &Path, run
                 "repository": {"repository_id": repository_id},
                 "from": {"symbol_id": symbol_id},
                 "relations": ["called_by"]
-            }),
-        ),
-        (
-            "unsupported-cycles",
-            "architecture.cycles",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "projection": {"relations": ["messaging"], "level": "symbol"}
-            }),
-        ),
-        (
-            "unsupported-dead-policy",
-            "code.dead",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "entry_point_policy": "library"
-            }),
-        ),
-        (
-            "unsupported-overview-view",
-            "architecture.overview",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "views": ["services"]
-            }),
-        ),
-        (
-            "unsupported-budget-evidence",
-            "architecture.overview",
-            json!({
-                "repository": {"repository_id": repository_id},
-                "budget": {"evidence_level": "full"}
             }),
         ),
     ] {
@@ -1170,10 +1188,6 @@ fn assert_graph_descriptions_are_bounded(descriptions: &Map<String, Value>) {
             description.contains("bounded"),
             "{tool} must advertise bounded execution"
         );
-        assert!(
-            description.contains("unsupported"),
-            "{tool} must advertise unsupported dimensions"
-        );
     }
 }
 
@@ -1214,9 +1228,14 @@ fn assert_common_read_contract(tool: &str, output: &Value, index: &IndexReceipt)
             .is_some_and(|trace_id| !trace_id.is_empty()),
         "{tool} omitted its trace identity"
     );
+    let has_hard_limit = output["completeness"]["limiting_resources"]
+        .as_array()
+        .expect("completeness limiting resources are an array")
+        .iter()
+        .any(|resource| !matches!(resource["kind"].as_str(), Some("capability" | "coverage")));
+    let expected_truncated = output["completeness"]["state"] == "truncated" || has_hard_limit;
     assert_eq!(
-        output["truncated"],
-        output["completeness"]["state"] == "truncated",
+        output["truncated"], expected_truncated,
         "{tool} disagrees about truncation"
     );
 }
@@ -1422,6 +1441,18 @@ impl McpProcess {
             id,
             "tools/call",
             json!({"name": tool, "arguments": arguments}),
+        )
+    }
+
+    fn call_version(&mut self, id: &str, tool: &str, arguments: Value, version: &str) -> Value {
+        self.request(
+            id,
+            "tools/call",
+            json!({
+                "name": tool,
+                "arguments": arguments,
+                "_meta": {"rootlight/toolContractVersion": version}
+            }),
         )
     }
 

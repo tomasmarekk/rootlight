@@ -706,16 +706,32 @@ impl RelationFamily {
                 RelationPredicate::Overrides,
             ],
             Self::Imports => &[RelationPredicate::Imports],
-            Self::Tests
-            | Self::Ownership
-            | Self::ServiceCall
-            | Self::CallsRoute
-            | Self::Messaging
-            | Self::ReadsTable
-            | Self::WritesTable
-            | Self::BuildDependency
-            | Self::DataFlow
-            | Self::History => &[],
+            Self::Tests => &[RelationPredicate::Tests],
+            // The normalized IR deliberately has no ownership predicate.
+            // Ownership remains a declared but coverage-limited projection
+            // until an adapter emits a semantically valid common relation.
+            Self::Ownership => &[],
+            Self::ServiceCall => &[
+                RelationPredicate::CallsForeign,
+                RelationPredicate::CallsRoute,
+                RelationPredicate::ServesRoute,
+            ],
+            Self::CallsRoute => &[
+                RelationPredicate::CallsRoute,
+                RelationPredicate::ServesRoute,
+            ],
+            Self::Messaging => &[RelationPredicate::Publishes, RelationPredicate::Consumes],
+            Self::ReadsTable => &[RelationPredicate::ReadsTable],
+            Self::WritesTable => &[RelationPredicate::WritesTable],
+            Self::BuildDependency => &[RelationPredicate::DependsOn],
+            Self::DataFlow => &[RelationPredicate::Reads, RelationPredicate::Writes],
+            Self::History => &[
+                RelationPredicate::ChangedIn,
+                RelationPredicate::LineageRenamedFrom,
+                RelationPredicate::LineageMovedFrom,
+                RelationPredicate::LineageSplitFrom,
+                RelationPredicate::LineageMergedFrom,
+            ],
         }
     }
 
@@ -776,10 +792,13 @@ impl FlowTracePlan {
 #[derive(Debug, Clone)]
 pub struct ArchitectureCyclesPlan {
     pub(crate) families: Vec<RelationFamily>,
+    pub(crate) scope: Option<AnalysisScope>,
+    pub(crate) level: CycleProjectionLevel,
     pub(crate) min_confidence: u16,
     pub(crate) min_size: u8,
     pub(crate) max_cycles: usize,
     pub(crate) include_self_cycles: bool,
+    pub(crate) rank_by: CycleRankBy,
     pub(crate) budget: QueryBudget,
     pub(crate) explanation: PlanExplanation,
 }
@@ -789,6 +808,105 @@ impl ArchitectureCyclesPlan {
     #[must_use]
     pub const fn explanation(&self) -> &PlanExplanation {
         &self.explanation
+    }
+}
+
+/// Typed structural scope shared by bounded architecture and reachability queries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "values", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AnalysisScope {
+    /// Repository-relative path prefixes.
+    Paths(Vec<String>),
+    /// Package identities or canonical package names.
+    Packages(Vec<String>),
+    /// Build-target identities or canonical target names.
+    BuildTargets(Vec<String>),
+    /// Stable symbol identities.
+    Symbols(BTreeSet<SymbolId>),
+}
+
+/// Aggregation level for an architecture-cycle projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CycleProjectionLevel {
+    /// Preserve entity-level symbols.
+    Symbol,
+    /// Aggregate through the nearest containing module or namespace.
+    Module,
+    /// Aggregate through the nearest containing package.
+    Package,
+    /// Aggregate through the nearest containing build target.
+    BuildTarget,
+    /// Aggregate through the nearest containing service.
+    Service,
+}
+
+impl CycleProjectionLevel {
+    /// Returns the stable wire label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Symbol => "symbol",
+            Self::Module => "module",
+            Self::Package => "package",
+            Self::BuildTarget => "build_target",
+            Self::Service => "service",
+        }
+    }
+
+    /// Parses one stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "symbol" => Some(Self::Symbol),
+            "module" => Some(Self::Module),
+            "package" => Some(Self::Package),
+            "build_target" => Some(Self::BuildTarget),
+            "service" => Some(Self::Service),
+            _ => None,
+        }
+    }
+}
+
+/// Ranking strategy for cyclic components and their representative cycles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CycleRankBy {
+    /// Largest strongly connected components first.
+    Size,
+    /// Densest components first.
+    EdgeWeight,
+    /// Components with the strongest change-history signal first.
+    ChangeRisk,
+    /// Components whose weakest dependency is hardest to remove first.
+    BreakCost,
+}
+
+impl CycleRankBy {
+    /// Returns the stable wire label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Size => "size",
+            Self::EdgeWeight => "edge_weight",
+            Self::ChangeRisk => "change_risk",
+            Self::BreakCost => "break_cost",
+        }
+    }
+
+    /// Parses one stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "size" => Some(Self::Size),
+            "edge_weight" => Some(Self::EdgeWeight),
+            "change_risk" => Some(Self::ChangeRisk),
+            "break_cost" => Some(Self::BreakCost),
+            _ => None,
+        }
     }
 }
 
@@ -1019,6 +1137,12 @@ pub struct CycleComponent {
     pub members: Vec<SymbolId>,
     /// Count of served edges whose endpoints both lie in the component.
     pub internal_edges: u32,
+    /// Sum of effective confidence across internal edges.
+    pub edge_weight: u64,
+    /// Bounded count of internal history edges.
+    pub change_risk: u32,
+    /// Confidence-derived cost of the least expensive candidate break edge.
+    pub break_cost: u16,
 }
 
 /// One bounded representative minimal cycle.
@@ -1052,8 +1176,14 @@ pub struct CycleBreak {
 pub struct ArchitectureCyclesProjection {
     /// Relation families included in the detection, in deterministic order.
     pub families: Vec<RelationFamily>,
+    /// Aggregation level applied before cycle detection.
+    pub level: CycleProjectionLevel,
     /// Minimum confidence threshold applied.
     pub min_confidence: u16,
+    /// Ranking strategy applied to components and representative cycles.
+    pub rank_by: CycleRankBy,
+    /// Scoped entity endpoints omitted because no requested-level container exists.
+    pub omitted_nodes: u32,
 }
 
 /// Data returned by an `architecture.cycles` plan.
@@ -1077,13 +1207,23 @@ pub struct ArchitectureCyclesResult {
     pub trust: RepositoryDataTrust,
 }
 
-/// Architecture derived-view categories served by an `architecture.overview`.
-///
-/// The base component and connection model is always file-granularity.
+/// Architecture view categories served by an `architecture.overview`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ArchitectureOverviewView {
+    /// Module and namespace boundaries.
+    Modules,
+    /// Package or distribution boundaries.
+    Packages,
+    /// Service and route boundaries.
+    Services,
+    /// Database objects and message topics.
+    Data,
+    /// Build-target boundaries.
+    Build,
+    /// Ownership relations and their coverage.
+    Ownership,
     /// Deterministic structural-affinity communities.
     Communities,
     /// Structural hotspot ranking derived view.
@@ -1095,6 +1235,12 @@ impl ArchitectureOverviewView {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Modules => "modules",
+            Self::Packages => "packages",
+            Self::Services => "services",
+            Self::Data => "data",
+            Self::Build => "build",
+            Self::Ownership => "ownership",
             Self::Communities => "communities",
             Self::Hotspots => "hotspots",
         }
@@ -1104,8 +1250,50 @@ impl ArchitectureOverviewView {
     #[must_use]
     pub fn from_label(value: &str) -> Option<Self> {
         match value {
+            "modules" => Some(Self::Modules),
+            "packages" => Some(Self::Packages),
+            "services" => Some(Self::Services),
+            "data" => Some(Self::Data),
+            "build" => Some(Self::Build),
+            "ownership" => Some(Self::Ownership),
             "communities" => Some(Self::Communities),
             "hotspots" => Some(Self::Hotspots),
+            _ => None,
+        }
+    }
+}
+
+/// Detail level controlling bounded architecture evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ArchitectureOverviewDetail {
+    /// Counts and identities only.
+    Summary,
+    /// Standard evidence and metrics.
+    Standard,
+    /// Maximum bounded evidence and source anchors.
+    Detailed,
+}
+
+impl ArchitectureOverviewDetail {
+    /// Returns the stable wire label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::Standard => "standard",
+            Self::Detailed => "detailed",
+        }
+    }
+
+    /// Parses one stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "summary" => Some(Self::Summary),
+            "standard" => Some(Self::Standard),
+            "detailed" => Some(Self::Detailed),
             _ => None,
         }
     }
@@ -1115,6 +1303,8 @@ impl ArchitectureOverviewView {
 #[derive(Debug, Clone)]
 pub struct ArchitectureOverviewPlan {
     pub(crate) views: Vec<ArchitectureOverviewView>,
+    pub(crate) scope: Option<AnalysisScope>,
+    pub(crate) detail: ArchitectureOverviewDetail,
     pub(crate) min_confidence: u16,
     pub(crate) max_components: usize,
     pub(crate) include_edges: bool,
@@ -1130,19 +1320,23 @@ impl ArchitectureOverviewPlan {
     }
 }
 
-/// One aggregated architecture component keyed by its containing file.
+/// One aggregated architecture component.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ArchitectureComponent {
-    /// Stable component identity derived from the containing file identity.
+    /// Stable component identity.
     pub id: String,
-    /// Component kind label; always `file` for this slice.
+    /// Component kind label.
     pub kind: String,
-    /// Repository-controlled display path; always untrusted data.
+    /// Repository-controlled display name; always untrusted data.
     pub name: String,
     /// Number of contained symbols.
     pub symbol_count: u32,
+    /// Number of distinct source files represented by the component.
+    pub file_count: u32,
     /// Source-free evidence categories supporting the responsibility claim.
     pub responsibility_evidence: Vec<String>,
+    /// Direct immutable source anchors, bounded by the requested detail level.
+    pub source_refs: Vec<SourceRef>,
     /// Aggregate containment confidence from 0 through 1000.
     pub confidence: u16,
 }
@@ -1171,10 +1365,14 @@ pub struct ArchitectureHotspot {
     pub fan_in: u32,
     /// Number of outgoing connections to distinct components.
     pub fan_out: u32,
-    /// Change-frequency signal; always absent in this slice.
+    /// Change-frequency signal when indexed history is available.
     pub change_frequency: Option<u32>,
-    /// Complexity signal; always absent in this slice.
+    /// Complexity signal when producer facts make it available.
     pub complexity: Option<u32>,
+    /// Ownership-edge signal when ownership facts are available.
+    pub ownership_signal: Option<u32>,
+    /// Test-edge signal when test relations are available.
+    pub test_signal: Option<u32>,
     /// Aggregate hotspot score from 0 through 1000.
     pub score: u16,
 }
@@ -1285,8 +1483,13 @@ impl TestsSelectKind {
 #[derive(Debug, Clone)]
 pub struct TestsSelectPlan {
     pub(crate) seeds: BTreeSet<SymbolId>,
+    pub(crate) seed_paths: Vec<String>,
+    pub(crate) seed_build_targets: Vec<String>,
     pub(crate) test_kinds: Vec<TestsSelectKind>,
+    pub(crate) frameworks: Vec<String>,
     pub(crate) max_tests: usize,
+    pub(crate) max_total_ms: Option<u32>,
+    pub(crate) max_slow_tests: Option<u16>,
     pub(crate) include_commands: bool,
     pub(crate) budget: QueryBudget,
     pub(crate) explanation: PlanExplanation,
@@ -1307,13 +1510,15 @@ pub struct RankedTestSelection {
     pub test_id: SymbolId,
     /// Test granularity category.
     pub kind: TestsSelectKind,
+    /// Source-free framework classification used for filtering.
+    pub framework: String,
     /// Repository-controlled display path to the test, when served.
     pub path: Option<String>,
     /// Relevance score from 0 through 1000.
     pub score: u16,
     /// Source-free rationale codes, in deterministic order.
     pub why: Vec<String>,
-    /// Estimated execution cost in milliseconds; always absent in this slice.
+    /// Deterministic estimated execution cost in milliseconds.
     pub estimated_cost_ms: Option<u32>,
     /// Inert declarative command hint; only present when requested.
     pub command_hint: Option<String>,
@@ -1326,8 +1531,10 @@ pub struct TestsSelectCoverage {
     pub direct_edges: bool,
     /// Whether transitive dependency signals were used.
     pub transitive_signals: bool,
-    /// Whether historical co-change signals were used; always false here.
+    /// Whether bounded historical co-change signals were used.
     pub history_signals: bool,
+    /// Whether build-target dependency signals were used.
+    pub build_target_signals: bool,
     /// Whether declaring-file co-location with a seed was used.
     pub file_colocation_signals: bool,
 }
@@ -1453,12 +1660,30 @@ impl ChangeImpactRiskLevel {
 pub struct ChangeImpactPlan {
     pub(crate) changed_symbols: BTreeSet<SymbolId>,
     pub(crate) changed_paths: Vec<String>,
+    pub(crate) scope_paths: Vec<String>,
+    pub(crate) scope_packages: Vec<String>,
+    pub(crate) scope_services: Vec<String>,
+    pub(crate) relation_policy: ChangeImpactRelationPolicy,
     pub(crate) max_depth: u8,
     pub(crate) min_confidence: u16,
     pub(crate) include_tests: bool,
+    pub(crate) include_history: bool,
     pub(crate) max_dependents: usize,
     pub(crate) budget: QueryBudget,
     pub(crate) explanation: PlanExplanation,
+}
+
+/// Relation projection used by a `change.impact` plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ChangeImpactRelationPolicy {
+    /// Propagate through the standard static semantic families.
+    Standard,
+    /// Over-approximate through every modeled dependency and boundary family.
+    Conservative,
+    /// Return only direct dependents.
+    DirectOnly,
 }
 
 impl ChangeImpactPlan {
@@ -1610,6 +1835,8 @@ pub struct PlanChangePlan {
     pub(crate) objective_text: String,
     pub(crate) target_symbols: BTreeSet<SymbolId>,
     pub(crate) target_files: BTreeSet<FileId>,
+    pub(crate) target_paths: BTreeSet<String>,
+    pub(crate) constraints: Vec<String>,
     pub(crate) max_steps: usize,
     pub(crate) max_depth: u8,
     pub(crate) max_dependents: usize,
@@ -1771,6 +1998,12 @@ pub enum HistorySemanticChangeKind {
     SignatureModified,
     /// A relation was added or removed.
     RelationChanged,
+    /// An architectural boundary or cross-component edge changed.
+    ArchitectureChanged,
+    /// One base declaration split into multiple head declarations.
+    Split,
+    /// Multiple base declarations merged into one head declaration.
+    Merged,
 }
 
 impl HistorySemanticChangeKind {
@@ -1785,6 +2018,9 @@ impl HistorySemanticChangeKind {
             Self::Modified => "modified",
             Self::SignatureModified => "signature_modified",
             Self::RelationChanged => "relation_changed",
+            Self::ArchitectureChanged => "architecture_changed",
+            Self::Split => "split",
+            Self::Merged => "merged",
         }
     }
 
@@ -1799,6 +2035,9 @@ impl HistorySemanticChangeKind {
             "modified" => Some(Self::Modified),
             "signature_modified" => Some(Self::SignatureModified),
             "relation_changed" => Some(Self::RelationChanged),
+            "architecture_changed" => Some(Self::ArchitectureChanged),
+            "split" => Some(Self::Split),
+            "merged" => Some(Self::Merged),
             _ => None,
         }
     }
@@ -1811,10 +2050,25 @@ impl HistorySemanticChangeKind {
 #[derive(Debug, Clone)]
 pub struct HistoryComparePlan {
     pub(crate) base_generation: GenerationId,
+    pub(crate) scope: HistoryCompareScope,
     pub(crate) change_kinds: BTreeSet<HistoryChangeKind>,
+    pub(crate) include_unchanged_context: bool,
     pub(crate) max_results: usize,
     pub(crate) budget: QueryBudget,
     pub(crate) explanation: PlanExplanation,
+}
+
+/// Combined structural scope for `history.compare`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct HistoryCompareScope {
+    /// Repository-relative path prefixes.
+    pub paths: Vec<String>,
+    /// Package identities or canonical names.
+    pub packages: Vec<String>,
+    /// Service identities or canonical names.
+    pub services: Vec<String>,
+    /// Stable symbol roots.
+    pub symbols: BTreeSet<SymbolId>,
 }
 
 impl HistoryComparePlan {
@@ -1842,17 +2096,16 @@ pub struct SemanticChangeRecord {
 
 /// Aggregate architecture delta between two generations.
 ///
-/// This slice models no service or component-boundary graph, so every field is
-/// an honest zero rather than a fabricated delta.
+/// Counts are derived from normalized service edges and component entities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct HistoryArchitectureDelta {
-    /// Number of new cross-service edges; always zero in this slice.
+    /// Number of new cross-service edges.
     pub new_cross_service_edges: u32,
-    /// Number of removed cross-service edges; always zero in this slice.
+    /// Number of removed cross-service edges.
     pub removed_cross_service_edges: u32,
-    /// Number of new component boundaries; always zero in this slice.
+    /// Number of new component boundaries.
     pub new_boundaries: u32,
-    /// Number of removed component boundaries; always zero in this slice.
+    /// Number of removed component boundaries.
     pub removed_boundaries: u32,
 }
 
@@ -1918,6 +2171,10 @@ pub enum CodeDeadEntryPointPolicy {
     Library,
     /// Application main and registered handlers as entry points.
     Application,
+    /// Framework routes, services, and registrations as entry points.
+    FrameworkSpecific,
+    /// Caller-supplied stable symbols as the complete static root set.
+    Explicit,
 }
 
 impl CodeDeadEntryPointPolicy {
@@ -1928,6 +2185,8 @@ impl CodeDeadEntryPointPolicy {
             Self::Standard => "standard",
             Self::Library => "library",
             Self::Application => "application",
+            Self::FrameworkSpecific => "framework_specific",
+            Self::Explicit => "explicit",
         }
     }
 
@@ -1938,6 +2197,8 @@ impl CodeDeadEntryPointPolicy {
             "standard" => Some(Self::Standard),
             "library" => Some(Self::Library),
             "application" => Some(Self::Application),
+            "framework_specific" => Some(Self::FrameworkSpecific),
+            "explicit" => Some(Self::Explicit),
             _ => None,
         }
     }
@@ -1991,6 +2252,8 @@ impl DeadCodeClassification {
 #[derive(Debug, Clone)]
 pub struct CodeDeadPlan {
     pub(crate) entry_point_policy: CodeDeadEntryPointPolicy,
+    pub(crate) explicit_entry_points: BTreeSet<SymbolId>,
+    pub(crate) scope: Option<AnalysisScope>,
     pub(crate) include_exported: bool,
     pub(crate) include_tests: bool,
     pub(crate) min_confidence: u16,
@@ -2020,17 +2283,34 @@ pub struct DeadCodeCandidate {
     pub why: Vec<String>,
     /// Suppression rules checked for this candidate, in deterministic order.
     pub suppressions_checked: Vec<String>,
+    /// Static reachability measurements supporting the classification.
+    pub reachability: DeadCodeReachabilitySummary,
+    /// Source-free conditions that can lower confidence in this observation.
+    pub uncertainty: Vec<String>,
     /// Direct immutable source evidence for the candidate definition.
     pub source_refs: Vec<SourceRef>,
 }
 
-/// Summary of the partial entry-point model used for static reachability.
+/// Static measurements used to classify one dead-code candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DeadCodeReachabilitySummary {
+    /// Whether the candidate was observed from the selected entry points.
+    pub reached_from_entry_points: bool,
+    /// Number of admitted incoming static edges.
+    pub incoming_edges: u32,
+    /// Strongest admitted incoming edge confidence.
+    pub strongest_incoming_confidence: u16,
+}
+
+/// Summary of the partial entry-point model used for static reachability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CodeDeadEntryPointSummary {
     /// Policy used for entry-point resolution.
     pub policy: CodeDeadEntryPointPolicy,
     /// Number of resolved entry points.
     pub entry_point_count: u32,
+    /// Bounded stable entry symbols used as reachability roots.
+    pub entry_symbols: Vec<SymbolId>,
     /// Whether the model is complete for the scope.
     pub complete: bool,
 }
@@ -2066,6 +2346,8 @@ pub struct CodeDeadResult {
     pub blind_spots: Vec<CodeDeadBlindSpot>,
     /// Applied false-positive suppression rules in deterministic order.
     pub suppression_rules: Vec<CodeDeadSuppressionRule>,
+    /// Source-free coverage caveats governing negative conclusions.
+    pub coverage_caveats: Vec<String>,
     /// Authoritative execution completeness.
     pub execution: ExecutionCompleteness,
     /// Compatibility projection of [`ExecutionCompleteness::limiting_resources`].

@@ -1871,14 +1871,14 @@ mod tests {
     }
 
     #[test]
-    fn exact_rule_for_open_string_value_is_accepted_and_emitted() {
+    fn exact_rule_for_closed_string_value_is_accepted_and_emitted() {
         let cycles = entry(McpTool::ArchitectureCycles);
         let vertical =
             vertical_tool(McpTool::ArchitectureCycles).expect("cycles has a generated contract");
         let shape =
             schema_shape(vertical.input_schema_json()).expect("cycles input schema is valid");
         assert!(
-            shape["projection.level"].accepts_open_string_value("symbol"),
+            shape["projection.level"].closed_values.contains("symbol"),
             "the exact supported projection must remain schema-valid"
         );
 
@@ -1888,7 +1888,7 @@ mod tests {
             !problems
                 .iter()
                 .any(|problem| matches!(problem.kind, ProblemKind::UnknownRuleValue { .. })),
-            "open-string exact values must be valid registry rules: {problems:#?}"
+            "closed-string exact values must be valid registry rules: {problems:#?}"
         );
 
         let fields = artifact_field_dispositions(&cycles, vertical)
@@ -1901,7 +1901,7 @@ mod tests {
         assert!(fields.iter().any(|field| {
             field.path == "projection.level"
                 && field.value.is_none()
-                && field.status == "unsupported_stable_error"
+                && field.status == "implemented"
         }));
     }
 

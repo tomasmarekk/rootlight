@@ -1307,6 +1307,7 @@ mod tests {
                         symbol,
                         kind: "function".to_owned(),
                         display_name: "<adversarial & name>".to_owned(),
+                        qualified_name: "adversarial::evidence".to_owned(),
                         signature: Some("fn evidence()".to_owned()),
                         definition: source_reference(repository, generation),
                         outbound_exact: u64::MAX,
@@ -1314,11 +1315,17 @@ mod tests {
                         inbound_exact: 3,
                         inbound_candidates: 4,
                         references_exact: u64::MAX,
+                        container: None,
+                        relation_samples: Vec::new(),
+                        source_preview: None,
+                        section_gaps: Vec::new(),
                         provider: "treesitter".to_owned(),
                         evidence: "semantic_definition".to_owned(),
                         language: "rust".to_owned(),
                         tier: AnalysisTier::TierB,
                         confidence: 875,
+                        provenance_frontend_version: None,
+                        provenance_rule: None,
                     }],
                     unresolved_symbols: Vec::new(),
                     truncated: false,
@@ -1457,6 +1464,7 @@ mod tests {
                             is_public: true,
                         }],
                     }],
+                    service_impacts: Vec::new(),
                     tests: include_tests
                         .unwrap_or(false)
                         .then(|| ChangeImpactTest {

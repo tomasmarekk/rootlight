@@ -10,27 +10,28 @@ use std::sync::{
 
 use rootlight_client::{
     AdvancedColumn, AdvancedQuery, AnalysisTier as ClientAnalysisTier, ArchitectureCycles,
-    ArchitectureOverview, ChangeImpact, ChangeImpactRiskSummary, ClientError, CodeDead,
-    CodeDeadEntryPointSummary, CodeLocate, ContinuationAvailability, CoverageStatus,
-    CycleProjection, FlowTrace, FlowTraceFrontier, FlowTraceProjection, GenerationSelector,
-    HistoryArchitectureDelta, HistoryCompare, HistoryMatchedStates, LocateHit, LocateMode,
-    OperationKind, OperationStage, OperationState, PlanChange, PlanChangeContextPack,
-    PlanChangeImpactSummary, QueryContext, QueryUsage, RecoveryClass, RepositoryCatalogEntry,
-    RepositoryCatalogFreshness, RepositoryCatalogPage, RepositoryCatalogPageRequest,
-    RepositoryCatalogSnapshotId, RepositoryCatalogState, RepositoryCoverageEntry, RepositoryIndex,
-    RepositoryIndexDiagnostic, RepositoryIndexMode, RepositoryOperationAction,
-    RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestOptions,
-    RequestTimeout, ResultCompleteness, ResultCompletenessState, SourceChunk, SourceRead,
-    SourceReference, SymbolExplain, SymbolExplanation, SymbolRelationships, TestsSelect,
-    TestsSelectCoverageStrategy,
+    ArchitectureCyclesOptions, ArchitectureOverview, ArchitectureOverviewOptions, ChangeImpact,
+    ChangeImpactRiskSummary, ClientError, CodeDead, CodeDeadEntryPointSummary, CodeDeadOptions,
+    CodeLocate, ContinuationAvailability, CoverageStatus, CycleProjection, FlowTrace,
+    FlowTraceFrontier, FlowTraceProjection, GenerationSelector, HistoryArchitectureDelta,
+    HistoryCompare, HistoryCompareScope, HistoryMatchedStates, HistoryRevisionSelector, LocateHit,
+    LocateMode, OperationKind, OperationStage, OperationState, PlanChange, PlanChangeContext,
+    PlanChangeContextPack, PlanChangeImpactSummary, QueryContext, QueryUsage, RecoveryClass,
+    RepositoryCatalogEntry, RepositoryCatalogFreshness, RepositoryCatalogPage,
+    RepositoryCatalogPageRequest, RepositoryCatalogSnapshotId, RepositoryCatalogState,
+    RepositoryCoverageEntry, RepositoryIndex, RepositoryIndexDiagnostic, RepositoryIndexMode,
+    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
+    RepositoryStatusRequest, RequestOptions, RequestTimeout, ResultCompleteness,
+    ResultCompletenessState, SourceChunk, SourceRead, SourceReference, SymbolExplain,
+    SymbolExplanation, SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
-    ErrorCode, ExposureProfile, PublicError, ToolResponse, VerticalTool,
+    ErrorCode, ExposureProfile, OperationStatusOutput, PublicError, ToolResponse, VerticalTool,
+    change::{ChangeImpactOutput, TestsSelectOutput},
     vertical::{
-        AnalysisTier, CodeLocateOutput, OperationStatusOutputV1_1 as OperationStatusOutput,
-        OperationToolResponse, RepoIndexOutputV1_1 as RepoIndexOutput, SourceReadOutput,
-        SymbolExplainOutput,
+        AnalysisTier, CodeLocateOutput, OperationStatusToolResponseV1_2, OperationToolResponse,
+        RepoIndexOutputV1_1 as RepoIndexOutput, SourceReadOutput, SymbolExplainOutput,
     },
 };
 use serde::de::DeserializeOwned;
@@ -77,6 +78,7 @@ enum Call {
         repository: RepositoryId,
         generation: GenerationSelector,
         symbols: Vec<SymbolId>,
+        projection: rootlight_client::SymbolExplainProjection,
         options: RequestOptions,
     },
     SourceRead {
@@ -126,6 +128,7 @@ enum Call {
         min_size: Option<u8>,
         max_cycles: Option<u16>,
         include_self_cycles: Option<bool>,
+        contract: ArchitectureCyclesOptions,
         options: RequestOptions,
     },
     CodeDead {
@@ -136,6 +139,7 @@ enum Call {
         include_tests: Option<bool>,
         min_confidence: Option<u16>,
         max_candidates: Option<u16>,
+        contract: CodeDeadOptions,
         options: RequestOptions,
     },
     ArchitectureOverview {
@@ -145,6 +149,7 @@ enum Call {
         max_components: Option<u16>,
         include_edges: Option<bool>,
         min_confidence: Option<u16>,
+        contract: ArchitectureOverviewOptions,
         options: RequestOptions,
     },
     TestsSelect {
@@ -152,6 +157,7 @@ enum Call {
         generation: GenerationSelector,
         seeds: Vec<SymbolId>,
         test_kinds: Vec<String>,
+        filters: rootlight_client::TestsSelectFilters,
         max_tests: Option<u16>,
         include_commands: Option<bool>,
         options: RequestOptions,
@@ -161,6 +167,7 @@ enum Call {
         generation: GenerationSelector,
         changed_symbols: Vec<SymbolId>,
         changed_paths: Vec<String>,
+        impact_options: rootlight_client::ChangeImpactOptions,
         max_depth: Option<u8>,
         min_confidence: Option<u16>,
         include_tests: Option<bool>,
@@ -174,14 +181,18 @@ enum Call {
         objective_text: String,
         target_symbols: Vec<SymbolId>,
         target_files: Vec<FileId>,
+        constraints: Vec<String>,
+        change_context: Option<PlanChangeContext>,
         max_steps: Option<u8>,
         options: RequestOptions,
     },
     HistoryCompare {
         repository: RepositoryId,
-        base: GenerationId,
-        head: GenerationId,
+        base: HistoryRevisionSelector,
+        head: HistoryRevisionSelector,
+        scope: HistoryCompareScope,
         change_kinds: Vec<String>,
+        include_unchanged_context: bool,
         max_results: Option<u16>,
         options: RequestOptions,
     },
@@ -373,12 +384,14 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         repository: RepositoryId,
         generation: GenerationSelector,
         symbols: Vec<SymbolId>,
+        projection: rootlight_client::SymbolExplainProjection,
         options: RequestOptions,
     ) -> AsyncClientFuture<SymbolExplain> {
         self.record(Call::SymbolExplain {
             repository,
             generation,
             symbols: symbols.clone(),
+            projection,
             options,
         });
         let resolve_symbols = self.resolve_symbols;
@@ -392,6 +405,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                             symbol,
                             kind: "function".to_owned(),
                             display_name: "fixture".to_owned(),
+                            qualified_name: "crate::fixture".to_owned(),
                             signature: None,
                             definition: source_reference(),
                             outbound_exact: 0,
@@ -399,11 +413,17 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                             inbound_exact: 0,
                             inbound_candidates: 0,
                             references_exact: 1,
+                            container: None,
+                            relation_samples: Vec::new(),
+                            source_preview: None,
+                            section_gaps: Vec::new(),
                             provider: FIRST_SLICE_PROVIDER.to_owned(),
                             evidence: "parser".to_owned(),
                             language: "rust".to_owned(),
                             tier: ClientAnalysisTier::TierB,
                             confidence: 1_000,
+                            provenance_frontend_version: None,
+                            provenance_rule: None,
                         })
                         .collect(),
                     Vec::new(),
@@ -522,6 +542,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 semantic_freshness: "current".to_owned(),
                 state: "ready".to_owned(),
                 publication_state: "published".to_owned(),
+                retained_durable_bytes: 0,
                 coverage: vec![RepositoryCoverageEntry {
                     language: "rust".to_owned(),
                     tier: "tier_a".to_owned(),
@@ -625,6 +646,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         min_size: Option<u8>,
         max_cycles: Option<u16>,
         include_self_cycles: Option<bool>,
+        contract: ArchitectureCyclesOptions,
         options: RequestOptions,
     ) -> AsyncClientFuture<ArchitectureCycles> {
         self.record(Call::ArchitectureCycles {
@@ -634,6 +656,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             min_size,
             max_cycles,
             include_self_cycles,
+            contract: contract.clone(),
             options,
         });
         Box::pin(async move {
@@ -645,6 +668,9 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 projection: CycleProjection {
                     relations,
                     min_confidence: 0,
+                    level: contract.level,
+                    rank_by: contract.rank_by,
+                    omitted_nodes: 0,
                 },
                 execution_completeness: complete_execution(),
             })
@@ -660,29 +686,35 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         include_tests: Option<bool>,
         min_confidence: Option<u16>,
         max_candidates: Option<u16>,
+        contract: CodeDeadOptions,
         options: RequestOptions,
     ) -> AsyncClientFuture<CodeDead> {
         self.record(Call::CodeDead {
             repository,
             generation,
-            entry_point_policy,
+            entry_point_policy: entry_point_policy.clone(),
             include_exported,
             include_tests,
             min_confidence,
             max_candidates,
+            contract: contract.clone(),
             options,
         });
+        let policy = entry_point_policy.unwrap_or_else(|| "standard".to_owned());
         Box::pin(async move {
             Ok(CodeDead {
                 context: query_context(repository, generation, true),
                 candidates: Vec::new(),
                 entry_points: CodeDeadEntryPointSummary {
-                    policy: "standard".to_owned(),
-                    entry_point_count: 0,
-                    complete: false,
+                    policy,
+                    entry_point_count: u32::try_from(contract.explicit_entry_points.len())
+                        .unwrap_or(u32::MAX),
+                    complete: !contract.explicit_entry_points.is_empty(),
+                    entry_symbols: contract.explicit_entry_points,
                 },
                 blind_spots: Vec::new(),
                 false_positive_controls: Vec::new(),
+                coverage_caveats: vec!["static_analysis_only".to_owned()],
                 execution_completeness: complete_execution(),
             })
         })
@@ -696,6 +728,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         max_components: Option<u16>,
         include_edges: Option<bool>,
         min_confidence: Option<u16>,
+        contract: ArchitectureOverviewOptions,
         options: RequestOptions,
     ) -> AsyncClientFuture<ArchitectureOverview> {
         self.record(Call::ArchitectureOverview {
@@ -705,6 +738,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             max_components,
             include_edges,
             min_confidence,
+            contract,
             options,
         });
         Box::pin(async move {
@@ -726,6 +760,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         generation: GenerationSelector,
         seeds: Vec<SymbolId>,
         test_kinds: Vec<String>,
+        filters: rootlight_client::TestsSelectFilters,
         max_tests: Option<u16>,
         include_commands: Option<bool>,
         options: RequestOptions,
@@ -735,6 +770,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             generation,
             seeds,
             test_kinds,
+            filters,
             max_tests,
             include_commands,
             options,
@@ -747,6 +783,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     direct_edges: false,
                     transitive_signals: false,
                     history_signals: false,
+                    build_target_signals: false,
                     file_colocation_signals: false,
                 },
                 gaps: Vec::new(),
@@ -761,6 +798,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         generation: GenerationSelector,
         changed_symbols: Vec<SymbolId>,
         changed_paths: Vec<String>,
+        impact_options: rootlight_client::ChangeImpactOptions,
         max_depth: Option<u8>,
         min_confidence: Option<u16>,
         include_tests: Option<bool>,
@@ -772,6 +810,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             generation,
             changed_symbols,
             changed_paths,
+            impact_options,
             max_depth,
             min_confidence,
             include_tests,
@@ -783,6 +822,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 context: query_context(repository, generation, true),
                 resolved_changes: Vec::new(),
                 impacted: Vec::new(),
+                service_impacts: Vec::new(),
                 tests: Vec::new(),
                 risk_summary: ChangeImpactRiskSummary {
                     level: "none".to_owned(),
@@ -805,6 +845,8 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         objective_text: String,
         target_symbols: Vec<SymbolId>,
         target_files: Vec<FileId>,
+        constraints: Vec<String>,
+        change_context: Option<PlanChangeContext>,
         max_steps: Option<u8>,
         options: RequestOptions,
     ) -> AsyncClientFuture<PlanChange> {
@@ -815,6 +857,8 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             objective_text,
             target_symbols,
             target_files,
+            constraints,
+            change_context,
             max_steps,
             options,
         });
@@ -842,26 +886,42 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
     fn history_compare(
         &self,
         repository: RepositoryId,
-        base: GenerationId,
-        head: GenerationId,
+        base: HistoryRevisionSelector,
+        head: HistoryRevisionSelector,
+        scope: HistoryCompareScope,
         change_kinds: Vec<String>,
+        include_unchanged_context: bool,
         max_results: Option<u16>,
         options: RequestOptions,
     ) -> AsyncClientFuture<HistoryCompare> {
         self.record(Call::HistoryCompare {
             repository,
-            base,
-            head,
+            base: base.clone(),
+            head: head.clone(),
+            scope,
             change_kinds,
+            include_unchanged_context,
             max_results,
             options,
         });
+        let base_generation = match base {
+            HistoryRevisionSelector::Generation(generation) => generation,
+            HistoryRevisionSelector::Git(_) => parent_generation(),
+        };
+        let head_generation = match head {
+            HistoryRevisionSelector::Generation(generation) => generation,
+            HistoryRevisionSelector::Git(_) => generation(),
+        };
         Box::pin(async move {
             Ok(HistoryCompare {
-                context: query_context(repository, GenerationSelector::Generation(head), false),
+                context: query_context(
+                    repository,
+                    GenerationSelector::Generation(head_generation),
+                    false,
+                ),
                 matched_states: HistoryMatchedStates {
-                    base_generation: base,
-                    head_generation: head,
+                    base_generation,
+                    head_generation,
                     coverage: "complete".to_owned(),
                 },
                 changes: Vec::new(),
@@ -962,7 +1022,10 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
         }),
     )
     .await;
-    assert!(matches!(status, OperationToolResponse::Success(_)));
+    assert!(matches!(
+        status,
+        OperationStatusToolResponseV1_2::Success(_)
+    ));
 
     let locate: CodeLocateOutput = execute(
         &executor,
@@ -999,7 +1062,10 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
             "repository": {"repository_id": repository()},
             "generation": parent_generation(),
             "symbol_ids": [symbol()],
-            "include_provenance": "none"
+            "sections": ["signature", "source_preview"],
+            "relation_sample_limit": 4,
+            "source_preview_lines": 12,
+            "include_provenance": "full"
         }),
     )
     .await;
@@ -1089,10 +1155,15 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
         Call::SymbolExplain {
             generation: GenerationSelector::Generation(observed),
             symbols,
+            projection,
             options,
             ..
         } if *observed == parent_generation()
             && symbols == &[symbol()]
+            && projection.sections == ["signature", "source_preview"]
+            && projection.relation_sample_limit == Some(4)
+            && projection.source_preview_lines == Some(12)
+            && projection.include_provenance == "full"
             && options.timeout().is_some()
             && options.effective_budget().is_some()
     ));
@@ -1108,6 +1179,112 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
             && options.timeout().is_some()
             && options.effective_budget().is_some()
     ));
+}
+
+#[tokio::test]
+async fn native_port_forwards_test_filters_and_change_impact_policy_options() {
+    let fake = FakeAsyncClient::default();
+    let calls = Arc::clone(&fake.calls);
+    let executor = FirstSliceToolExecutor::new(NativeFirstSliceClientPort::with_client(fake))
+        .expect("executor initializes");
+
+    let tests: TestsSelectOutput = execute(
+        &executor,
+        VerticalTool::TestsSelect,
+        json!({
+            "repository": {"repository_id": repository()},
+            "generation": generation(),
+            "seeds": {
+                "symbols": [symbol()],
+                "paths": ["src/lib.rs"],
+                "change": {"revision_range": "HEAD~1..HEAD"},
+                "build_targets": ["rootlight-query"]
+            },
+            "test_kinds": ["integration", "contract"],
+            "frameworks": ["rust-test"],
+            "max_tests": 8,
+            "execution_budget": {"max_total_ms": 15_000, "max_slow_tests": 2},
+            "include_commands": true
+        }),
+    )
+    .await;
+    assert!(matches!(tests, ToolResponse::Success(_)));
+
+    let impact: ChangeImpactOutput = execute(
+        &executor,
+        VerticalTool::ChangeImpact,
+        json!({
+            "repository": {"repository_id": repository()},
+            "generation": generation(),
+            "change": {
+                "symbol_ids": [symbol()],
+                "paths": ["src/lib.rs"],
+                "working_tree": "staged"
+            },
+            "scope": {
+                "paths": ["src"],
+                "packages": ["rootlight-query"],
+                "services": ["query-service"]
+            },
+            "relation_policy": "conservative",
+            "include_history": true,
+            "include_tests": true,
+            "max_depth": 4,
+            "min_confidence": 650
+        }),
+    )
+    .await;
+    assert!(matches!(impact, ToolResponse::Success(_)));
+
+    let calls = calls.lock().expect("fake call recorder is not poisoned");
+    let Call::TestsSelect {
+        seeds,
+        test_kinds,
+        filters,
+        max_tests,
+        include_commands,
+        ..
+    } = &calls[0]
+    else {
+        panic!("first call is tests.select");
+    };
+    assert_eq!(seeds, &[symbol()]);
+    assert_eq!(test_kinds, &["contract", "integration"]);
+    assert_eq!(filters.seed_paths, ["src/lib.rs"]);
+    assert_eq!(filters.seed_build_targets, ["rootlight-query"]);
+    assert_eq!(filters.frameworks, ["rust-test"]);
+    assert_eq!(filters.max_total_ms, Some(15_000));
+    assert_eq!(filters.max_slow_tests, Some(2));
+    assert_eq!(
+        filters.change_revision_range.as_deref(),
+        Some("HEAD~1..HEAD")
+    );
+    assert_eq!(*max_tests, Some(8));
+    assert_eq!(*include_commands, Some(true));
+
+    let Call::ChangeImpact {
+        changed_symbols,
+        changed_paths,
+        impact_options,
+        max_depth,
+        min_confidence,
+        include_tests,
+        ..
+    } = &calls[1]
+    else {
+        panic!("second call is change.impact");
+    };
+    assert_eq!(changed_symbols, &[symbol()]);
+    assert_eq!(changed_paths, &["src/lib.rs"]);
+    assert_eq!(impact_options.working_tree.as_deref(), Some("staged"));
+    assert_eq!(impact_options.scope_paths, ["src"]);
+    assert_eq!(impact_options.scope_packages, ["rootlight-query"]);
+    assert_eq!(impact_options.scope_services, ["query-service"]);
+    assert_eq!(impact_options.relation_policy, "conservative");
+    assert!(impact_options.include_history);
+    assert_eq!(*max_depth, Some(4));
+    assert_eq!(*min_confidence, Some(650));
+    assert_eq!(*include_tests, Some(true));
 }
 
 #[tokio::test]
@@ -1340,6 +1517,7 @@ fn read_metadata_preserves_safe_non_rust_languages() {
             symbol: symbol(),
             kind: "class".to_owned(),
             display_name: "EnvBuilder".to_owned(),
+            qualified_name: "example.EnvBuilder".to_owned(),
             signature: None,
             definition: read.chunks[0].source.clone(),
             outbound_exact: 0,
@@ -1347,11 +1525,17 @@ fn read_metadata_preserves_safe_non_rust_languages() {
             inbound_exact: 0,
             inbound_candidates: 0,
             references_exact: 1,
+            container: None,
+            relation_samples: Vec::new(),
+            source_preview: None,
+            section_gaps: Vec::new(),
             provider: FIRST_SLICE_PROVIDER.to_owned(),
             evidence: "parser".to_owned(),
             language: "python".to_owned(),
             tier: ClientAnalysisTier::TierB,
             confidence: 1_000,
+            provenance_frontend_version: None,
+            provenance_rule: None,
         }],
         unresolved_symbols: Vec::new(),
         truncated: false,

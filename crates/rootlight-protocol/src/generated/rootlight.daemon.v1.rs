@@ -600,9 +600,13 @@ pub struct DiagnosticsQuickResponse {
     #[allow(missing_docs)]
     pub results: ::prost::alloc::vec::Vec<DiagnosticResult>,
 }
-/// Requests a bounded source-free support bundle.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SupportBundleRequest {}
+/// Requests a bounded source-free support bundle, optionally scoped to one repository.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SupportBundleRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+}
 /// Returns one validated in-memory support archive.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SupportBundleResponse {
@@ -995,6 +999,10 @@ pub struct RepositoryOperationStatusResponse {
     #[prost(bytes = "vec", optional, tag = "25")]
     #[allow(missing_docs)]
     pub invalidation_trace_json: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Durable state retained for the resulting immutable generation.
+    #[prost(uint64, tag = "26")]
+    #[allow(missing_docs)]
+    pub retained_durable_bytes: u64,
 }
 /// Bounded measured usage for one first-slice query.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1203,9 +1211,40 @@ pub struct SymbolExplainRequest {
     #[prost(message, repeated, tag = "4")]
     #[allow(missing_docs)]
     pub symbols: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+    #[prost(string, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub sections: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub relation_sample_limit: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub source_preview_lines: ::core::option::Option<u32>,
+    #[prost(string, tag = "8")]
+    #[allow(missing_docs)]
+    pub include_provenance: ::prost::alloc::string::String,
+}
+/// One bounded typed relation sample attached to a symbol explanation.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceSymbolRelationSample {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub direction: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub target: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub source_refs: ::prost::alloc::vec::Vec<FirstSliceSourceRef>,
+    #[prost(uint32, tag = "5")]
+    #[allow(missing_docs)]
+    pub confidence: u32,
 }
 /// One typed, compact symbol explanation.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FirstSliceSymbolExplanation {
     #[prost(message, optional, tag = "1")]
     #[allow(missing_docs)]
@@ -1252,6 +1291,29 @@ pub struct FirstSliceSymbolExplanation {
     #[prost(enumeration = "FirstSliceAnalysisTier", tag = "15")]
     #[allow(missing_docs)]
     pub tier: i32,
+    #[prost(string, tag = "16")]
+    #[allow(missing_docs)]
+    pub qualified_name: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "17")]
+    #[allow(missing_docs)]
+    pub container: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "18")]
+    #[allow(missing_docs)]
+    pub relation_samples: ::prost::alloc::vec::Vec<FirstSliceSymbolRelationSample>,
+    #[prost(string, optional, tag = "19")]
+    #[allow(missing_docs)]
+    pub source_preview: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "20")]
+    #[allow(missing_docs)]
+    pub section_gaps: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "21")]
+    #[allow(missing_docs)]
+    pub provenance_frontend_version: ::core::option::Option<
+        ::prost::alloc::string::String,
+    >,
+    #[prost(string, optional, tag = "22")]
+    #[allow(missing_docs)]
+    pub provenance_rule: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Returns explanations in request order and unresolved stable identities.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1691,6 +1753,9 @@ pub struct RepositoryStatusResponse {
     #[prost(string, tag = "16")]
     #[allow(missing_docs)]
     pub active_semantic_freshness: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "17")]
+    #[allow(missing_docs)]
+    pub retained_durable_bytes: u64,
 }
 /// Requests bounded typed relation neighborhoods for stable symbols.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1908,8 +1973,62 @@ pub struct FlowTraceResponse {
     #[allow(missing_docs)]
     pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
-/// Requests bounded architecture cycle detection over a relation projection.
+/// Repository-relative path scope for bounded analysis tools.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSlicePathAnalysisScope {
+    #[prost(string, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub paths: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Package scope for bounded analysis tools.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSlicePackageAnalysisScope {
+    #[prost(string, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub packages: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Build-target scope for bounded analysis tools.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceBuildTargetAnalysisScope {
+    #[prost(string, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub build_targets: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Stable-symbol scope for bounded analysis tools.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceSymbolAnalysisScope {
+    #[prost(message, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub symbols: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+}
+/// Typed structural scope shared by architecture and reachability tools.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceAnalysisScope {
+    #[prost(oneof = "first_slice_analysis_scope::Selector", tags = "1, 2, 3, 4")]
+    #[allow(missing_docs)]
+    pub selector: ::core::option::Option<first_slice_analysis_scope::Selector>,
+}
+/// Nested message and enum types in `FirstSliceAnalysisScope`.
+pub mod first_slice_analysis_scope {
+    #[allow(missing_docs)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Selector {
+        #[prost(message, tag = "1")]
+        #[allow(missing_docs)]
+        Paths(super::FirstSlicePathAnalysisScope),
+        #[prost(message, tag = "2")]
+        #[allow(missing_docs)]
+        Packages(super::FirstSlicePackageAnalysisScope),
+        #[prost(message, tag = "3")]
+        #[allow(missing_docs)]
+        BuildTargets(super::FirstSliceBuildTargetAnalysisScope),
+        #[prost(message, tag = "4")]
+        #[allow(missing_docs)]
+        Symbols(super::FirstSliceSymbolAnalysisScope),
+    }
+}
+/// Requests bounded architecture cycle detection over a relation projection.
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ArchitectureCyclesRequest {
     #[prost(message, optional, tag = "1")]
     #[allow(missing_docs)]
@@ -1934,6 +2053,15 @@ pub struct ArchitectureCyclesRequest {
     #[prost(bool, optional, tag = "7")]
     #[allow(missing_docs)]
     pub include_self_cycles: ::core::option::Option<bool>,
+    #[prost(message, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub scope: ::core::option::Option<FirstSliceAnalysisScope>,
+    #[prost(string, optional, tag = "9")]
+    #[allow(missing_docs)]
+    pub level: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "10")]
+    #[allow(missing_docs)]
+    pub rank_by: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// One strongly connected component containing cycles.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1947,6 +2075,15 @@ pub struct FirstSliceCycleComponent {
     #[prost(uint32, tag = "3")]
     #[allow(missing_docs)]
     pub internal_edges: u32,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub edge_weight: u64,
+    #[prost(uint32, tag = "5")]
+    #[allow(missing_docs)]
+    pub change_risk: u32,
+    #[prost(uint32, tag = "6")]
+    #[allow(missing_docs)]
+    pub break_cost: u32,
 }
 /// One bounded representative minimal cycle with evidence.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1989,6 +2126,15 @@ pub struct FirstSliceCycleProjection {
     #[prost(uint32, tag = "2")]
     #[allow(missing_docs)]
     pub min_confidence: u32,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub level: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    #[allow(missing_docs)]
+    pub rank_by: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "5")]
+    #[allow(missing_docs)]
+    pub omitted_nodes: u32,
 }
 /// Returns bounded architecture cycles and generation correlation.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2018,7 +2164,7 @@ pub struct ArchitectureCyclesResponse {
     pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Requests bounded dead-code reachability analysis over one generation.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CodeDeadRequest {
     #[prost(message, optional, tag = "1")]
     #[allow(missing_docs)]
@@ -2046,6 +2192,27 @@ pub struct CodeDeadRequest {
     #[prost(uint32, optional, tag = "8")]
     #[allow(missing_docs)]
     pub max_candidates: ::core::option::Option<u32>,
+    #[prost(message, repeated, tag = "9")]
+    #[allow(missing_docs)]
+    pub explicit_entry_points: ::prost::alloc::vec::Vec<
+        super::super::common::v1::SymbolId,
+    >,
+    #[prost(message, optional, tag = "10")]
+    #[allow(missing_docs)]
+    pub scope: ::core::option::Option<FirstSliceAnalysisScope>,
+}
+/// Static reachability measurements for one dead-code candidate.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceDeadReachability {
+    #[prost(bool, tag = "1")]
+    #[allow(missing_docs)]
+    pub reached_from_entry_points: bool,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub incoming_edges: u32,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub strongest_incoming_confidence: u32,
 }
 /// One dead-code candidate with classification and source-free evidence.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2068,9 +2235,15 @@ pub struct FirstSliceDeadCandidate {
     #[prost(message, repeated, tag = "6")]
     #[allow(missing_docs)]
     pub source_refs: ::prost::alloc::vec::Vec<FirstSliceSourceRef>,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub reachability: ::core::option::Option<FirstSliceDeadReachability>,
+    #[prost(string, repeated, tag = "8")]
+    #[allow(missing_docs)]
+    pub uncertainty: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// Summary of the entry-point model used for reachability.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FirstSliceEntryPointSummary {
     #[prost(string, tag = "1")]
     #[allow(missing_docs)]
@@ -2081,6 +2254,9 @@ pub struct FirstSliceEntryPointSummary {
     #[prost(bool, tag = "3")]
     #[allow(missing_docs)]
     pub complete: bool,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub entry_symbols: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
 }
 /// One known blind spot in the reachability analysis.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2128,9 +2304,12 @@ pub struct CodeDeadResponse {
     #[prost(message, optional, tag = "7")]
     #[allow(missing_docs)]
     pub completeness: ::core::option::Option<FirstSliceCompleteness>,
+    #[prost(string, repeated, tag = "8")]
+    #[allow(missing_docs)]
+    pub coverage_caveats: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// Requests a bounded file-granularity architecture overview over one generation.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ArchitectureOverviewRequest {
     #[prost(message, optional, tag = "1")]
     #[allow(missing_docs)]
@@ -2155,9 +2334,15 @@ pub struct ArchitectureOverviewRequest {
     #[prost(uint32, optional, tag = "7")]
     #[allow(missing_docs)]
     pub min_confidence: ::core::option::Option<u32>,
+    #[prost(message, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub scope: ::core::option::Option<FirstSliceAnalysisScope>,
+    #[prost(string, optional, tag = "9")]
+    #[allow(missing_docs)]
+    pub detail: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// One aggregated architecture component keyed by its containing file.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FirstSliceArchitectureComponent {
     #[prost(string, tag = "1")]
     #[allow(missing_docs)]
@@ -2179,6 +2364,12 @@ pub struct FirstSliceArchitectureComponent {
     #[prost(uint32, tag = "6")]
     #[allow(missing_docs)]
     pub confidence: u32,
+    #[prost(uint32, tag = "7")]
+    #[allow(missing_docs)]
+    pub file_count: u32,
+    #[prost(message, repeated, tag = "8")]
+    #[allow(missing_docs)]
+    pub source_refs: ::prost::alloc::vec::Vec<FirstSliceSourceRef>,
 }
 /// One aggregated typed connection between two architecture components.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2220,6 +2411,12 @@ pub struct FirstSliceHotspot {
     #[prost(uint32, tag = "6")]
     #[allow(missing_docs)]
     pub score: u32,
+    #[prost(uint32, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub ownership_signal: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub test_signal: ::core::option::Option<u32>,
 }
 /// One deterministic structural-affinity community over reported components.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2309,6 +2506,27 @@ pub struct TestsSelectRequest {
     #[prost(bool, optional, tag = "7")]
     #[allow(missing_docs)]
     pub include_commands: ::core::option::Option<bool>,
+    #[prost(string, repeated, tag = "8")]
+    #[allow(missing_docs)]
+    pub seed_paths: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "9")]
+    #[allow(missing_docs)]
+    pub seed_build_targets: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "10")]
+    #[allow(missing_docs)]
+    pub frameworks: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "11")]
+    #[allow(missing_docs)]
+    pub max_total_ms: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "12")]
+    #[allow(missing_docs)]
+    pub max_slow_tests: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "13")]
+    #[allow(missing_docs)]
+    pub change_working_tree: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "14")]
+    #[allow(missing_docs)]
+    pub change_revision_range: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// One ranked test selected for relevance to the seed set.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2334,6 +2552,9 @@ pub struct FirstSliceRankedTest {
     #[prost(string, optional, tag = "7")]
     #[allow(missing_docs)]
     pub command_hint: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, tag = "8")]
+    #[allow(missing_docs)]
+    pub framework: ::prost::alloc::string::String,
 }
 /// Coverage signals actually used by a test selection.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2421,6 +2642,27 @@ pub struct ChangeImpactRequest {
     #[prost(uint32, optional, tag = "9")]
     #[allow(missing_docs)]
     pub max_dependents: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "10")]
+    #[allow(missing_docs)]
+    pub working_tree: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "11")]
+    #[allow(missing_docs)]
+    pub revision_range: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "12")]
+    #[allow(missing_docs)]
+    pub scope_paths: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "13")]
+    #[allow(missing_docs)]
+    pub scope_packages: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "14")]
+    #[allow(missing_docs)]
+    pub scope_services: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag = "15")]
+    #[allow(missing_docs)]
+    pub relation_policy: ::prost::alloc::string::String,
+    #[prost(bool, tag = "16")]
+    #[allow(missing_docs)]
+    pub include_history: bool,
 }
 /// One resolved change from the input change set.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2508,6 +2750,22 @@ pub struct FirstSliceImpactRiskSummary {
     #[allow(missing_docs)]
     pub dynamic_blind_spots: bool,
 }
+/// One cross-boundary impact derived from an affected service entity.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceServiceImpact {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub target: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub confidence: u32,
+    #[prost(string, tag = "4")]
+    #[allow(missing_docs)]
+    pub reason: ::prost::alloc::string::String,
+}
 /// Returns bounded resolved changes, impact groups, tests, and a risk summary.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ChangeImpactResponse {
@@ -2534,6 +2792,9 @@ pub struct ChangeImpactResponse {
     #[prost(message, optional, tag = "7")]
     #[allow(missing_docs)]
     pub completeness: ::core::option::Option<FirstSliceCompleteness>,
+    #[prost(message, repeated, tag = "8")]
+    #[allow(missing_docs)]
+    pub service_impacts: ::prost::alloc::vec::Vec<FirstSliceServiceImpact>,
 }
 /// Requests a bounded ordered change plan for one generation and target set.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2564,6 +2825,28 @@ pub struct PlanChangeRequest {
     #[prost(uint32, optional, tag = "8")]
     #[allow(missing_docs)]
     pub max_steps: ::core::option::Option<u32>,
+    #[prost(string, repeated, tag = "9")]
+    #[allow(missing_docs)]
+    pub constraints: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "10")]
+    #[allow(missing_docs)]
+    pub change_context: ::core::option::Option<FirstSlicePlanChangeContext>,
+}
+/// Existing or hypothetical change facts used to expand a plan's explicit targets.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSlicePlanChangeContext {
+    #[prost(string, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub working_tree: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub revision_range: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub symbol_ids: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+    #[prost(string, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub paths: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// One ordered step in a change plan.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2675,7 +2958,7 @@ pub mod first_slice_revision_selector {
     }
 }
 /// Requests a bounded semantic comparison between two revisions or generations.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct HistoryCompareRequest {
     #[prost(message, optional, tag = "1")]
     #[allow(missing_docs)]
@@ -2697,6 +2980,28 @@ pub struct HistoryCompareRequest {
     #[prost(uint32, optional, tag = "6")]
     #[allow(missing_docs)]
     pub max_results: ::core::option::Option<u32>,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub scope: ::core::option::Option<FirstSliceHistoryCompareScope>,
+    #[prost(bool, tag = "8")]
+    #[allow(missing_docs)]
+    pub include_unchanged_context: bool,
+}
+/// Combined structural scope for one semantic history comparison.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceHistoryCompareScope {
+    #[prost(string, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub paths: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "2")]
+    #[allow(missing_docs)]
+    pub packages: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub services: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub symbols: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
 }
 /// Resolved state pair for the comparison.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

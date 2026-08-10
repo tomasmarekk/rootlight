@@ -1,6 +1,11 @@
 //! Async thin-client boundary between browser handlers and the Rootlight daemon.
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use rootlight_client::{
     ChangeImpact, Client, ClientError, ConnectPolicy, DiagnosticsQuick, EffectiveBudget,
@@ -17,9 +22,12 @@ use crate::error::WebError;
 
 const WEB_CLIENT_INSTANCE_PREFIX: [u8; 8] = *b"rootweb1";
 const WEB_SOURCE_BYTES: u64 = 64 * 1024;
+const DAEMON_SUPERVISION_INTERVAL: Duration = Duration::from_millis(500);
+const DAEMON_SUPERVISION_TIMEOUT: Duration = Duration::from_secs(2);
 
 type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ClientError>> + Send + 'a>>;
 type ReconnectFuture<'a> = Pin<Box<dyn Future<Output = Option<Arc<dyn DaemonClient>>> + Send + 'a>>;
+type OwnedDaemonSlot = Arc<Mutex<Option<OwnedDaemon>>>;
 
 trait DaemonReconnect: Send + Sync {
     fn reconnect(&self) -> ReconnectFuture<'_>;
@@ -399,23 +407,38 @@ impl ResilientDaemonClient {
         *self.current.write().await = Arc::clone(&replacement);
         Some(replacement)
     }
+
+    async fn supervise_once(&self, timeout: RequestTimeout) {
+        let client = self.current().await;
+        if matches!(
+            client.health(timeout).await,
+            Err(ref error) if reconnectable_health_error(error)
+        ) {
+            let _ = self.reconnect_after(&client).await;
+        }
+    }
+
+    async fn supervise(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+        let timeout = RequestTimeout::new(DAEMON_SUPERVISION_TIMEOUT)
+            .expect("daemon supervision timeout is positive");
+        let mut interval = tokio::time::interval(DAEMON_SUPERVISION_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+                _ = interval.tick() => self.supervise_once(timeout).await,
+            }
+        }
+    }
 }
 
 impl DaemonClient for ResilientDaemonClient {
     fn health<'a>(&'a self, timeout: RequestTimeout) -> ClientFuture<'a, Health> {
-        Box::pin(async move {
-            let client = self.current().await;
-            match client.health(timeout).await {
-                Ok(health) => Ok(health),
-                Err(error) if reconnectable_health_error(&error) => {
-                    let Some(replacement) = self.reconnect_after(&client).await else {
-                        return Err(error);
-                    };
-                    replacement.health(timeout).await
-                }
-                Err(error) => Err(error),
-            }
-        })
+        Box::pin(async move { self.current().await.health(timeout).await })
     }
 
     fn repository_catalog_page<'a>(
@@ -645,14 +668,16 @@ impl DaemonClient for ResilientDaemonClient {
 struct RuntimeReconnect {
     paths: RuntimePaths,
     client_instance_id: [u8; 16],
+    owned: OwnedDaemonSlot,
 }
 
 impl DaemonReconnect for RuntimeReconnect {
     fn reconnect(&self) -> ReconnectFuture<'_> {
         let paths = self.paths.clone();
         let client_instance_id = self.client_instance_id;
+        let owned = Arc::clone(&self.owned);
         Box::pin(async move {
-            connect_once(paths, client_instance_id)
+            connect_owned_once(paths, client_instance_id, owned)
                 .await
                 .ok()
                 .map(|client| client as Arc<dyn DaemonClient>)
@@ -667,36 +692,50 @@ fn reconnectable_health_error(error: &ClientError) -> bool {
     )
 }
 
-async fn connect_once(
-    paths: RuntimePaths,
-    client_instance_id: [u8; 16],
-) -> Result<Arc<Client>, WebError> {
-    tokio::task::spawn_blocking(move || {
-        Client::connect_or_start(&paths, client_instance_id, ConnectPolicy::StartIfMissing)
-            .map(Arc::new)
-            .map_err(|_| WebError::DaemonUnavailable)
-    })
-    .await
-    .map_err(|_| WebError::TaskFailed)?
-}
-
 async fn connect_owned_once(
     paths: RuntimePaths,
     client_instance_id: [u8; 16],
-) -> Result<(Arc<Client>, Option<OwnedDaemon>), WebError> {
+    retained: OwnedDaemonSlot,
+) -> Result<Arc<Client>, WebError> {
     tokio::task::spawn_blocking(move || {
-        Client::connect_or_start_owned(&paths, client_instance_id, ConnectPolicy::StartIfMissing)
-            .map(|(client, owned)| (Arc::new(client), owned))
-            .map_err(|_| WebError::DaemonUnavailable)
+        let (client, owned) = Client::connect_or_start_owned(
+            &paths,
+            client_instance_id,
+            ConnectPolicy::StartIfMissing,
+        )
+        .map_err(|_| WebError::DaemonUnavailable)?;
+        let previous = retain_started_child(&retained, owned)?;
+        drop(previous);
+        Ok(Arc::new(client))
     })
     .await
     .map_err(|_| WebError::TaskFailed)?
 }
 
-/// A resilient daemon client plus exact ownership when this host started it.
+fn replace_retained_child<T>(
+    retained: &Mutex<Option<T>>,
+    replacement: Option<T>,
+) -> Result<Option<T>, WebError> {
+    let mut retained = retained.lock().map_err(|_| WebError::TaskFailed)?;
+    Ok(std::mem::replace(&mut *retained, replacement))
+}
+
+fn retain_started_child<T>(
+    retained: &Mutex<Option<T>>,
+    started: Option<T>,
+) -> Result<Option<T>, WebError> {
+    let Some(started) = started else {
+        return Ok(None);
+    };
+    replace_retained_child(retained, Some(started))
+}
+
+/// A resilient client with one supervisor for exact daemon-child ownership.
 pub(crate) struct DaemonConnection {
     client: Arc<dyn DaemonClient>,
-    owned: Option<OwnedDaemon>,
+    retained: OwnedDaemonSlot,
+    supervisor_shutdown: tokio::sync::watch::Sender<bool>,
+    supervisor: tokio::task::JoinHandle<()>,
 }
 
 impl DaemonConnection {
@@ -705,16 +744,22 @@ impl DaemonConnection {
         Arc::clone(&self.client)
     }
 
-    /// Stops and reaps the daemon only when this web host won startup.
+    /// Stops supervision and reaps the latest daemon child started by this host.
     pub(crate) async fn shutdown(self) -> Result<(), WebError> {
+        let _ = self.supervisor_shutdown.send(true);
+        let supervisor_result = self.supervisor.await.map_err(|_| WebError::TaskFailed);
         drop(self.client);
-        let Some(owned) = self.owned else {
-            return Ok(());
-        };
-        tokio::task::spawn_blocking(move || owned.shutdown())
-            .await
-            .map_err(|_| WebError::TaskFailed)?
-            .map_err(|_| WebError::DaemonUnavailable)
+        let retained = self.retained;
+        let shutdown_result = tokio::task::spawn_blocking(move || {
+            let owned = replace_retained_child(&retained, None)?;
+            owned.map_or(Ok(()), |owned| {
+                owned.shutdown().map_err(|_| WebError::DaemonUnavailable)
+            })
+        })
+        .await
+        .map_err(|_| WebError::TaskFailed)?;
+        supervisor_result?;
+        shutdown_result
     }
 }
 
@@ -723,7 +768,8 @@ impl DaemonConnection {
 /// The synchronous discovery/start protocol runs on Tokio's blocking pool so
 /// it never occupies an async HTTP worker. When this process wins daemon
 /// startup, the returned connection retains exact child ownership for bounded
-/// shutdown with the web host.
+/// shutdown with the web host. A dedicated supervisor restores connectivity
+/// independently of browser health requests and serializes replacement startup.
 ///
 /// # Errors
 ///
@@ -735,14 +781,24 @@ pub(crate) async fn connect(paths: RuntimePaths) -> Result<DaemonConnection, Web
         .copy_from_slice(&WEB_CLIENT_INSTANCE_PREFIX);
     getrandom::fill(&mut client_instance_id[WEB_CLIENT_INSTANCE_PREFIX.len()..])
         .map_err(|_| WebError::RandomUnavailable)?;
-    let (initial, owned) = connect_owned_once(paths.clone(), client_instance_id).await?;
+    let retained = Arc::new(Mutex::new(None));
+    let initial =
+        connect_owned_once(paths.clone(), client_instance_id, Arc::clone(&retained)).await?;
     let reconnect = Arc::new(RuntimeReconnect {
         paths,
         client_instance_id,
+        owned: Arc::clone(&retained),
     });
+    let client = Arc::new(ResilientDaemonClient::new(initial, reconnect));
+    let (supervisor_shutdown, supervisor_receiver) = tokio::sync::watch::channel(false);
+    let supervisor_client = Arc::clone(&client);
+    let supervisor =
+        tokio::spawn(async move { supervisor_client.supervise(supervisor_receiver).await });
     Ok(DaemonConnection {
-        client: Arc::new(ResilientDaemonClient::new(initial, reconnect)),
-        owned,
+        client,
+        retained,
+        supervisor_shutdown,
+        supervisor,
     })
 }
 
@@ -864,7 +920,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_health_failures_share_one_reconnect_and_retry() {
+    async fn concurrent_supervision_failures_share_one_reconnect() {
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let initial = Arc::new(ScriptedDaemon::failing_health(2, true, Some(barrier)));
         let replacement = Arc::new(ScriptedDaemon::healthy());
@@ -876,18 +932,24 @@ mod tests {
         let timeout =
             RequestTimeout::new(std::time::Duration::from_secs(1)).expect("test timeout is valid");
 
-        let (first, second) = tokio::join!(client.health(timeout), client.health(timeout));
+        tokio::join!(
+            client.supervise_once(timeout),
+            client.supervise_once(timeout)
+        );
+        let health = client
+            .health(timeout)
+            .await
+            .expect("replacement is healthy");
 
-        assert_eq!(first.expect("first health recovers"), test_health());
-        assert_eq!(second.expect("second health recovers"), test_health());
+        assert_eq!(health, test_health());
         assert_eq!(initial.health_calls.load(Ordering::SeqCst), 2);
-        assert_eq!(replacement.health_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(replacement.health_calls.load(Ordering::SeqCst), 1);
         assert_eq!(reconnect.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn nontransient_health_failure_does_not_replace_the_client() {
-        let initial = Arc::new(ScriptedDaemon::failing_health(1, false, None));
+    async fn health_observation_does_not_start_or_replace_a_daemon() {
+        let initial = Arc::new(ScriptedDaemon::failing_health(1, true, None));
         let replacement = Arc::new(ScriptedDaemon::healthy());
         let reconnect = Arc::new(TestReconnect {
             replacement,
@@ -899,9 +961,60 @@ mod tests {
 
         assert!(matches!(
             client.health(timeout).await,
-            Err(ClientError::ProtocolMismatch)
+            Err(ClientError::NonceMismatch)
         ));
         assert_eq!(reconnect.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn nontransient_supervision_failure_does_not_replace_the_client() {
+        let initial = Arc::new(ScriptedDaemon::failing_health(1, false, None));
+        let replacement = Arc::new(ScriptedDaemon::healthy());
+        let reconnect = Arc::new(TestReconnect {
+            replacement,
+            calls: AtomicUsize::new(0),
+        });
+        let client = ResilientDaemonClient::new(initial, reconnect.clone());
+        let timeout =
+            RequestTimeout::new(std::time::Duration::from_secs(1)).expect("test timeout is valid");
+
+        client.supervise_once(timeout).await;
+        assert_eq!(reconnect.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn supervisor_recovers_without_a_request_trigger() {
+        let initial = Arc::new(ScriptedDaemon::failing_health(1, true, None));
+        let replacement = Arc::new(ScriptedDaemon::healthy());
+        let reconnect = Arc::new(TestReconnect {
+            replacement: replacement.clone(),
+            calls: AtomicUsize::new(0),
+        });
+        let client = Arc::new(ResilientDaemonClient::new(initial, reconnect.clone()));
+        let (shutdown, receiver) = tokio::sync::watch::channel(false);
+        let supervised = Arc::clone(&client);
+        let supervisor = tokio::spawn(async move { supervised.supervise(receiver).await });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while reconnect.calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("supervisor reconnects before the deadline");
+        shutdown.send(true).expect("supervisor remains attached");
+        supervisor.await.expect("supervisor exits cleanly");
+
+        let timeout =
+            RequestTimeout::new(std::time::Duration::from_secs(1)).expect("test timeout is valid");
+        assert_eq!(
+            client
+                .health(timeout)
+                .await
+                .expect("replacement is healthy"),
+            test_health()
+        );
+        assert_eq!(replacement.health_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -930,6 +1043,27 @@ mod tests {
         assert_eq!(initial.index_calls.load(Ordering::SeqCst), 1);
         assert_eq!(replacement.index_calls.load(Ordering::SeqCst), 0);
         assert_eq!(reconnect.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn reconnect_retains_existing_ownership_until_it_starts_a_replacement() {
+        let retained = Mutex::new(Some(1_u8));
+
+        let previous =
+            retain_started_child(&retained, None).expect("retained slot remains available");
+        assert_eq!(previous, None);
+        assert_eq!(
+            *retained.lock().expect("retained slot remains available"),
+            Some(1)
+        );
+
+        let previous =
+            retain_started_child(&retained, Some(2)).expect("retained slot remains available");
+        assert_eq!(previous, Some(1));
+        assert_eq!(
+            *retained.lock().expect("retained slot remains available"),
+            Some(2)
+        );
     }
 
     fn take_failure(counter: &AtomicUsize) -> bool {

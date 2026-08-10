@@ -10,7 +10,9 @@ use rootlight_mcp_contract::{
     TrustClassification,
     capability::{ResponseProfileSupport, capability_for},
     catalog::McpTool,
-    change::{ChangeImpactData, PlanChangeData, TestCandidate, TestsSelectData},
+    change::{
+        ChangeImpactData, HistoryCompareData, PlanChangeData, TestCandidate, TestsSelectData,
+    },
     completeness::ResultCompleteness,
     context::{BatchTool, ContextPackData},
     intent::{
@@ -935,6 +937,18 @@ impl ProfileShape for CodeDeadData {
     }
 }
 
+impl ProfileShape for HistoryCompareData {
+    fn shape_with_limits(&mut self, _profile: ResponseProfile, limits: ProfileLimits) {
+        // Changes and aggregate deltas are the semantic result. Consumer-risk
+        // candidates and lineage matches are supporting evidence, so their
+        // prefixes may expand monotonically with the requested representation.
+        self.breaking_candidates
+            .truncate(usize::from(limits.rationale_items_per_result));
+        self.lineage
+            .truncate(usize::from(limits.evidence_references_per_result));
+    }
+}
+
 impl ProfileShape for PlanChangeData {
     fn shape_with_limits(&mut self, _profile: ResponseProfile, limits: ProfileLimits) {
         let rationale_limit = usize::from(limits.rationale_items_per_result);
@@ -1013,17 +1027,17 @@ mod tests {
     use rootlight_mcp_contract::{
         SafeLabel,
         change::{
-            ChangePlanStep, ContextPackRequest, ImpactEntry, ImpactGroup, ImpactRiskSummary,
-            PlanDecision, PlanImpactSummary, RankedTest, RiskLevel, TestCandidate,
-            TestCoverageStrategy, TestGap, TestKind,
+            ArchitectureDelta, BreakingCandidate, ChangePlanStep, ContextPackRequest, ImpactEntry,
+            ImpactGroup, ImpactRiskSummary, LineageMatch, MatchedStates, PlanDecision,
+            PlanImpactSummary, RankedTest, RiskLevel, SemanticChange, SemanticChangeKind,
+            TestCandidate, TestCoverageStrategy, TestGap, TestKind,
         },
         intent::{
             ArchitectureComponent, ArchitectureConnection, ArchitectureView, BlindSpot,
             CycleBreakCandidate, DeadCandidate, DeadClassification, DerivedViewInfo, Direction,
-            EntryPointPolicy, EntryPointSummary, FlowTraceData, FrontierSummary, Hotspot,
-            MinimalCycle, RelationKind, RelationProjection, RelationshipGroup, RelationshipTarget,
-            RelationshipTotals, RuleSummary, StronglyConnectedComponent, TraceEdge, TracePath,
-            UnresolvedSiteSummary,
+            EntryPointSummary, FlowTraceData, FrontierSummary, Hotspot, MinimalCycle, RelationKind,
+            RelationProjection, RelationshipGroup, RelationshipTarget, RelationshipTotals,
+            RuleSummary, StronglyConnectedComponent, TraceEdge, TracePath, UnresolvedSiteSummary,
         },
         vertical::{
             CodeLocateData, DetailHandle, EntityKind as ContractEntityKind, LocateReason,
@@ -1059,6 +1073,7 @@ mod tests {
                 test_id: "unit-agent-profile".to_owned(),
                 kind: TestKind::Unit,
                 path: include_optional_fields.then(|| "tests/agent_profile.rs".to_owned()),
+                framework: include_optional_fields.then(|| "cargo".to_owned()),
                 score: 975,
                 why: (0..rationale_count)
                     .map(|index| format!("reason-{index}"))
@@ -1072,6 +1087,7 @@ mod tests {
                 transitive_signals: true,
                 history_signals: false,
                 file_colocation_signals: true,
+                build_target_signals: true,
             },
             gaps: vec![TestGap {
                 scope: "platform-specific-cancellation".to_owned(),
@@ -1147,6 +1163,7 @@ mod tests {
         assert_profile_shape::<ArchitectureOverviewData>();
         assert_profile_shape::<ArchitectureCyclesData>();
         assert_profile_shape::<CodeDeadData>();
+        assert_profile_shape::<HistoryCompareData>();
         assert_profile_shape::<PlanChangeData>();
         assert_profile_shape::<ContextPackData>();
     }
@@ -1346,8 +1363,9 @@ mod tests {
     #[test]
     fn compact_code_dead_shape_preserves_recovery_and_false_positive_controls() {
         let entry_points = EntryPointSummary {
-            policy: EntryPointPolicy::Standard,
+            policy: rootlight_mcp_contract::intent::EntryPointPolicyKind::Standard,
             entry_point_count: 7,
+            entry_symbols: Vec::new(),
             complete: false,
         };
         let blind_spots = vec![BlindSpot {
@@ -1370,12 +1388,19 @@ mod tests {
                 confidence: 900,
                 why: vec!["unreachable".to_owned(), "unreferenced".to_owned()],
                 suppressions_checked: suppressions_checked.clone(),
+                reachability: rootlight_mcp_contract::intent::DeadReachabilitySummary {
+                    reached_from_entry_points: false,
+                    incoming_edges: 0,
+                    strongest_incoming_confidence: 0,
+                },
+                uncertainty: vec!["dynamic_dispatch_unobserved".to_owned()],
                 source_refs: Vec::new(),
                 trust: TrustClassification::UntrustedRepositoryData,
             }],
             entry_points: entry_points.clone(),
             blind_spots: blind_spots.clone(),
             false_positive_controls: false_positive_controls.clone(),
+            coverage_caveats: vec!["static_analysis_only".to_owned()],
             explanation: None,
         };
 
@@ -1524,6 +1549,8 @@ mod tests {
                 provider: format!("provider-{index}"),
                 evidence: format!("evidence-{index}"),
                 confidence: 900 - index,
+                frontend_version: None,
+                rule: None,
             })
             .collect();
         let raw = SymbolExplainData {
@@ -1531,6 +1558,7 @@ mod tests {
                 symbol_id,
                 kind: ContractEntityKind::Function,
                 display_name: "explained_symbol".to_owned(),
+                qualified_name: Some("crate::explained_symbol".to_owned()),
                 signature: Some("fn explained_symbol() -> bool".to_owned()),
                 definition: definition.clone(),
                 relations: RelationSummary {
@@ -1540,9 +1568,13 @@ mod tests {
                     inbound_candidates: 7,
                     references_exact: 11,
                 },
+                container: None,
+                relation_samples: Vec::new(),
+                source_preview: None,
                 provenance,
                 confidence: 925,
                 uncertainty: vec![warning("dynamic-call-uncertain")],
+                section_gaps: Vec::new(),
                 trust: TrustClassification::UntrustedRepositoryData,
             }],
             unresolved_ids: vec![SymbolId::from_bytes([22; 20])],
@@ -1590,6 +1622,8 @@ mod tests {
                 provider: format!("provider-{index}"),
                 evidence: format!("edge-{index}"),
                 confidence: 850 - index,
+                frontend_version: None,
+                rule: None,
             })
             .collect();
         let raw = SymbolRelationshipsData {
@@ -1743,9 +1777,11 @@ mod tests {
                 kind: "crate".to_owned(),
                 name: "agent".to_owned(),
                 symbol_count: 17,
+                file_count: 1,
                 responsibility_evidence: (0..6)
                     .map(|index| format!("responsibility-{index}"))
                     .collect(),
+                source_refs: Vec::new(),
                 confidence: 940,
                 trust: TrustClassification::UntrustedRepositoryData,
             }],
@@ -1762,6 +1798,8 @@ mod tests {
                 fan_out: 13,
                 change_frequency: Some(21),
                 complexity: Some(34),
+                ownership_signal: None,
+                test_signal: None,
                 score: 915,
             }],
             views: vec![DerivedViewInfo {
@@ -1809,6 +1847,9 @@ mod tests {
                 size: 2,
                 members: vec!["component-a".to_owned(), "component-b".to_owned()],
                 internal_edges: 3,
+                edge_weight: 2_700,
+                change_risk: 0,
+                break_cost: 420,
             }],
             cycles: vec![MinimalCycle {
                 nodes: vec![
@@ -1826,6 +1867,13 @@ mod tests {
                 break_cost: 420,
                 source_refs: source_refs(6),
             }],
+            projection: rootlight_mcp_contract::intent::ServedCycleProjection {
+                relations: BTreeSet::from([RelationKind::Imports]),
+                min_confidence: 0,
+                level: rootlight_mcp_contract::intent::CycleLevel::Symbol,
+                rank_by: rootlight_mcp_contract::intent::CycleRankBy::Size,
+                omitted_nodes: 0,
+            },
             explanation: None,
         };
         let (compact, standard, evidence) = shaped_profiles(&raw);
@@ -1863,6 +1911,71 @@ mod tests {
             {
                 assert_source_semantics(actual, expected);
             }
+        }
+    }
+
+    #[test]
+    fn history_profiles_expand_supporting_evidence_without_changing_the_diff() {
+        let changes = vec![SemanticChange {
+            kind: SemanticChangeKind::SignatureModified,
+            symbol_id: SymbolId::from_bytes([50; 20]),
+            entity_kind: EntityKind::Function,
+            breaking_candidate: true,
+            significance: 950,
+        }];
+        let breaking_candidates = (0_u8..6)
+            .map(|index| BreakingCandidate {
+                symbol_id: SymbolId::from_bytes([index.saturating_add(60); 20]),
+                consumer_count: u32::from(index).saturating_add(1),
+                is_public_surface: true,
+                reason: SafeLabel::parse("public-consumer")
+                    .expect("history reason should be source-free"),
+            })
+            .collect();
+        let lineage = (0_u8..6)
+            .map(|index| LineageMatch {
+                base_symbol_id: SymbolId::from_bytes([index.saturating_add(70); 20]),
+                head_symbol_id: SymbolId::from_bytes([index.saturating_add(80); 20]),
+                confidence: 900_u16.saturating_sub(u16::from(index)),
+                is_rename: index % 2 == 0,
+            })
+            .collect();
+        let raw = HistoryCompareData {
+            matched_states: MatchedStates {
+                base_generation: GenerationId::from_bytes([40; 20]),
+                head_generation: GenerationId::from_bytes([41; 20]),
+                coverage: CoverageStatus::Complete,
+            },
+            changes,
+            architecture_delta: ArchitectureDelta {
+                new_cross_service_edges: 2,
+                removed_cross_service_edges: 1,
+                new_boundaries: 1,
+                removed_boundaries: 0,
+            },
+            breaking_candidates,
+            lineage,
+            explanation: None,
+        };
+        let (compact, standard, evidence) = shaped_profiles(&raw);
+
+        assert_eq!(compact.breaking_candidates.len(), 1);
+        assert_eq!(standard.breaking_candidates.len(), 4);
+        assert_eq!(evidence.breaking_candidates.len(), 6);
+        assert_eq!(compact.lineage.len(), 1);
+        assert_eq!(standard.lineage.len(), 4);
+        assert_eq!(evidence.lineage.len(), 6);
+
+        for shaped in [&compact, &standard, &evidence] {
+            assert_eq!(shaped.matched_states, raw.matched_states);
+            assert_eq!(shaped.changes, raw.changes);
+            assert_eq!(shaped.architecture_delta, raw.architecture_delta);
+            assert_eq!(shaped.explanation, raw.explanation);
+            assert_eq!(
+                shaped.breaking_candidates,
+                raw.breaking_candidates[..shaped.breaking_candidates.len()]
+            );
+            assert_eq!(shaped.lineage, raw.lineage[..shaped.lineage.len()]);
         }
     }
 

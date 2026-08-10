@@ -28,10 +28,10 @@ pub use rootlight_error::{
 };
 pub use vertical::{
     CodeLocateInput, CodeLocateOutput, ContinuationCursor, GenerationSelector,
-    OperationStatusInput, OperationStatusOutputV1_1 as OperationStatusOutput, RepoIndexInput,
+    OperationStatusInput, OperationStatusOutput, RepoIndexInput,
     RepoIndexOutputV1_1 as RepoIndexOutput, RepositorySelector, SchemaVersion, SourceFreeMessage,
-    SourceReadInput, SourceReadOutput, SymbolExplainInput, SymbolExplainOutput, ToolResponse,
-    VerticalTool,
+    SourceReadInput, SourceReadOutput, SymbolExplainInput,
+    SymbolExplainOutputV1_1 as SymbolExplainOutput, ToolResponse, VerticalTool,
 };
 
 /// The MCP specification revision fixed by the compatibility contract.
@@ -42,6 +42,15 @@ pub const MCP_SCHEMA_VERSION: &str = "1.0";
 
 /// The additive repository-operation tool schema version.
 pub const MCP_OPERATION_SCHEMA_VERSION: &str = "1.1";
+
+/// The additive operation-status tool schema version.
+pub const MCP_OPERATION_STATUS_SCHEMA_VERSION: &str = "1.2";
+
+/// The additive analysis-tool schema version.
+pub const MCP_ANALYSIS_SCHEMA_VERSION: &str = "1.1";
+
+/// The additive repository-status tool schema version.
+pub const MCP_REPOSITORY_STATUS_SCHEMA_VERSION: &str = "1.1";
 
 /// The repository catalog response schema version.
 pub const REPO_LIST_SCHEMA_VERSION: &str = "2.0";

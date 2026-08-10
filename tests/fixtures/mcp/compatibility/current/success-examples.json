@@ -77,7 +77,8 @@
           "recommended_actions": [],
           "repository_state": "ready",
           "requested_generation": null,
-          "resolved_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by"
+          "resolved_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "retained_durable_bytes": 0
         },
         "generation": {
           "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
@@ -90,7 +91,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -191,6 +192,7 @@
               "peak_rss_bytes": 0,
               "referenced_bytes": 0,
               "reserved_memory_bytes": 0,
+              "retained_durable_bytes": 0,
               "written_bytes": 0
             },
             "revision": 1,
@@ -202,7 +204,7 @@
           "retry_after_ms": null,
           "semantic_operation_id": null
         },
-        "schema_version": "1.1"
+        "schema_version": "1.2"
       },
       "tool": "operation.status"
     },
@@ -311,7 +313,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -476,7 +478,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -595,7 +597,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -639,7 +641,16 @@
         "data": {
           "break_candidates": [],
           "components": [],
-          "cycles": []
+          "cycles": [],
+          "projection": {
+            "level": "module",
+            "min_confidence": 0,
+            "omitted_nodes": 0,
+            "rank_by": "size",
+            "relations": [
+              "calls"
+            ]
+          }
         },
         "generation": {
           "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
@@ -652,7 +663,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -690,9 +701,11 @@
         "data": {
           "blind_spots": [],
           "candidates": [],
+          "coverage_caveats": [],
           "entry_points": {
             "complete": true,
             "entry_point_count": 0,
+            "entry_symbols": [],
             "policy": "standard"
           },
           "false_positive_controls": []
@@ -708,7 +721,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -779,7 +792,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -821,6 +834,7 @@
         },
         "data": {
           "coverage_strategy": {
+            "build_target_signals": false,
             "direct_edges": false,
             "file_colocation_signals": false,
             "history_signals": false,
@@ -840,7 +854,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -904,7 +918,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -980,7 +994,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
@@ -1123,7 +1137,7 @@
           "display_name": "fixture",
           "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
         },
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "truncated": false,
         "trust": "untrusted_repository_data",
         "usage": {
