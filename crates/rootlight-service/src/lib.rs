@@ -162,6 +162,10 @@ const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provide
 const PARSER_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.parser-providers/1";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
 const PROJECT_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.project-context/1";
+const PROJECT_PARTITION_DIAGNOSTIC_RESERVE: usize = 2;
+const PROJECT_DIAGNOSTICS_TRUNCATED_CODE: &str = "project-adapter-diagnostics-truncated";
+const PROJECT_DIAGNOSTICS_TRUNCATED_MESSAGE: &str =
+    "additional project adapter diagnostics were omitted by the aggregate diagnostic limit";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/2";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
@@ -2539,6 +2543,7 @@ pub struct FirstSliceProjectAnalysis {
     external_symbols: BTreeSet<SymbolId>,
     isolation_permits_deep_adapter: bool,
     partitioned: bool,
+    diagnostics_truncated: bool,
 }
 
 impl FirstSliceProjectAnalysis {
@@ -2551,6 +2556,7 @@ impl FirstSliceProjectAnalysis {
             external_symbols,
             isolation_permits_deep_adapter,
             partitioned: false,
+            diagnostics_truncated: false,
         }
     }
 
@@ -2570,6 +2576,7 @@ impl FirstSliceProjectAnalysis {
             external_symbols,
             isolation_permits_deep_adapter,
             partitioned,
+            diagnostics_truncated: false,
         }
     }
 
@@ -2591,18 +2598,29 @@ impl FirstSliceProjectAnalysis {
             .documents
             .first_mut()
             .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
-        merge_project_document(merged, document, &mut self.external_symbols)
-            .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+        // Partition output still needs one aggregate truncation record and one
+        // cross-partition coverage record after the streaming merge completes.
+        let diagnostic_capacity = IrLimits::default()
+            .max_diagnostics
+            .saturating_sub(PROJECT_PARTITION_DIAGNOSTIC_RESERVE);
+        self.diagnostics_truncated |= merge_project_document(
+            merged,
+            document,
+            &mut self.external_symbols,
+            diagnostic_capacity,
+        )
+        .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
         self.isolation_permits_deep_adapter &= isolation_permits_deep_adapter;
         self.partitioned = true;
         Ok(())
     }
 
-    fn into_parts(self) -> (Vec<NormalizedIrDocument>, bool, bool) {
+    fn into_parts(self) -> (Vec<NormalizedIrDocument>, bool, bool, bool) {
         (
             self.documents,
             self.isolation_permits_deep_adapter,
             self.partitioned,
+            self.diagnostics_truncated,
         )
     }
 }
@@ -4770,8 +4788,12 @@ impl FirstSliceService {
                     .ok_or(FirstSliceError::Limits)?;
                 match analysis {
                     Ok(output) => {
-                        let (documents, isolation_permits_deep_adapter, partitioned) =
-                            output.into_parts();
+                        let (
+                            documents,
+                            isolation_permits_deep_adapter,
+                            partitioned,
+                            diagnostics_truncated,
+                        ) = output.into_parts();
                         if !isolation_permits_deep_adapter {
                             fallback_error = Some(FirstSliceProjectAnalysisError::Isolation);
                         } else if !project_documents_match_inputs(
@@ -4783,25 +4805,21 @@ impl FirstSliceService {
                         ) {
                             fallback_error = Some(FirstSliceProjectAnalysisError::Protocol);
                         } else {
-                            match merge_project_documents(documents) {
-                                Ok(mut document) => {
-                                    let preparation = if partitioned {
-                                        append_project_partition_diagnostic(
-                                            &mut document,
-                                            &language,
-                                            self.analysis_limits.ir(),
-                                        )
-                                    } else {
-                                        Ok(())
-                                    };
-                                    if preparation.is_ok()
-                                        && append_normalized_document(
-                                            target,
-                                            document,
-                                            self.analysis_limits.ir(),
-                                            &mut append_state,
-                                        )
-                                        .is_ok()
+                            match prepare_project_analysis_document(
+                                documents,
+                                &language,
+                                partitioned,
+                                diagnostics_truncated,
+                                self.analysis_limits.ir(),
+                            ) {
+                                Ok(document) => {
+                                    if append_normalized_document(
+                                        target,
+                                        document,
+                                        self.analysis_limits.ir(),
+                                        &mut append_state,
+                                    )
+                                    .is_ok()
                                     {
                                         continue;
                                     }
@@ -10045,14 +10063,22 @@ fn project_documents_match_inputs(
 
 fn merge_project_documents(
     documents: Vec<NormalizedIrDocument>,
-) -> Result<NormalizedIrDocument, FirstSliceError> {
+    diagnostic_capacity: usize,
+) -> Result<(NormalizedIrDocument, bool), FirstSliceError> {
     let mut documents = documents.into_iter();
     let mut merged = documents.next().ok_or(FirstSliceError::Identity)?;
     let mut external_symbols = project_external_symbols(&merged);
+    let mut diagnostics_truncated = merged.diagnostics.len() > diagnostic_capacity;
+    merged.diagnostics.truncate(diagnostic_capacity);
     for document in documents {
-        merge_project_document(&mut merged, document, &mut external_symbols)?;
+        diagnostics_truncated |= merge_project_document(
+            &mut merged,
+            document,
+            &mut external_symbols,
+            diagnostic_capacity,
+        )?;
     }
-    Ok(merged)
+    Ok((merged, diagnostics_truncated))
 }
 
 fn project_external_symbols(document: &NormalizedIrDocument) -> BTreeSet<SymbolId> {
@@ -10067,7 +10093,8 @@ fn merge_project_document(
     merged: &mut NormalizedIrDocument,
     mut document: NormalizedIrDocument,
     external_symbols: &mut BTreeSet<SymbolId>,
-) -> Result<(), FirstSliceError> {
+    diagnostic_capacity: usize,
+) -> Result<bool, FirstSliceError> {
     if document.version != merged.version
         || document.repository != merged.repository
         || document.generation != merged.generation
@@ -10095,6 +10122,11 @@ fn merge_project_document(
             !duplicate_external_symbols.contains(symbol)
         });
     }
+    let mut diagnostics_truncated = merged.diagnostics.len() > diagnostic_capacity;
+    merged.diagnostics.truncate(diagnostic_capacity);
+    let remaining_diagnostics = diagnostic_capacity.saturating_sub(merged.diagnostics.len());
+    diagnostics_truncated |= document.diagnostics.len() > remaining_diagnostics;
+    document.diagnostics.truncate(remaining_diagnostics);
     merged
         .files
         .try_reserve_exact(document.files.len())
@@ -10147,6 +10179,67 @@ fn merge_project_document(
     merged.skipped_regions.append(&mut document.skipped_regions);
     merged.diagnostics.append(&mut document.diagnostics);
     merged.extensions.append(&mut document.extensions);
+    Ok(diagnostics_truncated)
+}
+
+fn prepare_project_analysis_document(
+    documents: Vec<NormalizedIrDocument>,
+    language: &str,
+    partitioned: bool,
+    diagnostics_truncated: bool,
+    limits: &IrLimits,
+) -> Result<NormalizedIrDocument, FirstSliceError> {
+    let diagnostic_reserve = if partitioned {
+        PROJECT_PARTITION_DIAGNOSTIC_RESERVE
+    } else {
+        0
+    };
+    let diagnostic_capacity = limits.max_diagnostics.saturating_sub(diagnostic_reserve);
+    let (mut document, merge_truncated) = merge_project_documents(documents, diagnostic_capacity)?;
+    if partitioned {
+        if diagnostics_truncated || merge_truncated {
+            append_project_diagnostics_truncated(&mut document, limits)?;
+        }
+        append_project_partition_diagnostic(&mut document, language, limits)?;
+    }
+    Ok(document)
+}
+
+fn append_project_diagnostics_truncated(
+    document: &mut NormalizedIrDocument,
+    limits: &IrLimits,
+) -> Result<(), FirstSliceError> {
+    let provenance = document
+        .provenance
+        .first()
+        .map(|record| record.id)
+        .ok_or(FirstSliceError::Identity)?;
+    let evidence_file = document
+        .files
+        .first()
+        .map(|record| record.id)
+        .ok_or(FirstSliceError::Identity)?;
+    let total = normalized_record_count(document)?;
+    checked_combined_length(total, 1, limits.max_total_records)?;
+    reserve_records(&mut document.diagnostics, 1, limits.max_diagnostics)?;
+    let mut diagnostic = DiagnosticRecord {
+        id: FactId::from_bytes([0; 20]),
+        repository: document.repository,
+        generation: document.generation,
+        code: PROJECT_DIAGNOSTICS_TRUNCATED_CODE.to_owned(),
+        message: PROJECT_DIAGNOSTICS_TRUNCATED_MESSAGE.to_owned(),
+        severity: DiagnosticSeverity::Warning,
+        source: None,
+        coverage_effect: CoverageStatus::Bounded,
+        provenance,
+        evidence: FactEvidence {
+            source: None,
+            derivation: vec![FactRef::File(evidence_file)],
+        },
+    };
+    diagnostic.id =
+        derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
+    document.diagnostics.push(diagnostic);
     Ok(())
 }
 
@@ -11968,9 +12061,11 @@ mod tests {
                 false,
             )
             .expect("the next project partition merges immediately");
-        let (documents, isolation_permits_deep_adapter, partitioned) = analysis.into_parts();
+        let (documents, isolation_permits_deep_adapter, partitioned, diagnostics_truncated) =
+            analysis.into_parts();
         assert!(!isolation_permits_deep_adapter);
         assert!(partitioned);
+        assert!(!diagnostics_truncated);
         assert_eq!(documents.len(), 1);
         let merged = &documents[0];
 
@@ -11984,6 +12079,146 @@ mod tests {
             1
         );
         assert_eq!(merged.provenance.len(), 2);
+    }
+
+    #[test]
+    fn project_partition_merge_bounds_aggregate_diagnostics() {
+        fn document(
+            repository: RepositoryId,
+            generation: GenerationId,
+            file: FileId,
+            partition: usize,
+            diagnostic_count: usize,
+        ) -> NormalizedIrDocument {
+            let source = SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, 0, 1).expect("diagnostic source span is valid"),
+                content_hash(file.as_bytes()),
+                None,
+            );
+            let producer = ProducerIdentity::new(
+                "rootlight-test-project",
+                "1.0",
+                content_hash(b"partition-diagnostic-producer"),
+            )
+            .expect("project producer is valid");
+            let mut provenance = ProvenanceRecord {
+                id: FactId::from_bytes([0; 20]),
+                repository,
+                generation,
+                producer_kind: ProducerKind::Derivation,
+                producer,
+                binary_digest: content_hash(b"partition-diagnostic-binary"),
+                frontend_version: Some("test-project-1".to_owned()),
+                language: "rust".to_owned(),
+                tier: AnalysisTier::TierB,
+                build_context: BuildContextIdentity::new(content_hash(
+                    b"partition-diagnostic-context",
+                )),
+                input_sources: vec![source.clone()],
+                evidence_sources: vec![source.clone()],
+                derivation_parents: Vec::new(),
+                rule: None,
+            };
+            provenance.id = derive_provenance_record_id(&provenance)
+                .expect("project provenance identity derives");
+            let file_record = FileRecord {
+                id: file,
+                repository,
+                generation,
+                path: format!("src/partition-{partition}.rs"),
+                path_locator: None,
+                content_hash: source.content_hash(),
+                byte_length: 1,
+                language: "rust".to_owned(),
+                encoding: "utf-8".to_owned(),
+                generated: false,
+                provenance: provenance.id,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            };
+            let diagnostics = (0..diagnostic_count)
+                .map(|index| {
+                    let mut diagnostic = DiagnosticRecord {
+                        id: FactId::from_bytes([0; 20]),
+                        repository,
+                        generation,
+                        code: format!("partition-{partition}-diagnostic-{index}"),
+                        message: "bounded parser recovery".to_owned(),
+                        severity: DiagnosticSeverity::Warning,
+                        source: Some(source.clone()),
+                        coverage_effect: CoverageStatus::Bounded,
+                        provenance: provenance.id,
+                        evidence: FactEvidence {
+                            source: Some(source.clone()),
+                            derivation: Vec::new(),
+                        },
+                    };
+                    diagnostic.id = derive_diagnostic_record_id(&diagnostic)
+                        .expect("diagnostic identity derives");
+                    diagnostic
+                })
+                .collect();
+            let mut document = NormalizedIrDocument::empty(repository, generation);
+            document.files.push(file_record);
+            document.provenance.push(provenance);
+            document.diagnostics = diagnostics;
+            document
+        }
+
+        let repository = derive_repository(b"partition-diagnostic-repository").id();
+        let generation = GenerationId::from_bytes([22; 20]);
+        let limits = IrLimits::default();
+        let diagnostics_per_partition = limits.max_diagnostics / 2 + 1;
+        let mut analysis = FirstSliceProjectAnalysis::new(
+            document(
+                repository,
+                generation,
+                FileId::from_bytes([1; 20]),
+                1,
+                diagnostics_per_partition,
+            ),
+            true,
+        );
+        analysis
+            .append_partition(
+                document(
+                    repository,
+                    generation,
+                    FileId::from_bytes([2; 20]),
+                    2,
+                    diagnostics_per_partition,
+                ),
+                true,
+            )
+            .expect("the bounded diagnostic partition merges");
+        let (documents, isolated, partitioned, diagnostics_truncated) = analysis.into_parts();
+        assert!(isolated);
+        assert!(partitioned);
+        assert!(diagnostics_truncated);
+
+        let merged = prepare_project_analysis_document(
+            documents,
+            "rust",
+            partitioned,
+            diagnostics_truncated,
+            &limits,
+        )
+        .expect("bounded aggregate diagnostics remain publishable");
+        assert_eq!(merged.diagnostics.len(), limits.max_diagnostics);
+        assert!(
+            merged
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == PROJECT_DIAGNOSTICS_TRUNCATED_CODE)
+        );
+        assert!(merged.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "project-adapter-partitioned-coverage"
+                && diagnostic.coverage_effect == CoverageStatus::Bounded
+        }));
     }
 
     struct FailingProjectAnalyzer {
