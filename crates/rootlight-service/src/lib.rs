@@ -71,8 +71,9 @@ use rootlight_incremental::{
 pub use rootlight_incremental::{ChangeClass, FactDomain, FallbackReason, FileChangeKind};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageRecord, CoverageScope, CoverageStatus,
-    DiagnosticRecord, DiagnosticSeverity, EntityKind, ExtensionSupport, FactDomain as IrFactDomain,
-    FactEvidence, FactRef, FileIdentityClaim, FileRecord, IrDocumentValidationError, IrLimits,
+    DiagnosticRecord, DiagnosticSeverity, EntityKind, ExtensionSupport,
+    FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain as IrFactDomain, FactEvidence, FactRef,
+    FileIdentityClaim, FileRecord, IrDocumentValidationError, IrLimits,
     LEXICAL_EXTENSION_NAMESPACE, NormalizedIrDocument, OccurrenceRole, ProducerIdentity,
     ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
     SYMBOL_IDENTITY_CLAIM_NAMESPACE, SkippedRegion, SkippedRegionReason, SourceMappingKind,
@@ -4814,18 +4815,27 @@ impl FirstSliceService {
                                 self.analysis_limits.ir(),
                             ) {
                                 Ok(document) => {
-                                    if append_normalized_document(
+                                    match append_project_document_with_capacity(
                                         target,
                                         document,
                                         self.analysis_limits.ir(),
                                         &mut append_state,
-                                    )
-                                    .is_ok()
-                                    {
-                                        continue;
+                                    ) {
+                                        Ok(()) => continue,
+                                        Err(
+                                            error @ (FirstSliceError::Limits
+                                            | FirstSliceError::ResourceLimit { .. }),
+                                        ) => return Err(error),
+                                        Err(_) => {
+                                            fallback_error =
+                                                Some(FirstSliceProjectAnalysisError::Analysis);
+                                        }
                                     }
-                                    fallback_error = Some(FirstSliceProjectAnalysisError::Analysis);
                                 }
+                                Err(
+                                    error @ (FirstSliceError::Limits
+                                    | FirstSliceError::ResourceLimit { .. }),
+                                ) => return Err(error),
                                 Err(_) => {
                                     fallback_error = Some(FirstSliceProjectAnalysisError::Analysis);
                                 }
@@ -10648,6 +10658,199 @@ fn append_normalized_document(
     Ok(())
 }
 
+fn append_project_document_with_capacity(
+    target: &mut NormalizedIrDocument,
+    mut source: NormalizedIrDocument,
+    limits: &IrLimits,
+    append_state: &mut DocumentAppendState,
+) -> Result<(), FirstSliceError> {
+    // Decide whether to retain full project facts before the shared append path
+    // can reserve or truncate any target-owned collection.
+    match preflight_normalized_document_append(target, &source, limits) {
+        Ok(()) => {}
+        Err(FirstSliceError::ResourceLimit { .. }) => {
+            retain_project_capacity_summary(&mut source)?;
+            preflight_normalized_document_append(target, &source, limits)?;
+        }
+        Err(error) => return Err(error),
+    }
+    append_normalized_document(target, source, limits, append_state)
+}
+
+fn preflight_normalized_document_append(
+    target: &NormalizedIrDocument,
+    source: &NormalizedIrDocument,
+    limits: &IrLimits,
+) -> Result<(), FirstSliceError> {
+    if source.version != target.version
+        || source.repository != target.repository
+        || source.generation != target.generation
+    {
+        return Err(FirstSliceError::Identity);
+    }
+    for (current, additional, maximum, resource) in [
+        (
+            target.files.len(),
+            source.files.len(),
+            limits.max_files,
+            FirstSliceResource::Files,
+        ),
+        (
+            target.entities.len(),
+            source.entities.len(),
+            limits.max_entities,
+            FirstSliceResource::Entities,
+        ),
+        (
+            target.occurrences.len(),
+            source.occurrences.len(),
+            limits.max_occurrences,
+            FirstSliceResource::Occurrences,
+        ),
+        (
+            target.relations.len(),
+            source.relations.len(),
+            limits.max_relations,
+            FirstSliceResource::Relations,
+        ),
+        (
+            target.provenance.len(),
+            source.provenance.len(),
+            limits.max_provenance_records,
+            FirstSliceResource::Provenance,
+        ),
+        (
+            target.source_mappings.len(),
+            source.source_mappings.len(),
+            limits.max_source_mappings,
+            FirstSliceResource::SourceMappings,
+        ),
+        (
+            target.coverage_records.len(),
+            source.coverage_records.len(),
+            limits.max_coverage_records,
+            FirstSliceResource::Coverage,
+        ),
+        (
+            target.diagnostics.len(),
+            source.diagnostics.len(),
+            limits.max_diagnostics,
+            FirstSliceResource::Diagnostics,
+        ),
+    ] {
+        checked_resource_length(current, additional, maximum, resource)?;
+    }
+    checked_resource_length(
+        target.skipped_regions.len(),
+        0,
+        limits.max_skipped_regions,
+        FirstSliceResource::SkippedRegions,
+    )?;
+
+    let target_required_extensions = target
+        .extensions
+        .iter()
+        .filter(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE)
+        .count();
+    let source_required_extensions = source
+        .extensions
+        .iter()
+        .filter(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE)
+        .count();
+    checked_resource_length(
+        target_required_extensions,
+        source_required_extensions,
+        limits.max_extensions,
+        FirstSliceResource::Extensions,
+    )?;
+    let target_required_extension_bytes = extension_payload_bytes(
+        target
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE),
+    )?;
+    let source_required_extension_bytes = extension_payload_bytes(
+        source
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE),
+    )?;
+    checked_resource_length(
+        target_required_extension_bytes,
+        source_required_extension_bytes,
+        limits.max_total_extension_bytes,
+        FirstSliceResource::ExtensionBytes,
+    )?;
+
+    let available_skipped_regions = limits
+        .max_skipped_regions
+        .checked_sub(target.skipped_regions.len())
+        .ok_or_else(|| {
+            resource_limit(
+                FirstSliceResource::SkippedRegions,
+                target.skipped_regions.len(),
+                limits.max_skipped_regions,
+            )
+        })?;
+    let retained_source_skipped_regions =
+        source.skipped_regions.len().min(available_skipped_regions);
+    let target_non_extensions = normalized_record_count(target)?
+        .checked_sub(target.extensions.len())
+        .ok_or(FirstSliceError::Limits)?;
+    let source_non_extensions = normalized_record_count(source)?
+        .checked_sub(source.extensions.len())
+        .and_then(|total| total.checked_sub(source.skipped_regions.len()))
+        .and_then(|total| total.checked_add(retained_source_skipped_regions))
+        .ok_or(FirstSliceError::Limits)?;
+    let maximum_merged_extensions = target
+        .extensions
+        .len()
+        .checked_add(source.extensions.len())
+        .ok_or(FirstSliceError::Limits)?
+        .min(limits.max_extensions);
+    let maximum_total = target_non_extensions
+        .checked_add(source_non_extensions)
+        .and_then(|total| total.checked_add(maximum_merged_extensions))
+        .ok_or(FirstSliceError::Limits)?;
+    if maximum_total > limits.max_total_records {
+        return Err(resource_limit(
+            FirstSliceResource::Records,
+            maximum_total,
+            limits.max_total_records,
+        ));
+    }
+    Ok(())
+}
+
+fn retain_project_capacity_summary(
+    document: &mut NormalizedIrDocument,
+) -> Result<(), FirstSliceError> {
+    document.entities.clear();
+    document.occurrences.clear();
+    document.relations.clear();
+    document.source_mappings.clear();
+    document.skipped_regions.clear();
+    document.diagnostics.clear();
+    // File claims remain required for generation identity verification. Other
+    // extensions can name entities or mappings omitted by this summary.
+    document
+        .extensions
+        .retain(|extension| extension.namespace == FILE_IDENTITY_CLAIM_NAMESPACE);
+    for coverage in &mut document.coverage_records {
+        coverage.status = CoverageStatus::Bounded;
+        if !matches!(
+            coverage.domain,
+            IrFactDomain::Files | IrFactDomain::Provenance
+        ) {
+            coverage.indexed = 0;
+            coverage.skipped = coverage.discovered;
+        }
+        coverage.evidence.derivation.clear();
+        coverage.id = derive_coverage_record_id(coverage).map_err(|_| FirstSliceError::Identity)?;
+    }
+    Ok(())
+}
+
 fn truncate_skipped_regions(
     target: &NormalizedIrDocument,
     source: &mut NormalizedIrDocument,
@@ -12107,7 +12310,7 @@ mod tests {
     }
 
     #[test]
-    fn project_partition_merge_bounds_aggregate_diagnostics() {
+    fn project_partition_merge_bounds_aggregate_output() {
         fn document(
             repository: RepositoryId,
             generation: GenerationId,
@@ -12307,6 +12510,55 @@ mod tests {
                 .iter()
                 .all(|coverage| coverage.status == CoverageStatus::Bounded)
         );
+
+        let mut capacity_document =
+            document(repository, generation, FileId::from_bytes([5; 20]), 5, 0);
+        let provenance = capacity_document.provenance[0].id;
+        let source = capacity_document.files[0]
+            .evidence
+            .source
+            .clone()
+            .expect("project file has direct evidence");
+        capacity_document.entities.push(EntityRecord {
+            id: SymbolId::from_bytes([6; 20]),
+            repository,
+            generation,
+            kind: EntityKind::Function,
+            language: "rust".to_owned(),
+            tier: AnalysisTier::TierB,
+            canonical_name: "capacity_bound".to_owned(),
+            display_name: "capacity_bound".to_owned(),
+            qualified_name: "capacity_bound".to_owned(),
+            container: None,
+            visibility: EntityVisibility::Private,
+            flags: Vec::new(),
+            provenance,
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        });
+        let mut capacity_limits = limits;
+        capacity_limits.max_entities = 0;
+        let mut target = NormalizedIrDocument::empty(repository, generation);
+        let mut append_state =
+            DocumentAppendState::from_document(&target).expect("empty append state initializes");
+        append_project_document_with_capacity(
+            &mut target,
+            capacity_document,
+            &capacity_limits,
+            &mut append_state,
+        )
+        .expect("project capacity exhaustion commits a bounded summary");
+        assert!(target.entities.is_empty());
+        assert_eq!(target.files.len(), 1);
+        assert!(target.coverage_records.iter().all(|coverage| {
+            coverage.status == CoverageStatus::Bounded
+                && coverage.indexed == 0
+                && coverage.skipped == coverage.discovered
+        }));
+        rootlight_ir::validate_ir_document(&target, &capacity_limits, &ExtensionSupport::default())
+            .expect("the bounded project summary remains valid normalized IR");
     }
 
     struct FailingProjectAnalyzer {
