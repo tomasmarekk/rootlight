@@ -8958,7 +8958,10 @@ fn parse_repository_index_stage(
     }
     if matches!(
         stage.as_str(),
-        "discovery"
+        "queued"
+            | "cancelling"
+            | "recovery"
+            | "discovery"
             | "snapshot"
             | "analysis"
             | "merge"
@@ -15835,10 +15838,31 @@ mod tests {
             .expect("operation exists")
             .state = daemon::OperationState::Queued as i32;
         queued_without_retry.published_generation = None;
-        queued_without_retry.index_stage = "discovery".to_owned();
+        queued_without_retry.index_stage = "queued".to_owned();
         assert!(parse_repository_operation_status(queued_without_retry.clone(), operation).is_ok());
         queued_without_retry.retry_after_ms = Some(0);
         assert!(parse_repository_operation_status(queued_without_retry, operation).is_ok());
+        let mut cancelling_status = status.clone();
+        cancelling_status
+            .operation
+            .as_mut()
+            .expect("operation exists")
+            .state = daemon::OperationState::Cancelling as i32;
+        cancelling_status.published_generation = None;
+        cancelling_status.index_stage = "cancelling".to_owned();
+        cancelling_status.retry_after_ms = Some(50);
+        assert!(parse_repository_operation_status(cancelling_status, operation).is_ok());
+        let mut running_recovery_status = status.clone();
+        let running_recovery_operation = running_recovery_status
+            .operation
+            .as_mut()
+            .expect("operation exists");
+        running_recovery_operation.kind = daemon::OperationKind::Recovery as i32;
+        running_recovery_operation.state = daemon::OperationState::Running as i32;
+        running_recovery_status.published_generation = None;
+        running_recovery_status.index_stage = "recovery".to_owned();
+        running_recovery_status.retry_after_ms = Some(250);
+        assert!(parse_repository_operation_status(running_recovery_status, operation).is_ok());
         let mut publishing_status = status.clone();
         publishing_status
             .operation
