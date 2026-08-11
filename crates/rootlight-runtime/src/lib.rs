@@ -42,6 +42,23 @@ pub const COORDINATED_START_SIGNAL_ENV: &str = "ROOTLIGHT_COORDINATED_START_SIGN
 /// Current coordinated startup signal protocol version.
 pub const COORDINATED_START_SIGNAL_VERSION: &str = "1";
 
+/// Resolves an existing executable beneath the trusted Windows system root.
+///
+/// The returned path is canonical, remains beneath the canonical `SystemRoot`,
+/// contains no reparse-point component, and names a nonempty regular file.
+///
+/// # Errors
+///
+/// Returns [`RuntimeError::WindowsSystemExecutablePolicy`] when `SystemRoot`
+/// or `relative_path` violates the trusted executable policy, or when filesystem
+/// validation cannot establish the boundary.
+#[cfg(windows)]
+pub fn trusted_windows_system_executable(relative_path: &Path) -> Result<PathBuf, RuntimeError> {
+    let system_root =
+        std::env::var_os("SystemRoot").ok_or(RuntimeError::WindowsSystemExecutablePolicy(None))?;
+    trusted_windows_system_executable_in(Path::new(&system_root), relative_path)
+}
+
 /// One exact-child startup state published through the coordinator-owned pipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoordinatedStartupSignal {
@@ -885,6 +902,84 @@ fn validate_directory_path(path: &Path) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn trusted_windows_system_executable_in(
+    system_root: &Path,
+    relative_path: &Path,
+) -> Result<PathBuf, RuntimeError> {
+    validate_windows_system_root_path(system_root)?;
+    validate_windows_system_executable_relative_path(relative_path)?;
+    reject_windows_reparse_components(system_root)?;
+
+    let canonical_root = fs::canonicalize(system_root)
+        .map_err(|source| RuntimeError::WindowsSystemExecutablePolicy(Some(source)))?;
+    reject_windows_reparse_components(&canonical_root)?;
+    let root_metadata = fs::symlink_metadata(&canonical_root)
+        .map_err(|source| RuntimeError::WindowsSystemExecutablePolicy(Some(source)))?;
+    if !root_metadata.file_type().is_dir() {
+        return Err(RuntimeError::WindowsSystemExecutablePolicy(None));
+    }
+
+    let candidate = system_root.join(relative_path);
+    reject_windows_reparse_components(&candidate)?;
+    let canonical_candidate = fs::canonicalize(&candidate)
+        .map_err(|source| RuntimeError::WindowsSystemExecutablePolicy(Some(source)))?;
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(RuntimeError::WindowsSystemExecutablePolicy(None));
+    }
+    reject_windows_reparse_components(&canonical_candidate)?;
+    let metadata = fs::symlink_metadata(&canonical_candidate)
+        .map_err(|source| RuntimeError::WindowsSystemExecutablePolicy(Some(source)))?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 {
+        return Err(RuntimeError::WindowsSystemExecutablePolicy(None));
+    }
+    Ok(canonical_candidate)
+}
+
+#[cfg(windows)]
+fn validate_windows_system_root_path(path: &Path) -> Result<(), RuntimeError> {
+    use std::path::{Component, Prefix};
+
+    if path.as_os_str().is_empty() || !path.is_absolute() {
+        return Err(RuntimeError::WindowsSystemExecutablePolicy(None));
+    }
+    let mut components = path.components();
+    if !matches!(
+        components.next(),
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_))
+    ) || !matches!(components.next(), Some(Component::RootDir))
+        || components.any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(RuntimeError::WindowsSystemExecutablePolicy(None));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_windows_system_executable_relative_path(path: &Path) -> Result<(), RuntimeError> {
+    use std::path::Component;
+
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(RuntimeError::WindowsSystemExecutablePolicy(None));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn reject_windows_reparse_components(path: &Path) -> Result<(), RuntimeError> {
+    let has_reparse = windows_path_has_reparse_component(path)
+        .map_err(|source| RuntimeError::WindowsSystemExecutablePolicy(Some(source)))?;
+    if has_reparse {
+        return Err(RuntimeError::WindowsSystemExecutablePolicy(None));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrivateScope {
     Account,
@@ -915,7 +1010,7 @@ fn prepare_private_directory(path: &Path, scope: PrivateScope) -> Result<(), Run
     }
     #[cfg(windows)]
     {
-        if windows_path_has_reparse_component(path)? {
+        if windows_path_has_reparse_component(path).map_err(RuntimeError::Io)? {
             return Err(RuntimeError::InsecureDirectory);
         }
         apply_private_windows_dacl(path, scope)?;
@@ -947,7 +1042,9 @@ fn validate_private_directory(path: &Path, scope: PrivateScope) -> Result<(), Ru
     }
     #[cfg(windows)]
     {
-        if metadata.file_type().is_symlink() || windows_path_has_reparse_component(path)? {
+        if metadata.file_type().is_symlink()
+            || windows_path_has_reparse_component(path).map_err(RuntimeError::Io)?
+        {
             return Err(RuntimeError::InsecureDirectory);
         }
         verify_private_windows_dacl(path, scope)?;
@@ -1336,14 +1433,15 @@ fn windows_scope_sids(scope: PrivateScope) -> Result<Vec<String>, RuntimeError> 
 }
 
 #[cfg(windows)]
-fn windows_path_has_reparse_component(path: &Path) -> Result<bool, RuntimeError> {
+fn windows_path_has_reparse_component(path: &Path) -> io::Result<bool> {
     use std::os::windows::fs::MetadataExt as _;
     use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        let metadata = fs::symlink_metadata(&current).map_err(RuntimeError::Io)?;
+    for current in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        if current.as_os_str().is_empty() {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(current)?;
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
             return Ok(true);
         }
@@ -1476,6 +1574,12 @@ pub enum RuntimeError {
     /// Windows token, reparse-point, or ACL verification failed.
     #[error("daemon Windows security policy failed")]
     WindowsSecurityPolicy,
+    /// A Windows system executable could not be confined to the trusted system root.
+    ///
+    /// The optional source retains filesystem context without exposing rejected
+    /// attacker-controlled path input in diagnostics.
+    #[error("Windows system executable security policy failed")]
+    WindowsSystemExecutablePolicy(#[source] Option<io::Error>),
     /// The endpoint failed platform transport validation.
     #[error("daemon endpoint is invalid")]
     InvalidEndpoint(#[source] rootlight_ipc::IpcError),
@@ -1586,6 +1690,126 @@ mod tests {
 
         verify_private_windows_file_dacl(&file, PrivateScope::Account)
             .expect("output account DACL verifies through its handle");
+    }
+
+    #[cfg(windows)]
+    fn fake_windows_system_root() -> (tempfile::TempDir, PathBuf) {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let system_root = temporary.path().join("Windows");
+        fs::create_dir_all(system_root.join("System32")).expect("fake system directory creates");
+        (temporary, system_root)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_windows_system_executable_is_canonical_regular_and_nonempty() {
+        let (_temporary, system_root) = fake_windows_system_root();
+        let executable = system_root.join("System32").join("schtasks.exe");
+        fs::write(&executable, b"fixture executable").expect("fixture executable writes");
+
+        let resolved =
+            trusted_windows_system_executable_in(&system_root, Path::new("System32/schtasks.exe"))
+                .expect("trusted executable resolves");
+
+        assert_eq!(
+            resolved,
+            fs::canonicalize(executable).expect("fixture executable canonicalizes")
+        );
+        assert!(resolved.is_absolute());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_windows_system_executable_rejects_untrusted_relative_paths() {
+        let (_temporary, system_root) = fake_windows_system_root();
+        let absolute = system_root.join("System32").join("schtasks.exe");
+
+        for candidate in [
+            Path::new(""),
+            Path::new("../schtasks.exe"),
+            Path::new("System32/../schtasks.exe"),
+            Path::new("./System32/schtasks.exe"),
+            Path::new(r"\System32\schtasks.exe"),
+            Path::new(r"C:System32\schtasks.exe"),
+            absolute.as_path(),
+        ] {
+            assert!(matches!(
+                trusted_windows_system_executable_in(&system_root, candidate),
+                Err(RuntimeError::WindowsSystemExecutablePolicy(_))
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_windows_system_executable_rejects_invalid_roots_and_files() {
+        let (_temporary, system_root) = fake_windows_system_root();
+        let executable = system_root.join("System32").join("schtasks.exe");
+        fs::write(&executable, []).expect("empty executable fixture writes");
+
+        for invalid_root in [
+            Path::new("relative/Windows"),
+            Path::new(r"\\server\share\Windows"),
+            Path::new(r"\\?\C:\Windows"),
+            Path::new(r"C:\Windows\.."),
+        ] {
+            assert!(matches!(
+                trusted_windows_system_executable_in(
+                    invalid_root,
+                    Path::new("System32/schtasks.exe")
+                ),
+                Err(RuntimeError::WindowsSystemExecutablePolicy(_))
+            ));
+        }
+        assert!(matches!(
+            trusted_windows_system_executable_in(&system_root, Path::new("System32/schtasks.exe")),
+            Err(RuntimeError::WindowsSystemExecutablePolicy(_))
+        ));
+        assert!(matches!(
+            trusted_windows_system_executable_in(&system_root, Path::new("System32")),
+            Err(RuntimeError::WindowsSystemExecutablePolicy(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_windows_system_executable_rejects_reparse_candidates() {
+        use std::os::windows::fs::symlink_file;
+
+        let (_temporary, system_root) = fake_windows_system_root();
+        let outside = system_root
+            .parent()
+            .expect("fake system root has a parent")
+            .join("outside.exe");
+        fs::write(&outside, b"outside executable").expect("outside fixture writes");
+        let candidate = system_root.join("System32").join("schtasks.exe");
+        match symlink_file(&outside, &candidate) {
+            Ok(()) => assert!(matches!(
+                trusted_windows_system_executable_in(
+                    &system_root,
+                    Path::new("System32/schtasks.exe")
+                ),
+                Err(RuntimeError::WindowsSystemExecutablePolicy(_))
+            )),
+            Err(source) if source.kind() == io::ErrorKind::PermissionDenied => {}
+            Err(source) => panic!("reparse fixture creation failed: {source}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_windows_system_executable_resolves_required_host_tools() {
+        for relative_path in [
+            Path::new(r"System32\schtasks.exe"),
+            Path::new(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
+        ] {
+            let resolved = trusted_windows_system_executable(relative_path)
+                .expect("required Windows system executable resolves");
+            assert!(resolved.is_absolute());
+            let metadata = fs::symlink_metadata(resolved).expect("resolved executable exists");
+            assert!(metadata.file_type().is_file());
+            assert!(metadata.len() > 0);
+        }
     }
 
     #[cfg(unix)]

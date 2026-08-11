@@ -16,6 +16,8 @@ use std::{
 use rootlight_client::{
     DetachedProcess, DetachedProcessError, spawn_detached_null_stdio_process_in,
 };
+#[cfg(windows)]
+use rootlight_runtime::trusted_windows_system_executable;
 use rootlight_runtime::{RuntimeError, RuntimePaths, WEB_UI_PORT, WebDiscoveryRecord};
 use serde::{Deserialize, Serialize};
 
@@ -512,7 +514,11 @@ fn registration_exists() -> bool {
 
 #[cfg(windows)]
 fn windows_task_exists() -> bool {
-    let mut command = Command::new("schtasks.exe");
+    let Ok(schtasks) = trusted_windows_system_executable(Path::new(r"System32\schtasks.exe"))
+    else {
+        return false;
+    };
+    let mut command = Command::new(schtasks);
     command
         .args(["/Query", "/TN", WINDOWS_TASK_NAME])
         .stdout(Stdio::null())
@@ -535,7 +541,10 @@ fn windows_startup_path() -> Result<PathBuf, WebServiceError> {
 
 #[cfg(windows)]
 fn powershell(script: &str, executable: Option<&std::ffi::OsStr>) -> Result<(), WebServiceError> {
-    let mut command = Command::new("powershell.exe");
+    let powershell = trusted_windows_system_executable(Path::new(
+        r"System32\WindowsPowerShell\v1.0\powershell.exe",
+    ))?;
+    let mut command = Command::new(powershell);
     command
         .args([
             "-NoLogo",

@@ -2831,7 +2831,9 @@ impl CliError {
             Self::WebService(
                 web_service::WebServiceError::PrivilegeInspection
                     | web_service::WebServiceError::ElevatedExecution
-            )
+            ) | Self::WebService(web_service::WebServiceError::Runtime(
+                rootlight_runtime::RuntimeError::WindowsSystemExecutablePolicy(_),
+            ))
         ) {
             return ExitFamily::SecurityPolicy;
         }
@@ -2879,6 +2881,7 @@ impl CliError {
             | Self::Runtime(rootlight_runtime::RuntimeError::InsecureOutputFile)
             | Self::Runtime(rootlight_runtime::RuntimeError::PrivateOutputSecurityPolicy(_))
             | Self::Runtime(rootlight_runtime::RuntimeError::WindowsSecurityPolicy)
+            | Self::Runtime(rootlight_runtime::RuntimeError::WindowsSystemExecutablePolicy(_))
             | Self::Runtime(rootlight_runtime::RuntimeError::InvalidEndpoint(_))
             | Self::Operations(rootlight_operations::OperationError::InsecureLockFile)
             | Self::Operations(rootlight_operations::OperationError::WindowsSecurityPolicy) => {
@@ -2958,6 +2961,9 @@ impl CliError {
         if matches!(
             self,
             Self::WebService(web_service::WebServiceError::PrivilegeInspection)
+                | Self::WebService(web_service::WebServiceError::Runtime(
+                    rootlight_runtime::RuntimeError::WindowsSystemExecutablePolicy(_),
+                ))
         ) {
             return PublicError::builder(
                 ErrorCode::PermissionDenied,
@@ -3642,6 +3648,22 @@ mod tests {
         assert_eq!(
             public.message(),
             "local web service requires a non-elevated process"
+        );
+        assert!(!public.retryable());
+    }
+
+    #[test]
+    fn untrusted_web_service_helper_is_a_security_policy_failure() {
+        let error = CliError::WebService(web_service::WebServiceError::Runtime(
+            rootlight_runtime::RuntimeError::WindowsSystemExecutablePolicy(None),
+        ));
+
+        assert_eq!(error.exit_family(), ExitFamily::SecurityPolicy);
+        let public = error.public_error().expect("public error builds");
+        assert_eq!(public.code(), ErrorCode::PermissionDenied);
+        assert_eq!(
+            public.message(),
+            "local web service privilege policy could not be verified"
         );
         assert!(!public.retryable());
     }
