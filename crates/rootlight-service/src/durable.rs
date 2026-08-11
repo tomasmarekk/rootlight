@@ -2375,10 +2375,7 @@ fn restore_recovery_generation(
         context,
     )
     .map(Some)
-    .map_err(|error| match error {
-        error @ IdentityVerificationError::Control(_) => map_identity_error(error, cancellation),
-        _ => FirstSliceError::CatalogCorrupt,
-    })
+    .map_err(|error| map_persisted_identity_error(error, cancellation))
 }
 
 fn restore_oracle_generation(
@@ -2407,8 +2404,18 @@ fn restore_oracle_generation(
         return Err(FirstSliceError::CatalogCorrupt);
     }
     let verified = IdentityVerifiedGeneration::verify_snapshot(persisted, context)
-        .map_err(|error| map_identity_error(error, cancellation))?;
+        .map_err(|error| map_persisted_identity_error(error, cancellation))?;
     Ok((verified, allocated_bytes))
+}
+
+fn map_persisted_identity_error(
+    error: IdentityVerificationError,
+    cancellation: &Cancellation,
+) -> FirstSliceError {
+    match error {
+        error @ IdentityVerificationError::Control(_) => map_identity_error(error, cancellation),
+        _ => FirstSliceError::CatalogCorrupt,
+    }
 }
 
 fn read_persisted_source(
@@ -2709,6 +2716,26 @@ mod tests {
         assert_eq!(writer.bytes, 10_000);
         assert_eq!(writer.inner.get_ref().bytes, 10_000);
         assert_eq!(writer.inner.get_ref().writes, 1);
+    }
+
+    #[test]
+    fn persisted_identity_failures_are_generation_scoped_corruption() {
+        let cancellation = Cancellation::new();
+
+        for error in [
+            IdentityVerificationError::InvalidGeneration,
+            IdentityVerificationError::LegacyContract,
+            IdentityVerificationError::MissingClaim,
+            IdentityVerificationError::DuplicateClaim,
+            IdentityVerificationError::ManifestMismatch,
+            IdentityVerificationError::UnsupportedExtension,
+            IdentityVerificationError::RecipeEncoding,
+        ] {
+            assert_eq!(
+                map_persisted_identity_error(error, &cancellation),
+                FirstSliceError::CatalogCorrupt
+            );
+        }
     }
 
     #[test]
