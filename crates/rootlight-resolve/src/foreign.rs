@@ -9,9 +9,10 @@ use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, SymbolId, content_hash};
 use rootlight_ir::{
     BuildContextIdentity, Confidence, CoverageStatus, EvidenceKind, ExtensionSupport, FactEvidence,
-    FactRef, IrLimits, NormalizedIrDocument, ProducerIdentity, ProducerKind, ProvenanceRecord,
-    RelationEndpoint, RelationPredicate, RelationRecord, SourceRef, canonicalize_ir_document,
-    derive_provenance_record_id, derive_relation_record_id, validate_ir_document,
+    FactRef, IrDocumentValidationError, IrLimits, NormalizedIrDocument, ProducerIdentity,
+    ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SourceRef,
+    canonicalize_ir_document, derive_provenance_record_id, derive_relation_record_id,
+    validate_ir_document,
 };
 
 use crate::{DEFAULT_CANDIDATE_LIMIT, MAX_CANDIDATE_LIMIT, ResolverFactContext};
@@ -403,20 +404,32 @@ impl ForeignLinkEngine {
             {
                 let provenance = build_link_provenance(&document, top, context)?;
                 let provenance_id = provenance.id;
-                if !document
+                match document
                     .provenance
                     .iter()
-                    .any(|existing| existing.id == provenance_id)
+                    .find(|existing| existing.id == provenance_id)
                 {
-                    document.provenance.push(provenance);
+                    Some(existing) if existing != &provenance => {
+                        return Err(ForeignLinkError::InvalidDocument(
+                            IrDocumentValidationError::DuplicateUnequalFactId(provenance_id),
+                        ));
+                    }
+                    Some(_) => {}
+                    None => document.provenance.push(provenance),
                 }
                 let relation = build_link_relation(&document, top, provenance_id)?;
-                if !document
+                match document
                     .relations
                     .iter()
-                    .any(|existing| existing.id == relation.id)
+                    .find(|existing| existing.id == relation.id)
                 {
-                    document.relations.push(relation);
+                    Some(existing) if existing != &relation => {
+                        return Err(ForeignLinkError::InvalidDocument(
+                            IrDocumentValidationError::DuplicateUnequalFactId(relation.id),
+                        ));
+                    }
+                    Some(_) => {}
+                    None => document.relations.push(relation),
                 }
                 ForeignLinkOutcome::Exact {
                     target: top.target,

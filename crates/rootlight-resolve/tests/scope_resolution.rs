@@ -16,7 +16,7 @@ use rootlight_ir::{
 };
 use rootlight_resolve::{
     CompletenessAssumption, DEFAULT_CANDIDATE_LIMIT, DynamicCallCalibration, ExpectedResolution,
-    ForeignLinkEngine, ForeignLinkInput, ForeignLinkLimits, ForeignLinkNamespace,
+    ForeignLinkEngine, ForeignLinkError, ForeignLinkInput, ForeignLinkLimits, ForeignLinkNamespace,
     ForeignLinkOutcome, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionError,
     ResolutionExpectation, ResolutionPenalty, ResolutionPolicy, ResolutionSignal,
     ResolverFactContext, UnresolvedReason, evaluate_resolution_quality,
@@ -1048,6 +1048,117 @@ fn typed_foreign_links_retain_protocol_evidence_and_confidence() {
                 .expect("relation retains source evidence")
         ]
     );
+}
+
+#[test]
+fn foreign_links_reject_preseeded_derived_fact_ids() {
+    let mut fixture = Fixture::new();
+    let caller = fixture.add_entity(
+        172,
+        "caller",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    let target = fixture.add_entity(
+        173,
+        "native_target",
+        fixture.primary_file,
+        EntityKind::ExternalSymbol,
+        None,
+    );
+    fixture.validate();
+    let source = source_ref(
+        fixture.document.repository,
+        fixture.document.generation,
+        fixture.primary_file,
+        fixture.content_hash,
+        32,
+        40,
+    );
+    let link = ForeignLinkInput::new(
+        RelationEndpoint::Entity(caller),
+        target,
+        RelationPredicate::CallsForeign,
+        ForeignLinkNamespace::ForeignFunction,
+        content_hash(b"ffi:c:rootlight_target:v1"),
+        Confidence::new(950).expect("fixture confidence is valid"),
+        source,
+        fixture.provenance,
+    )
+    .expect("typed FFI link is valid");
+    let context = ResolverFactContext::new(content_hash(b"foreign-link-binary"));
+    let expected = ForeignLinkEngine::default()
+        .apply(
+            fixture.document.clone(),
+            std::slice::from_ref(&link),
+            context,
+            &Cancellation::new(),
+        )
+        .expect("clean foreign link applies");
+    let expected_relation = expected
+        .document
+        .relations
+        .iter()
+        .find(|relation| relation.predicate == RelationPredicate::CallsForeign)
+        .expect("derived relation exists")
+        .clone();
+    let expected_provenance = expected
+        .document
+        .provenance
+        .iter()
+        .find(|record| record.id == expected_relation.provenance)
+        .expect("derived provenance exists")
+        .clone();
+    let reapplied = ForeignLinkEngine::default()
+        .apply(
+            expected.document.clone(),
+            std::slice::from_ref(&link),
+            context,
+            &Cancellation::new(),
+        )
+        .expect("canonical foreign links are idempotent");
+    assert_eq!(reapplied.document, expected.document);
+
+    let mut provenance_poisoned = fixture.document.clone();
+    let mut forged_provenance = expected_provenance;
+    forged_provenance.rule = Some("attacker-controlled-rule".to_owned());
+    provenance_poisoned.provenance.push(forged_provenance);
+    validate_ir_document(
+        &provenance_poisoned,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .expect("single forged provenance ID remains schema-valid");
+    assert!(matches!(
+        ForeignLinkEngine::default().apply(
+            provenance_poisoned,
+            std::slice::from_ref(&link),
+            context,
+            &Cancellation::new(),
+        ),
+        Err(ForeignLinkError::InvalidDocument(_))
+    ));
+
+    let mut relation_poisoned = fixture.document;
+    let mut forged_relation = expected_relation;
+    forged_relation.provenance = fixture.provenance;
+    relation_poisoned.relations.push(forged_relation);
+    validate_ir_document(
+        &relation_poisoned,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .expect("single forged relation ID remains schema-valid");
+    assert!(matches!(
+        ForeignLinkEngine::default().apply(
+            relation_poisoned,
+            &[link],
+            context,
+            &Cancellation::new(),
+        ),
+        Err(ForeignLinkError::InvalidDocument(_))
+    ));
 }
 
 #[test]
