@@ -18,7 +18,19 @@ install_archive() {
     local archive="$temporary_root/${name}.archive"
     local unpacked="$temporary_root/${name}"
 
-    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$url" --output "$archive"
+    curl \
+        --fail \
+        --silent \
+        --show-error \
+        --location \
+        --retry 3 \
+        --retry-all-errors \
+        --retry-delay 2 \
+        --retry-max-time 30 \
+        --proto '=https' \
+        --tlsv1.2 \
+        "$url" \
+        --output "$archive"
     printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --status
     mkdir -p "$unpacked"
     case "$archive_type" in
@@ -35,7 +47,19 @@ install_binary() {
     local sha256="$3"
     local binary="$temporary_root/$name"
 
-    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$url" --output "$binary"
+    curl \
+        --fail \
+        --silent \
+        --show-error \
+        --location \
+        --retry 3 \
+        --retry-all-errors \
+        --retry-delay 2 \
+        --retry-max-time 30 \
+        --proto '=https' \
+        --tlsv1.2 \
+        "$url" \
+        --output "$binary"
     printf '%s  %s\n' "$sha256" "$binary" | sha256sum --check --status
     install -m 0755 "$binary" "$install_root/$name"
 }
