@@ -60,6 +60,7 @@ jobs:
           python scripts/test-validate-package-lifecycle.py
           python scripts/test_generate_release_sboms.py
           python scripts/test_orchestrate_release.py
+          python scripts/test_release_signing_workflow.py
           python scripts/test_prepare_npm_packages.py
           python scripts/test_publish_npm_packages.py
           python scripts/test_verify_installed_web.py
