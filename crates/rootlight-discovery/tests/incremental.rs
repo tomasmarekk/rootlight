@@ -368,6 +368,93 @@ fn scoped_ignores_exclude_files_and_subtrees_before_incremental_hashing() {
 }
 
 #[test]
+fn vcs_negations_cannot_reopen_default_exclusions() {
+    let temporary = local_tempdir();
+    fs::create_dir(temporary.path().join(".git")).expect("git fixture directory is created");
+    fs::create_dir(temporary.path().join("target")).expect("target fixture directory is created");
+    fs::create_dir(temporary.path().join("nested")).expect("nested fixture directory is created");
+    fs::create_dir(temporary.path().join("nested").join("target"))
+        .expect("nested target fixture directory is created");
+    fs::write(
+        temporary.path().join(".gitignore"),
+        b"!.git/\n!.git/*.rs\n!target/\n!target/*.rs\n",
+    )
+    .expect("malicious ignore fixture is written");
+    fs::write(
+        temporary.path().join("nested").join(".gitignore"),
+        b"!target/\n!target/*.rs\n",
+    )
+    .expect("nested malicious ignore fixture is written");
+    fs::write(
+        temporary.path().join(".git").join("leaked.rs"),
+        b"git secret",
+    )
+    .expect("git fixture is written");
+    fs::write(
+        temporary.path().join("target").join("leaked.rs"),
+        b"build secret",
+    )
+    .expect("target fixture is written");
+    fs::write(
+        temporary
+            .path()
+            .join("nested")
+            .join("target")
+            .join("leaked.rs"),
+        b"nested build secret",
+    )
+    .expect("nested target fixture is written");
+    fs::write(temporary.path().join("visible.rs"), b"fn visible() {}\n")
+        .expect("visible fixture is written");
+    let root = root(&temporary, b"default-exclusion-negation");
+    let policy = policy();
+    let cancellation = Cancellation::new();
+
+    let incremental = discover_incremental(
+        &root,
+        None,
+        context(b"config-v1", b"provider-v1"),
+        &policy,
+        ReconcileMode::Normal,
+        limits(),
+        &cancellation,
+    )
+    .expect("incremental discovery succeeds");
+    let manifest = discover(
+        &root,
+        &ConfigSnapshot::resolve(&[]).expect("default config resolves"),
+        &policy,
+        limits(),
+        &cancellation,
+    )
+    .expect("clean discovery succeeds");
+    let git_file = root.file_id(
+        &RelativePath::parse(std::path::Path::new(".git/leaked.rs"))
+            .expect("git fixture path is valid"),
+    );
+    let target_file = root.file_id(
+        &RelativePath::parse(std::path::Path::new("target/leaked.rs"))
+            .expect("target fixture path is valid"),
+    );
+    let nested_target_file = root.file_id(
+        &RelativePath::parse(std::path::Path::new("nested/target/leaked.rs"))
+            .expect("nested target fixture path is valid"),
+    );
+
+    assert!(!incremental.hashed_files().contains(&git_file));
+    assert!(!incremental.hashed_files().contains(&target_file));
+    assert!(!incremental.hashed_files().contains(&nested_target_file));
+    assert_eq!(
+        manifest
+            .inputs
+            .iter()
+            .map(|input| input.path.as_str())
+            .collect::<Vec<_>>(),
+        [".gitignore", "nested/.gitignore", "visible.rs"]
+    );
+}
+
+#[test]
 fn clean_manifest_must_match_the_incremental_observation() {
     let temporary = local_tempdir();
     fs::write(temporary.path().join("lib.rs"), b"pub fn value() {}\n")

@@ -264,18 +264,28 @@ impl DiscoveryPolicy {
         scoped_ignores: Option<&ScopedIgnores>,
     ) -> PolicyDecision {
         let candidate = Path::new(path.as_str());
-        let mut decision = PolicyDecision::default();
-        for matcher in [&self.matchers.default, &self.matchers.vcs_ignore] {
-            if let Some(layer_decision) =
-                decision_from_match(matcher.matched(candidate, is_directory), self.audit)
-            {
+        let default_decision = decision_from_match(
+            self.matchers.default.matched(candidate, is_directory),
+            self.audit,
+        );
+        let default_excluded = default_decision
+            .as_ref()
+            .is_some_and(|decision| decision.excluded);
+        let mut decision = default_decision.unwrap_or_default();
+
+        // Repository-controlled ignore files must not reopen host-owned default exclusions.
+        if !default_excluded {
+            if let Some(layer_decision) = decision_from_match(
+                self.matchers.vcs_ignore.matched(candidate, is_directory),
+                self.audit,
+            ) {
                 decision = layer_decision;
             }
-        }
-        if let Some(scoped_decision) =
-            scoped_ignores.and_then(|ignores| ignores.decision(path, is_directory, self.audit))
-        {
-            decision = scoped_decision;
+            if let Some(scoped_decision) =
+                scoped_ignores.and_then(|ignores| ignores.decision(path, is_directory, self.audit))
+            {
+                decision = scoped_decision;
+            }
         }
         for matcher in [&self.matchers.repository, &self.matchers.operation] {
             if let Some(layer_decision) =
