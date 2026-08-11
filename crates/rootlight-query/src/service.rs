@@ -4066,6 +4066,12 @@ struct FlowAdjEdge {
     source_refs: Vec<SourceRef>,
 }
 
+// The full adjacency remains live throughout traversal. This charge covers
+// B-tree nodes, per-source vectors, copied edge evidence, bounded path state,
+// and the doubled projection used for bidirectional traces.
+const FLOW_TRACE_FIXED_WORKSPACE_BYTES: usize = 64 * 1024;
+const FLOW_TRACE_DIRECTED_EDGE_WORKSPACE_BYTES: usize = 512;
+
 /// Returns the first requested family admitting a predicate, in plan order.
 ///
 /// The plan families are sorted and deduplicated, so the first match is
@@ -4079,6 +4085,26 @@ fn predicate_family(
         .iter()
         .copied()
         .find(|family| family.predicates().contains(&predicate))
+}
+
+fn flow_adjacency_workspace_bytes(
+    document: &NormalizedIrDocument,
+    direction: RelationDirection,
+) -> Result<u64, QueryError> {
+    let direction_multiplier = if direction == RelationDirection::Both {
+        2
+    } else {
+        1
+    };
+    checked_usize_to_u64(
+        FLOW_TRACE_FIXED_WORKSPACE_BYTES.saturating_add(
+            document
+                .relations
+                .len()
+                .saturating_mul(direction_multiplier)
+                .saturating_mul(FLOW_TRACE_DIRECTED_EDGE_WORKSPACE_BYTES),
+        ),
+    )
 }
 
 /// Builds a directed adjacency view over the requested relation projection.
@@ -4095,6 +4121,9 @@ fn build_flow_adjacency(
     tracker: &mut UsageTracker,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<(BTreeMap<SymbolId, Vec<FlowAdjEdge>>, bool), QueryError> {
+    control.check()?;
+    tracker.add_memory(flow_adjacency_workspace_bytes(document, plan.direction)?)?;
+
     let allowed: BTreeSet<RelationPredicate> = plan
         .families
         .iter()
@@ -4138,36 +4167,51 @@ fn build_flow_adjacency(
         let source_refs: Vec<SourceRef> = relation.evidence.source.iter().cloned().collect();
         match plan.direction {
             RelationDirection::Outbound => {
-                adjacency.entry(subject).or_default().push(FlowAdjEdge {
-                    target: object,
-                    family,
-                    confidence,
-                    source_refs,
-                })
+                try_push(
+                    adjacency.entry(subject).or_default(),
+                    FlowAdjEdge {
+                        target: object,
+                        family,
+                        confidence,
+                        source_refs,
+                    },
+                )?;
             }
-            RelationDirection::Inbound => adjacency.entry(object).or_default().push(FlowAdjEdge {
-                target: subject,
-                family,
-                confidence,
-                source_refs,
-            }),
+            RelationDirection::Inbound => {
+                try_push(
+                    adjacency.entry(object).or_default(),
+                    FlowAdjEdge {
+                        target: subject,
+                        family,
+                        confidence,
+                        source_refs,
+                    },
+                )?;
+            }
             RelationDirection::Both => {
-                adjacency.entry(subject).or_default().push(FlowAdjEdge {
-                    target: object,
-                    family,
-                    confidence,
-                    source_refs: source_refs.clone(),
-                });
-                adjacency.entry(object).or_default().push(FlowAdjEdge {
-                    target: subject,
-                    family,
-                    confidence,
-                    source_refs,
-                });
+                try_push(
+                    adjacency.entry(subject).or_default(),
+                    FlowAdjEdge {
+                        target: object,
+                        family,
+                        confidence,
+                        source_refs: source_refs.clone(),
+                    },
+                )?;
+                try_push(
+                    adjacency.entry(object).or_default(),
+                    FlowAdjEdge {
+                        target: subject,
+                        family,
+                        confidence,
+                        source_refs,
+                    },
+                )?;
             }
         }
     }
     for edges in adjacency.values_mut() {
+        control.check()?;
         edges.sort_by(|left, right| {
             left.target
                 .cmp(&right.target)
@@ -4175,6 +4219,7 @@ fn build_flow_adjacency(
                 .then_with(|| right.confidence.cmp(&left.confidence))
         });
     }
+    control.check()?;
     Ok((adjacency, scan_truncated))
 }
 
@@ -10615,6 +10660,34 @@ mod tests {
         }
     }
 
+    fn flow_plan(direction: RelationDirection) -> FlowTracePlan {
+        FlowTracePlan {
+            from: symbol(1),
+            to: None,
+            direction,
+            families: vec![RelationFamily::Calls],
+            min_confidence: 0,
+            max_depth: 3,
+            max_paths: 10,
+            budget: QueryBudget::new(),
+            explanation: PlanExplanation {
+                generation: GenerationId::from_bytes([0; 20]),
+                kind: PlanKind::FlowTrace,
+                operators: Vec::new(),
+                estimate: PlanEstimate {
+                    rows: 0,
+                    edges: 0,
+                    results: 0,
+                    source_bytes: 0,
+                    memory_bytes: 0,
+                    json_bytes: 0,
+                    estimated_tokens: 0,
+                    duration_micros: 0,
+                },
+            },
+        }
+    }
+
     fn run_trace(
         adjacency: &BTreeMap<SymbolId, Vec<FlowAdjEdge>>,
         from: SymbolId,
@@ -10644,6 +10717,47 @@ mod tests {
         .expect("bounded trace succeeds");
         let execution = authoritative_execution(&limiting_resources);
         (paths, frontier, execution)
+    }
+
+    #[test]
+    fn flow_trace_rejects_unfunded_bidirectional_adjacency() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_file(&mut document, 2, "src/b.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 2, EntityKind::Function);
+        add_calls(&mut document, 110, 11, 12, 900);
+
+        let outbound = flow_adjacency_workspace_bytes(&document, RelationDirection::Outbound)
+            .expect("outbound workspace is representable");
+        let bidirectional = flow_adjacency_workspace_bytes(&document, RelationDirection::Both)
+            .expect("bidirectional workspace is representable");
+        assert!(bidirectional > outbound);
+
+        let mut plan = flow_plan(RelationDirection::Both);
+        plan.budget = QueryBudget::new().with_max_memory_bytes(bidirectional - 1);
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+
+        assert!(matches!(
+            build_flow_adjacency(
+                &document,
+                &plan,
+                &control,
+                &mut tracker,
+                &mut limiting_resources,
+            ),
+            Err(QueryError::BudgetExceeded {
+                resource: QueryResource::MemoryBytes,
+                limit,
+            }) if limit == bidirectional - 1
+        ));
+        assert_eq!(tracker.memory_bytes, 0);
+        assert_eq!(tracker.rows, 0);
+        assert_eq!(tracker.edges, 0);
+        assert!(limiting_resources.is_empty());
     }
 
     #[test]
