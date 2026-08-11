@@ -14291,6 +14291,7 @@ mod tests {
         add_entity(&mut document, 11, 1, EntityKind::Function);
         add_entity(&mut document, 12, 1, EntityKind::Struct);
         add_entity(&mut document, 13, 2, EntityKind::Function);
+        add_entity(&mut document, 14, 2, EntityKind::ExternalSymbol);
         document
     }
 
@@ -14483,6 +14484,25 @@ mod tests {
         assert_eq!(
             built.rows[0]["path"],
             serde_json::Value::String("src/a.rs".to_owned())
+        );
+    }
+
+    #[test]
+    fn advanced_scan_accepts_external_symbols_from_the_wire_contract() {
+        let document = advanced_document();
+        let ast: AdvancedAstNode =
+            serde_json::from_str(r#"{"op":"scan","entity":"external_symbol"}"#)
+                .expect("public external-symbol scan is wire-compatible");
+        let built = run_advanced(&document, &advanced_plan(ast, false, 100));
+
+        assert_eq!(built.rows.len(), 1);
+        assert_eq!(
+            built.rows[0]["id"],
+            serde_json::Value::String(symbol(14).to_string())
+        );
+        assert_eq!(
+            built.rows[0]["kind"],
+            serde_json::Value::String("external_symbol".to_owned())
         );
     }
 

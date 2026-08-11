@@ -2521,6 +2521,8 @@ pub enum AdvancedEntityKind {
     Variable,
     /// Configuration record.
     Configuration,
+    /// Symbol whose definition is outside the indexed repository.
+    ExternalSymbol,
 }
 
 impl AdvancedEntityKind {
@@ -2537,6 +2539,7 @@ impl AdvancedEntityKind {
             Self::Constant => "constant",
             Self::Variable => "variable",
             Self::Configuration => "configuration",
+            Self::ExternalSymbol => "external_symbol",
         }
     }
 
@@ -2553,6 +2556,7 @@ impl AdvancedEntityKind {
             "constant" => Some(Self::Constant),
             "variable" => Some(Self::Variable),
             "configuration" => Some(Self::Configuration),
+            "external_symbol" => Some(Self::ExternalSymbol),
             _ => None,
         }
     }
@@ -2587,6 +2591,7 @@ impl AdvancedEntityKind {
             Self::Constant => matches!(kind, IrEntityKind::Constant),
             Self::Variable => matches!(kind, IrEntityKind::Variable | IrEntityKind::Parameter),
             Self::Configuration => matches!(kind, IrEntityKind::ConfigurationKey),
+            Self::ExternalSymbol => matches!(kind, IrEntityKind::ExternalSymbol),
         }
     }
 }
