@@ -90,6 +90,10 @@ pub(crate) enum WebServiceError {
     Browser(#[source] io::Error),
     #[error("Web UI login registration failed")]
     Registration(#[source] io::Error),
+    #[error("Web UI service privilege inspection failed")]
+    PrivilegeInspection,
+    #[error("Web UI service cannot run with elevated privileges")]
+    ElevatedExecution,
 }
 
 pub(crate) fn status(paths: &RuntimePaths) -> Result<WebServiceStatus, WebServiceError> {
@@ -103,6 +107,14 @@ pub(crate) fn status(paths: &RuntimePaths) -> Result<WebServiceStatus, WebServic
 }
 
 pub(crate) fn start(
+    paths: &RuntimePaths,
+    executable: &Path,
+) -> Result<WebServiceStatus, WebServiceError> {
+    enforce_per_user_service_identity(current_process_is_elevated()?)?;
+    start_for_current_user(paths, executable)
+}
+
+fn start_for_current_user(
     paths: &RuntimePaths,
     executable: &Path,
 ) -> Result<WebServiceStatus, WebServiceError> {
@@ -177,8 +189,9 @@ pub(crate) fn restart(
     paths: &RuntimePaths,
     executable: &Path,
 ) -> Result<WebServiceStatus, WebServiceError> {
+    enforce_per_user_service_identity(current_process_is_elevated()?)?;
     stop(paths)?;
-    start(paths, executable)
+    start_for_current_user(paths, executable)
 }
 
 pub(crate) fn install(
@@ -217,6 +230,36 @@ pub(crate) fn open_browser() -> Result<(), WebServiceError> {
         .spawn()
         .map(|_| ())
         .map_err(WebServiceError::Browser)
+}
+
+fn enforce_per_user_service_identity(is_elevated: bool) -> Result<(), WebServiceError> {
+    // Loopback clients share the service process's filesystem authority, so an
+    // elevated service would expose that authority across the local-user boundary.
+    if is_elevated {
+        return Err(WebServiceError::ElevatedExecution);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn current_process_is_elevated() -> Result<bool, WebServiceError> {
+    Ok(rustix::process::geteuid().is_root())
+}
+
+#[cfg(windows)]
+fn current_process_is_elevated() -> Result<bool, WebServiceError> {
+    use nt_token::OwnedToken;
+    use windows::Win32::Security::TOKEN_QUERY;
+
+    OwnedToken::from_current_process(TOKEN_QUERY)
+        .map_err(|_| WebServiceError::PrivilegeInspection)?
+        .is_elevated()
+        .map_err(|_| WebServiceError::PrivilegeInspection)
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn current_process_is_elevated() -> Result<bool, WebServiceError> {
+    Err(WebServiceError::PrivilegeInspection)
 }
 
 fn live_record(paths: &RuntimePaths) -> Result<Option<WebDiscoveryRecord>, WebServiceError> {
@@ -868,5 +911,14 @@ mod tests {
                 pid: None,
             }
         );
+    }
+
+    #[test]
+    fn per_user_service_policy_rejects_elevated_processes() {
+        assert!(matches!(
+            enforce_per_user_service_identity(true),
+            Err(WebServiceError::ElevatedExecution)
+        ));
+        assert!(enforce_per_user_service_identity(false).is_ok());
     }
 }

@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const nativePackages = new Map([
@@ -63,6 +63,7 @@ try {
     join(temporary, "service"),
     [
       'const { spawn } = require("node:child_process");',
+      'if (process.env.ROOTLIGHT_TEST_FORBID_SERVICE === "1") process.exit(97);',
       'if (!new Set(["install", "uninstall"]).has(process.argv[2])) process.exit(1);',
       'const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 3000)"], { stdio: "inherit" });',
       "child.unref();",
@@ -92,6 +93,27 @@ try {
       process.platform === "win32" ? ";" : ":",
     ),
   };
+  const elevatedLifecycle = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `process.getuid = () => 0; await import(${JSON.stringify(
+        pathToFileURL(join(rootBin, "postinstall.mjs")).href,
+      )});`,
+    ],
+    {
+      cwd: temporary,
+      encoding: "utf8",
+      env: {
+        ...lifecycleEnvironment,
+        ROOTLIGHT_TEST_FORBID_SERVICE: "1",
+      },
+    },
+  );
+  assert.equal(elevatedLifecycle.status, 0, elevatedLifecycle.stderr);
+  assert.match(elevatedLifecycle.stderr, /refusing to install.* as root/u);
+
   for (const lifecycle of ["postinstall", "preuninstall"]) {
     const started = Date.now();
     const result = spawnSync(

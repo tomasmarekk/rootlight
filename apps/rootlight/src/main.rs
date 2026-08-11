@@ -2826,6 +2826,15 @@ impl CliError {
         {
             return ExitFamily::Unavailable;
         }
+        if matches!(
+            self,
+            Self::WebService(
+                web_service::WebServiceError::PrivilegeInspection
+                    | web_service::WebServiceError::ElevatedExecution
+            )
+        ) {
+            return ExitFamily::SecurityPolicy;
+        }
         match self {
             Self::Usage
             | Self::IncompletePathOverride
@@ -2934,6 +2943,26 @@ impl CliError {
             )
             .retryable()
             .next_action(NextAction::Retry)
+            .build();
+        }
+        if matches!(
+            self,
+            Self::WebService(web_service::WebServiceError::ElevatedExecution)
+        ) {
+            return PublicError::builder(
+                ErrorCode::PermissionDenied,
+                "local web service requires a non-elevated process",
+            )
+            .build();
+        }
+        if matches!(
+            self,
+            Self::WebService(web_service::WebServiceError::PrivilegeInspection)
+        ) {
+            return PublicError::builder(
+                ErrorCode::PermissionDenied,
+                "local web service privilege policy could not be verified",
+            )
             .build();
         }
         if matches!(self, Self::WebService(_)) {
@@ -3601,6 +3630,20 @@ mod tests {
 
         classify_uninstall_daemon_probe(Err(ClientError::DaemonUnavailable))
             .expect("an absent daemon permits uninstall");
+    }
+
+    #[test]
+    fn elevated_web_service_launch_is_a_security_policy_failure() {
+        let error = CliError::WebService(web_service::WebServiceError::ElevatedExecution);
+
+        assert_eq!(error.exit_family(), ExitFamily::SecurityPolicy);
+        let public = error.public_error().expect("public error builds");
+        assert_eq!(public.code(), ErrorCode::PermissionDenied);
+        assert_eq!(
+            public.message(),
+            "local web service requires a non-elevated process"
+        );
+        assert!(!public.retryable());
     }
 
     #[test]

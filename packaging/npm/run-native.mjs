@@ -63,6 +63,22 @@ export function runLifecycle(action) {
       fail(`rootlight: failed to install CLI access: ${errorMessage(error)}`);
     }
   }
+  if (process.getuid?.() === 0) {
+    console.warn(
+      `rootlight: refusing to ${action} the per-user service as root; run rootlight service ${action} as the desktop user`,
+    );
+    if (
+      action === "uninstall" &&
+      process.env[managedUninstallEnvironment] !== "1"
+    ) {
+      try {
+        removeCliBridge();
+      } catch (error) {
+        fail(`rootlight: failed to remove CLI access: ${errorMessage(error)}`);
+      }
+    }
+    return;
+  }
   const result = spawnNative("rootlight", ["service", action], "ignore");
   if (result.error !== undefined) {
     if (action === "install") {
