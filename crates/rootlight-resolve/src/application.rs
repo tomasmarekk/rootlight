@@ -10,10 +10,11 @@ use rootlight_cancel::Cancellation;
 use rootlight_ids::{FactId, SymbolId, content_hash};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, Confidence, EvidenceKind, ExtensionSupport, FactEvidence,
-    FactRef, IrLimits, NormalizedIrDocument, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
-    ProducerIdentity, ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
-    RelationRecord, SourceRef, canonicalize_ir_document, derive_occurrence_record_id,
-    derive_provenance_record_id, derive_relation_record_id, validate_ir_document,
+    FactRef, IrDocumentValidationError, IrLimits, NormalizedIrDocument, OccurrenceRecord,
+    OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord,
+    RelationEndpoint, RelationPredicate, RelationRecord, SourceRef, canonicalize_ir_document,
+    derive_occurrence_record_id, derive_provenance_record_id, derive_relation_record_id,
+    validate_ir_document,
 };
 
 use crate::{
@@ -39,6 +40,10 @@ impl ResolutionEngine {
         context: ResolverFactContext,
         cancellation: &Cancellation,
     ) -> Result<AppliedResolution, ResolutionError> {
+        let ir_limits = IrLimits::default();
+        validate_ir_document(&document, &ir_limits, &ExtensionSupport::default())
+            .map_err(ResolutionError::InvalidDocument)?;
+        let mut output_budget = OutputRecordBudget::from_document(&document, &ir_limits);
         let batch = self.resolve(&document, cancellation)?;
         let lookup = CandidateIndex::build(
             &document.files,
@@ -53,7 +58,6 @@ impl ResolutionEngine {
             .map(|(index, occurrence)| (occurrence.id, index))
             .collect::<BTreeMap<_, _>>();
         let mut occurrence_remap = BTreeMap::new();
-        let mut pending_relations = Vec::new();
         let mut new_provenance = Vec::new();
         let mut known_provenance = document
             .provenance
@@ -81,6 +85,7 @@ impl ResolutionEngine {
             )?;
             let provenance_id = provenance.id;
             if known_provenance.insert(provenance_id) {
+                output_budget.reserve_provenance()?;
                 new_provenance.push(provenance);
             }
 
@@ -94,7 +99,13 @@ impl ResolutionEngine {
             occurrence.id =
                 derive_occurrence_record_id(occurrence).map_err(ResolutionError::FactIdentity)?;
             occurrence_remap.insert(old_id, occurrence.id);
-            pending_relations.extend(relation_specs(occurrence, decision));
+            append_relation_specs(
+                occurrence,
+                decision,
+                &mut document.relations,
+                &mut output_budget,
+                cancellation,
+            )?;
         }
         drop(lookup);
         document.provenance.append(&mut new_provenance);
@@ -103,13 +114,8 @@ impl ResolutionEngine {
         let relation_remap =
             remap_existing_relations(&mut document.relations, &occurrence_remap, cancellation)?;
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
-        for spec in pending_relations {
-            cancellation.check()?;
-            document.relations.push(spec.into_record()?);
-        }
-        let document =
-            canonicalize_ir_document(document, &IrLimits::default(), &Default::default())
-                .map_err(ResolutionError::InvalidDocument)?;
+        let document = canonicalize_ir_document(document, &ir_limits, &Default::default())
+            .map_err(ResolutionError::InvalidDocument)?;
 
         Ok(AppliedResolution { document, batch })
     }
@@ -134,12 +140,10 @@ impl ResolutionEngine {
         cancellation: &Cancellation,
     ) -> Result<NormalizedIrDocument, ResolutionError> {
         cancellation.check()?;
-        validate_ir_document(
-            &document,
-            &IrLimits::default(),
-            &ExtensionSupport::default(),
-        )
-        .map_err(ResolutionError::InvalidDocument)?;
+        let ir_limits = IrLimits::default();
+        validate_ir_document(&document, &ir_limits, &ExtensionSupport::default())
+            .map_err(ResolutionError::InvalidDocument)?;
+        let mut output_budget = OutputRecordBudget::from_document(&document, &ir_limits);
 
         let lookup = CandidateIndex::build(
             &document.files,
@@ -176,6 +180,7 @@ impl ResolutionEngine {
             )?;
             let provenance_id = provenance.id;
             if known_provenance.insert(provenance_id) {
+                output_budget.reserve_provenance()?;
                 new_provenance.push(provenance);
             }
 
@@ -185,9 +190,13 @@ impl ResolutionEngine {
             occurrence.id =
                 derive_occurrence_record_id(occurrence).map_err(ResolutionError::FactIdentity)?;
             occurrence_remap.insert(old_id, occurrence.id);
-            for relation in relation_specs(occurrence, &decision) {
-                document.relations.push(relation.into_record()?);
-            }
+            append_relation_specs(
+                occurrence,
+                &decision,
+                &mut document.relations,
+                &mut output_budget,
+                cancellation,
+            )?;
         }
         drop(lookup);
         document.provenance.append(&mut new_provenance);
@@ -196,7 +205,7 @@ impl ResolutionEngine {
         let relation_remap =
             remap_existing_relations(&mut document.relations, &occurrence_remap, cancellation)?;
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
-        canonicalize_ir_document(document, &IrLimits::default(), &Default::default())
+        canonicalize_ir_document(document, &ir_limits, &Default::default())
             .map_err(ResolutionError::InvalidDocument)
     }
 }
@@ -239,6 +248,89 @@ impl PendingRelation {
         };
         record.id = derive_relation_record_id(&record).map_err(ResolutionError::FactIdentity)?;
         Ok(record)
+    }
+}
+
+struct OutputRecordBudget {
+    relations: usize,
+    provenance: usize,
+    total_records: usize,
+    max_relations: usize,
+    max_provenance: usize,
+    max_total_records: usize,
+}
+
+impl OutputRecordBudget {
+    fn from_document(document: &NormalizedIrDocument, limits: &IrLimits) -> Self {
+        let total_records = [
+            document.files.len(),
+            document.entities.len(),
+            document.occurrences.len(),
+            document.relations.len(),
+            document.provenance.len(),
+            document.source_mappings.len(),
+            document.coverage_records.len(),
+            document.skipped_regions.len(),
+            document.diagnostics.len(),
+            document.extensions.len(),
+        ]
+        .into_iter()
+        .fold(0usize, usize::saturating_add);
+        Self {
+            relations: document.relations.len(),
+            provenance: document.provenance.len(),
+            total_records,
+            max_relations: limits.max_relations,
+            max_provenance: limits.max_provenance_records,
+            max_total_records: limits.max_total_records,
+        }
+    }
+
+    fn reserve_provenance(&mut self) -> Result<(), ResolutionError> {
+        let provenance = self.provenance.saturating_add(1);
+        if provenance > self.max_provenance {
+            return Err(ResolutionError::InvalidDocument(
+                IrDocumentValidationError::CollectionLimit {
+                    collection: "provenance",
+                    observed: provenance,
+                    limit: self.max_provenance,
+                },
+            ));
+        }
+        let total_records = self.reserve_total()?;
+        self.provenance = provenance;
+        self.total_records = total_records;
+        Ok(())
+    }
+
+    fn reserve_relation(&mut self) -> Result<(), ResolutionError> {
+        let relations = self.relations.saturating_add(1);
+        if relations > self.max_relations {
+            return Err(ResolutionError::InvalidDocument(
+                IrDocumentValidationError::CollectionLimit {
+                    collection: "relations",
+                    observed: relations,
+                    limit: self.max_relations,
+                },
+            ));
+        }
+        let total_records = self.reserve_total()?;
+        self.relations = relations;
+        self.total_records = total_records;
+        Ok(())
+    }
+
+    fn reserve_total(&self) -> Result<usize, ResolutionError> {
+        let total_records = self.total_records.saturating_add(1);
+        if total_records > self.max_total_records {
+            return Err(ResolutionError::InvalidDocument(
+                IrDocumentValidationError::TotalRecordLimit {
+                    observed: total_records,
+                    limit: self.max_total_records,
+                },
+            ));
+        }
+        Ok(total_records)
     }
 }
 
@@ -368,44 +460,51 @@ fn apply_target(occurrence: &mut OccurrenceRecord, decision: &ResolutionDecision
     }
 }
 
-fn relation_specs(
+fn append_relation_specs(
     occurrence: &OccurrenceRecord,
     decision: &ResolutionDecision,
-) -> Vec<PendingRelation> {
+    relations: &mut Vec<RelationRecord>,
+    budget: &mut OutputRecordBudget,
+    cancellation: &Cancellation,
+) -> Result<(), ResolutionError> {
+    let mut append = |relation: PendingRelation| -> Result<(), ResolutionError> {
+        cancellation.check()?;
+        budget.reserve_relation()?;
+        relations.push(relation.into_record()?);
+        Ok(())
+    };
     match &decision.outcome {
-        ResolutionOutcome::Resolved { symbol, confidence } => relation_predicate(occurrence.role)
-            .map(|predicate| {
-                vec![pending_relation(
+        ResolutionOutcome::Resolved { symbol, confidence } => {
+            if let Some(predicate) = relation_predicate(occurrence.role) {
+                append(pending_relation(
                     occurrence,
                     *symbol,
                     predicate,
                     *confidence,
-                )]
-            })
-            .unwrap_or_default(),
+                ))?;
+            }
+        }
         ResolutionOutcome::Candidates { symbols, .. }
             if occurrence.role == OccurrenceRole::CallSite =>
         {
-            symbols
-                .iter()
-                .map(|symbol| {
-                    let confidence = decision
-                        .explanation
-                        .candidates
-                        .iter()
-                        .find(|candidate| candidate.symbol == *symbol)
-                        .map_or(occurrence.confidence, |candidate| candidate.score);
-                    pending_relation(
-                        occurrence,
-                        *symbol,
-                        RelationPredicate::DispatchCandidate,
-                        confidence,
-                    )
-                })
-                .collect()
+            for symbol in symbols {
+                let confidence = decision
+                    .explanation
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.symbol == *symbol)
+                    .map_or(occurrence.confidence, |candidate| candidate.score);
+                append(pending_relation(
+                    occurrence,
+                    *symbol,
+                    RelationPredicate::DispatchCandidate,
+                    confidence,
+                ))?;
+            }
         }
-        ResolutionOutcome::Candidates { .. } | ResolutionOutcome::Unresolved { .. } => Vec::new(),
+        ResolutionOutcome::Candidates { .. } | ResolutionOutcome::Unresolved { .. } => {}
     }
+    Ok(())
 }
 
 fn pending_relation(
@@ -602,17 +701,18 @@ fn tier_rank(tier: AnalysisTier) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use rootlight_cancel::Cancellation;
     use rootlight_ids::{FactId, FileId, GenerationId, RepositoryId, SymbolId, content_hash};
     use rootlight_ir::{
-        Confidence, CoverageStatus, FactEvidence, OccurrenceRecord, OccurrenceRole,
-        OccurrenceTarget, SourceRef, SourceSpan,
+        Confidence, CoverageStatus, FactEvidence, IrDocumentValidationError, OccurrenceRecord,
+        OccurrenceRole, OccurrenceTarget, SourceRef, SourceSpan,
     };
 
-    use crate::{CompletenessAssumption, ResolutionExplanation};
+    use crate::{CompletenessAssumption, ResolutionError, ResolutionExplanation};
 
     use super::{
-        RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionDecision, ResolutionOutcome,
-        ResolutionRule, apply_target,
+        OutputRecordBudget, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionDecision,
+        ResolutionOutcome, ResolutionRule, append_relation_specs, apply_target,
     };
 
     #[test]
@@ -678,5 +778,115 @@ mod tests {
                 completeness: CoverageStatus::Complete,
             }
         );
+    }
+
+    #[test]
+    fn relation_fanout_stops_at_collection_and_total_limits() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let spelling = content_hash(b"candidate");
+        let occurrence = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, 0, 1).expect("source span is valid"),
+                content_hash(b"x"),
+                None,
+            ),
+            role: OccurrenceRole::CallSite,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved {
+                text_hash: spelling,
+            },
+            syntactic_text_hash: spelling,
+            syntax_kind: "call".to_owned(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(800).expect("confidence is valid"),
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        };
+        let decision = ResolutionDecision {
+            occurrence: occurrence.id,
+            outcome: ResolutionOutcome::Candidates {
+                symbols: vec![
+                    SymbolId::from_bytes([6; 20]),
+                    SymbolId::from_bytes([7; 20]),
+                    SymbolId::from_bytes([8; 20]),
+                ],
+                total_count: 3,
+                completeness: CoverageStatus::Complete,
+                confidence: Confidence::new(800).expect("confidence is valid"),
+            },
+            explanation: ResolutionExplanation {
+                rule: ResolutionRule::LexicalScope,
+                provider_name: RESOLVER_PROVIDER_NAME,
+                provider_version: RESOLVER_PROVIDER_VERSION,
+                candidates: Vec::new(),
+                rejected_candidates: Vec::new(),
+                rejected_total: 0,
+                completeness_assumptions: vec![CompletenessAssumption::ValidatedNormalizedDocument],
+            },
+        };
+        let mut relations = Vec::new();
+        let mut relation_budget = OutputRecordBudget {
+            relations: 0,
+            provenance: 0,
+            total_records: 0,
+            max_relations: 2,
+            max_provenance: 0,
+            max_total_records: 10,
+        };
+
+        let cancellation = Cancellation::new();
+        let relation_error = append_relation_specs(
+            &occurrence,
+            &decision,
+            &mut relations,
+            &mut relation_budget,
+            &cancellation,
+        )
+        .expect_err("third candidate exceeds the relation limit");
+        assert_eq!(relations.len(), 2);
+        assert!(matches!(
+            relation_error,
+            ResolutionError::InvalidDocument(IrDocumentValidationError::CollectionLimit {
+                collection: "relations",
+                observed: 3,
+                limit: 2,
+            })
+        ));
+
+        relations.clear();
+        let mut total_budget = OutputRecordBudget {
+            relations: 0,
+            provenance: 0,
+            total_records: 0,
+            max_relations: 10,
+            max_provenance: 0,
+            max_total_records: 1,
+        };
+        let total_error = append_relation_specs(
+            &occurrence,
+            &decision,
+            &mut relations,
+            &mut total_budget,
+            &cancellation,
+        )
+        .expect_err("second candidate exceeds the total record limit");
+        assert_eq!(relations.len(), 1);
+        assert!(matches!(
+            total_error,
+            ResolutionError::InvalidDocument(IrDocumentValidationError::TotalRecordLimit {
+                observed: 2,
+                limit: 1,
+            })
+        ));
     }
 }
