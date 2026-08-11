@@ -10429,6 +10429,43 @@ fn is_project_fallback_code(code: &str) -> bool {
     code.starts_with("project-adapter-") && code.ends_with("-fallback")
 }
 
+fn is_priority_aggregate_diagnostic(code: &str) -> bool {
+    code.starts_with("project-adapter-")
+        || matches!(
+            code,
+            "extension-coverage-bounded"
+                | "skipped-region-details-bounded"
+                | "oversized-inputs-bounded"
+        )
+}
+
+fn retain_priority_aggregate_diagnostic(
+    document: &mut NormalizedIrDocument,
+    diagnostic: DiagnosticRecord,
+    limits: &IrLimits,
+) -> Result<(), FirstSliceError> {
+    let total = normalized_record_count(document)?;
+    if total > limits.max_total_records || document.diagnostics.len() > limits.max_diagnostics {
+        return Err(FirstSliceError::Limits);
+    }
+    if total < limits.max_total_records && document.diagnostics.len() < limits.max_diagnostics {
+        reserve_records(&mut document.diagnostics, 1, limits.max_diagnostics)?;
+        document.diagnostics.push(diagnostic);
+        return Ok(());
+    }
+    // Aggregate coverage and fallback reasons outrank one parser-recovery
+    // detail. Replacing a deterministic low-priority record preserves both
+    // document ceilings without hiding an earlier aggregate limitation.
+    if let Some(index) = document.diagnostics.iter().rposition(|retained| {
+        !is_priority_aggregate_diagnostic(&retained.code)
+            && retained.source.is_some()
+            && retained.coverage_effect == CoverageStatus::Bounded
+    }) {
+        document.diagnostics[index] = diagnostic;
+    }
+    Ok(())
+}
+
 fn project_fallback_error(code: &str) -> Option<FirstSliceError> {
     match code {
         "project-adapter-wall-time-fallback" => Some(FirstSliceError::AdapterWallTimeLimit),
@@ -10449,10 +10486,6 @@ fn append_project_fallback_diagnostic(
     fallback_provenance: FactId,
     limits: &IrLimits,
 ) -> Result<(), FirstSliceError> {
-    let total = normalized_record_count(document)?;
-    if total > limits.max_total_records || document.diagnostics.len() > limits.max_diagnostics {
-        return Err(FirstSliceError::Limits);
-    }
     let mut diagnostic = DiagnosticRecord {
         id: FactId::from_bytes([0; 20]),
         repository: document.repository,
@@ -10470,17 +10503,7 @@ fn append_project_fallback_diagnostic(
     };
     diagnostic.id =
         derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
-    if total == limits.max_total_records || document.diagnostics.len() == limits.max_diagnostics {
-        // The fallback reason outranks one parser-recovery detail. Replacing the
-        // final deterministic record preserves both aggregate IR ceilings.
-        if let Some(retained) = document.diagnostics.last_mut() {
-            *retained = diagnostic;
-        }
-        return Ok(());
-    }
-    reserve_records(&mut document.diagnostics, 1, limits.max_diagnostics)?;
-    document.diagnostics.push(diagnostic);
-    Ok(())
+    retain_priority_aggregate_diagnostic(document, diagnostic, limits)
 }
 
 fn append_extension_truncation_diagnostic(
@@ -10498,9 +10521,6 @@ fn append_extension_truncation_diagnostic(
         .first()
         .map(|record| record.id)
         .ok_or(FirstSliceError::Identity)?;
-    let total = normalized_record_count(document)?;
-    checked_combined_length(total, 1, limits.max_total_records)?;
-    reserve_records(&mut document.diagnostics, 1, limits.max_diagnostics)?;
     let mut diagnostic = DiagnosticRecord {
         id: FactId::from_bytes([0; 20]),
         repository: document.repository,
@@ -10520,8 +10540,7 @@ fn append_extension_truncation_diagnostic(
     };
     diagnostic.id =
         derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
-    document.diagnostics.push(diagnostic);
-    Ok(())
+    retain_priority_aggregate_diagnostic(document, diagnostic, limits)
 }
 
 fn append_skipped_region_truncation_diagnostic(
@@ -10539,9 +10558,6 @@ fn append_skipped_region_truncation_diagnostic(
         .first()
         .map(|record| record.id)
         .ok_or(FirstSliceError::Identity)?;
-    let total = normalized_record_count(document)?;
-    checked_combined_length(total, 1, limits.max_total_records)?;
-    reserve_records(&mut document.diagnostics, 1, limits.max_diagnostics)?;
     let mut diagnostic = DiagnosticRecord {
         id: FactId::from_bytes([0; 20]),
         repository: document.repository,
@@ -10561,8 +10577,7 @@ fn append_skipped_region_truncation_diagnostic(
     };
     diagnostic.id =
         derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
-    document.diagnostics.push(diagnostic);
-    Ok(())
+    retain_priority_aggregate_diagnostic(document, diagnostic, limits)
 }
 
 fn append_oversized_input_diagnostic(
@@ -10580,9 +10595,6 @@ fn append_oversized_input_diagnostic(
         .first()
         .map(|record| record.id)
         .ok_or(FirstSliceError::Identity)?;
-    let total = normalized_record_count(document)?;
-    checked_combined_length(total, 1, limits.max_total_records)?;
-    reserve_records(&mut document.diagnostics, 1, limits.max_diagnostics)?;
     let mut diagnostic = DiagnosticRecord {
         id: FactId::from_bytes([0; 20]),
         repository: document.repository,
@@ -10602,8 +10614,7 @@ fn append_oversized_input_diagnostic(
     };
     diagnostic.id =
         derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
-    document.diagnostics.push(diagnostic);
-    Ok(())
+    retain_priority_aggregate_diagnostic(document, diagnostic, limits)
 }
 
 #[derive(Debug, Default)]
@@ -12657,6 +12668,24 @@ mod tests {
                 .map(|diagnostic| diagnostic.code.as_str()),
             Some("project-adapter-protocol-fallback")
         );
+        append_extension_truncation_diagnostic(&mut saturated_fallback, 17, &limits)
+            .expect("a saturated target retains the extension coverage summary");
+        append_skipped_region_truncation_diagnostic(&mut saturated_fallback, 19, &limits)
+            .expect("a saturated target retains the skipped-region coverage summary");
+        assert_eq!(saturated_fallback.diagnostics.len(), limits.max_diagnostics);
+        for code in [
+            "project-adapter-protocol-fallback",
+            "extension-coverage-bounded",
+            "skipped-region-details-bounded",
+        ] {
+            assert!(
+                saturated_fallback
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code),
+                "priority diagnostic {code} remains observable"
+            );
+        }
         rootlight_ir::validate_ir_document(
             &saturated_fallback,
             &limits,
