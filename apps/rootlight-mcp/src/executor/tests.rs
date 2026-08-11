@@ -9513,6 +9513,52 @@ async fn change_impact_explain_returns_a_plan_without_retrieval() {
 }
 
 #[tokio::test]
+async fn change_impact_explain_passes_router_output_validation() {
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
+        repository_id: repository(),
+        resolved_generation: generation(),
+        active_generation: generation(),
+        parent_generation: None,
+        active_parent_generation: None,
+        structural_freshness: "current".to_owned(),
+        semantic_freshness: "current".to_owned(),
+        state: "ready".to_owned(),
+        coverage: vec![],
+        ..repository_status_response()
+    })));
+    let call_count = Arc::clone(&harness.call_count);
+    let router = ToolRouter::new(
+        harness.executor,
+        rootlight_mcp_contract::ExposureProfile::Developer,
+    )
+    .expect("tool catalog compiles");
+
+    let response = router
+        .handle(
+            operating_request(json!({
+                "name": "change.impact",
+                "arguments": {
+                    "repository": {"repository_id": repository()},
+                    "change": {"symbol_ids": [symbol()]},
+                    "explain": true
+                }
+            })),
+            cancellation(),
+        )
+        .await;
+
+    let HandlerResponse::Success(result) = response else {
+        panic!("explain output passes router schema validation");
+    };
+    assert_eq!(result["isError"], false);
+    assert_eq!(
+        result["structuredContent"]["data"]["resolved_changes"],
+        json!([])
+    );
+    assert_eq!(call_count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
 async fn flow_trace_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),

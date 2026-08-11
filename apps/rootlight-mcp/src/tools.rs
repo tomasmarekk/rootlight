@@ -3609,12 +3609,12 @@ mod tests {
                     "c24f5f1b2a28079ee1ff961ae9a3abeb105fa0e78cfbeab3dee768f9983a5ca0".to_owned(),
                 ),
                 (
-                    493_575,
-                    "a6fd0375dafd929fb83d289bc9743c9f9ee09abcf0edb0bd1a75511a926fac05".to_owned(),
+                    493_579,
+                    "f892b4e23e63bfb2ab935ea41b59fc52e09eeba2fca5332d15eb38b6e0754175".to_owned(),
                 ),
                 (
-                    678_324,
-                    "152a1da13695af14832e8f29da7c1b195cce7fafc78b0c620cfc6f8c1aa18fb9".to_owned(),
+                    678_328,
+                    "7bae4e449b5675016f18c7533478635f37de14eefd13cdc92aa676a7ebfe2be2".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"

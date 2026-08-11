@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "7b6b403cb770da3eaf7abefda9314d289cec4e94cd1abb0be6e400eeceb11614"
+      "blake3": "0f2671eab082c3feb47346cd74917459f1feb23f4c90b3e90ec5cbae5a624692"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
@@ -46,7 +46,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/change.rs",
-      "blake3": "dc71dcff3ea7f471b3c953190519eb42d0924386dc1aa5f7593ec6d2c6d798b4"
+      "blake3": "5903b129be590ff0c3d8b13bbd728851849e5f4685d672e6682b354c29e2e537"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/context.rs",
@@ -70,7 +70,7 @@
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
-      "blake3": "ecbad47b2590b0def76d3b30f115c08c7fc8b60dcd7c7fd8d5160a9ed0db10ec"
+      "blake3": "4cf3a979f77b7dfd0081c89d9603e8d3128f953482ea64ae6fd85c80d1251e0a"
     },
     {
       "path": "proto/adapter_v1.proto",
@@ -300,11 +300,11 @@
     },
     {
       "path": "schemas/generated/json/mcp-change-impact-output-1.0.schema.json",
-      "blake3": "941859dd158dfb8ed115bed2dad6102acfbbddc3bec9d063f923c1749baa8384"
+      "blake3": "bac06aa36d28334745711fecb1aa67bc8986162bcbb8bdf0af0f6a002559a482"
     },
     {
       "path": "schemas/generated/json/mcp-change-impact-output-1.1.schema.json",
-      "blake3": "d2be5588d09cf6c61ed6ddff62d4c6950678fbe5b0163de175c1f52e24efb4ec"
+      "blake3": "8919c1aa62c231be097633fd90f61dc751a1d30d0ad6eddf330ec5a3d5cb5e84"
     },
     {
       "path": "schemas/generated/json/mcp-code-dead-input-1.0.schema.json",

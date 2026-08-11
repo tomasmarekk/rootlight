@@ -345,8 +345,8 @@ pub struct ImpactRiskSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeImpactData {
-    /// Resolved changes from the input change set.
-    #[schemars(length(min = 1, max = 1256))]
+    /// Resolved changes, empty only for source-free explain output.
+    #[schemars(length(max = 1256))]
     pub resolved_changes: Vec<ResolvedChange>,
     /// Ranked impact groups.
     #[schemars(length(max = 1256))]

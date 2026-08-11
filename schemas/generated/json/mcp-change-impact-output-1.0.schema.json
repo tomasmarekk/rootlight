@@ -115,13 +115,12 @@
           "maxItems": 1256
         },
         "resolved_changes": {
-          "description": "Resolved changes from the input change set.",
+          "description": "Resolved changes, empty only for source-free explain output.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/ResolvedChange"
           },
-          "maxItems": 1256,
-          "minItems": 1
+          "maxItems": 1256
         },
         "risk_summary": {
           "description": "Aggregate risk summary.",

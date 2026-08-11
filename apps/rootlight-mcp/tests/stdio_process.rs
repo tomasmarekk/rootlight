@@ -261,13 +261,13 @@ fn tools_list_payloads_match_all_profile_goldens_across_the_process_boundary() {
         ),
         (
             ExposureProfile::Analysis,
-            493_575,
-            "a6fd0375dafd929fb83d289bc9743c9f9ee09abcf0edb0bd1a75511a926fac05",
+            493_579,
+            "f892b4e23e63bfb2ab935ea41b59fc52e09eeba2fca5332d15eb38b6e0754175",
         ),
         (
             ExposureProfile::Developer,
-            678_324,
-            "152a1da13695af14832e8f29da7c1b195cce7fafc78b0c620cfc6f8c1aa18fb9",
+            678_328,
+            "7bae4e449b5675016f18c7533478635f37de14eefd13cdc92aa676a7ebfe2be2",
         ),
     ];
     for (profile, expected_bytes, expected_hash) in expected {
