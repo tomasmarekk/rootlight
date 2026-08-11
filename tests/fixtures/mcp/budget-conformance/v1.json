@@ -1,6 +1,6 @@
 {
   "schema": "rootlight.mcp-budget-conformance/1",
-  "source_revision": "7993bd460e85b226e17f37dbfa91804c96e49a57",
+  "source_revision": "e968299f2f3a812a136f9f21f656687963472b19",
   "tools": [
     {
       "tool": "repo.index",
@@ -547,7 +547,7 @@
     },
     {
       "file": "apps/rootlight-mcp/src/executor/tests.rs",
-      "sha256": "7e18767ea276b75a6fa5870c19fbdb12c6c7a067c521f8c8971f681226bb1c88",
+      "sha256": "7cf4688c4de57f44f6bfee380134bd913c67c08e281a60dc8073e83e3163361d",
       "symbols": [
         "analytical_budget_lowers_every_public_resource_dimension",
         "omitted_analytical_budget_transports_the_complete_server_ceiling",
@@ -559,7 +559,7 @@
     },
     {
       "file": "apps/rootlight-daemon/src/first_slice.rs",
-      "sha256": "be57fb09307e38beb84bee9b70300b9ea033d75625638e47eaa89725b93de7b5",
+      "sha256": "ae6ce088168be887a2edee419129ea854865299e01b8b287140bdb2dd291b7db",
       "symbols": [
         "peer_cancellation_leaves_work_lane_reusable_before_publication",
         "durable_commit_boundary_failure_is_terminal_and_publishes_nothing"
@@ -593,10 +593,10 @@
       "asset_sha256": "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
     },
     "input_schema": "rootlight.mcp-budget-conformance-input/1",
-    "input_sha256": "f1e9fe1ad2966a02886a5db2d3af5f4e1f003b870f7b6648c8a57eb994237bc9",
+    "input_sha256": "9f80be3df1aa3af687bd6346956af7924910b12917caae550e2bac5c8655510c",
     "serialized_bytes": 13148,
     "deterministic_estimated_tokens": 3287,
-    "actual_tokens": 2985,
+    "actual_tokens": 2981,
     "normalization": "none_exact_utf8",
     "framing": "canonical_compact_json_without_accounting_measurement"
   },
