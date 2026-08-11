@@ -6,12 +6,13 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
-    io::Read as _,
+    io::{Read as _, Seek as _, SeekFrom},
     path::{Path, PathBuf},
     time::Instant,
 };
 
+use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
+use cap_std::{ambient_authority, fs::Dir};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -39,6 +40,7 @@ const TOKENIZER_VERSION: &str = "0.12.0";
 const MAX_PROTOCOL_LABEL_BYTES: usize = 128;
 const MAX_WORKFLOW_CALLS: usize = 32;
 const SPOT_REVIEW_COUNT: usize = 6;
+const MAX_BASELINE_DISCOVERY_ENTRIES: usize = 512;
 
 /// Closed comparison conditions executed for every workflow and seed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1782,10 +1784,22 @@ impl TrajectoryAdapter for BoundedFileExplorationAdapter {
     }
 }
 
+#[derive(Debug)]
 struct BoundedSourceSelection {
     paths: Vec<String>,
     source_frame: Vec<u8>,
     truncated: bool,
+}
+
+struct PendingBaselineDirectory {
+    directory: Dir,
+    prefix: String,
+}
+
+struct OpenedBaselineFile {
+    file: cap_std::fs::File,
+    length: u64,
+    relative: String,
 }
 
 fn collect_bounded_source(
@@ -1795,48 +1809,121 @@ fn collect_bounded_source(
     prompt: &str,
     bounds: TrajectorySharedBounds,
 ) -> Result<BoundedSourceSelection, String> {
-    let metadata = fs::symlink_metadata(root).map_err(|_| "fixture_unavailable".to_owned())?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err("fixture_unavailable".to_owned());
+    collect_bounded_source_with_control(root, family, seed, prompt, bounds, |_| {})
+}
+
+fn collect_bounded_source_with_control<F>(
+    root: &Path,
+    family: TrajectoryWorkflowFamily,
+    seed: u64,
+    prompt: &str,
+    bounds: TrajectorySharedBounds,
+    mut after_file_open: F,
+) -> Result<BoundedSourceSelection, String>
+where
+    F: FnMut(&str),
+{
+    let root = open_baseline_root(root)?;
+    if bounds.result_items == 0 || bounds.source_bytes == 0 {
+        return Ok(BoundedSourceSelection {
+            paths: Vec::new(),
+            source_frame: Vec::new(),
+            truncated: true,
+        });
     }
-    let mut pending = vec![root.to_owned()];
+    let mut pending = vec![PendingBaselineDirectory {
+        directory: root,
+        prefix: String::new(),
+    }];
     let mut files = Vec::new();
-    while let Some(directory) = pending.pop() {
-        let entries = fs::read_dir(&directory).map_err(|_| "fixture_unavailable".to_owned())?;
+    files
+        .try_reserve_exact(MAX_BASELINE_DISCOVERY_ENTRIES)
+        .map_err(|_| "fixture_limit_exceeded".to_owned())?;
+    let mut visited_entries = 0_usize;
+    while let Some(current) = pending.pop() {
+        let entries = current
+            .directory
+            .entries()
+            .map_err(|_| "fixture_unavailable".to_owned())?;
         for entry in entries {
             let entry = entry.map_err(|_| "fixture_unavailable".to_owned())?;
-            let path = entry.path();
-            let metadata =
-                fs::symlink_metadata(&path).map_err(|_| "fixture_unavailable".to_owned())?;
-            if metadata.file_type().is_symlink() {
+            visited_entries = visited_entries
+                .checked_add(1)
+                .ok_or_else(|| "fixture_limit_exceeded".to_owned())?;
+            if visited_entries > MAX_BASELINE_DISCOVERY_ENTRIES {
+                return Err("fixture_limit_exceeded".to_owned());
+            }
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| "fixture_unavailable".to_owned())?;
+            let relative = if current.prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{name}", current.prefix)
+            };
+            let file_type = entry
+                .file_type()
+                .map_err(|_| "fixture_unavailable".to_owned())?;
+            if file_type.is_symlink() {
                 continue;
             }
-            if metadata.is_dir() {
-                pending.push(path);
-            } else if metadata.is_file() {
-                files.push(path);
+            if file_type.is_dir() {
+                let directory = current
+                    .directory
+                    .open_dir_nofollow(&name)
+                    .map_err(|_| "fixture_unavailable".to_owned())?;
+                let metadata = directory
+                    .dir_metadata()
+                    .map_err(|_| "fixture_unavailable".to_owned())?;
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err("fixture_unavailable".to_owned());
+                }
+                pending.push(PendingBaselineDirectory {
+                    directory,
+                    prefix: relative,
+                });
+            } else if file_type.is_file() {
+                let mut options = cap_std::fs::OpenOptions::new();
+                options.read(true).follow(FollowSymlinks::No);
+                let file = current
+                    .directory
+                    .open_with(&name, &options)
+                    .map_err(|_| "fixture_unavailable".to_owned())?;
+                let metadata = file
+                    .metadata()
+                    .map_err(|_| "fixture_unavailable".to_owned())?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err("fixture_unavailable".to_owned());
+                }
+                after_file_open(&relative);
+                files.push(OpenedBaselineFile {
+                    file,
+                    length: metadata.len(),
+                    relative,
+                });
             }
         }
     }
+    files.sort_by(|left, right| left.relative.cmp(&right.relative));
     let prompt_terms = prompt
         .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
         .filter(|term| term.len() >= 4)
         .map(str::to_ascii_lowercase)
         .collect::<BTreeSet<_>>();
     let mut ranked = Vec::new();
-    let discovery_truncated = files.len() > 512;
-    for path in files.into_iter().take(512) {
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|_| "fixture_unavailable".to_owned())?
-            .to_string_lossy()
-            .replace('\\', "/");
-        let metadata = fs::metadata(&path).map_err(|_| "fixture_unavailable".to_owned())?;
+    for candidate in files {
+        let OpenedBaselineFile {
+            mut file,
+            length,
+            relative,
+        } = candidate;
         let mut preview = Vec::new();
-        fs::File::open(&path)
-            .map_err(|_| "fixture_unavailable".to_owned())?
-            .take(metadata.len().min(64 * 1024))
+        file.by_ref()
+            .take(length.min(64 * 1024))
             .read_to_end(&mut preview)
+            .map_err(|_| "fixture_unavailable".to_owned())?;
+        file.seek(SeekFrom::Start(0))
             .map_err(|_| "fixture_unavailable".to_owned())?;
         let Ok(preview) = std::str::from_utf8(&preview) else {
             continue;
@@ -1849,7 +1936,8 @@ fn collect_bounded_source(
         ranked.push((
             std::cmp::Reverse(score),
             tie_hasher.finalize(),
-            path,
+            file,
+            length,
             relative,
         ));
     }
@@ -1857,7 +1945,7 @@ fn collect_bounded_source(
         left.0
             .cmp(&right.0)
             .then_with(|| left.1.as_slice().cmp(right.1.as_slice()))
-            .then_with(|| left.3.cmp(&right.3))
+            .then_with(|| left.4.cmp(&right.4))
     });
     let selected_file_limit = match family {
         TrajectoryWorkflowFamily::ArchitectureOverview
@@ -1877,9 +1965,9 @@ fn collect_bounded_source(
     };
     let mut source = Vec::new();
     let mut paths = Vec::new();
-    let mut truncated = discovery_truncated || ranked.len() > selected_file_limit;
+    let mut truncated = ranked.len() > selected_file_limit;
     let source_limit = usize::try_from(bounds.source_bytes).unwrap_or(usize::MAX);
-    for (_, _, path, relative) in ranked.into_iter().take(selected_file_limit) {
+    for (_, _, mut file, file_length, relative) in ranked.into_iter().take(selected_file_limit) {
         if u64::try_from(paths.len()).unwrap_or(u64::MAX) >= bounds.result_items
             || source.len() >= source_limit
         {
@@ -1893,10 +1981,6 @@ fn collect_bounded_source(
             truncated = true;
             break;
         }
-        let file_length = fs::metadata(&path)
-            .map_err(|_| "fixture_unavailable".to_owned())?
-            .len();
-        let mut file = fs::File::open(&path).map_err(|_| "fixture_unavailable".to_owned())?;
         let mut bytes = Vec::with_capacity(content_limit.min(8 * 1024));
         file.by_ref()
             .take(u64::try_from(content_limit).unwrap_or(u64::MAX))
@@ -1919,6 +2003,29 @@ fn collect_bounded_source(
         source_frame: source,
         truncated,
     })
+}
+
+fn open_baseline_root(root: &Path) -> Result<Dir, String> {
+    let Some(name) = root.file_name() else {
+        return Dir::open_ambient_dir(root, ambient_authority())
+            .map_err(|_| "fixture_unavailable".to_owned());
+    };
+    let parent_path = root
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = Dir::open_ambient_dir(parent_path, ambient_authority())
+        .map_err(|_| "fixture_unavailable".to_owned())?;
+    let directory = parent
+        .open_dir_nofollow(name)
+        .map_err(|_| "fixture_unavailable".to_owned())?;
+    let metadata = directory
+        .dir_metadata()
+        .map_err(|_| "fixture_unavailable".to_owned())?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("fixture_unavailable".to_owned());
+    }
+    Ok(directory)
 }
 
 fn baseline_file_score(
@@ -3079,5 +3186,83 @@ mod tests {
         let encoded = serde_json::to_vec(&attempt.calls[0].response_frame)
             .expect("ephemeral response is serializable");
         assert!(!encoded.is_empty());
+    }
+
+    #[test]
+    fn bounded_file_discovery_stops_at_its_entry_ceiling() {
+        let temporary = tempfile::tempdir().expect("temporary fixture is available");
+        for index in 0..=MAX_BASELINE_DISCOVERY_ENTRIES {
+            fs::write(
+                temporary.path().join(format!("fixture-{index:04}.rs")),
+                "fn fixture() {}",
+            )
+            .expect("source fixture is written");
+        }
+        let mut opened = 0_usize;
+
+        let error = collect_bounded_source_with_control(
+            temporary.path(),
+            TrajectoryWorkflowFamily::LocateImplementation,
+            17,
+            "locate fixture",
+            TrajectorySharedBounds::default(),
+            |_| opened += 1,
+        )
+        .expect_err("oversized fixture discovery must fail closed");
+
+        assert_eq!(error, "fixture_limit_exceeded");
+        assert_eq!(opened, MAX_BASELINE_DISCOVERY_ENTRIES);
+
+        let zero_bounds = TrajectorySharedBounds {
+            result_items: 0,
+            ..TrajectorySharedBounds::default()
+        };
+        let mut opened = 0_usize;
+        let selection = collect_bounded_source_with_control(
+            temporary.path(),
+            TrajectoryWorkflowFamily::LocateImplementation,
+            17,
+            "locate fixture",
+            zero_bounds,
+            |_| opened += 1,
+        )
+        .expect("zero result budget returns without discovery");
+        assert!(selection.truncated);
+        assert!(selection.paths.is_empty());
+        assert_eq!(opened, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_file_selection_keeps_the_nofollow_opened_file() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary fixture is available");
+        let root = temporary.path().join("fixture");
+        fs::create_dir(&root).expect("fixture root exists");
+        let source = root.join("source.rs");
+        let victim = temporary.path().join("victim.rs");
+        fs::write(&source, "fn trusted_fixture() {}").expect("fixture source is written");
+        fs::write(&victim, "OUT_OF_ROOT_SECRET").expect("victim source is written");
+
+        let selection = collect_bounded_source_with_control(
+            &root,
+            TrajectoryWorkflowFamily::LocateImplementation,
+            17,
+            "locate trusted fixture",
+            TrajectorySharedBounds::default(),
+            |relative| {
+                if relative == "source.rs" {
+                    fs::remove_file(&source).expect("fixture path is replaceable");
+                    symlink(&victim, &source).expect("fixture path is replaced by a symlink");
+                }
+            },
+        )
+        .expect("opened fixture handle remains readable");
+
+        let source_frame =
+            std::str::from_utf8(&selection.source_frame).expect("selected source is UTF-8");
+        assert!(source_frame.contains("trusted_fixture"));
+        assert!(!source_frame.contains("OUT_OF_ROOT_SECRET"));
     }
 }
