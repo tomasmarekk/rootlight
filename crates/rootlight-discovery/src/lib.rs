@@ -16,7 +16,7 @@ use ignore::{
     gitignore::{Gitignore, GitignoreBuilder},
 };
 use rootlight_cancel::{Cancellation, Cancelled};
-use rootlight_config::ConfigSnapshot;
+use rootlight_config::{CONFIG_VERSION_1_0, ConfigSnapshot};
 use rootlight_ids::{ContentHash, FileId, RepositoryId, content_hash};
 use rootlight_incremental::IncrementalError;
 use rootlight_vfs::{
@@ -154,12 +154,15 @@ impl DiscoveryLimits {
     #[must_use]
     pub fn from_config(config: &ConfigSnapshot) -> Self {
         let analysis = config.analysis();
+        let max_file_bytes = if config.version() == CONFIG_VERSION_1_0 {
+            config.resources().max_source_bytes
+        } else {
+            analysis.max_source_file_bytes
+        };
         Self {
             max_entries: MAX_DISCOVERY_ENTRIES.min(100_000),
             max_depth: MAX_DISCOVERY_DEPTH.min(128),
-            max_file_bytes: analysis
-                .max_source_file_bytes
-                .min(rootlight_vfs::MAX_SNAPSHOT_BYTES),
+            max_file_bytes: max_file_bytes.min(rootlight_vfs::MAX_SNAPSHOT_BYTES),
             max_diagnostics: MAX_DISCOVERY_DIAGNOSTICS.min(1_000),
         }
     }
@@ -1394,10 +1397,42 @@ max_source_file_bytes = 2097152
         let legacy_limits = DiscoveryLimits::from_config(&legacy);
 
         assert_eq!(legacy.resources().max_source_bytes, 1024 * 1024);
+        assert_eq!(legacy_limits.max_file_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn legacy_source_limit_excludes_oversized_files_before_snapshotting() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "oversized.rs", &[b'x'; 17]);
+        write_fixture(&temporary, "included.rs", &[b'x'; 16]);
+        let root = fixture_root(&temporary, b"legacy-source-limit");
+        let config = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::User,
+            contents: "version = \"1.0\"\n[resources]\nmax_source_bytes = 16\n",
+        }])
+        .expect("legacy configuration resolves");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).expect("policy builds");
+
+        let manifest = discover(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .expect("legacy-bounded discovery succeeds");
+
         assert_eq!(
-            legacy_limits.max_file_bytes,
-            rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES
+            manifest
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            ["included.rs"]
         );
+        assert!(manifest.exclusions.iter().any(|exclusion| {
+            exclusion.path == "oversized.rs" && exclusion.reason == ExclusionReason::Oversized
+        }));
     }
 
     #[test]
