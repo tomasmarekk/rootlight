@@ -800,17 +800,16 @@ impl IdentityVerifiedGeneration {
 
     /// Restores a crash-safe published snapshot from its exact bounded JSON image.
     ///
-    /// This path is reserved for an immutable artifact whose digest was written
-    /// into the generation manifest before the activation marker became
-    /// durable. It rechecks that digest, the normalized IR contract, canonical
-    /// quotas, metadata ownership, and operation budgets. Full identity-recipe
-    /// recomputation remains suitable for background scrubs, but is not needed
-    /// to make the already verified last-good image available after restart.
+    /// The digest may be stored beside the recovery image, so it proves
+    /// consistency rather than authenticity. Restoration therefore rechecks
+    /// the normalized IR contract, quotas, metadata ownership, and every
+    /// identity recipe before returning the verified capability.
     ///
     /// # Errors
     ///
     /// Returns [`IdentityVerificationError::InvalidGeneration`] when the digest,
-    /// document contract, or metadata binding differs, and
+    /// document contract, or metadata binding differs, an identity-verification
+    /// error when a claim, fact ID, or manifest binding is invalid, and
     /// [`IdentityVerificationError::Control`] when the recovery budget or
     /// cancellation policy stops the operation.
     pub fn restore_published_json(
@@ -858,14 +857,7 @@ impl IdentityVerifiedGeneration {
         {
             return Err(IdentityVerificationError::InvalidGeneration);
         }
-        require_document_budget(metadata.contract_version(), &document, context)
-            .map_err(IdentityVerificationError::Control)?;
-        context
-            .check()
-            .map_err(IdentityVerificationError::Control)?;
-        Ok(Self {
-            snapshot: GenerationSnapshot { metadata, document },
-        })
+        Self::verify_snapshot(GenerationSnapshot { metadata, document }, context)
     }
 
     /// Returns the verified generation metadata.
@@ -1951,6 +1943,27 @@ mod tests {
                 }
             ))
         );
+    }
+
+    #[test]
+    fn published_json_restore_rechecks_manifest_identity() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let metadata = metadata(repository);
+        let document = NormalizedIrDocument::empty(repository, metadata.generation());
+        let encoded = serde_json::to_vec(&document).expect("fixture document serializes");
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+
+        let result = IdentityVerifiedGeneration::restore_published_json(
+            metadata,
+            &encoded,
+            content_hash(&encoded),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        );
+
+        assert_eq!(result, Err(IdentityVerificationError::ManifestMismatch));
     }
 
     #[test]
