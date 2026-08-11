@@ -10453,16 +10453,28 @@ fn retain_priority_aggregate_diagnostic(
         document.diagnostics.push(diagnostic);
         return Ok(());
     }
-    // Aggregate coverage and fallback reasons outrank one parser-recovery
-    // detail. Replacing a deterministic low-priority record preserves both
-    // document ceilings without hiding an earlier aggregate limitation.
-    if let Some(index) = document.diagnostics.iter().rposition(|retained| {
-        !is_priority_aggregate_diagnostic(&retained.code)
-            && retained.source.is_some()
-            && retained.coverage_effect == CoverageStatus::Bounded
-    }) {
-        document.diagnostics[index] = diagnostic;
-    }
+    // Source-bearing bounded details are already lossy, so evict one before
+    // diagnostics that may be the only disposition evidence for a source.
+    let replacement = document
+        .diagnostics
+        .iter()
+        .rposition(|retained| {
+            !is_priority_aggregate_diagnostic(&retained.code)
+                && retained.source.is_some()
+                && retained.coverage_effect == CoverageStatus::Bounded
+        })
+        .or_else(|| {
+            document
+                .diagnostics
+                .iter()
+                .rposition(|retained| !is_priority_aggregate_diagnostic(&retained.code))
+        })
+        .ok_or(FirstSliceError::Limits)?;
+    let retained = document
+        .diagnostics
+        .get_mut(replacement)
+        .ok_or(FirstSliceError::Limits)?;
+    *retained = diagnostic;
     Ok(())
 }
 
@@ -12763,6 +12775,158 @@ mod tests {
         .expect("the bounded streaming partition remains valid normalized IR");
     }
 
+    #[test]
+    fn priority_diagnostics_replace_details_or_fail_closed() {
+        fn diagnostic(
+            repository: RepositoryId,
+            generation: GenerationId,
+            source: &SourceRef,
+            provenance: FactId,
+            code: &str,
+            coverage_effect: CoverageStatus,
+        ) -> DiagnosticRecord {
+            let mut diagnostic = DiagnosticRecord {
+                id: FactId::from_bytes([0; 20]),
+                repository,
+                generation,
+                code: code.to_owned(),
+                message: format!("{code} detail"),
+                severity: DiagnosticSeverity::Warning,
+                source: Some(source.clone()),
+                coverage_effect,
+                provenance,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            };
+            diagnostic.id =
+                derive_diagnostic_record_id(&diagnostic).expect("diagnostic identity derives");
+            diagnostic
+        }
+
+        let repository = derive_repository(b"priority-diagnostic-repository").id();
+        let generation = GenerationId::from_bytes([23; 20]);
+        let file = FileId::from_bytes([24; 20]);
+        let provenance = FactId::from_bytes([25; 20]);
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).expect("diagnostic source span is valid"),
+            content_hash(b"priority-diagnostic-source"),
+            None,
+        );
+        let mut limits = IrLimits::default();
+        limits.max_diagnostics = 3;
+
+        let mut mixed = NormalizedIrDocument::empty(repository, generation);
+        mixed.diagnostics = vec![
+            diagnostic(
+                repository,
+                generation,
+                &source,
+                provenance,
+                "unsupported-language-first",
+                CoverageStatus::Unknown,
+            ),
+            diagnostic(
+                repository,
+                generation,
+                &source,
+                provenance,
+                "bounded-parser-detail",
+                CoverageStatus::Bounded,
+            ),
+            diagnostic(
+                repository,
+                generation,
+                &source,
+                provenance,
+                "unsupported-language-last",
+                CoverageStatus::Unknown,
+            ),
+        ];
+        append_project_fallback_diagnostic(
+            &mut mixed,
+            "rust",
+            FirstSliceProjectAnalysisError::Protocol,
+            file,
+            provenance,
+            &limits,
+        )
+        .expect("a bounded detail yields to the project fallback");
+        assert_eq!(mixed.diagnostics[0].code, "unsupported-language-first");
+        assert_eq!(
+            mixed.diagnostics[1].code,
+            "project-adapter-protocol-fallback"
+        );
+        assert_eq!(mixed.diagnostics[2].code, "unsupported-language-last");
+
+        let mut unknown_only = NormalizedIrDocument::empty(repository, generation);
+        unknown_only.diagnostics = ["first", "middle", "last"]
+            .into_iter()
+            .map(|suffix| {
+                diagnostic(
+                    repository,
+                    generation,
+                    &source,
+                    provenance,
+                    &format!("unsupported-language-{suffix}"),
+                    CoverageStatus::Unknown,
+                )
+            })
+            .collect();
+        append_project_fallback_diagnostic(
+            &mut unknown_only,
+            "rust",
+            FirstSliceProjectAnalysisError::Protocol,
+            file,
+            provenance,
+            &limits,
+        )
+        .expect("the last non-priority detail yields to the project fallback");
+        assert_eq!(
+            unknown_only
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "unsupported-language-first",
+                "unsupported-language-middle",
+                "project-adapter-protocol-fallback",
+            ]
+        );
+
+        let mut priority_only = NormalizedIrDocument::empty(repository, generation);
+        priority_only.diagnostics = ["first", "middle", "last"]
+            .into_iter()
+            .map(|suffix| {
+                diagnostic(
+                    repository,
+                    generation,
+                    &source,
+                    provenance,
+                    &format!("project-adapter-{suffix}"),
+                    CoverageStatus::Bounded,
+                )
+            })
+            .collect();
+        let retained = priority_only.diagnostics.clone();
+        assert_eq!(
+            append_project_fallback_diagnostic(
+                &mut priority_only,
+                "rust",
+                FirstSliceProjectAnalysisError::Protocol,
+                file,
+                provenance,
+                &limits,
+            ),
+            Err(FirstSliceError::Limits)
+        );
+        assert_eq!(priority_only.diagnostics, retained);
+    }
+
     struct FailingProjectAnalyzer {
         identity: ContentHash,
         error: FirstSliceProjectAnalysisError,
@@ -13323,6 +13487,134 @@ mod tests {
                 && coverage.status == "complete"
         }));
         assert_eq!(status.semantic_freshness, "pending_refinement");
+    }
+
+    #[test]
+    fn saturated_unsupported_diagnostics_keep_fallback_noncurrent() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[
+                ("src/first.asm", "first: nop\n"),
+                ("src/second.asm", "second: nop\n"),
+                ("src/third.asm", "third: nop\n"),
+                ("src/value.rs", "pub fn value() -> usize { 1 }\n"),
+            ],
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer: Arc<dyn FirstSliceProjectAnalyzer> = Arc::new(FailingProjectAnalyzer {
+            identity: content_hash(b"saturated-fallback-project-adapter"),
+            error: FirstSliceProjectAnalysisError::Protocol,
+            calls: Arc::clone(&calls),
+        });
+        let cancellation = deadline();
+        let mut direct = FirstSliceService::new_with_storage(
+            2,
+            MAX_RETAINED_SOURCE_BYTES,
+            None,
+            Some(Arc::clone(&analyzer)),
+        )
+        .expect("project service initializes");
+        limit_service_diagnostics(&mut direct, 3);
+
+        let deep = direct
+            .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &cancellation)
+            .expect("direct deep indexing publishes an explicit fallback");
+        let deep_document = direct
+            .generations
+            .generation(deep.generation)
+            .expect("deep fallback generation remains retained")
+            .document();
+        assert_eq!(deep_document.diagnostics.len(), 3);
+        assert_eq!(
+            deep_document
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "unsupported-language")
+                .count(),
+            2
+        );
+        assert!(
+            deep.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "project-adapter-protocol-fallback")
+        );
+        assert_eq!(
+            direct
+                .generation_freshness(deep.repository, deep.generation)
+                .expect("fallback freshness resolves"),
+            FirstSliceFreshnessStatus {
+                structural: FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
+                semantic: FirstSliceObservedFreshness::PendingSemanticRefinement,
+                publication: FirstSlicePublicationMode::ProcessLocalSingleStage,
+                two_stage: FirstSliceTwoStageAvailability::UnavailableWithoutDurablePublication,
+            }
+        );
+
+        let temporary = durable_test_tempdir();
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .expect("runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let mut service = FirstSliceService::new_durable_with_project_analyzer(
+            3,
+            paths.state_dir(),
+            analyzer,
+            &cancellation,
+        )
+        .expect("durable project service initializes");
+        limit_service_diagnostics(&mut service, 3);
+
+        let structural = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &cancellation,
+            )
+            .expect("structural stage publishes");
+        let structural_document = service
+            .generations
+            .generation(structural.generation)
+            .expect("structural generation remains retained")
+            .document();
+        assert_eq!(structural_document.diagnostics.len(), 3);
+        assert!(
+            structural_document
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code == "unsupported-language")
+        );
+        let error = match service.prepare_semantic_refinement(
+            fixture.path(),
+            structural.generation,
+            &cancellation,
+        ) {
+            Ok(_) => panic!("saturated fallback cannot become a semantic refinement"),
+            Err(error) => error,
+        };
+        let freshness = service
+            .generation_freshness(structural.repository, structural.generation)
+            .expect("structural freshness resolves");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(error, FirstSliceError::Adapter);
+        assert_eq!(
+            freshness,
+            FirstSliceFreshnessStatus {
+                structural: FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
+                semantic: FirstSliceObservedFreshness::PendingSemanticRefinement,
+                publication: FirstSlicePublicationMode::DurableStructuralStage,
+                two_stage: FirstSliceTwoStageAvailability::StructuralPublished,
+            }
+        );
+        assert_eq!(
+            service.active_generation_for(structural.repository),
+            Some(structural.generation)
+        );
     }
 
     #[test]
@@ -17306,6 +17598,27 @@ mod tests {
             }
             fs::write(path, source).expect("fixture source writes");
         }
+    }
+
+    fn limit_service_diagnostics(service: &mut FirstSliceService, max_diagnostics: usize) {
+        let current = &service.analysis_limits;
+        let mut ir = current.ir().clone();
+        ir.max_diagnostics = max_diagnostics;
+        let mut limited = AnalysisLimits::new(
+            current.max_source_bytes(),
+            current.max_syntax_nodes(),
+            current.max_syntax_depth(),
+            current.max_embedded_ranges(),
+            current.max_reported_memory_bytes(),
+            current.syntax_stream().clone(),
+            current.ir_stream().clone(),
+            ir,
+        )
+        .expect("test analysis limits are valid");
+        if let Some(project) = current.project() {
+            limited = limited.with_project_limits(project);
+        }
+        service.analysis_limits = limited;
     }
 
     fn assert_fresh_equivalent(
