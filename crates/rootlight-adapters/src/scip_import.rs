@@ -38,6 +38,7 @@ const MAX_OCCURRENCES: usize = 1_000_000;
 const MAX_RELATIONSHIPS: usize = 500_000;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TOTAL_SOURCE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_LINE_STARTS: usize = 1_000_000;
 const CHECK_INTERVAL: usize = 128;
 const DEFINITION_ROLE: i32 = 0x1;
 const IMPORT_ROLE: i32 = 0x2;
@@ -724,7 +725,12 @@ impl<'a> Importer<'a> {
             build_context_discriminator: self.build_context.digest().as_bytes().to_vec(),
         };
         claim.symbol = claim.derived_symbol();
-        let flags = symbol_flags(context.scip, &information.symbol, context.source.generated);
+        let entity_index = document.entities.len();
+        let flags = if context.source.generated {
+            vec![EntityFlag::Generated]
+        } else {
+            Vec::new()
+        };
         document.entities.push(EntityRecord {
             id: claim.symbol,
             repository: self.repository,
@@ -754,6 +760,7 @@ impl<'a> Importer<'a> {
             id: claim.symbol,
             provenance: context.provenance,
             source: context.source.source.clone(),
+            entity_index,
         })
     }
 
@@ -793,7 +800,17 @@ impl<'a> Importer<'a> {
                             .map_err(|_| ScipImportError::InvalidRange)?,
                 )
                 .ok_or(ScipImportError::InvalidRange)?;
-            let target = symbols.get(&occurrence.symbol).map_or_else(
+            let symbol = symbols.get(&occurrence.symbol);
+            if let Some(symbol) = symbol
+                && symbol.source.span().file() == context.source.source.span().file()
+            {
+                let entity = document
+                    .entities
+                    .get_mut(symbol.entity_index)
+                    .ok_or(ScipImportError::Accounting)?;
+                merge_occurrence_flags(entity, occurrence.symbol_roles);
+            }
+            let target = symbol.map_or_else(
                 || OccurrenceTarget::Unresolved {
                     text_hash: content_hash(occurrence.symbol.as_bytes()),
                 },
@@ -1001,7 +1018,7 @@ struct SourceMaterial<'a> {
     text: &'a str,
     generated: bool,
     source: SourceRef,
-    line_starts: Vec<usize>,
+    line_starts: Vec<u32>,
 }
 
 struct DocumentContext<'a> {
@@ -1015,6 +1032,7 @@ struct MaterializedSymbol {
     id: SymbolId,
     provenance: FactId,
     source: SourceRef,
+    entity_index: usize,
 }
 
 fn materialize_sources<'a>(
@@ -1026,6 +1044,7 @@ fn materialize_sources<'a>(
 ) -> Result<BTreeMap<&'a str, SourceMaterial<'a>>, ScipImportError> {
     require_limit(ScipResource::Documents, sources.len(), limits.max_documents)?;
     let mut total_bytes = 0_usize;
+    let mut total_line_starts = 0_usize;
     let mut materialized = BTreeMap::new();
     for (index, source) in sources.iter().copied().enumerate() {
         check_periodically(index, cancellation)?;
@@ -1045,6 +1064,19 @@ fn materialize_sources<'a>(
         )?;
         let text =
             std::str::from_utf8(source.content).map_err(|_| ScipImportError::NonUtf8Source)?;
+        let line_start_count = source
+            .content
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count()
+            .checked_add(1)
+            .ok_or(ScipImportError::Accounting)?;
+        total_line_starts = checked_add(
+            total_line_starts,
+            line_start_count,
+            ScipResource::LineStarts,
+        )?;
+        require_limit(ScipResource::LineStarts, total_line_starts, MAX_LINE_STARTS)?;
         let file = derive_file(FileIdentity {
             repository,
             path_identity: source.path.as_bytes(),
@@ -1065,7 +1097,7 @@ fn materialize_sources<'a>(
             text,
             generated: source.generated,
             source: reference,
-            line_starts: line_starts(source.content)?,
+            line_starts: line_starts(source.content, line_start_count)?,
         };
         if materialized.insert(source.path, value).is_some() {
             return Err(ScipImportError::DuplicateSource);
@@ -1074,16 +1106,16 @@ fn materialize_sources<'a>(
     Ok(materialized)
 }
 
-fn line_starts(content: &[u8]) -> Result<Vec<usize>, ScipImportError> {
-    let newline_count = content.iter().filter(|byte| **byte == b'\n').count();
-    let capacity = newline_count
-        .checked_add(1)
-        .ok_or(ScipImportError::Accounting)?;
-    let mut starts = Vec::with_capacity(capacity);
+fn line_starts(content: &[u8], capacity: usize) -> Result<Vec<u32>, ScipImportError> {
+    let mut starts = Vec::new();
+    starts
+        .try_reserve_exact(capacity)
+        .map_err(|_| ScipImportError::Accounting)?;
     starts.push(0);
     for (index, byte) in content.iter().copied().enumerate() {
         if byte == b'\n' {
-            starts.push(index.checked_add(1).ok_or(ScipImportError::Accounting)?);
+            let start = index.checked_add(1).ok_or(ScipImportError::Accounting)?;
+            starts.push(u32::try_from(start).map_err(|_| ScipImportError::Accounting)?);
         }
     }
     Ok(starts)
@@ -1147,15 +1179,17 @@ fn position_to_byte(
 ) -> Result<usize, ScipImportError> {
     let line = usize::try_from(line).map_err(|_| ScipImportError::InvalidRange)?;
     let character = usize::try_from(character).map_err(|_| ScipImportError::InvalidRange)?;
-    let start = *source
-        .line_starts
-        .get(line)
-        .ok_or(ScipImportError::InvalidRange)?;
-    let next = source
-        .line_starts
-        .get(line.saturating_add(1))
-        .copied()
-        .unwrap_or(source.content.len());
+    let start = usize::try_from(
+        *source
+            .line_starts
+            .get(line)
+            .ok_or(ScipImportError::InvalidRange)?,
+    )
+    .map_err(|_| ScipImportError::InvalidRange)?;
+    let next = match source.line_starts.get(line.saturating_add(1)).copied() {
+        Some(next) => usize::try_from(next).map_err(|_| ScipImportError::InvalidRange)?,
+        None => source.content.len(),
+    };
     let mut end = next;
     if end > start && source.content.get(end - 1) == Some(&b'\n') {
         end -= 1;
@@ -1276,25 +1310,16 @@ fn project_entity_kind(information: &SymbolInformation) -> Option<EntityKind> {
     }
 }
 
-fn symbol_flags(document: &Document, symbol: &str, generated_source: bool) -> Vec<EntityFlag> {
-    let mut generated = generated_source;
-    let mut test = false;
-    for occurrence in document
-        .occurrences
-        .iter()
-        .filter(|occurrence| occurrence.symbol == symbol)
-    {
-        generated |= occurrence.symbol_roles & GENERATED_ROLE != 0;
-        test |= occurrence.symbol_roles & TEST_ROLE != 0;
-    }
-    let mut flags = Vec::new();
+fn merge_occurrence_flags(entity: &mut EntityRecord, roles: i32) {
+    let generated = entity.flags.contains(&EntityFlag::Generated) || roles & GENERATED_ROLE != 0;
+    let test = entity.flags.contains(&EntityFlag::Test) || roles & TEST_ROLE != 0;
+    entity.flags.clear();
     if generated {
-        flags.push(EntityFlag::Generated);
+        entity.flags.push(EntityFlag::Generated);
     }
     if test {
-        flags.push(EntityFlag::Test);
+        entity.flags.push(EntityFlag::Test);
     }
-    flags
 }
 
 fn occurrence_role(occurrence: &Occurrence) -> OccurrenceRole {
@@ -1451,6 +1476,8 @@ pub enum ScipResource {
     Relationships,
     /// Exact source bytes supplied by the host.
     SourceBytes,
+    /// Derived source-line offsets retained for position conversion.
+    LineStarts,
     /// Diagnostics intentionally omitted from normalized semantic facts.
     Diagnostics,
 }
@@ -1464,6 +1491,7 @@ impl std::fmt::Display for ScipResource {
             Self::Occurrences => "occurrences",
             Self::Relationships => "relationships",
             Self::SourceBytes => "source_bytes",
+            Self::LineStarts => "line_starts",
             Self::Diagnostics => "diagnostics",
         })
     }

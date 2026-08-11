@@ -9,7 +9,9 @@ use rootlight_adapters::{
 };
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, content_hash, derive_repository};
-use rootlight_ir::{BuildContextIdentity, CoverageStatus, EntityKind, IrLimits, OccurrenceRole};
+use rootlight_ir::{
+    BuildContextIdentity, CoverageStatus, EntityFlag, EntityKind, IrLimits, OccurrenceRole,
+};
 use scip::types::{
     Document, Index, Metadata, PositionEncoding, Relationship, SingleLineRange, SymbolInformation,
     TextEncoding, ToolInfo, symbol_information::Kind,
@@ -18,6 +20,7 @@ use scip::types::{
 const SOURCE: &[u8] = b"fn target() {}\nfn caller() { target(); }\n";
 const TARGET: &str = "rust cargo fixture 0.1.0 target().";
 const CALLER: &str = "rust cargo fixture 0.1.0 caller().";
+const GENERATED_AND_TEST_ROLES: i32 = 0x10 | 0x20;
 
 #[test]
 fn official_index_imports_deterministically_with_explicit_coverage() {
@@ -140,6 +143,53 @@ fn import_rejects_malformed_mismatched_and_ambiguous_inputs() {
     let cancellation = Cancellation::new();
     cancellation.cancel(CancellationReason::ClientRequest);
     assert!(import_with_cancellation(&valid, SOURCE, &cancellation).is_err());
+}
+
+#[test]
+fn import_bounds_line_index_memory_before_allocation() {
+    let source = vec![b'\n'; 1_000_000];
+    let encoded = one_symbol_index(&source, PositionEncoding::UTF8CodeUnitOffsetFromLineStart)
+        .write_to_bytes()
+        .expect("line-dense fixture encodes");
+
+    let error = import(&encoded, &source).expect_err("line index ceiling rejects amplification");
+    assert!(matches!(
+        error,
+        rootlight_adapters::ScipImportError::LimitExceeded {
+            resource: ScipResource::LineStarts,
+            observed: 1_000_001,
+            limit: 1_000_000,
+        }
+    ));
+}
+
+#[test]
+fn large_symbol_and_occurrence_sets_import_without_pairwise_scans() {
+    const FACTS: usize = 4_096;
+
+    let mut index = one_symbol_index(SOURCE, PositionEncoding::UTF8CodeUnitOffsetFromLineStart);
+    let document = &mut index.documents[0];
+    document.symbols.clear();
+    document.occurrences.clear();
+    for index in 0..FACTS {
+        let identity = format!("rust cargo fixture 0.1.0 symbol{index}().");
+        document.symbols.push(symbol(&identity, "symbol"));
+        document
+            .occurrences
+            .push(occurrence(&identity, 0, 3, 9, GENERATED_AND_TEST_ROLES));
+    }
+    let encoded = index.write_to_bytes().expect("large SCIP fixture encodes");
+
+    let outcome = import(&encoded, SOURCE).expect("large SCIP fixture imports");
+    assert_eq!(outcome.report().symbols(), FACTS);
+    assert_eq!(outcome.report().occurrences(), FACTS);
+    assert!(
+        outcome
+            .document()
+            .entities
+            .iter()
+            .all(|entity| { entity.flags == [EntityFlag::Generated, EntityFlag::Test] })
+    );
 }
 
 #[test]
