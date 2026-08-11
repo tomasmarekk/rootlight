@@ -450,6 +450,9 @@ fn inspect_workflow_node(
                     "pull_request_target" => {
                         return Err(PolicyError::UnsafeWorkflowTrigger(path.to_path_buf()));
                     }
+                    "on" if contains_pull_request_target(value) => {
+                        return Err(PolicyError::UnsafeWorkflowTrigger(path.to_path_buf()));
+                    }
                     "container" | "services" => {
                         return Err(PolicyError::WorkflowContainer {
                             path: path.to_path_buf(),
@@ -478,6 +481,24 @@ fn inspect_workflow_node(
         | Yaml::BadValue => {}
     }
     Ok(())
+}
+
+fn contains_pull_request_target(events: &Yaml) -> bool {
+    match events {
+        Yaml::String(event) => event == "pull_request_target",
+        Yaml::Array(events) => events
+            .iter()
+            .any(|event| event.as_str() == Some("pull_request_target")),
+        Yaml::Hash(events) => events
+            .keys()
+            .any(|event| event.as_str() == Some("pull_request_target")),
+        Yaml::Alias(_)
+        | Yaml::Real(_)
+        | Yaml::Integer(_)
+        | Yaml::Boolean(_)
+        | Yaml::Null
+        | Yaml::BadValue => false,
+    }
 }
 
 fn validate_action_reference(
@@ -2589,25 +2610,49 @@ mod tests {
 
     #[test]
     fn workflow_parser_rejects_flow_syntax_bypasses() {
+        for workflow in [
+            "on: { pull_request_target: null }\n",
+            "on: pull_request_target\n",
+            "on: [push, pull_request_target]\n",
+        ] {
+            let documents = YamlLoader::load_from_str(workflow).expect("fixture parses");
+            let approved = BTreeMap::new();
+            let mut inspected = BTreeSet::new();
+            let mut used = BTreeSet::new();
+
+            assert!(matches!(
+                inspect_workflow_node(
+                    Path::new("."),
+                    &documents[0],
+                    Path::new("fixture.yml"),
+                    &approved,
+                    &mut used,
+                    &mut inspected,
+                ),
+                Err(PolicyError::UnsafeWorkflowTrigger(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn workflow_parser_does_not_treat_nested_values_as_events() {
         let documents = YamlLoader::load_from_str(
-            "on: { pull_request_target: null }\npermissions: { contents: \"write\" }\n",
+            "on:\n  push:\n    branches: [pull_request_target]\njobs:\n  check:\n    runs-on: pull_request_target\n",
         )
         .expect("fixture parses");
         let approved = BTreeMap::new();
         let mut inspected = BTreeSet::new();
         let mut used = BTreeSet::new();
 
-        assert!(matches!(
-            inspect_workflow_node(
-                Path::new("."),
-                &documents[0],
-                Path::new("fixture.yml"),
-                &approved,
-                &mut used,
-                &mut inspected,
-            ),
-            Err(PolicyError::UnsafeWorkflowTrigger(_))
-        ));
+        inspect_workflow_node(
+            Path::new("."),
+            &documents[0],
+            Path::new("fixture.yml"),
+            &approved,
+            &mut used,
+            &mut inspected,
+        )
+        .expect("non-event scalar values pass");
     }
 
     #[test]
