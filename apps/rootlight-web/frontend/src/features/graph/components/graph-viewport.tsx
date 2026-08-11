@@ -56,6 +56,7 @@ export function GraphViewport(props: GraphViewportProps) {
   const [fallbackSelection, setFallbackSelection] = useState<readonly number[]>([]);
   const pendingFitOrdinal = useRef<number | null>(null);
   const selectionControlled = selectedOrdinals !== undefined;
+  const controllerEnabled = capability.state === "supported" && fallbackReason === null;
   const options = useMemo(
     () => ({
       layoutIdentity,
@@ -89,35 +90,36 @@ export function GraphViewport(props: GraphViewportProps) {
     ],
   );
   const { controller, setContainer, snapshot } = useGraphController({
-    enabled: capability.state === "supported" && fallbackReason === null,
+    enabled: controllerEnabled,
     model,
     options,
   });
   useEffect(() => {
-    if (selectedOrdinals === undefined) {
+    if (!controllerEnabled || selectedOrdinals === undefined) {
       return;
     }
     controller.syncSelection(selectedOrdinals);
     if (
       pendingFitOrdinal.current !== null &&
-      selectedOrdinals.includes(pendingFitOrdinal.current) &&
-      capability.state === "supported" &&
-      fallbackReason === null
+      selectedOrdinals.includes(pendingFitOrdinal.current)
     ) {
       pendingFitOrdinal.current = null;
       controller.fitSelection();
     }
-  }, [capability.state, controller, fallbackReason, model.revision, selectedOrdinals]);
+  }, [controller, controllerEnabled, model.revision, selectedOrdinals]);
 
   useEffect(() => {
+    if (!controllerEnabled) {
+      return;
+    }
     controller.syncOverlay(overlayOrdinals ?? []);
-  }, [controller, model.revision, overlayOrdinals]);
+  }, [controller, controllerEnabled, model.revision, overlayOrdinals]);
 
   useEffect(() => {
-    if (labelsVisible !== undefined) {
+    if (controllerEnabled && labelsVisible !== undefined) {
       controller.setLabelsVisible(labelsVisible);
     }
-  }, [controller, labelsVisible]);
+  }, [controller, controllerEnabled, labelsVisible]);
 
   const selectFromCompanion = (ordinal: number, fit: boolean) => {
     if (

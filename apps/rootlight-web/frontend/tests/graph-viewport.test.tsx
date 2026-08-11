@@ -188,22 +188,48 @@ describe("GraphViewport", () => {
 
   it("moves initialization failures to fallback and keeps local selection usable", async () => {
     const selection = vi.fn();
-    render(
+    const model = graphModelFixture();
+    const factory = vi.fn(() => Promise.reject(new Error("GPU denied")));
+    const { rerender } = render(
       <GraphViewport
-        model={graphModelFixture()}
+        model={model}
         layoutIdentity={graphLayoutIdentity}
         view="architecture"
         budgetProfile="balanced"
+        selectedOrdinals={[1]}
+        overlayOrdinals={[2]}
+        labelsVisible
         capabilityOverride={{ state: "supported", reason: null }}
-        factory={() => Promise.reject(new Error("GPU denied"))}
+        factory={factory}
         onSelectionChange={selection}
       />,
     );
 
     expect(await screen.findByText("Graphical view is unavailable")).toBeVisible();
     expect(screen.getByText("The graphics renderer could not be initialized.")).toBeVisible();
-    await userEvent.click(screen.getByRole("button", { name: /main.*symbol/i }));
-    expect(selection).toHaveBeenCalledWith([1]);
+    expect(screen.getByRole("button", { name: /main.*symbol/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    rerender(
+      <GraphViewport
+        model={model}
+        layoutIdentity={graphLayoutIdentity}
+        view="architecture"
+        budgetProfile="balanced"
+        selectedOrdinals={[2]}
+        overlayOrdinals={[1]}
+        labelsVisible={false}
+        capabilityOverride={{ state: "supported", reason: null }}
+        factory={factory}
+        onSelectionChange={selection}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /config.*file/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 
   it("shows a non-blocking capability check while preserving projection context", () => {
