@@ -5089,7 +5089,7 @@ fn build_architecture_overview(
 /// contributes to exactly one direct-edge rationale. `CalledBy` is intentionally
 /// omitted because it shares the `Calls` predicate and would double-count the
 /// same directed edge.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct TestsSelectSignal {
     label: &'static str,
     history: bool,
@@ -5147,6 +5147,9 @@ struct TestsSelectCandidate {
     framework: String,
     estimated_cost_ms: u32,
 }
+
+type TestsSelectEdges = BTreeMap<(SymbolId, TestsSelectSignal), (u16, bool)>;
+type TestsSelectAdjacency = BTreeMap<SymbolId, TestsSelectEdges>;
 
 fn test_candidate(entity: &rootlight_ir::EntityRecord, path: Option<&str>) -> TestsSelectCandidate {
     let path = path.unwrap_or_default().to_ascii_lowercase();
@@ -5308,8 +5311,7 @@ fn build_tests_select(
 
     // A single bounded relation scan contributes explicit test, semantic,
     // build-target, and bounded historical signals without a second graph walk.
-    let mut out_adj: BTreeMap<SymbolId, Vec<(SymbolId, TestsSelectSignal, u16, bool)>> =
-        BTreeMap::new();
+    let mut out_adj = TestsSelectAdjacency::new();
     let mut saw_dispatch_candidate = false;
     let mut observed_history_evidence = false;
     let mut observed_build_evidence = false;
@@ -5352,14 +5354,17 @@ fn build_tests_select(
             break;
         }
         tracker.add_edges(1)?;
-        out_adj
+        let aggregate = out_adj
             .entry(subject)
             .or_default()
-            .push((object, signal, confidence, dispatch_candidate));
+            .entry((object, signal))
+            .or_insert((0, false));
+        aggregate.0 = aggregate.0.max(confidence);
+        aggregate.1 |= dispatch_candidate;
     }
     let coverage = repository_coverage_summary(document, control, tracker, limiting_resources)?;
     scan_truncated |= coverage.truncated;
-    let negative_coverage_complete = coverage.entities_complete
+    let mut negative_coverage_complete = coverage.entities_complete
         && coverage.relations_semantic_complete
         && !scan_truncated
         && !saw_dispatch_candidate;
@@ -5383,7 +5388,7 @@ fn build_tests_select(
     let mut any_colocated = false;
     let mut covered_seeds: BTreeSet<SymbolId> = BTreeSet::new();
     let requested_frameworks: BTreeSet<&str> = plan.frameworks.iter().map(String::as_str).collect();
-    for (test_id, candidate) in &tests {
+    'test_candidates: for (test_id, candidate) in &tests {
         control.check()?;
         if (!requested_kinds.is_empty() && !requested_kinds.contains(&candidate.kind))
             || (!requested_frameworks.is_empty()
@@ -5391,17 +5396,22 @@ fn build_tests_select(
         {
             continue;
         }
-        let edges = out_adj.get(test_id).map(Vec::as_slice).unwrap_or(&[]);
         // Direct signal: strongest outbound edge into a seed.
         let mut direct_confidence = 0_u16;
         let mut direct_signal: Option<TestsSelectSignal> = None;
         let mut direct_candidate = false;
-        for (target, signal, confidence, candidate) in edges {
-            if effective_seeds.contains(target) && *confidence > direct_confidence {
-                direct_confidence = *confidence;
-                direct_signal = Some(*signal);
-                direct_candidate = *candidate;
-                covered_seeds.insert(*target);
+        if let Some(edges) = out_adj.get(test_id) {
+            for ((target, signal), (confidence, candidate)) in edges {
+                if !tests_select_charge_edge_work(tracker, limiting_resources, control)? {
+                    negative_coverage_complete = false;
+                    break 'test_candidates;
+                }
+                if effective_seeds.contains(target) && *confidence > direct_confidence {
+                    direct_confidence = *confidence;
+                    direct_signal = Some(*signal);
+                    direct_candidate = *candidate;
+                    covered_seeds.insert(*target);
+                }
             }
         }
         // Transitive signal: strongest two-hop path test -> node -> seed,
@@ -5410,15 +5420,25 @@ fn build_tests_select(
         let mut transitive_candidate = false;
         let mut transitive_history = false;
         let mut transitive_build = false;
-        if direct_confidence == 0 {
-            for (mid, first_signal, first_confidence, first_candidate) in edges {
+        if direct_confidence == 0
+            && let Some(edges) = out_adj.get(test_id)
+        {
+            for ((mid, first_signal), (first_confidence, first_candidate)) in edges {
+                if !tests_select_charge_edge_work(tracker, limiting_resources, control)? {
+                    negative_coverage_complete = false;
+                    break 'test_candidates;
+                }
                 if effective_seeds.contains(mid) {
                     continue;
                 }
                 let Some(second_hop) = out_adj.get(mid) else {
                     continue;
                 };
-                for (target, second_signal, second_confidence, second_candidate) in second_hop {
+                for ((target, second_signal), (second_confidence, second_candidate)) in second_hop {
+                    if !tests_select_charge_edge_work(tracker, limiting_resources, control)? {
+                        negative_coverage_complete = false;
+                        break 'test_candidates;
+                    }
                     if !effective_seeds.contains(target) {
                         continue;
                     }
@@ -5710,6 +5730,20 @@ fn build_tests_select(
         },
         gaps,
     })
+}
+
+fn tests_select_charge_edge_work(
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+    control: &QueryControl<'_>,
+) -> Result<bool, QueryError> {
+    control.check()?;
+    if !tracker.can_add(QueryResource::Edges, 1) {
+        record_limit(limiting_resources, QueryResource::Edges)?;
+        return Ok(false);
+    }
+    tracker.add_edges(1)?;
+    Ok(true)
 }
 
 /// Served relation families used to propagate change impact to dependents.
@@ -11861,6 +11895,60 @@ mod tests {
         assert!(!selection.coverage_strategy.file_colocation_signals);
         assert!(has_test_gap(&selection, "history_signal_unavailable"));
         assert!(has_test_gap(&selection, "runtime_coverage_unavailable"));
+    }
+
+    #[test]
+    fn tests_select_deduplicates_and_budgets_transitive_edges() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_file(&mut document, 2, "src/t.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Function);
+        add_entity(&mut document, 21, 2, EntityKind::Test);
+        for offset in 0_u8..16 {
+            add_calls(&mut document, 100 + offset, 21, 12, 800);
+            add_calls(&mut document, 140 + offset, 12, 11, 600);
+        }
+
+        let plan = tests_select_plan(BTreeSet::from([symbol(11)]), Vec::new(), 20, false);
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+
+        let selection = build_tests_select(
+            &document,
+            &plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )
+        .expect("deduplicated test selection succeeds");
+
+        assert_eq!(selection.tests.len(), 1);
+        assert_eq!(selection.tests[0].test_id, symbol(21));
+        // The 32 source facts are scanned once, then only three unique-edge
+        // scoring steps remain: direct, first hop, and second hop.
+        assert_eq!(tracker.edges, 35);
+        assert!(limiting_resources.is_empty());
+
+        let mut bounded_plan = plan;
+        bounded_plan.budget = QueryBudget::new().with_max_edges(34);
+        let mut bounded_tracker = UsageTracker::new(bounded_plan.budget);
+        let mut bounded_resources = Vec::new();
+        let bounded_control = QueryControl::new(&cancellation, bounded_plan.budget.max_duration);
+        let bounded_selection = build_tests_select(
+            &document,
+            &bounded_plan,
+            &bounded_control,
+            &mut bounded_tracker,
+            &mut bounded_resources,
+        )
+        .expect("edge exhaustion returns a bounded partial selection");
+
+        assert!(bounded_selection.tests.is_empty());
+        assert_eq!(bounded_tracker.edges, 34);
+        assert_eq!(bounded_resources, vec![QueryResource::Edges]);
     }
 
     #[test]
