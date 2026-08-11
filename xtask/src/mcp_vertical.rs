@@ -16,7 +16,7 @@ use std::{
 };
 
 use rootlight_bench::{TokenInputKind, TokenMeasurement, WorkflowTokenAccounting};
-use rootlight_client::{Client, ConnectPolicy, OperationState as ClientOperationState};
+use rootlight_client::{Client, ConnectPolicy};
 use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource};
 use rootlight_ids::{GenerationId, OperationId, RepositoryId};
 use rootlight_mcp_contract::{MCP_SPECIFICATION_DATE, capability::DISCOVERY_METADATA_KEY};
@@ -260,8 +260,13 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     wait_until_ready(&paths, &mut daemon)?;
     daemon_ready_samples.push(elapsed_micros(daemon_started.elapsed()));
 
-    let (mut mcp, catalog, bridge_start) =
-        open_session("primary", &mcp_binary, &environment, &mut transcript)?;
+    let (mut mcp, catalog, bridge_start) = open_session(
+        "primary",
+        &mcp_binary,
+        &environment,
+        temporary.path(),
+        &mut transcript,
+    )?;
     bridge_start_samples.push(bridge_start);
     let primary_tool_list = catalog.list_result.clone();
     exercise_protocol_errors(&mut mcp, &mut transcript)?;
@@ -427,25 +432,20 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     let mut restarted_daemon = SupervisedDaemon::spawn(&daemon_binary, &environment)?;
     wait_until_ready(&paths, &mut restarted_daemon)?;
     daemon_ready_samples.push(elapsed_micros(restart_started.elapsed()));
-    let (mut restarted_mcp, restarted_catalog, restarted_bridge_start) =
-        open_session("restart", &mcp_binary, &environment, &mut transcript)?;
+    let (mut restarted_mcp, restarted_catalog, restarted_bridge_start) = open_session(
+        "restart",
+        &mcp_binary,
+        &environment,
+        temporary.path(),
+        &mut transcript,
+    )?;
     bridge_start_samples.push(restarted_bridge_start);
     if restarted_catalog.list_result != primary_tool_list {
         return Err(VerticalError::Invariant(
             "tool catalog changed after daemon restart",
         ));
     }
-    let durable_operation_id = v2_index
-        .operation
-        .parse::<OperationId>()
-        .map_err(|_| VerticalError::Invariant("repo.index returned an invalid operation ID"))?;
-    let durable_client = Client::connect_or_start(&paths, [0x72; 16], ConnectPolicy::ExistingOnly)?;
-    let durable_operation = durable_client.operation_status(durable_operation_id)?;
-    if durable_operation.state != ClientOperationState::Succeeded {
-        return Err(VerticalError::Invariant(
-            "base durable operation journal did not survive daemon restart",
-        ));
-    }
+    OperationJournal::quick_check_path_with_timeout(&operation_journal, STOP_TIMEOUT)?;
     let restarted_operation = operation_status(
         "restart.operation-status",
         &mut restarted_mcp,
@@ -512,8 +512,13 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     let mut rebuilt_daemon = SupervisedDaemon::spawn(&daemon_binary, &environment)?;
     wait_until_ready(&paths, &mut rebuilt_daemon)?;
     daemon_ready_samples.push(elapsed_micros(rebuild_started.elapsed()));
-    let (mut rebuilt_mcp, rebuilt_catalog, rebuilt_bridge_start) =
-        open_session("rebuild", &mcp_binary, &environment, &mut transcript)?;
+    let (mut rebuilt_mcp, rebuilt_catalog, rebuilt_bridge_start) = open_session(
+        "rebuild",
+        &mcp_binary,
+        &environment,
+        temporary.path(),
+        &mut transcript,
+    )?;
     bridge_start_samples.push(rebuilt_bridge_start);
     if rebuilt_catalog.list_result != primary_tool_list {
         return Err(VerticalError::Invariant(
@@ -790,10 +795,11 @@ fn open_session(
     session: &'static str,
     binary: &Path,
     environment: &Environment,
+    authorized_repository_root: &Path,
     transcript: &mut TranscriptWriter,
 ) -> Result<(McpProcess, ToolCatalog, u64), VerticalError> {
     let started = Instant::now();
-    let mut process = McpProcess::spawn(session, binary, environment)?;
+    let mut process = McpProcess::spawn(session, binary, environment, authorized_repository_root)?;
     let initialize = process.request(
         transcript,
         format!("{session}.initialize"),
@@ -1786,9 +1792,32 @@ fn index_repository_with_mode(
     }
     let resources = &detail["resources"];
     let files_examined = required_u64(&resources["files_examined"], "operation files examined")?;
-    if files_examined == 0 {
+    let incremental = &terminal.structured["data"]["incremental"];
+    let build_strategy = required_string(
+        &incremental["build_strategy"],
+        "operation incremental build strategy",
+    )?;
+    if files_examined == 0 && build_strategy != "retained_generation" {
         return Err(VerticalError::Invariant(
             "published operation.status reported no examined inputs",
+        ));
+    }
+    if build_strategy == "retained_generation"
+        && (required_u64(
+            &incremental["changed_files"],
+            "retained generation changed files",
+        )? != 0
+            || required_u64(
+                &incremental["rebuilt_files"],
+                "retained generation rebuilt files",
+            )? != 0
+            || required_u64(
+                &incremental["reused_files"],
+                "retained generation reused files",
+            )? == 0)
+    {
+        return Err(VerticalError::Invariant(
+            "retained generation operation reported inconsistent reuse evidence",
         ));
     }
     let peak_rss_bytes = required_u64(&resources["peak_rss_bytes"], "operation peak RSS")?;
@@ -4796,10 +4825,12 @@ impl McpProcess {
         session: &'static str,
         binary: &Path,
         environment: &Environment,
+        authorized_repository_root: &Path,
     ) -> Result<Self, VerticalError> {
         let mut command = Command::new(binary);
         environment.apply(&mut command);
         command
+            .current_dir(authorized_repository_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -6593,7 +6624,10 @@ fn binary_path(directory: &Path, name: &str) -> Result<PathBuf, VerticalError> {
     };
     let path = directory.join(file);
     if path.is_file() {
-        Ok(path)
+        path.canonicalize().map_err(|source| VerticalError::Io {
+            action: "canonicalize MCP vertical binary",
+            source,
+        })
     } else {
         Err(VerticalError::MissingBinary(path))
     }
