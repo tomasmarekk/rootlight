@@ -99,9 +99,9 @@ const ENDPOINT_ID_SUFFIX: &str = ".sock";
 #[cfg(windows)]
 const ENDPOINT_ID_SUFFIX: &str = "";
 #[cfg(target_os = "macos")]
-const MACOS_RUNTIME_ROOT: &str = "/private/tmp";
-#[cfg(all(target_os = "macos", test))]
 const MACOS_UNIX_SOCKET_PATH_MAX: usize = 103;
+#[cfg(target_os = "macos")]
+const MACOS_RUNTIME_DIR_NAME: &str = "rl";
 
 /// Resolved private paths for one user's Rootlight daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,7 +116,9 @@ impl RuntimePaths {
     /// # Errors
     ///
     /// Returns [`RuntimeError::UserDirectoriesUnavailable`] when current-user
-    /// application directories cannot be resolved.
+    /// application directories cannot be resolved. On macOS, also returns a
+    /// path or security error when the session temporary directory is not
+    /// private or cannot hold the maximum daemon endpoint path.
     pub fn resolve() -> Result<Self, RuntimeError> {
         let project = ProjectDirs::from("dev", "tomasmarekk", "rootlight")
             .ok_or(RuntimeError::UserDirectoriesUnavailable)?;
@@ -125,7 +127,7 @@ impl RuntimePaths {
             .unwrap_or_else(|| project.data_local_dir())
             .to_path_buf();
         #[cfg(target_os = "macos")]
-        let runtime_dir = macos_default_runtime_dir(effective_user_id());
+        let runtime_dir = macos_default_runtime_dir()?;
         #[cfg(not(target_os = "macos"))]
         let runtime_dir = project
             .runtime_dir()
@@ -1470,10 +1472,26 @@ fn effective_user_id() -> u32 {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_default_runtime_dir(user_id: u32) -> PathBuf {
+fn macos_default_runtime_dir() -> Result<PathBuf, RuntimeError> {
+    macos_runtime_dir_in(&std::env::temp_dir())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_runtime_dir_in(root: &Path) -> Result<PathBuf, RuntimeError> {
+    validate_private_directory(root, PrivateScope::Session)?;
+    let runtime = root.join(MACOS_RUNTIME_DIR_NAME);
     // Darwin's AF_UNIX path ceiling cannot represent a socket beneath the
-    // standard Application Support path, so keep only transient artifacts here.
-    Path::new(MACOS_RUNTIME_ROOT).join(format!("rootlight-{user_id}"))
+    // standard Application Support path. The OS-provided temporary parent is
+    // user-private, so another local account cannot reserve this child first.
+    let endpoint = runtime.join(format!(
+        "{ENDPOINT_ID_PREFIX}{}{ENDPOINT_ID_SUFFIX}",
+        encode_nonce([u8::MAX; 16])
+    ));
+    use std::os::unix::ffi::OsStrExt as _;
+    if endpoint.as_os_str().as_bytes().len() > MACOS_UNIX_SOCKET_PATH_MAX {
+        return Err(RuntimeError::InvalidDirectory);
+    }
+    Ok(runtime)
 }
 
 #[cfg(unix)]
@@ -1617,13 +1635,13 @@ mod tests {
     fn default_macos_runtime_keeps_daemon_socket_representable() {
         use std::os::unix::ffi::OsStrExt as _;
 
-        let runtime = macos_default_runtime_dir(u32::MAX);
+        let runtime = macos_default_runtime_dir().expect("default macOS runtime resolves");
         let socket = runtime.join(format!(
             "{ENDPOINT_ID_PREFIX}{}{ENDPOINT_ID_SUFFIX}",
             encode_nonce([u8::MAX; 16])
         ));
 
-        assert_eq!(runtime.parent(), Some(Path::new(MACOS_RUNTIME_ROOT)));
+        assert_eq!(runtime.parent(), Some(std::env::temp_dir().as_path()));
         assert!(
             socket.as_os_str().as_bytes().len() <= MACOS_UNIX_SOCKET_PATH_MAX,
             "default macOS daemon socket exceeds Darwin's AF_UNIX path ceiling"
@@ -1632,8 +1650,23 @@ mod tests {
             RuntimePaths::resolve()
                 .expect("default macOS paths resolve")
                 .runtime_dir(),
-            macos_default_runtime_dir(effective_user_id())
+            runtime
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_runtime_rejects_a_shared_temporary_parent() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = tempfile::tempdir().expect("temporary directory creates");
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o777))
+            .expect("test parent becomes shared");
+
+        assert!(matches!(
+            macos_runtime_dir_in(temporary.path()),
+            Err(RuntimeError::InsecureDirectory)
+        ));
     }
 
     fn private_tempdir() -> tempfile::TempDir {
