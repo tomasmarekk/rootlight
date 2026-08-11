@@ -5657,21 +5657,7 @@ fn repository_operation_status(
         && record.state == OperationState::Succeeded
     {
         if repository_context.is_some_and(|context| context.mode == RepositoryOperationMode::Auto) {
-            let candidate = semantic_refinement_operation(operation);
-            match journal_call(
-                runtime,
-                context.deadline,
-                journal.control(ControlRequest::OperationStatus(candidate)),
-            ) {
-                Ok(ControlResponse::OperationStatus(child))
-                    if child.kind == OperationKind::RepositoryIndex =>
-                {
-                    Some(candidate)
-                }
-                Ok(ControlResponse::OperationStatus(_)) | Ok(_) => return Err(internal_error()),
-                Err(error) if error.code() == ErrorCode::NotFound => None,
-                Err(error) => return Err(error),
-            }
+            completed_auto_semantic_operation(journal, runtime, operation, context)?
         } else {
             None
         }
@@ -5709,6 +5695,50 @@ fn repository_operation_status(
             .transpose()?;
     }
     Ok(response)
+}
+
+fn completed_auto_semantic_operation(
+    journal: &JournalActorHandle,
+    runtime: &tokio::runtime::Runtime,
+    parent: OperationId,
+    context: &FirstSliceIpcContext,
+) -> Result<Option<OperationId>, PublicError> {
+    let candidate = semantic_refinement_operation(parent);
+    let grace_deadline = Instant::now()
+        .checked_add(OPERATION_STATUS_RESPONSE_GRACE)
+        .ok_or_else(internal_error)?;
+    let wait_deadline = grace_deadline.min(context.deadline);
+    loop {
+        match journal_call(
+            runtime,
+            context.deadline,
+            journal.control(ControlRequest::OperationStatus(candidate)),
+        ) {
+            Ok(ControlResponse::OperationStatus(child))
+                if child.kind == OperationKind::RepositoryIndex =>
+            {
+                return Ok(Some(candidate));
+            }
+            Ok(ControlResponse::OperationStatus(_)) | Ok(_) => return Err(internal_error()),
+            Err(error) if error.code() == ErrorCode::NotFound => {
+                context
+                    .cancellation
+                    .check()
+                    .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
+                let now = Instant::now();
+                if now >= wait_deadline {
+                    return Ok(None);
+                }
+                // Parent publication and deterministic child admission use
+                // separate durable transactions, so hide only that bounded gap.
+                thread::sleep(
+                    OPERATION_STATUS_POLL_INTERVAL
+                        .min(wait_deadline.saturating_duration_since(now)),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn project_repository_operation_evidence(
@@ -16580,6 +16610,87 @@ mod tests {
             generation
         );
         assert_eq!(status.started_unix_ms, 1_700_000_000_056);
+        actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn succeeded_auto_status_waits_for_durable_semantic_child() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = OperationId::from_bytes([60; 16]);
+        let semantic_operation = semantic_refinement_operation(operation);
+        let repository = RepositoryId::from_bytes([61; 16]);
+        let generation = GenerationId::from_bytes([62; 20]);
+        let submission = repository_submission(operation, 60)
+            .with_repository_context(
+                RepositoryOperationSubmission::new(
+                    repository,
+                    None,
+                    1_700_000_000_060,
+                    64 * 1024 * 1024,
+                    RepositoryOperationMode::Auto,
+                )
+                .expect("repository context is valid")
+                .with_root_identity([63; 32]),
+            )
+            .expect("repository context attaches");
+        journal
+            .submit(submission)
+            .expect("repository operation submits");
+        journal
+            .start_execution(operation)
+            .expect("repository operation starts");
+        journal
+            .complete_repository_publication(operation)
+            .expect("publication succeeds");
+        journal
+            .record_repository_publication(operation, generation)
+            .expect("published generation projects durably");
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let child_journal = Arc::clone(&journal);
+        let child_submitter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            child_journal
+                .submit(repository_submission(semantic_operation, 61))
+                .expect("semantic child submits");
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        let status = repository_operation_status(
+            &RwLock::new(
+                FirstSliceService::new(DEFAULT_GENERATION_RETENTION)
+                    .expect("status service initializes"),
+            ),
+            &actor.handle(),
+            &Mutex::new(OperationMetadataSet::new(1)),
+            &runtime,
+            daemon::RepositoryOperationStatusRequest {
+                schema_version: Some(schema_version()),
+                operation: Some(operation_to_wire(operation)),
+                action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                after_revision: None,
+                wait_ms: None,
+            },
+            &FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::from_bytes([60; 16]),
+                selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+                cancellation: Cancellation::with_deadline(deadline),
+                deadline,
+                effective_budget: None,
+                index_admission: None,
+            },
+        )
+        .expect("status bridges the parent-child admission gap");
+
+        assert_eq!(
+            parse_operation(status.semantic_operation.as_ref())
+                .expect("semantic child identity is exposed"),
+            semantic_operation
+        );
+        child_submitter.join().expect("child submitter joins");
         actor.join().expect("actor joins");
     }
 
