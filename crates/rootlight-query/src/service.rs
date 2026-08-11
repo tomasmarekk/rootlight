@@ -7065,129 +7065,136 @@ const HISTORY_COMPARE_MAX_CHANGE_KINDS: usize = 8;
 /// Maximum breaking candidates carried in one `history.compare` result.
 const HISTORY_COMPARE_MAX_BREAKING: usize = 256;
 
+// Each logical item can occupy several live B-tree indexes during comparison.
+// These conservative charges cover the borrowed entry values plus node slack.
+const HISTORY_COMPARE_FIXED_WORKSPACE_BYTES: usize = 64 * 1024;
+const HISTORY_COMPARE_ENTITY_WORKSPACE_BYTES: usize = 2 * 1024;
+const HISTORY_COMPARE_FILE_WORKSPACE_BYTES: usize = 512;
+const HISTORY_COMPARE_RELATION_WORKSPACE_BYTES: usize = 512;
+
 /// Comparable per-entity fingerprint used to diff two generations.
 ///
 /// The fingerprint captures the normalized fields needed for identity-preserved
 /// comparison and conservative one-to-one rename or move matching.
-struct HistoryEntityFingerprint {
-    kind_label: String,
-    language: String,
-    canonical_name: String,
-    normalized_name: String,
-    container_identity: Option<HistoryContainerIdentity>,
+struct HistoryEntityFingerprint<'a> {
+    kind: EntityKind,
+    language: &'a str,
+    canonical_name: &'a str,
+    normalized_name: &'a str,
+    container_identity: Option<HistoryContainerIdentity<'a>>,
     is_public: bool,
-    source_identity: Option<HistoryFileIdentity>,
+    source_identity: Option<HistoryFileIdentity<'a>>,
     source_content_hash: Option<ContentHash>,
     source_start: u64,
     source_end: u64,
 }
 
-impl HistoryEntityFingerprint {
+impl<'a> HistoryEntityFingerprint<'a> {
     fn from_entity(
-        entity: &rootlight_ir::EntityRecord,
-        entities: &BTreeMap<SymbolId, &rootlight_ir::EntityRecord>,
-        file_paths: &BTreeMap<FileId, &str>,
-    ) -> Result<Self, QueryError> {
+        entity: &'a rootlight_ir::EntityRecord,
+        entities: &BTreeMap<SymbolId, &'a rootlight_ir::EntityRecord>,
+        file_paths: &BTreeMap<FileId, &'a str>,
+    ) -> Self {
         let span = entity.evidence.source.as_ref().map(|source| source.span());
-        Ok(Self {
-            kind_label: serialized_label(&entity.kind)?,
-            language: entity.language.clone(),
-            canonical_name: entity.canonical_name.clone(),
+        Self {
+            kind: entity.kind,
+            language: &entity.language,
+            canonical_name: &entity.canonical_name,
             normalized_name: if entity.flags.contains(&EntityFlag::Synthetic) {
-                entity.display_name.clone()
+                &entity.display_name
             } else {
-                entity.canonical_name.clone()
+                &entity.canonical_name
             },
-            container_identity: history_container_identity(entity.container, entities, file_paths)?,
+            container_identity: history_container_identity(entity.container, entities, file_paths),
             is_public: entity_is_exported(entity),
             source_identity: span.map(|span| history_file_identity(span.file(), file_paths)),
             source_content_hash: entity.evidence.source.as_ref().map(SourceRef::content_hash),
             source_start: span.map_or(0, |span| span.start_byte()),
             source_end: span.map_or(0, |span| span.end_byte()),
-        })
-    }
-
-    fn semantic_key(&self) -> HistorySemanticKey {
-        HistorySemanticKey {
-            kind_label: self.kind_label.clone(),
-            language: self.language.clone(),
-            normalized_name: self.normalized_name.clone(),
-            container_identity: self.container_identity.clone(),
-            source_identity: self.source_identity.clone(),
         }
     }
 
-    fn signature_key(&self) -> HistorySignatureKey {
+    const fn semantic_key(&self) -> HistorySemanticKey<'a> {
+        HistorySemanticKey {
+            kind: self.kind,
+            language: self.language,
+            normalized_name: self.normalized_name,
+            container_identity: self.container_identity,
+            source_identity: self.source_identity,
+        }
+    }
+
+    const fn signature_key(&self) -> HistorySignatureKey<'a> {
         HistorySignatureKey {
-            language: self.language.clone(),
-            normalized_name: self.normalized_name.clone(),
-            container_identity: self.container_identity.clone(),
-            source_identity: self.source_identity.clone(),
+            language: self.language,
+            normalized_name: self.normalized_name,
+            container_identity: self.container_identity,
+            source_identity: self.source_identity,
         }
     }
 
     fn surface_differs(&self, other: &Self) -> bool {
-        self.kind_label != other.kind_label || self.is_public != other.is_public
+        self.kind != other.kind || self.is_public != other.is_public
     }
 }
 
 /// Stable file identity used only while comparing generation-local records.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum HistoryFileIdentity {
-    Path(String),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum HistoryFileIdentity<'a> {
+    Path(&'a str),
     Id(FileId),
 }
 
 /// Stable container identity used only while comparing generation-local records.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum HistoryContainerIdentity {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum HistoryContainerIdentity<'a> {
     Repository,
-    File(HistoryFileIdentity),
+    File(HistoryFileIdentity<'a>),
     Entity {
-        kind_label: String,
-        language: String,
-        qualified_name: String,
+        kind: EntityKind,
+        language: &'a str,
+        qualified_name: &'a str,
     },
     EntityId(SymbolId),
 }
 
 /// Normalized semantic identity available in the current common IR.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct HistorySemanticKey {
-    kind_label: String,
-    language: String,
-    normalized_name: String,
-    container_identity: Option<HistoryContainerIdentity>,
-    source_identity: Option<HistoryFileIdentity>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct HistorySemanticKey<'a> {
+    kind: EntityKind,
+    language: &'a str,
+    normalized_name: &'a str,
+    container_identity: Option<HistoryContainerIdentity<'a>>,
+    source_identity: Option<HistoryFileIdentity<'a>>,
 }
 
 /// Declaration identity used to preserve lineage across a kind change.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct HistorySignatureKey {
-    language: String,
-    normalized_name: String,
-    container_identity: Option<HistoryContainerIdentity>,
-    source_identity: Option<HistoryFileIdentity>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct HistorySignatureKey<'a> {
+    language: &'a str,
+    normalized_name: &'a str,
+    container_identity: Option<HistoryContainerIdentity<'a>>,
+    source_identity: Option<HistoryFileIdentity<'a>>,
 }
 
 /// Exact fields that prove an entity moved with unchanged source content.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct HistoryMoveKey {
-    kind_label: String,
-    language: String,
-    canonical_name: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct HistoryMoveKey<'a> {
+    kind: EntityKind,
+    language: &'a str,
+    canonical_name: &'a str,
     source_content_hash: ContentHash,
     source_start: u64,
     source_end: u64,
 }
 
 /// Stable declaration neighborhood used for conservative rename matching.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct HistoryRenameKey {
-    kind_label: String,
-    language: String,
-    container_identity: Option<HistoryContainerIdentity>,
-    source_identity: HistoryFileIdentity,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct HistoryRenameKey<'a> {
+    kind: EntityKind,
+    language: &'a str,
+    container_identity: Option<HistoryContainerIdentity<'a>>,
+    source_identity: HistoryFileIdentity<'a>,
     source_start: u64,
 }
 
@@ -7200,21 +7207,24 @@ struct HistoryCompareAnalysis {
     lineage: Vec<LineageMatchRecord>,
 }
 
-fn history_file_identity(file: FileId, file_paths: &BTreeMap<FileId, &str>) -> HistoryFileIdentity {
+fn history_file_identity<'a>(
+    file: FileId,
+    file_paths: &BTreeMap<FileId, &'a str>,
+) -> HistoryFileIdentity<'a> {
     file_paths
         .get(&file)
         .map_or(HistoryFileIdentity::Id(file), |path| {
-            HistoryFileIdentity::Path((*path).to_owned())
+            HistoryFileIdentity::Path(path)
         })
 }
 
-fn history_container_identity(
+fn history_container_identity<'a>(
     container: Option<ContainerRef>,
-    entities: &BTreeMap<SymbolId, &rootlight_ir::EntityRecord>,
-    file_paths: &BTreeMap<FileId, &str>,
-) -> Result<Option<HistoryContainerIdentity>, QueryError> {
+    entities: &BTreeMap<SymbolId, &'a rootlight_ir::EntityRecord>,
+    file_paths: &BTreeMap<FileId, &'a str>,
+) -> Option<HistoryContainerIdentity<'a>> {
     let identity = match container {
-        None => return Ok(None),
+        None => return None,
         Some(ContainerRef::Repository(_)) => HistoryContainerIdentity::Repository,
         Some(ContainerRef::File(file)) => {
             HistoryContainerIdentity::File(history_file_identity(file, file_paths))
@@ -7222,16 +7232,16 @@ fn history_container_identity(
         Some(ContainerRef::Entity(symbol)) => {
             if let Some(entity) = entities.get(&symbol) {
                 HistoryContainerIdentity::Entity {
-                    kind_label: serialized_label(&entity.kind)?,
-                    language: entity.language.clone(),
-                    qualified_name: entity.qualified_name.clone(),
+                    kind: entity.kind,
+                    language: &entity.language,
+                    qualified_name: &entity.qualified_name,
                 }
             } else {
                 HistoryContainerIdentity::EntityId(symbol)
             }
         }
     };
-    Ok(Some(identity))
+    Some(identity)
 }
 
 fn history_source_snapshot(
@@ -7276,6 +7286,11 @@ fn build_history_compare(
     tracker: &mut UsageTracker,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<HistoryCompareAnalysis, QueryError> {
+    control.check()?;
+    tracker.add_memory(history_compare_workspace_bytes(
+        base_document,
+        head_document,
+    )?)?;
     let source_snapshots_match = history_source_snapshots_match(base_document, head_document);
     let base_entities = history_entity_index(
         base_document,
@@ -7323,7 +7338,7 @@ fn build_history_compare(
                     let change = SemanticChangeRecord {
                         kind,
                         symbol_id: symbol,
-                        entity_kind: head.kind_label.clone(),
+                        entity_kind: serialized_label(&head.kind)?,
                         breaking_candidate,
                         significance,
                     };
@@ -7347,7 +7362,7 @@ fn build_history_compare(
                         SemanticChangeRecord {
                             kind,
                             symbol_id: symbol,
-                            entity_kind: head.kind_label.clone(),
+                            entity_kind: serialized_label(&head.kind)?,
                             breaking_candidate: false,
                             significance: history_significance(kind, false),
                         },
@@ -7401,7 +7416,7 @@ fn build_history_compare(
                 SemanticChangeRecord {
                     kind,
                     symbol_id: head_symbol,
-                    entity_kind: head.kind_label.clone(),
+                    entity_kind: serialized_label(&head.kind)?,
                     breaking_candidate,
                     significance,
                 },
@@ -7483,9 +7498,9 @@ fn build_history_compare(
             &unmatched_head,
             |entity| {
                 Some(HistoryMoveKey {
-                    kind_label: entity.kind_label.clone(),
-                    language: entity.language.clone(),
-                    canonical_name: entity.canonical_name.clone(),
+                    kind: entity.kind,
+                    language: entity.language,
+                    canonical_name: entity.canonical_name,
                     source_content_hash: entity.source_content_hash?,
                     source_start: entity.source_start,
                     source_end: entity.source_end,
@@ -7528,10 +7543,10 @@ fn build_history_compare(
             &unmatched_head,
             |entity| {
                 Some(HistoryRenameKey {
-                    kind_label: entity.kind_label.clone(),
-                    language: entity.language.clone(),
-                    container_identity: entity.container_identity.clone(),
-                    source_identity: entity.source_identity.clone()?,
+                    kind: entity.kind,
+                    language: entity.language,
+                    container_identity: entity.container_identity,
+                    source_identity: entity.source_identity?,
                     source_start: entity.source_start,
                 })
             },
@@ -7545,7 +7560,7 @@ fn build_history_compare(
                 .get(&head_symbol)
                 .ok_or(QueryError::SymbolNotFound)?;
             if base.canonical_name == head.canonical_name
-                || !history_names_resemble(&base.canonical_name, &head.canonical_name)
+                || !history_names_resemble(base.canonical_name, head.canonical_name)
             {
                 continue;
             }
@@ -7595,7 +7610,7 @@ fn build_history_compare(
                 SemanticChangeRecord {
                     kind,
                     symbol_id: symbol,
-                    entity_kind: base.kind_label.clone(),
+                    entity_kind: serialized_label(&base.kind)?,
                     breaking_candidate,
                     significance,
                 },
@@ -7628,7 +7643,7 @@ fn build_history_compare(
                 SemanticChangeRecord {
                     kind,
                     symbol_id: symbol,
-                    entity_kind: head.kind_label.clone(),
+                    entity_kind: serialized_label(&head.kind)?,
                     breaking_candidate: false,
                     significance: history_significance(kind, false),
                 },
@@ -7810,16 +7825,30 @@ fn build_history_compare(
     })
 }
 
-struct HistoryRelationChangeInputs<'a> {
-    base_document: &'a NormalizedIrDocument,
-    head_document: &'a NormalizedIrDocument,
-    base_entities: &'a BTreeMap<SymbolId, HistoryEntityFingerprint>,
-    head_entities: &'a BTreeMap<SymbolId, HistoryEntityFingerprint>,
+fn history_compare_workspace_bytes(
+    base: &NormalizedIrDocument,
+    head: &NormalizedIrDocument,
+) -> Result<u64, QueryError> {
+    let entities = base.entities.len().saturating_add(head.entities.len());
+    let files = base.files.len().saturating_add(head.files.len());
+    let relations = base.relations.len().saturating_add(head.relations.len());
+    let bytes = HISTORY_COMPARE_FIXED_WORKSPACE_BYTES
+        .saturating_add(entities.saturating_mul(HISTORY_COMPARE_ENTITY_WORKSPACE_BYTES))
+        .saturating_add(files.saturating_mul(HISTORY_COMPARE_FILE_WORKSPACE_BYTES))
+        .saturating_add(relations.saturating_mul(HISTORY_COMPARE_RELATION_WORKSPACE_BYTES));
+    checked_usize_to_u64(bytes)
+}
+
+struct HistoryRelationChangeInputs<'a, 'document> {
+    base_document: &'document NormalizedIrDocument,
+    head_document: &'document NormalizedIrDocument,
+    base_entities: &'a BTreeMap<SymbolId, HistoryEntityFingerprint<'document>>,
+    head_entities: &'a BTreeMap<SymbolId, HistoryEntityFingerprint<'document>>,
     plan: &'a HistoryComparePlan,
 }
 
 fn append_history_relation_changes(
-    inputs: &HistoryRelationChangeInputs<'_>,
+    inputs: &HistoryRelationChangeInputs<'_, '_>,
     changes: &mut Vec<SemanticChangeRecord>,
     control: &QueryControl<'_>,
     tracker: &mut UsageTracker,
@@ -7872,7 +7901,7 @@ fn append_history_relation_changes(
             SemanticChangeRecord {
                 kind,
                 symbol_id: symbol,
-                entity_kind: entity.kind_label.clone(),
+                entity_kind: serialized_label(&entity.kind)?,
                 breaking_candidate: false,
                 significance: history_significance(kind, false),
             },
@@ -8093,9 +8122,9 @@ fn bounded_history_count(count: usize) -> u32 {
 /// Returns only bidirectionally unique matches for a deterministic key.
 ///
 /// Marking duplicate keys as ambiguous prevents collision-dependent aliases.
-fn unique_history_matches<Key, KeyFor>(
-    base_entities: &BTreeMap<SymbolId, HistoryEntityFingerprint>,
-    head_entities: &BTreeMap<SymbolId, HistoryEntityFingerprint>,
+fn unique_history_matches<'a, Key, KeyFor>(
+    base_entities: &BTreeMap<SymbolId, HistoryEntityFingerprint<'a>>,
+    head_entities: &BTreeMap<SymbolId, HistoryEntityFingerprint<'a>>,
     base_symbols: &BTreeSet<SymbolId>,
     head_symbols: &BTreeSet<SymbolId>,
     key_for: KeyFor,
@@ -8103,7 +8132,7 @@ fn unique_history_matches<Key, KeyFor>(
 ) -> Result<Vec<(SymbolId, SymbolId)>, QueryError>
 where
     Key: Ord,
-    KeyFor: Fn(&HistoryEntityFingerprint) -> Option<Key>,
+    KeyFor: Fn(&HistoryEntityFingerprint<'a>) -> Option<Key>,
 {
     fn insert<Key: Ord>(index: &mut BTreeMap<Key, Option<SymbolId>>, key: Key, symbol: SymbolId) {
         index
@@ -8152,21 +8181,19 @@ where
 /// Exact Git or declaration-fingerprint evidence can broaden this conservative
 /// fallback later without weakening collision handling.
 fn history_names_resemble(base: &str, head: &str) -> bool {
-    let base_chars: Vec<char> = base.chars().collect();
-    let head_chars: Vec<char> = head.chars().collect();
-    let shorter = base_chars.len().min(head_chars.len());
+    let shorter = base.chars().count().min(head.chars().count());
     if shorter < 4 {
         return false;
     }
-    let common_prefix = base_chars
-        .iter()
-        .zip(&head_chars)
+    let common_prefix = base
+        .chars()
+        .zip(head.chars())
         .take_while(|(left, right)| left == right)
         .count();
-    let common_suffix = base_chars
-        .iter()
+    let common_suffix = base
+        .chars()
         .rev()
-        .zip(head_chars.iter().rev())
+        .zip(head.chars().rev())
         .take_while(|(left, right)| left == right)
         .count();
     common_prefix.max(common_suffix) >= 3_usize.max(shorter / 2)
@@ -8182,7 +8209,7 @@ fn emit_history_lineage_change(
     kind: HistorySemanticChangeKind,
     base_symbol: SymbolId,
     head_symbol: SymbolId,
-    head: &HistoryEntityFingerprint,
+    head: &HistoryEntityFingerprint<'_>,
     breaking_candidate: bool,
     confidence: u16,
     plan: &HistoryComparePlan,
@@ -8195,7 +8222,7 @@ fn emit_history_lineage_change(
         SemanticChangeRecord {
             kind,
             symbol_id: head_symbol,
-            entity_kind: head.kind_label.clone(),
+            entity_kind: serialized_label(&head.kind)?,
             breaking_candidate,
             significance: history_significance(kind, breaking_candidate),
         },
@@ -8221,13 +8248,13 @@ fn emit_history_lineage_change(
 }
 
 /// Indexes one generation's entities by stable identity under the row budget.
-fn history_entity_index(
-    document: &NormalizedIrDocument,
+fn history_entity_index<'a>(
+    document: &'a NormalizedIrDocument,
     scope: &HistoryCompareScope,
     control: &QueryControl<'_>,
     tracker: &mut UsageTracker,
     limiting_resources: &mut Vec<QueryResource>,
-) -> Result<BTreeMap<SymbolId, HistoryEntityFingerprint>, QueryError> {
+) -> Result<BTreeMap<SymbolId, HistoryEntityFingerprint<'a>>, QueryError> {
     let scoped = history_scope_entities(document, scope);
     let entities: BTreeMap<SymbolId, &rootlight_ir::EntityRecord> = document
         .entities
@@ -8239,7 +8266,7 @@ fn history_entity_index(
         .iter()
         .map(|file| (file.id, file.path.as_str()))
         .collect();
-    let mut index: BTreeMap<SymbolId, HistoryEntityFingerprint> = BTreeMap::new();
+    let mut index: BTreeMap<SymbolId, HistoryEntityFingerprint<'a>> = BTreeMap::new();
     for entity in &document.entities {
         control.check()?;
         if !scoped.contains(&entity.id) {
@@ -8252,7 +8279,7 @@ fn history_entity_index(
         tracker.add_rows(1)?;
         index.insert(
             entity.id,
-            HistoryEntityFingerprint::from_entity(entity, &entities, &file_paths)?,
+            HistoryEntityFingerprint::from_entity(entity, &entities, &file_paths),
         );
     }
     Ok(index)
@@ -12661,6 +12688,61 @@ mod tests {
         .expect("bounded history compare succeeds");
         let execution = authoritative_execution(&limiting_resources);
         (analysis, execution)
+    }
+
+    #[test]
+    fn history_compare_rejects_unfunded_lineage_workspace() {
+        let mut base = history_document(1);
+        add_file(&mut base, 1, "src/a.rs");
+        add_entity(&mut base, 11, 1, EntityKind::Function);
+        let attacker_name = "attacker_controlled_name".repeat(4_096);
+        let entity = base.entities.last_mut().expect("history entity exists");
+        entity.canonical_name = attacker_name.clone();
+        entity.display_name = attacker_name;
+        let head = base.clone();
+        let mut plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::new(),
+            0,
+        );
+        plan.budget = QueryBudget::new().with_max_memory_bytes(1);
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+
+        assert!(matches!(
+            build_history_compare(
+                &base,
+                &head,
+                &plan,
+                &control,
+                &mut tracker,
+                &mut limiting_resources,
+            ),
+            Err(QueryError::BudgetExceeded {
+                resource: QueryResource::MemoryBytes,
+                limit: 1,
+            })
+        ));
+        assert_eq!(tracker.memory_bytes, 0);
+
+        let required =
+            history_compare_workspace_bytes(&base, &head).expect("workspace size is representable");
+        plan.budget = QueryBudget::new().with_max_memory_bytes(required);
+        let mut tracker = UsageTracker::new(plan.budget);
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+        build_history_compare(
+            &base,
+            &head,
+            &plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )
+        .expect("the exact lineage workspace budget is sufficient");
+        assert_eq!(tracker.memory_bytes, required);
     }
 
     #[test]
