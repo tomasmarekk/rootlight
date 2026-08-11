@@ -4390,6 +4390,15 @@ struct CycleAdjEdge {
     source_refs: Vec<SourceRef>,
 }
 
+// Cycle execution retains the scoped projection, adjacency, and Tarjan state
+// together. These charges conservatively cover B-tree nodes, vector capacity,
+// copied source evidence, component membership, and traversal queues.
+const CYCLE_ADJACENCY_FIXED_WORKSPACE_BYTES: usize = 64 * 1024;
+const CYCLE_ADJACENCY_ENTITY_WORKSPACE_BYTES: usize = 384;
+const CYCLE_ADJACENCY_RELATION_WORKSPACE_BYTES: usize = 256;
+const CYCLE_DETECTION_FIXED_WORKSPACE_BYTES: usize = 32 * 1024;
+const CYCLE_DETECTION_NODE_WORKSPACE_BYTES: usize = 640;
+
 /// Served relation families aggregated into architecture connections.
 ///
 /// Each family maps to a disjoint IR predicate set, so a served relation
@@ -8824,6 +8833,24 @@ fn cycle_projection_node(
     }
 }
 
+fn cycle_adjacency_workspace_bytes(document: &NormalizedIrDocument) -> Result<u64, QueryError> {
+    checked_usize_to_u64(
+        CYCLE_ADJACENCY_FIXED_WORKSPACE_BYTES
+            .saturating_add(
+                document
+                    .entities
+                    .len()
+                    .saturating_mul(CYCLE_ADJACENCY_ENTITY_WORKSPACE_BYTES),
+            )
+            .saturating_add(
+                document
+                    .relations
+                    .len()
+                    .saturating_mul(CYCLE_ADJACENCY_RELATION_WORKSPACE_BYTES),
+            ),
+    )
+}
+
 /// Builds a directed outbound adjacency view over the requested projection.
 ///
 /// Each served relation contributes a subject-to-object entity edge, including
@@ -8838,6 +8865,9 @@ fn build_cycle_adjacency(
     tracker: &mut UsageTracker,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<(BTreeMap<SymbolId, Vec<CycleAdjEdge>>, u32), QueryError> {
+    control.check()?;
+    tracker.add_memory(cycle_adjacency_workspace_bytes(document)?)?;
+
     let allowed: BTreeSet<RelationPredicate> = plan
         .families
         .iter()
@@ -8906,6 +8936,7 @@ fn build_cycle_adjacency(
         });
     }
     for edges in adjacency.values_mut() {
+        control.check()?;
         edges.sort_by(|left, right| {
             left.target
                 .cmp(&right.target)
@@ -8913,6 +8944,7 @@ fn build_cycle_adjacency(
                 .then_with(|| right.confidence.cmp(&left.confidence))
         });
     }
+    control.check()?;
     Ok((adjacency, u32::try_from(omitted.len()).unwrap_or(u32::MAX)))
 }
 
@@ -8925,6 +8957,21 @@ fn build_cycle_adjacency(
 /// per reported component, all under the result and memory budgets.
 type CycleDetection = (Vec<CycleComponent>, Vec<CyclePath>, Vec<CycleBreak>);
 
+fn cycle_detection_workspace_bytes(
+    adjacency: &BTreeMap<SymbolId, Vec<CycleAdjEdge>>,
+) -> Result<u64, QueryError> {
+    let node_upper_bound = adjacency.len().saturating_add(
+        adjacency
+            .values()
+            .map(Vec::len)
+            .fold(0_usize, usize::saturating_add),
+    );
+    checked_usize_to_u64(
+        CYCLE_DETECTION_FIXED_WORKSPACE_BYTES
+            .saturating_add(node_upper_bound.saturating_mul(CYCLE_DETECTION_NODE_WORKSPACE_BYTES)),
+    )
+}
+
 fn detect_cycles(
     adjacency: &BTreeMap<SymbolId, Vec<CycleAdjEdge>>,
     plan: &ArchitectureCyclesPlan,
@@ -8932,14 +8979,19 @@ fn detect_cycles(
     limiting_resources: &mut Vec<QueryResource>,
     control: &QueryControl<'_>,
 ) -> Result<CycleDetection, QueryError> {
+    control.check()?;
+    tracker.add_memory(cycle_detection_workspace_bytes(adjacency)?)?;
+
     let mut nodes: BTreeSet<SymbolId> = BTreeSet::new();
     for (source, edges) in adjacency {
+        control.check()?;
         nodes.insert(*source);
         for edge in edges {
+            control.check()?;
             nodes.insert(edge.target);
         }
     }
-    let raw_components = strongly_connected_components(adjacency, &nodes);
+    let raw_components = strongly_connected_components(adjacency, &nodes, control)?;
 
     #[derive(Debug)]
     struct RankedCycleComponent {
@@ -8952,13 +9004,15 @@ fn detect_cycles(
 
     let mut selected: Vec<RankedCycleComponent> = Vec::new();
     for mut component in raw_components {
+        control.check()?;
         component.sort();
         let size = component.len();
-        let self_cycle = plan.include_self_cycles
-            && size == 1
-            && component
-                .first()
-                .is_some_and(|node| best_edge(adjacency, *node, *node).is_some());
+        let self_cycle = if plan.include_self_cycles && size == 1 {
+            let node = component[0];
+            best_edge(adjacency, node, node, control)?.is_some()
+        } else {
+            false
+        };
         if (size >= 2 && size >= usize::from(plan.min_size)) || self_cycle {
             let member_set: BTreeSet<SymbolId> = component.iter().copied().collect();
             let mut internal_edges = 0_u32;
@@ -8966,8 +9020,10 @@ fn detect_cycles(
             let mut change_risk = 0_u32;
             let mut minimum_confidence = u16::MAX;
             for member in &member_set {
+                control.check()?;
                 if let Some(edges) = adjacency.get(member) {
                     for edge in edges {
+                        control.check()?;
                         if member_set.contains(&edge.target) {
                             internal_edges = internal_edges.saturating_add(1);
                             edge_weight = edge_weight.saturating_add(u64::from(edge.confidence));
@@ -9002,6 +9058,7 @@ fn detect_cycles(
             .then_with(|| right.members.len().cmp(&left.members.len()))
             .then_with(|| left.members[0].cmp(&right.members[0]))
     });
+    control.check()?;
     if selected.len() > plan.max_cycles {
         selected.truncate(plan.max_cycles);
         record_limit(limiting_resources, QueryResource::Results)?;
@@ -9034,12 +9091,12 @@ fn detect_cycles(
             let node = component.members[0];
             vec![node, node]
         } else {
-            match representative_cycle(adjacency, &member_set, component.members[0]) {
+            match representative_cycle(adjacency, &member_set, component.members[0], control)? {
                 Some(path) => path,
                 None => continue,
             }
         };
-        let (confidence, edge_evidence) = cycle_details(adjacency, &cycle_nodes);
+        let (confidence, edge_evidence) = cycle_details(adjacency, &cycle_nodes, control)?;
         let cycle_record = CyclePath {
             nodes: cycle_nodes.clone(),
             confidence,
@@ -9053,7 +9110,7 @@ fn detect_cycles(
             control,
         )?;
 
-        if let Some(break_record) = break_candidate(adjacency, &cycle_nodes) {
+        if let Some(break_record) = break_candidate(adjacency, &cycle_nodes, control)? {
             emit_cycle_value(
                 &mut break_candidates,
                 break_record,
@@ -9109,7 +9166,8 @@ where
 fn strongly_connected_components(
     adjacency: &BTreeMap<SymbolId, Vec<CycleAdjEdge>>,
     nodes: &BTreeSet<SymbolId>,
-) -> Vec<Vec<SymbolId>> {
+    control: &QueryControl<'_>,
+) -> Result<Vec<Vec<SymbolId>>, QueryError> {
     let mut index = 0_u32;
     let mut indices: BTreeMap<SymbolId, u32> = BTreeMap::new();
     let mut lowlinks: BTreeMap<SymbolId, u32> = BTreeMap::new();
@@ -9118,6 +9176,7 @@ fn strongly_connected_components(
     let mut components: Vec<Vec<SymbolId>> = Vec::new();
 
     for start in nodes {
+        control.check()?;
         if indices.contains_key(start) {
             continue;
         }
@@ -9128,6 +9187,7 @@ fn strongly_connected_components(
         on_stack.insert(*start);
         let mut call_stack: Vec<(SymbolId, usize)> = vec![(*start, 0)];
         while let Some(&(node, neighbor_index)) = call_stack.last() {
+            control.check()?;
             let neighbor_count = adjacency.get(&node).map_or(0, Vec::len);
             if neighbor_index < neighbor_count {
                 let target = adjacency[&node][neighbor_index].target;
@@ -9179,7 +9239,7 @@ fn strongly_connected_components(
             }
         }
     }
-    components
+    Ok(components)
 }
 
 /// Finds one bounded simple cycle through `start` inside a component.
@@ -9192,13 +9252,16 @@ fn representative_cycle(
     adjacency: &BTreeMap<SymbolId, Vec<CycleAdjEdge>>,
     member_set: &BTreeSet<SymbolId>,
     start: SymbolId,
-) -> Option<Vec<SymbolId>> {
+    control: &QueryControl<'_>,
+) -> Result<Option<Vec<SymbolId>>, QueryError> {
     let mut parent: BTreeMap<SymbolId, SymbolId> = BTreeMap::new();
     let mut visited: BTreeSet<SymbolId> = BTreeSet::from([start]);
     let mut queue: VecDeque<SymbolId> = VecDeque::from([start]);
     while let Some(node) = queue.pop_front() {
+        control.check()?;
         let neighbors = adjacency.get(&node).map(Vec::as_slice).unwrap_or(&[]);
         for edge in neighbors {
+            control.check()?;
             let target = edge.target;
             if target == node || !member_set.contains(&target) {
                 continue;
@@ -9207,12 +9270,15 @@ fn representative_cycle(
                 let mut chain = vec![node];
                 let mut cursor = node;
                 while cursor != start {
-                    cursor = *parent.get(&cursor)?;
+                    let Some(next) = parent.get(&cursor) else {
+                        return Ok(None);
+                    };
+                    cursor = *next;
                     chain.push(cursor);
                 }
                 chain.reverse();
                 chain.push(start);
-                return Some(chain);
+                return Ok(Some(chain));
             }
             if visited.insert(target) {
                 parent.insert(target, node);
@@ -9220,38 +9286,52 @@ fn representative_cycle(
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// Returns the strongest edge from one node to another, deterministically.
-fn best_edge(
-    adjacency: &BTreeMap<SymbolId, Vec<CycleAdjEdge>>,
+fn best_edge<'adjacency>(
+    adjacency: &'adjacency BTreeMap<SymbolId, Vec<CycleAdjEdge>>,
     from: SymbolId,
     to: SymbolId,
-) -> Option<&CycleAdjEdge> {
-    adjacency
-        .get(&from)?
-        .iter()
-        .filter(|edge| edge.target == to)
-        .max_by(|left, right| {
-            left.confidence
-                .cmp(&right.confidence)
-                .then_with(|| left.family.as_str().cmp(right.family.as_str()))
-        })
+    control: &QueryControl<'_>,
+) -> Result<Option<&'adjacency CycleAdjEdge>, QueryError> {
+    let Some(edges) = adjacency.get(&from) else {
+        return Ok(None);
+    };
+    let mut selected: Option<&CycleAdjEdge> = None;
+    for edge in edges {
+        control.check()?;
+        if edge.target != to {
+            continue;
+        }
+        let replace = selected.is_none_or(|current| {
+            edge.confidence > current.confidence
+                || (edge.confidence == current.confidence
+                    && edge.family.as_str() > current.family.as_str())
+        });
+        if replace {
+            selected = Some(edge);
+        }
+    }
+    Ok(selected)
 }
 
 /// Computes the weakest-edge confidence and bounded evidence for a cycle.
 fn cycle_details(
     adjacency: &BTreeMap<SymbolId, Vec<CycleAdjEdge>>,
     nodes: &[SymbolId],
-) -> (u16, Vec<SourceRef>) {
+    control: &QueryControl<'_>,
+) -> Result<(u16, Vec<SourceRef>), QueryError> {
     const MAX_CYCLE_EVIDENCE: usize = 64;
     let mut confidence = u16::MAX;
     let mut evidence: Vec<SourceRef> = Vec::new();
     for pair in nodes.windows(2) {
-        if let Some(edge) = best_edge(adjacency, pair[0], pair[1]) {
+        control.check()?;
+        if let Some(edge) = best_edge(adjacency, pair[0], pair[1], control)? {
             confidence = confidence.min(edge.confidence);
             for source in &edge.source_refs {
+                control.check()?;
                 if evidence.len() < MAX_CYCLE_EVIDENCE {
                     evidence.push(source.clone());
                 }
@@ -9261,7 +9341,7 @@ fn cycle_details(
     if confidence == u16::MAX {
         confidence = 0;
     }
-    (confidence, evidence)
+    Ok((confidence, evidence))
 }
 
 /// Selects the cheapest single edge whose removal breaks the cycle.
@@ -9272,19 +9352,21 @@ fn cycle_details(
 fn break_candidate(
     adjacency: &BTreeMap<SymbolId, Vec<CycleAdjEdge>>,
     nodes: &[SymbolId],
-) -> Option<CycleBreak> {
+    control: &QueryControl<'_>,
+) -> Result<Option<CycleBreak>, QueryError> {
     const MAX_BREAK_REFS: usize = 8;
     let mut chosen: Option<(SymbolId, SymbolId, &CycleAdjEdge)> = None;
     for pair in nodes.windows(2) {
+        control.check()?;
         let (from, to) = (pair[0], pair[1]);
-        if let Some(edge) = best_edge(adjacency, from, to) {
+        if let Some(edge) = best_edge(adjacency, from, to, control)? {
             let better = chosen.is_none_or(|(_, _, current)| edge.confidence < current.confidence);
             if better {
                 chosen = Some((from, to, edge));
             }
         }
     }
-    chosen.map(|(from, to, edge)| CycleBreak {
+    Ok(chosen.map(|(from, to, edge)| CycleBreak {
         from,
         to,
         family: edge.family,
@@ -9295,7 +9377,7 @@ fn break_candidate(
             .take(MAX_BREAK_REFS)
             .cloned()
             .collect(),
-    })
+    }))
 }
 
 /// Relation families whose served predicates back the static reachability graph.
@@ -10771,6 +10853,85 @@ mod tests {
         .expect("bounded cycle detection succeeds");
         let execution = authoritative_execution(&limiting_resources);
         (analysis, execution)
+    }
+
+    #[test]
+    fn architecture_cycles_rejects_unfunded_detection_workspace() {
+        let (a, b) = (symbol(1), symbol(2));
+        let adjacency =
+            BTreeMap::from([(a, vec![cycle_edge(b, 900)]), (b, vec![cycle_edge(a, 900)])]);
+        let mut plan = cycle_plan(2, 50, false);
+        plan.budget = QueryBudget::new().with_max_memory_bytes(1);
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+
+        assert!(matches!(
+            detect_cycles(
+                &adjacency,
+                &plan,
+                &mut tracker,
+                &mut limiting_resources,
+                &control,
+            ),
+            Err(QueryError::BudgetExceeded {
+                resource: QueryResource::MemoryBytes,
+                limit: 1,
+            })
+        ));
+        assert_eq!(tracker.memory_bytes, 0);
+        assert!(limiting_resources.is_empty());
+    }
+
+    #[test]
+    fn architecture_cycles_rejects_unfunded_adjacency_before_scanning() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_file(&mut document, 2, "src/b.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 2, EntityKind::Function);
+        add_calls(&mut document, 110, 11, 12, 900);
+
+        let mut plan = cycle_plan(2, 50, false);
+        plan.budget = QueryBudget::new().with_max_memory_bytes(1);
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+
+        assert!(matches!(
+            build_cycle_adjacency(
+                &document,
+                &plan,
+                &control,
+                &mut tracker,
+                &mut limiting_resources,
+            ),
+            Err(QueryError::BudgetExceeded {
+                resource: QueryResource::MemoryBytes,
+                limit: 1,
+            })
+        ));
+        assert_eq!(tracker.memory_bytes, 0);
+        assert_eq!(tracker.rows, 0);
+        assert_eq!(tracker.edges, 0);
+        assert!(limiting_resources.is_empty());
+    }
+
+    #[test]
+    fn architecture_cycles_scc_observes_an_expired_deadline() {
+        let (a, b) = (symbol(1), symbol(2));
+        let adjacency =
+            BTreeMap::from([(a, vec![cycle_edge(b, 900)]), (b, vec![cycle_edge(a, 900)])]);
+        let nodes = BTreeSet::from([a, b]);
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::ZERO);
+
+        assert!(matches!(
+            strongly_connected_components(&adjacency, &nodes, &control),
+            Err(QueryError::Cancelled(CancellationReason::DeadlineExceeded))
+        ));
     }
 
     #[test]
