@@ -3620,7 +3620,10 @@ pub enum ControlRequest {
     SupportBundle(SupportBundleSchema, Option<RepositoryId>),
     /// Submit one durable operation for admission.
     OperationSubmit(OperationSubmission),
-    /// Read one durable operation status.
+    /// Read one durable operation status from a host-owned internal path.
+    ///
+    /// Negotiated client requests are authorized before their record is
+    /// returned and never enter the generic wire-control path as this variant.
     OperationStatus(OperationId),
     /// Legacy lease-renewal request retained only for source compatibility.
     ///
@@ -3832,6 +3835,10 @@ impl PreparedOperationSubmission {
         self.submission.operation
     }
 
+    const fn owner(self) -> ClientInstanceId {
+        self.submission.owner
+    }
+
     fn into_parts(
         self,
     ) -> (
@@ -3930,7 +3937,13 @@ impl OrchestratorSenders {
 #[derive(Debug)]
 struct PendingAdmissionRegistry {
     next_generation: u64,
-    by_operation: BTreeMap<OperationId, BTreeMap<u64, Arc<AtomicBool>>>,
+    by_operation: BTreeMap<OperationId, BTreeMap<u64, PendingAdmission>>,
+}
+
+#[derive(Debug)]
+struct PendingAdmission {
+    owner: ClientInstanceId,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl Default for PendingAdmissionRegistry {
@@ -6037,6 +6050,7 @@ impl ControlService {
     fn register_pending_admission(
         &self,
         operation: OperationId,
+        owner: ClientInstanceId,
     ) -> Result<PendingAdmissionHandle, ServiceError> {
         let mut registry = self
             .pending_admissions
@@ -6048,11 +6062,13 @@ impl ControlService {
             .checked_add(1)
             .ok_or(ServiceError::InvalidLimits)?;
         let cancelled = Arc::new(AtomicBool::new(false));
-        registry
-            .by_operation
-            .entry(operation)
-            .or_default()
-            .insert(generation, Arc::clone(&cancelled));
+        registry.by_operation.entry(operation).or_default().insert(
+            generation,
+            PendingAdmission {
+                owner,
+                cancelled: Arc::clone(&cancelled),
+            },
+        );
         drop(registry);
         Ok(PendingAdmissionHandle {
             operation,
@@ -6062,7 +6078,11 @@ impl ControlService {
         })
     }
 
-    fn cancel_pending_admission(&self, operation: OperationId) -> Result<bool, ServiceError> {
+    fn cancel_pending_admission(
+        &self,
+        operation: OperationId,
+        authority: CancellationAuthority,
+    ) -> Result<bool, ServiceError> {
         let registry = self
             .pending_admissions
             .lock()
@@ -6070,8 +6090,20 @@ impl ControlService {
         let Some(generations) = registry.by_operation.get(&operation) else {
             return Ok(false);
         };
-        for cancelled in generations.values() {
-            cancelled.store(true, Ordering::Release);
+        let mut authorized = false;
+        for pending in generations.values() {
+            if matches!(authority, CancellationAuthority::Internal(_))
+                || matches!(
+                    authority,
+                    CancellationAuthority::Client(actor) if actor == pending.owner
+                )
+            {
+                pending.cancelled.store(true, Ordering::Release);
+                authorized = true;
+            }
+        }
+        if !authorized {
+            return Err(ServiceError::Operations(OperationError::CancellationDenied));
         }
         Ok(true)
     }
@@ -6526,6 +6558,24 @@ impl ControlService {
                 client_instance_id,
                 selected_protocol_minor,
             ) {
+                Ok(DecodedRequest::ClientOperationStatus { operation, owner }) => {
+                    journal_response_to_wire(
+                        authorize_client_operation_status(
+                            self.journal
+                                .status(operation)
+                                .map(ControlResponse::OperationStatus)
+                                .map_err(ServiceError::Operations),
+                            owner,
+                        ),
+                        self.limits.operation_queue_limit(),
+                    )
+                }
+                Ok(DecodedRequest::Control(request @ ControlRequest::OperationCancel { .. })) => {
+                    journal_response_to_wire(
+                        conceal_client_operation_access(Ok(self.execute(request))),
+                        self.limits.operation_queue_limit(),
+                    )
+                }
                 Ok(DecodedRequest::Control(request)) => response_to_wire(self.execute(request)),
                 Ok(DecodedRequest::Submission(_)) => daemon::response_envelope::Response::Error(
                     public_error_to_wire(&invalid_argument(
@@ -6951,8 +7001,9 @@ async fn dispatch_async(
                     }
                     Ok(DecodedRequest::Submission(prepared)) => {
                         let operation = prepared.operation();
+                        let owner = prepared.owner();
                         let response = async {
-                            let pending = service.register_pending_admission(operation)?;
+                            let pending = service.register_pending_admission(operation, owner)?;
                             let (admission, receiver) =
                                 OperationAdmission::registered(prepared, pending);
                             match commands.submissions.try_send(admission) {
@@ -6998,7 +7049,7 @@ async fn dispatch_async(
                         authority,
                     })) => {
                         let response = async {
-                            match journal
+                            let response = match journal
                                 .control_until(
                                     ControlRequest::OperationCancel {
                                         operation,
@@ -7015,32 +7066,52 @@ async fn dispatch_async(
                                         // durable-admission handoff without sleeps.
                                         hook.pause_after_initial_not_found().await;
                                     }
-                                    let pending = service.cancel_pending_admission(operation)?;
-                                    match journal
-                                        .control_until(
-                                            ControlRequest::OperationCancel {
-                                                operation,
-                                                authority,
-                                            },
-                                            request_deadline,
-                                        )
-                                        .await
-                                    {
-                                        Err(ServiceError::Operations(OperationError::NotFound))
-                                            if pending =>
+                                    match service.cancel_pending_admission(operation, authority) {
+                                        Ok(pending) => match journal
+                                            .control_until(
+                                                ControlRequest::OperationCancel {
+                                                    operation,
+                                                    authority,
+                                                },
+                                                request_deadline,
+                                            )
+                                            .await
                                         {
-                                            Ok(ControlResponse::Error(operation_not_ready(
-                                                operation,
-                                            )))
-                                        }
-                                        result => result,
+                                            Err(ServiceError::Operations(
+                                                OperationError::NotFound,
+                                            )) if pending => Ok(ControlResponse::Error(
+                                                operation_not_ready(operation),
+                                            )),
+                                            result => result,
+                                        },
+                                        Err(error) => Err(error),
                                     }
                                 }
                                 result => result,
-                            }
+                            };
+                            conceal_client_operation_access(response)
                         };
                         await_claimed_journal_response(
                             response,
+                            service.limits.operation_queue_limit(),
+                        )
+                        .await
+                    }
+                    Ok(DecodedRequest::ClientOperationStatus { operation, owner }) => {
+                        let response = async {
+                            authorize_client_operation_status(
+                                journal
+                                    .control_until(
+                                        ControlRequest::OperationStatus(operation),
+                                        request_deadline,
+                                    )
+                                    .await,
+                                owner,
+                            )
+                        };
+                        await_journal_response_until(
+                            response,
+                            request_deadline,
                             service.limits.operation_queue_limit(),
                         )
                         .await
@@ -9982,6 +10053,41 @@ async fn await_claimed_journal_response(
     journal_response_to_wire(response.await, queue_limit)
 }
 
+fn authorize_client_operation_status(
+    response: Result<ControlResponse, ServiceError>,
+    owner: ClientInstanceId,
+) -> Result<ControlResponse, ServiceError> {
+    match response {
+        Ok(ControlResponse::OperationStatus(record)) if record.owner == owner => {
+            Ok(ControlResponse::OperationStatus(record))
+        }
+        Ok(ControlResponse::OperationStatus(_))
+        | Err(ServiceError::Operations(OperationError::NotFound)) => {
+            Ok(ControlResponse::Error(operation_access_denied()))
+        }
+        response => conceal_client_operation_access(response),
+    }
+}
+
+fn conceal_client_operation_access(
+    response: Result<ControlResponse, ServiceError>,
+) -> Result<ControlResponse, ServiceError> {
+    match response {
+        Ok(ControlResponse::Error(error))
+            if matches!(
+                error.code(),
+                ErrorCode::NotFound | ErrorCode::PermissionDenied
+            ) =>
+        {
+            Ok(ControlResponse::Error(operation_access_denied()))
+        }
+        Err(ServiceError::Operations(
+            OperationError::NotFound | OperationError::CancellationDenied,
+        )) => Ok(ControlResponse::Error(operation_access_denied())),
+        response => response,
+    }
+}
+
 fn journal_response_to_wire(
     response: Result<ControlResponse, ServiceError>,
     queue_limit: u32,
@@ -10268,6 +10374,10 @@ fn validate_client_hello(
 
 enum DecodedRequest {
     Control(ControlRequest),
+    ClientOperationStatus {
+        operation: OperationId,
+        owner: ClientInstanceId,
+    },
     Submission(PreparedOperationSubmission),
 }
 
@@ -10318,9 +10428,12 @@ fn request_from_wire(
                 .map(DecodedRequest::Submission)
         }
         Some(daemon::request_envelope::Request::OperationStatus(request)) => {
-            parse_operation(request.operation)
-                .map(ControlRequest::OperationStatus)
-                .map(DecodedRequest::Control)
+            parse_operation(request.operation).map(|operation| {
+                DecodedRequest::ClientOperationStatus {
+                    operation,
+                    owner: client_instance_id,
+                }
+            })
         }
         Some(daemon::request_envelope::Request::OperationCancel(request)) => {
             parse_operation(request.operation).map(|operation| {
@@ -11030,6 +11143,12 @@ fn permission_denied(message: &'static str) -> PublicError {
     PublicError::builder(ErrorCode::PermissionDenied, message)
         .build()
         .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
+}
+
+fn operation_access_denied() -> PublicError {
+    // Foreign and absent operation IDs deliberately share one metadata-free
+    // response so the authorization boundary does not become an existence oracle.
+    permission_denied("operation access is denied")
 }
 
 fn protocol_mismatch(message: &'static str) -> PublicError {
@@ -15011,16 +15130,24 @@ mod tests {
     fn pending_admission_generations_cancel_and_cleanup_independently() {
         let service = service();
         let operation = OperationId::from_bytes([16; 16]);
+        let owner = ClientInstanceId::new([16; 16]).expect("owner is valid");
+        let foreign = ClientInstanceId::new([17; 16]).expect("foreign client is valid");
         let mut first = service
-            .register_pending_admission(operation)
+            .register_pending_admission(operation, owner)
             .expect("first admission registers");
         let second = service
-            .register_pending_admission(operation)
+            .register_pending_admission(operation, owner)
             .expect("second admission registers");
 
+        assert!(matches!(
+            service.cancel_pending_admission(operation, CancellationAuthority::Client(foreign),),
+            Err(ServiceError::Operations(OperationError::CancellationDenied))
+        ));
+        assert!(!first.cancelled().load(Ordering::Acquire));
+        assert!(!second.cancelled().load(Ordering::Acquire));
         assert!(
             service
-                .cancel_pending_admission(operation)
+                .cancel_pending_admission(operation, CancellationAuthority::Client(owner))
                 .expect("pending cancellation succeeds")
         );
         assert!(first.cancelled().load(Ordering::Acquire));
@@ -15049,7 +15176,7 @@ mod tests {
         );
 
         let mut handed_off = service
-            .register_pending_admission(operation)
+            .register_pending_admission(operation, owner)
             .expect("third admission registers");
         assert!(
             !handed_off
@@ -15058,7 +15185,7 @@ mod tests {
         );
         assert!(
             !service
-                .cancel_pending_admission(operation)
+                .cancel_pending_admission(operation, CancellationAuthority::Client(owner))
                 .expect("post-handoff lookup succeeds")
         );
     }
@@ -17006,8 +17133,8 @@ mod tests {
             .operation_status(OperationId::from_bytes([9; 16]))
             .expect_err("missing operation fails");
         let public = missing.as_public_error().expect("public error is retained");
-        assert_eq!(public.code(), ErrorCode::NotFound);
-        assert_eq!(public.message(), "operation was not found");
+        assert_eq!(public.code(), ErrorCode::PermissionDenied);
+        assert_eq!(public.message(), "operation access is denied");
 
         server.join().expect("server thread joins");
     }
@@ -17082,11 +17209,12 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_cancellation_denies_foreign_clients_and_audits_every_decision() {
+    fn authenticated_operation_access_enforces_owner_without_existence_oracle() {
         let service = service();
         let owner = ClientInstanceId::new([61; 16]).expect("owner is valid");
         let foreign = ClientInstanceId::new([62; 16]).expect("foreign client is valid");
         let operation = OperationId::from_bytes([63; 16]);
+        let unknown = OperationId::from_bytes([65; 16]);
         service
             .journal
             .submit(
@@ -17111,7 +17239,54 @@ mod tests {
             .cancellation_token(operation)
             .expect("active cancellation token exists");
         let before_denial = service.journal.status(operation).expect("status loads");
-        let request = || daemon::RequestEnvelope {
+        let status_request = |requested: OperationId| daemon::RequestEnvelope {
+            request_id: 1,
+            instance_nonce: vec![7; 16],
+            timeout_ms: Some(1_000),
+            effective_budget: None,
+            request: Some(daemon::request_envelope::Request::OperationStatus(
+                daemon::OperationStatusRequest {
+                    operation: Some(common::OperationId {
+                        value: requested.as_bytes().to_vec(),
+                    }),
+                },
+            )),
+        };
+        let denied_status =
+            service.dispatch_for_client(status_request(operation), foreign, PROTOCOL_MINOR);
+        let Some(daemon::response_envelope::Response::Error(denied_status)) =
+            denied_status.response
+        else {
+            panic!("foreign status is denied");
+        };
+        let unknown_status =
+            service.dispatch_for_client(status_request(unknown), owner, PROTOCOL_MINOR);
+        let Some(daemon::response_envelope::Response::Error(unknown_status)) =
+            unknown_status.response
+        else {
+            panic!("unknown status is denied");
+        };
+        assert_eq!(denied_status, unknown_status);
+        assert_eq!(
+            denied_status.code,
+            common::ErrorCode::PermissionDenied as i32
+        );
+        assert!(denied_status.operation.is_none());
+        assert!(matches!(
+            service
+                .dispatch_for_client(status_request(operation), owner, PROTOCOL_MINOR)
+                .response,
+            Some(daemon::response_envelope::Response::OperationStatus(_))
+        ));
+        assert_eq!(
+            service
+                .journal
+                .status(operation)
+                .expect("status is unchanged"),
+            before_denial
+        );
+
+        let cancel_request = |requested: OperationId| daemon::RequestEnvelope {
             request_id: 1,
             instance_nonce: vec![7; 16],
             timeout_ms: Some(1_000),
@@ -17119,20 +17294,26 @@ mod tests {
             request: Some(daemon::request_envelope::Request::OperationCancel(
                 daemon::OperationCancelRequest {
                     operation: Some(common::OperationId {
-                        value: operation.as_bytes().to_vec(),
+                        value: requested.as_bytes().to_vec(),
                     }),
                 },
             )),
         };
 
-        let denied = service.dispatch_for_client(request(), foreign, PROTOCOL_MINOR);
-        assert!(matches!(
-            denied.response,
-            Some(daemon::response_envelope::Response::Error(common::PublicError {
-                code,
-                ..
-            })) if code == common::ErrorCode::PermissionDenied as i32
-        ));
+        let denied =
+            service.dispatch_for_client(cancel_request(operation), foreign, PROTOCOL_MINOR);
+        let Some(daemon::response_envelope::Response::Error(denied)) = denied.response else {
+            panic!("foreign cancellation is denied");
+        };
+        let unknown_denial =
+            service.dispatch_for_client(cancel_request(unknown), owner, PROTOCOL_MINOR);
+        let Some(daemon::response_envelope::Response::Error(unknown_denial)) =
+            unknown_denial.response
+        else {
+            panic!("unknown cancellation is denied");
+        };
+        assert_eq!(denied, unknown_denial);
+        assert_eq!(denied, denied_status);
         assert_eq!(
             service
                 .journal
@@ -17142,7 +17323,8 @@ mod tests {
         );
         assert_eq!(token.reason(), None);
 
-        let accepted = service.dispatch_for_client(request(), owner, PROTOCOL_MINOR);
+        let accepted =
+            service.dispatch_for_client(cancel_request(operation), owner, PROTOCOL_MINOR);
         let Some(daemon::response_envelope::Response::OperationCancel(accepted)) =
             accepted.response
         else {
@@ -17154,7 +17336,8 @@ mod tests {
             .as_ref()
             .expect("accepted operation is present")
             .revision;
-        let replayed = service.dispatch_for_client(request(), owner, PROTOCOL_MINOR);
+        let replayed =
+            service.dispatch_for_client(cancel_request(operation), owner, PROTOCOL_MINOR);
         let Some(daemon::response_envelope::Response::OperationCancel(replayed)) =
             replayed.response
         else {
@@ -17184,7 +17367,7 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(cancellations.len(), 3);
+        assert_eq!(cancellations.len(), 4);
         assert_eq!(
             cancellations
                 .iter()
@@ -17192,18 +17375,240 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 CancellationAuditOutcome::Denied,
+                CancellationAuditOutcome::NotFound,
                 CancellationAuditOutcome::Accepted,
                 CancellationAuditOutcome::Replayed,
             ]
         );
+        assert_eq!(
+            cancellations
+                .iter()
+                .map(|(_, _, _, error)| *error)
+                .collect::<Vec<_>>(),
+            vec![
+                Some(ObservabilityErrorCode::PermissionDenied),
+                Some(ObservabilityErrorCode::NotFound),
+                None,
+                None,
+            ]
+        );
         assert!(cancellations.iter().all(|(digest, authority, _, _)| {
-            digest != operation.as_bytes() && *authority == CancellationAuditAuthority::Client
+            digest != operation.as_bytes()
+                && digest != unknown.as_bytes()
+                && *authority == CancellationAuditAuthority::Client
         }));
         let serialized =
             serde_json::to_string(&snapshot.logs).expect("bounded audit records serialize");
         for forbidden in ["owner", "plan_hash", "path", "source", "journal"] {
             assert!(!serialized.contains(forbidden));
         }
+    }
+
+    #[tokio::test]
+    async fn async_operation_access_matches_synchronous_authorization() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let owner = ClientInstanceId::new([66; 16]).expect("owner is valid");
+        let foreign = ClientInstanceId::new([67; 16]).expect("foreign client is valid");
+        let operation = OperationId::from_bytes([68; 16]);
+        let unknown = OperationId::from_bytes([69; 16]);
+        let pending_operation = OperationId::from_bytes([70; 16]);
+        journal
+            .submit(
+                OperationSubmission::new(
+                    operation,
+                    OperationKind::ControlProbe,
+                    PlanHash::from_bytes([68; 32]),
+                    owner,
+                    true,
+                    None,
+                    None,
+                )
+                .expect("submission is valid"),
+            )
+            .expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let before_denial = journal.status(operation).expect("status loads");
+        let token = journal
+            .cancellation_token(operation)
+            .expect("active cancellation token exists");
+        let state = Arc::new(DaemonState::starting());
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let actor = JournalActor::start_with_state(Arc::clone(&journal), 4, 4, Arc::clone(&state))
+            .expect("actor starts");
+        let service = ControlService::with_state(
+            Arc::clone(&journal),
+            [7; 16],
+            Arc::clone(&state),
+            DaemonLimits::default(),
+        );
+        let (submissions, _receiver) = tokio::sync::mpsc::channel(4);
+        let commands = OrchestratorSenders::new(submissions);
+        let pending = service
+            .register_pending_admission(pending_operation, owner)
+            .expect("pending admission registers");
+        let status_request = |requested: OperationId| daemon::RequestEnvelope {
+            request_id: 1,
+            instance_nonce: vec![7; 16],
+            timeout_ms: Some(1_000),
+            effective_budget: None,
+            request: Some(daemon::request_envelope::Request::OperationStatus(
+                daemon::OperationStatusRequest {
+                    operation: Some(common::OperationId {
+                        value: requested.as_bytes().to_vec(),
+                    }),
+                },
+            )),
+        };
+
+        let mut denied_statuses = Vec::new();
+        for (requested, requester) in [
+            (operation, foreign),
+            (unknown, owner),
+            (pending_operation, foreign),
+        ] {
+            let envelope = status_request(requested);
+            let context = test_dispatch_context(&service, &envelope, requester);
+            let response = dispatch_async(
+                &service,
+                &actor.handle(),
+                &commands,
+                &UnavailableFirstSliceIpcHandler,
+                envelope,
+                context,
+            )
+            .await;
+            let Some(daemon::response_envelope::Response::Error(error)) = response.response else {
+                panic!("unauthorized status is denied");
+            };
+            denied_statuses.push(error);
+        }
+        assert_eq!(denied_statuses[0], denied_statuses[1]);
+        assert_eq!(denied_statuses[0], denied_statuses[2]);
+        assert_eq!(
+            denied_statuses[0].code,
+            common::ErrorCode::PermissionDenied as i32
+        );
+        assert!(denied_statuses[0].operation.is_none());
+
+        let envelope = status_request(operation);
+        let context = test_dispatch_context(&service, &envelope, owner);
+        let response = dispatch_async(
+            &service,
+            &actor.handle(),
+            &commands,
+            &UnavailableFirstSliceIpcHandler,
+            envelope,
+            context,
+        )
+        .await;
+        assert!(matches!(
+            response.response,
+            Some(daemon::response_envelope::Response::OperationStatus(_))
+        ));
+
+        let cancel_request = |requested: OperationId| daemon::RequestEnvelope {
+            request_id: 2,
+            instance_nonce: vec![7; 16],
+            timeout_ms: Some(1_000),
+            effective_budget: None,
+            request: Some(daemon::request_envelope::Request::OperationCancel(
+                daemon::OperationCancelRequest {
+                    operation: Some(common::OperationId {
+                        value: requested.as_bytes().to_vec(),
+                    }),
+                },
+            )),
+        };
+        let mut denied_cancellations = Vec::new();
+        for (requested, requester) in [
+            (operation, foreign),
+            (unknown, owner),
+            (pending_operation, foreign),
+        ] {
+            let envelope = cancel_request(requested);
+            let context = test_dispatch_context(&service, &envelope, requester);
+            let response = dispatch_async(
+                &service,
+                &actor.handle(),
+                &commands,
+                &UnavailableFirstSliceIpcHandler,
+                envelope,
+                context,
+            )
+            .await;
+            let Some(daemon::response_envelope::Response::Error(error)) = response.response else {
+                panic!("unauthorized cancellation is denied");
+            };
+            denied_cancellations.push(error);
+        }
+        assert_eq!(denied_cancellations[0], denied_cancellations[1]);
+        assert_eq!(denied_cancellations[0], denied_cancellations[2]);
+        assert_eq!(denied_cancellations[0], denied_statuses[0]);
+        assert_eq!(
+            journal.status(operation).expect("status is unchanged"),
+            before_denial
+        );
+        assert_eq!(token.reason(), None);
+        assert!(!pending.cancelled().load(Ordering::Acquire));
+
+        let envelope = cancel_request(operation);
+        let context = test_dispatch_context(&service, &envelope, owner);
+        let response = dispatch_async(
+            &service,
+            &actor.handle(),
+            &commands,
+            &UnavailableFirstSliceIpcHandler,
+            envelope,
+            context,
+        )
+        .await;
+        assert!(matches!(
+            response.response,
+            Some(daemon::response_envelope::Response::OperationCancel(
+                daemon::OperationCancelResponse { accepted: true, .. }
+            ))
+        ));
+        assert_eq!(token.reason(), Some(CancellationReason::ClientRequest));
+
+        let cancellations = state
+            .telemetry()
+            .snapshot()
+            .logs
+            .iter()
+            .filter_map(|record| match record.event {
+                rootlight_observability::LogEvent::CancellationAttempt {
+                    outcome,
+                    error_code,
+                    ..
+                } => Some((outcome, error_code)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cancellations,
+            vec![
+                (
+                    CancellationAuditOutcome::Denied,
+                    Some(ObservabilityErrorCode::PermissionDenied),
+                ),
+                (
+                    CancellationAuditOutcome::NotFound,
+                    Some(ObservabilityErrorCode::NotFound),
+                ),
+                (
+                    CancellationAuditOutcome::NotFound,
+                    Some(ObservabilityErrorCode::NotFound),
+                ),
+                (
+                    CancellationAuditOutcome::NotFound,
+                    Some(ObservabilityErrorCode::NotFound),
+                ),
+                (CancellationAuditOutcome::Accepted, None),
+            ]
+        );
+        actor.join().expect("actor joins");
     }
 
     #[test]
