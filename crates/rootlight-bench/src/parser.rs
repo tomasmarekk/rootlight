@@ -437,6 +437,9 @@ pub(crate) fn build_schedule(
     seed: u64,
     max_samples: usize,
 ) -> Result<Vec<ScheduledSample>, ParserRunError> {
+    if input_count == 0 {
+        return Ok(Vec::new());
+    }
     let total_rounds = warmup_rounds
         .checked_add(trial_rounds)
         .ok_or(ParserRunError::SampleCountOverflow)?;
@@ -1208,6 +1211,13 @@ mod tests {
         assert!(first.raw_samples.iter().all(|sample| {
             matches!(sample.process_tree_cpu_ns, EvidenceValue::Observed { .. })
         }));
+    }
+
+    #[test]
+    fn empty_schedule_skips_maximum_rounds_without_iteration() {
+        let schedule = build_schedule(0, 1, u32::MAX - 1, 7, 1)
+            .expect("empty schedules do not iterate over rounds");
+        assert!(schedule.is_empty());
     }
 
     #[test]

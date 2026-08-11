@@ -2274,6 +2274,60 @@ mod tests {
 
     use super::*;
 
+    struct EmptyScheduleArtifacts {
+        manifest: Vec<u8>,
+        command: Vec<u8>,
+    }
+
+    impl FixedArtifactSource for EmptyScheduleArtifacts {
+        fn artifact_bytes(&self, name: &str) -> Option<&[u8]> {
+            match name {
+                DATASET_MANIFEST_FILE => Some(&self.manifest),
+                COMMAND_FILE => Some(&self.command),
+                _ if LEGACY_FIXED_ARTIFACTS.contains(&name) => Some(b"{}\n"),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn verifier_handles_empty_manifest_with_maximum_rounds_without_iteration() {
+        let limits = BundleLimits::default();
+        let artifacts = EmptyScheduleArtifacts {
+            manifest: json_bytes(
+                &DatasetManifest {
+                    schema_version: LEGACY_RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
+                    dataset_id: "empty-fixture".to_owned(),
+                    revision: "empty-revision".to_owned(),
+                    scope_rule: "all".to_owned(),
+                    loc_counting_rule: "physical".to_owned(),
+                    entries: Vec::new(),
+                },
+                limits.max_input_bytes,
+            )
+            .expect("empty manifest serializes"),
+            command: json_bytes(
+                &BenchmarkCommand {
+                    schema_version: LEGACY_RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
+                    subcommand: "parser-evidence".to_owned(),
+                    arguments: Vec::new(),
+                    seed: 7,
+                    warmup_rounds: 1,
+                    trial_rounds: u32::MAX - 1,
+                    timeout_ms: 1,
+                },
+                limits.max_input_bytes,
+            )
+            .expect("maximum-round command serializes"),
+        };
+
+        let result = validate_fixed_artifacts(&artifacts, limits);
+        assert!(
+            matches!(result, Err(BundleError::InvalidArtifactEncoding)),
+            "{result:?}"
+        );
+    }
+
     #[test]
     fn decoded_retention_budget_is_shared_and_monotonic() {
         let mut budget = FixedDecodeBudget {
