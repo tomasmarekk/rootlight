@@ -295,7 +295,7 @@ jobs:
                   raise SystemExit(f"candidate web smoke digest differs for {target}")
               web_smoke = json.loads(web_smoke_bytes)
               if (
-                  web_smoke.get("schema") != "rootlight.installed-web-smoke/2"
+                  web_smoke.get("schema") != "rootlight.installed-web-smoke/3"
                   or web_smoke.get("candidate_version") != os.environ["VERSION"]
                   or web_smoke.get("target") != target
                   or web_smoke.get("node_runtime_required") is not False

@@ -199,6 +199,30 @@ class VerifyNpmInstallTests(unittest.TestCase):
                 "web bootstrap",
             )
 
+    def test_elevated_web_startup_requires_exact_policy_denial(self) -> None:
+        completed = verify_npm_install.subprocess.CompletedProcess(
+            args=["rootlight", "web", "--no-open"],
+            returncode=6,
+            stdout="",
+            stderr=(
+                '{"contract_version":"1.0","ok":false,'
+                '"exit_family":"security_policy","error":{'
+                '"code":"PERMISSION_DENIED",'
+                '"message":"local web service requires a non-elevated process",'
+                '"retryable":false}}'
+            ),
+        )
+        with mock.patch.object(
+            verify_npm_install,
+            "run",
+            return_value=completed,
+        ):
+            verify_npm_install.verify_elevated_startup_denial(
+                Path("rootlight"),
+                {},
+                "elevated web startup",
+            )
+
     def test_login_registration_uses_the_disposable_user_boundary(self) -> None:
         prefix = Path("/private/prefix")
         cache = Path("/private/cache")

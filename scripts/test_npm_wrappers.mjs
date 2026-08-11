@@ -101,7 +101,15 @@ try {
     [
       'const { spawn } = require("node:child_process");',
       'if (process.env.ROOTLIGHT_TEST_FORBID_SERVICE === "1") process.exit(97);',
+      'if (process.argv[2] === "status") {',
+      '  console.log(JSON.stringify({ contract_version: "1.0", ok: true, result: { type: "web_service", data: { registered: false, running: false, pid: null } } }));',
+      "  process.exit(0);",
+      "}",
       'if (!new Set(["install", "uninstall"]).has(process.argv[2])) process.exit(1);',
+      'if (process.env.ROOTLIGHT_TEST_ELEVATED_SERVICE === "1") {',
+      '  console.error(JSON.stringify({ contract_version: "1.0", ok: false, exit_family: "security_policy", error: { code: "PERMISSION_DENIED", message: "local web service requires a non-elevated process", retryable: false } }));',
+      "  process.exit(6);",
+      "}",
       'const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 3000)"], { stdio: "inherit" });',
       "child.unref();",
       "",
@@ -150,6 +158,30 @@ try {
   );
   assert.equal(elevatedLifecycle.status, 0, elevatedLifecycle.stderr);
   assert.match(elevatedLifecycle.stderr, /refusing to install.* as root/u);
+
+  if (process.platform === "win32") {
+    const elevatedWindowsLifecycle = spawnSync(
+      process.execPath,
+      [join(rootBin, "postinstall.mjs")],
+      {
+        cwd: temporary,
+        encoding: "utf8",
+        env: {
+          ...lifecycleEnvironment,
+          ROOTLIGHT_TEST_ELEVATED_SERVICE: "1",
+        },
+      },
+    );
+    assert.equal(
+      elevatedWindowsLifecycle.status,
+      0,
+      elevatedWindowsLifecycle.stderr,
+    );
+    assert.match(
+      elevatedWindowsLifecycle.stderr,
+      /refusing to install.*elevated Windows process/u,
+    );
+  }
 
   for (const lifecycle of ["postinstall", "preuninstall"]) {
     const started = Date.now();

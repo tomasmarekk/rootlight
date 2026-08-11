@@ -462,18 +462,21 @@ jobs:
           web_smoke_bytes = web_smoke_path.read_bytes()
           web_smoke = json.loads(web_smoke_bytes)
           if (
-              web_smoke.get("schema") != "rootlight.installed-web-smoke/2"
+              web_smoke.get("schema") != "rootlight.installed-web-smoke/3"
               or web_smoke.get("target") != target
               or web_smoke.get("candidate_version") != os.environ["VERSION"]
+              or web_smoke.get("elevated_startup_rejected")
+              is not (target == "x86_64-pc-windows-msvc")
               or any(
-                  web_smoke.get(field) is not True
+                  web_smoke.get(field)
+                  is not (target != "x86_64-pc-windows-msvc")
                   for field in (
                       "authenticated_health_observed",
                       "graceful_shutdown_observed",
-                      "native_cli_dispatch_observed",
                       "direct_session_observed",
                   )
               )
+              or web_smoke.get("native_cli_dispatch_observed") is not True
               or web_smoke.get("node_runtime_required") is not False
           ):
               raise SystemExit(f"installed web smoke evidence differs: {web_smoke!r}")
@@ -674,7 +677,7 @@ jobs:
                   raise SystemExit(f"{target} installed web smoke digest differs")
               web_smoke = json.loads(web_smoke_bytes)
               if (
-                  web_smoke.get("schema") != "rootlight.installed-web-smoke/2"
+                  web_smoke.get("schema") != "rootlight.installed-web-smoke/3"
                   or web_smoke.get("target") != target
                   or web_smoke.get("candidate_version") != version
                   or web_smoke.get("node_runtime_required") is not False

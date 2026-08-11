@@ -21,7 +21,7 @@ import zipfile
 
 
 PACKAGE_SCHEMA = "rootlight.package-manifest/3"
-REPORT_SCHEMA = "rootlight.installed-web-smoke/2"
+REPORT_SCHEMA = "rootlight.installed-web-smoke/3"
 SOURCE_REVISION = re.compile(r"^[0-9a-f]{40}$")
 TARGET = re.compile(
     r"^(?:aarch64-apple-darwin|aarch64-unknown-linux-gnu|"
@@ -42,6 +42,10 @@ MAX_ARCHIVE_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_HTTP_BYTES = 1024 * 1024
 START_TIMEOUT_SECONDS = 30.0
 STOP_TIMEOUT_SECONDS = 20.0
+
+
+class ElevatedWebServiceRejected(RuntimeError):
+    """The native CLI enforced the elevated Windows startup boundary."""
 
 
 def parse_args() -> argparse.Namespace:
@@ -270,11 +274,39 @@ def start_web(
         timeout=START_TIMEOUT_SECONDS,
     )
     if completed.returncode != 0:
+        if is_elevated_service_denial(completed):
+            raise ElevatedWebServiceRejected(
+                "installed web command rejected elevated startup"
+            )
         raise RuntimeError("installed web command failed to start the service")
     match = WEB_URL.fullmatch(completed.stdout)
     if match is None:
         raise ValueError("installed web host published an invalid URL")
     return match.group(1), match.group(2)
+
+
+def is_elevated_service_denial(
+    completed: subprocess.CompletedProcess[str],
+) -> bool:
+    if completed.returncode != 6 or completed.stdout != "":
+        return False
+    try:
+        response = json.loads(completed.stderr)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(response, dict):
+        return False
+    error = response.get("error")
+    return (
+        response.get("contract_version") == "1.0"
+        and response.get("ok") is False
+        and response.get("exit_family") == "security_policy"
+        and isinstance(error, dict)
+        and error.get("code") == "PERMISSION_DENIED"
+        and error.get("message")
+        == "local web service requires a non-elevated process"
+        and error.get("retryable") is False
+    )
 
 
 def read_http_response(response: http.client.HTTPResponse) -> bytes:
@@ -447,19 +479,26 @@ def main() -> None:
         rootlight = package_root / "bin" / f"rootlight{suffix}"
         environment = process_environment(root)
         web_started = False
+        elevated_startup_rejected = False
         try:
-            origin, bootstrap = start_web(rootlight, environment)
-            web_started = True
-            wait_for_daemon(rootlight, environment)
-            exercise_session(
-                origin,
-                bootstrap,
-                identities["share/rootlight/web/index.html"],
-            )
-            stop_web(rootlight, environment)
-            web_started = False
-            wait_for_daemon_shutdown(environment)
-            remove_windows_daemon_after_shutdown(package_root)
+            try:
+                origin, bootstrap = start_web(rootlight, environment)
+            except ElevatedWebServiceRejected:
+                if args.target != "x86_64-pc-windows-msvc":
+                    raise
+                elevated_startup_rejected = True
+            else:
+                web_started = True
+                wait_for_daemon(rootlight, environment)
+                exercise_session(
+                    origin,
+                    bootstrap,
+                    identities["share/rootlight/web/index.html"],
+                )
+                stop_web(rootlight, environment)
+                web_started = False
+                wait_for_daemon_shutdown(environment)
+                remove_windows_daemon_after_shutdown(package_root)
         finally:
             if web_started:
                 subprocess.run(
@@ -476,12 +515,13 @@ def main() -> None:
             "asset_manifest_sha256": identities[
                 "share/rootlight/web/asset-manifest.json"
             ],
-            "authenticated_health_observed": True,
+            "authenticated_health_observed": not elevated_startup_rejected,
             "candidate_version": args.candidate_version,
-            "graceful_shutdown_observed": True,
+            "elevated_startup_rejected": elevated_startup_rejected,
+            "graceful_shutdown_observed": not elevated_startup_rejected,
             "native_cli_dispatch_observed": True,
             "node_runtime_required": False,
-            "direct_session_observed": True,
+            "direct_session_observed": not elevated_startup_rejected,
             "source_revision": args.source_revision,
             "target": args.target,
         }

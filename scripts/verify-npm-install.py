@@ -183,33 +183,57 @@ def verify_install_mode(
             )
 
         initial = service_status(cli, environment, f"{mode} postinstall service status")
-        require_service_state(initial, registered=True, running=True)
-        initial_pid = require_pid(initial)
-        verify_http_session(
-            issue_web_bootstrap(cli, environment, f"{mode} web bootstrap")
+        elevated_startup_rejected = (
+            os.name == "nt"
+            and initial.get("registered") is False
+            and initial.get("running") is False
         )
+        if elevated_startup_rejected:
+            require_service_state(initial, registered=False, running=False)
+            verify_elevated_startup_denial(
+                cli,
+                environment,
+                f"{mode} elevated web startup",
+            )
+            initial_pid = None
+            restarted_pid = None
+        else:
+            require_service_state(initial, registered=True, running=True)
+            initial_pid = require_pid(initial)
+            verify_http_session(
+                issue_web_bootstrap(cli, environment, f"{mode} web bootstrap")
+            )
 
-        stopped = run_json(
-            [str(cli), "service", "stop"],
-            environment,
-            stage=f"{mode} service stop",
-        )
-        require_service_state(service_data(stopped), registered=True, running=False)
-        wait_for_port(closed=True)
+            stopped = run_json(
+                [str(cli), "service", "stop"],
+                environment,
+                stage=f"{mode} service stop",
+            )
+            require_service_state(
+                service_data(stopped),
+                registered=True,
+                running=False,
+            )
+            wait_for_port(closed=True)
 
-        restarted = run_json_retrying_busy(
-            [str(cli), "service", "restart"],
-            environment,
-            stage=f"{mode} service restart",
-        )
-        restarted_data = service_data(restarted)
-        require_service_state(restarted_data, registered=True, running=True)
-        restarted_pid = require_pid(restarted_data)
-        verify_http_session(
-            issue_web_bootstrap(cli, environment, f"{mode} restarted web bootstrap")
-        )
-        sentinel = state / "uninstall-sentinel"
-        sentinel.write_bytes(b"owned state")
+            restarted = run_json_retrying_busy(
+                [str(cli), "service", "restart"],
+                environment,
+                stage=f"{mode} service restart",
+            )
+            restarted_data = service_data(restarted)
+            require_service_state(restarted_data, registered=True, running=True)
+            restarted_pid = require_pid(restarted_data)
+            verify_http_session(
+                issue_web_bootstrap(
+                    cli,
+                    environment,
+                    f"{mode} restarted web bootstrap",
+                )
+            )
+        if not elevated_startup_rejected:
+            sentinel = state / "uninstall-sentinel"
+            sentinel.write_bytes(b"owned state")
 
         run([str(cli), "uninstall"], environment, stage=f"{mode} rootlight uninstall")
         wait_for_paths_removed(
@@ -232,6 +256,7 @@ def verify_install_mode(
         wait_for_port(closed=True)
         return {
             "install_seconds": round(install_seconds, 3),
+            "elevated_startup_rejected": elevated_startup_rejected,
             "initial_pid": initial_pid,
             "mode": mode,
             "restarted_pid": restarted_pid,
@@ -506,6 +531,41 @@ def issue_web_bootstrap(
     if match is None:
         raise NpmInstallError("Rootlight Web UI bootstrap URL is invalid")
     return match.group(1)
+
+
+def verify_elevated_startup_denial(
+    cli: Path,
+    environment: dict[str, str],
+    stage: str,
+) -> None:
+    completed = run(
+        [str(cli), "web", "--no-open"],
+        environment,
+        check=False,
+        stage=stage,
+    )
+    if completed.returncode != 6 or completed.stdout != "":
+        raise NpmInstallError("Rootlight elevated web startup was not rejected")
+    try:
+        response = json.loads(completed.stderr)
+    except json.JSONDecodeError as error:
+        raise NpmInstallError(
+            "Rootlight elevated web rejection returned invalid JSON"
+        ) from error
+    if not isinstance(response, dict):
+        raise NpmInstallError("Rootlight elevated web rejection differs")
+    error = response.get("error")
+    if (
+        response.get("contract_version") != "1.0"
+        or response.get("ok") is not False
+        or response.get("exit_family") != "security_policy"
+        or not isinstance(error, dict)
+        or error.get("code") != "PERMISSION_DENIED"
+        or error.get("message")
+        != "local web service requires a non-elevated process"
+        or error.get("retryable") is not False
+    ):
+        raise NpmInstallError("Rootlight elevated web rejection differs")
 
 
 def verify_http_session(bootstrap: str) -> None:

@@ -27,6 +27,8 @@ const cliBridgeRuntime = ".rootlight-cli-bridge.mjs";
 const cliBridgeCleanupRuntime = ".rootlight-cli-cleanup.mjs";
 const managedUninstallEnvironment = "ROOTLIGHT_NPM_MANAGED_UNINSTALL";
 const maximumBridgeFileBytes = 64 * 1024;
+const maximumNativeErrorBytes = 64 * 1024;
+const elevatedServiceExitStatus = 6;
 const nativePackages = new Map([
   ["darwin-arm64", "@tomasmarekk/rootlight-darwin-arm64"],
   ["darwin-x64", "@tomasmarekk/rootlight-darwin-x64"],
@@ -55,6 +57,12 @@ export function runLifecycle(action) {
   if (!new Set(["install", "uninstall"]).has(action)) {
     fail("rootlight: unsupported npm lifecycle action");
   }
+  if (
+    action === "uninstall" &&
+    process.env[managedUninstallEnvironment] === "1"
+  ) {
+    return;
+  }
   if (action === "install") {
     try {
       installCliBridge();
@@ -78,7 +86,23 @@ export function runLifecycle(action) {
     }
     return;
   }
-  const result = spawnNative("rootlight", ["service", action], "ignore");
+  const result = spawnNative("rootlight", ["service", action], "pipe");
+  if (isWindowsElevatedServiceDenial(result)) {
+    console.warn(
+      `rootlight: refusing to ${action} the per-user service from an elevated Windows process; run rootlight service ${action} as the desktop user`,
+    );
+    if (
+      action === "uninstall" &&
+      process.env[managedUninstallEnvironment] !== "1"
+    ) {
+      try {
+        removeCliBridge();
+      } catch (error) {
+        fail(`rootlight: failed to remove CLI access: ${errorMessage(error)}`);
+      }
+    }
+    return;
+  }
   if (result.error !== undefined) {
     if (action === "install") {
       removeCliBridgeAfterFailedInstall();
@@ -107,9 +131,12 @@ export function runLifecycle(action) {
 }
 
 function uninstallRootlight() {
-  const cleanup = spawnNative("rootlight", ["service", "uninstall"]);
-  if (cleanup.error !== undefined || cleanup.status !== 0) {
-    exitFor(cleanup);
+  const serviceStatus = spawnNative("rootlight", ["service", "status"], "pipe");
+  if (!serviceIsAbsent(serviceStatus)) {
+    const cleanup = spawnNative("rootlight", ["service", "uninstall"]);
+    if (cleanup.error !== undefined || cleanup.status !== 0) {
+      exitFor(cleanup);
+    }
   }
   const context = packageInstallContext();
   const arguments_ =
@@ -147,7 +174,64 @@ function uninstallRootlight() {
 
 function spawnNative(executable, arguments_, stdio = "inherit") {
   const path = resolveNativeExecutable(executable);
-  return spawnSync(path, arguments_, { stdio });
+  return spawnSync(path, arguments_, {
+    encoding: stdio === "pipe" ? "utf8" : undefined,
+    maxBuffer: maximumNativeErrorBytes,
+    stdio,
+  });
+}
+
+function isWindowsElevatedServiceDenial(result) {
+  if (
+    process.platform !== "win32" ||
+    result.error !== undefined ||
+    result.status !== elevatedServiceExitStatus ||
+    result.stdout !== "" ||
+    typeof result.stderr !== "string"
+  ) {
+    return false;
+  }
+  let response;
+  try {
+    response = JSON.parse(result.stderr);
+  } catch {
+    return false;
+  }
+  return (
+    response?.contract_version === "1.0" &&
+    response?.ok === false &&
+    response?.exit_family === "security_policy" &&
+    response?.error?.code === "PERMISSION_DENIED" &&
+    response?.error?.message ===
+      "local web service requires a non-elevated process" &&
+    response?.error?.retryable === false
+  );
+}
+
+function serviceIsAbsent(result) {
+  if (
+    result.error !== undefined ||
+    result.status !== 0 ||
+    typeof result.stdout !== "string" ||
+    result.stderr !== ""
+  ) {
+    return false;
+  }
+  let response;
+  try {
+    response = JSON.parse(result.stdout);
+  } catch {
+    return false;
+  }
+  const data = response?.result?.data;
+  return (
+    response?.contract_version === "1.0" &&
+    response?.ok === true &&
+    response?.result?.type === "web_service" &&
+    data?.registered === false &&
+    data?.running === false &&
+    data?.pid === null
+  );
 }
 
 function resolveNativeExecutable(executable) {

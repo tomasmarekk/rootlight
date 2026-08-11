@@ -34,8 +34,10 @@ class InstalledWebSmokeTests(unittest.TestCase):
 
         self.assertEqual(workflows.count(installed_web.REPORT_SCHEMA), 3)
         self.assertNotIn("rootlight.installed-web-smoke/1", workflows)
+        self.assertNotIn("rootlight.installed-web-smoke/2", workflows)
         self.assertNotIn('"session_bootstrap_observed"', workflows)
         self.assertIn('"direct_session_observed"', candidate)
+        self.assertIn('"elevated_startup_rejected"', candidate)
 
     def test_smoke_temporary_parent_is_short_and_macos_only(self) -> None:
         self.assertEqual(
@@ -123,6 +125,36 @@ class InstalledWebSmokeTests(unittest.TestCase):
                 return_value=completed,
             ),
             self.assertRaisesRegex(ValueError, "invalid URL"),
+        ):
+            installed_web.start_web(Path("rootlight"), {})
+
+    def test_start_web_classifies_exact_elevated_denial(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=6,
+            stdout="",
+            stderr=json.dumps(
+                {
+                    "contract_version": "1.0",
+                    "ok": False,
+                    "exit_family": "security_policy",
+                    "error": {
+                        "code": "PERMISSION_DENIED",
+                        "message": (
+                            "local web service requires a non-elevated process"
+                        ),
+                        "retryable": False,
+                    },
+                }
+            ),
+        )
+        with (
+            mock.patch.object(
+                installed_web.subprocess,
+                "run",
+                return_value=completed,
+            ),
+            self.assertRaises(installed_web.ElevatedWebServiceRejected),
         ):
             installed_web.start_web(Path("rootlight"), {})
 
