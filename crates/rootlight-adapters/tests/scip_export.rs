@@ -10,13 +10,16 @@ use rootlight_adapters::{
     import_scip_index,
 };
 use rootlight_cancel::{Cancellation, CancellationReason};
-use rootlight_ids::{FactId, GenerationId, SymbolId, content_hash, derive_repository};
+use rootlight_ids::{
+    FactId, FileIdentity, GenerationId, SymbolId, content_hash, derive_file, derive_repository,
+};
 use rootlight_ir::{
-    BuildContextIdentity, Confidence, ContainerRef, CoverageStatus, EntityKind, EntityRecord,
-    EntityVisibility, EvidenceKind, ExtensionSupport, FactEvidence, IrLimits, OccurrenceRole,
-    OccurrenceTarget, RelationEndpoint, RelationPredicate, RelationRecord, SourceRef, SourceSpan,
-    SymbolIdentityClaim, derive_occurrence_record_id, derive_relation_record_id,
-    new_symbol_identity_claim_envelope,
+    AnalysisTier, BuildContextIdentity, Confidence, ContainerRef, CoverageStatus, EntityKind,
+    EntityRecord, EntityVisibility, EvidenceKind, ExtensionSupport, FactEvidence, FileRecord,
+    IrLimits, NormalizedIrDocument, OccurrenceRole, OccurrenceTarget, ProducerIdentity,
+    ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SourceRef,
+    SourceSpan, SymbolIdentityClaim, derive_occurrence_record_id, derive_provenance_record_id,
+    derive_relation_record_id, new_symbol_identity_claim_envelope,
 };
 use scip::types::{
     Document, Index, Metadata, MultiLineRange, PositionEncoding, Relationship, SingleLineRange,
@@ -400,6 +403,82 @@ fn hard_limits_and_cancellation_stop_export() {
     assert!(matches!(
         export_with(&document, &sources, defaults, &cancellation),
         Err(ScipExportError::Cancelled)
+    ));
+}
+
+#[test]
+fn export_bounds_line_index_memory_before_allocation() {
+    let source = vec![b'\n'; 1_000_000];
+    let repository = derive_repository(b"line-dense-scip-export").id();
+    let generation = GenerationId::from_bytes([31; 20]);
+    let path = "src/line-dense.rs";
+    let file = derive_file(FileIdentity {
+        repository,
+        path_identity: path.as_bytes(),
+    })
+    .id();
+    let source_ref = SourceRef::new(
+        repository,
+        generation,
+        SourceSpan::new(
+            file,
+            0,
+            u64::try_from(source.len()).expect("fixture length fits u64"),
+        )
+        .expect("fixture source span is valid"),
+        content_hash(&source),
+        None,
+    );
+    let build_context = BuildContextIdentity::new(content_hash(b"line-dense-build"));
+    let mut provenance = ProvenanceRecord {
+        id: FactId::from_bytes([0; 20]),
+        repository,
+        generation,
+        producer_kind: ProducerKind::Scip,
+        producer: ProducerIdentity::new("fixture-scip", "1.0", build_context.digest())
+            .expect("producer identity is valid"),
+        binary_digest: content_hash(b"fixture-scip-binary"),
+        frontend_version: Some("fixture-scip-1".to_owned()),
+        language: "rust".to_owned(),
+        tier: AnalysisTier::TierB,
+        build_context,
+        input_sources: vec![source_ref.clone()],
+        evidence_sources: vec![source_ref.clone()],
+        derivation_parents: Vec::new(),
+        rule: None,
+    };
+    provenance.id = derive_provenance_record_id(&provenance).expect("provenance identity derives");
+    let mut document = NormalizedIrDocument::empty(repository, generation);
+    document.files.push(FileRecord {
+        id: file,
+        repository,
+        generation,
+        path: path.to_owned(),
+        path_locator: None,
+        content_hash: content_hash(&source),
+        byte_length: u64::try_from(source.len()).expect("fixture length fits u64"),
+        language: "rust".to_owned(),
+        encoding: "utf-8".to_owned(),
+        generated: false,
+        provenance: provenance.id,
+        evidence: FactEvidence {
+            source: Some(source_ref),
+            derivation: Vec::new(),
+        },
+    });
+    document.provenance.push(provenance);
+    let sources = [ScipExportSource::new(
+        repository, generation, file, path, &source,
+    )];
+
+    let error = export(&document, &sources).expect_err("line index ceiling rejects amplification");
+    assert!(matches!(
+        error,
+        ScipExportError::LimitExceeded {
+            resource: ScipExportResource::LineStarts,
+            observed: 1_000_001,
+            limit: 1_000_000,
+        }
     ));
 }
 

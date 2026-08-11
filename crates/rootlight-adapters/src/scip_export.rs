@@ -45,6 +45,7 @@ const MAX_OCCURRENCES: usize = 1_000_000;
 const MAX_RELATIONSHIPS: usize = 500_000;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TOTAL_SOURCE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_LINE_STARTS: usize = 1_000_000;
 const CHECK_INTERVAL: usize = 128;
 const EXACT_CONFIDENCE: u16 = 1_000;
 const DEFINITION_ROLE: i32 = 0x1;
@@ -924,7 +925,7 @@ struct SourceMaterial<'a> {
     path: &'a str,
     text: &'a str,
     generated: bool,
-    line_starts: Vec<usize>,
+    line_starts: Vec<u32>,
 }
 
 impl SourceMaterial<'_> {
@@ -968,18 +969,27 @@ impl SourceMaterial<'_> {
         if offset > self.text.len() || !self.text.is_char_boundary(offset) {
             return Err(ScipExportError::InvalidRange);
         }
-        let insertion = self.line_starts.partition_point(|start| *start <= offset);
+        let offset_u32 = u32::try_from(offset).map_err(|_| ScipExportError::InvalidRange)?;
+        let insertion = self
+            .line_starts
+            .partition_point(|start| *start <= offset_u32);
         let line_index = insertion
             .checked_sub(1)
             .ok_or(ScipExportError::InvalidRange)?;
-        let line_start = *self
-            .line_starts
-            .get(line_index)
-            .ok_or(ScipExportError::InvalidRange)?;
+        let line_start = usize::try_from(
+            *self
+                .line_starts
+                .get(line_index)
+                .ok_or(ScipExportError::InvalidRange)?,
+        )
+        .map_err(|_| ScipExportError::InvalidRange)?;
         let next_start = self
             .line_starts
             .get(line_index.saturating_add(1))
             .copied()
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| ScipExportError::InvalidRange)?
             .unwrap_or(self.text.len());
         let bytes = self.text.as_bytes();
         let mut logical_end = next_start;
@@ -1117,6 +1127,7 @@ fn materialize_sources<'a>(
     let mut materialized = BTreeMap::new();
     let mut paths = BTreeSet::new();
     let mut total_bytes = 0_usize;
+    let mut total_line_starts = 0_usize;
     for (index, source) in sources.iter().copied().enumerate() {
         check_periodically(index, cancellation)?;
         if source.repository != document.repository || source.generation != document.generation {
@@ -1167,11 +1178,28 @@ fn materialize_sources<'a>(
         }
         let text = std::str::from_utf8(source.content)
             .map_err(|_| ScipExportError::UnsupportedSourceEncoding)?;
+        let line_start_count = source
+            .content
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count()
+            .checked_add(1)
+            .ok_or(ScipExportError::Accounting)?;
+        total_line_starts = checked_add(
+            total_line_starts,
+            line_start_count,
+            ScipExportResource::LineStarts,
+        )?;
+        require_limit(
+            ScipExportResource::LineStarts,
+            total_line_starts,
+            MAX_LINE_STARTS,
+        )?;
         let value = SourceMaterial {
             path: source.path,
             text,
             generated: file.generated,
-            line_starts: line_starts(source.content)?,
+            line_starts: line_starts(source.content, line_start_count)?,
         };
         if materialized.insert(source.file, value).is_some() {
             return Err(ScipExportError::DuplicateSource);
@@ -1183,16 +1211,16 @@ fn materialize_sources<'a>(
     Ok(materialized)
 }
 
-fn line_starts(content: &[u8]) -> Result<Vec<usize>, ScipExportError> {
-    let newline_count = content.iter().filter(|byte| **byte == b'\n').count();
-    let capacity = newline_count
-        .checked_add(1)
-        .ok_or(ScipExportError::Accounting)?;
-    let mut starts = Vec::with_capacity(capacity);
+fn line_starts(content: &[u8], capacity: usize) -> Result<Vec<u32>, ScipExportError> {
+    let mut starts = Vec::new();
+    starts
+        .try_reserve_exact(capacity)
+        .map_err(|_| ScipExportError::Accounting)?;
     starts.push(0);
     for (index, byte) in content.iter().copied().enumerate() {
         if byte == b'\n' {
-            starts.push(index.checked_add(1).ok_or(ScipExportError::Accounting)?);
+            let start = index.checked_add(1).ok_or(ScipExportError::Accounting)?;
+            starts.push(u32::try_from(start).map_err(|_| ScipExportError::Accounting)?);
         }
     }
     Ok(starts)
@@ -1459,6 +1487,8 @@ pub enum ScipExportResource {
     Relationships,
     /// Exact source bytes supplied by the host.
     SourceBytes,
+    /// Derived source-line offsets retained for position conversion.
+    LineStarts,
 }
 
 impl std::fmt::Display for ScipExportResource {
@@ -1470,6 +1500,7 @@ impl std::fmt::Display for ScipExportResource {
             Self::Occurrences => "occurrences",
             Self::Relationships => "relationships",
             Self::SourceBytes => "source_bytes",
+            Self::LineStarts => "line_starts",
         })
     }
 }
