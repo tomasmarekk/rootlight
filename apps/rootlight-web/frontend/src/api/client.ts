@@ -53,12 +53,14 @@ import {
 const maximumJsonBytes = 1024 * 1024;
 const maximumErrorBytes = 16 * 1024;
 const maximumSupportArchiveBytes = 768 * 1024;
+const bootstrapPattern = /^[A-Za-z0-9_-]{43}$/u;
 const publicErrorPattern = /^[a-z][a-z0-9_]{0,63}$/u;
 const sessionExpiredEvent = "rootlight:session-expired";
 const daemonReconnectedEvent = "rootlight:daemon-reconnected";
 
 let csrfToken: string | undefined;
 let initialization: Promise<Session> | undefined;
+let bootstrapSecret: string | undefined;
 
 export class ApiError extends Error {
   public readonly status: number;
@@ -499,6 +501,7 @@ export async function logout(): Promise<void> {
     headers: csrfToken === undefined ? undefined : { "x-rootlight-csrf": csrfToken },
   });
   csrfToken = undefined;
+  bootstrapSecret = undefined;
   initialization = undefined;
 }
 
@@ -523,9 +526,46 @@ async function mutationJson(
 }
 
 async function initializeSessionOnce(): Promise<Session> {
-  const session = parseSession(await requestJson("/api/v1/session"));
+  bootstrapSecret ??= takeBootstrapSecret();
+  const bootstrap = bootstrapSecret;
+  let session: Session;
+  try {
+    session =
+      bootstrap === undefined
+        ? parseSession(await requestJson("/api/v1/session"))
+        : parseSession(
+            await requestJson("/api/v1/session/bootstrap", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ secret: bootstrap }),
+            }),
+          );
+  } catch (error) {
+    if (error instanceof ApiError) {
+      bootstrapSecret = undefined;
+    }
+    throw error;
+  }
+  bootstrapSecret = undefined;
   csrfToken = session.csrfToken;
   return session;
+}
+
+function takeBootstrapSecret(): string | undefined {
+  const fragment = window.location.hash;
+  if (!fragment.startsWith("#bootstrap=")) {
+    return undefined;
+  }
+  window.history.replaceState(
+    window.history.state,
+    "",
+    `${window.location.pathname}${window.location.search}`,
+  );
+  const secret = fragment.slice("#bootstrap=".length);
+  if (!bootstrapPattern.test(secret)) {
+    throw new ApiError(401, "invalid_bootstrap");
+  }
+  return secret;
 }
 
 async function requestJson(path: string, init?: RequestInit): Promise<unknown> {

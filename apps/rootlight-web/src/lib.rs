@@ -17,7 +17,12 @@ mod session;
 mod source_registry;
 mod support_registry;
 
-use std::{ffi::OsString, net::Ipv4Addr, sync::Arc, time::Duration};
+use std::{
+    ffi::OsString,
+    net::Ipv4Addr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use rootlight_client::RequestTimeout;
 use rootlight_runtime::WebDiscoveryRecord;
@@ -64,10 +69,12 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     let indexes = Arc::new(index_registry::IndexRegistry::new());
     let graphs = Arc::new(graph_registry::GraphRegistry::new());
     let support = Arc::new(support_registry::SupportRegistry::new());
-    let url = format!("{}/", policy.origin());
-    println!("Rootlight Web UI: {url}");
-    if config.open_browser() {
-        let _ = browser::open(&url);
+    if !config.service_mode() {
+        let url = issue_browser_entry_url(&sessions, policy.origin(), Instant::now())?;
+        println!("Rootlight Web UI: {url}");
+        if config.open_browser() {
+            let _ = browser::open(&url);
+        }
     }
     let mut state = app::AppState::new(
         assets,
@@ -134,6 +141,15 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     shutdown
 }
 
+fn issue_browser_entry_url(
+    sessions: &session::SessionRegistry,
+    origin: &str,
+    now: Instant,
+) -> Result<String, WebError> {
+    let bootstrap = sessions.issue_bootstrap(now)?;
+    Ok(format!("{origin}/#bootstrap={}", bootstrap.encoded()))
+}
+
 async fn shutdown_signal(service: Option<watch::Receiver<bool>>) {
     if let Some(mut receiver) = service {
         tokio::select! {
@@ -189,5 +205,24 @@ mod test_support {
     pub(crate) fn local_tempdir() -> tempfile::TempDir {
         let current = std::env::current_dir().expect("current directory is available");
         tempfile::tempdir_in(current).expect("local temporary directory is available")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standalone_browser_entry_issues_a_consumable_fragment_bootstrap() {
+        let sessions = session::SessionRegistry::new();
+        let now = Instant::now();
+        let url = issue_browser_entry_url(&sessions, "http://127.0.0.1:43127", now)
+            .expect("browser entry issues");
+        let bootstrap = url
+            .strip_prefix("http://127.0.0.1:43127/#bootstrap=")
+            .expect("browser entry uses a fragment");
+
+        assert!(sessions.consume_bootstrap(bootstrap, now).is_some());
+        assert!(sessions.consume_bootstrap(bootstrap, now).is_none());
     }
 }

@@ -22,8 +22,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     let active = true;
     const unsubscribe = subscribeSessionExpired(() => {
       if (active) {
-        // The local host keeps sessions in memory, so a service restart needs
-        // a fresh credential only after all data from the old session is gone.
+        // A replacement service requires a fresh CLI bootstrap, so clear all
+        // data from the old in-memory session before the status check fails closed.
         queryClient.clear();
         setState({ kind: "loading" });
         setAttempt((current) => current + 1);

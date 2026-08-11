@@ -27,6 +27,8 @@ type DetachedChild = std::process::Child;
 type DetachedChild = DetachedProcess;
 
 const ORIGIN: &str = "http://127.0.0.1:43127";
+const SERVICE_BOOTSTRAP_SCHEMA: &str = "rootlight.web-service-bootstrap/1";
+const ENCODED_BOOTSTRAP_BYTES: usize = 43;
 const MAX_HTTP_RESPONSE_BYTES: u64 = 16 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -219,7 +221,17 @@ pub(crate) fn uninstall(paths: &RuntimePaths) -> Result<WebServiceStatus, WebSer
     Ok(WebServiceStatus::stopped())
 }
 
-pub(crate) fn open_browser(paths: &RuntimePaths) -> Result<(), WebServiceError> {
+pub(crate) fn browser_entry(paths: &RuntimePaths) -> Result<String, WebServiceError> {
+    let record = live_record(paths)?.ok_or(WebServiceError::InvalidResponse)?;
+    let response = request(
+        "POST",
+        "/api/v1/service/bootstrap",
+        Some(record.control_token()),
+    )?;
+    browser_entry_from_response(response)
+}
+
+pub(crate) fn open_browser(url: &str) -> Result<(), WebServiceError> {
     #[cfg(target_os = "windows")]
     const LAUNCHER: &str = "explorer.exe";
     #[cfg(target_os = "macos")]
@@ -227,16 +239,31 @@ pub(crate) fn open_browser(paths: &RuntimePaths) -> Result<(), WebServiceError> 
     #[cfg(all(unix, not(target_os = "macos")))]
     const LAUNCHER: &str = "xdg-open";
 
-    let record = live_record(paths)?.ok_or(WebServiceError::InvalidResponse)?;
     Command::new(LAUNCHER)
-        .arg(browser_entry_url(&record))
+        .arg(url)
         .spawn()
         .map(|_| ())
         .map_err(WebServiceError::Browser)
 }
 
-fn browser_entry_url(record: &WebDiscoveryRecord) -> String {
-    format!("{ORIGIN}/?bootstrap={}", record.control_token())
+fn browser_entry_from_response(response: HttpResponse) -> Result<String, WebServiceError> {
+    if response.status != 200 {
+        return Err(WebServiceError::InvalidResponse);
+    }
+    let response: ServiceBootstrapResponse =
+        serde_json::from_slice(&response.body).map_err(|_| WebServiceError::InvalidResponse)?;
+    if response.schema != SERVICE_BOOTSTRAP_SCHEMA || !valid_encoded_bootstrap(&response.bootstrap)
+    {
+        return Err(WebServiceError::InvalidResponse);
+    }
+    Ok(format!("{ORIGIN}/#bootstrap={}", response.bootstrap))
+}
+
+fn valid_encoded_bootstrap(candidate: &str) -> bool {
+    candidate.len() == ENCODED_BOOTSTRAP_BYTES
+        && candidate
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn enforce_per_user_service_identity(is_elevated: bool) -> Result<(), WebServiceError> {
@@ -429,6 +456,13 @@ fn request(
 struct HttpResponse {
     status: u16,
     body: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceBootstrapResponse {
+    schema: String,
+    bootstrap: String,
 }
 
 fn parse_http_response(mut bytes: Vec<u8>) -> Result<HttpResponse, WebServiceError> {
@@ -928,14 +962,42 @@ mod tests {
     }
 
     #[test]
-    fn browser_entry_uses_the_discovered_control_credential() {
-        let record =
-            WebDiscoveryRecord::new(7, WEB_UI_PORT, [1; 16], [2; 32]).expect("record validates");
+    fn browser_entry_accepts_only_a_bounded_service_bootstrap() {
+        let bootstrap = "a".repeat(ENCODED_BOOTSTRAP_BYTES);
+        let entry = browser_entry_from_response(HttpResponse {
+            status: 200,
+            body: serde_json::to_vec(&serde_json::json!({
+                "schema": SERVICE_BOOTSTRAP_SCHEMA,
+                "bootstrap": bootstrap,
+            }))
+            .expect("response serializes"),
+        })
+        .expect("service bootstrap response validates");
+        assert_eq!(entry, format!("{ORIGIN}/#bootstrap={bootstrap}"));
+        assert!(!entry.contains('?'));
 
-        assert_eq!(
-            browser_entry_url(&record),
-            format!("{ORIGIN}/?bootstrap={}", record.control_token())
-        );
+        for body in [
+            serde_json::json!({
+                "schema": "rootlight.web-service-bootstrap/2",
+                "bootstrap": bootstrap,
+            }),
+            serde_json::json!({
+                "schema": SERVICE_BOOTSTRAP_SCHEMA,
+                "bootstrap": "too-short",
+            }),
+            serde_json::json!({
+                "schema": SERVICE_BOOTSTRAP_SCHEMA,
+                "bootstrap": format!("{}!", "a".repeat(ENCODED_BOOTSTRAP_BYTES - 1)),
+            }),
+        ] {
+            assert!(
+                browser_entry_from_response(HttpResponse {
+                    status: 200,
+                    body: serde_json::to_vec(&body).expect("response serializes"),
+                })
+                .is_err()
+            );
+        }
     }
 
     #[test]

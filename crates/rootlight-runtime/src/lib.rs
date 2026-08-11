@@ -835,9 +835,9 @@ impl WebDiscoveryRecord {
         nonce
     }
 
-    /// Returns the private credential for authenticated Web UI control and browser entry.
+    /// Returns the private credential for Web UI control and browser-bootstrap issuance.
     ///
-    /// Callers must not log or expose this value outside those authenticated requests.
+    /// Callers must not log or expose this value outside authenticated control requests.
     #[must_use]
     pub fn control_token(&self) -> &str {
         &self.control_token

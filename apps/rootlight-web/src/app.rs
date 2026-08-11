@@ -7,8 +7,8 @@ use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Extension, Path, Request, State},
     http::{
-        HeaderMap, HeaderName, HeaderValue, StatusCode, Uri,
-        header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, COOKIE, LOCATION, SET_COOKIE},
+        HeaderMap, HeaderName, HeaderValue, StatusCode,
+        header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, COOKIE, SET_COOKIE},
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -17,7 +17,7 @@ use axum::{
 use rootlight_client::{
     ClientError, DaemonLifecycle, Health, HealthStatus, RequestTimeout, ResourcePressure,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq as _;
 use tokio::sync::watch;
 
@@ -63,16 +63,6 @@ impl ServiceControl {
             .get(&SERVICE_TOKEN_HEADER)
             .and_then(|value| value.to_str().ok())
             .is_some_and(|candidate| self.authorize_credential(candidate))
-    }
-
-    fn authorize_browser_entry(&self, uri: &Uri) -> Option<bool> {
-        let mut credentials = uri.query().into_iter().flat_map(|query| {
-            form_urlencoded::parse(query.as_bytes())
-                .filter(|(name, _)| name == "bootstrap")
-                .map(|(_, value)| value)
-        });
-        let candidate = credentials.next()?;
-        Some(credentials.next().is_none() && self.authorize_credential(candidate.as_ref()))
     }
 
     fn authorize_credential(&self, candidate: &str) -> bool {
@@ -209,7 +199,10 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
         )
         .route_layer(middleware::from_fn(require_mutation_csrf));
     let protected_api = Router::new()
-        .route("/api/v1/session", delete(logout_session))
+        .route(
+            "/api/v1/session",
+            get(session_status).delete(logout_session),
+        )
         .route("/api/v1/health", get(health))
         .route("/api/v1/filesystem/roots", get(api::filesystem::roots))
         .route(
@@ -236,8 +229,9 @@ pub(crate) fn router(state: AppState, policy: SecurityPolicy) -> Router {
         ));
     Router::new()
         .route("/api/v1/service/status", get(service_status))
+        .route("/api/v1/service/bootstrap", post(service_bootstrap))
         .route("/api/v1/service/shutdown", post(service_shutdown))
-        .route("/api/v1/session", get(session_status_or_create))
+        .route("/api/v1/session/bootstrap", post(bootstrap_session))
         .merge(protected_api)
         .route("/", get(index))
         .route("/{*path}", get(asset_or_route))
@@ -257,6 +251,12 @@ struct ServiceStatusResponse {
     pid: u32,
 }
 
+#[derive(Serialize)]
+struct ServiceBootstrapResponse {
+    schema: &'static str,
+    bootstrap: String,
+}
+
 async fn service_status(
     State(state): State<AppState>,
 ) -> Result<Json<ServiceStatusResponse>, ApiError> {
@@ -267,6 +267,29 @@ async fn service_status(
     Ok(Json(ServiceStatusResponse {
         ready: true,
         pid: control.pid,
+    }))
+}
+
+async fn service_bootstrap(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ServiceBootstrapResponse>, ApiError> {
+    let control = state
+        .service_control
+        .as_ref()
+        .ok_or_else(ApiError::service_unavailable)?;
+    if !control.authorize(&headers) {
+        return Err(ApiError::unauthorized());
+    }
+    let now = Instant::now();
+    state.reap_expired_session_resources(now);
+    let bootstrap = state
+        .sessions
+        .issue_bootstrap(now)
+        .map_err(|_| ApiError::session_unavailable())?;
+    Ok(Json(ServiceBootstrapResponse {
+        schema: "rootlight.web-service-bootstrap/1",
+        bootstrap: bootstrap.encoded().to_owned(),
     }))
 }
 
@@ -591,28 +614,22 @@ impl IntoResponse for ApiError {
     }
 }
 
-async fn session_status_or_create(
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapRequest {
+    secret: String,
+}
+
+async fn bootstrap_session(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Json(request): Json<BootstrapRequest>,
 ) -> Result<Response, ApiError> {
     let now = Instant::now();
     state.reap_expired_session_resources(now);
-    if let Some(session) =
-        session_cookie(&headers).and_then(|cookie| state.sessions.authenticate(cookie, now))
-    {
-        return Ok(Json(SessionResponse {
-            csrf_token: session.csrf_token(),
-            idle_ttl_seconds: idle_ttl_seconds(),
-        })
-        .into_response());
-    }
-    if state.service_control.is_some() {
-        return Err(ApiError::unauthorized());
-    }
     let credentials = state
         .sessions
-        .issue_session(now)
-        .map_err(|_| ApiError::session_unavailable())?;
+        .consume_bootstrap(&request.secret, now)
+        .ok_or_else(ApiError::unauthorized)?;
     let mut response = Json(SessionResponse {
         csrf_token: credentials.csrf_token,
         idle_ttl_seconds: credentials.idle_ttl_seconds,
@@ -620,6 +637,15 @@ async fn session_status_or_create(
     .into_response();
     set_session_cookie(&mut response, &credentials.cookie_value)?;
     Ok(response)
+}
+
+async fn session_status(
+    Extension(session): Extension<AuthenticatedSession>,
+) -> Json<SessionResponse> {
+    Json(SessionResponse {
+        csrf_token: session.csrf_token(),
+        idle_ttl_seconds: idle_ttl_seconds(),
+    })
 }
 
 async fn logout_session(
@@ -716,12 +742,8 @@ fn map_health(health: Health) -> HealthResponse {
     }
 }
 
-async fn index(
-    State(state): State<AppState>,
-    uri: Uri,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    session_asset_response(&state, state.assets.index(), Some(&uri), &headers)
+async fn index(State(state): State<AppState>) -> Response {
+    asset_response(state.assets.index())
 }
 
 async fn asset_or_route(
@@ -741,60 +763,9 @@ async fn asset_or_route(
             .next()
             .is_some_and(|name| name.contains('.'))
     {
-        return session_asset_response(&state, state.assets.index(), None, &headers)
-            .unwrap_or_else(IntoResponse::into_response);
+        return asset_response(state.assets.index());
     }
     StatusCode::NOT_FOUND.into_response()
-}
-
-fn session_asset_response(
-    state: &AppState,
-    asset: &Asset,
-    browser_entry: Option<&Uri>,
-    headers: &HeaderMap,
-) -> Result<Response, ApiError> {
-    let now = Instant::now();
-    state.reap_expired_session_resources(now);
-    let has_session = session_cookie(headers)
-        .is_some_and(|cookie| state.sessions.authenticate(cookie, now).is_some());
-    if let Some(control) = &state.service_control {
-        match browser_entry.and_then(|uri| control.authorize_browser_entry(uri)) {
-            Some(true) => {
-                let mut response = StatusCode::SEE_OTHER.into_response();
-                response
-                    .headers_mut()
-                    .insert(LOCATION, HeaderValue::from_static("/"));
-                response
-                    .headers_mut()
-                    .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-                if !has_session {
-                    issue_session_cookie(state, now, &mut response)?;
-                }
-                return Ok(response);
-            }
-            Some(false) => return Err(ApiError::unauthorized()),
-            None if !has_session => return Err(ApiError::unauthorized()),
-            None => {}
-        }
-    }
-    if has_session {
-        return Ok(asset_response(asset));
-    }
-    let mut response = asset_response(asset);
-    issue_session_cookie(state, now, &mut response)?;
-    Ok(response)
-}
-
-fn issue_session_cookie(
-    state: &AppState,
-    now: Instant,
-    response: &mut Response,
-) -> Result<(), ApiError> {
-    let credentials = state
-        .sessions
-        .issue_session(now)
-        .map_err(|_| ApiError::session_unavailable())?;
-    set_session_cookie(response, &credentials.cookie_value)
 }
 
 fn set_session_cookie(response: &mut Response, cookie_value: &str) -> Result<(), ApiError> {
@@ -951,7 +922,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_enforces_direct_session_csrf_and_security_headers() {
+    async fn router_enforces_one_time_bootstrap_csrf_and_security_headers() {
         let asset_root = TempDir::new().expect("asset root exists");
         let index = b"<!doctype html><html class=\"dark\"></html>";
         fs::write(asset_root.path().join("index.html"), index).expect("index writes");
@@ -998,7 +969,7 @@ mod tests {
             .oneshot(direct_navigation)
             .await
             .expect("direct navigation response returns");
-        assert_eq!(direct_response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(direct_response.status(), StatusCode::OK);
         assert!(!direct_response.headers().contains_key(SET_COOKIE));
 
         let unauthenticated_session = Request::builder()
@@ -1022,114 +993,140 @@ mod tests {
                 .contains_key(SET_COOKIE)
         );
 
-        for uri in [
-            format!("/?bootstrap={}", "b".repeat(64)),
-            format!("/?bootstrap={service_token}&bootstrap={service_token}"),
-        ] {
-            let invalid_bootstrap = Request::builder()
-                .uri(uri)
-                .header(HOST, "127.0.0.1:43127")
-                .header("sec-fetch-site", "none")
-                .header(ACCEPT, "text/html")
-                .body(Body::empty())
-                .expect("invalid bootstrap request builds");
-            let invalid_bootstrap_response = app
-                .clone()
-                .oneshot(invalid_bootstrap)
-                .await
-                .expect("invalid bootstrap response returns");
-            assert_eq!(
-                invalid_bootstrap_response.status(),
-                StatusCode::UNAUTHORIZED
-            );
-            assert!(
-                !invalid_bootstrap_response
-                    .headers()
-                    .contains_key(SET_COOKIE)
-            );
-        }
-
-        let bootstrap_navigation = Request::builder()
-            .uri(format!("/?bootstrap={service_token}"))
+        let invalid_service_bootstrap = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/service/bootstrap")
             .header(HOST, "127.0.0.1:43127")
-            .header("sec-fetch-site", "none")
-            .header(ACCEPT, "text/html")
+            .header("origin", "http://127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .header(&SERVICE_TOKEN_HEADER, "invalid")
             .body(Body::empty())
-            .expect("bootstrap navigation request builds");
+            .expect("invalid service bootstrap request builds");
+        assert_eq!(
+            app.clone()
+                .oneshot(invalid_service_bootstrap)
+                .await
+                .expect("invalid service bootstrap response returns")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let service_bootstrap = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/service/bootstrap")
+            .header(HOST, "127.0.0.1:43127")
+            .header("origin", "http://127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .header(&SERVICE_TOKEN_HEADER, &service_token)
+            .body(Body::empty())
+            .expect("service bootstrap request builds");
+        let service_bootstrap_response = app
+            .clone()
+            .oneshot(service_bootstrap)
+            .await
+            .expect("service bootstrap response returns");
+        assert_eq!(service_bootstrap_response.status(), StatusCode::OK);
+        assert_eq!(
+            service_bootstrap_response.headers().get(CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+        let response_body = to_bytes(
+            service_bootstrap_response.into_body(),
+            MAX_BROWSER_BODY_BYTES,
+        )
+        .await
+        .expect("service bootstrap response body reads");
+        let response_json: serde_json::Value =
+            serde_json::from_slice(&response_body).expect("service bootstrap response parses");
+        assert_eq!(response_json["schema"], "rootlight.web-service-bootstrap/1");
+        let bootstrap = response_json["bootstrap"]
+            .as_str()
+            .expect("service bootstrap secret returns")
+            .to_owned();
+        assert_eq!(bootstrap.len(), 43);
+        assert_ne!(bootstrap, service_token);
+
+        let invalid_bootstrap = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/session/bootstrap")
+            .header(HOST, "127.0.0.1:43127")
+            .header("origin", "http://127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({ "secret": "b".repeat(43) }))
+                    .expect("invalid bootstrap request serializes"),
+            ))
+            .expect("invalid bootstrap request builds");
+        let invalid_bootstrap_response = app
+            .clone()
+            .oneshot(invalid_bootstrap)
+            .await
+            .expect("invalid bootstrap response returns");
+        assert_eq!(
+            invalid_bootstrap_response.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(
+            !invalid_bootstrap_response
+                .headers()
+                .contains_key(SET_COOKIE)
+        );
+
+        let bootstrap_request = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/session/bootstrap")
+                .header(HOST, "127.0.0.1:43127")
+                .header("origin", "http://127.0.0.1:43127")
+                .header("sec-fetch-site", "same-origin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "secret": bootstrap }))
+                        .expect("bootstrap request serializes"),
+                ))
+                .expect("bootstrap request builds")
+        };
         let bootstrap_response = app
             .clone()
-            .oneshot(bootstrap_navigation)
+            .oneshot(bootstrap_request())
             .await
-            .expect("bootstrap navigation response returns");
-        assert_eq!(bootstrap_response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            bootstrap_response.headers().get(LOCATION),
-            Some(&HeaderValue::from_static("/"))
-        );
+            .expect("bootstrap response returns");
+        assert_eq!(bootstrap_response.status(), StatusCode::OK);
         assert_eq!(
             bootstrap_response.headers().get(CACHE_CONTROL),
             Some(&HeaderValue::from_static("no-store"))
         );
-        let direct_cookie = bootstrap_response
+        let cookie = bootstrap_response
             .headers()
             .get(SET_COOKIE)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.split(';').next())
-            .expect("authorized bootstrap creates a browser session")
+            .expect("bootstrap creates a browser session")
+            .to_owned();
+        let response_body = to_bytes(bootstrap_response.into_body(), MAX_BROWSER_BODY_BYTES)
+            .await
+            .expect("bootstrap response body reads");
+        let response_json: serde_json::Value =
+            serde_json::from_slice(&response_body).expect("bootstrap response parses");
+        let csrf = response_json["csrfToken"]
+            .as_str()
+            .expect("csrf token returns")
             .to_owned();
 
-        let authenticated_bootstrap = Request::builder()
-            .uri(format!("/?bootstrap={service_token}"))
-            .header(HOST, "127.0.0.1:43127")
-            .header("sec-fetch-site", "none")
-            .header(ACCEPT, "text/html")
-            .header(COOKIE, &direct_cookie)
-            .body(Body::empty())
-            .expect("authenticated bootstrap request builds");
-        let authenticated_bootstrap_response = app
+        let replay_response = app
             .clone()
-            .oneshot(authenticated_bootstrap)
+            .oneshot(bootstrap_request())
             .await
-            .expect("authenticated bootstrap response returns");
-        assert_eq!(
-            authenticated_bootstrap_response.status(),
-            StatusCode::SEE_OTHER
-        );
-        assert_eq!(
-            authenticated_bootstrap_response.headers().get(LOCATION),
-            Some(&HeaderValue::from_static("/"))
-        );
-        assert!(
-            !authenticated_bootstrap_response
-                .headers()
-                .contains_key(SET_COOKIE)
-        );
-
-        let authenticated_navigation = Request::builder()
-            .uri("/")
-            .header(HOST, "127.0.0.1:43127")
-            .header("sec-fetch-site", "none")
-            .header(ACCEPT, "text/html")
-            .header(COOKIE, &direct_cookie)
-            .body(Body::empty())
-            .expect("authenticated navigation request builds");
-        let authenticated_navigation_response = app
-            .clone()
-            .oneshot(authenticated_navigation)
-            .await
-            .expect("authenticated navigation response returns");
-        assert_eq!(authenticated_navigation_response.status(), StatusCode::OK);
-        assert!(
-            !authenticated_navigation_response
-                .headers()
-                .contains_key(SET_COOKIE)
-        );
+            .expect("bootstrap replay response returns");
+        assert_eq!(replay_response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!replay_response.headers().contains_key(SET_COOKIE));
 
         let direct_session = Request::builder()
             .uri("/api/v1/session")
             .header(HOST, "127.0.0.1:43127")
             .header("sec-fetch-site", "same-origin")
-            .header(COOKIE, &direct_cookie)
+            .header(COOKIE, &cookie)
             .body(Body::empty())
             .expect("direct browser session request builds");
         let direct_session_response = app
@@ -1143,11 +1140,7 @@ mod tests {
             .expect("direct session response body reads");
         let response_json: serde_json::Value =
             serde_json::from_slice(&response_body).expect("direct session response parses");
-        let csrf = response_json["csrfToken"]
-            .as_str()
-            .expect("csrf token returns")
-            .to_owned();
-        let cookie = direct_cookie;
+        assert_eq!(response_json["csrfToken"], csrf);
 
         let unauthenticated_malformed_query = Request::builder()
             .uri(format!("/api/v1/projects?snapshot={}", "x".repeat(2_000)))

@@ -1,4 +1,4 @@
-// Exercises direct local-session initialization and the authenticated shell boundary.
+// Exercises one-time session bootstrap and the authenticated shell boundary.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
@@ -17,7 +17,9 @@ afterEach(() => {
 });
 
 describe("SessionProvider", () => {
-  it("initializes a direct local session", async () => {
+  it("exchanges and immediately removes a bootstrap fragment", async () => {
+    const secret = "a".repeat(43);
+    window.history.replaceState(null, "", `/#bootstrap=${secret}`);
     const { SessionProvider } = await import("../src/session/session-provider");
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify({ csrfToken: "csrf", idleTtlSeconds: 1_800 }), {
@@ -36,8 +38,15 @@ describe("SessionProvider", () => {
     );
 
     expect(await screen.findByText("Authenticated content")).toBeInTheDocument();
+    expect(window.location.hash).toBe("");
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/session");
+    expect(fetchMock.mock.calls[0]).toEqual([
+      "/api/v1/session/bootstrap",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ secret }),
+      }),
+    ]);
   });
 
   it("reports a local service connection failure", async () => {
@@ -62,6 +71,8 @@ describe("SessionProvider", () => {
   });
 
   it("retries a transient local service connection", async () => {
+    const secret = "b".repeat(43);
+    window.history.replaceState(null, "", `/#bootstrap=${secret}`);
     const { SessionProvider } = await import("../src/session/session-provider");
     const fetchMock = vi
       .fn<typeof fetch>()
@@ -88,6 +99,10 @@ describe("SessionProvider", () => {
 
     expect(await screen.findByText("Authenticated content")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map((call) => call[1]?.body)).toEqual([
+      JSON.stringify({ secret }),
+      JSON.stringify({ secret }),
+    ]);
   });
 
   it("keeps CSRF in memory and closes the session after logout", async () => {
@@ -128,7 +143,7 @@ describe("SessionProvider", () => {
     });
   });
 
-  it("renews the local session when a later API request reports expiry", async () => {
+  it("fails closed when a session expires without a fresh bootstrap", async () => {
     const { SessionProvider } = await import("../src/session/session-provider");
     const { fetchHealth } = await import("../src/api/client");
     const fetchMock = vi
@@ -140,12 +155,7 @@ describe("SessionProvider", () => {
         }),
       )
       .mockResolvedValueOnce(new Response(null, { status: 401 }))
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ csrfToken: "renewed-csrf", idleTtlSeconds: 1_800 }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
-      );
+      .mockResolvedValueOnce(new Response(null, { status: 401 }));
     vi.stubGlobal("fetch", fetchMock);
 
     function SessionConsumer() {
@@ -163,7 +173,10 @@ describe("SessionProvider", () => {
     );
 
     await userEvent.click(await screen.findByRole("button", { name: "Check health" }));
-    expect(await screen.findByRole("button", { name: "Check health" })).toBeVisible();
+    expect(
+      await screen.findByRole("heading", { name: "Rootlight could not reconnect" }),
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Check health" })).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock.mock.calls[2]?.[0]).toBe("/api/v1/session");
   });
