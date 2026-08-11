@@ -4143,7 +4143,7 @@ where
             matches!(request.mode, LocateMode::Exact),
             request.maximum_results,
         ),
-        &status.active_generation.to_string(),
+        &status.resolved_generation.to_string(),
     );
     let data = CodeLocateData {
         matches: Vec::new(),
@@ -4259,7 +4259,7 @@ where
     .await?;
     let explanation = rootlight_agent::explain::finalize_plan(
         rootlight_agent::explain::symbol_explain_plan(request.symbols.len()),
-        &status.active_generation.to_string(),
+        &status.resolved_generation.to_string(),
     );
     let data = SymbolExplainData {
         symbols: Vec::new(),
@@ -4290,7 +4290,7 @@ where
     .await?;
     let explanation = rootlight_agent::explain::finalize_plan(
         rootlight_agent::explain::source_read_plan(request.selector_count),
-        &status.active_generation.to_string(),
+        &status.resolved_generation.to_string(),
     );
     let data = SourceReadData {
         chunks: Vec::new(),
@@ -4326,7 +4326,7 @@ where
             request.seeds.len(),
             request.max_results.map(u32::from),
         ),
-        &status.active_generation.to_string(),
+        &status.resolved_generation.to_string(),
     );
     let data = SymbolRelationshipsData {
         groups: Vec::new(),
@@ -4718,7 +4718,7 @@ where
     .await?;
     let explanation = rootlight_agent::explain::finalize_plan(
         rootlight_agent::explain::flow_trace_plan(request.max_depth, request.max_paths),
-        &status.active_generation.to_string(),
+        &status.resolved_generation.to_string(),
     );
     let data = FlowTraceData {
         paths: Vec::new(),
@@ -4921,7 +4921,7 @@ where
     .await?;
     let explanation = rootlight_agent::explain::finalize_plan(
         rootlight_agent::explain::architecture_cycles_plan(request.max_cycles),
-        &status.active_generation.to_string(),
+        &status.resolved_generation.to_string(),
     );
     let data = ArchitectureCyclesData {
         components: Vec::new(),
@@ -5150,7 +5150,7 @@ where
     .await?;
     let explanation = rootlight_agent::explain::finalize_plan(
         rootlight_agent::explain::code_dead_plan(request.max_candidates),
-        &status.active_generation.to_string(),
+        &status.resolved_generation.to_string(),
     );
     let data = CodeDeadData {
         candidates: Vec::new(),
@@ -5361,7 +5361,7 @@ where
     .await?;
     let explanation = rootlight_agent::explain::finalize_plan(
         rootlight_agent::explain::architecture_overview_plan(request.max_components),
-        &status.active_generation.to_string(),
+        &status.resolved_generation.to_string(),
     );
     let data = ArchitectureOverviewData {
         components: Vec::new(),
@@ -5572,7 +5572,7 @@ where
     .await?;
     let explanation = rootlight_agent::explain::finalize_plan(
         rootlight_agent::explain::tests_select_plan(request.max_tests),
-        &status.active_generation.to_string(),
+        &status.resolved_generation.to_string(),
     );
     let data = TestsSelectData {
         tests: Vec::new(),
@@ -5801,7 +5801,7 @@ where
         .saturating_add(request.changed_paths.len());
     let explanation = rootlight_agent::explain::finalize_plan(
         rootlight_agent::explain::change_impact_plan(changed_count),
-        &status.active_generation.to_string(),
+        &status.resolved_generation.to_string(),
     );
     let data = ChangeImpactData {
         resolved_changes: Vec::new(),
@@ -6294,7 +6294,7 @@ where
     .await?;
     let explanation = rootlight_agent::explain::finalize_plan(
         rootlight_agent::explain::history_compare_plan(request.max_results),
-        &status.active_generation.to_string(),
+        &status.resolved_generation.to_string(),
     );
     let data = HistoryCompareData {
         matched_states: MatchedStates {

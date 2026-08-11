@@ -9711,6 +9711,50 @@ async fn code_locate_explain_returns_a_plan_without_retrieval() {
 }
 
 #[tokio::test]
+async fn code_locate_explain_fingerprint_binds_the_resolved_generation() {
+    let status = RepositoryStatus {
+        resolved_generation: alternate_generation(),
+        active_generation: generation(),
+        parent_generation: None,
+        active_parent_generation: Some(parent_generation()),
+        structural_freshness: "superseded".to_owned(),
+        semantic_freshness: "superseded".to_owned(),
+        ..repository_status_response()
+    };
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(status)));
+    let output: CodeLocateOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::CodeLocate,
+            json!({
+                "repository": {"repository_id": repository()},
+                "generation": alternate_generation(),
+                "query": "publish",
+                "explain": true
+            }),
+        )
+        .await
+        .expect("historical explain executes"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected explain success");
+    };
+    let actual = output
+        .data
+        .explanation
+        .expect("explain returns a plan")
+        .fingerprint;
+    let plan = rootlight_agent::explain::code_locate_plan(false, u32::from(DEFAULT_LOCATE_RESULTS));
+    let resolved =
+        rootlight_agent::explain::finalize_plan(plan.clone(), &alternate_generation().to_string());
+    let active = rootlight_agent::explain::finalize_plan(plan, &generation().to_string());
+
+    assert_eq!(actual, resolved.fingerprint);
+    assert_ne!(actual, active.fingerprint);
+    assert_eq!(output.generation.generation_id, alternate_generation());
+}
+
+#[tokio::test]
 async fn explain_fingerprint_is_stable_for_identical_requests() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
