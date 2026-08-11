@@ -5286,7 +5286,7 @@ async fn query_batch_keeps_local_deadline_budget_error_inside_the_operation_resu
 }
 
 #[tokio::test]
-async fn query_batch_root_gate_admits_child_budget_dimensions() {
+async fn query_batch_root_gate_enforces_parent_budget_dimensions() {
     let timeout_harness = batch_harness();
     let timeout_calls = Arc::clone(&timeout_harness.call_count);
     let timeout_router = ToolRouter::new(
@@ -5332,52 +5332,48 @@ async fn query_batch_root_gate_admits_child_budget_dimensions() {
         rootlight_mcp_contract::ExposureProfile::Developer,
     )
     .expect("router compiles");
+    let batch_request = |max_tokens| {
+        operating_request(json!({
+            "name": "query.batch",
+            "arguments": {
+                "repository": {"repository_id": repository()},
+                "budget": {"max_tokens": max_tokens},
+                "operations": [{
+                    "id": "bounded",
+                    "tool": "code.locate",
+                    "arguments": {"query": "publish"},
+                    "local_budget": {"max_tokens": 500}
+                }]
+            }
+        }))
+    };
+    let baseline_response = token_router
+        .handle(batch_request(16_000), cancellation())
+        .await;
+    let HandlerResponse::Success(baseline_result) = baseline_response else {
+        panic!("baseline max_tokens case returns an MCP tool result");
+    };
+    assert_eq!(baseline_result["isError"], false);
+    let baseline = &baseline_result["structuredContent"];
+    let baseline_bytes = serde_json::to_vec(baseline).expect("batch response serializes");
+    assert!(baseline_bytes.len() > 1_000);
+    assert!(
+        rootlight_mcp_contract::accounting::estimate_tokens(baseline_bytes.len()) <= 1_000,
+        "the regression fixture must distinguish the estimate from the conservative byte ceiling"
+    );
+
     let token_response = token_router
-        .handle(
-            operating_request(json!({
-                "name": "query.batch",
-                "arguments": {
-                    "repository": {"repository_id": repository()},
-                    "budget": {"max_tokens": 1000},
-                    "operations": [{
-                        "id": "bounded",
-                        "tool": "code.locate",
-                        "arguments": {"query": "publish"},
-                        "local_budget": {"max_tokens": 500}
-                    }]
-                }
-            })),
-            cancellation(),
-        )
+        .handle(batch_request(1_000), cancellation())
         .await;
     let HandlerResponse::Success(token_result) = token_response else {
         panic!("max_tokens case returns an MCP tool result");
     };
-    assert_eq!(token_result["isError"], false);
+    assert_eq!(token_result["isError"], true);
     assert_eq!(
-        token_result["structuredContent"]["data"]["operation_results"][0]["status"],
-        "ok"
+        token_result["structuredContent"]["error"]["code"],
+        "BUDGET_EXCEEDED"
     );
-    let structured = &token_result["structuredContent"];
-    let encoded = serde_json::to_vec(structured).expect("batch response serializes");
-    assert_eq!(
-        structured["usage"]["json_bytes"],
-        json!(encoded.len()),
-        "batch usage must report the exact final serialized response"
-    );
-    assert_eq!(
-        structured["usage"]["estimated_tokens"],
-        json!(rootlight_mcp_contract::accounting::estimate_tokens(
-            encoded.len()
-        ))
-    );
-    assert!(
-        structured["usage"]["estimated_tokens"]
-            .as_u64()
-            .expect("batch usage contains estimated tokens")
-            <= 1_000
-    );
-    assert_eq!(token_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(token_calls.load(Ordering::Relaxed), 4);
 }
 
 #[tokio::test]

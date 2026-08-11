@@ -8378,8 +8378,10 @@ fn serialize_measured_batch_success(
             && output.usage.estimated_tokens == estimated_tokens
         {
             let maximums = limits.maximums();
+            // Token estimates are telemetry, not a conservative admission
+            // bound when no provider tokenizer is available.
             let representation_exceeded =
-                json_bytes > maximums.json_bytes || estimated_tokens > maximums.tokens;
+                json_bytes > maximums.json_bytes || json_bytes > maximums.tokens;
             if representation_exceeded && !payload_was_reduced {
                 reduce_batch_payload(&mut output)?;
                 payload_was_reduced = true;
