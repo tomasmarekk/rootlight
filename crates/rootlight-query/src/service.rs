@@ -2534,13 +2534,25 @@ fn build_advanced_query(
     }
 
     // Index file identities to presentation paths for scan rows.
-    let mut file_paths: BTreeMap<FileId, String> = BTreeMap::new();
+    let mut file_paths: BTreeMap<FileId, &str> = BTreeMap::new();
     for file in &document.files {
-        file_paths.insert(file.id, file.path.clone());
+        tracker.add_memory(advanced_file_path_index_entry_bytes()?)?;
+        file_paths.insert(file.id, file.path.as_str());
     }
 
-    let (mut set, truncated) =
-        eval_advanced_node(document, &plan.ast, &file_paths, control, tracker)?;
+    let materialization_cap = plan
+        .page_offset
+        .checked_add(plan.max_rows)
+        .and_then(|cap| cap.checked_add(1))
+        .ok_or(QueryError::MemoryUnavailable)?;
+    let (mut set, truncated) = eval_advanced_node(
+        document,
+        &plan.ast,
+        &file_paths,
+        Some(materialization_cap),
+        control,
+        tracker,
+    )?;
 
     let page_start = plan.page_offset.min(set.rows.len());
     let page_end = page_start.saturating_add(plan.max_rows).min(set.rows.len());
@@ -2810,7 +2822,8 @@ fn advanced_project_schema(
 fn eval_advanced_node(
     document: &NormalizedIrDocument,
     node: &AdvancedAstNode,
-    file_paths: &BTreeMap<FileId, String>,
+    file_paths: &BTreeMap<FileId, &str>,
+    output_cap: Option<usize>,
     control: &QueryControl<'_>,
     tracker: &mut UsageTracker,
 ) -> Result<(AdvancedRowSet, bool), QueryError> {
@@ -2821,6 +2834,7 @@ fn eval_advanced_node(
                 *entity,
                 filter.as_deref(),
                 file_paths,
+                output_cap,
                 control,
                 tracker,
             )?;
@@ -2828,34 +2842,40 @@ fn eval_advanced_node(
         }
         AdvancedAstNode::Filter { input, predicate } => {
             let (set, truncated) =
-                eval_advanced_node(document, input, file_paths, control, tracker)?;
-            Ok((advanced_filter_rows(set, predicate, control)?, truncated))
+                eval_advanced_node(document, input, file_paths, None, control, tracker)?;
+            let mut set = advanced_filter_rows(set, predicate, control)?;
+            cap_advanced_rows(&mut set, output_cap);
+            Ok((set, truncated))
         }
         AdvancedAstNode::Project { input, columns } => {
             let (set, truncated) =
-                eval_advanced_node(document, input, file_paths, control, tracker)?;
-            Ok((advanced_project_rows(set, columns, control)?, truncated))
-        }
-        AdvancedAstNode::Sort { input, by } => {
-            let (mut set, truncated) =
-                eval_advanced_node(document, input, file_paths, control, tracker)?;
-            advanced_sort_rows(&mut set.rows, by, control, tracker)?;
-            Ok((set, truncated))
-        }
-        AdvancedAstNode::Limit { input, max_rows } => {
-            let (set, truncated) =
-                eval_advanced_node(document, input, file_paths, control, tracker)?;
+                eval_advanced_node(document, input, file_paths, output_cap, control, tracker)?;
             Ok((
-                advanced_limit_rows(set, usize::from(*max_rows), control)?,
+                advanced_project_rows(set, columns, control, tracker)?,
                 truncated,
             ))
         }
+        AdvancedAstNode::Sort { input, by } => {
+            let (mut set, truncated) =
+                eval_advanced_node(document, input, file_paths, None, control, tracker)?;
+            advanced_sort_rows(&mut set.rows, by, control, tracker)?;
+            cap_advanced_rows(&mut set, output_cap);
+            Ok((set, truncated))
+        }
+        AdvancedAstNode::Limit { input, max_rows } => {
+            let limit = usize::from(*max_rows);
+            let input_cap = Some(output_cap.map_or(limit, |cap| cap.min(limit)));
+            let (set, truncated) =
+                eval_advanced_node(document, input, file_paths, input_cap, control, tracker)?;
+            Ok((advanced_limit_rows(set, limit, control)?, truncated))
+        }
         AdvancedAstNode::Join { left, right, on } => {
             let (left, left_truncated) =
-                eval_advanced_node(document, left, file_paths, control, tracker)?;
+                eval_advanced_node(document, left, file_paths, None, control, tracker)?;
             let (right, right_truncated) =
-                eval_advanced_node(document, right, file_paths, control, tracker)?;
-            let joined = advanced_join_rows(left, right, on, control, tracker)?;
+                eval_advanced_node(document, right, file_paths, None, control, tracker)?;
+            let mut joined = advanced_join_rows(left, right, on, control, tracker)?;
+            cap_advanced_rows(&mut joined, output_cap);
             Ok((joined, left_truncated || right_truncated))
         }
         AdvancedAstNode::Aggregate {
@@ -2864,9 +2884,10 @@ fn eval_advanced_node(
             aggregations,
         } => {
             let (input, truncated) =
-                eval_advanced_node(document, input, file_paths, control, tracker)?;
-            let aggregated =
+                eval_advanced_node(document, input, file_paths, None, control, tracker)?;
+            let mut aggregated =
                 advanced_aggregate_rows(input, group_by, aggregations, control, tracker)?;
+            cap_advanced_rows(&mut aggregated, output_cap);
             Ok((aggregated, truncated))
         }
         AdvancedAstNode::Traverse {
@@ -2886,7 +2907,7 @@ fn eval_advanced_node(
                     resource: QueryResource::Results,
                 });
             }
-            let traversed = advanced_traverse_rows(
+            let mut traversed = advanced_traverse_rows(
                 document,
                 seed,
                 *relation,
@@ -2895,6 +2916,7 @@ fn eval_advanced_node(
                 control,
                 tracker,
             )?;
+            cap_advanced_rows(&mut traversed, output_cap);
             Ok((traversed, false))
         }
     }
@@ -2905,27 +2927,65 @@ fn eval_advanced_scan(
     document: &NormalizedIrDocument,
     entity_kind: AdvancedEntityKind,
     filter: Option<&AdvancedPredicate>,
-    file_paths: &BTreeMap<FileId, String>,
+    file_paths: &BTreeMap<FileId, &str>,
+    output_cap: Option<usize>,
     control: &QueryControl<'_>,
     tracker: &mut UsageTracker,
 ) -> Result<AdvancedRowSet, QueryError> {
     let columns = advanced_default_scan_columns();
-    let mut matched: Vec<&rootlight_ir::EntityRecord> = document
-        .entities
-        .iter()
-        .filter(|entity| entity_kind.matches_ir(entity.kind))
-        .collect();
+    let mut matched_count = 0_usize;
+    for entity in &document.entities {
+        control.check()?;
+        if entity_kind.matches_ir(entity.kind) {
+            tracker.add_rows(1)?;
+            matched_count = matched_count
+                .checked_add(1)
+                .ok_or(QueryError::MemoryUnavailable)?;
+        }
+    }
+
+    tracker.add_memory(advanced_vector_bytes::<&rootlight_ir::EntityRecord>(
+        matched_count,
+    )?)?;
+    let mut matched = Vec::new();
+    matched
+        .try_reserve_exact(matched_count)
+        .map_err(|_| QueryError::MemoryUnavailable)?;
+    for entity in &document.entities {
+        control.check()?;
+        if entity_kind.matches_ir(entity.kind) {
+            matched.push(entity);
+        }
+    }
     // Deterministic identity order independent of document insertion order.
     matched.sort_by_key(|entity| entity.id);
-    let mut rows: Vec<BTreeMap<String, AdvancedValue>> = Vec::new();
+
+    let output_cap = output_cap.unwrap_or(usize::MAX);
+    let row_capacity = matched_count.min(output_cap);
+    tracker.add_memory(advanced_vector_bytes::<BTreeMap<String, AdvancedValue>>(
+        row_capacity,
+    )?)?;
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(row_capacity)
+        .map_err(|_| QueryError::MemoryUnavailable)?;
     for entity in matched {
+        if rows.len() >= output_cap {
+            break;
+        }
         control.check()?;
-        tracker.add_rows(1)?;
-        let row = advanced_scan_row(entity, file_paths)?;
+        let kind = serialized_label(&entity.kind)?;
+        let path = entity
+            .evidence
+            .source
+            .as_ref()
+            .and_then(|source| file_paths.get(&source.span().file()).copied())
+            .unwrap_or_default();
+        tracker.add_memory(advanced_scan_row_owned_bytes(entity, &kind, path)?)?;
+        let row = advanced_scan_row(entity, kind, path);
         if filter.is_some_and(|predicate| !advanced_predicate_matches(predicate, &row)) {
             continue;
         }
-        try_push(&mut rows, row)?;
+        rows.push(row);
     }
     Ok(AdvancedRowSet { columns, rows })
 }
@@ -2933,26 +2993,18 @@ fn eval_advanced_scan(
 /// Builds one scan row keyed by the default scan columns.
 fn advanced_scan_row(
     entity: &rootlight_ir::EntityRecord,
-    file_paths: &BTreeMap<FileId, String>,
-) -> Result<BTreeMap<String, AdvancedValue>, QueryError> {
+    kind: String,
+    path: &str,
+) -> BTreeMap<String, AdvancedValue> {
     let mut row = BTreeMap::new();
     row.insert("id".to_owned(), AdvancedValue::Symbol(entity.id));
-    row.insert(
-        "kind".to_owned(),
-        AdvancedValue::Text(serialized_label(&entity.kind)?),
-    );
+    row.insert("kind".to_owned(), AdvancedValue::Text(kind));
     row.insert(
         "name".to_owned(),
         AdvancedValue::Text(entity.canonical_name.clone()),
     );
-    let path = entity
-        .evidence
-        .source
-        .as_ref()
-        .and_then(|source| file_paths.get(&source.span().file()).cloned())
-        .unwrap_or_default();
-    row.insert("path".to_owned(), AdvancedValue::Text(path));
-    Ok(row)
+    row.insert("path".to_owned(), AdvancedValue::Text(path.to_owned()));
+    row
 }
 
 /// Evaluates a bounded predicate against one row.
@@ -3006,12 +3058,18 @@ fn advanced_project_rows(
     set: AdvancedRowSet,
     columns: &[String],
     control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
 ) -> Result<AdvancedRowSet, QueryError> {
     let schema = advanced_project_schema(&set.columns, columns);
     let mut rows = Vec::new();
-    try_reserve(&mut rows, set.rows.len())?;
+    tracker.add_memory(advanced_vector_bytes::<BTreeMap<String, AdvancedValue>>(
+        set.rows.len(),
+    )?)?;
+    rows.try_reserve_exact(set.rows.len())
+        .map_err(|_| QueryError::MemoryUnavailable)?;
     for row in set.rows {
         control.check()?;
+        tracker.add_memory(advanced_projected_row_owned_bytes(&row, columns)?)?;
         let mut projected = BTreeMap::new();
         for name in columns {
             if let Some(value) = row.get(name) {
@@ -3036,6 +3094,12 @@ fn advanced_limit_rows(
         set.rows.truncate(cap);
     }
     Ok(set)
+}
+
+fn cap_advanced_rows(set: &mut AdvancedRowSet, cap: Option<usize>) {
+    if let Some(cap) = cap {
+        set.rows.truncate(cap);
+    }
 }
 
 fn advanced_traverse_rows(
@@ -3152,6 +3216,21 @@ const fn advanced_relation_projection(relation: AdvancedRelationKind) -> (Relati
 
 const ADVANCED_BTREE_ENTRY_OVERHEAD_BYTES: usize = mem::size_of::<usize>() * 4;
 
+fn advanced_file_path_index_entry_bytes() -> Result<u64, QueryError> {
+    checked_usize_to_u64(
+        ADVANCED_BTREE_ENTRY_OVERHEAD_BYTES
+            .saturating_add(mem::size_of::<FileId>())
+            .saturating_add(mem::size_of::<&str>()),
+    )
+}
+
+fn advanced_vector_bytes<T>(len: usize) -> Result<u64, QueryError> {
+    let bytes = len
+        .checked_mul(mem::size_of::<T>())
+        .ok_or(QueryError::MemoryUnavailable)?;
+    checked_usize_to_u64(bytes)
+}
+
 fn advanced_value_dynamic_bytes(value: &AdvancedValue) -> usize {
     match value {
         AdvancedValue::Text(text) => text.len(),
@@ -3165,6 +3244,47 @@ fn advanced_value_dynamic_bytes(value: &AdvancedValue) -> usize {
 fn advanced_row_owned_bytes(row: &BTreeMap<String, AdvancedValue>) -> Result<u64, QueryError> {
     let mut bytes = mem::size_of::<BTreeMap<String, AdvancedValue>>();
     for (name, value) in row {
+        bytes = bytes
+            .saturating_add(ADVANCED_BTREE_ENTRY_OVERHEAD_BYTES)
+            .saturating_add(mem::size_of::<String>())
+            .saturating_add(name.len())
+            .saturating_add(mem::size_of::<AdvancedValue>())
+            .saturating_add(advanced_value_dynamic_bytes(value));
+    }
+    checked_usize_to_u64(bytes)
+}
+
+fn advanced_scan_row_owned_bytes(
+    entity: &rootlight_ir::EntityRecord,
+    kind: &str,
+    path: &str,
+) -> Result<u64, QueryError> {
+    let mut bytes = mem::size_of::<BTreeMap<String, AdvancedValue>>();
+    for (name, dynamic_bytes) in [
+        ("id", 0),
+        ("kind", kind.len()),
+        ("name", entity.canonical_name.len()),
+        ("path", path.len()),
+    ] {
+        bytes = bytes
+            .saturating_add(ADVANCED_BTREE_ENTRY_OVERHEAD_BYTES)
+            .saturating_add(mem::size_of::<String>())
+            .saturating_add(name.len())
+            .saturating_add(mem::size_of::<AdvancedValue>())
+            .saturating_add(dynamic_bytes);
+    }
+    checked_usize_to_u64(bytes)
+}
+
+fn advanced_projected_row_owned_bytes(
+    row: &BTreeMap<String, AdvancedValue>,
+    columns: &[String],
+) -> Result<u64, QueryError> {
+    let mut bytes = mem::size_of::<BTreeMap<String, AdvancedValue>>();
+    for name in columns {
+        let Some(value) = row.get(name) else {
+            continue;
+        };
         bytes = bytes
             .saturating_add(ADVANCED_BTREE_ENTRY_OVERHEAD_BYTES)
             .saturating_add(mem::size_of::<String>())
@@ -14038,11 +14158,11 @@ mod tests {
         }
     }
 
-    fn advanced_file_paths(document: &NormalizedIrDocument) -> BTreeMap<FileId, String> {
+    fn advanced_file_paths(document: &NormalizedIrDocument) -> BTreeMap<FileId, &str> {
         document
             .files
             .iter()
-            .map(|file| (file.id, file.path.clone()))
+            .map(|file| (file.id, file.path.as_str()))
             .collect()
     }
 
@@ -14069,6 +14189,7 @@ mod tests {
                 AdvancedEntityKind::Function,
                 None,
                 &advanced_file_paths(&document),
+                None,
                 &control,
                 &mut below,
             ),
@@ -14089,12 +14210,125 @@ mod tests {
             AdvancedEntityKind::Function,
             None,
             &advanced_file_paths(&document),
+            None,
             &control,
             &mut exact,
         )
         .expect("two matching entities fit the exact row budget");
         assert_eq!(rows.rows.len(), 2);
         assert_eq!(exact.rows, 2);
+    }
+
+    #[test]
+    fn advanced_scan_bounds_materialization_and_accounts_owned_rows() {
+        let mut document = advanced_document();
+        for entity in &mut document.entities {
+            if entity.kind == EntityKind::Function {
+                entity.canonical_name = "x".repeat(4_096);
+            }
+        }
+        let file_paths = advanced_file_paths(&document);
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(30));
+
+        let mut tiny = UsageTracker::new(QueryBudget::new().with_max_memory_bytes(1));
+        let error = expect_advanced_error(
+            eval_advanced_scan(
+                &document,
+                AdvancedEntityKind::Function,
+                None,
+                &file_paths,
+                Some(1),
+                &control,
+                &mut tiny,
+            ),
+            "the borrowed match index exceeds a one-byte memory budget",
+        );
+        assert!(matches!(
+            error,
+            QueryError::BudgetExceeded {
+                resource: QueryResource::MemoryBytes,
+                limit: 1,
+            }
+        ));
+        assert_eq!(tiny.memory_bytes, 0);
+
+        let mut measured = UsageTracker::new(QueryBudget::new());
+        let capped = eval_advanced_scan(
+            &document,
+            AdvancedEntityKind::Function,
+            None,
+            &file_paths,
+            Some(1),
+            &control,
+            &mut measured,
+        )
+        .expect("one materialized row fits the default memory budget");
+        assert_eq!(capped.rows.len(), 1);
+        let capped_bytes = measured.memory_bytes;
+
+        let mut exact = UsageTracker::new(QueryBudget::new().with_max_memory_bytes(capped_bytes));
+        let capped = eval_advanced_scan(
+            &document,
+            AdvancedEntityKind::Function,
+            None,
+            &file_paths,
+            Some(1),
+            &control,
+            &mut exact,
+        )
+        .expect("the measured memory budget admits the capped scan");
+        assert_eq!(capped.rows.len(), 1);
+        assert_eq!(exact.memory_bytes, capped_bytes);
+
+        let mut uncapped =
+            UsageTracker::new(QueryBudget::new().with_max_memory_bytes(capped_bytes));
+        let error = expect_advanced_error(
+            eval_advanced_scan(
+                &document,
+                AdvancedEntityKind::Function,
+                None,
+                &file_paths,
+                None,
+                &control,
+                &mut uncapped,
+            ),
+            "the same budget cannot materialize the second owned row",
+        );
+        assert!(matches!(
+            error,
+            QueryError::BudgetExceeded {
+                resource: QueryResource::MemoryBytes,
+                limit,
+            } if limit == capped_bytes
+        ));
+    }
+
+    #[test]
+    fn advanced_limit_pushes_its_cap_into_scan_materialization() {
+        let document = advanced_document();
+        let ast = AdvancedAstNode::Limit {
+            input: Box::new(scan_functions()),
+            max_rows: 1,
+        };
+        let file_paths = advanced_file_paths(&document);
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, Duration::from_secs(30));
+        let mut tracker = UsageTracker::new(QueryBudget::new());
+
+        let (set, truncated) = eval_advanced_node(
+            &document,
+            &ast,
+            &file_paths,
+            Some(2),
+            &control,
+            &mut tracker,
+        )
+        .expect("the limit admits one scan row");
+
+        assert_eq!(set.rows.len(), 1);
+        assert!(!truncated);
+        assert_eq!(tracker.rows, 2);
     }
 
     #[test]
@@ -14323,6 +14557,7 @@ mod tests {
                 AdvancedEntityKind::Function,
                 None,
                 &file_paths,
+                None,
                 &control,
                 &mut scan_tracker,
             ),
@@ -14387,7 +14622,12 @@ mod tests {
             Err(QueryError::Cancelled(CancellationReason::ClientRequest))
         ));
         assert!(matches!(
-            advanced_project_rows(advanced_integer_rows(&[1, 2]), &["id".to_owned()], &control,),
+            advanced_project_rows(
+                advanced_integer_rows(&[1, 2]),
+                &["id".to_owned()],
+                &control,
+                &mut UsageTracker::new(QueryBudget::new()),
+            ),
             Err(QueryError::Cancelled(CancellationReason::ClientRequest))
         ));
         assert!(matches!(
