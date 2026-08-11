@@ -4220,6 +4220,7 @@ fn exercise_incremental_lineage(
             "repository": {"repository_id": base.repository},
             "base": base.generation,
             "head": head.generation,
+            "include_unchanged_context": true,
             "max_results": 100,
             "profile": "evidence"
         }),
