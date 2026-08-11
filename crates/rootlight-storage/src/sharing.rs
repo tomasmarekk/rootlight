@@ -8,7 +8,8 @@
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, GenerationId, RepositoryId, content_hash};
 use rootlight_ir::{
-    ExtensionSupport, IrDocument, IrLimits, NormalizedIrDocument, decode_ir_document,
+    ExtensionSupport, IrDocument, IrLimits, LEXICAL_EXTENSION_NAMESPACE, NormalizedIrDocument,
+    decode_ir_document,
 };
 use serde::{Deserialize, Serialize};
 
@@ -210,8 +211,14 @@ pub fn export_shared_generation(
     {
         return Err(SharedGenerationError::Identity);
     }
+    let mut shared_document = document.clone();
+    // Lexical extensions deliberately retain source text for local queries, so
+    // they cannot cross the source-free sharing boundary.
+    shared_document
+        .extensions
+        .retain(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE);
     let document_bytes =
-        serde_json::to_vec(document).map_err(|_| SharedGenerationError::Encoding)?;
+        serde_json::to_vec(&shared_document).map_err(|_| SharedGenerationError::Encoding)?;
     let document_length =
         u64::try_from(document_bytes.len()).map_err(|_| SharedGenerationError::ResourceLimit)?;
     let source_set_hash = shared_generation_source_set_hash(document)?;

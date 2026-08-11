@@ -34,10 +34,13 @@ const AFTER: &str = "pub fn answer() -> u32 {\n    43\n}\n";
 const OTHER: &str = "pub fn other() -> u32 {\n    7\n}\n";
 const KEPT: &str = "pub fn kept_after_negation() -> bool {\n    true\n}\n";
 const MALFORMED: &str = "// malformed_source_sentinel\npub fn broken( {\n";
+const SHARED_SECRET: &str = "CUSTOMER_SECRET_DO_NOT_SHARE";
 
 #[test]
 fn shared_generation_round_trip_is_source_bound_and_does_not_activate() {
-    let fixture = fixture(BEFORE);
+    let fixture = fixture(&format!(
+        "/// {SHARED_SECRET}\npub fn answer() -> u32 {{\n    42\n}}\n"
+    ));
     let cancellation = deadline();
     let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
     let indexed = service
@@ -54,6 +57,13 @@ fn shared_generation_round_trip_is_source_bound_and_does_not_activate() {
         .expect("generation exports");
     assert_eq!(exported.repository(), indexed.repository);
     assert_eq!(exported.generation(), indexed.generation);
+    assert!(
+        !exported
+            .bundle()
+            .windows(SHARED_SECRET.len())
+            .any(|window| window == SHARED_SECRET.as_bytes()),
+        "source-derived lexical text must not enter a shared bundle"
+    );
 
     let imported = service
         .import_shared_generation(
