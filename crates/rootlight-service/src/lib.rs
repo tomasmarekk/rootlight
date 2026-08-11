@@ -3406,7 +3406,7 @@ impl FirstSliceService {
             .ok_or(FirstSliceError::Retention)?;
         let config = ConfigSnapshot::resolve(&[ConfigLayer {
             source: ConfigSource::Defaults,
-            contents: "version = \"1.0\"",
+            contents: "version = \"1.1\"",
         }])
         .map_err(|_| FirstSliceError::Configuration)?;
         // Discovery, the capability snapshot, and parser admission must share
@@ -16058,6 +16058,7 @@ mod tests {
         );
         let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
 
+        assert_eq!(service.config.version(), rootlight_config::CONFIG_VERSION);
         assert_eq!(
             service.analysis_limits.max_source_bytes(),
             usize::try_from(rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES)
