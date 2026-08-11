@@ -455,6 +455,37 @@ fn vcs_negations_cannot_reopen_default_exclusions() {
 }
 
 #[test]
+fn entry_limit_bounds_clean_and_incremental_directory_enumeration() {
+    let temporary = local_tempdir();
+    for name in ["one.rs", "two.rs", "three.rs"] {
+        fs::write(temporary.path().join(name), b"fn fixture() {}\n")
+            .expect("fixture source is written");
+    }
+    let root = root(&temporary, b"bounded-directory-enumeration");
+    let config = ConfigSnapshot::resolve(&[]).expect("default config resolves");
+    let limits = DiscoveryLimits::new(1, 16, 1024 * 1024, 100).expect("test limits are valid");
+
+    for result in [
+        discover(&root, &config, &policy(), limits, &Cancellation::new()).map(|_| ()),
+        discover_incremental(
+            &root,
+            None,
+            context(b"config-v1", b"provider-v1"),
+            &policy(),
+            ReconcileMode::Normal,
+            limits,
+            &Cancellation::new(),
+        )
+        .map(|_| ()),
+    ] {
+        assert!(matches!(
+            result,
+            Err(DiscoveryError::EntryLimit { maximum: 1 })
+        ));
+    }
+}
+
+#[test]
 fn clean_manifest_must_match_the_incremental_observation() {
     let temporary = local_tempdir();
     fs::write(temporary.path().join("lib.rs"), b"pub fn value() {}\n")

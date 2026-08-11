@@ -679,7 +679,14 @@ impl<'a> DiscoveryState<'a> {
     fn run(&mut self) -> Result<(), DiscoveryError> {
         while let Some((directory, depth)) = self.queue.pop_front() {
             self.cancellation.check()?;
-            let entries = self.root.read_directory(directory.as_ref())?;
+            let visited = usize::try_from(self.coverage.visited).unwrap_or(usize::MAX);
+            let entries = read_directory_with_entry_budget(
+                self.root,
+                directory.as_ref(),
+                self.limits.max_entries.saturating_sub(visited),
+                self.limits.max_entries,
+                self.cancellation,
+            )?;
             self.cancellation.check()?;
             self.ensure_entry_capacity(entries.len())?;
             // Ignore files become readable only after ancestor policy admits this
@@ -969,6 +976,19 @@ fn child_path(
     match parent {
         Some(parent) => parent.join_name(name).map_err(DiscoveryError::Vfs),
         None => RelativePath::parse(Path::new(name)).map_err(DiscoveryError::Vfs),
+    }
+}
+
+fn read_directory_with_entry_budget(
+    root: &RepositoryRoot,
+    directory: Option<&RelativePath>,
+    remaining: usize,
+    maximum: usize,
+    cancellation: &Cancellation,
+) -> Result<Vec<DirectoryEntry>, DiscoveryError> {
+    match root.read_directory(directory, remaining, cancellation) {
+        Err(VfsError::DirectoryEntryLimit { .. }) => Err(DiscoveryError::EntryLimit { maximum }),
+        result => result.map_err(DiscoveryError::Vfs),
     }
 }
 

@@ -861,15 +861,25 @@ impl RepositoryRoot {
         .id()
     }
 
-    /// Enumerates one directory without following a directory-entry link.
+    /// Enumerates one directory within an inherited entry and cancellation budget.
     ///
     /// # Errors
     ///
-    /// Returns [`VfsError`] for invalid paths, link/reparse entries, or IO errors.
+    /// Returns [`VfsError::DirectoryEntryLimit`] before retaining more than
+    /// `maximum_entries`, [`VfsError::Cancelled`] when cancellation wins, or
+    /// another [`VfsError`] for invalid paths and IO failures.
     pub fn read_directory(
         &self,
         directory: Option<&RelativePath>,
+        maximum_entries: usize,
+        cancellation: &Cancellation,
     ) -> Result<Vec<DirectoryEntry>, VfsError> {
+        let check = || {
+            cancellation
+                .check()
+                .map_err(|cancelled| VfsError::Cancelled(cancelled.reason()))
+        };
+        check()?;
         let opened = match directory {
             Some(path) => self.open_directory(path)?,
             None => self
@@ -877,22 +887,36 @@ impl RepositoryRoot {
                 .try_clone()
                 .map_err(|source| VfsError::ReadDirectory { source })?,
         };
-        let mut entries = Vec::new();
-        for result in opened
+        check()?;
+        let directory_entries = opened
             .entries()
-            .map_err(|source| VfsError::ReadDirectory { source })?
-        {
+            .map_err(|source| VfsError::ReadDirectory { source })?;
+        check()?;
+        let mut entries = Vec::new();
+        for result in directory_entries {
+            check()?;
             let entry = result.map_err(|source| VfsError::ReadDirectory { source })?;
             let name = entry.file_name();
             if name == OsStr::new(".") || name == OsStr::new("..") {
                 continue;
             }
+            if entries.len() >= maximum_entries {
+                return Err(VfsError::DirectoryEntryLimit {
+                    maximum: maximum_entries,
+                });
+            }
+            entries
+                .try_reserve(1)
+                .map_err(|_| VfsError::MemoryUnavailable)?;
+            check()?;
             let file_type = entry
                 .file_type()
                 .map_err(|source| VfsError::ReadDirectory { source })?;
+            check()?;
             let metadata = entry
                 .metadata()
                 .map_err(|source| VfsError::ReadDirectory { source })?;
+            check()?;
             let kind = if file_type.is_symlink() || is_reparse_point(&metadata) {
                 EntryKind::Link
             } else if file_type.is_dir() {
@@ -917,6 +941,7 @@ impl RepositoryRoot {
             } else {
                 directory_entry_metadata(&metadata)
             };
+            check()?;
             entries.push(DirectoryEntry {
                 name,
                 kind,
@@ -924,9 +949,9 @@ impl RepositoryRoot {
                 metadata: source_metadata,
             });
         }
-        entries.sort_by(|left, right| {
-            platform_path_bytes(&left.name).cmp(&platform_path_bytes(&right.name))
-        });
+        check()?;
+        entries.sort_unstable_by(|left, right| compare_platform_paths(&left.name, &right.name));
+        check()?;
         Ok(entries)
     }
 
@@ -1661,6 +1686,22 @@ fn platform_path_bytes(value: &OsStr) -> Vec<u8> {
         .collect::<Vec<_>>()
 }
 
+#[cfg(unix)]
+fn compare_platform_paths(left: &OsStr, right: &OsStr) -> std::cmp::Ordering {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    left.as_bytes().cmp(right.as_bytes())
+}
+
+#[cfg(windows)]
+fn compare_platform_paths(left: &OsStr, right: &OsStr) -> std::cmp::Ordering {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    left.encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .cmp(right.encode_wide().flat_map(u16::to_le_bytes))
+}
+
 /// Typed failures returned by repository-independent directory browsing.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -1783,6 +1824,12 @@ pub enum VfsError {
         /// Underlying capability filesystem error.
         #[source]
         source: io::Error,
+    },
+    /// Directory enumeration crossed the caller-owned entry ceiling.
+    #[error("repository directory exceeds {maximum} entries")]
+    DirectoryEntryLimit {
+        /// Maximum entries permitted in this directory result.
+        maximum: usize,
     },
     /// A source file could not be opened without following links.
     #[error("failed to open repository file")]
@@ -2117,6 +2164,38 @@ mod tests {
                 .as_str(),
             "src/lib.rs"
         );
+    }
+
+    #[test]
+    fn repository_directory_enumeration_stops_at_the_caller_limit() {
+        let (temporary, root) = fixture();
+        for name in ["one.rs", "two.rs", "three.rs"] {
+            fs::write(temporary.path().join(name), b"source").expect("fixture file is created");
+        }
+        let cancellation = browse_deadline();
+
+        assert!(matches!(
+            root.read_directory(None, 2, &cancellation),
+            Err(VfsError::DirectoryEntryLimit { maximum: 2 })
+        ));
+        assert_eq!(
+            root.read_directory(None, 3, &cancellation)
+                .expect("admitted directory enumeration succeeds")
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect::<Vec<_>>(),
+            ["one.rs", "three.rs", "two.rs"]
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        );
+
+        let cancelled = Cancellation::new();
+        assert!(cancelled.cancel(CancellationReason::ClientRequest));
+        assert!(matches!(
+            root.read_directory(None, 3, &cancelled),
+            Err(VfsError::Cancelled(CancellationReason::ClientRequest))
+        ));
     }
 
     #[test]

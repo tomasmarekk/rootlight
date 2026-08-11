@@ -21,7 +21,7 @@ use rootlight_vfs::{EntryKind, RelativePath, RepositoryRoot, SnapshotMetadata, S
 
 use crate::{
     DiscoveryError, DiscoveryLimits, DiscoveryManifest, DiscoveryPolicy, MAX_RETAINED_SOURCE_BYTES,
-    RetainedSnapshotBudget, ScopedIgnores, child_path,
+    RetainedSnapshotBudget, ScopedIgnores, child_path, read_directory_with_entry_budget,
 };
 
 /// Configuration and provider identities included in one incremental input set.
@@ -493,7 +493,13 @@ fn scan_candidates(
 
     while let Some((directory, depth)) = queue.pop_front() {
         cancellation.check()?;
-        let entries = root.read_directory(directory.as_ref())?;
+        let entries = read_directory_with_entry_budget(
+            root,
+            directory.as_ref(),
+            limits.max_entries.saturating_sub(visited),
+            limits.max_entries,
+            cancellation,
+        )?;
         cancellation.check()?;
         if entries.len() > limits.max_entries.saturating_sub(visited) {
             return Err(DiscoveryError::EntryLimit {
