@@ -20,9 +20,9 @@ use rootlight_adapter_sdk::{
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, CoverageStatus, ExtensionSupport, FactDomain, IrLimits,
-    IrValidationError, NormalizedIrDocument, ProducerIdentity, ProducerKind,
-    canonicalize_ir_document,
+    AnalysisTier, BuildContextIdentity, CoverageStatus, ExtensionSupport, FactDomain,
+    FilePathLocator, IrLimits, IrValidationError, NormalizedIrDocument, ProducerIdentity,
+    ProducerKind, canonicalize_ir_document,
 };
 
 pub use project_context::{
@@ -676,8 +676,13 @@ impl LanguageAnalyzer for ContextAnalyzer {
     ) -> Result<AnalysisReport, AdapterError> {
         cancellation.check()?;
         self.validate_request(request)?;
+        let source_path = request.source().path();
         emit_records(
-            document_records(&self.context.document),
+            document_records(
+                &self.context.document,
+                source_path.as_str(),
+                source_path.to_locator(),
+            ),
             request,
             sink,
             cancellation,
@@ -722,9 +727,17 @@ pub enum ContextAnalyzerConfigError {
     InvalidProducer(#[source] IrValidationError),
 }
 
-fn document_records(document: &NormalizedIrDocument) -> Vec<IrRecord> {
+fn document_records(
+    document: &NormalizedIrDocument,
+    source_path: &str,
+    path_locator: FilePathLocator,
+) -> Vec<IrRecord> {
     let mut records = Vec::new();
-    records.extend(document.files.iter().cloned().map(IrRecord::File));
+    records.extend(document.files.iter().cloned().map(|mut file| {
+        file.path = source_path.to_owned();
+        file.path_locator = Some(path_locator.clone());
+        IrRecord::File(file)
+    }));
     records.extend(
         document
             .provenance

@@ -95,6 +95,43 @@ fn imported_context_commits_deterministically_and_rejects_other_builds() {
 }
 
 #[test]
+fn imported_context_rebuilds_file_paths_from_the_snapshot() {
+    let mut fixture = Fixture::new();
+    let limits = limits();
+    let poisoned = RelativePath::parse(Path::new("attacker/poisoned.rs"))
+        .expect("poisoned path remains syntactically valid");
+    fixture.document.files[0].path = poisoned.as_str().to_owned();
+    fixture.document.files[0].path_locator = Some(poisoned.to_locator());
+    let context = ImportedSemanticContext::new(
+        "rust",
+        AnalysisTier::TierB,
+        fixture.build_context,
+        fixture.document.clone(),
+        limits.ir(),
+    )
+    .expect("path metadata does not define imported semantic identity");
+    let profile = LanguageProfile::new("rust", AnalysisTier::TierA, LanguageSemantics::Static)
+        .expect("Rust profile is valid");
+    let analyzer = ContextAnalyzer::new(context, profile, ProducerKind::Compiler)
+        .expect("context analyzer configuration is valid");
+
+    let output = execute_analysis(
+        &analyzer,
+        &fixture.request(fixture.build_context, &limits),
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect("trusted snapshot repairs imported path metadata");
+    let file = &output.document().files[0];
+    assert_eq!(file.path, fixture.snapshot.path().as_str());
+    assert_eq!(
+        file.path_locator.as_ref(),
+        Some(&fixture.snapshot.path().to_locator())
+    );
+}
+
+#[test]
 fn shared_registry_keeps_language_profiles_bounded_and_independent() {
     let registry = initial_semantic_registry().expect("built-in registry is valid");
     let observed = registry
