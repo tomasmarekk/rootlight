@@ -820,10 +820,10 @@ where
     };
     if envelope.repository.repository_id != identity.repository.repository_id
         || envelope.generation.generation_id != identity.generation.generation_id
-        || envelope.next_cursor.0.is_some()
     {
         return Err(PlanChangeServiceError::InvalidResponse);
     }
+    let (provider_completeness, provider_paginated) = normalize_provider_completeness(&envelope)?;
     let data: T = serde_json::from_value(envelope.data)
         .map_err(|_| PlanChangeServiceError::InvalidResponse)?;
     let observed = observed_items(&data);
@@ -841,9 +841,16 @@ where
         kind,
         evidence_prefix,
         observed,
-        envelope.completeness,
+        provider_completeness,
     )?;
     let mut warnings = envelope.warnings;
+    if provider_paginated {
+        warnings.truncate(31);
+        warnings.push(plan_warning(
+            "plan_provider_evidence_paginated",
+            "plan provider evidence used one bounded page",
+        )?);
+    }
     if projection_truncated {
         warnings.truncate(31);
         warnings.push(plan_warning(
@@ -852,6 +859,48 @@ where
         )?);
     }
     Ok(CollectedPlanProvider { coverage, warnings })
+}
+
+fn normalize_provider_completeness(
+    envelope: &ReadEnvelope<Value>,
+) -> Result<(ResultCompleteness, bool), PlanChangeServiceError> {
+    let has_cursor = envelope.next_cursor.0.is_some();
+    let continuation_available =
+        envelope.completeness.continuation == ContinuationAvailability::Available;
+    let resource_truncated = envelope.completeness.state == CompletenessState::Truncated
+        || envelope
+            .completeness
+            .limiting_resources
+            .iter()
+            .any(|resource| {
+                !matches!(
+                    resource.kind,
+                    LimitingResourceKind::Capability | LimitingResourceKind::Coverage
+                )
+            });
+    if continuation_available != has_cursor || resource_truncated != envelope.truncated {
+        return Err(PlanChangeServiceError::InvalidResponse);
+    }
+    if !has_cursor {
+        return Ok((envelope.completeness.clone(), false));
+    }
+
+    let guidance = envelope
+        .completeness
+        .guidance
+        .iter()
+        .copied()
+        .filter(|guidance| *guidance != ContinuationGuidance::UseCursor)
+        .chain([ContinuationGuidance::NarrowScope])
+        .collect();
+    let completeness = ResultCompleteness::new(
+        envelope.completeness.state,
+        envelope.completeness.limiting_resources.clone(),
+        ContinuationAvailability::Unavailable,
+        guidance,
+    )
+    .map_err(|_| PlanChangeServiceError::InvalidResponse)?;
+    Ok((completeness, true))
 }
 
 fn provider_error_coverage(

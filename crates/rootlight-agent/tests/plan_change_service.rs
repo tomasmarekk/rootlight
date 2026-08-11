@@ -32,9 +32,9 @@ use rootlight_mcp_contract::{
     },
     context::BatchTool,
     vertical::{
-        CacheStatus, CoverageSummary, Freshness, GenerationSelector, GenerationSummary,
-        ProvenanceLevel, ReadEnvelope, RepositoryIdSelector, RequiredNullable, ResolvedRepository,
-        ResponseBudget, ResponseProfile, UsageSummary,
+        CacheStatus, ContinuationCursor, CoverageSummary, Freshness, GenerationSelector,
+        GenerationSummary, ProvenanceLevel, ReadEnvelope, RepositoryIdSelector, RequiredNullable,
+        ResolvedRepository, ResponseBudget, ResponseProfile, UsageSummary,
     },
 };
 use serde_json::{Value, json};
@@ -83,6 +83,7 @@ struct FakePort {
     provider_generation: Mutex<Option<GenerationId>>,
     provider_error: Mutex<Option<(BatchTool, AgentPortError)>>,
     provider_items: Mutex<Option<(BatchTool, usize)>>,
+    paginated_provider: Mutex<Option<BatchTool>>,
 }
 
 impl FakePort {
@@ -99,6 +100,7 @@ impl FakePort {
             provider_generation: Mutex::new(None),
             provider_error: Mutex::new(None),
             provider_items: Mutex::new(None),
+            paginated_provider: Mutex::new(None),
         }
     }
 
@@ -123,6 +125,14 @@ impl FakePort {
             .provider_items
             .lock()
             .expect("provider items lock is available") = Some((tool, items));
+        self
+    }
+
+    fn with_paginated_provider(self, tool: BatchTool) -> Self {
+        *self
+            .paginated_provider
+            .lock()
+            .expect("paginated provider lock is available") = Some(tool);
         self
     }
 }
@@ -201,10 +211,15 @@ impl AgentToolPort<TestCancellation> for FakePort {
             .filter(|(configured_tool, _)| *configured_tool == tool)
             .map(|(_, count)| *count)
             .unwrap_or(1);
+        let paginated = self
+            .paginated_provider
+            .lock()
+            .expect("paginated provider lock is available")
+            .is_some_and(|configured_tool| configured_tool == tool);
         Box::pin(async move {
             match error {
                 Some(error) => Err(error),
-                None => Ok(provider_envelope(tool, pinned, item_count)),
+                None => Ok(provider_envelope(tool, pinned, item_count, paginated)),
             }
         })
     }
@@ -285,6 +300,7 @@ fn provider_envelope(
     tool: BatchTool,
     pinned: AgentResolvedIdentity,
     item_count: usize,
+    paginated: bool,
 ) -> ReadEnvelope<Value> {
     let resolved_changes = (0..item_count)
         .map(|_| {
@@ -349,15 +365,41 @@ fn provider_envelope(
         }),
         _ => panic!("unexpected plan evidence provider {tool:?}"),
     };
+    let (truncated, completeness, next_cursor) = if paginated {
+        (
+            true,
+            rootlight_mcp_contract::completeness::ResultCompleteness::new(
+                rootlight_mcp_contract::completeness::CompletenessState::Truncated,
+                vec![rootlight_mcp_contract::completeness::LimitingResource {
+                    kind: rootlight_mcp_contract::completeness::LimitingResourceKind::Results,
+                    limit: Some(1),
+                    observed: Some(2),
+                }],
+                rootlight_mcp_contract::completeness::ContinuationAvailability::Available,
+                vec![rootlight_mcp_contract::completeness::ContinuationGuidance::UseCursor],
+            )
+            .expect("paginated provider completeness is valid"),
+            RequiredNullable(Some(
+                ContinuationCursor::parse("provider-next-page")
+                    .expect("fixture continuation cursor is valid"),
+            )),
+        )
+    } else {
+        (
+            false,
+            rootlight_mcp_contract::completeness::ResultCompleteness::complete(),
+            RequiredNullable(None),
+        )
+    };
     ReadEnvelope {
         schema_version: rootlight_mcp_contract::SchemaVersion::V1_0,
         repository: pinned.repository,
         generation: pinned.generation,
         coverage: pinned.coverage,
         data,
-        truncated: false,
-        completeness: rootlight_mcp_contract::completeness::ResultCompleteness::complete(),
-        next_cursor: RequiredNullable(None),
+        truncated,
+        completeness,
+        next_cursor,
         usage: UsageSummary {
             rows: 1,
             edges: 1,
@@ -987,6 +1029,59 @@ async fn provider_identity_race_fails_closed_before_structural_planning() {
             .lock()
             .expect("plan call lock is available")
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn paginated_relationship_evidence_preserves_a_partial_plan() {
+    let mut structural = plan_output(generation(2));
+    structural.truncated = false;
+    structural.completeness = rootlight_mcp_contract::completeness::ResultCompleteness::complete();
+    let port = Arc::new(
+        FakePort::new(Some(Ok(identity(generation(2)))), Some(Ok(structural)))
+            .with_paginated_provider(BatchTool::SymbolRelationships),
+    );
+
+    let output = PlanChangeService
+        .execute(
+            Arc::clone(&port),
+            input(generation(2)),
+            TestCancellation(false),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .expect("one bounded provider page preserves structural planning");
+
+    let relationships = &output.data.provider_coverage[1];
+    assert_eq!(relationships.provider, PlanEvidenceProvider::Relationships);
+    assert_eq!(relationships.state, PlanProviderState::Partial);
+    assert_eq!(
+        relationships.completeness.continuation,
+        rootlight_mcp_contract::completeness::ContinuationAvailability::Unavailable
+    );
+    assert!(
+        !relationships
+            .completeness
+            .guidance
+            .contains(&rootlight_mcp_contract::completeness::ContinuationGuidance::UseCursor)
+    );
+    assert_eq!(
+        output.completeness.continuation,
+        rootlight_mcp_contract::completeness::ContinuationAvailability::Unavailable
+    );
+    assert!(output.next_cursor.0.is_none());
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|warning| warning.code.as_str() == "plan_provider_evidence_paginated")
+    );
+    assert_eq!(
+        port.plan_calls
+            .lock()
+            .expect("plan call lock is available")
+            .len(),
+        1
     );
 }
 
