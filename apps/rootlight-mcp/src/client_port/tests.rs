@@ -3,9 +3,12 @@
 //! A typed fake pins exact client calls while the real executor validates the
 //! complete five-tool output contract and source-free failure classes.
 
-use std::sync::{
-    Arc, Mutex, OnceLock,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    path::Path,
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use rootlight_client::{
@@ -39,9 +42,9 @@ use serde_json::{Map, Value, json};
 use tokio::sync::watch;
 
 use super::{
-    AsyncClientFuture, AsyncFirstSliceClient, FIRST_SLICE_PROVIDER, NativeFirstSliceClientPort,
-    UnavailableFirstSliceClientPort, locate_languages, map_client_error,
-    map_operation_client_error, source_languages, symbol_languages,
+    AsyncClientFuture, AsyncFirstSliceClient, AuthorizedRepositoryRoot, FIRST_SLICE_PROVIDER,
+    NativeFirstSliceClientPort, UnavailableFirstSliceClientPort, locate_languages,
+    map_client_error, map_operation_client_error, source_languages, symbol_languages,
 };
 use crate::{
     FirstSliceClientPort, FirstSliceToolExecutor, RequestCancellation, ToolExecutionFailure,
@@ -980,15 +983,24 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
 
 #[tokio::test]
 async fn native_port_maps_all_five_calls_without_blocking_adapters() {
+    let fixture = tempfile::tempdir().expect("repository fixture is available");
+    let canonical_root = fixture
+        .path()
+        .canonicalize()
+        .expect("repository fixture canonicalizes");
+    let root = path_argument(&canonical_root);
     let fake = FakeAsyncClient::default();
     let calls = Arc::clone(&fake.calls);
-    let executor = FirstSliceToolExecutor::new(NativeFirstSliceClientPort::with_client(fake))
-        .expect("executor initializes");
+    let executor = FirstSliceToolExecutor::new(NativeFirstSliceClientPort::with_client(
+        fake,
+        authorized_root(&canonical_root),
+    ))
+    .expect("executor initializes");
 
     let index: RepoIndexOutput = execute(
         &executor,
         VerticalTool::RepoIndex,
-        json!({"root": "C:/fixture", "mode": "auto", "detached": false}),
+        json!({"root": root, "mode": "auto", "detached": false}),
     )
     .await;
     let OperationToolResponse::Success(index) = index else {
@@ -1120,7 +1132,7 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
     else {
         panic!("first call is repository index");
     };
-    assert_eq!(root, "C:/fixture");
+    assert_eq!(root, &path_argument(&canonical_root));
     assert!(!*detached);
     assert_eq!(*first_operation, indexed_operation);
     assert!(matches!(
@@ -1182,11 +1194,77 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
 }
 
 #[tokio::test]
+async fn repository_index_is_limited_to_the_canonical_authorized_tree() {
+    let fixture = tempfile::tempdir().expect("authorization fixture is available");
+    let allowed = fixture.path().join("allowed");
+    let child = allowed.join("child");
+    let sibling = fixture.path().join("sibling");
+    std::fs::create_dir_all(&child).expect("allowed child is created");
+    std::fs::create_dir_all(&sibling).expect("sibling is created");
+
+    let fake = FakeAsyncClient::default();
+    let calls = Arc::clone(&fake.calls);
+    let executor = FirstSliceToolExecutor::new(NativeFirstSliceClientPort::with_client(
+        fake,
+        authorized_root(&allowed),
+    ))
+    .expect("executor initializes");
+
+    for root in [&allowed, &child] {
+        let output: RepoIndexOutput = execute(
+            &executor,
+            VerticalTool::RepoIndex,
+            json!({"root": path_argument(root)}),
+        )
+        .await;
+        assert!(matches!(output, OperationToolResponse::Success(_)));
+    }
+
+    let linked_escape = allowed.join("linked-escape");
+    let mut denied = vec![
+        sibling.clone(),
+        child.join("..").join("..").join("sibling"),
+        allowed.join("missing"),
+    ];
+    if create_directory_link(&sibling, &linked_escape).is_ok() {
+        denied.push(linked_escape);
+    }
+    for root in denied {
+        let error = executor
+            .execute(
+                VerticalTool::RepoIndex,
+                object(json!({"root": path_argument(&root)})),
+                ExposureProfile::Developer,
+                cancellation(),
+            )
+            .await
+            .expect_err("path outside the authorized tree is rejected");
+        assert_eq!(error.failure(), Some(ToolExecutionFailure::Executor));
+    }
+
+    let calls = calls.lock().expect("fake call recorder is not poisoned");
+    let forwarded_roots = calls
+        .iter()
+        .map(|call| match call {
+            Call::RepositoryIndex { root, .. } => root.as_str(),
+            _ => panic!("only authorized repository calls reach the client"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        forwarded_roots,
+        [
+            path_argument(&allowed.canonicalize().expect("allowed root canonicalizes")),
+            path_argument(&child.canonicalize().expect("allowed child canonicalizes")),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn native_port_forwards_test_filters_and_change_impact_policy_options() {
     let fake = FakeAsyncClient::default();
     let calls = Arc::clone(&fake.calls);
-    let executor = FirstSliceToolExecutor::new(NativeFirstSliceClientPort::with_client(fake))
-        .expect("executor initializes");
+    let executor =
+        FirstSliceToolExecutor::new(native_port_with_client(fake)).expect("executor initializes");
 
     let tests: TestsSelectOutput = execute(
         &executor,
@@ -1289,15 +1367,20 @@ async fn native_port_forwards_test_filters_and_change_impact_policy_options() {
 
 #[tokio::test]
 async fn repository_index_waits_for_progress_when_the_initial_operation_is_pending() {
+    let fixture = tempfile::tempdir().expect("repository fixture is available");
+    let root = path_argument(fixture.path());
     let fake = FakeAsyncClient::with_pending_index();
     let calls = Arc::clone(&fake.calls);
-    let executor = FirstSliceToolExecutor::new(NativeFirstSliceClientPort::with_client(fake))
-        .expect("executor initializes");
+    let executor = FirstSliceToolExecutor::new(NativeFirstSliceClientPort::with_client(
+        fake,
+        authorized_root(fixture.path()),
+    ))
+    .expect("executor initializes");
 
     let output: RepoIndexOutput = execute(
         &executor,
         VerticalTool::RepoIndex,
-        json!({"root": "C:/fixture", "wait_ms": 250}),
+        json!({"root": root, "wait_ms": 250}),
     )
     .await;
     let OperationToolResponse::Success(output) = output else {
@@ -1328,8 +1411,8 @@ async fn repository_index_waits_for_progress_when_the_initial_operation_is_pendi
 async fn source_read_resolves_an_advertised_symbol_selector_before_reading() {
     let fake = FakeAsyncClient::with_resolved_symbols();
     let calls = Arc::clone(&fake.calls);
-    let executor = FirstSliceToolExecutor::new(NativeFirstSliceClientPort::with_client(fake))
-        .expect("executor initializes");
+    let executor =
+        FirstSliceToolExecutor::new(native_port_with_client(fake)).expect("executor initializes");
 
     let output: SourceReadOutput = execute(
         &executor,
@@ -1379,7 +1462,7 @@ async fn source_read_resolves_an_advertised_symbol_selector_before_reading() {
 async fn native_port_forwards_the_typed_catalog_continuation() {
     let fake = FakeAsyncClient::default();
     let calls = Arc::clone(&fake.calls);
-    let port = NativeFirstSliceClientPort::with_client(fake);
+    let port = native_port_with_client(fake);
     let mut sort_key = Vec::new();
     sort_key.extend_from_slice(&1_u16.to_le_bytes());
     sort_key.push(b'x');
@@ -1418,10 +1501,13 @@ async fn native_port_forwards_the_typed_catalog_continuation() {
 async fn deferred_port_connects_only_for_tool_calls_and_retries_transient_failures() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let connector_attempts = Arc::clone(&attempts);
-    let port = NativeFirstSliceClientPort::connect_on_first_request(move || {
-        connector_attempts.fetch_add(1, Ordering::SeqCst);
-        Err(ClientError::DaemonUnavailable)
-    });
+    let port = NativeFirstSliceClientPort::connect_on_first_request(
+        current_authorized_root(),
+        move || {
+            connector_attempts.fetch_add(1, Ordering::SeqCst);
+            Err(ClientError::DaemonUnavailable)
+        },
+    );
     assert_eq!(attempts.load(Ordering::SeqCst), 0);
 
     for expected_attempts in 1..=2 {
@@ -1634,6 +1720,34 @@ fn client_errors_map_to_source_free_port_classes() {
         map_client_error(ClientError::InvalidRepositoryCatalogRequest),
         crate::ClientPortError::Executor
     );
+}
+
+fn authorized_root(path: &Path) -> AuthorizedRepositoryRoot {
+    AuthorizedRepositoryRoot::new(path).expect("authorized repository root is valid")
+}
+
+fn current_authorized_root() -> AuthorizedRepositoryRoot {
+    authorized_root(&std::env::current_dir().expect("test process working directory is available"))
+}
+
+fn native_port_with_client(client: impl AsyncFirstSliceClient) -> NativeFirstSliceClientPort {
+    NativeFirstSliceClientPort::with_client(client, current_authorized_root())
+}
+
+fn path_argument(path: &Path) -> String {
+    path.to_str()
+        .expect("test repository path is UTF-8")
+        .to_owned()
+}
+
+#[cfg(unix)]
+fn create_directory_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_directory_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
 }
 
 async fn execute<T: DeserializeOwned>(

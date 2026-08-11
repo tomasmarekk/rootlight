@@ -1350,6 +1350,11 @@ struct McpProcess {
 impl McpProcess {
     fn spawn(state_dir: &Path, runtime_dir: &Path) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_rootlight-mcp"))
+            .current_dir(
+                state_dir
+                    .parent()
+                    .expect("fixture state directory has a launch root"),
+            )
             .env("ROOTLIGHT_STATE_DIR", state_dir)
             .env("ROOTLIGHT_RUNTIME_DIR", runtime_dir)
             .env("ROOTLIGHT_MCP_PROFILE", "developer")

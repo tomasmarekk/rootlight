@@ -7,6 +7,8 @@ use std::{
     collections::BTreeMap,
     fmt,
     future::Future,
+    io,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
@@ -66,6 +68,54 @@ const PROJECT_SEMANTICS_PROVIDER: &str = "rootlight-project-semantics";
 const BRIDGE_TRACE_PREFIX: &str = "bridge-";
 
 type AsyncClientFuture<T> = Pin<Box<dyn Future<Output = Result<T, ClientError>> + Send + 'static>>;
+
+/// Canonical operator-selected directory tree available to repository indexing.
+#[derive(Clone)]
+pub struct AuthorizedRepositoryRoot {
+    canonical: PathBuf,
+}
+
+impl AuthorizedRepositoryRoot {
+    /// Creates an authorization boundary from an existing directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the directory cannot be canonicalized or the
+    /// resulting path is not a directory.
+    pub fn new(root: &Path) -> io::Result<Self> {
+        let canonical = root.canonicalize()?;
+        if !canonical.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "authorized repository root is not a directory",
+            ));
+        }
+        Ok(Self { canonical })
+    }
+
+    fn authorize(&self, requested: &str) -> Result<String, ClientPortError> {
+        let canonical = Path::new(requested)
+            .canonicalize()
+            .map_err(|_| ClientPortError::Executor)?;
+        if !canonical.is_dir() || !canonical.starts_with(&self.canonical) {
+            return Err(ClientPortError::Executor);
+        }
+        // The daemon must consume this resolved spelling; forwarding the
+        // caller's path would repeat symlink resolution past this boundary.
+        canonical
+            .into_os_string()
+            .into_string()
+            .map_err(|_| ClientPortError::Executor)
+    }
+}
+
+impl fmt::Debug for AuthorizedRepositoryRoot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthorizedRepositoryRoot")
+            .finish_non_exhaustive()
+    }
+}
 
 trait AsyncFirstSliceClient: Send + Sync + 'static {
     fn prepare(&self) -> AsyncClientFuture<()>;
@@ -841,16 +891,18 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
 /// future therefore closes that exchange without a blocking worker.
 pub struct NativeFirstSliceClientPort {
     client: Arc<dyn AsyncFirstSliceClient>,
+    repository_root: AuthorizedRepositoryRoot,
 }
 
 impl NativeFirstSliceClientPort {
     /// Creates a native port over one synchronously resolved daemon client.
     #[must_use]
-    pub fn new(client: Client) -> Self {
+    pub fn new(client: Client, repository_root: AuthorizedRepositoryRoot) -> Self {
         Self {
             client: Arc::new(LiveAsyncFirstSliceClient {
                 client: Arc::new(ClientProvider::ready(client)),
             }),
+            repository_root,
         }
     }
 
@@ -860,19 +912,25 @@ impl NativeFirstSliceClientPort {
     /// are not cached, so a later tool call may recover from transient startup.
     #[must_use]
     pub fn connect_on_first_request(
+        repository_root: AuthorizedRepositoryRoot,
         connector: impl Fn() -> Result<Client, ClientError> + Send + Sync + 'static,
     ) -> Self {
         Self {
             client: Arc::new(LiveAsyncFirstSliceClient {
                 client: Arc::new(ClientProvider::deferred(connector)),
             }),
+            repository_root,
         }
     }
 
     #[cfg(test)]
-    fn with_client(client: impl AsyncFirstSliceClient) -> Self {
+    fn with_client(
+        client: impl AsyncFirstSliceClient,
+        repository_root: AuthorizedRepositoryRoot,
+    ) -> Self {
         Self {
             client: Arc::new(client),
+            repository_root,
         }
     }
 }
@@ -896,6 +954,10 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
         request: RepositoryIndexPortRequest,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<RepositoryIndexPortResponse> {
+        let root = match self.repository_root.authorize(request.root()) {
+            Ok(root) => root,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             let operation = random_operation_id()?;
@@ -907,13 +969,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 IndexMode::Rebuild => return Err(ClientPortError::Executor),
             };
             let mut result = client
-                .repository_index(
-                    request.root().to_owned(),
-                    operation,
-                    request.detached(),
-                    requested_mode,
-                    timeout,
-                )
+                .repository_index(root, operation, request.detached(), requested_mode, timeout)
                 .await
                 .map_err(|error| map_operation_client_error(error, operation))?;
             if let Some(wait_ms) = request.wait_ms()

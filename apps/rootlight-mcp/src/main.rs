@@ -12,10 +12,10 @@ use std::{
 
 use rootlight_client::{Client, ClientError, ConnectPolicy};
 use rootlight_mcp::{
-    BoundedBlockingPool, FirstSliceClientPort, FirstSliceToolExecutor, HandlerCapabilities,
-    HandlerFuture, HandlerResponse, NativeFirstSliceClientPort, OperatingRequest,
-    RequestCancellation, RequestHandler, Session, StdioLimits, ToolExecutorBuildError,
-    ToolRegistryError, ToolRouter, UnavailableFirstSliceClientPort,
+    AuthorizedRepositoryRoot, BoundedBlockingPool, FirstSliceClientPort, FirstSliceToolExecutor,
+    HandlerCapabilities, HandlerFuture, HandlerResponse, NativeFirstSliceClientPort,
+    OperatingRequest, RequestCancellation, RequestHandler, Session, StdioLimits,
+    ToolExecutorBuildError, ToolRegistryError, ToolRouter, UnavailableFirstSliceClientPort,
     resolve_exposure_profile_policy, serve,
 };
 use rootlight_mcp_contract::ExposureProfile;
@@ -99,10 +99,23 @@ fn request_handler(
     let blocking_pool = StdioLimits::default()
         .blocking_pool()
         .map_err(|_| BridgeInitializationError)?;
+    let repository_root = match mode {
+        BridgeMode::Production => Some(
+            AuthorizedRepositoryRoot::new(
+                &env::current_dir().map_err(|_| BridgeInitializationError)?,
+            )
+            .map_err(|_| BridgeInitializationError)?,
+        ),
+        BridgeMode::TransportOnly => None,
+    };
     // `initialize` needs only the stable capability bit. Schema compilation
     // moves to the first operating request and never occupies the async worker.
     let factory = move || match mode {
-        BridgeMode::Production => tool_handler(native_port(), profile.clone(), ceiling),
+        BridgeMode::Production => tool_handler(
+            native_port(repository_root.clone().ok_or(BridgeInitializationError)?),
+            profile.clone(),
+            ceiling,
+        ),
         BridgeMode::TransportOnly => {
             // Transport conformance must never attach to or launch a user's daemon.
             tool_handler(UnavailableFirstSliceClientPort, profile.clone(), ceiling)
@@ -114,8 +127,8 @@ fn request_handler(
     )))
 }
 
-fn native_port() -> NativeFirstSliceClientPort {
-    NativeFirstSliceClientPort::connect_on_first_request(|| {
+fn native_port(repository_root: AuthorizedRepositoryRoot) -> NativeFirstSliceClientPort {
+    NativeFirstSliceClientPort::connect_on_first_request(repository_root, || {
         let paths = runtime_paths().map_err(|()| ClientError::DaemonUnavailable)?;
         let mut client_instance_id = [0_u8; 16];
         getrandom::fill(&mut client_instance_id).map_err(|_| ClientError::RequestIdExhausted)?;

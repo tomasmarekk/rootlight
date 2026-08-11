@@ -42,7 +42,9 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
-pub use client_port::{NativeFirstSliceClientPort, UnavailableFirstSliceClientPort};
+pub use client_port::{
+    AuthorizedRepositoryRoot, NativeFirstSliceClientPort, UnavailableFirstSliceClientPort,
+};
 pub use executor::{
     ArchitectureCyclesPortRequest, ArchitectureCyclesPortResponse, ArchitectureOverviewPortRequest,
     ArchitectureOverviewPortResponse, ChangeImpactPortRequest, ChangeImpactPortResponse,

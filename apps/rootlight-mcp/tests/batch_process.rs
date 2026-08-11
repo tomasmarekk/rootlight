@@ -1196,6 +1196,11 @@ impl McpProcess {
             command.env("ROOTLIGHT_PROCESS_TEST_BATCH_CANCEL", "1");
         }
         let mut child = command
+            .current_dir(
+                state_dir
+                    .parent()
+                    .expect("fixture state directory has a launch root"),
+            )
             .env("ROOTLIGHT_STATE_DIR", state_dir)
             .env("ROOTLIGHT_RUNTIME_DIR", runtime_dir)
             .env("ROOTLIGHT_MCP_PROFILE", profile)
