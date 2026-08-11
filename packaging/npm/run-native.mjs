@@ -11,7 +11,6 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import {
-  delimiter,
   dirname,
   isAbsolute,
   join,
@@ -484,9 +483,13 @@ function spawnNpm(arguments_, stdio, environment = process.env) {
 }
 
 function resolveNpmCli() {
-  const executableDirectory = dirname(process.execPath);
+  let executableDirectory;
+  try {
+    executableDirectory = dirname(realpathSync.native(process.execPath));
+  } catch {
+    throw new Error("npm CLI is unavailable");
+  }
   const candidates = [
-    process.env.npm_execpath,
     join(executableDirectory, "node_modules", "npm", "bin", "npm-cli.js"),
     resolve(
       executableDirectory,
@@ -498,18 +501,7 @@ function resolveNpmCli() {
       "npm-cli.js",
     ),
   ];
-  for (const entry of (process.env.PATH ?? "").split(delimiter)) {
-    if (entry.length > 0 && isAbsolute(entry)) {
-      candidates.push(
-        join(entry, "node_modules", "npm", "bin", "npm-cli.js"),
-        resolve(entry, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
-      );
-    }
-  }
   for (const candidate of candidates) {
-    if (typeof candidate !== "string" || !isAbsolute(candidate)) {
-      continue;
-    }
     try {
       const resolved = realpathSync.native(candidate);
       const metadata = lstatSync(resolved);

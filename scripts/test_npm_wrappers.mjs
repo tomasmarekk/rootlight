@@ -26,6 +26,43 @@ const nativePackage = nativePackages.get(`${process.platform}-${process.arch}`);
 assert.notEqual(nativePackage, undefined, "test host must be supported");
 
 const sourceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+
+function createNodeRuntime(root, npmCliSource) {
+  const nodeExecutable =
+    process.platform === "win32"
+      ? join(root, "node.exe")
+      : join(root, "bin", "node");
+  mkdirSync(dirname(nodeExecutable), { recursive: true });
+  linkSync(process.execPath, nodeExecutable);
+  if (npmCliSource !== undefined) {
+    const npmCli =
+      process.platform === "win32"
+        ? join(root, "node_modules", "npm", "bin", "npm-cli.js")
+        : join(root, "lib", "node_modules", "npm", "bin", "npm-cli.js");
+    mkdirSync(dirname(npmCli), { recursive: true });
+    writeFileSync(npmCli, npmCliSource);
+  }
+  return nodeExecutable;
+}
+
+function npmResolutionEnvironment(overrides = {}) {
+  const environment = { ...process.env };
+  delete environment.npm_config_prefix;
+  delete environment.NPM_CONFIG_PREFIX;
+  delete environment.npm_execpath;
+  delete environment.NPM_EXECPATH;
+  return { ...environment, ...overrides };
+}
+
+function markerNpmCli(marker, prefix) {
+  return [
+    'const { writeFileSync } = require("node:fs");',
+    `writeFileSync(${JSON.stringify(marker)}, "executed\\n");`,
+    `console.log(${JSON.stringify(prefix)});`,
+    "",
+  ].join("\n");
+}
+
 const temporary = mkdtempSync(join(tmpdir(), "rootlight-npm-wrappers-"));
 try {
   const globalPrefix = join(temporary, "global");
@@ -169,6 +206,102 @@ try {
   ]) {
     assert.equal(existsSync(join(globalBin, name)), false, `${name} remained`);
   }
+
+  const untrustedRuntime = createNodeRuntime(
+    join(temporary, "untrusted-node"),
+  );
+  const npmExecpathMarker = join(temporary, "npm-execpath-executed");
+  const maliciousNpmExecpath = join(temporary, "malicious-npm-cli.js");
+  writeFileSync(
+    maliciousNpmExecpath,
+    markerNpmCli(npmExecpathMarker, globalPrefix),
+  );
+  const npmExecpathResult = spawnSync(
+    untrustedRuntime,
+    [join(rootBin, "postinstall.mjs")],
+    {
+      cwd: temporary,
+      encoding: "utf8",
+      env: npmResolutionEnvironment({
+        npm_execpath: maliciousNpmExecpath,
+        PATH: process.env.PATH ?? "",
+      }),
+    },
+  );
+  assert.notEqual(npmExecpathResult.status, 0);
+  assert.match(npmExecpathResult.stderr, /npm CLI is unavailable/u);
+  assert.equal(existsSync(npmExecpathMarker), false);
+
+  const pathMarker = join(temporary, "path-npm-cli-executed");
+  const maliciousPathEntry = join(temporary, "malicious-path");
+  const maliciousPathNpmCli = join(
+    maliciousPathEntry,
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
+  );
+  mkdirSync(dirname(maliciousPathNpmCli), { recursive: true });
+  writeFileSync(maliciousPathNpmCli, markerNpmCli(pathMarker, globalPrefix));
+  const pathResult = spawnSync(
+    untrustedRuntime,
+    [join(rootBin, "postinstall.mjs")],
+    {
+      cwd: temporary,
+      encoding: "utf8",
+      env: npmResolutionEnvironment({
+        PATH: [maliciousPathEntry, process.env.PATH ?? ""].join(
+          process.platform === "win32" ? ";" : ":",
+        ),
+      }),
+    },
+  );
+  assert.notEqual(pathResult.status, 0);
+  assert.match(pathResult.stderr, /npm CLI is unavailable/u);
+  assert.equal(existsSync(pathMarker), false);
+
+  const trustedMarker = join(temporary, "trusted-npm-cli-executed");
+  const trustedRuntime = createNodeRuntime(
+    join(temporary, "trusted-node"),
+    markerNpmCli(trustedMarker, globalPrefix),
+  );
+  const trustedEnvironment = npmResolutionEnvironment({
+    npm_execpath: maliciousNpmExecpath,
+    PATH: [globalBin, maliciousPathEntry, process.env.PATH ?? ""].join(
+      process.platform === "win32" ? ";" : ":",
+    ),
+  });
+  const trustedResult = spawnSync(
+    trustedRuntime,
+    [join(rootBin, "postinstall.mjs")],
+    {
+      cwd: temporary,
+      encoding: "utf8",
+      env: trustedEnvironment,
+    },
+  );
+  assert.equal(trustedResult.status, 0, trustedResult.stderr);
+  assert.equal(existsSync(trustedMarker), true);
+  assert.equal(existsSync(npmExecpathMarker), false);
+  assert.equal(existsSync(pathMarker), false);
+  assert.equal(
+    existsSync(join(globalBin, ".rootlight-cli-bridge.json")),
+    true,
+  );
+  const trustedCleanup = spawnSync(
+    trustedRuntime,
+    [join(rootBin, "preuninstall.mjs")],
+    {
+      cwd: temporary,
+      encoding: "utf8",
+      env: trustedEnvironment,
+    },
+  );
+  assert.equal(trustedCleanup.status, 0, trustedCleanup.stderr);
+  assert.equal(
+    existsSync(join(globalBin, ".rootlight-cli-bridge.json")),
+    false,
+  );
 
   if (process.platform === "win32") {
     const reinstall = spawnSync(
