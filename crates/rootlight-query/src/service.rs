@@ -6638,6 +6638,9 @@ const PLAN_CHANGE_MAX_CONTEXT_ITEMS: usize = 64;
 /// Maximum target symbols attached to one `plan.change` step.
 const PLAN_CHANGE_MAX_STEP_TARGETS: usize = 32;
 
+/// Maximum UTF-8 bytes in one `plan.change` action.
+const PLAN_CHANGE_MAX_ACTION_BYTES: usize = 1_024;
+
 /// Maximum relation rows inspected while expanding one change-plan target set.
 const PLAN_CHANGE_MAX_RELATION_SCAN_ROWS: u64 = 100_000;
 
@@ -7187,8 +7190,8 @@ struct PlanChangeStepInputs<'a> {
 /// assess, and report steps. The first action identifies the caller-authored
 /// requested outcome and caller constraints as instructions to validate; risk
 /// codes and verification hints remain source-free. The sequence is capped at
-/// `max_steps`, and every step only depends on earlier ordinals so truncation
-/// keeps dependencies valid.
+/// `max_steps` and the public action byte contract, and every step only depends
+/// on earlier ordinals so truncation keeps dependencies valid.
 fn build_plan_change_steps(
     objective: PlanChangeObjective,
     inputs: &PlanChangeStepInputs<'_>,
@@ -7224,8 +7227,14 @@ fn build_plan_change_steps(
         .collect();
 
     let mut steps: Vec<PlanChangeStepRecord> = Vec::new();
-    let requested_outcome =
-        |action: &str| format!("{action} Validate the caller-requested outcome: {objective_text}");
+    let mut action_truncated = false;
+    let mut requested_outcome = |action: &str| {
+        let (action, truncated) = bounded_plan_action(format!(
+            "{action} Validate the caller-requested outcome: {objective_text}"
+        ));
+        action_truncated |= truncated;
+        action
+    };
     match objective {
         PlanChangeObjective::Explanation => {
             steps.push(plan_step(
@@ -7357,9 +7366,13 @@ fn build_plan_change_steps(
             summary = summary.chars().take(765).collect::<String>();
             summary.push_str("...");
         }
+        let (action, truncated) = bounded_plan_action(format!(
+            "Verify the planned change against caller constraints: {summary}"
+        ));
+        action_truncated |= truncated;
         steps.push(plan_step(
             step,
-            &format!("Verify the planned change against caller constraints: {summary}"),
+            &action,
             target_symbols.clone(),
             depends_on,
             &["constraint_violation"],
@@ -7369,9 +7382,23 @@ fn build_plan_change_steps(
     let truncated = steps.len() > *max_steps
         || target_symbols_truncated
         || direct_dependents_truncated
-        || test_targets_truncated;
+        || test_targets_truncated
+        || action_truncated;
     steps.truncate(*max_steps);
     (steps, truncated)
+}
+
+fn bounded_plan_action(mut action: String) -> (String, bool) {
+    if action.len() <= PLAN_CHANGE_MAX_ACTION_BYTES {
+        return (action, false);
+    }
+    let mut end = PLAN_CHANGE_MAX_ACTION_BYTES - "...".len();
+    while !action.is_char_boundary(end) {
+        end -= 1;
+    }
+    action.truncate(end);
+    action.push_str("...");
+    (action, true)
 }
 
 /// Builds one source-free ordered plan step.
@@ -7383,6 +7410,7 @@ fn plan_step(
     risks: &[&str],
     verification: Option<&str>,
 ) -> PlanChangeStepRecord {
+    debug_assert!(action.len() <= PLAN_CHANGE_MAX_ACTION_BYTES);
     PlanChangeStepRecord {
         step,
         action: action.to_owned(),
@@ -13222,6 +13250,41 @@ mod tests {
         assert_eq!(analysis.plan[1].step, 2);
         // Truncation keeps every dependency reference valid.
         assert!(analysis.plan[1].depends_on.iter().all(|dep| *dep <= 2));
+        assert!(execution.is_truncated());
+        assert_eq!(execution.limiting_resources(), &[QueryResource::Results]);
+    }
+
+    #[test]
+    fn plan_change_bounds_caller_text_in_step_actions() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        let mut plan = plan_change_plan(
+            PlanChangeObjective::BugFix,
+            BTreeSet::from([symbol(11)]),
+            BTreeSet::new(),
+            6,
+        );
+        plan.objective_text = "🦀".repeat(4_096);
+        plan.constraints = vec!["界".repeat(1_024)];
+
+        let (analysis, execution) = run_plan_change_with_execution(&document, &plan);
+
+        assert!(
+            analysis
+                .plan
+                .iter()
+                .all(|step| step.action.len() <= PLAN_CHANGE_MAX_ACTION_BYTES)
+        );
+        assert!(analysis.plan[0].action.ends_with("..."));
+        assert!(
+            analysis
+                .plan
+                .last()
+                .expect("constraint step exists")
+                .action
+                .ends_with("...")
+        );
         assert!(execution.is_truncated());
         assert_eq!(execution.limiting_resources(), &[QueryResource::Results]);
     }
