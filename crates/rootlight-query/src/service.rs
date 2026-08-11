@@ -4425,6 +4425,15 @@ struct ArchitectureOverviewAnalysis {
 const ARCHITECTURE_COMMUNITY_SEED: u64 = 0x524f_4f54_4c49_4748;
 const ARCHITECTURE_COMMUNITY_MAX_ITERATIONS: usize = 8;
 
+// The overview keeps several B-tree indexes and owned component labels alive
+// through result emission. These conservative charges cover tree nodes, string
+// capacity, vector slack, graph aggregation, and community projection.
+const ARCHITECTURE_OVERVIEW_FIXED_WORKSPACE_BYTES: usize = 64 * 1024;
+const ARCHITECTURE_OVERVIEW_FILE_WORKSPACE_BYTES: usize = 256;
+const ARCHITECTURE_OVERVIEW_ENTITY_WORKSPACE_BYTES: usize = 1_280;
+const ARCHITECTURE_OVERVIEW_RELATION_WORKSPACE_BYTES: usize = 384;
+const ARCHITECTURE_OVERVIEW_COMMUNITY_RELATION_BYTES: usize = 256;
+
 /// Returns the stable algorithm-version label for one derived view.
 const fn architecture_overview_algorithm_version(view: ArchitectureOverviewView) -> &'static str {
     match view {
@@ -4700,6 +4709,53 @@ fn architecture_detail_limits(detail: ArchitectureOverviewDetail) -> (usize, usi
     }
 }
 
+fn architecture_overview_workspace_bytes(
+    document: &NormalizedIrDocument,
+    plan: &ArchitectureOverviewPlan,
+) -> Result<u64, QueryError> {
+    let graph_requested = plan.include_edges
+        || plan.views.iter().any(|view| {
+            matches!(
+                view,
+                ArchitectureOverviewView::Communities
+                    | ArchitectureOverviewView::Hotspots
+                    | ArchitectureOverviewView::Ownership
+            )
+        });
+    let relation_bytes = if graph_requested {
+        ARCHITECTURE_OVERVIEW_RELATION_WORKSPACE_BYTES.saturating_add(
+            if plan.views.contains(&ArchitectureOverviewView::Communities) {
+                ARCHITECTURE_OVERVIEW_COMMUNITY_RELATION_BYTES
+            } else {
+                0
+            },
+        )
+    } else {
+        0
+    };
+    let mut bytes = ARCHITECTURE_OVERVIEW_FIXED_WORKSPACE_BYTES
+        .saturating_add(
+            document
+                .files
+                .len()
+                .saturating_mul(ARCHITECTURE_OVERVIEW_FILE_WORKSPACE_BYTES),
+        )
+        .saturating_add(
+            document
+                .entities
+                .len()
+                .saturating_mul(ARCHITECTURE_OVERVIEW_ENTITY_WORKSPACE_BYTES),
+        )
+        .saturating_add(document.relations.len().saturating_mul(relation_bytes));
+    for file in &document.files {
+        bytes = bytes.saturating_add(file.path.len().saturating_mul(2));
+    }
+    for entity in &document.entities {
+        bytes = bytes.saturating_add(entity.qualified_name.len().saturating_mul(2));
+    }
+    checked_usize_to_u64(bytes)
+}
+
 /// Builds a bounded typed architecture overview.
 ///
 /// Requested structural views select module, package, service, data, or build
@@ -4712,6 +4768,9 @@ fn build_architecture_overview(
     tracker: &mut UsageTracker,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<ArchitectureOverviewAnalysis, QueryError> {
+    control.check()?;
+    tracker.add_memory(architecture_overview_workspace_bytes(document, plan)?)?;
+
     let scoped_entities = analysis_scope_entities(document, plan.scope.as_ref());
     let structural_views: Vec<ArchitectureOverviewView> = plan
         .views
@@ -11610,6 +11669,50 @@ mod tests {
         assert!(overview.hotspots.is_empty());
         assert!(execution.is_truncated());
         assert_eq!(execution.limiting_resources(), &[QueryResource::Results]);
+    }
+
+    #[test]
+    fn architecture_overview_rejects_unfunded_workspace_before_scanning() {
+        let mut document = overview_document();
+        for byte in 1..=3 {
+            add_file(&mut document, byte, &format!("src/f{byte}.rs"));
+            add_entity(&mut document, 10 + byte, byte, EntityKind::Function);
+            add_contains(&mut document, 100 + byte, byte, 10 + byte, 800);
+        }
+        add_calls(&mut document, 110, 13, 11, 900);
+
+        let mut plan = overview_plan(1, true, 0, Vec::new());
+        let workspace = architecture_overview_workspace_bytes(&document, &plan)
+            .expect("workspace size is representable");
+        let larger_result_plan = overview_plan(50, true, 0, Vec::new());
+        assert_eq!(
+            workspace,
+            architecture_overview_workspace_bytes(&document, &larger_result_plan)
+                .expect("workspace size remains representable")
+        );
+        plan.budget = QueryBudget::new().with_max_memory_bytes(workspace - 1);
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+
+        assert!(matches!(
+            build_architecture_overview(
+                &document,
+                &plan,
+                &control,
+                &mut tracker,
+                &mut limiting_resources,
+            ),
+            Err(QueryError::BudgetExceeded {
+                resource: QueryResource::MemoryBytes,
+                limit,
+            }) if limit == workspace - 1
+        ));
+        assert_eq!(tracker.memory_bytes, 0);
+        assert_eq!(tracker.rows, 0);
+        assert_eq!(tracker.edges, 0);
+        assert!(limiting_resources.is_empty());
     }
 
     #[test]
