@@ -88,24 +88,7 @@ class InstalledWebSmokeTests(unittest.TestCase):
 
             run.assert_called_once()
 
-    def test_start_web_accepts_the_stable_service_url(self) -> None:
-        completed = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout="Rootlight Web UI: http://127.0.0.1:43127/\n",
-            stderr="",
-        )
-        with mock.patch.object(
-            installed_web.subprocess,
-            "run",
-            return_value=completed,
-        ) as run:
-            origin = installed_web.start_web(Path("rootlight"), {})
-
-        self.assertEqual(origin, "http://127.0.0.1:43127")
-        run.assert_called_once()
-
-    def test_start_web_rejects_a_bootstrap_fragment(self) -> None:
+    def test_start_web_accepts_the_one_time_bootstrap_url(self) -> None:
         completed = subprocess.CompletedProcess(
             args=[],
             returncode=0,
@@ -113,6 +96,24 @@ class InstalledWebSmokeTests(unittest.TestCase):
                 "Rootlight Web UI: http://127.0.0.1:43127/"
                 f"#bootstrap={'a' * 43}\n"
             ),
+            stderr="",
+        )
+        with mock.patch.object(
+            installed_web.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            origin, bootstrap = installed_web.start_web(Path("rootlight"), {})
+
+        self.assertEqual(origin, "http://127.0.0.1:43127")
+        self.assertEqual(bootstrap, "a" * 43)
+        run.assert_called_once()
+
+    def test_start_web_rejects_a_url_without_bootstrap(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="Rootlight Web UI: http://127.0.0.1:43127/\n",
             stderr="",
         )
         with (

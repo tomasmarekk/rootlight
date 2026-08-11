@@ -33,7 +33,8 @@ VERSION = re.compile(
     r"(?:0|[1-9][0-9]*)(?:-alpha\.(?:0|[1-9][0-9]*))?$"
 )
 WEB_URL = re.compile(
-    r"^Rootlight Web UI: (http://127\.0\.0\.1:43127)/\r?\n$"
+    r"^Rootlight Web UI: (http://127\.0\.0\.1:43127)/"
+    r"#bootstrap=([A-Za-z0-9_-]{43})\r?\n$"
 )
 MAX_ARCHIVE_ENTRIES = 2_048
 MAX_ARCHIVE_FILE_BYTES = 256 * 1024 * 1024
@@ -258,7 +259,7 @@ def remove_windows_daemon_after_shutdown(package_root: Path) -> None:
 
 def start_web(
     rootlight: Path, environment: dict[str, str]
-) -> str:
+) -> tuple[str, str]:
     completed = subprocess.run(
         [rootlight, "web", "--no-open"],
         env=environment,
@@ -273,7 +274,7 @@ def start_web(
     match = WEB_URL.fullmatch(completed.stdout)
     if match is None:
         raise ValueError("installed web host published an invalid URL")
-    return match.group(1)
+    return match.group(1), match.group(2)
 
 
 def read_http_response(response: http.client.HTTPResponse) -> bytes:
@@ -283,7 +284,9 @@ def read_http_response(response: http.client.HTTPResponse) -> bytes:
     return content
 
 
-def exercise_session(origin: str, expected_index_sha256: str) -> None:
+def exercise_session(
+    origin: str, bootstrap: str, expected_index_sha256: str
+) -> None:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(f"{origin}/", timeout=5) as response:
         index = read_http_response(response)
@@ -292,8 +295,33 @@ def exercise_session(origin: str, expected_index_sha256: str) -> None:
             response.status != 200
             or not response.headers.get("Content-Security-Policy")
             or hashlib.sha256(index).hexdigest() != expected_index_sha256
+            or set_cookie
         ):
             raise ValueError("installed web entrypoint response is invalid")
+
+    bootstrap_body = json.dumps(
+        {"secret": bootstrap},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    bootstrap_request = urllib.request.Request(
+        f"{origin}/api/v1/session/bootstrap",
+        data=bootstrap_body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Origin": origin,
+            "Sec-Fetch-Site": "same-origin",
+        },
+    )
+    with opener.open(bootstrap_request, timeout=5) as response:
+        session_body = read_http_response(response)
+        set_cookie = response.headers.get("Set-Cookie", "")
+        if (
+            response.status != 200
+            or response.headers.get("Cache-Control") != "no-store"
+            or not response.headers.get("Content-Security-Policy")
+        ):
+            raise ValueError("installed web bootstrap response headers are invalid")
 
     cookie = set_cookie.split(";", 1)[0]
     cookie_attributes = {
@@ -305,7 +333,12 @@ def exercise_session(origin: str, expected_index_sha256: str) -> None:
         or "samesite=strict" not in cookie_attributes
         or "path=/" not in cookie_attributes
     ):
-        raise ValueError("installed web entrypoint session cookie is invalid")
+        raise ValueError("installed web bootstrap session cookie is invalid")
+
+    bootstrap_session = json.loads(session_body)
+    csrf_token = bootstrap_session.get("csrfToken")
+    if not isinstance(csrf_token, str) or len(csrf_token) != 43:
+        raise ValueError("installed web bootstrap session response is invalid")
 
     request = urllib.request.Request(
         f"{origin}/api/v1/session",
@@ -328,6 +361,7 @@ def exercise_session(origin: str, expected_index_sha256: str) -> None:
     if (
         not isinstance(session.get("csrfToken"), str)
         or len(session["csrfToken"]) != 43
+        or session["csrfToken"] != csrf_token
     ):
         raise ValueError("installed web direct session response is invalid")
 
@@ -414,10 +448,14 @@ def main() -> None:
         environment = process_environment(root)
         web_started = False
         try:
-            origin = start_web(rootlight, environment)
+            origin, bootstrap = start_web(rootlight, environment)
             web_started = True
             wait_for_daemon(rootlight, environment)
-            exercise_session(origin, identities["share/rootlight/web/index.html"])
+            exercise_session(
+                origin,
+                bootstrap,
+                identities["share/rootlight/web/index.html"],
+            )
             stop_web(rootlight, environment)
             web_started = False
             wait_for_daemon_shutdown(environment)
