@@ -10450,8 +10450,9 @@ fn append_project_fallback_diagnostic(
     limits: &IrLimits,
 ) -> Result<(), FirstSliceError> {
     let total = normalized_record_count(document)?;
-    checked_combined_length(total, 1, limits.max_total_records)?;
-    reserve_records(&mut document.diagnostics, 1, limits.max_diagnostics)?;
+    if total > limits.max_total_records || document.diagnostics.len() > limits.max_diagnostics {
+        return Err(FirstSliceError::Limits);
+    }
     let mut diagnostic = DiagnosticRecord {
         id: FactId::from_bytes([0; 20]),
         repository: document.repository,
@@ -10469,6 +10470,15 @@ fn append_project_fallback_diagnostic(
     };
     diagnostic.id =
         derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
+    if total == limits.max_total_records || document.diagnostics.len() == limits.max_diagnostics {
+        // The fallback reason outranks one parser-recovery detail. Replacing the
+        // final deterministic record preserves both aggregate IR ceilings.
+        if let Some(retained) = document.diagnostics.last_mut() {
+            *retained = diagnostic;
+        }
+        return Ok(());
+    }
+    reserve_records(&mut document.diagnostics, 1, limits.max_diagnostics)?;
     document.diagnostics.push(diagnostic);
     Ok(())
 }
@@ -12620,6 +12630,39 @@ mod tests {
                 .iter()
                 .all(|coverage| coverage.status == CoverageStatus::Bounded)
         );
+
+        let mut saturated_fallback = document(
+            repository,
+            generation,
+            FileId::from_bytes([6; 20]),
+            6,
+            limits.max_diagnostics,
+        );
+        let fallback_file = saturated_fallback.files[0].id;
+        let fallback_provenance = saturated_fallback.provenance[0].id;
+        append_project_fallback_diagnostic(
+            &mut saturated_fallback,
+            "typescript",
+            FirstSliceProjectAnalysisError::Protocol,
+            fallback_file,
+            fallback_provenance,
+            &limits,
+        )
+        .expect("a saturated target retains the project fallback reason");
+        assert_eq!(saturated_fallback.diagnostics.len(), limits.max_diagnostics);
+        assert_eq!(
+            saturated_fallback
+                .diagnostics
+                .last()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some("project-adapter-protocol-fallback")
+        );
+        rootlight_ir::validate_ir_document(
+            &saturated_fallback,
+            &limits,
+            &ExtensionSupport::default(),
+        )
+        .expect("the saturated fallback target remains valid normalized IR");
 
         let mut capacity_document =
             document(repository, generation, FileId::from_bytes([5; 20]), 5, 0);
