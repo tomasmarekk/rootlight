@@ -1700,6 +1700,10 @@ impl From<&SourceSnapshot> for SourceSnapshotIdentity {
     }
 }
 
+const SOURCE_RETENTION_BTREE_ENTRY_OVERHEAD: usize = 4 * size_of::<usize>();
+const SOURCE_RETENTION_ARC_OVERHEAD: usize = 2 * size_of::<usize>();
+const SOURCE_RETENTION_ALLOCATION_OVERHEAD: usize = 2 * size_of::<usize>();
+
 struct SharedSourceSnapshot {
     snapshot: Arc<SourceSnapshot>,
     generation_references: usize,
@@ -1727,11 +1731,37 @@ enum SourceSnapshotReleaseUpdate {
     Remove(SourceSnapshotIdentity),
 }
 
+fn unique_source_snapshot_bytes(snapshot: &SourceSnapshot) -> Result<usize, FirstSliceError> {
+    snapshot
+        .retained_memory_bytes()
+        .ok_or(FirstSliceError::Retention)?
+        .checked_add(SOURCE_RETENTION_ARC_OVERHEAD)
+        .and_then(|bytes| bytes.checked_add(size_of::<SourceSnapshotIdentity>()))
+        .and_then(|bytes| bytes.checked_add(size_of::<SharedSourceSnapshot>()))
+        .and_then(|bytes| bytes.checked_add(SOURCE_RETENTION_BTREE_ENTRY_OVERHEAD))
+        .ok_or(FirstSliceError::Retention)
+}
+
+fn source_generation_reference_bytes(snapshot_count: usize) -> Result<usize, FirstSliceError> {
+    let references = snapshot_count
+        .checked_mul(size_of::<Arc<SourceSnapshot>>())
+        .ok_or(FirstSliceError::Retention)?;
+    let allocation_overhead = usize::from(snapshot_count != 0)
+        .checked_mul(SOURCE_RETENTION_ALLOCATION_OVERHEAD)
+        .ok_or(FirstSliceError::Retention)?;
+    size_of::<GenerationId>()
+        .checked_add(size_of::<Vec<Arc<SourceSnapshot>>>())
+        .and_then(|bytes| bytes.checked_add(SOURCE_RETENTION_BTREE_ENTRY_OVERHEAD))
+        .and_then(|bytes| bytes.checked_add(references))
+        .and_then(|bytes| bytes.checked_add(allocation_overhead))
+        .ok_or(FirstSliceError::Retention)
+}
+
 /// Bounded runtime source retention mirroring generation publication.
 ///
 /// Source bodies remain outside normalized IR. Durable services persist
 /// identity-verified bytes beside each immutable oracle and reconstruct this
-/// deduplicated, byte-bounded runtime view during startup.
+/// deduplicated, memory-bounded runtime view during startup.
 struct SourceSnapshotRetention {
     maximum_generations: usize,
     maximum_bytes: usize,
@@ -1809,7 +1839,7 @@ impl SourceSnapshotRetention {
         }
 
         let mut files = BTreeSet::new();
-        let mut additional_bytes = 0usize;
+        let mut additional_bytes = source_generation_reference_bytes(sources.len())?;
         for source in sources {
             check_cancellation(cancellation)?;
             let identity = SourceSnapshotIdentity::from(&source.snapshot);
@@ -1818,7 +1848,7 @@ impl SourceSnapshotRetention {
             }
             if !self.shared.contains_key(&identity) {
                 additional_bytes = additional_bytes
-                    .checked_add(source.snapshot.content().len())
+                    .checked_add(unique_source_snapshot_bytes(&source.snapshot)?)
                     .ok_or(FirstSliceError::Retention)?;
             }
         }
@@ -1856,6 +1886,7 @@ impl SourceSnapshotRetention {
         }
 
         let mut retained = BTreeMap::<SourceSnapshotIdentity, usize>::new();
+        let mut retained_bytes = 0_usize;
         for snapshots in self
             .committed
             .iter()
@@ -1863,18 +1894,24 @@ impl SourceSnapshotRetention {
             .map(|(_, snapshots)| snapshots)
             .chain(self.staged.values())
         {
+            retained_bytes = retained_bytes
+                .checked_add(source_generation_reference_bytes(snapshots.len())?)
+                .ok_or(FirstSliceError::Retention)?;
             for snapshot in snapshots {
                 check_cancellation(cancellation)?;
-                retained
-                    .entry(SourceSnapshotIdentity::from(snapshot.as_ref()))
-                    .or_insert(snapshot.content().len());
+                let identity = SourceSnapshotIdentity::from(snapshot.as_ref());
+                if let std::collections::btree_map::Entry::Vacant(entry) = retained.entry(identity)
+                {
+                    let snapshot_bytes = unique_source_snapshot_bytes(snapshot.as_ref())?;
+                    retained_bytes = retained_bytes
+                        .checked_add(snapshot_bytes)
+                        .ok_or(FirstSliceError::Retention)?;
+                    entry.insert(snapshot_bytes);
+                }
             }
         }
-        let retained_bytes = retained.values().try_fold(0_usize, |total, bytes| {
-            total.checked_add(*bytes).ok_or(FirstSliceError::Retention)
-        })?;
         let mut files = BTreeSet::new();
-        let mut additional_bytes = 0usize;
+        let mut additional_bytes = source_generation_reference_bytes(sources.len())?;
         for source in sources {
             check_cancellation(cancellation)?;
             let identity = SourceSnapshotIdentity::from(&source.snapshot);
@@ -1883,7 +1920,7 @@ impl SourceSnapshotRetention {
             }
             if !retained.contains_key(&identity) {
                 additional_bytes = additional_bytes
-                    .checked_add(source.snapshot.content().len())
+                    .checked_add(unique_source_snapshot_bytes(&source.snapshot)?)
                     .ok_or(FirstSliceError::Retention)?;
             }
         }
@@ -2011,7 +2048,7 @@ impl SourceSnapshotRetention {
         updates
             .try_reserve_exact(snapshots.len())
             .map_err(|_| FirstSliceError::Retention)?;
-        let mut released_bytes = 0usize;
+        let mut released_bytes = source_generation_reference_bytes(snapshots.len())?;
         for snapshot in snapshots {
             let identity = SourceSnapshotIdentity::from(snapshot.as_ref());
             let shared = self
@@ -2023,7 +2060,7 @@ impl SourceSnapshotRetention {
             }
             if shared.generation_references == 1 {
                 released_bytes = released_bytes
-                    .checked_add(shared.snapshot.content().len())
+                    .checked_add(unique_source_snapshot_bytes(shared.snapshot.as_ref())?)
                     .ok_or(FirstSliceError::Retention)?;
                 updates.push(SourceSnapshotReleaseUpdate::Remove(identity));
             } else {
@@ -2107,7 +2144,7 @@ impl SourceSnapshotRetention {
         updates
             .try_reserve_exact(snapshots.len())
             .map_err(|_| FirstSliceError::Retention)?;
-        let mut released_bytes = 0_usize;
+        let mut released_bytes = source_generation_reference_bytes(snapshots.len())?;
         for snapshot in snapshots {
             let identity = SourceSnapshotIdentity::from(snapshot.as_ref());
             let shared = self
@@ -2120,7 +2157,7 @@ impl SourceSnapshotRetention {
                 .ok_or(FirstSliceError::Retention)?;
             if remaining == 0 {
                 released_bytes = released_bytes
-                    .checked_add(shared.snapshot.content().len())
+                    .checked_add(unique_source_snapshot_bytes(shared.snapshot.as_ref())?)
                     .ok_or(FirstSliceError::Retention)?;
             }
             updates.push((identity, remaining));
@@ -14581,7 +14618,10 @@ mod tests {
         restored
             .install_deferred_restore(restored_state, &cancellation)
             .expect("verified durable generation installs");
-        assert_eq!(restored.source_snapshots.retained_bytes(), 0);
+        assert_eq!(
+            restored.source_snapshots.retained_bytes(),
+            source_generation_reference_bytes(0).expect("empty generation charge fits")
+        );
         assert_eq!(
             restored.active_generation_for(receipt.repository),
             Some(receipt.generation)
@@ -17309,6 +17349,55 @@ mod tests {
     }
 
     #[test]
+    fn empty_snapshot_path_and_container_overhead_is_retention_bounded() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        let file_name = format!("{}.rs", "x".repeat(200));
+        fs::write(fixture.path().join("src").join(&file_name), [])
+            .expect("empty long-path source writes");
+        let root = RepositoryRoot::open(
+            derive_repository(b"empty-source-retention").id(),
+            fixture.path(),
+        )
+        .expect("retention fixture root opens");
+        let relative = RelativePath::parse(Path::new(&format!("src/{file_name}")))
+            .expect("long fixture path is valid");
+        let snapshot = root
+            .snapshot(&relative, 1)
+            .expect("empty source snapshot captures");
+        assert!(snapshot.content().is_empty());
+        let exact_charge = unique_source_snapshot_bytes(&snapshot)
+            .and_then(|bytes| {
+                bytes
+                    .checked_add(source_generation_reference_bytes(1)?)
+                    .ok_or(FirstSliceError::Retention)
+            })
+            .expect("empty snapshot retained charge fits");
+        assert!(exact_charge > relative.as_str().len());
+        let generation = GenerationId::from_bytes([0x39; 20]);
+        let source = || RustSourceInput {
+            snapshot: snapshot.clone(),
+            generated: false,
+            origins: Vec::new(),
+        };
+
+        let below = SourceSnapshotRetention::new(1, exact_charge - 1)
+            .expect("below-limit retention initializes");
+        assert!(matches!(
+            below.admit(generation, vec![source()], &Cancellation::new()),
+            Err(FirstSliceError::Retention)
+        ));
+
+        let mut exact = SourceSnapshotRetention::new(1, exact_charge)
+            .expect("exact-limit retention initializes");
+        let admission = exact
+            .admit(generation, vec![source()], &Cancellation::new())
+            .expect("exact metadata-aware charge is admitted");
+        exact.stage(admission).expect("exact admission stages");
+        assert_eq!(exact.retained_bytes(), exact_charge);
+    }
+
+    #[test]
     fn source_retention_is_byte_bounded_deduplicated_and_cleanup_aware() {
         const FIRST: &str = "pub fn answer() -> u32 {\n    42\n}\n";
         const SECOND: &str = "pub fn answer() -> u32 {\n    43\n}\n";
@@ -17320,8 +17409,37 @@ mod tests {
         let answer_path = fixture.path().join("src/lib.rs");
         fs::write(&answer_path, FIRST).expect("first source writes");
         fs::write(fixture.path().join("src/stable.rs"), STABLE).expect("stable source writes");
-        let first_generation_bytes = FIRST.len() + STABLE.len();
-        let exact_retention_bytes = first_generation_bytes + SECOND.len();
+        assert_eq!(FIRST.len(), SECOND.len());
+        assert_eq!(SECOND.len(), THIRD.len());
+        let root = RepositoryRoot::open(
+            derive_repository(b"source-retention-accounting").id(),
+            fixture.path(),
+        )
+        .expect("retention accounting root opens");
+        let answer_snapshot = root
+            .snapshot(
+                &RelativePath::parse(Path::new("src/lib.rs"))
+                    .expect("answer relative path is valid"),
+                u64::try_from(FIRST.len()).expect("answer length is representable"),
+            )
+            .expect("answer snapshot captures");
+        let stable_snapshot = root
+            .snapshot(
+                &RelativePath::parse(Path::new("src/stable.rs"))
+                    .expect("stable relative path is valid"),
+                u64::try_from(STABLE.len()).expect("stable length is representable"),
+            )
+            .expect("stable snapshot captures");
+        let generation_reference_bytes =
+            source_generation_reference_bytes(2).expect("generation reference charge fits");
+        let answer_snapshot_bytes =
+            unique_source_snapshot_bytes(&answer_snapshot).expect("answer snapshot charge fits");
+        let stable_snapshot_bytes =
+            unique_source_snapshot_bytes(&stable_snapshot).expect("stable snapshot charge fits");
+        let first_generation_bytes =
+            generation_reference_bytes + answer_snapshot_bytes + stable_snapshot_bytes;
+        let exact_retention_bytes =
+            first_generation_bytes + generation_reference_bytes + answer_snapshot_bytes;
         let mut service = FirstSliceService::new_with_source_limit(3, exact_retention_bytes)
             .expect("bounded first-slice service initializes");
 

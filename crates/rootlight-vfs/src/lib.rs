@@ -35,6 +35,7 @@ pub mod platform;
 /// Hard ceiling for one VFS source capture, independent of caller configuration.
 pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 const SNAPSHOT_READ_CHUNK_BYTES: usize = 64 * 1024;
+const RETAINED_ALLOCATION_OVERHEAD_BYTES: usize = 2 * size_of::<usize>();
 /// Maximum number of relative path components accepted by the VFS.
 pub const MAX_PATH_COMPONENTS: usize = 256;
 /// Maximum platform path bytes accepted by the VFS.
@@ -252,6 +253,28 @@ impl RelativePath {
     fn parent_components(&self) -> &[OsString] {
         &self.components[..self.components.len() - 1]
     }
+
+    fn retained_owned_bytes(&self) -> Option<usize> {
+        let component_slots = self
+            .components
+            .capacity()
+            .checked_mul(size_of::<OsString>())?;
+        let mut bytes = component_slots.checked_add(RETAINED_ALLOCATION_OVERHEAD_BYTES)?;
+        for component in &self.components {
+            let component_bytes = platform_path_byte_len(component)?;
+            bytes = bytes.checked_add(component_bytes)?;
+            if component_bytes != 0 {
+                bytes = bytes.checked_add(RETAINED_ALLOCATION_OVERHEAD_BYTES)?;
+            }
+        }
+        for capacity in [self.display.capacity(), self.identity.capacity()] {
+            bytes = bytes.checked_add(capacity)?;
+            if capacity != 0 {
+                bytes = bytes.checked_add(RETAINED_ALLOCATION_OVERHEAD_BYTES)?;
+            }
+        }
+        Some(bytes)
+    }
 }
 
 impl fmt::Debug for RelativePath {
@@ -353,6 +376,21 @@ impl SourceSnapshot {
     #[must_use]
     pub const fn metadata(&self) -> SnapshotMetadata {
         self.metadata
+    }
+
+    /// Returns a conservative charge for the retained object and owned buffers.
+    ///
+    /// The estimate uses live allocation capacities and includes a fixed
+    /// allocator allowance for each path or content buffer. Container entries
+    /// that own an `Arc` to this snapshot remain the caller's responsibility.
+    #[must_use]
+    pub fn retained_memory_bytes(&self) -> Option<usize> {
+        let mut bytes = size_of::<Self>().checked_add(self.path.retained_owned_bytes()?)?;
+        bytes = bytes.checked_add(self.content.capacity())?;
+        if self.content.capacity() != 0 {
+            bytes = bytes.checked_add(RETAINED_ALLOCATION_OVERHEAD_BYTES)?;
+        }
+        Some(bytes)
     }
 }
 
