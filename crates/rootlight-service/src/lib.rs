@@ -1461,6 +1461,7 @@ struct StructuralArtifactEntry {
 struct StructuralGenerationArtifacts {
     by_file: BTreeMap<FileId, StructuralArtifactEntry>,
     accounted_bytes: usize,
+    retention_complete: bool,
 }
 
 impl StructuralGenerationArtifacts {
@@ -1468,11 +1469,14 @@ impl StructuralGenerationArtifacts {
         Self {
             by_file: BTreeMap::new(),
             accounted_bytes: 0,
+            retention_complete: false,
         }
     }
 
     fn new(
         entries: impl IntoIterator<Item = StructuralArtifactEntry>,
+        maximum_bytes: usize,
+        retention_complete: bool,
         cancellation: &Cancellation,
     ) -> Result<Self, FirstSliceError> {
         let mut by_file = BTreeMap::new();
@@ -1486,12 +1490,16 @@ impl StructuralGenerationArtifacts {
             accounted_bytes = accounted_bytes
                 .checked_add(entry.artifact.accounted_bytes())
                 .ok_or(FirstSliceError::Retention)?;
+            if accounted_bytes > maximum_bytes {
+                return Err(FirstSliceError::Retention);
+            }
             by_file.insert(file, entry);
         }
         check_cancellation(cancellation)?;
         Ok(Self {
             by_file,
             accounted_bytes,
+            retention_complete,
         })
     }
 
@@ -1545,6 +1553,10 @@ impl StructuralArtifactRetention {
         self.committed.get(&generation)
     }
 
+    const fn available_bytes(&self) -> usize {
+        self.maximum_bytes.saturating_sub(self.retained_bytes)
+    }
+
     fn stage(
         &mut self,
         generation: GenerationId,
@@ -1567,15 +1579,16 @@ impl StructuralArtifactRetention {
             .retained_bytes
             .checked_add(artifacts.accounted_bytes)
             .ok_or(FirstSliceError::Retention)?;
-        let (artifacts, retained, admitted_bytes) = if admitted_bytes <= self.maximum_bytes {
-            (artifacts, true, admitted_bytes)
-        } else {
-            (
-                StructuralGenerationArtifacts::empty(),
-                false,
-                self.retained_bytes,
-            )
-        };
+        let (artifacts, retained, admitted_bytes) =
+            if artifacts.retention_complete && admitted_bytes <= self.maximum_bytes {
+                (artifacts, true, admitted_bytes)
+            } else {
+                (
+                    StructuralGenerationArtifacts::empty(),
+                    false,
+                    self.retained_bytes,
+                )
+            };
         check_cancellation(cancellation)?;
         self.staged.insert(generation, artifacts);
         self.retained_bytes = admitted_bytes;
@@ -4183,9 +4196,9 @@ impl FirstSliceService {
         }
         let mut structural_documents = BTreeMap::<String, Vec<NormalizedIrDocument>>::new();
         let mut structural_entries = Vec::new();
-        structural_entries
-            .try_reserve_exact(sources.len())
-            .map_err(|_| FirstSliceError::Retention)?;
+        let structural_artifact_budget = self.structural_artifacts.available_bytes();
+        let mut structural_artifact_bytes = 0usize;
+        let mut structural_retention_complete = true;
         let mut parsed_files = 0usize;
         let mut reused_parser_artifacts = 0usize;
         let mut reused_parser_artifact_bytes = 0usize;
@@ -4305,11 +4318,25 @@ impl FirstSliceService {
                 .try_reserve(1)
                 .map_err(|_| FirstSliceError::Limits)?;
             language_documents.push(output.document().clone());
-            if let Some(artifact) = artifact {
-                structural_entries.push(StructuralArtifactEntry {
-                    id: artifact_id,
-                    artifact,
-                });
+            if let Some(artifact) = artifact
+                && structural_retention_complete
+            {
+                let admitted_bytes = structural_artifact_bytes
+                    .checked_add(artifact.accounted_bytes())
+                    .ok_or(FirstSliceError::Retention)?;
+                if admitted_bytes <= structural_artifact_budget {
+                    structural_entries
+                        .try_reserve(1)
+                        .map_err(|_| FirstSliceError::Retention)?;
+                    structural_entries.push(StructuralArtifactEntry {
+                        id: artifact_id,
+                        artifact,
+                    });
+                    structural_artifact_bytes = admitted_bytes;
+                } else {
+                    structural_entries.clear();
+                    structural_retention_complete = false;
+                }
             }
             analyzed_files = analyzed_files
                 .checked_add(1)
@@ -4414,8 +4441,12 @@ impl FirstSliceService {
             u64::try_from(reused_parser_artifact_bytes).map_err(|_| FirstSliceError::Limits)?;
         incremental_plan.state.evidence.lowered_files =
             u64::try_from(sources.len()).map_err(|_| FirstSliceError::Limits)?;
-        let structural_artifacts =
-            StructuralGenerationArtifacts::new(structural_entries, cancellation)?;
+        let structural_artifacts = StructuralGenerationArtifacts::new(
+            structural_entries,
+            structural_artifact_budget,
+            structural_retention_complete,
+            cancellation,
+        )?;
         let resolution_limits = resolution_limits_for_occurrences(document.occurrences.len())?;
         let document = ResolutionEngine::new(resolution_limits)
             .apply_document(
@@ -16965,8 +16996,17 @@ mod tests {
         let mut service = FirstSliceService::new(3).expect("service initializes");
         service.structural_artifacts.maximum_bytes = 1;
 
+        let prepared = service
+            .prepare_rust_fixture(fixture.path(), &cancellation)
+            .expect("initial generation prepares within the structural cap");
+        let FirstSliceIndexPreparation::Pending(pending) = &prepared else {
+            panic!("changed fixture requires a pending generation");
+        };
+        assert!(pending.structural_artifacts.by_file.is_empty());
+        assert_eq!(pending.structural_artifacts.accounted_bytes, 0);
+        assert!(!pending.structural_artifacts.retention_complete);
         let first = service
-            .index_rust_fixture(fixture.path(), &cancellation)
+            .publish_prepared(prepared, &cancellation)
             .expect("initial generation publishes without structural retention");
         let initial = service
             .incremental_evidence(first.generation)
@@ -16975,8 +17015,17 @@ mod tests {
         assert_eq!(service.structural_artifacts.retained_bytes, 0);
 
         fs::write(&source, "pub fn value() -> u32 { 2 }\n").expect("Rust source changes");
+        let prepared = service
+            .prepare_rust_fixture(fixture.path(), &cancellation)
+            .expect("successor prepares with immediate artifact eviction");
+        let FirstSliceIndexPreparation::Pending(pending) = &prepared else {
+            panic!("changed fixture requires a pending generation");
+        };
+        assert!(pending.structural_artifacts.by_file.is_empty());
+        assert_eq!(pending.structural_artifacts.accounted_bytes, 0);
+        assert!(!pending.structural_artifacts.retention_complete);
         let second = service
-            .index_rust_fixture(fixture.path(), &cancellation)
+            .publish_prepared(prepared, &cancellation)
             .expect("successor generation performs a fresh parse");
         let successor = service
             .incremental_evidence(second.generation)
