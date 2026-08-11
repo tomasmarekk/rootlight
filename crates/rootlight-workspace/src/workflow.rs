@@ -349,6 +349,12 @@ struct DirectedEdge {
     edge: WorkflowEdge,
 }
 
+#[derive(Debug)]
+struct DirectedEdges {
+    edges: Vec<DirectedEdge>,
+    truncated: bool,
+}
+
 /// Executes a deterministic traversal without consulting live generations.
 ///
 /// # Errors
@@ -393,8 +399,13 @@ pub fn execute_workflow(
         Some(_) => return Err(WorkflowError::ContinuationMismatch),
         None => 0,
     };
-    let directed = directed_edges(request.kind, overlay, cancellation)?;
-    let adjacency = adjacency(&directed);
+    let directed = directed_edges(
+        request.kind,
+        overlay,
+        request.budget.max_edges,
+        cancellation,
+    )?;
+    let adjacency = adjacency(&directed.edges)?;
     let metadata_bytes = serde_json::to_vec(snapshot.failures())
         .map_err(|_| WorkflowError::Serialization)?
         .len()
@@ -423,7 +434,7 @@ pub fn execute_workflow(
     let mut estimated_json_bytes = metadata_bytes;
     let mut ordinal = 0_usize;
     let result_incomplete = !snapshot.is_complete();
-    let mut traversal_truncated = false;
+    let mut traversal_truncated = directed.truncated;
     let mut continuable = false;
     let mut continuation_offset = offset;
 
@@ -448,6 +459,7 @@ pub fn execute_workflow(
                 break 'traversal;
             }
             let edge = &directed
+                .edges
                 .get(edge_index)
                 .ok_or(WorkflowError::Accounting)?
                 .edge;
@@ -528,14 +540,20 @@ pub fn execute_workflow(
 fn directed_edges(
     kind: WorkflowKind,
     overlay: &LinkOverlay,
+    limit: usize,
     cancellation: &Cancellation,
-) -> Result<Vec<DirectedEdge>, WorkflowError> {
+) -> Result<DirectedEdges, WorkflowError> {
     let mut directed = Vec::new();
-    for (index, link) in overlay.links().iter().enumerate() {
+    let mut truncated = false;
+    'links: for (index, link) in overlay.links().iter().enumerate() {
         if index % 64 == 0 {
             cancellation.check()?;
         }
         for candidate in link.candidates() {
+            if directed.len() >= limit {
+                truncated = true;
+                break 'links;
+            }
             let consumer_to_provider = WorkflowEdge {
                 id: edge_id(link.id(), link.consumer(), candidate.endpoint()),
                 link: link.id(),
@@ -547,25 +565,39 @@ fn directed_edges(
                 caveats: candidate.caveats().to_vec(),
             };
             match kind {
-                WorkflowKind::Flow => directed.push(DirectedEdge {
-                    edge: consumer_to_provider,
-                }),
-                WorkflowKind::Impact => directed.push(DirectedEdge {
-                    edge: reverse_edge(consumer_to_provider),
-                }),
+                WorkflowKind::Flow => {
+                    push_directed(&mut directed, consumer_to_provider)?;
+                }
+                WorkflowKind::Impact => {
+                    push_directed(&mut directed, reverse_edge(consumer_to_provider))?;
+                }
                 WorkflowKind::Context | WorkflowKind::Plan | WorkflowKind::Migration => {
-                    directed.push(DirectedEdge {
-                        edge: consumer_to_provider.clone(),
-                    });
-                    directed.push(DirectedEdge {
-                        edge: reverse_edge(consumer_to_provider),
-                    });
+                    push_directed(&mut directed, consumer_to_provider.clone())?;
+                    if directed.len() >= limit {
+                        truncated = true;
+                        break 'links;
+                    }
+                    push_directed(&mut directed, reverse_edge(consumer_to_provider))?;
                 }
             }
         }
     }
     directed.sort_by_key(|directed| directed.edge.id);
-    Ok(directed)
+    Ok(DirectedEdges {
+        edges: directed,
+        truncated,
+    })
+}
+
+fn push_directed(
+    directed: &mut Vec<DirectedEdge>,
+    edge: WorkflowEdge,
+) -> Result<(), WorkflowError> {
+    directed
+        .try_reserve(1)
+        .map_err(|_| WorkflowError::Accounting)?;
+    directed.push(DirectedEdge { edge });
+    Ok(())
 }
 
 fn reverse_edge(mut edge: WorkflowEdge) -> WorkflowEdge {
@@ -574,12 +606,18 @@ fn reverse_edge(mut edge: WorkflowEdge) -> WorkflowEdge {
     edge
 }
 
-fn adjacency(directed: &[DirectedEdge]) -> BTreeMap<WorkspaceFactRef, Vec<usize>> {
+fn adjacency(
+    directed: &[DirectedEdge],
+) -> Result<BTreeMap<WorkspaceFactRef, Vec<usize>>, WorkflowError> {
     let mut adjacency = BTreeMap::<WorkspaceFactRef, Vec<usize>>::new();
     for (index, edge) in directed.iter().enumerate() {
-        adjacency.entry(edge.edge.from).or_default().push(index);
+        let outbound = adjacency.entry(edge.edge.from).or_default();
+        outbound
+            .try_reserve(1)
+            .map_err(|_| WorkflowError::Accounting)?;
+        outbound.push(index);
     }
-    adjacency
+    Ok(adjacency)
 }
 
 fn edge_id(link: ContentHash, from: WorkspaceFactRef, to: WorkspaceFactRef) -> ContentHash {

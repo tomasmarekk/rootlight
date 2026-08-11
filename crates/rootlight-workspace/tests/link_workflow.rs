@@ -232,6 +232,55 @@ fn normalized_http_routes_keep_ambiguity_and_candidate_limits_explicit() {
 }
 
 #[test]
+fn workflow_edge_budget_bounds_overlay_expansion() {
+    let catalog = catalog(&[(1, 11), (2, 21), (3, 31), (4, 41)]);
+    let snapshot = snapshot(
+        &catalog,
+        &[(1, 11), (2, 21), (3, 31), (4, 41)],
+        SnapshotBuildMode::Strict,
+    );
+    let key = named_key(LinkKind::Rpc, "inventory.reserve");
+    let consumer = endpoint(4, 41, 4);
+    let mut declarations = vec![declaration(
+        consumer,
+        LinkKind::Rpc,
+        LinkDirection::Consumer,
+        key.clone(),
+        850,
+    )];
+    for repository_seed in 1..=3 {
+        declarations.push(declaration(
+            endpoint(repository_seed, repository_seed * 10 + 1, repository_seed),
+            LinkKind::Rpc,
+            LinkDirection::Provider,
+            key.clone(),
+            900,
+        ));
+    }
+    let overlay = build_link_overlay(
+        &snapshot,
+        declarations,
+        LinkLimits::new(10, 10, 3, 512, 16).expect("fixture limits should be valid"),
+        &Cancellation::new(),
+    )
+    .expect("wide overlay should build");
+    let budget = WorkflowBudget::new(4, 10, 1, 4, 4).expect("tiny edge budget should be valid");
+
+    let result = execute_workflow(
+        &snapshot,
+        &overlay,
+        WorkflowRequest::new(WorkflowKind::Flow, budget).with_seed(consumer),
+        &Cancellation::new(),
+    )
+    .expect("bounded workflow should return its admitted prefix");
+
+    assert_eq!(result.edges_scanned(), 1);
+    assert_eq!(result.rows().len(), 1);
+    assert!(result.truncated());
+    assert!(result.continuation().is_none());
+}
+
+#[test]
 fn overlay_identity_and_encoding_are_independent_of_declaration_order() {
     let catalog = catalog(&[(1, 11), (2, 21), (3, 31)]);
     let snapshot = snapshot(
