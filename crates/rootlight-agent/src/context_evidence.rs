@@ -29,6 +29,8 @@ pub const MAX_CONTEXT_PROVIDER_CALLS: usize = 64;
 /// Maximum candidates retained from one provider invocation.
 pub const MAX_CANDIDATES_PER_PROVIDER: u16 = 32;
 
+const ARCHITECTURE_PROVIDER_WORKSPACE_BYTES: u64 = 1024 * 1024;
+
 /// Maximum source references or dependency edges on one candidate.
 pub const MAX_CANDIDATE_LINKS: usize = 16;
 
@@ -1601,6 +1603,14 @@ fn provider_reservation(provider: EvidenceProvider, max_candidates: u16) -> Budg
         EvidenceProvider::Relationships => 20_480,
         _ => 4_096,
     };
+    // Architecture aggregation has a fixed document workspace independent of
+    // returned components. Reserve a dedicated child ceiling so the query can
+    // enforce that workspace without borrowing unaccounted parent capacity.
+    let memory_bytes = if provider == EvidenceProvider::Architecture {
+        ARCHITECTURE_PROVIDER_WORKSPACE_BYTES
+    } else {
+        results.saturating_mul(envelope_bytes_per_result)
+    };
     let paths_per_result = if provider == EvidenceProvider::Relationships {
         2
     } else {
@@ -1615,7 +1625,7 @@ fn provider_reservation(provider: EvidenceProvider, max_candidates: u16) -> Budg
         depth: 4,
         paths: results.saturating_mul(paths_per_result),
         json_bytes: results.saturating_mul(envelope_bytes_per_result),
-        memory_bytes: results.saturating_mul(envelope_bytes_per_result),
+        memory_bytes,
         time_ms: 2_000,
         ..BudgetCharge::default()
     }
@@ -1955,6 +1965,10 @@ mod tests {
         assert_eq!(reservation.rows, 256);
         assert_eq!(reservation.json_bytes, 16_384);
         assert_eq!(reservation.traversal_facts, 32);
+        assert_eq!(
+            reservation.memory_bytes,
+            ARCHITECTURE_PROVIDER_WORKSPACE_BYTES
+        );
     }
 
     #[test]
