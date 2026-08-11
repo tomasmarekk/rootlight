@@ -121,7 +121,7 @@
     "resource_exhausted": {
       "repository_preserved": true,
       "generation_preserved": true,
-      "batch_status": "error",
+      "batch_status": "partial",
       "operation_results": [
         {
           "id": "later",
@@ -133,17 +133,17 @@
         {
           "id": "overrun",
           "tool": "code.locate",
-          "status": "error",
-          "error_code": "BUDGET_EXCEEDED",
-          "truncated": false
+          "status": "ok",
+          "error_code": null,
+          "truncated": true
         }
       ],
       "truncated": true,
       "completeness": {
         "state": "truncated",
-        "limiting_resources": ["estimated_tokens"]
+        "limiting_resources": ["results", "estimated_tokens"]
       },
-      "warnings": 0,
+      "warnings": 4,
       "usage": {
         "json_bytes_exact": true,
         "estimated_tokens_exact": true

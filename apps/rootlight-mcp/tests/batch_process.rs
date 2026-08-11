@@ -669,9 +669,28 @@ fn ordered_runtime_outcomes_match_the_public_process_golden() {
             json!({
                 "repository": {"repository_id": repository_id},
                 "generation": "active",
-                "operations": [locate("later", 500), locate("overrun", 500)],
+                "operations": [
+                    {
+                        "id": "later",
+                        "tool": "code.locate",
+                        "arguments": {
+                            "query": "batch_outcome_fixture",
+                            "search_modes": ["exact"]
+                        },
+                        "local_budget": {"max_results": 1, "max_tokens": 16_000}
+                    },
+                    {
+                        "id": "overrun",
+                        "tool": "code.locate",
+                        "arguments": {
+                            "query": "batch_outcome_fixture",
+                            "search_modes": ["exact"]
+                        },
+                        "local_budget": {"max_results": 1, "max_tokens": 16_000}
+                    }
+                ],
                 "failure_policy": "continue_independent",
-                "budget": {"max_tokens": 500}
+                "budget": {"max_results": 1, "max_tokens": 16_000}
             }),
         ),
     ];
