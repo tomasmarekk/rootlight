@@ -3,7 +3,10 @@
 //! Exact bindings require a unique candidate at or above the documented strong
 //! threshold; tied or weaker evidence remains an explicit candidate set.
 
-use std::collections::BTreeMap;
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BinaryHeap},
+};
 
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
@@ -78,15 +81,17 @@ impl ResolutionEngine {
             &document.provenance,
             cancellation,
         )?;
-        let mut decisions = Vec::with_capacity(document.occurrences.len());
+        let mut work = ResolutionWorkBudget::new(self.limits.work_limit());
+        let mut decisions = Vec::new();
         for occurrence in &document.occurrences {
             cancellation.check()?;
+            work.consume()?;
             if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
                 || !resolvable_role(occurrence.role)
             {
                 continue;
             }
-            decisions.push(self.resolve_occurrence(occurrence, &index, cancellation)?);
+            decisions.push(self.resolve_occurrence(occurrence, &index, &mut work, cancellation)?);
         }
         decisions.sort_unstable_by_key(|decision| decision.occurrence);
 
@@ -101,6 +106,7 @@ impl ResolutionEngine {
         &self,
         occurrence: &OccurrenceRecord,
         index: &CandidateIndex<'_>,
+        work: &mut ResolutionWorkBudget,
         cancellation: &Cancellation,
     ) -> Result<ResolutionDecision, ResolutionError> {
         let language = index
@@ -118,13 +124,17 @@ impl ResolutionEngine {
             .get(&occurrence.syntactic_text_hash)
             .map(Vec::as_slice)
             .unwrap_or_default();
-        let mut candidates = Vec::new();
+        let mut candidates = BinaryHeap::with_capacity(self.limits.candidate_limit());
         let mut rejected = Vec::new();
+        let mut candidate_total = 0_u64;
         let mut rejected_total = 0_u64;
         let mut kind_rejection_total = 0_u64;
+        let mut best_score = None;
+        let mut best_score_count = 0_u64;
 
         for indexed in same_spelling {
             cancellation.check()?;
+            work.consume()?;
             let entity = indexed.entity;
             let rejection = if entity.language != language {
                 Some(RejectionReason::LanguageMismatch)
@@ -150,12 +160,58 @@ impl ResolutionEngine {
                 }
                 continue;
             }
-            let candidate = score_candidate(occurrence, entity, indexed.name_match, index)?;
-            candidates.push(candidate);
+            candidate_total = candidate_total
+                .checked_add(1)
+                .ok_or(ResolutionError::CountOverflow)?;
+            let mut candidate = score_candidate(occurrence, entity, indexed.name_match, index)?;
+            if occurrence.role == OccurrenceRole::CallSite
+                && !self.policy.allows_exact_call(language)
+            {
+                candidate.score = confidence(candidate.score.get().min(899))?;
+                candidate
+                    .penalties
+                    .push(ResolutionPenalty::DynamicCallUncalibrated);
+            }
+            match best_score {
+                None => {
+                    best_score = Some(candidate.score);
+                    best_score_count = 1;
+                }
+                Some(score) => match candidate.score.cmp(&score) {
+                    Ordering::Greater => {
+                        best_score = Some(candidate.score);
+                        best_score_count = 1;
+                    }
+                    Ordering::Equal => {
+                        best_score_count = best_score_count
+                            .checked_add(1)
+                            .ok_or(ResolutionError::CountOverflow)?;
+                    }
+                    Ordering::Less => {}
+                },
+            }
+            let ranked = RankedCandidate(candidate);
+            if candidates.len() < self.limits.candidate_limit() {
+                candidates.push(ranked);
+            } else if candidates
+                .peek()
+                .is_some_and(|worst| candidate_precedes(&ranked.0, &worst.0))
+            {
+                candidates.pop();
+                candidates.push(ranked);
+            }
         }
 
-        if candidates.len() == 1 && is_scoped_call_syntax(&occurrence.syntax_kind) {
-            let candidate = &mut candidates[0];
+        let mut candidates = candidates
+            .into_iter()
+            .map(|candidate| candidate.0)
+            .collect::<Vec<_>>();
+        candidates.sort_unstable_by(candidate_order);
+
+        if candidate_total == 1 && is_scoped_call_syntax(&occurrence.syntax_kind) {
+            let candidate = candidates
+                .first_mut()
+                .ok_or(ResolutionError::InvalidScore)?;
             let entity = index
                 .entities
                 .get(&candidate.symbol)
@@ -178,35 +234,21 @@ impl ResolutionEngine {
             candidate
                 .positive_signals
                 .push(ResolutionSignal::UniqueScopedCallCandidate);
-        }
-        if occurrence.role == OccurrenceRole::CallSite && !self.policy.allows_exact_call(language) {
-            for candidate in &mut candidates {
-                candidate.score = confidence(candidate.score.get().min(899))?;
-                candidate
-                    .penalties
-                    .push(ResolutionPenalty::DynamicCallUncalibrated);
-            }
+            best_score = Some(candidate.score);
         }
 
-        candidates.sort_unstable_by(|left, right| {
-            right
-                .score
-                .cmp(&left.score)
-                .then_with(|| left.symbol.cmp(&right.symbol))
-        });
+        candidates.sort_unstable_by(candidate_order);
         rejected.sort_unstable_by_key(|candidate| candidate.symbol);
 
-        let total_count =
-            u64::try_from(candidates.len()).map_err(|_| ResolutionError::CountOverflow)?;
-        let top_is_unique = candidates
-            .get(1)
-            .is_none_or(|second| second.score < candidates[0].score);
+        let top_is_unique = best_score_count == 1
+            && candidates
+                .first()
+                .is_some_and(|candidate| Some(candidate.score) == best_score);
         let exact = candidates
             .first()
             .filter(|candidate| top_is_unique && candidate.score.get() >= EXACT_BINDING_THRESHOLD)
             .map(|candidate| (candidate.symbol, candidate.score));
-        let materialized_count = candidates.len().min(self.limits.candidate_limit());
-        candidates.truncate(materialized_count);
+        let materialized_count = candidates.len();
 
         let outcome = if let Some((symbol, confidence)) = exact {
             ResolutionOutcome::Resolved { symbol, confidence }
@@ -216,8 +258,8 @@ impl ResolutionEngine {
                     .iter()
                     .map(|candidate| candidate.symbol)
                     .collect(),
-                total_count,
-                completeness: if total_count
+                total_count: candidate_total,
+                completeness: if candidate_total
                     > u64::try_from(materialized_count)
                         .map_err(|_| ResolutionError::CountOverflow)?
                 {
@@ -253,6 +295,60 @@ impl ResolutionEngine {
             outcome,
             explanation,
         })
+    }
+}
+
+fn candidate_order(left: &CandidateExplanation, right: &CandidateExplanation) -> Ordering {
+    right
+        .score
+        .cmp(&left.score)
+        .then_with(|| left.symbol.cmp(&right.symbol))
+}
+
+fn candidate_precedes(left: &CandidateExplanation, right: &CandidateExplanation) -> bool {
+    candidate_order(left, right) == Ordering::Less
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RankedCandidate(CandidateExplanation);
+
+impl Ord for RankedCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .0
+            .score
+            .cmp(&self.0.score)
+            .then_with(|| self.0.symbol.cmp(&other.0.symbol))
+    }
+}
+
+impl PartialOrd for RankedCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+pub(crate) struct ResolutionWorkBudget {
+    remaining: usize,
+    maximum: usize,
+}
+
+impl ResolutionWorkBudget {
+    pub(crate) const fn new(maximum: usize) -> Self {
+        Self {
+            remaining: maximum,
+            maximum,
+        }
+    }
+
+    pub(crate) fn consume(&mut self) -> Result<(), ResolutionError> {
+        self.remaining = self
+            .remaining
+            .checked_sub(1)
+            .ok_or(ResolutionError::WorkLimit {
+                maximum: self.maximum,
+            })?;
+        Ok(())
     }
 }
 

@@ -99,8 +99,8 @@ pub use rootlight_query::{
 };
 use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
 use rootlight_resolve::{
-    DEFAULT_CANDIDATE_LIMIT, RESOLVER_PROVIDER_VERSION, ResolutionEngine, ResolutionError,
-    ResolutionLimits, ResolverFactContext,
+    DEFAULT_CANDIDATE_LIMIT, MAX_RESOLUTION_WORK_LIMIT, RESOLVER_PROVIDER_VERSION,
+    ResolutionEngine, ResolutionError, ResolutionLimits, ResolverFactContext,
 };
 use rootlight_search::{BuildBudget, LexicalIndex, SearchBudget, SearchError};
 use rootlight_source::{SourceBudget, SourceError, SourceService};
@@ -11601,6 +11601,7 @@ fn map_resolution_error(error: ResolutionError, cancellation: &Cancellation) -> 
     }
     match error {
         ResolutionError::Cancelled(cancelled) => FirstSliceError::Cancelled(cancelled.reason()),
+        ResolutionError::WorkLimit { .. } => FirstSliceError::Limits,
         ResolutionError::InvalidDocument(IrDocumentValidationError::CollectionLimit {
             collection,
             observed,
@@ -11628,12 +11629,15 @@ fn resolution_limits_for_occurrences(
     occurrence_count: usize,
 ) -> Result<ResolutionLimits, FirstSliceError> {
     // Preserve the documented per-site default for ordinary repositories while
-    // constraining aggregate candidate materialization for substantial inputs.
+    // constraining aggregate materialization and resolver work independently.
     let aggregate_limit = MAX_TOTAL_MATERIALIZED_RESOLUTION_CANDIDATES
         .checked_div(occurrence_count.max(1))
         .unwrap_or(1);
-    ResolutionLimits::new(aggregate_limit.clamp(1, DEFAULT_CANDIDATE_LIMIT))
-        .map_err(|_| FirstSliceError::Limits)
+    ResolutionLimits::with_work_limit(
+        aggregate_limit.clamp(1, DEFAULT_CANDIDATE_LIMIT),
+        MAX_RESOLUTION_WORK_LIMIT,
+    )
+    .map_err(|_| FirstSliceError::Limits)
 }
 
 const fn ir_collection_resource(collection: &str) -> Option<FirstSliceResource> {

@@ -147,6 +147,14 @@ fn validates_candidate_bounds() {
     assert!(ResolutionLimits::new(0).is_err());
     assert!(ResolutionLimits::new(4_096).is_ok());
     assert!(ResolutionLimits::new(4_097).is_err());
+    assert!(ResolutionLimits::with_work_limit(1, 0).is_err());
+    assert!(
+        ResolutionLimits::with_work_limit(1, rootlight_resolve::MAX_RESOLUTION_WORK_LIMIT).is_ok()
+    );
+    assert!(
+        ResolutionLimits::with_work_limit(1, rootlight_resolve::MAX_RESOLUTION_WORK_LIMIT + 1)
+            .is_err()
+    );
 }
 
 #[test]
@@ -254,6 +262,48 @@ fn truncates_candidates_without_hiding_total_or_order() {
     assert_eq!(*total_count, 3);
     assert_eq!(*completeness, CoverageStatus::Bounded);
     assert_eq!(batch.decisions[0].explanation.candidates.len(), 2);
+}
+
+#[test]
+fn resolver_work_limit_bounds_same_name_candidate_scans() {
+    let mut fixture = Fixture::new();
+    for identity in [44, 45, 46] {
+        let file = fixture.add_file(identity, &format!("src/{identity}.rs"));
+        fixture.add_entity(identity, "shared", file, EntityKind::Module, None);
+    }
+    fixture.add_occurrence(
+        47,
+        "shared",
+        fixture.primary_file,
+        OccurrenceRole::ImportUse,
+        None,
+    );
+    fixture.validate();
+
+    let constrained = ResolutionEngine::new(
+        ResolutionLimits::with_work_limit(1, 3).expect("fixture work limit is valid"),
+    );
+    assert!(matches!(
+        constrained.resolve(&fixture.document, &Cancellation::new()),
+        Err(ResolutionError::WorkLimit { maximum: 3 })
+    ));
+
+    let exact = ResolutionEngine::new(
+        ResolutionLimits::with_work_limit(1, 4).expect("exact work limit is valid"),
+    )
+    .resolve(&fixture.document, &Cancellation::new())
+    .expect("exact occurrence and candidate work is admitted");
+    let ResolutionOutcome::Candidates {
+        total_count,
+        completeness,
+        ..
+    } = exact.decisions[0].outcome
+    else {
+        panic!("same-name fixture remains ambiguous");
+    };
+    assert_eq!(total_count, 3);
+    assert_eq!(completeness, CoverageStatus::Bounded);
+    assert_eq!(exact.decisions[0].explanation.candidates.len(), 1);
 }
 
 #[test]

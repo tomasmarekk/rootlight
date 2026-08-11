@@ -19,7 +19,7 @@ use rootlight_ir::{
 use crate::{
     AppliedResolution, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionDecision,
     ResolutionEngine, ResolutionError, ResolutionOutcome, ResolutionRule, ResolverFactContext,
-    engine::{CandidateIndex, resolvable_role},
+    engine::{CandidateIndex, ResolutionWorkBudget, resolvable_role},
 };
 
 impl ResolutionEngine {
@@ -60,7 +60,7 @@ impl ResolutionEngine {
             .iter()
             .map(|record| record.id)
             .collect::<BTreeSet<_>>();
-        let producer = resolver_producer(self.limits.candidate_limit(), &self.policy)?;
+        let producer = resolver_producer(self.limits, &self.policy)?;
 
         for decision in &batch.decisions {
             cancellation.check()?;
@@ -149,7 +149,7 @@ impl ResolutionEngine {
         )?;
         let repository = document.repository;
         let generation = document.generation;
-        let producer = resolver_producer(self.limits.candidate_limit(), &self.policy)?;
+        let producer = resolver_producer(self.limits, &self.policy)?;
         let mut known_provenance = document
             .provenance
             .iter()
@@ -157,15 +157,17 @@ impl ResolutionEngine {
             .collect::<BTreeSet<_>>();
         let mut new_provenance = Vec::new();
         let mut occurrence_remap = BTreeMap::new();
+        let mut work = ResolutionWorkBudget::new(self.limits.work_limit());
 
         for occurrence in &mut document.occurrences {
             cancellation.check()?;
+            work.consume()?;
             if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
                 || !resolvable_role(occurrence.role)
             {
                 continue;
             }
-            let decision = self.resolve_occurrence(occurrence, &lookup, cancellation)?;
+            let decision = self.resolve_occurrence(occurrence, &lookup, &mut work, cancellation)?;
             if matches!(decision.outcome, ResolutionOutcome::Unresolved { .. }) {
                 continue;
             }
@@ -241,13 +243,17 @@ impl PendingRelation {
 }
 
 fn resolver_producer(
-    candidate_limit: usize,
+    limits: crate::ResolutionLimits,
     policy: &crate::ResolutionPolicy,
 ) -> Result<ProducerIdentity, ResolutionError> {
-    let mut configuration = Vec::with_capacity(RESOLVER_PROVIDER_VERSION.len() + 8);
+    let mut configuration = Vec::with_capacity(RESOLVER_PROVIDER_VERSION.len() + 16);
     configuration.extend_from_slice(RESOLVER_PROVIDER_VERSION.as_bytes());
-    let limit = u64::try_from(candidate_limit).map_err(|_| ResolutionError::CountOverflow)?;
-    configuration.extend_from_slice(&limit.to_be_bytes());
+    let candidate_limit =
+        u64::try_from(limits.candidate_limit()).map_err(|_| ResolutionError::CountOverflow)?;
+    configuration.extend_from_slice(&candidate_limit.to_be_bytes());
+    let work_limit =
+        u64::try_from(limits.work_limit()).map_err(|_| ResolutionError::CountOverflow)?;
+    configuration.extend_from_slice(&work_limit.to_be_bytes());
     policy.append_configuration(&mut configuration);
     ProducerIdentity::new(
         RESOLVER_PROVIDER_NAME,

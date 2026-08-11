@@ -20,12 +20,12 @@ pub use foreign::{
 };
 pub use model::{
     AppliedResolution, CandidateExplanation, CompletenessAssumption, DEFAULT_CANDIDATE_LIMIT,
-    DynamicCallCalibration, DynamicCallCalibrationError, MAX_CANDIDATE_LIMIT,
-    MIN_DYNAMIC_CALL_PRECISION_BASIS_POINTS, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION,
-    RejectedCandidate, RejectionReason, ResolutionBatch, ResolutionDecision, ResolutionError,
-    ResolutionExplanation, ResolutionLimitError, ResolutionLimits, ResolutionOutcome,
-    ResolutionPenalty, ResolutionPolicy, ResolutionRule, ResolutionSignal, ResolverFactContext,
-    UnresolvedReason,
+    DEFAULT_RESOLUTION_WORK_LIMIT, DynamicCallCalibration, DynamicCallCalibrationError,
+    MAX_CANDIDATE_LIMIT, MAX_RESOLUTION_WORK_LIMIT, MIN_DYNAMIC_CALL_PRECISION_BASIS_POINTS,
+    RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, RejectedCandidate, RejectionReason,
+    ResolutionBatch, ResolutionDecision, ResolutionError, ResolutionExplanation,
+    ResolutionLimitError, ResolutionLimits, ResolutionOutcome, ResolutionPenalty, ResolutionPolicy,
+    ResolutionRule, ResolutionSignal, ResolverFactContext, UnresolvedReason,
 };
 pub use quality::{
     CalibrationBin, CalibrationReport, ExpectedResolution, QualityError, QualityRatio,

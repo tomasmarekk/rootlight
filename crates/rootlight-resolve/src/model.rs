@@ -24,14 +24,21 @@ pub const DEFAULT_CANDIDATE_LIMIT: usize = 256;
 /// Absolute number of candidate targets materialized for one occurrence.
 pub const MAX_CANDIDATE_LIMIT: usize = 4_096;
 
+/// Default operation-wide resolver work units.
+pub const DEFAULT_RESOLUTION_WORK_LIMIT: usize = 2_000_000;
+
+/// Absolute operation-wide resolver work units.
+pub const MAX_RESOLUTION_WORK_LIMIT: usize = 2_000_000;
+
 /// Checked resolver resource limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolutionLimits {
     candidate_limit: usize,
+    work_limit: usize,
 }
 
 impl ResolutionLimits {
-    /// Creates checked candidate limits.
+    /// Creates a checked candidate limit with the default work ceiling.
     ///
     /// # Errors
     ///
@@ -41,7 +48,34 @@ impl ResolutionLimits {
         if candidate_limit == 0 || candidate_limit > MAX_CANDIDATE_LIMIT {
             Err(ResolutionLimitError)
         } else {
-            Ok(Self { candidate_limit })
+            Ok(Self {
+                candidate_limit,
+                work_limit: DEFAULT_RESOLUTION_WORK_LIMIT,
+            })
+        }
+    }
+
+    /// Creates checked candidate and operation-wide work limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResolutionLimitError`] when either limit is zero or exceeds
+    /// its absolute ceiling.
+    pub const fn with_work_limit(
+        candidate_limit: usize,
+        work_limit: usize,
+    ) -> Result<Self, ResolutionLimitError> {
+        if candidate_limit == 0
+            || candidate_limit > MAX_CANDIDATE_LIMIT
+            || work_limit == 0
+            || work_limit > MAX_RESOLUTION_WORK_LIMIT
+        {
+            Err(ResolutionLimitError)
+        } else {
+            Ok(Self {
+                candidate_limit,
+                work_limit,
+            })
         }
     }
 
@@ -50,19 +84,26 @@ impl ResolutionLimits {
     pub const fn candidate_limit(self) -> usize {
         self.candidate_limit
     }
+
+    /// Returns the operation-wide occurrence and candidate-inspection ceiling.
+    #[must_use]
+    pub const fn work_limit(self) -> usize {
+        self.work_limit
+    }
 }
 
 impl Default for ResolutionLimits {
     fn default() -> Self {
         Self {
             candidate_limit: DEFAULT_CANDIDATE_LIMIT,
+            work_limit: DEFAULT_RESOLUTION_WORK_LIMIT,
         }
     }
 }
 
 /// Invalid resolver resource limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("resolver candidate limit must be between 1 and 4096")]
+#[error("resolver limits exceed their checked ceilings")]
 pub struct ResolutionLimitError;
 
 /// Minimum measured dynamic-call precision required for exact promotion.
@@ -410,6 +451,12 @@ pub enum ResolutionError {
     /// A bounded collection length could not be represented in the IR count domain.
     #[error("resolver result count is not representable")]
     CountOverflow,
+    /// Resolution exhausted its operation-wide occurrence and candidate work.
+    #[error("resolver work exceeds {maximum} units")]
+    WorkLimit {
+        /// Maximum occurrence and candidate inspections allowed.
+        maximum: usize,
+    },
     /// An internal score escaped the documented confidence range.
     #[error("resolver score escaped the confidence range")]
     InvalidScore,
