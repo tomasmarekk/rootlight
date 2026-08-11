@@ -2215,6 +2215,7 @@ fn optimize_admitted_pack(
     // the semantic material for every subject except the highest-ranked one.
     let mut reserved = vec![false; candidates.len()];
     let mut reserved_tokens = 0u32;
+    let mut reserved_items = 0usize;
     let mut anchor_indices = candidates
         .iter()
         .enumerate()
@@ -2228,9 +2229,13 @@ fn optimize_admitted_pack(
             .then_with(|| left.identity.cmp(&right.identity))
     });
     for (index, candidate) in anchor_indices {
+        if reserved_items == MAX_PACK_ITEMS {
+            break;
+        }
         if reserved_tokens.saturating_add(candidate.estimated_tokens) <= token_budget {
             reserved[index] = true;
             reserved_tokens = reserved_tokens.saturating_add(candidate.estimated_tokens);
+            reserved_items = reserved_items.saturating_add(1);
         }
     }
 
@@ -2240,6 +2245,9 @@ fn optimize_admitted_pack(
     // Candidates are already ranked by task relevance and confidence; source
     // diversity must not displace an explicitly task-relevant required item.
     for required_role in required {
+        if reserved_items == MAX_PACK_ITEMS {
+            break;
+        }
         if candidates
             .iter()
             .enumerate()
@@ -2258,6 +2266,7 @@ fn optimize_admitted_pack(
         if let Some((index, candidate)) = selected {
             reserved[index] = true;
             reserved_tokens = reserved_tokens.saturating_add(candidate.estimated_tokens);
+            reserved_items = reserved_items.saturating_add(1);
         }
     }
 
@@ -2265,7 +2274,8 @@ fn optimize_admitted_pack(
     // included so every represented required role stays present; the remaining
     // budget is filled greedily under the per-source diversity bound. Greedy
     // spending is capped at the budget left over after reservation so greedy
-    // items can never displace a reserved required-role representative.
+    // items can never displace a reserved required-role representative. The
+    // item cap likewise leaves one slot for every reservation not yet emitted.
     let greedy_budget = token_budget.saturating_sub(reserved_tokens);
     let mut greedy_spent = 0u32;
     let mut items: Vec<PackItem> = Vec::new();
@@ -2275,9 +2285,22 @@ fn optimize_admitted_pack(
     let mut seen_paths: Vec<&str> = Vec::new();
     let mut seen_providers: Vec<&str> = Vec::new();
     let mut seen_regions: Vec<(&str, u32)> = Vec::new();
+    let mut remaining_reserved = reserved_items;
 
-    for (index, candidate) in candidates.iter().enumerate().take(MAX_PACK_ITEMS) {
-        if !reserved[index] {
+    for (index, candidate) in candidates.iter().enumerate() {
+        if reserved[index] {
+            remaining_reserved = remaining_reserved.saturating_sub(1);
+        } else {
+            if items.len().saturating_add(remaining_reserved) >= MAX_PACK_ITEMS {
+                record_omission(
+                    &mut omissions,
+                    candidate,
+                    PackOmissionReason::ItemLimit,
+                    candidate.estimated_tokens <= token_budget,
+                );
+                truncated = true;
+                continue;
+            }
             // Deduplication: skip items from the same source path if we already
             // have two items from it (diversity constraint).
             let diversity_limited = path_count(&seen_paths, &candidate.source_path) >= 2
@@ -2313,18 +2336,6 @@ fn optimize_admitted_pack(
         seen_paths.push(candidate.source_path.as_str());
         seen_providers.push(candidate.provider_key.as_str());
         seen_regions.push((candidate.source_path.as_str(), candidate.source_region));
-    }
-
-    if candidates.len() > MAX_PACK_ITEMS {
-        truncated = true;
-        for candidate in candidates.iter().skip(MAX_PACK_ITEMS) {
-            record_omission(
-                &mut omissions,
-                candidate,
-                PackOmissionReason::ItemLimit,
-                candidate.estimated_tokens <= token_budget,
-            );
-        }
     }
 
     omissions.truncate(MAX_OMISSIONS);
@@ -3106,8 +3117,8 @@ mod tests {
 
     use super::{
         ContextPackPlanRequest, ContextPackPlanner, ContextPackPlanningError,
-        DefaultContextPackPlanner, EvidenceCandidate, EvidenceRole, MAX_PACK_TOKENS,
-        MIN_PACK_TOKENS, PackError, PackObjective, SourceMaterializationPlan,
+        DefaultContextPackPlanner, EvidenceCandidate, EvidenceRole, MAX_PACK_ITEMS,
+        MAX_PACK_TOKENS, MIN_PACK_TOKENS, PackError, PackObjective, SourceMaterializationPlan,
         affordable_source_materialization, append_role_followups, bounded_source_ref,
         context_pack_completeness, context_pack_id, contract_role, evaluate_role_coverage,
         objective_for_task, optimize_admitted_pack, optimize_context_page, optimize_pack,
@@ -3473,6 +3484,46 @@ mod tests {
         assert!(roles.contains(&EvidenceRole::Caller), "caller represented");
         assert!(roles.contains(&EvidenceRole::Test), "test represented");
         assert!(result.total_tokens <= 1_200, "budget respected");
+    }
+
+    #[test]
+    fn required_role_reservations_survive_the_item_window() {
+        let mut candidates = (0..=MAX_PACK_ITEMS)
+            .map(|index| {
+                candidate(
+                    &format!("definition-{index:03}"),
+                    EvidenceRole::Definition,
+                    900,
+                    100,
+                )
+            })
+            .collect::<Vec<_>>();
+        candidates.extend([
+            candidate("implementation", EvidenceRole::Implementation, 800, 100),
+            candidate("caller", EvidenceRole::Caller, 800, 100),
+            candidate("test", EvidenceRole::Test, 800, 100),
+        ]);
+
+        let result =
+            optimize_pack(PackObjective::BugFix, &mut candidates, 500).expect("valid pack");
+        let roles = result
+            .items
+            .iter()
+            .map(|item| item.candidate.role)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            roles,
+            BTreeSet::from([
+                EvidenceRole::Definition,
+                EvidenceRole::Implementation,
+                EvidenceRole::Caller,
+                EvidenceRole::Test,
+            ])
+        );
+        assert_eq!(result.items.len(), 5);
+        assert_eq!(result.total_tokens, 500);
+        assert!(result.truncated);
     }
 
     #[test]
