@@ -152,6 +152,53 @@ class VerifyNpmInstallTests(unittest.TestCase):
 
         self.assertEqual(run.call_args.kwargs["cwd"], project)
 
+    def test_web_bootstrap_requires_the_one_time_fragment(self) -> None:
+        completed = verify_npm_install.subprocess.CompletedProcess(
+            args=["rootlight", "web", "--no-open"],
+            returncode=0,
+            stdout=(
+                "Rootlight Web UI: http://127.0.0.1:43127/"
+                f"#bootstrap={'a' * 43}\n"
+            ),
+            stderr="",
+        )
+        with mock.patch.object(
+            verify_npm_install,
+            "run",
+            return_value=completed,
+        ):
+            bootstrap = verify_npm_install.issue_web_bootstrap(
+                Path("rootlight"),
+                {},
+                "web bootstrap",
+            )
+
+        self.assertEqual(bootstrap, "a" * 43)
+
+    def test_web_bootstrap_rejects_the_legacy_bare_url(self) -> None:
+        completed = verify_npm_install.subprocess.CompletedProcess(
+            args=["rootlight", "web", "--no-open"],
+            returncode=0,
+            stdout="Rootlight Web UI: http://127.0.0.1:43127/\n",
+            stderr="",
+        )
+        with (
+            mock.patch.object(
+                verify_npm_install,
+                "run",
+                return_value=completed,
+            ),
+            self.assertRaisesRegex(
+                verify_npm_install.NpmInstallError,
+                "bootstrap URL is invalid",
+            ),
+        ):
+            verify_npm_install.issue_web_bootstrap(
+                Path("rootlight"),
+                {},
+                "web bootstrap",
+            )
+
     def test_login_registration_uses_the_disposable_user_boundary(self) -> None:
         prefix = Path("/private/prefix")
         cache = Path("/private/cache")

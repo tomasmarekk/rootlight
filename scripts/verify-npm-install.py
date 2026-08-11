@@ -7,6 +7,7 @@ import argparse
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -23,6 +24,10 @@ COMMAND_TIMEOUT_SECONDS = 180
 HTTP_TIMEOUT_SECONDS = 5
 STOP_TIMEOUT_SECONDS = 30
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
+WEB_URL = re.compile(
+    r"^Rootlight Web UI: http://127\.0\.0\.1:43127/"
+    r"#bootstrap=([A-Za-z0-9_-]{43})\r?\n$"
+)
 TARGET_PACKAGES = {
     "aarch64-apple-darwin": "@tomasmarekk/rootlight-darwin-arm64",
     "aarch64-unknown-linux-gnu": "@tomasmarekk/rootlight-linux-arm64-gnu",
@@ -180,7 +185,9 @@ def verify_install_mode(
         initial = service_status(cli, environment, f"{mode} postinstall service status")
         require_service_state(initial, registered=True, running=True)
         initial_pid = require_pid(initial)
-        verify_http_session()
+        verify_http_session(
+            issue_web_bootstrap(cli, environment, f"{mode} web bootstrap")
+        )
 
         stopped = run_json(
             [str(cli), "service", "stop"],
@@ -198,7 +205,9 @@ def verify_install_mode(
         restarted_data = service_data(restarted)
         require_service_state(restarted_data, registered=True, running=True)
         restarted_pid = require_pid(restarted_data)
-        verify_http_session()
+        verify_http_session(
+            issue_web_bootstrap(cli, environment, f"{mode} restarted web bootstrap")
+        )
         sentinel = state / "uninstall-sentinel"
         sentinel.write_bytes(b"owned state")
 
@@ -483,7 +492,23 @@ def require_pid(data: dict[str, Any]) -> int:
     return pid
 
 
-def verify_http_session() -> None:
+def issue_web_bootstrap(
+    cli: Path,
+    environment: dict[str, str],
+    stage: str,
+) -> str:
+    completed = run(
+        [str(cli), "web", "--no-open"],
+        environment,
+        stage=stage,
+    )
+    match = WEB_URL.fullmatch(completed.stdout)
+    if match is None:
+        raise NpmInstallError("Rootlight Web UI bootstrap URL is invalid")
+    return match.group(1)
+
+
+def verify_http_session(bootstrap: str) -> None:
     connection = http.client.HTTPConnection(
         ORIGIN_HOST, ORIGIN_PORT, timeout=HTTP_TIMEOUT_SECONDS
     )
@@ -494,16 +519,65 @@ def verify_http_session() -> None:
         cookie = response.getheader("Set-Cookie")
     finally:
         connection.close()
-    if response.status != 200 or len(body) > 4 * 1024 * 1024:
+    if (
+        response.status != 200
+        or len(body) > 4 * 1024 * 1024
+        or cookie is not None
+        or b"#bootstrap=" in body
+    ):
         raise NpmInstallError("Rootlight Web UI root response is invalid")
+
+    bootstrap_body = json.dumps(
+        {"secret": bootstrap},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    connection = http.client.HTTPConnection(
+        ORIGIN_HOST, ORIGIN_PORT, timeout=HTTP_TIMEOUT_SECONDS
+    )
+    try:
+        connection.request(
+            "POST",
+            "/api/v1/session/bootstrap",
+            body=bootstrap_body,
+            headers={
+                "Content-Type": "application/json",
+                "Origin": f"http://{ORIGIN_HOST}:{ORIGIN_PORT}",
+                "Sec-Fetch-Site": "same-origin",
+            },
+        )
+        response = connection.getresponse()
+        session_body = response.read(64 * 1024 + 1)
+        cookie = response.getheader("Set-Cookie")
+    finally:
+        connection.close()
+    if (
+        response.status != 200
+        or len(session_body) > 64 * 1024
+        or response.getheader("Cache-Control") != "no-store"
+    ):
+        raise NpmInstallError("Rootlight Web UI bootstrap response is invalid")
     if (
         not isinstance(cookie, str)
         or not cookie.startswith("rootlight_session=")
         or "HttpOnly" not in cookie
         or "SameSite=Strict" not in cookie
-        or b"#bootstrap=" in body
     ):
         raise NpmInstallError("Rootlight Web UI session cookie contract differs")
+    try:
+        bootstrap_session = json.loads(session_body)
+    except json.JSONDecodeError as error:
+        raise NpmInstallError(
+            "Rootlight Web UI bootstrap returned invalid JSON"
+        ) from error
+    if not isinstance(bootstrap_session, dict):
+        raise NpmInstallError("Rootlight Web UI bootstrap contract differs")
+    csrf_token = bootstrap_session.get("csrfToken")
+    if (
+        not isinstance(csrf_token, str)
+        or len(csrf_token) != 43
+        or bootstrap_session.get("idleTtlSeconds") != 1800
+    ):
+        raise NpmInstallError("Rootlight Web UI bootstrap contract differs")
 
     connection = http.client.HTTPConnection(
         ORIGIN_HOST, ORIGIN_PORT, timeout=HTTP_TIMEOUT_SECONDS
@@ -530,7 +604,7 @@ def verify_http_session() -> None:
     if (
         not isinstance(session, dict)
         or not isinstance(session.get("csrfToken"), str)
-        or not session["csrfToken"]
+        or session["csrfToken"] != csrf_token
         or session.get("idleTtlSeconds") != 1800
     ):
         raise NpmInstallError("Rootlight session endpoint contract differs")
