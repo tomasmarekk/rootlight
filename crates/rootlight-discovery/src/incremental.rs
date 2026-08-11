@@ -5,9 +5,11 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    path::Path,
+    ffi::OsStr,
+    path::{Path, PathBuf},
 };
 
+use ignore::gitignore::GitignoreBuilder;
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, RepositoryId, content_hash};
 use rootlight_incremental::{
@@ -19,7 +21,7 @@ use rootlight_vfs::{EntryKind, RelativePath, RepositoryRoot, SnapshotMetadata, S
 
 use crate::{
     DiscoveryError, DiscoveryLimits, DiscoveryManifest, DiscoveryPolicy, MAX_RETAINED_SOURCE_BYTES,
-    RetainedSnapshotBudget, child_path,
+    RetainedSnapshotBudget, ScopedIgnores, child_path,
 };
 
 /// Configuration and provider identities included in one incremental input set.
@@ -181,10 +183,10 @@ impl IncrementalDiscovery {
 /// Reconciles a complete metadata scan against an optional parent baseline.
 ///
 /// The scan uses only repository-root capabilities and validated relative
-/// paths. It applies compiled policy layers but conservatively retains files
-/// excluded only by repository-scoped ignore contents. This avoids reading an
-/// unchanged ignore file merely to decide whether another unchanged file needs
-/// hashing; downstream clean discovery still applies scoped ignore semantics.
+/// paths. It reads bounded repository-scoped ignore files before visiting each
+/// directory so excluded files and subtrees never enter content hashing.
+/// Downstream clean discovery independently reapplies the same policy while
+/// classifying admitted content.
 ///
 /// # Errors
 ///
@@ -334,9 +336,9 @@ pub fn discover_incremental_with_progress(
 
 /// Correlates an incremental metadata result with one clean discovery manifest.
 ///
-/// Clean discovery applies repository-scoped ignore files and content
-/// classification after the incremental candidate scan. This function makes
-/// the clean manifest the generation boundary: only its inputs enter the next
+/// Clean discovery reapplies repository-scoped ignore files and content
+/// classification after the incremental candidate scan. This function makes the
+/// clean manifest the generation boundary: only its inputs enter the next
 /// baseline, and their paths, lengths, and content hashes must agree with the
 /// independently observed incremental result. No filesystem reads occur here.
 ///
@@ -486,6 +488,7 @@ fn scan_candidates(
     let mut scanned = Vec::new();
     let mut paths = BTreeMap::new();
     let mut descriptors = BTreeMap::new();
+    let mut scoped_ignores = ScopedIgnores::default();
     let mut visited = 0_usize;
 
     while let Some((directory, depth)) = queue.pop_front() {
@@ -497,12 +500,21 @@ fn scan_candidates(
                 maximum: limits.max_entries,
             });
         }
+        load_incremental_scoped_ignore(
+            root,
+            directory.as_ref(),
+            &entries,
+            &mut scoped_ignores,
+            limits,
+            cancellation,
+        )?;
         for entry in entries {
             cancellation.check()?;
             visited = visited.saturating_add(1);
             let path = child_path(directory.as_ref(), &entry.name)?;
             let is_directory = entry.kind == EntryKind::Directory;
-            let decision = policy.layered_decision(&path, is_directory, None);
+            let decision =
+                policy.decision_with_scoped_ignores(&path, is_directory, &scoped_ignores);
             if decision.excluded && !decision.included {
                 continue;
             }
@@ -510,7 +522,14 @@ fn scan_candidates(
                 EntryKind::Directory if depth < limits.max_depth => {
                     queue.push_back((Some(path), depth + 1));
                 }
-                EntryKind::File if entry.metadata.length <= limits.max_file_bytes => {
+                // `read_directory` leaves platform identity absent when its
+                // no-follow file open fails. Clean discovery excludes the same
+                // entry as unreadable, so it must not enter reconcile or hashing.
+                EntryKind::File
+                    if entry.metadata.length <= limits.max_file_bytes
+                        && entry.metadata.volume.is_some()
+                        && entry.metadata.file_index.is_some() =>
+                {
                     let file = root.file_id(&path);
                     let descriptor = FileDescriptor::new(
                         file,
@@ -537,6 +556,42 @@ fn scan_candidates(
         paths,
         descriptors,
     })
+}
+
+fn load_incremental_scoped_ignore(
+    root: &RepositoryRoot,
+    directory: Option<&RelativePath>,
+    entries: &[rootlight_vfs::DirectoryEntry],
+    scoped_ignores: &mut ScopedIgnores,
+    limits: DiscoveryLimits,
+    cancellation: &Cancellation,
+) -> Result<(), DiscoveryError> {
+    let Some(entry) = entries
+        .iter()
+        .find(|entry| entry.name == OsStr::new(".gitignore") && entry.kind == EntryKind::File)
+    else {
+        return Ok(());
+    };
+    let path = child_path(directory, &entry.name)?;
+    let capture_limit = entry.metadata.length.min(limits.max_file_bytes).max(1);
+    let snapshot = root.snapshot_with_cancellation(&path, capture_limit, cancellation)?;
+    let contents =
+        std::str::from_utf8(snapshot.content()).map_err(|_| DiscoveryError::InvalidPolicy)?;
+    let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
+    let scope = directory.map_or("", RelativePath::as_str);
+    let source = PathBuf::from(path.as_str());
+    let mut builder = GitignoreBuilder::new(Path::new(scope));
+    for line in contents.lines() {
+        cancellation.check()?;
+        builder
+            .add_line(Some(source.clone()), line)
+            .map_err(|_| DiscoveryError::InvalidPolicy)?;
+    }
+    cancellation.check()?;
+    let matcher = builder.build().map_err(|_| DiscoveryError::InvalidPolicy)?;
+    cancellation.check()?;
+    scoped_ignores.insert(scope, matcher);
+    Ok(())
 }
 
 fn incremental_metadata(metadata: SnapshotMetadata) -> FileMetadata {

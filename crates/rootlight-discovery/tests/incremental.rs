@@ -314,6 +314,60 @@ fn cancelled_incremental_scan_stops_before_repository_work() {
 }
 
 #[test]
+fn scoped_ignores_exclude_files_and_subtrees_before_incremental_hashing() {
+    let temporary = local_tempdir();
+    fs::create_dir(temporary.path().join("ignored")).expect("ignored fixture directory is created");
+    fs::write(
+        temporary.path().join(".gitignore"),
+        b"ignored/\nignored.txt\n",
+    )
+    .expect("ignore fixture is written");
+    fs::write(temporary.path().join("included.rs"), b"fn included() {}\n")
+        .expect("included fixture is written");
+    fs::write(temporary.path().join("ignored.txt"), b"ignored file")
+        .expect("ignored file fixture is written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::set_permissions(
+            temporary.path().join("ignored.txt"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .expect("ignored file is made unreadable");
+    }
+    fs::write(
+        temporary.path().join("ignored").join("nested.rs"),
+        b"fn ignored_nested() {}\n",
+    )
+    .expect("ignored subtree fixture is written");
+    let root = root(&temporary, b"incremental-scoped-ignore");
+
+    let discovery = discover_incremental(
+        &root,
+        None,
+        context(b"config-v1", b"provider-v1"),
+        &policy(),
+        ReconcileMode::Normal,
+        limits(),
+        &Cancellation::new(),
+    )
+    .expect("ignored paths do not enter incremental hashing");
+    let ignored_file = root.file_id(
+        &RelativePath::parse(std::path::Path::new("ignored.txt"))
+            .expect("ignored fixture path is valid"),
+    );
+    let ignored_nested = root.file_id(
+        &RelativePath::parse(std::path::Path::new("ignored/nested.rs"))
+            .expect("ignored nested fixture path is valid"),
+    );
+
+    assert!(!discovery.hashed_files().contains(&ignored_file));
+    assert!(!discovery.hashed_files().contains(&ignored_nested));
+    assert_eq!(discovery.baseline().metadata().len(), 2);
+}
+
+#[test]
 fn clean_manifest_must_match_the_incremental_observation() {
     let temporary = local_tempdir();
     fs::write(temporary.path().join("lib.rs"), b"pub fn value() {}\n")
