@@ -1,4 +1,4 @@
-//! Persistent local Web UI process discovery and authenticated lifecycle control.
+//! Persistent local Web UI discovery, authenticated browser entry, and lifecycle control.
 
 use std::{
     env,
@@ -219,7 +219,7 @@ pub(crate) fn uninstall(paths: &RuntimePaths) -> Result<WebServiceStatus, WebSer
     Ok(WebServiceStatus::stopped())
 }
 
-pub(crate) fn open_browser() -> Result<(), WebServiceError> {
+pub(crate) fn open_browser(paths: &RuntimePaths) -> Result<(), WebServiceError> {
     #[cfg(target_os = "windows")]
     const LAUNCHER: &str = "explorer.exe";
     #[cfg(target_os = "macos")]
@@ -227,11 +227,16 @@ pub(crate) fn open_browser() -> Result<(), WebServiceError> {
     #[cfg(all(unix, not(target_os = "macos")))]
     const LAUNCHER: &str = "xdg-open";
 
+    let record = live_record(paths)?.ok_or(WebServiceError::InvalidResponse)?;
     Command::new(LAUNCHER)
-        .arg(ORIGIN)
+        .arg(browser_entry_url(&record))
         .spawn()
         .map(|_| ())
         .map_err(WebServiceError::Browser)
+}
+
+fn browser_entry_url(record: &WebDiscoveryRecord) -> String {
+    format!("{ORIGIN}/?bootstrap={}", record.control_token())
 }
 
 fn enforce_per_user_service_identity(is_elevated: bool) -> Result<(), WebServiceError> {
@@ -919,6 +924,17 @@ mod tests {
                 origin: "http://127.0.0.1:43127",
                 pid: None,
             }
+        );
+    }
+
+    #[test]
+    fn browser_entry_uses_the_discovered_control_credential() {
+        let record =
+            WebDiscoveryRecord::new(7, WEB_UI_PORT, [1; 16], [2; 32]).expect("record validates");
+
+        assert_eq!(
+            browser_entry_url(&record),
+            format!("{ORIGIN}/?bootstrap={}", record.control_token())
         );
     }
 

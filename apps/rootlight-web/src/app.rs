@@ -7,8 +7,8 @@ use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Extension, Path, Request, State},
     http::{
-        HeaderMap, HeaderName, HeaderValue, StatusCode,
-        header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, COOKIE, SET_COOKIE},
+        HeaderMap, HeaderName, HeaderValue, StatusCode, Uri,
+        header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, COOKIE, LOCATION, SET_COOKIE},
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -62,10 +62,22 @@ impl ServiceControl {
         headers
             .get(&SERVICE_TOKEN_HEADER)
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|candidate| {
-                candidate.len() == self.token.len()
-                    && bool::from(candidate.as_bytes().ct_eq(self.token.as_bytes()))
-            })
+            .is_some_and(|candidate| self.authorize_credential(candidate))
+    }
+
+    fn authorize_browser_entry(&self, uri: &Uri) -> Option<bool> {
+        let mut credentials = uri.query().into_iter().flat_map(|query| {
+            form_urlencoded::parse(query.as_bytes())
+                .filter(|(name, _)| name == "bootstrap")
+                .map(|(_, value)| value)
+        });
+        let candidate = credentials.next()?;
+        Some(credentials.next().is_none() && self.authorize_credential(candidate.as_ref()))
+    }
+
+    fn authorize_credential(&self, candidate: &str) -> bool {
+        candidate.len() == self.token.len()
+            && bool::from(candidate.as_bytes().ct_eq(self.token.as_bytes()))
     }
 }
 
@@ -594,6 +606,9 @@ async fn session_status_or_create(
         })
         .into_response());
     }
+    if state.service_control.is_some() {
+        return Err(ApiError::unauthorized());
+    }
     let credentials = state
         .sessions
         .issue_session(now)
@@ -701,8 +716,12 @@ fn map_health(health: Health) -> HealthResponse {
     }
 }
 
-async fn index(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
-    session_asset_response(&state, state.assets.index(), &headers)
+async fn index(
+    State(state): State<AppState>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    session_asset_response(&state, state.assets.index(), Some(&uri), &headers)
 }
 
 async fn asset_or_route(
@@ -722,7 +741,7 @@ async fn asset_or_route(
             .next()
             .is_some_and(|name| name.contains('.'))
     {
-        return session_asset_response(&state, state.assets.index(), &headers)
+        return session_asset_response(&state, state.assets.index(), None, &headers)
             .unwrap_or_else(IntoResponse::into_response);
     }
     StatusCode::NOT_FOUND.into_response()
@@ -731,22 +750,51 @@ async fn asset_or_route(
 fn session_asset_response(
     state: &AppState,
     asset: &Asset,
+    browser_entry: Option<&Uri>,
     headers: &HeaderMap,
 ) -> Result<Response, ApiError> {
     let now = Instant::now();
     state.reap_expired_session_resources(now);
-    if session_cookie(headers)
-        .is_some_and(|cookie| state.sessions.authenticate(cookie, now).is_some())
-    {
+    let has_session = session_cookie(headers)
+        .is_some_and(|cookie| state.sessions.authenticate(cookie, now).is_some());
+    if let Some(control) = &state.service_control {
+        match browser_entry.and_then(|uri| control.authorize_browser_entry(uri)) {
+            Some(true) => {
+                let mut response = StatusCode::SEE_OTHER.into_response();
+                response
+                    .headers_mut()
+                    .insert(LOCATION, HeaderValue::from_static("/"));
+                response
+                    .headers_mut()
+                    .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                if !has_session {
+                    issue_session_cookie(state, now, &mut response)?;
+                }
+                return Ok(response);
+            }
+            Some(false) => return Err(ApiError::unauthorized()),
+            None if !has_session => return Err(ApiError::unauthorized()),
+            None => {}
+        }
+    }
+    if has_session {
         return Ok(asset_response(asset));
     }
+    let mut response = asset_response(asset);
+    issue_session_cookie(state, now, &mut response)?;
+    Ok(response)
+}
+
+fn issue_session_cookie(
+    state: &AppState,
+    now: Instant,
+    response: &mut Response,
+) -> Result<(), ApiError> {
     let credentials = state
         .sessions
         .issue_session(now)
         .map_err(|_| ApiError::session_unavailable())?;
-    let mut response = asset_response(asset);
-    set_session_cookie(&mut response, &credentials.cookie_value)?;
-    Ok(response)
+    set_session_cookie(response, &credentials.cookie_value)
 }
 
 fn set_session_cookie(response: &mut Response, cookie_value: &str) -> Result<(), ApiError> {
@@ -950,14 +998,133 @@ mod tests {
             .oneshot(direct_navigation)
             .await
             .expect("direct navigation response returns");
-        assert_eq!(direct_response.status(), StatusCode::OK);
-        let direct_cookie = direct_response
+        assert_eq!(direct_response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!direct_response.headers().contains_key(SET_COOKIE));
+
+        let unauthenticated_session = Request::builder()
+            .uri("/api/v1/session")
+            .header(HOST, "127.0.0.1:43127")
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::empty())
+            .expect("unauthenticated session request builds");
+        let unauthenticated_session_response = app
+            .clone()
+            .oneshot(unauthenticated_session)
+            .await
+            .expect("unauthenticated session response returns");
+        assert_eq!(
+            unauthenticated_session_response.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(
+            !unauthenticated_session_response
+                .headers()
+                .contains_key(SET_COOKIE)
+        );
+
+        for uri in [
+            format!("/?bootstrap={}", "b".repeat(64)),
+            format!("/?bootstrap={service_token}&bootstrap={service_token}"),
+        ] {
+            let invalid_bootstrap = Request::builder()
+                .uri(uri)
+                .header(HOST, "127.0.0.1:43127")
+                .header("sec-fetch-site", "none")
+                .header(ACCEPT, "text/html")
+                .body(Body::empty())
+                .expect("invalid bootstrap request builds");
+            let invalid_bootstrap_response = app
+                .clone()
+                .oneshot(invalid_bootstrap)
+                .await
+                .expect("invalid bootstrap response returns");
+            assert_eq!(
+                invalid_bootstrap_response.status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert!(
+                !invalid_bootstrap_response
+                    .headers()
+                    .contains_key(SET_COOKIE)
+            );
+        }
+
+        let bootstrap_navigation = Request::builder()
+            .uri(format!("/?bootstrap={service_token}"))
+            .header(HOST, "127.0.0.1:43127")
+            .header("sec-fetch-site", "none")
+            .header(ACCEPT, "text/html")
+            .body(Body::empty())
+            .expect("bootstrap navigation request builds");
+        let bootstrap_response = app
+            .clone()
+            .oneshot(bootstrap_navigation)
+            .await
+            .expect("bootstrap navigation response returns");
+        assert_eq!(bootstrap_response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            bootstrap_response.headers().get(LOCATION),
+            Some(&HeaderValue::from_static("/"))
+        );
+        assert_eq!(
+            bootstrap_response.headers().get(CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+        let direct_cookie = bootstrap_response
             .headers()
             .get(SET_COOKIE)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.split(';').next())
-            .expect("direct navigation creates a browser session")
+            .expect("authorized bootstrap creates a browser session")
             .to_owned();
+
+        let authenticated_bootstrap = Request::builder()
+            .uri(format!("/?bootstrap={service_token}"))
+            .header(HOST, "127.0.0.1:43127")
+            .header("sec-fetch-site", "none")
+            .header(ACCEPT, "text/html")
+            .header(COOKIE, &direct_cookie)
+            .body(Body::empty())
+            .expect("authenticated bootstrap request builds");
+        let authenticated_bootstrap_response = app
+            .clone()
+            .oneshot(authenticated_bootstrap)
+            .await
+            .expect("authenticated bootstrap response returns");
+        assert_eq!(
+            authenticated_bootstrap_response.status(),
+            StatusCode::SEE_OTHER
+        );
+        assert_eq!(
+            authenticated_bootstrap_response.headers().get(LOCATION),
+            Some(&HeaderValue::from_static("/"))
+        );
+        assert!(
+            !authenticated_bootstrap_response
+                .headers()
+                .contains_key(SET_COOKIE)
+        );
+
+        let authenticated_navigation = Request::builder()
+            .uri("/")
+            .header(HOST, "127.0.0.1:43127")
+            .header("sec-fetch-site", "none")
+            .header(ACCEPT, "text/html")
+            .header(COOKIE, &direct_cookie)
+            .body(Body::empty())
+            .expect("authenticated navigation request builds");
+        let authenticated_navigation_response = app
+            .clone()
+            .oneshot(authenticated_navigation)
+            .await
+            .expect("authenticated navigation response returns");
+        assert_eq!(authenticated_navigation_response.status(), StatusCode::OK);
+        assert!(
+            !authenticated_navigation_response
+                .headers()
+                .contains_key(SET_COOKIE)
+        );
+
         let direct_session = Request::builder()
             .uri("/api/v1/session")
             .header(HOST, "127.0.0.1:43127")

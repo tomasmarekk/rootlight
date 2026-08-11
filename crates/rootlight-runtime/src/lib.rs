@@ -835,9 +835,9 @@ impl WebDiscoveryRecord {
         nonce
     }
 
-    /// Returns the private shutdown credential for an authenticated local control request.
+    /// Returns the private credential for authenticated Web UI control and browser entry.
     ///
-    /// Callers must not log or expose this value.
+    /// Callers must not log or expose this value outside those authenticated requests.
     #[must_use]
     pub fn control_token(&self) -> &str {
         &self.control_token

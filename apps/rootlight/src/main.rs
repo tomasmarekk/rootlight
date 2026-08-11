@@ -286,10 +286,11 @@ fn execute_web(arguments: &[std::ffi::OsString]) -> Result<ExitCode, CliError> {
     };
     let current = env::current_exe().map_err(CliError::CurrentExecutable)?;
     let executable = web_executable_for(&current)?;
-    let status = web_service::start(&runtime_paths()?, &executable)?;
+    let paths = runtime_paths()?;
+    let status = web_service::start(&paths, &executable)?;
     println!("Rootlight Web UI: {}/", status.origin);
     if open_browser {
-        web_service::open_browser()?;
+        web_service::open_browser(&paths)?;
     }
     Ok(ExitCode::SUCCESS)
 }
