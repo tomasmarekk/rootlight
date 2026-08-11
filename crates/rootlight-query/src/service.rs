@@ -1114,8 +1114,8 @@ where
         budget.validate()?;
         validate_analysis_scope(scope.as_ref())?;
         if explicit_entry_points.len() > 64
-            || (matches!(entry_point_policy, CodeDeadEntryPointPolicy::Explicit)
-                != !explicit_entry_points.is_empty())
+            || matches!(entry_point_policy, CodeDeadEntryPointPolicy::Explicit)
+                == explicit_entry_points.is_empty()
         {
             return Err(QueryError::PlanRejected {
                 resource: QueryResource::Results,

@@ -10029,7 +10029,7 @@ fn build_code_dead_request(
             .iter()
             .enumerate()
             .any(|(index, symbol)| contract.explicit_entry_points[..index].contains(symbol))
-        || (entry_point_policy == Some("explicit")) != !contract.explicit_entry_points.is_empty()
+        || (entry_point_policy == Some("explicit")) == contract.explicit_entry_points.is_empty()
     {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
