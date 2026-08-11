@@ -84,36 +84,23 @@ pub(crate) async fn create_support_bundle(
     Extension(session): Extension<AuthenticatedSession>,
 ) -> Result<Json<SupportBundleResponse>, ApiError> {
     let now = Instant::now();
-    state
+    let reservation = state
         .support()
-        .reserve(session.identity(), now)
+        .reserve_guard(session.identity(), now)
         .map_err(support_registry_error)?;
-    let bundle = match state
+    let bundle = state
         .daemon()
         .support_bundle(
             RequestTimeout::try_from(SUPPORT_TIMEOUT)
                 .map_err(|_| ApiError::diagnostics_unavailable())?,
         )
         .await
-    {
-        Ok(bundle) => bundle,
-        Err(error) => {
-            state.support().abort(session.identity());
-            return Err(ApiError::from_daemon(&error));
-        }
-    };
+        .map_err(|error| ApiError::from_daemon(&error))?;
     if bundle.contains_source {
-        state.support().abort(session.identity());
         return Err(ApiError::support_bundle_invalid());
     }
-    let issued = state
-        .support()
-        .issue_reserved(
-            session.identity(),
-            bundle.archive,
-            bundle.sha256,
-            Instant::now(),
-        )
+    let issued = reservation
+        .issue(bundle.archive, bundle.sha256, Instant::now())
         .map_err(support_registry_error)?;
     Ok(Json(SupportBundleResponse {
         schema: "rootlight.web-support-bundle/1",

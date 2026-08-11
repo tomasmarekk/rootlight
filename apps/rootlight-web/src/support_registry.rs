@@ -46,9 +46,25 @@ pub(crate) struct SupportRegistry {
     state: Mutex<RegistryState>,
 }
 
+#[must_use = "dropping the reservation releases its registry slot"]
+pub(crate) struct SupportReservation<'a> {
+    registry: &'a SupportRegistry,
+    owner: SessionIdentity,
+    reservation: ReservationIdentity,
+}
+
 struct RegistryState {
-    reservations: Vec<SessionIdentity>,
+    next_reservation: u64,
+    reservations: Vec<ReservationRecord>,
     artifacts: VecDeque<ArtifactRecord>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ReservationIdentity(u64);
+
+struct ReservationRecord {
+    identity: ReservationIdentity,
+    owner: SessionIdentity,
 }
 
 struct ArtifactRecord {
@@ -62,35 +78,71 @@ impl SupportRegistry {
     pub(crate) fn new() -> Self {
         Self {
             state: Mutex::new(RegistryState {
+                next_reservation: 1,
                 reservations: Vec::new(),
                 artifacts: VecDeque::new(),
             }),
         }
     }
 
-    pub(crate) fn reserve(
+    fn reserve(
         &self,
         owner: SessionIdentity,
         now: Instant,
-    ) -> Result<(), SupportRegistryError> {
+    ) -> Result<ReservationIdentity, SupportRegistryError> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| SupportRegistryError::ResourceUnavailable)?;
         reap_expired(&mut state, now);
-        if state.reservations.contains(&owner)
+        if state
+            .reservations
+            .iter()
+            .any(|reservation| reservation.owner == owner)
             || state.artifacts.iter().any(|record| record.owner == owner)
             || state.artifacts.len() + state.reservations.len() >= MAX_ARTIFACTS_GLOBAL
         {
             return Err(SupportRegistryError::LimitReached);
         }
-        state.reservations.push(owner);
-        Ok(())
+        let identity = ReservationIdentity(state.next_reservation);
+        state.next_reservation = state
+            .next_reservation
+            .checked_add(1)
+            .ok_or(SupportRegistryError::ResourceUnavailable)?;
+        state
+            .reservations
+            .push(ReservationRecord { identity, owner });
+        Ok(identity)
     }
 
-    pub(crate) fn issue_reserved(
+    pub(crate) fn reserve_guard(
         &self,
         owner: SessionIdentity,
+        now: Instant,
+    ) -> Result<SupportReservation<'_>, SupportRegistryError> {
+        let reservation = self.reserve(owner, now)?;
+        Ok(SupportReservation {
+            registry: self,
+            owner,
+            reservation,
+        })
+    }
+
+    #[cfg(test)]
+    fn issue_reserved(
+        &self,
+        owner: SessionIdentity,
+        archive: Vec<u8>,
+        sha256: [u8; 32],
+        now: Instant,
+    ) -> Result<IssuedSupportArtifact, SupportRegistryError> {
+        self.issue_reservation(owner, None, archive, sha256, now)
+    }
+
+    fn issue_reservation(
+        &self,
+        owner: SessionIdentity,
+        reservation: Option<ReservationIdentity>,
         archive: Vec<u8>,
         sha256: [u8; 32],
         now: Instant,
@@ -99,11 +151,10 @@ impl SupportRegistry {
             .state
             .lock()
             .map_err(|_| SupportRegistryError::ResourceUnavailable)?;
-        let Some(reservation) = state
-            .reservations
-            .iter()
-            .position(|candidate| *candidate == owner)
-        else {
+        let Some(reservation) = state.reservations.iter().position(|candidate| {
+            candidate.owner == owner
+                && reservation.is_none_or(|expected| candidate.identity == expected)
+        }) else {
             return Err(SupportRegistryError::Invalid);
         };
         state.reservations.remove(reservation);
@@ -130,11 +181,13 @@ impl SupportRegistry {
         })
     }
 
-    pub(crate) fn abort(&self, owner: SessionIdentity) {
+    fn abort_reservation(&self, reservation: ReservationIdentity) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        state.reservations.retain(|candidate| *candidate != owner);
+        state
+            .reservations
+            .retain(|candidate| candidate.identity != reservation);
     }
 
     pub(crate) fn take(
@@ -167,7 +220,9 @@ impl SupportRegistry {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        state.reservations.retain(|candidate| *candidate != owner);
+        state
+            .reservations
+            .retain(|candidate| candidate.owner != owner);
         state.artifacts.retain(|record| record.owner != owner);
     }
 
@@ -177,7 +232,7 @@ impl SupportRegistry {
         };
         state
             .reservations
-            .retain(|candidate| !owners.contains(candidate));
+            .retain(|candidate| !owners.contains(&candidate.owner));
         state
             .artifacts
             .retain(|record| !owners.contains(&record.owner));
@@ -195,6 +250,24 @@ impl SupportRegistry {
             state.reservations.clear();
             state.artifacts.clear();
         }
+    }
+}
+
+impl SupportReservation<'_> {
+    pub(crate) fn issue(
+        self,
+        archive: Vec<u8>,
+        sha256: [u8; 32],
+        now: Instant,
+    ) -> Result<IssuedSupportArtifact, SupportRegistryError> {
+        self.registry
+            .issue_reservation(self.owner, Some(self.reservation), archive, sha256, now)
+    }
+}
+
+impl Drop for SupportReservation<'_> {
+    fn drop(&mut self) {
+        self.registry.abort_reservation(self.reservation);
     }
 }
 
@@ -294,5 +367,37 @@ mod tests {
             Some(SupportRegistryError::ArchiveInvalid)
         );
         assert!(registry.reserve(identity(3), now).is_ok());
+    }
+
+    #[test]
+    fn dropping_pending_reservation_releases_its_slot() {
+        let registry = SupportRegistry::new();
+        let now = Instant::now();
+        let reservation = registry
+            .reserve_guard(identity(4), now)
+            .expect("support slot reserves");
+
+        assert_eq!(
+            registry.reserve(identity(4), now).err(),
+            Some(SupportRegistryError::LimitReached)
+        );
+        drop(reservation);
+        assert!(registry.reserve(identity(4), now).is_ok());
+    }
+
+    #[test]
+    fn failed_issue_consumes_only_the_guarded_reservation() {
+        let registry = SupportRegistry::new();
+        let now = Instant::now();
+        let reservation = registry
+            .reserve_guard(identity(5), now)
+            .expect("support slot reserves");
+        let (archive, _) = archive();
+
+        assert_eq!(
+            reservation.issue(archive, [0; 32], now).err(),
+            Some(SupportRegistryError::ArchiveInvalid)
+        );
+        assert!(registry.reserve(identity(5), now).is_ok());
     }
 }
