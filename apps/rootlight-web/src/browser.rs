@@ -2,11 +2,10 @@
 
 use std::io;
 
+#[cfg(any(windows, all(test, unix)))]
+use std::path::Path;
 #[cfg(any(windows, unix))]
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{path::PathBuf, process::Command};
 
 #[cfg(windows)]
 const WINDOWS_LAUNCHER_RELATIVE_PATH: &str = "explorer.exe";

@@ -2830,12 +2830,13 @@ impl CliError {
         }
         if matches!(
             self,
-            Self::WebService(
-                web_service::WebServiceError::PrivilegeInspection
-                    | web_service::WebServiceError::ElevatedExecution
-            ) | Self::WebService(web_service::WebServiceError::Runtime(
-                rootlight_runtime::RuntimeError::WindowsSystemExecutablePolicy(_),
-            ))
+            Self::WebService(web_service::WebServiceError::ElevatedExecution)
+                | Self::WebService(web_service::WebServiceError::Runtime(
+                    rootlight_runtime::RuntimeError::WindowsSystemExecutablePolicy(_),
+                ))
+        ) || matches!(
+            self,
+            Self::WebService(error) if error.is_privilege_inspection_failure()
         ) {
             return ExitFamily::SecurityPolicy;
         }
@@ -2962,10 +2963,12 @@ impl CliError {
         }
         if matches!(
             self,
-            Self::WebService(web_service::WebServiceError::PrivilegeInspection)
-                | Self::WebService(web_service::WebServiceError::Runtime(
-                    rootlight_runtime::RuntimeError::WindowsSystemExecutablePolicy(_),
-                ))
+            Self::WebService(web_service::WebServiceError::Runtime(
+                rootlight_runtime::RuntimeError::WindowsSystemExecutablePolicy(_),
+            ))
+        ) || matches!(
+            self,
+            Self::WebService(error) if error.is_privilege_inspection_failure()
         ) {
             return PublicError::builder(
                 ErrorCode::PermissionDenied,

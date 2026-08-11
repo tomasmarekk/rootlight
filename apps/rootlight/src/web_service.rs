@@ -100,10 +100,23 @@ pub(crate) enum WebServiceError {
     Browser(#[source] io::Error),
     #[error("Web UI login registration failed")]
     Registration(#[source] io::Error),
+    #[cfg(not(unix))]
     #[error("Web UI service privilege inspection failed")]
     PrivilegeInspection,
     #[error("Web UI service cannot run with elevated privileges")]
     ElevatedExecution,
+}
+
+impl WebServiceError {
+    #[cfg(not(unix))]
+    pub(crate) fn is_privilege_inspection_failure(&self) -> bool {
+        matches!(self, Self::PrivilegeInspection)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn is_privilege_inspection_failure(&self) -> bool {
+        false
+    }
 }
 
 pub(crate) fn status(paths: &RuntimePaths) -> Result<WebServiceStatus, WebServiceError> {
