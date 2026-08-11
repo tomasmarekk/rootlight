@@ -98,6 +98,8 @@ const REPOSITORY_OPERATION_CONTEXT_BYTES: usize =
     VERSION_FOUR_REPOSITORY_OPERATION_CONTEXT_BYTES + size_of::<u64>();
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const SYSTEM_CLIENT_INSTANCE_ID: [u8; 16] = [0; 16];
+// Older journals used this marker before `error_json` stored typed public errors.
+const LEGACY_PERSISTED_ERROR_SENTINEL: &str = "present";
 const CATALOG_MUTATION_BATCH: usize = 256;
 const MAX_RECOVERY_HISTORY_PER_REPOSITORY: usize = 4;
 
@@ -4934,12 +4936,12 @@ fn decode_record(
         return Err(OperationError::CorruptState);
     }
     let has_persisted_error = raw.error_json.is_some();
-    let error = raw
-        .error_json
-        .as_deref()
-        .map(deserialize_public_error)
-        .transpose()?;
-    if (state == OperationState::Failed) != error.is_some() {
+    let error = match raw.error_json.as_deref() {
+        Some(LEGACY_PERSISTED_ERROR_SENTINEL) => None,
+        Some(encoded) => Some(deserialize_public_error(encoded)?),
+        None => None,
+    };
+    if (state == OperationState::Failed) != has_persisted_error {
         return Err(OperationError::CorruptState);
     }
     Ok(OperationRecord {
@@ -8422,6 +8424,72 @@ mod tests {
             .expect("strict schema flag reads")
         );
         migrated.quick_check().expect("migrated catalog validates");
+    }
+
+    #[test]
+    fn legacy_error_sentinel_survives_schema_migration() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let submitted = OperationSubmission::new(
+            operation(23),
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes([7; 32]),
+            ClientInstanceId::new([8; 16]).expect("client identity is valid"),
+            true,
+            Some(4_000_000_000_000),
+            None,
+        )
+        .expect("submission is valid");
+        {
+            let connection = Connection::open(&path).expect("database opens");
+            connection
+                .execute_batch(VERSION_ONE_OPERATIONS_SCHEMA_SQL)
+                .expect("version-one schema creates");
+            connection
+                .execute(
+                    "INSERT INTO operations (
+                        operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                        lease_expires_unix_ms, state, stage, cancellation_requested,
+                        cancellation_reason, recovery_class, revision, completed, total,
+                        error_json, sequence
+                     ) VALUES (?1, 'control_probe', ?2, ?3, 1, ?4, NULL, 'failed',
+                               'cleanup', 0, NULL, 'not_applicable', 4, 3, 3, 'present', 1)",
+                    params![
+                        submitted.operation.as_bytes().as_slice(),
+                        submitted.plan_hash.as_bytes().as_slice(),
+                        submitted.owner.as_bytes().as_slice(),
+                        u64_to_i64(submitted.deadline_unix_ms.expect("deadline exists"))
+                            .expect("deadline fits SQLite"),
+                    ],
+                )
+                .expect("legacy failed row inserts");
+            connection
+                .pragma_update(None, "user_version", 1)
+                .expect("version-one marker writes");
+        }
+
+        let migrated = OperationJournal::open(&path).expect("version-one schema migrates");
+        let record = migrated
+            .status(submitted.operation)
+            .expect("legacy failed status remains readable");
+
+        assert_eq!(record.state, OperationState::Failed);
+        assert!(record.has_persisted_error);
+        assert_eq!(record.error, None);
+        migrated.quick_check().expect("migrated catalog validates");
+
+        migrated
+            .lock_connection()
+            .expect("catalog lock is healthy")
+            .execute(
+                "UPDATE operations SET error_json = 'invalid' WHERE operation = ?1",
+                [submitted.operation.as_bytes().as_slice()],
+            )
+            .expect("non-sentinel malformed error inserts");
+        assert!(matches!(
+            migrated.status(submitted.operation),
+            Err(OperationError::DeserializePublicError(_))
+        ));
     }
 
     #[test]
