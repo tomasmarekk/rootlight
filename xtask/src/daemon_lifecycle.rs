@@ -118,14 +118,14 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
         &environment,
         COMMAND_TIMEOUT,
     )?;
-    assert_error_code(&unknown_status, "NOT_FOUND")?;
+    assert_error_code(&unknown_status, "PERMISSION_DENIED")?;
     let unknown_cancel = run_json_allow_failure(
         &rootlight,
         &["operation-cancel", &unknown_operation],
         &environment,
         COMMAND_TIMEOUT,
     )?;
-    assert_error_code(&unknown_cancel, "NOT_FOUND")?;
+    assert_error_code(&unknown_cancel, "PERMISSION_DENIED")?;
 
     let cancelled_operation_id = OperationId::from_bytes([44; 16]);
     let cancelled_operation = cancelled_operation_id.to_string();
@@ -149,13 +149,15 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     {
         return Err(LifecycleError::UnexpectedEnvelope);
     }
-    let after_foreign = foreign_client
-        .operation_status(cancelled_operation_id)
-        .map_err(|source| client_stage("foreign cancellation status verification", source))?;
-    if matches!(
-        after_foreign.state,
-        OperationState::Cancelling | OperationState::Cancelled
-    ) {
+    let foreign_status_error = match foreign_client.operation_status(cancelled_operation_id) {
+        Ok(_) => return Err(LifecycleError::UnexpectedEnvelope),
+        Err(error) => error,
+    };
+    if foreign_status_error
+        .as_public_error()
+        .map(rootlight_error::PublicError::code)
+        != Some(ErrorCode::PermissionDenied)
+    {
         return Err(LifecycleError::UnexpectedEnvelope);
     }
     drop(foreign_client);
@@ -250,9 +252,7 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     {
         return Err(LifecycleError::UnexpectedEnvelope);
     }
-    let lease_operation = lease_operation.to_string();
-    let lease_terminal = wait_for_terminal(&rootlight, &lease_operation, &environment)?;
-    assert_operation_state(&lease_terminal, "succeeded")?;
+    wait_for_client_terminal(&lease_client, lease_operation, OperationState::Succeeded)?;
 
     let expired_lease_operation = OperationId::from_bytes([49; 16]).to_string();
     let expired_lease = unix_time_ms()?

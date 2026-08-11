@@ -47,7 +47,7 @@ fn installed_process_semantics_and_query_truth_are_release_ready() {
     let (daemon_binary, mcp_binary) = semantic_process_binaries();
     let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
-    let mut mcp = McpProcess::spawn(&mcp_binary, &state_dir, &runtime_dir);
+    let mut mcp = McpProcess::spawn(&mcp_binary, &state_dir, &runtime_dir, &repositories_root);
 
     let mut indexes = BTreeMap::new();
     for language in TERMINAL_SEMANTIC_LANGUAGES {
@@ -547,7 +547,12 @@ fn real_repository_cold_index_is_release_bounded() {
     let mut daemon = DaemonProcess::spawn(&environment.daemon_binary, &state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
     let empty_state_bytes = directory_bytes(&state_dir);
-    let mut mcp = McpProcess::spawn(&environment.mcp_binary, &state_dir, &runtime_dir);
+    let mut mcp = McpProcess::spawn(
+        &environment.mcp_binary,
+        &state_dir,
+        &runtime_dir,
+        &environment.repository_root,
+    );
 
     let recovery_admission = mcp.call_success(
         "cold-index-recovery-admit",
@@ -571,7 +576,12 @@ fn real_repository_cold_index_is_release_bounded() {
 
     let mut daemon = DaemonProcess::spawn(&environment.daemon_binary, &state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
-    let mut mcp = McpProcess::spawn(&environment.mcp_binary, &state_dir, &runtime_dir);
+    let mut mcp = McpProcess::spawn(
+        &environment.mcp_binary,
+        &state_dir,
+        &runtime_dir,
+        &environment.repository_root,
+    );
     let interrupted_after = read_interrupted_operation(&mut mcp, &interrupted_id);
 
     let indexing_started = Instant::now();
@@ -627,7 +637,12 @@ fn real_repository_cold_index_is_release_bounded() {
 
     let mut daemon = DaemonProcess::spawn(&environment.daemon_binary, &state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
-    let mut mcp = McpProcess::spawn(&environment.mcp_binary, &state_dir, &runtime_dir);
+    let mut mcp = McpProcess::spawn(
+        &environment.mcp_binary,
+        &state_dir,
+        &runtime_dir,
+        &environment.repository_root,
+    );
     // IPC readiness precedes rebuilding retained search indexes, so large
     // repositories need a separate bounded recovery window.
     let status = mcp.call_until_not_busy(
@@ -1634,8 +1649,14 @@ struct McpProcess {
 }
 
 impl McpProcess {
-    fn spawn(binary: &Path, state_dir: &Path, runtime_dir: &Path) -> Self {
+    fn spawn(
+        binary: &Path,
+        state_dir: &Path,
+        runtime_dir: &Path,
+        authorized_repository_root: &Path,
+    ) -> Self {
         let mut child = Command::new(binary)
+            .current_dir(authorized_repository_root)
             .env("ROOTLIGHT_STATE_DIR", state_dir)
             .env("ROOTLIGHT_RUNTIME_DIR", runtime_dir)
             .env("ROOTLIGHT_MCP_PROFILE", "developer")

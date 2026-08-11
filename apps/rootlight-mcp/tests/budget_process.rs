@@ -58,7 +58,7 @@ fn all_budget_tools_enforce_hard_limits_across_daemon_and_mcp_processes() {
     let runtime_dir = isolated.path().join("runtime");
     let mut daemon = DaemonProcess::spawn(&state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
-    let mut mcp = McpProcess::spawn(&state_dir, &runtime_dir);
+    let mut mcp = McpProcess::spawn(&state_dir, &runtime_dir, &repository_root);
 
     let first = index_repository(&mut mcp, &repository_root, "index-v1");
     fs::OpenOptions::new()
@@ -797,8 +797,9 @@ struct McpProcess {
 }
 
 impl McpProcess {
-    fn spawn(state_dir: &Path, runtime_dir: &Path) -> Self {
+    fn spawn(state_dir: &Path, runtime_dir: &Path, authorized_repository_root: &Path) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_rootlight-mcp"))
+            .current_dir(authorized_repository_root)
             .env("ROOTLIGHT_STATE_DIR", state_dir)
             .env("ROOTLIGHT_RUNTIME_DIR", runtime_dir)
             .env("ROOTLIGHT_MCP_PROFILE", "developer")

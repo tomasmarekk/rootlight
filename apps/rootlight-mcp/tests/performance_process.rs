@@ -188,7 +188,7 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
         Client::connect_or_start(&runtime_paths, [0x70; 16], ConnectPolicy::ExistingOnly)
             .expect("control client connects to the isolated daemon");
     let mcp_binary = PathBuf::from(env!("CARGO_BIN_EXE_rootlight-mcp"));
-    let mut mcp = McpProcess::spawn(&mcp_binary, &state_dir, &runtime_dir);
+    let mut mcp = McpProcess::spawn(&mcp_binary, &state_dir, &runtime_dir, fixture.path());
 
     let base = index_repository(&mut mcp, &repository_root, "setup-base");
     append_head_change(&repository_root);
@@ -216,7 +216,7 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
         for ordinal in 0..WARMUP_SAMPLES + MAX_MEASURED_ATTEMPTS_PER_TOOL {
             if case.tool == "context.pack" && successful_measured == next_context_session_rotation {
                 mcp.finish();
-                mcp = McpProcess::spawn(&mcp_binary, &state_dir, &runtime_dir);
+                mcp = McpProcess::spawn(&mcp_binary, &state_dir, &runtime_dir, fixture.path());
                 next_context_session_rotation = next_context_session_rotation.saturating_add(20);
             }
             let phase = if ordinal < WARMUP_SAMPLES {
@@ -295,7 +295,7 @@ fn real_daemon_mcp_produces_all_tool_performance_evidence() {
     let mut cold_successes = 0_u64;
     for ordinal in 0..WARMUP_SAMPLES + MAX_MEASURED_ATTEMPTS_PER_TOOL {
         mcp.finish();
-        mcp = McpProcess::spawn(&mcp_binary, &state_dir, &runtime_dir);
+        mcp = McpProcess::spawn(&mcp_binary, &state_dir, &runtime_dir, fixture.path());
         let phase = if ordinal < WARMUP_SAMPLES {
             SamplePhase::Warmup
         } else {
@@ -1709,8 +1709,14 @@ struct McpProcess {
 }
 
 impl McpProcess {
-    fn spawn(binary: &Path, state_dir: &Path, runtime_dir: &Path) -> Self {
+    fn spawn(
+        binary: &Path,
+        state_dir: &Path,
+        runtime_dir: &Path,
+        authorized_repository_root: &Path,
+    ) -> Self {
         let mut child = Command::new(binary)
+            .current_dir(authorized_repository_root)
             .env("ROOTLIGHT_STATE_DIR", state_dir)
             .env("ROOTLIGHT_RUNTIME_DIR", runtime_dir)
             .env("ROOTLIGHT_MCP_PROFILE", "developer")
