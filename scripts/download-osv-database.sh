@@ -3,8 +3,8 @@
 
 set -euo pipefail
 
-generation="1785774003284492"
-expected_sha256="e864f02179aeb85e5e884bc9411f1647e3d60087d248b8d3776f2ddcd906ed0e"
+generation="1786447137307581"
+expected_sha256="b2292c99556b9c3834e89506c378b547e722edeb51b02198f4600e0a9024eff5"
 cache_root="${1:-artifacts/osv-db}"
 destination="$cache_root/osv-scanner/crates.io/all.zip"
 digest_path="$cache_root/osv-scanner/crates.io/all.zip.sha256"
@@ -14,6 +14,10 @@ curl \
     --silent \
     --show-error \
     --location \
+    --retry 3 \
+    --retry-all-errors \
+    --retry-delay 2 \
+    --retry-max-time 30 \
     --proto '=https' \
     --tlsv1.2 \
     "https://storage.googleapis.com/download/storage/v1/b/osv-vulnerabilities/o/crates.io%2Fall.zip?generation=$generation&alt=media" \

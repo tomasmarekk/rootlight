@@ -19,6 +19,10 @@ curl \
     --silent \
     --show-error \
     --location \
+    --retry 3 \
+    --retry-all-errors \
+    --retry-delay 2 \
+    --retry-max-time 30 \
     --proto '=https' \
     --tlsv1.2 \
     "https://github.com/RustSec/advisory-db/archive/$snapshot.tar.gz" \
