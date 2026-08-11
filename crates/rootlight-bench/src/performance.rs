@@ -1483,10 +1483,12 @@ fn overall_disposition(evaluations: &[ThresholdEvaluation]) -> GateDisposition {
 }
 
 fn reject_target<T>(value: &EvidenceValue<T>) -> Result<(), PerformanceEvidenceError> {
-    if matches!(value, EvidenceValue::Target { .. }) {
-        Err(PerformanceEvidenceError::TargetInObservation)
-    } else {
-        Ok(())
+    match value {
+        EvidenceValue::Target { .. } => Err(PerformanceEvidenceError::TargetInObservation),
+        EvidenceValue::Unavailable { reason_code } if !valid_identifier(reason_code) => {
+            Err(PerformanceEvidenceError::InvalidIdentifier)
+        }
+        EvidenceValue::Observed { .. } | EvidenceValue::Unavailable { .. } => Ok(()),
     }
 }
 
@@ -1649,6 +1651,53 @@ mod tests {
         assert!(matches!(
             error,
             PerformanceEvidenceError::TargetInObservation
+        ));
+    }
+
+    #[test]
+    fn unavailable_measurements_require_source_free_reason_codes() {
+        let protocol = protocol(100);
+        let mut manifest = environment();
+        manifest.resource_method.rss_resolution_bytes =
+            EvidenceValue::unavailable("C:\\private\\repo\\secret.txt");
+        let error = build_performance_evidence(
+            protocol.clone(),
+            manifest,
+            all_successful_samples(&protocol),
+            cancellation_samples(),
+            None,
+            Vec::new(),
+        )
+        .expect_err("environment reason paths must be rejected");
+        assert!(matches!(error, PerformanceEvidenceError::InvalidIdentifier));
+
+        let mut samples = all_successful_samples(&protocol);
+        samples[0].dimensions.source_bytes = EvidenceValue::unavailable("api_key=source-secret");
+        let error = build_performance_evidence(
+            protocol.clone(),
+            environment(),
+            samples,
+            cancellation_samples(),
+            None,
+            Vec::new(),
+        )
+        .expect_err("raw sample reason text must be rejected");
+        assert!(matches!(error, PerformanceEvidenceError::InvalidIdentifier));
+
+        let mut package = build_performance_evidence(
+            protocol.clone(),
+            environment(),
+            all_successful_samples(&protocol),
+            cancellation_samples(),
+            None,
+            Vec::new(),
+        )
+        .expect("canonical package builds");
+        package.raw_samples[0].process_tree_cpu_ns =
+            EvidenceValue::unavailable("/private/repo/source.rs");
+        assert!(matches!(
+            encode_performance_evidence(&package),
+            Err(PerformanceEvidenceError::InvalidIdentifier)
         ));
     }
 
