@@ -62,9 +62,10 @@ use rootlight_mcp_contract::intent::{
     CycleBreakCandidate, CycleLevel, CycleRankBy, DeadCandidate, DeadClassification,
     DeadReachabilitySummary, DerivedViewInfo, Direction, EntryPointPolicy, EntryPointPolicyKind,
     EntryPointSummary, FlowTraceData, FlowTraceInput, FrontierSummary, Hotspot, MinimalCycle,
-    NamedEntryPointPolicy, RelationKind, RelationProjection, RelationshipGroup, RelationshipTarget,
-    RelationshipTotals, RuleSummary, ServedCycleProjection, StronglyConnectedComponent,
-    SymbolRelationshipsData, SymbolRelationshipsInput, TraceEdge, TracePath,
+    NamedEntryPointPolicy, NodeSelector, RelationKind, RelationProjection, RelationshipGroup,
+    RelationshipTarget, RelationshipTotals, RuleSummary, ServedCycleProjection,
+    StronglyConnectedComponent, SymbolRelationshipsData, SymbolRelationshipsInput, TraceEdge,
+    TracePath,
 };
 use rootlight_mcp_contract::{
     DetailKey, ErrorCode, ExposureProfile, GenerationSelector, McpTool, NextAction, PublicError,
@@ -4794,16 +4795,9 @@ fn normalize_flow_trace(
     }
     // The first slice resolves only stable symbol endpoints; route, service,
     // and database selectors have no oracle data yet.
-    let from = input
-        .from
-        .symbol_id
-        .ok_or_else(|| ToolExecutionError::new(unsupported.clone()))?;
+    let from = normalize_flow_endpoint(input.from, unsupported)?;
     let to = match input.to {
-        Some(selector) => Some(
-            selector
-                .symbol_id
-                .ok_or_else(|| ToolExecutionError::new(unsupported.clone()))?,
-        ),
+        Some(selector) => Some(normalize_flow_endpoint(selector, unsupported)?),
         None => None,
     };
     let mut relations = Vec::new();
@@ -4829,6 +4823,21 @@ fn normalize_flow_trace(
         min_confidence: input.min_confidence,
         cross_repository: input.cross_repository.unwrap_or(false),
     })
+}
+
+fn normalize_flow_endpoint(
+    selector: NodeSelector,
+    unsupported: &PublicError,
+) -> Result<SymbolId, ToolExecutionError> {
+    if selector.route_id.is_some()
+        || selector.service_id.is_some()
+        || selector.database_object_id.is_some()
+    {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    selector
+        .symbol_id
+        .ok_or_else(|| ToolExecutionError::new(unsupported.clone()))
 }
 
 fn map_flow_trace(

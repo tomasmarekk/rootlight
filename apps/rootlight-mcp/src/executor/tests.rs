@@ -7070,6 +7070,51 @@ async fn flow_trace_rejects_noncanonical_called_by_relation_before_the_port() {
 }
 
 #[tokio::test]
+async fn flow_trace_rejects_mixed_endpoint_selectors_before_the_port() {
+    let harness = Harness::new(FakeOutcome::FlowTrace(Err(ClientPortError::Executor)));
+    let mixed_endpoints = [
+        json!({
+            "from": {
+                "symbol_id": symbol(),
+                "route_id": "GET /internal"
+            }
+        }),
+        json!({
+            "from": {"symbol_id": symbol()},
+            "to": {
+                "symbol_id": missing_symbol(),
+                "service_id": "billing",
+                "database_object_id": "ledger.entries"
+            }
+        }),
+    ];
+
+    for endpoints in mixed_endpoints {
+        let mut arguments = json!({
+            "repository": {"repository_id": repository()},
+            "relations": ["calls"]
+        });
+        arguments
+            .as_object_mut()
+            .expect("flow trace fixture is an object")
+            .extend(
+                endpoints
+                    .as_object()
+                    .expect("endpoint fixture is an object")
+                    .clone(),
+            );
+        let error = execute(&harness.executor, VerticalTool::FlowTrace, arguments)
+            .await
+            .expect_err("mixed endpoint selectors are rejected before the port");
+        let public = error
+            .public_error()
+            .expect("mixed endpoint selector is a checked public error");
+        assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    }
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn architecture_cycles_maps_components_cycles_and_breaks() {
     let response = ArchitectureCyclesPortResponse::new(
         ClientArchitectureCycles {
