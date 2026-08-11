@@ -1097,7 +1097,7 @@ fn open_discovery_no_follow(path: &Path) -> Result<File, RuntimeError> {
 
         let descriptor = open(
             path,
-            OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK,
             Mode::empty(),
         )
         .map_err(|source| RuntimeError::Io(io::Error::from_raw_os_error(source as i32)))?;
@@ -2175,6 +2175,21 @@ mod tests {
             symlink(target, paths.discovery_path()).expect("link creates");
             assert!(matches!(paths.discover(), Err(RuntimeError::Io(_))));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_a_fifo_without_blocking() {
+        use nix::{sys::stat::Mode, unistd::mkfifo};
+
+        let (_temporary, paths) = paths();
+        mkfifo(&paths.discovery_path(), Mode::S_IRUSR | Mode::S_IWUSR)
+            .expect("FIFO fixture creates");
+
+        assert!(matches!(
+            paths.discover(),
+            Err(RuntimeError::InvalidDiscovery)
+        ));
     }
 
     #[test]
