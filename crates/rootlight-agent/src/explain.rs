@@ -41,6 +41,9 @@ const TESTS_COST_PER_TEST: u64 = 6;
 /// Estimated cost units per planned component for `architecture.overview`.
 const OVERVIEW_COST_PER_COMPONENT: u64 = 20;
 
+/// Execution component ceiling used when `architecture.overview` omits its cap.
+const DEFAULT_ARCHITECTURE_OVERVIEW_MAX_COMPONENTS: u16 = 50;
+
 /// Estimated cost units per planned cycle for `architecture.cycles`.
 const CYCLES_COST_PER_CYCLE: u64 = 28;
 
@@ -299,7 +302,8 @@ pub fn tests_select_plan(max_tests: Option<u16>) -> PlanExplanation {
 /// `max_components` bounds the planned aggregation and drives the cost estimate.
 #[must_use]
 pub fn architecture_overview_plan(max_components: Option<u16>) -> PlanExplanation {
-    let components = u64::from(max_components.unwrap_or(100));
+    let components =
+        u64::from(max_components.unwrap_or(DEFAULT_ARCHITECTURE_OVERVIEW_MAX_COMPONENTS));
     let cost = components.saturating_mul(OVERVIEW_COST_PER_COMPONENT);
     PlanExplanation {
         estimated_cost: cost,
@@ -776,6 +780,13 @@ mod tests {
         let plan = architecture_overview_plan(Some(50));
         assert_eq!(plan.operators, vec!["architecture_mapping".to_owned()]);
         assert_eq!(plan.applied_limits, vec!["max_components: 50".to_owned()]);
+
+        let defaulted = architecture_overview_plan(None);
+        assert_eq!(
+            defaulted.applied_limits,
+            vec!["max_components: 50".to_owned()]
+        );
+        assert_eq!(defaulted.estimated_cost, 1_000);
     }
 
     #[test]
