@@ -424,12 +424,17 @@ impl MigrationSession {
         })
     }
 
-    /// Restores a session only when a canonical journal binds the exact plan.
+    /// Restores a canonical pre-verification session bound to the exact plan.
+    ///
+    /// Journals are not authenticated durable evidence, so states that could
+    /// authorize activation, serving, or rollback must be reconstructed from
+    /// independently verified catalog state instead of resumed here.
     ///
     /// # Errors
     ///
     /// Returns [`MigrationError`] for cancellation, oversized, malformed,
-    /// unsupported, non-canonical, or plan-mismatched journal bytes.
+    /// unsupported, non-canonical, plan-mismatched, or unverifiable journal
+    /// state.
     pub fn resume(
         plan: MigrationPlan,
         journal_bytes: &[u8],
@@ -459,6 +464,14 @@ impl MigrationSession {
         let canonical = session.canonical_journal(cancellation)?;
         if canonical != journal_bytes {
             return Err(MigrationError::NonCanonicalJournal);
+        }
+        if matches!(
+            session.state,
+            MigrationState::Verified { .. }
+                | MigrationState::Activated { .. }
+                | MigrationState::RolledBack { .. }
+        ) {
+            return Err(MigrationError::UnverifiableJournalState);
         }
         Ok(session)
     }
@@ -754,6 +767,9 @@ pub enum MigrationError {
     /// Migration journal was created for a different immutable plan.
     #[error("generation migration journal does not match its plan")]
     PlanMismatch,
+    /// Journal state requires independent durable verification before recovery.
+    #[error("generation migration journal state is not independently verifiable")]
+    UnverifiableJournalState,
     /// Canonical migration encoding failed.
     #[error("generation migration encoding failed")]
     Encode,
@@ -960,6 +976,43 @@ mod tests {
             MigrationSession::resume(other_plan, &journal, &cancellation),
             Err(MigrationError::PlanMismatch)
         );
+    }
+
+    #[test]
+    fn resume_rejects_forgeable_privileged_states() {
+        let cancellation = Cancellation::new();
+        let plan = registry()
+            .plan(version(1), generation(1), generation(2), 10, &cancellation)
+            .expect("fixture migration plans");
+        let attacker_manifest = content_hash(b"attacker-selected-manifest");
+
+        for state in [
+            MigrationState::Verified {
+                manifest_hash: attacker_manifest,
+            },
+            MigrationState::Activated {
+                manifest_hash: attacker_manifest,
+            },
+            MigrationState::RolledBack {
+                manifest_hash: attacker_manifest,
+            },
+        ] {
+            let forged = MigrationJournal {
+                schema: MIGRATION_JOURNAL_SCHEMA.to_owned(),
+                source_version: VersionWire::from(plan.source_version),
+                target_version: VersionWire::from(plan.target_version),
+                source_generation: plan.source_generation,
+                target_generation: plan.target_generation,
+                plan_hash: plan.canonical_hash().expect("plan hash encodes"),
+                state,
+            };
+            let journal = serde_json::to_vec(&forged).expect("forged journal is canonical");
+
+            assert_eq!(
+                MigrationSession::resume(plan.clone(), &journal, &cancellation),
+                Err(MigrationError::UnverifiableJournalState)
+            );
+        }
     }
 
     #[test]
