@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use rootlight_cancel::{Cancellation, CancellationReason};
-use rootlight_catalog::{EphemeralOracleReader, EphemeralOracleWriter};
+use rootlight_catalog::{CatalogErrorKind, EphemeralOracleReader, EphemeralOracleWriter};
 use rootlight_ids::{
     FactId, FileIdentity, GenerationIdentity, content_hash, derive_file, derive_generation,
     derive_repository,
@@ -24,8 +24,9 @@ use rootlight_ir::{
 use rootlight_segment::{Segment, SegmentError, SegmentReader};
 use rootlight_storage::{
     CoverageReadRequest, GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext,
-    GenerationManifestRecipe, GenerationMetadata, GenerationReadLimit, GenerationReader,
-    IdentityVerifiedGeneration, OccurrenceReadRequest, RelationReadDirection, RelationReadRequest,
+    GenerationControlError, GenerationManifestRecipe, GenerationMetadata, GenerationReadLimit,
+    GenerationReader, GenerationResource, IdentityVerifiedGeneration, OccurrenceReadRequest,
+    RelationReadDirection, RelationReadRequest,
 };
 
 const HEADER_BYTES: usize = 576;
@@ -525,6 +526,39 @@ fn segment_reader_matches_sqlite_for_every_indexed_operation() {
             .coverage(&coverage_request.with_after(coverage_cursor), &context)
             .expect("oracle second coverage page reads")
     );
+}
+
+#[test]
+fn provenance_source_links_match_sqlite_row_accounting() {
+    let cancellation = Cancellation::new();
+    let setup_context = context(&cancellation);
+    let (oracle, segment, document) = readers(&setup_context);
+    let budget = GenerationBudget::new(4, 3, 1_024).expect("tight read budget is valid");
+    let read_context = GenerationContext::new(&cancellation, budget);
+
+    let segment_error = segment
+        .provenance(document.provenance[0].id, &read_context)
+        .expect_err("segment accounts for provenance source links");
+    assert!(matches!(
+        segment_error,
+        SegmentError::Control(GenerationControlError::BudgetExceeded {
+            resource: GenerationResource::Rows,
+            limit: 4,
+            ..
+        })
+    ));
+
+    let oracle_error = oracle
+        .provenance(document.provenance[0].id, &read_context)
+        .expect_err("SQLite accounts for provenance source links");
+    assert!(matches!(
+        oracle_error.kind(),
+        CatalogErrorKind::BudgetExceeded {
+            resource: GenerationResource::Rows,
+            limit: 4,
+            ..
+        }
+    ));
 }
 
 #[test]

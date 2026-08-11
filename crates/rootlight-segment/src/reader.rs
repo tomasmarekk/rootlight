@@ -385,6 +385,12 @@ impl<'a, 'b> ReadMeter<'a, 'b> {
 
     fn provenance(&mut self, record: &ProvenanceRecord) -> Result<(), SegmentError> {
         self.rows(1)?;
+        let source_links = record
+            .input_sources
+            .len()
+            .checked_add(record.evidence_sources.len())
+            .ok_or(SegmentError::Corrupt)?;
+        self.rows(source_links)?;
         for source in record.input_sources.iter().chain(&record.evidence_sources) {
             self.source(source)?;
         }
