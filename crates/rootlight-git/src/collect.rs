@@ -530,6 +530,8 @@ impl<'a> GitRunner<'a> {
             .current_dir(self.repository_root)
             .arg("--no-pager")
             .arg("--no-optional-locks")
+            .arg("--git-dir=.git")
+            .arg("--work-tree=.")
             .arg("--literal-pathspecs")
             .args([
                 OsString::from("-c"),

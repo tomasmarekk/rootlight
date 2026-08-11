@@ -417,6 +417,39 @@ fn non_git_root_is_explicit_and_pre_cancelled_collection_spawns_nothing() {
 }
 
 #[test]
+fn selected_subdirectory_cannot_discover_a_parent_repository() {
+    let directory = initialized_repository();
+    let selected_root = directory.path().join("selected");
+    fs::create_dir(&selected_root).expect("selected subdirectory is created");
+    write_and_commit(
+        directory.path(),
+        "outside.rs",
+        "fn outside_selected_root() {}\n",
+        "outside",
+    );
+    fs::write(
+        directory.path().join("outside.rs"),
+        "fn modified_outside_selected_root() {}\n",
+    )
+    .expect("outside fixture is modified");
+
+    let snapshot = collect_repository(
+        &selected_root,
+        repository(),
+        &GitLimits::default(),
+        collection_limits(8),
+        &Cancellation::new(),
+    )
+    .expect("a selected non-root directory is classified without parent discovery");
+    assert!(matches!(
+        snapshot.as_input().state,
+        RepositoryState::NonGit { .. }
+    ));
+    assert!(snapshot.as_input().commits.is_empty());
+    assert!(snapshot.as_input().change_sets.is_empty());
+}
+
+#[test]
 fn command_bytes_and_contract_collections_fail_at_configured_limits() {
     let directory = initialized_repository();
     write_and_commit(
