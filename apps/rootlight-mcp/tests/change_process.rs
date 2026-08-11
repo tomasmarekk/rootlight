@@ -101,7 +101,6 @@ fn change_tools_preserve_truthful_contracts_across_processes() {
         let repeated = &repeated["result"]["structuredContent"];
         for field in [
             "repository",
-            "data",
             "coverage",
             "completeness",
             "truncated",
@@ -113,6 +112,7 @@ fn change_tools_preserve_truthful_contracts_across_processes() {
                 "{tool} changed deterministic field {field}"
             );
         }
+        assert_repeated_tool_data(tool, output, repeated);
         assert_generation_identity_and_monotone_freshness(tool, output, repeated);
 
         if matches!(*tool, "change.impact" | "tests.select") {
@@ -161,6 +161,93 @@ fn change_tools_preserve_truthful_contracts_across_processes() {
 
     mcp.finish();
     daemon.finish();
+}
+
+fn assert_repeated_tool_data(tool: &str, first: &Value, repeated: &Value) {
+    if first["data"] == repeated["data"] {
+        return;
+    }
+
+    assert_eq!(
+        tool, "plan.change",
+        "{tool} changed deterministic data without a bounded evidence provider"
+    );
+    for response in [first, repeated] {
+        if has_shared_budget_evidence_omission(response) {
+            assert_eq!(response["truncated"], true);
+            assert_eq!(response["completeness"]["state"], "truncated");
+            assert_eq!(response["next_cursor"], Value::Null);
+        }
+    }
+    assert!(
+        has_shared_budget_evidence_omission(first) || has_shared_budget_evidence_omission(repeated),
+        "plan.change changed evidence without an explicit shared-budget omission"
+    );
+    assert_eq!(
+        stable_plan_change_data(first),
+        stable_plan_change_data(repeated),
+        "plan.change changed structural plan data while evidence was budget-limited"
+    );
+}
+
+fn has_shared_budget_evidence_omission(response: &Value) -> bool {
+    response["data"]["provider_coverage"]
+        .as_array()
+        .is_some_and(|providers| {
+            providers.iter().any(|provider| {
+                provider["omission"]["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason == "shared_budget_exhausted")
+            })
+        })
+}
+
+fn stable_plan_change_data(response: &Value) -> Value {
+    let mut data = response["data"].clone();
+    let data = data.as_object_mut().expect("plan.change data is an object");
+    data.remove("provider_coverage");
+    for step in data["plan"]
+        .as_array_mut()
+        .expect("plan.change returns plan steps")
+    {
+        step.as_object_mut()
+            .expect("plan.change step is an object")
+            .remove("evidence_refs");
+    }
+    Value::Object(data.clone())
+}
+
+#[test]
+fn repeated_plan_comparison_accepts_only_explicit_budget_limited_evidence() {
+    let complete = json!({
+        "data": {
+            "plan": [{"step": 1, "action": "inspect", "evidence_refs": ["impact:000"]}],
+            "provider_coverage": [{
+                "provider": "change_impact",
+                "state": "complete",
+                "evidence": [{"evidence_id": "impact:000"}]
+            }]
+        },
+        "truncated": false,
+        "completeness": {"state": "complete"},
+        "next_cursor": null
+    });
+    let budget_limited = json!({
+        "data": {
+            "plan": [{"step": 1, "action": "inspect", "evidence_refs": []}],
+            "provider_coverage": [{
+                "provider": "change_impact",
+                "state": "partial",
+                "evidence": [],
+                "omission": {"reason": "shared_budget_exhausted"}
+            }]
+        },
+        "truncated": true,
+        "completeness": {"state": "truncated"},
+        "next_cursor": null
+    });
+
+    assert_repeated_tool_data("plan.change", &complete, &budget_limited);
 }
 
 fn assert_dirty_head_requires_indexed_history(mcp: &mut McpProcess, second: &IndexReceipt) {
