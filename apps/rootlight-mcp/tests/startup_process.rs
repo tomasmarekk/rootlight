@@ -21,12 +21,12 @@ const MEASURED_SAMPLES: usize = 100;
 const P50_TARGET_US: u64 = 80_000;
 const P95_TARGET_US: u64 = 150_000;
 const P99_TARGET_US: u64 = 300_000;
-// Readiness follows restoration of every retained generation, so this recovery
-// budget scales with fixture cardinality while the bridge SLO remains absolute.
+// Health readiness follows restoration of one active generation per fixture
+// repository, so the recovery budget and liveness cap scale with cardinality.
 const DAEMON_RECOVERY_P50_PER_REPOSITORY_US: u64 = 125_000;
 const DAEMON_RECOVERY_P95_PER_REPOSITORY_US: u64 = 200_000;
 const DAEMON_RECOVERY_P99_PER_REPOSITORY_US: u64 = 250_000;
-const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(10);
+const DAEMON_READY_TIMEOUT_MULTIPLIER: u32 = 2;
 const STARTUP_REPOSITORIES: usize = 24;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -121,7 +121,7 @@ fn daemon_reaches_ready_within_release_startup_slo() {
     let targets = daemon_recovery_targets();
     assert!(
         p50 <= targets.p50 && p95 <= targets.p95 && p99 <= targets.p99,
-        "daemon retained-generation recovery exceeded release budget: \
+        "daemon active-generation recovery exceeded release budget: \
          repositories={STARTUP_REPOSITORIES}, p50={p50}us/{}us, \
          p95={p95}us/{}us, p99={p99}us/{}us, \
          min={}us, max={}us",
@@ -132,8 +132,8 @@ fn daemon_reaches_ready_within_release_startup_slo() {
         samples[samples.len() - 1],
     );
 
-    // Keep endpoint checks outside the latency samples so the percentiles
-    // continue to represent daemon readiness rather than fixture cardinality.
+    // Keep post-readiness endpoint checks outside the latency samples so the
+    // percentiles remain limited to recovery and health readiness.
     let (mut daemon, input, _elapsed, control) = start_healthy_daemon(&state_dir, &runtime_dir);
     let health = control
         .health()
@@ -237,7 +237,9 @@ fn start_healthy_daemon(state_dir: &Path, runtime_dir: &Path) -> (Child, ChildSt
         .spawn()
         .expect("daemon process starts");
     let input = child.stdin.take().expect("daemon stdin is piped");
-    let deadline = started + DAEMON_READY_TIMEOUT;
+    let deadline = started
+        .checked_add(daemon_ready_timeout())
+        .expect("daemon readiness deadline fits Instant");
     let paths = RuntimePaths::new(state_dir.to_path_buf(), runtime_dir.to_path_buf())
         .expect("isolated runtime paths are valid");
     while Instant::now() < deadline {
@@ -498,6 +500,28 @@ fn daemon_recovery_targets() -> RecoveryTargets {
             .checked_mul(repositories)
             .expect("p99 recovery budget fits u64"),
     }
+}
+
+fn daemon_ready_timeout() -> Duration {
+    // This is a wedged-child guard, not a maximum-latency gate. Keep it above
+    // the measured p99 budget so one permitted tail sample remains observable.
+    Duration::from_micros(daemon_recovery_targets().p99)
+        .checked_mul(DAEMON_READY_TIMEOUT_MULTIPLIER)
+        .expect("daemon readiness timeout fits Duration")
+}
+
+#[test]
+fn daemon_readiness_guard_does_not_preempt_tail_measurement() {
+    let targets = daemon_recovery_targets();
+    let timeout = daemon_ready_timeout();
+
+    assert_eq!(
+        timeout,
+        Duration::from_micros(targets.p99)
+            .checked_mul(DAEMON_READY_TIMEOUT_MULTIPLIER)
+            .expect("expected daemon readiness timeout fits Duration")
+    );
+    assert!(timeout > Duration::from_micros(targets.p99));
 }
 
 struct RecoveryTargets {
