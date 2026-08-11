@@ -39,6 +39,8 @@ use crate::{
 
 const LOGICAL_TREE_NODE_BYTES: usize = 64;
 const LOGICAL_SYNTAX_FACT_BYTES: usize = 64;
+const MIN_SYNTAX_KIND_BYTES: usize = 1;
+const MIN_SYNTAX_FACT_OUTPUT_BYTES: usize = LOGICAL_SYNTAX_FACT_BYTES + MIN_SYNTAX_KIND_BYTES;
 const CANCELLATION_CHECK_INTERVAL: usize = 256;
 const CANCELLATION_BYTE_INTERVAL: usize = 64 * 1024;
 // The progress callback is the safe API's only parser-action checkpoint. These
@@ -380,12 +382,7 @@ impl TreeSitterProvider {
     ) -> Result<ExtractionReport, AdapterError> {
         cancellation.check()?;
         let budget = sink.remaining_budget();
-        let max_facts = budget
-            .remaining()
-            .batches()
-            .checked_mul(budget.batch().max_records())
-            .ok_or_else(|| provider_failure("query-fact-accounting"))?
-            .min(budget.remaining().records());
+        let max_facts = pre_extraction_fact_limit(budget)?;
         let pack = self
             .query_packs
             .get(family)
@@ -403,13 +400,7 @@ impl TreeSitterProvider {
             emit_extraction_limit_diagnostic(request, sink, cancellation)?;
         }
         let normalization_fact_limit = if extraction_limited {
-            let budget = sink.remaining_budget();
-            budget
-                .remaining()
-                .batches()
-                .checked_mul(budget.batch().max_records())
-                .ok_or_else(|| provider_failure("query-fact-accounting"))?
-                .min(budget.remaining().records())
+            pre_extraction_fact_limit(sink.remaining_budget())?
         } else {
             extraction.fact_limit
         };
@@ -1936,6 +1927,22 @@ fn emit_fact_plan(
     Ok(())
 }
 
+fn pre_extraction_fact_limit(budget: RemainingBudget) -> Result<usize, AdapterError> {
+    let remaining = budget.remaining();
+    let batch = budget.batch();
+    let facts_per_batch = batch
+        .max_records()
+        .min(batch.max_output_bytes() / MIN_SYNTAX_FACT_OUTPUT_BYTES);
+    let batched_facts = remaining
+        .batches()
+        .checked_mul(facts_per_batch)
+        .ok_or_else(|| provider_failure("query-fact-accounting"))?;
+    Ok(batched_facts
+        .min(remaining.records())
+        .min(remaining.output_bytes() / MIN_SYNTAX_FACT_OUTPUT_BYTES)
+        .min(remaining.string_bytes() / MIN_SYNTAX_KIND_BYTES))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ParseWorkLimit {
     max_progress_checks: usize,
@@ -2505,6 +2512,37 @@ mod tests {
         assert_eq!(observed.output_bytes, expected.output_bytes());
         assert_eq!(observed.string_bytes, expected.string_bytes());
         assert_eq!(expected.records(), 1);
+    }
+
+    #[test]
+    fn pre_extraction_limit_accounts_all_output_dimensions() {
+        let batch = rootlight_adapter_sdk::BatchThresholds::new(128, 128, 8, 4096)
+            .expect("test batch limits are valid");
+        let stream = rootlight_adapter_sdk::StreamLimits::new(
+            8192,
+            1_048_576,
+            128,
+            64,
+            64 * 1024,
+            32,
+            batch,
+        )
+        .expect("test stream limits are valid");
+        let file = rootlight_ids::FileId::from_bytes([3; 20]);
+        let source = SourceRef::new(
+            rootlight_ids::RepositoryId::from_bytes([1; 16]),
+            rootlight_ids::GenerationId::from_bytes([2; 20]),
+            SourceSpan::new(file, 0, 1).expect("test source span is ordered"),
+            ContentHash::from_bytes([4; 32]),
+            None,
+        );
+        let sink = rootlight_adapter_sdk::BoundedSyntaxSink::new(source, stream, 64);
+
+        assert_eq!(
+            pre_extraction_fact_limit(sink.remaining_budget())
+                .expect("fact capacity is representable"),
+            1
+        );
     }
 
     #[test]

@@ -15,6 +15,10 @@ const QUERY_CURSOR_MATCH_LIMIT: u32 = 4096;
 const HARD_MAX_QUERY_MATCHES: usize = 1_048_576;
 const HARD_MAX_QUERY_CAPTURES: usize = 2_097_152;
 const HARD_MAX_QUERY_FACTS: usize = 1_048_576;
+// Preserve a bounded window for late high-value declarations without letting
+// tiny emission budgets authorize a full-tree query scan.
+const QUERY_MATCHES_PER_RETAINED_FACT: usize = 64;
+const QUERY_CAPTURES_PER_RETAINED_FACT: usize = 128;
 
 const EXPECTED_CAPTURES: [&str; 12] = [
     "call",
@@ -249,15 +253,23 @@ impl QueryPack {
         cancellation: &Cancellation,
     ) -> Result<QueryExtraction, AdapterError> {
         cancellation.check()?;
+        let max_facts = max_facts.min(HARD_MAX_QUERY_FACTS);
+        let budgeted_matches = max_facts
+            .checked_mul(QUERY_MATCHES_PER_RETAINED_FACT)
+            .ok_or_else(|| query_failure("query-match-accounting"))?;
+        let budgeted_captures = max_facts
+            .checked_mul(QUERY_CAPTURES_PER_RETAINED_FACT)
+            .ok_or_else(|| query_failure("query-capture-accounting"))?;
         let max_matches = max_nodes
             .checked_mul(8)
             .ok_or_else(|| query_failure("query-match-accounting"))?
-            .min(HARD_MAX_QUERY_MATCHES);
+            .min(HARD_MAX_QUERY_MATCHES)
+            .min(budgeted_matches);
         let max_captures = max_nodes
             .checked_mul(8)
             .ok_or_else(|| query_failure("query-capture-accounting"))?
-            .min(HARD_MAX_QUERY_CAPTURES);
-        let max_facts = max_facts.min(HARD_MAX_QUERY_FACTS);
+            .min(HARD_MAX_QUERY_CAPTURES)
+            .min(budgeted_captures);
         if max_matches == 0 || max_captures == 0 || max_facts == 0 {
             return Ok(QueryExtraction {
                 candidates: Vec::new(),
@@ -690,5 +702,34 @@ mod tests {
             assert_eq!(names, expected);
             assert_eq!(pack.roles_by_capture.len(), expected.len());
         }
+    }
+
+    #[test]
+    fn retained_fact_limit_also_bounds_query_scan_work() {
+        let mut source = b"fn first() {}\n".to_vec();
+        source.extend(std::iter::repeat_n(b"fn repeated() {}\n".as_slice(), 256).flatten());
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::Rust))
+            .expect("Rust grammar loads");
+        let tree = parser.parse(&source, None).expect("fixture parses");
+        let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
+        let pack = registry
+            .get(GrammarFamily::Rust)
+            .expect("Rust query pack exists");
+
+        let extraction = pack
+            .extract(
+                GrammarFamily::Rust,
+                &tree,
+                &source,
+                10_000,
+                1,
+                &Cancellation::new(),
+            )
+            .expect("bounded query extraction succeeds");
+
+        assert_eq!(extraction.candidates.len(), 1);
+        assert_eq!(extraction.limit, Some(QueryLimit::Match));
     }
 }

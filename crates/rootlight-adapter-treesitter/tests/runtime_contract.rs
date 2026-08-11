@@ -612,6 +612,65 @@ fn syntax_budgets_abort_parser_work_before_full_tree_materialization() {
 }
 
 #[test]
+fn syntax_extraction_honors_tiny_output_budgets_before_materialization() {
+    let mut source = b"fn first() {}\n".to_vec();
+    source.extend(std::iter::repeat_n(b"fn repeated() {}\n".as_slice(), 5000).flatten());
+    let fixture = Fixture::new("output-budget.rs", &source);
+    let syntax_batch =
+        BatchThresholds::new(128, 128, 8, 4096).expect("syntax batch limits are valid");
+    let syntax = StreamLimits::new(8192, 1_048_576, 128, 64, 64 * 1024, 32, syntax_batch)
+        .expect("syntax limits are valid");
+    let ir_batch =
+        BatchThresholds::new(128, 64 * 1024, 8, 4096).expect("IR batch limits are valid");
+    let ir = StreamLimits::new(
+        64,
+        4096,
+        4 * 1024 * 1024,
+        64,
+        64 * 1024,
+        128 * 1024,
+        ir_batch,
+    )
+    .expect("IR limits are valid");
+    let limits = AnalysisLimits::new(
+        source.len(),
+        100_000,
+        64,
+        16,
+        8 * 1024 * 1024,
+        syntax,
+        ir,
+        IrLimits::default(),
+    )
+    .expect("analysis limits are valid");
+    let provider = provider(source.len(), 100_000, 64, 2 * 1024 * 1024);
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "rust",
+        Vec::new(),
+    );
+
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(Duration::from_secs(30)),
+    )
+    .expect("byte-limited extraction commits bounded output");
+
+    assert!(output.facts().len() <= 1);
+    assert!(
+        output
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| { diagnostic.code().as_str() == "syntax-extraction-limit" })
+    );
+    assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+}
+
+#[test]
 fn cache_byte_eviction_invalidates_an_old_handle() {
     let mut first_bytes = b"// ".to_vec();
     first_bytes.extend(std::iter::repeat_n(b'a', 8_000));
