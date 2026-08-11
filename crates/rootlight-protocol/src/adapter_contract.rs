@@ -63,7 +63,7 @@ pub struct ValidatedAdvertisement {
     selected_protocol: ContractVersion,
     capabilities: BTreeSet<String>,
     extensions: BTreeMap<String, ExtensionDescriptor>,
-    trust_level: AdapterTrustLevel,
+    host_trust: AdapterTrustLevel,
     hard_limits: ResourceLimits,
 }
 
@@ -71,11 +71,18 @@ impl ValidatedAdvertisement {
     /// Validates a hostile capability advertisement and selects the newest
     /// mutually supported protocol minor.
     ///
+    /// `host_trust` must come from host-owned executable authorization, never
+    /// from the child advertisement. The child claim is retained only as a
+    /// consistency check against that out-of-band decision.
+    ///
     /// # Errors
     ///
     /// Returns [`AdapterContractError`] when identity, version range,
     /// declarations, trust, cancellation, or resource ceilings are invalid.
-    pub fn validate(advertisement: CapabilityAdvertisement) -> Result<Self, AdapterContractError> {
+    pub fn validate(
+        advertisement: CapabilityAdvertisement,
+        host_trust: AdapterTrustLevel,
+    ) -> Result<Self, AdapterContractError> {
         let identity = advertisement
             .adapter
             .as_ref()
@@ -89,10 +96,15 @@ impl ValidatedAdvertisement {
         )?;
         let capabilities = validate_capabilities(&advertisement.capabilities)?;
         let extensions = validate_extensions(&advertisement.extensions)?;
-        let trust_level = AdapterTrustLevel::try_from(advertisement.trust_level)
+        let advertised_trust = AdapterTrustLevel::try_from(advertisement.trust_level)
             .map_err(|_| AdapterContractError::InvalidTrust)?;
-        if trust_level == AdapterTrustLevel::Unspecified {
+        if host_trust == AdapterTrustLevel::Unspecified
+            || advertised_trust == AdapterTrustLevel::Unspecified
+        {
             return Err(AdapterContractError::InvalidTrust);
+        }
+        if advertised_trust != host_trust {
+            return Err(AdapterContractError::TrustMismatch);
         }
         let hard_limits = advertisement
             .hard_limits
@@ -108,7 +120,7 @@ impl ValidatedAdvertisement {
             selected_protocol,
             capabilities,
             extensions,
-            trust_level,
+            host_trust,
             hard_limits,
         })
     }
@@ -125,10 +137,10 @@ impl ValidatedAdvertisement {
         self.selected_protocol
     }
 
-    /// Returns the validated adapter trust origin.
+    /// Returns the host-authorized adapter trust origin.
     #[must_use]
     pub const fn trust_level(&self) -> AdapterTrustLevel {
-        self.trust_level
+        self.host_trust
     }
 
     /// Returns the child-advertised hard resource ceiling.
@@ -172,7 +184,7 @@ impl ValidatedAdvertisement {
         let maximum_trust = AdapterTrustLevel::try_from(requirements.maximum_trust)
             .map_err(|_| AdapterContractError::InvalidTrust)?;
         if maximum_trust == AdapterTrustLevel::Unspecified
-            || trust_rank(self.trust_level) > trust_rank(maximum_trust)
+            || trust_rank(self.host_trust) > trust_rank(maximum_trust)
         {
             return Err(AdapterContractError::TrustMismatch);
         }
@@ -193,7 +205,7 @@ impl ValidatedAdvertisement {
             capabilities: required_capabilities,
             extensions: required_extensions,
             limits: granted_limits,
-            trust_level: self.trust_level,
+            trust_level: self.host_trust,
         })
     }
 }
@@ -1111,7 +1123,8 @@ mod tests {
     #[test]
     fn negotiation_binds_identity_capabilities_extensions_quotas_and_cancellation() {
         let validated =
-            ValidatedAdvertisement::validate(advertisement()).expect("advertisement validates");
+            ValidatedAdvertisement::validate(advertisement(), AdapterTrustLevel::FirstParty)
+                .expect("advertisement validates");
         let session = validated
             .negotiate(requirements())
             .expect("host requirements negotiate");
@@ -1124,6 +1137,31 @@ mod tests {
     }
 
     #[test]
+    fn child_trust_claim_cannot_override_host_authorization() {
+        assert_eq!(
+            ValidatedAdvertisement::validate(advertisement(), AdapterTrustLevel::Untrusted),
+            Err(AdapterContractError::TrustMismatch)
+        );
+
+        let mut untrusted_advertisement = advertisement();
+        untrusted_advertisement.trust_level = AdapterTrustLevel::Untrusted as i32;
+        let validated =
+            ValidatedAdvertisement::validate(untrusted_advertisement, AdapterTrustLevel::Untrusted)
+                .expect("matching host authorization validates");
+        assert_eq!(
+            validated.negotiate(requirements()),
+            Err(AdapterContractError::TrustMismatch)
+        );
+
+        let mut untrusted_requirements = requirements();
+        untrusted_requirements.maximum_trust = AdapterTrustLevel::Untrusted as i32;
+        let session = validated
+            .negotiate(untrusted_requirements)
+            .expect("untrusted policy admits host-authorized untrusted adapter");
+        assert_eq!(session.trust_level(), AdapterTrustLevel::Untrusted);
+    }
+
+    #[test]
     fn negotiation_rejects_major_identity_quota_extension_and_cancellation_drift() {
         let mut legacy_minor = advertisement();
         legacy_minor.supported_protocols = Some(VersionRange {
@@ -1131,7 +1169,7 @@ mod tests {
             maximum: Some(ContractVersion { major: 1, minor: 0 }),
         });
         assert_eq!(
-            ValidatedAdvertisement::validate(legacy_minor),
+            ValidatedAdvertisement::validate(legacy_minor, AdapterTrustLevel::FirstParty),
             Err(AdapterContractError::ProtocolMismatch)
         );
 
@@ -1141,12 +1179,13 @@ mod tests {
             maximum: Some(ContractVersion { major: 2, minor: 0 }),
         });
         assert_eq!(
-            ValidatedAdvertisement::validate(major),
+            ValidatedAdvertisement::validate(major, AdapterTrustLevel::FirstParty),
             Err(AdapterContractError::ProtocolMismatch)
         );
 
         let validated =
-            ValidatedAdvertisement::validate(advertisement()).expect("advertisement validates");
+            ValidatedAdvertisement::validate(advertisement(), AdapterTrustLevel::FirstParty)
+                .expect("advertisement validates");
         let mut identity = requirements();
         identity
             .expected_adapter
@@ -1183,17 +1222,18 @@ mod tests {
         let mut no_cancel = advertisement();
         no_cancel.supports_cancellation = false;
         assert_eq!(
-            ValidatedAdvertisement::validate(no_cancel),
+            ValidatedAdvertisement::validate(no_cancel, AdapterTrustLevel::FirstParty),
             Err(AdapterContractError::CancellationRequired)
         );
     }
 
     #[test]
     fn negotiated_session_bounds_requests_results_and_cancellation() {
-        let session = ValidatedAdvertisement::validate(advertisement())
-            .expect("advertisement validates")
-            .negotiate(requirements())
-            .expect("requirements negotiate");
+        let session =
+            ValidatedAdvertisement::validate(advertisement(), AdapterTrustLevel::FirstParty)
+                .expect("advertisement validates")
+                .negotiate(requirements())
+                .expect("requirements negotiate");
         let request = analysis_request(32);
         session
             .validate_analysis_request(&request)
@@ -1237,10 +1277,11 @@ mod tests {
 
     #[test]
     fn negotiated_session_validates_canonical_bounded_project_frames() {
-        let session = ValidatedAdvertisement::validate(advertisement())
-            .expect("advertisement validates")
-            .negotiate(requirements())
-            .expect("requirements negotiate");
+        let session =
+            ValidatedAdvertisement::validate(advertisement(), AdapterTrustLevel::FirstParty)
+                .expect("advertisement validates")
+                .negotiate(requirements())
+                .expect("requirements negotiate");
         let request = project_analysis_request();
         session
             .validate_project_analysis_request(&request)
@@ -1284,10 +1325,11 @@ mod tests {
 
     #[test]
     fn project_request_rejects_noncanonical_identity_origins_and_aggregate_quota() {
-        let session = ValidatedAdvertisement::validate(advertisement())
-            .expect("advertisement validates")
-            .negotiate(requirements())
-            .expect("requirements negotiate");
+        let session =
+            ValidatedAdvertisement::validate(advertisement(), AdapterTrustLevel::FirstParty)
+                .expect("advertisement validates")
+                .negotiate(requirements())
+                .expect("requirements negotiate");
 
         let mut reversed = project_analysis_request();
         reversed.inputs.reverse();
@@ -1346,8 +1388,9 @@ mod tests {
             .as_mut()
             .expect("version range exists")
             .maximum = Some(ContractVersion { major: 1, minor: 1 });
-        let validated = ValidatedAdvertisement::validate(legacy_advertisement)
-            .expect("legacy advertisement validates");
+        let validated =
+            ValidatedAdvertisement::validate(legacy_advertisement, AdapterTrustLevel::FirstParty)
+                .expect("legacy advertisement validates");
         let mut legacy_requirements = requirements();
         legacy_requirements
             .required_capabilities

@@ -148,18 +148,21 @@ fn project_adapter_advertisement_for_identity(
     identity: AdapterIdentity,
 ) -> Result<ValidatedAdvertisement, AdapterHostError> {
     let version = project_protocol_version();
-    ValidatedAdvertisement::validate(CapabilityAdvertisement {
-        adapter: Some(identity),
-        supported_protocols: Some(VersionRange {
-            minimum: Some(version),
-            maximum: Some(version),
-        }),
-        capabilities: vec![crate::PROJECT_NORMALIZED_IR_CAPABILITY.to_owned()],
-        extensions: project_extensions(),
-        trust_level: AdapterTrustLevel::FirstParty as i32,
-        hard_limits: Some(PROJECT_ADAPTER_HARD_LIMITS),
-        supports_cancellation: true,
-    })
+    ValidatedAdvertisement::validate(
+        CapabilityAdvertisement {
+            adapter: Some(identity),
+            supported_protocols: Some(VersionRange {
+                minimum: Some(version),
+                maximum: Some(version),
+            }),
+            capabilities: vec![crate::PROJECT_NORMALIZED_IR_CAPABILITY.to_owned()],
+            extensions: project_extensions(),
+            trust_level: AdapterTrustLevel::FirstParty as i32,
+            hard_limits: Some(PROJECT_ADAPTER_HARD_LIMITS),
+            supports_cancellation: true,
+        },
+        AdapterTrustLevel::FirstParty,
+    )
     .map_err(AdapterHostError::from)
 }
 

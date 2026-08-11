@@ -1421,24 +1421,27 @@ mod tests {
             handles: 16,
             retries: 0,
         };
-        let advertisement = ValidatedAdvertisement::validate(CapabilityAdvertisement {
-            adapter: Some(identity.clone()),
-            supported_protocols: Some(VersionRange {
-                minimum: Some(ContractVersion {
-                    major: ADAPTER_PROTOCOL_MAJOR,
-                    minor: CURRENT_ADAPTER_PROTOCOL_MINOR,
+        let advertisement = ValidatedAdvertisement::validate(
+            CapabilityAdvertisement {
+                adapter: Some(identity.clone()),
+                supported_protocols: Some(VersionRange {
+                    minimum: Some(ContractVersion {
+                        major: ADAPTER_PROTOCOL_MAJOR,
+                        minor: CURRENT_ADAPTER_PROTOCOL_MINOR,
+                    }),
+                    maximum: Some(ContractVersion {
+                        major: ADAPTER_PROTOCOL_MAJOR,
+                        minor: CURRENT_ADAPTER_PROTOCOL_MINOR,
+                    }),
                 }),
-                maximum: Some(ContractVersion {
-                    major: ADAPTER_PROTOCOL_MAJOR,
-                    minor: CURRENT_ADAPTER_PROTOCOL_MINOR,
-                }),
-            }),
-            capabilities: vec!["normalized_ir".to_owned()],
-            extensions: Vec::new(),
-            trust_level: AdapterTrustLevel::FirstParty as i32,
-            hard_limits: Some(limits),
-            supports_cancellation: true,
-        })
+                capabilities: vec!["normalized_ir".to_owned()],
+                extensions: Vec::new(),
+                trust_level: AdapterTrustLevel::FirstParty as i32,
+                hard_limits: Some(limits),
+                supports_cancellation: true,
+            },
+            AdapterTrustLevel::FirstParty,
+        )
         .expect("advertisement is valid");
         let session = advertisement
             .negotiate(SessionRequirements {
@@ -1489,24 +1492,27 @@ mod tests {
             retries: 0,
         };
         let capabilities = vec![PROJECT_NORMALIZED_IR_CAPABILITY.to_owned()];
-        let advertisement = ValidatedAdvertisement::validate(CapabilityAdvertisement {
-            adapter: Some(identity.clone()),
-            supported_protocols: Some(VersionRange {
-                minimum: Some(ContractVersion {
-                    major: ADAPTER_PROTOCOL_MAJOR,
-                    minor: CURRENT_ADAPTER_PROTOCOL_MINOR,
+        let advertisement = ValidatedAdvertisement::validate(
+            CapabilityAdvertisement {
+                adapter: Some(identity.clone()),
+                supported_protocols: Some(VersionRange {
+                    minimum: Some(ContractVersion {
+                        major: ADAPTER_PROTOCOL_MAJOR,
+                        minor: CURRENT_ADAPTER_PROTOCOL_MINOR,
+                    }),
+                    maximum: Some(ContractVersion {
+                        major: ADAPTER_PROTOCOL_MAJOR,
+                        minor: CURRENT_ADAPTER_PROTOCOL_MINOR,
+                    }),
                 }),
-                maximum: Some(ContractVersion {
-                    major: ADAPTER_PROTOCOL_MAJOR,
-                    minor: CURRENT_ADAPTER_PROTOCOL_MINOR,
-                }),
-            }),
-            capabilities: capabilities.clone(),
-            extensions: Vec::new(),
-            trust_level: AdapterTrustLevel::FirstParty as i32,
-            hard_limits: Some(limits),
-            supports_cancellation: true,
-        })
+                capabilities: capabilities.clone(),
+                extensions: Vec::new(),
+                trust_level: AdapterTrustLevel::FirstParty as i32,
+                hard_limits: Some(limits),
+                supports_cancellation: true,
+            },
+            AdapterTrustLevel::FirstParty,
+        )
         .expect("project advertisement is valid");
         let session = advertisement
             .negotiate(SessionRequirements {
