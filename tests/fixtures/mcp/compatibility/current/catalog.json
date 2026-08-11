@@ -15039,12 +15039,11 @@
                   "type": "array"
                 },
                 "resolved_changes": {
-                  "description": "Resolved changes from the input change set.",
+                  "description": "Resolved changes, empty only for source-free explain output.",
                   "items": {
                     "$ref": "#/$defs/ResolvedChange"
                   },
                   "maxItems": 1256,
-                  "minItems": 1,
                   "type": "array"
                 },
                 "risk_summary": {
