@@ -29,6 +29,7 @@ SUPPORTED_CARGO_GEIGER_VERSION = "cargo-geiger 0.13.0"
 SUPPORTED_CARGO_GEIGER_POLICY_VERSION = "0.13.0"
 SOURCE_INPUT_MODE = "workspace-rust-source-digest-v1"
 REPORT_FORMAT = "cargo-geiger SafetyReport"
+NATIVE_UNSAFE_INVENTORY_PACKAGE = "rootlight-sandbox"
 CARGO_GEIGER_REPORT_ARGUMENTS = (
     "--all-features",
     "--all-targets",
@@ -438,6 +439,15 @@ def load_approved_counts(
             raise fail(
                 "unsafe inventory policy contains an invalid cargo-geiger "
                 f"host operating system: {geiger_host_os}"
+            )
+        if (
+            status == "enabled"
+            and geiger_host_os in {"macos", "windows"}
+            and package_name != NATIVE_UNSAFE_INVENTORY_PACKAGE
+        ):
+            raise fail(
+                "host-specific unsafe boundary lacks native CI coverage: "
+                f"{package_name} on {geiger_host_os}"
             )
         if status == "disabled" and (source_count != 0 or geiger_count != 0):
             raise fail("disabled unsafe boundaries must retain zero evidence counts")

@@ -305,7 +305,6 @@ class GeigerValidationTests(unittest.TestCase):
             .replace('status = "disabled"', 'status = "enabled"')
             .replace("expected_source_tokens = 0", "expected_source_tokens = 1")
             .replace("expected_geiger_count = 0", "expected_geiger_count = 2")
-            .replace('geiger_host_os = "all"', 'geiger_host_os = "windows"')
         )
         self.policy_path.write_text(
             enabled
@@ -322,7 +321,7 @@ class GeigerValidationTests(unittest.TestCase):
                     'reason = "Darwin APIs require a reviewed boundary"',
                     "expected_source_tokens = 1",
                     "expected_geiger_count = 3",
-                    'geiger_host_os = "macos"',
+                    'geiger_host_os = "linux"',
                     "",
                 )
             ),
@@ -339,16 +338,16 @@ class GeigerValidationTests(unittest.TestCase):
             VALIDATOR.load_approved_counts(
                 self.policy_path, self.inventory, "macos"
             ),
-            {self.cargo_id: 3},
+            {self.cargo_id: 2},
         )
         self.assertEqual(
             VALIDATOR.load_approved_counts(
                 self.policy_path, self.inventory, "linux"
             ),
-            {self.cargo_id: 0},
+            {self.cargo_id: 5},
         )
 
-    def test_host_specific_boundary_requires_zero_off_host(self) -> None:
+    def test_uncovered_native_boundary_is_rejected(self) -> None:
         self.policy_path.write_text(
             self.policy_path.read_text(encoding="utf-8")
             .replace('status = "disabled"', 'status = "enabled"')
@@ -357,32 +356,9 @@ class GeigerValidationTests(unittest.TestCase):
             .replace('geiger_host_os = "all"', 'geiger_host_os = "windows"'),
             encoding="utf-8",
         )
-        approved = VALIDATOR.load_approved_counts(
-            self.policy_path, self.inventory, "linux"
-        )
-        self.assertEqual(approved, {self.cargo_id: 0})
-        report = self.report()
-        report["packages"][0]["unsafety"]["forbids_unsafe"] = False
-        self.assertEqual(
-            VALIDATOR.validate_report(
-                report,
-                self.cargo_id,
-                self.inventory,
-                approved,
-                VALIDATOR.SUPPORTED_CARGO_GEIGER_VERSION,
-            ),
-            1,
-        )
-
-        entry = report["packages"][0]
-        entry["unsafety"]["used"]["exprs"]["unsafe_"] = 1
-        with self.assertRaisesRegex(ValueError, "expected 0 used unsafe items"):
-            VALIDATOR.validate_report(
-                report,
-                self.cargo_id,
-                self.inventory,
-                approved,
-                VALIDATOR.SUPPORTED_CARGO_GEIGER_VERSION,
+        with self.assertRaisesRegex(ValueError, "lacks native CI coverage"):
+            VALIDATOR.load_approved_counts(
+                self.policy_path, self.inventory, "linux"
             )
 
     def test_safe_package_still_requires_an_unconditional_forbid_lint(self) -> None:

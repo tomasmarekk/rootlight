@@ -25,6 +25,7 @@ const UNSAFE_POLICY_PATH: &str = "policy/unsafe.toml";
 const WORKFLOW_ROOT: &str = ".github/workflows";
 const CURRENT_SCHEMA_VERSION: &str = "1.0";
 const UNSAFE_SCHEMA_VERSION: &str = "4.0";
+const NATIVE_UNSAFE_INVENTORY_PACKAGE: &str = "rootlight-sandbox";
 
 pub(crate) fn check() -> Result<(), PolicyError> {
     let metadata = MetadataCommand::new()
@@ -810,6 +811,16 @@ fn validate_unsafe_boundaries<'a>(
     let mut by_source = BTreeMap::new();
     let mut modules = BTreeSet::new();
     for boundary in &policy.boundaries {
+        if boundary.status == UnsafeBoundaryStatus::Enabled
+            && !unsafe_boundary_has_ci_coverage(&boundary.package, boundary.geiger_host_os)
+        {
+            return Err(PolicyError::InvalidUnsafeBoundary {
+                detail: format!(
+                    "host-specific boundary for {} lacks native CI coverage",
+                    boundary.package
+                ),
+            });
+        }
         validate_relative_policy_path(&boundary.source)?;
         validate_relative_policy_path(&boundary.manifest)?;
         if boundary.module.is_empty()
@@ -894,6 +905,15 @@ fn validate_unsafe_boundaries<'a>(
         }
     }
     Ok(by_source)
+}
+
+fn unsafe_boundary_has_ci_coverage(package: &str, host: UnsafeBoundaryGeigerHost) -> bool {
+    match host {
+        UnsafeBoundaryGeigerHost::All | UnsafeBoundaryGeigerHost::Linux => true,
+        UnsafeBoundaryGeigerHost::Macos | UnsafeBoundaryGeigerHost::Windows => {
+            package == NATIVE_UNSAFE_INVENTORY_PACKAGE
+        }
+    }
 }
 
 fn canonical_policy_file(
@@ -1946,8 +1966,7 @@ struct UnsafeBoundary {
     reason: String,
     expected_source_tokens: usize,
     expected_geiger_count: usize,
-    #[serde(rename = "geiger_host_os")]
-    _geiger_host_os: UnsafeBoundaryGeigerHost,
+    geiger_host_os: UnsafeBoundaryGeigerHost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -2168,6 +2187,28 @@ pub(crate) enum PolicyError {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn native_unsafe_boundaries_require_the_scanned_package() {
+        for host in [
+            UnsafeBoundaryGeigerHost::Macos,
+            UnsafeBoundaryGeigerHost::Windows,
+        ] {
+            assert!(unsafe_boundary_has_ci_coverage(
+                NATIVE_UNSAFE_INVENTORY_PACKAGE,
+                host
+            ));
+            assert!(!unsafe_boundary_has_ci_coverage("rootlight-vfs", host));
+        }
+        assert!(unsafe_boundary_has_ci_coverage(
+            "rootlight-vfs",
+            UnsafeBoundaryGeigerHost::All
+        ));
+        assert!(unsafe_boundary_has_ci_coverage(
+            "rootlight-vfs",
+            UnsafeBoundaryGeigerHost::Linux
+        ));
+    }
 
     fn lint_inventory(target: &str, reachable_non_target: &[&str]) -> Option<UnsafeLintInventory> {
         let target = unsafe_lint_declarations(target)?;
