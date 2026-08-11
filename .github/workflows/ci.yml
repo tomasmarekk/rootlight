@@ -1075,8 +1075,9 @@ jobs:
                   or item.get("exact_recall_basis_points", 0) < 9000
                   or item.get("candidate_recall_basis_points", 0) < 9000
                   or item.get("expected_calibration_error_milli", 1001) > 400
+                  or item.get("analysis_coverage_complete") is not False
+                  or item.get("analysis_coverage_truthful") is not True
                   or not all(item.get(field) is True for field in (
-                      "analysis_coverage_complete",
                       "build_context_identity_bound",
                       "provenance_complete",
                       "repeated_output_identical",
