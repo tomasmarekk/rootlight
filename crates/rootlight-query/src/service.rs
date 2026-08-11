@@ -5019,6 +5019,16 @@ fn test_candidate(entity: &rootlight_ir::EntityRecord, path: Option<&str>) -> Te
     let path = path.unwrap_or_default().to_ascii_lowercase();
     let name = entity.display_name.to_ascii_lowercase();
     let joined = format!("{path}/{name}");
+    let file_name = path.rsplit('/').next().unwrap_or_default();
+    let stem = file_name
+        .rsplit_once('.')
+        .map_or(file_name, |(stem, _extension)| stem);
+    let conventional_unit_test = name.starts_with("test_")
+        || stem.starts_with("test_")
+        || stem.ends_with("_test")
+        || stem.ends_with("_spec")
+        || stem.ends_with(".test")
+        || stem.ends_with(".spec");
     let kind = if joined.contains("e2e") || joined.contains("end_to_end") {
         TestsSelectKind::E2e
     } else if joined.contains("contract") || joined.contains("schema") {
@@ -5028,6 +5038,8 @@ fn test_candidate(entity: &rootlight_ir::EntityRecord, path: Option<&str>) -> Te
         || path.starts_with("tests/")
     {
         TestsSelectKind::Integration
+    } else if conventional_unit_test {
+        TestsSelectKind::Unit
     } else if joined.contains("lint") || joined.contains("clippy") || joined.contains("static") {
         TestsSelectKind::Static
     } else if joined.contains("build") || joined.contains("compile") {
@@ -11751,6 +11763,33 @@ mod tests {
             assert_eq!(selection.tests[0].test_id, symbol(symbol_byte));
             assert_eq!(selection.tests[0].kind, kind);
         }
+    }
+
+    #[test]
+    fn tests_select_keeps_conventional_unit_tests_with_build_subjects() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "kdtree.py");
+        add_file(&mut document, 2, "test_kdtree.py");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 21, 2, EntityKind::Test);
+        let test = document
+            .entities
+            .last_mut()
+            .expect("test entity was just pushed");
+        test.display_name = "test_build_kdtree_recursion".to_owned();
+        add_calls(&mut document, 110, 21, 11, 900);
+
+        let unit_plan = tests_select_plan(
+            BTreeSet::from([symbol(11)]),
+            vec![TestsSelectKind::Unit],
+            20,
+            false,
+        );
+        let selection = run_tests_select(&document, &unit_plan);
+
+        assert_eq!(selection.tests.len(), 1);
+        assert_eq!(selection.tests[0].test_id, symbol(21));
+        assert_eq!(selection.tests[0].kind, TestsSelectKind::Unit);
     }
 
     #[test]

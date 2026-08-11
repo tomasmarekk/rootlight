@@ -278,7 +278,7 @@ fn assert_semantic_truth_workflow(
             "repository": {"repository_id": index.repository_id},
             "generation": index.generation,
             "seeds": {"symbols": [definition_id]},
-            "test_kinds": ["unit"],
+            "test_kinds": ["unit", "integration"],
             "max_tests": 50,
             "include_commands": true,
             "profile": "evidence"
