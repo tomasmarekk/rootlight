@@ -8,12 +8,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rootlight_sandbox::{AdapterProcessCommand, AdapterSandboxLimits, spawn_isolated_adapter};
+use rootlight_sandbox::{
+    AdapterExecutableDigest, AdapterProcessCommand, AdapterSandboxLimits, spawn_isolated_adapter,
+};
 
 #[test]
 fn exact_native_process_reports_every_required_control() {
-    let command = AdapterProcessCommand::new(adapter_executable(), 1, 64, 4_096)
-        .expect("stream limits validate")
+    let command = authenticated_adapter_command()
         .arg("--isolation-witness")
         .expect("witness argument validates");
     let limits = AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_secs(5))
@@ -213,11 +214,19 @@ fn run_adversary_command_with_limits(
 }
 
 fn adversary_command(mode: &str) -> AdapterProcessCommand {
-    AdapterProcessCommand::new(adapter_executable(), 1, 64, 4_096)
-        .expect("stream limits validate")
+    authenticated_adapter_command()
         .arg("--isolation-adversary")
         .and_then(|command| command.arg(mode))
         .expect("adversary arguments validate")
+}
+
+fn authenticated_adapter_command() -> AdapterProcessCommand {
+    let executable = adapter_executable();
+    let bytes = std::fs::read(&executable).expect("test adapter executable reads");
+    let digest = AdapterExecutableDigest::from_bytes(*blake3::hash(&bytes).as_bytes());
+    AdapterProcessCommand::new(executable, 1, 64, 4_096)
+        .expect("stream limits validate")
+        .expected_executable_digest(digest)
 }
 
 fn sandbox_limits() -> AdapterSandboxLimits {

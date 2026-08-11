@@ -164,15 +164,26 @@ struct InstalledProjectAnalyzer {
     provider_identity: ContentHash,
 }
 
+fn installed_project_adapter_path(daemon_executable: &Path) -> Result<PathBuf, FirstSliceError> {
+    if !daemon_executable.is_absolute() {
+        return Err(FirstSliceError::Adapter);
+    }
+    let install_directory = daemon_executable.parent().ok_or(FirstSliceError::Adapter)?;
+    Ok(install_directory.join(format!(
+        "rootlight-adapter-host{}",
+        std::env::consts::EXE_SUFFIX
+    )))
+}
+
 impl InstalledProjectAnalyzer {
     fn discover(
         cancellation: &Cancellation,
     ) -> Result<Option<Arc<dyn FirstSliceProjectAnalyzer>>, FirstSliceError> {
-        let mut executable = std::env::current_exe().map_err(|_| FirstSliceError::Adapter)?;
-        executable.set_file_name(format!(
-            "rootlight-adapter-host{}",
-            std::env::consts::EXE_SUFFIX
-        ));
+        let daemon_executable = std::env::current_exe().map_err(|_| FirstSliceError::Adapter)?;
+        // The launcher selects the daemon from its installed version payload.
+        // The adapter is the exact first-party sibling, never a repository,
+        // current-directory, PATH, or request-selected executable.
+        let executable = installed_project_adapter_path(&daemon_executable)?;
         if !executable
             .try_exists()
             .map_err(|_| FirstSliceError::Adapter)?
@@ -10113,6 +10124,25 @@ mod tests {
     use tempfile::TempDir;
 
     static OBSERVED_STARTUP_SIGNAL: AtomicU8 = AtomicU8::new(0);
+
+    #[test]
+    fn installed_project_adapter_is_the_exact_daemon_sibling() {
+        let directory = TempDir::new().expect("fixture directory creates");
+        let daemon = directory
+            .path()
+            .join(format!("rootlight-daemon{}", std::env::consts::EXE_SUFFIX));
+
+        assert_eq!(
+            installed_project_adapter_path(&daemon).expect("daemon path has an install directory"),
+            directory.path().join(format!(
+                "rootlight-adapter-host{}",
+                std::env::consts::EXE_SUFFIX
+            ))
+        );
+        let relative_daemon =
+            PathBuf::from(format!("rootlight-daemon{}", std::env::consts::EXE_SUFFIX));
+        assert!(installed_project_adapter_path(&relative_daemon).is_err());
+    }
 
     fn record_startup_signal(signal: CoordinatedStartupSignal) -> io::Result<()> {
         OBSERVED_STARTUP_SIGNAL.store(signal.to_byte(), AtomicOrdering::SeqCst);

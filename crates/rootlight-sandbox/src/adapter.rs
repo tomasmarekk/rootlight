@@ -19,7 +19,11 @@ pub const MAX_ADAPTER_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
 
 const EXECUTABLE_COPY_BUFFER_BYTES: usize = 64 * 1024;
 
-/// Expected BLAKE3 identity of one negotiated adapter executable.
+/// Expected BLAKE3 identity of one host-authorized adapter executable.
+///
+/// This value binds staging to exact bytes but does not authorize those bytes.
+/// Callers must obtain it from a trusted negotiation or a fixed first-party
+/// companion boundary; hashing a caller-selected executable is insufficient.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdapterExecutableDigest([u8; blake3::OUT_LEN]);
 
@@ -625,7 +629,11 @@ impl AdapterProcessCommand {
         })
     }
 
-    /// Binds staging to the executable identity authenticated by negotiation.
+    /// Binds staging to an executable identity authorized by the host.
+    ///
+    /// The digest is an integrity check, not an authorization mechanism.
+    /// Callers must not derive it from an executable selected by untrusted
+    /// input.
     #[must_use]
     pub fn expected_executable_digest(mut self, digest: AdapterExecutableDigest) -> Self {
         self.expected_executable_digest = Some(digest);
@@ -896,17 +904,29 @@ bounded_reader!(AdapterStderr, platform::ChildStderr);
 /// The executable is copied into an operation-owned immutable runtime
 /// directory. The child receives no repository path or user environment, and
 /// Rootlight grants it no writable filesystem location. Source and results
-/// cross only bounded pipes.
+/// cross only bounded pipes. The command must carry an executable digest from
+/// a host-authorized negotiation or fixed first-party companion boundary.
+///
+/// On Unix, the child readiness record only coordinates stream framing. It is
+/// cooperative launcher output, not kernel-backed executable authentication;
+/// safety depends on matching the staged bytes to the separately authorized
+/// digest before any process is created.
 ///
 /// # Errors
 ///
-/// Returns [`ProcessError`] when policy preparation, staging, native process
-/// creation, verification, or containment fails. No adapter entry point runs
-/// before every platform requirement succeeds.
+/// Returns [`ProcessError`] when the authenticated executable digest is
+/// missing, or when policy preparation, staging, native process creation,
+/// verification, or containment fails. A missing digest is rejected before
+/// staging or process creation.
 pub fn spawn_isolated_adapter(
     command: AdapterProcessCommand,
     limits: AdapterSandboxLimits,
 ) -> Result<IsolatedAdapterProcess, ProcessError> {
+    if command.expected_executable_digest.is_none() {
+        return Err(ProcessError::InvalidInput(
+            "native adapter isolation requires a host-authorized executable digest".to_owned(),
+        ));
+    }
     let (inner, report) = platform::spawn_isolated_adapter(command, limits)?;
     if !report.permits_deep_adapter() {
         inner.fail_closed_cleanup()?;
@@ -920,8 +940,9 @@ pub fn spawn_isolated_adapter(
 /// Applies the Unix native profile and enters the adapter dispatch contract.
 ///
 /// This entry point is reserved for the operation-owned executable staged by
-/// [`spawn_isolated_adapter`]. It writes a private parent handshake only after
-/// all native controls are active.
+/// [`spawn_isolated_adapter`]. It writes a cooperative readiness record only
+/// after all native controls are active. The record is not an authentication
+/// proof; the parent authenticates staged bytes before creating this process.
 ///
 /// # Errors
 ///
@@ -1153,6 +1174,59 @@ mod tests {
     fn zero_limits_are_rejected() {
         assert!(AdapterSandboxLimits::new(0, Duration::from_secs(1)).is_err());
         assert!(AdapterSandboxLimits::new(1, Duration::ZERO).is_err());
+    }
+
+    #[test]
+    fn native_spawn_rejects_a_missing_executable_digest_before_platform_work() {
+        let command = AdapterProcessCommand::new("missing-adapter", 1, 1, 1)
+            .expect("nonzero stream quotas validate");
+        let limits = AdapterSandboxLimits::new(1, Duration::from_secs(1))
+            .expect("nonzero sandbox limits validate");
+
+        assert!(matches!(
+            spawn_isolated_adapter(command, limits),
+            Err(ProcessError::InvalidInput(message))
+                if message
+                    == "native adapter isolation requires a host-authorized executable digest"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unauthenticated_spoof_executable_never_starts() {
+        use std::{fs, os::unix::fs::PermissionsExt as _};
+
+        let directory = tempfile::tempdir().expect("fixture directory creates");
+        let executable = directory.path().join("spoof-adapter");
+        let sentinel = directory.path().join("started");
+        let script = format!(
+            "#!/bin/sh\nprintf started > '{}'\nprintf 'rootlight-native-isolated/1\\n'\nread _\n",
+            sentinel.display()
+        );
+        fs::write(&executable, script).expect("spoof executable writes");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+            .expect("spoof executable becomes executable");
+        let command = AdapterProcessCommand::new(executable, 1, 64, 64)
+            .expect("nonzero stream quotas validate");
+        let limits = AdapterSandboxLimits::new(64 * 1024 * 1024, Duration::from_secs(1))
+            .expect("nonzero sandbox limits validate");
+
+        match spawn_isolated_adapter(command, limits) {
+            Err(ProcessError::InvalidInput(message)) => assert_eq!(
+                message,
+                "native adapter isolation requires a host-authorized executable digest"
+            ),
+            Ok(process) => {
+                let _ = process.terminate();
+                let _ = process.wait_empty(Instant::now() + Duration::from_secs(2));
+                panic!("unauthenticated spoof executable was started");
+            }
+            Err(error) => panic!("missing digest returned the wrong error: {error}"),
+        }
+        assert!(
+            !sentinel.exists(),
+            "unauthenticated spoof executable reached its entry point"
+        );
     }
 
     #[test]

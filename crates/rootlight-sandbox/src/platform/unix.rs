@@ -37,7 +37,7 @@ use crate::{
 
 const LAUNCHER_ARGUMENT: &str = "--rootlight-native-isolation-launcher";
 const LAUNCHER_SEPARATOR: &str = "--";
-const HANDSHAKE: &[u8] = b"rootlight-native-isolated/1\n";
+const LAUNCHER_READY_RECORD: &[u8] = b"rootlight-native-isolated/1\n";
 #[cfg(target_os = "macos")]
 const MACOS_UNLINK_READY: &[u8] = b"rootlight-macos-unlink/1\n";
 #[cfg(target_os = "macos")]
@@ -46,7 +46,7 @@ const MACOS_UNLINK_ACK: &[u8] = b"\x06";
 const MACOS_FAILURE_PREFIX: &str = "rootlight-macos-launcher-failure/1:";
 #[cfg(target_os = "macos")]
 const MACOS_DIAGNOSTIC_LIMIT: u64 = 4096;
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const LAUNCHER_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const EXECUTABLE_BUSY_RETRY_LIMIT: usize = 8;
 const ADAPTER_DESCRIPTOR_LIMIT: u64 = 64;
@@ -374,7 +374,7 @@ pub(crate) fn spawn_isolated_adapter(
     #[cfg(target_os = "macos")]
     let mut stderr = stderr;
     #[cfg(target_os = "linux")]
-    let verification = verify_record(&mut stdout, &mut child, HANDSHAKE);
+    let verification = verify_record(&mut stdout, &mut child, LAUNCHER_READY_RECORD);
     #[cfg(target_os = "macos")]
     let verification = verify_macos_unlink_handshake(&workspace, &mut stdout, &mut child);
     if let Err(error) = verification {
@@ -476,7 +476,7 @@ fn verify_macos_unlink_handshake(
         .and_then(|()| stdin.write_all(&workspace.executable_digest().as_bytes()))
         .and_then(|()| stdin.flush())
         .map_err(|error| ProcessError::io("acknowledge staged adapter unlink", error))?;
-    verify_record(stdout, child, HANDSHAKE)
+    verify_record(stdout, child, LAUNCHER_READY_RECORD)
 }
 
 fn verify_record(
@@ -495,7 +495,7 @@ fn verify_record(
     )
     .map_err(|error| nix_error("set launcher handshake nonblocking", error))?;
 
-    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let deadline = Instant::now() + LAUNCHER_READY_TIMEOUT;
     let mut observed = vec![0_u8; expected.len()];
     let mut offset = 0;
     while offset < observed.len() {
@@ -709,7 +709,7 @@ fn enter_macos_sandbox_stage(
             ));
         }
     }
-    write_handshake()?;
+    write_launcher_ready_record()?;
     Ok(IsolatedAdapterEntry::new(
         arguments.collect(),
         AdapterExecutableDigest::from_bytes(executable_digest),
@@ -721,7 +721,7 @@ fn enter_verified_adapter(
     executable: &Path,
     adapter_arguments: Vec<OsString>,
 ) -> Result<std::convert::Infallible, ProcessError> {
-    write_handshake()?;
+    write_launcher_ready_record()?;
     let error = Command::new(executable)
         .args(adapter_arguments)
         .env_clear()
@@ -729,13 +729,14 @@ fn enter_verified_adapter(
     Err(ProcessError::io("enter isolated adapter executable", error))
 }
 
-fn write_handshake() -> Result<(), ProcessError> {
-    write_record(HANDSHAKE)
+fn write_launcher_ready_record() -> Result<(), ProcessError> {
+    write_record(LAUNCHER_READY_RECORD)
 }
 
 fn write_record(record: &[u8]) -> Result<(), ProcessError> {
-    // Keep the private verification record separate from sandbox-exec and
-    // adapter diagnostics, which both intentionally use standard error.
+    // The record only coordinates parent stream framing; executable
+    // authentication comes from the separately authorized staging digest.
+    // Keep it separate from diagnostics, which use standard error.
     io::stdout()
         .lock()
         .write_all(record)
@@ -1391,10 +1392,10 @@ mod tests {
     }
 
     #[test]
-    fn launcher_handshake_is_separate_from_diagnostics_and_adapter_output() {
+    fn launcher_ready_record_is_separate_from_diagnostics_and_adapter_output() {
         let script = format!(
             "printf wrapper-diagnostic >&2; printf '{}'; printf adapter-output",
-            String::from_utf8_lossy(HANDSHAKE)
+            String::from_utf8_lossy(LAUNCHER_READY_RECORD)
         );
         let mut child = Command::new("/bin/sh")
             .arg("-c")
@@ -1406,7 +1407,7 @@ mod tests {
         let mut stdout = child.stdout.take().expect("fixture stdout exists");
         let mut stderr = child.stderr.take().expect("fixture stderr exists");
 
-        verify_record(&mut stdout, &mut child, HANDSHAKE).expect("handshake verifies");
+        verify_record(&mut stdout, &mut child, LAUNCHER_READY_RECORD).expect("readiness verifies");
 
         let mut adapter_output = Vec::new();
         stdout

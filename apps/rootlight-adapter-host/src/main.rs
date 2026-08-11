@@ -17,6 +17,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+use rootlight_adapter_host::project_adapter_identity;
 use rootlight_adapter_host::{
     AdapterActivation, IsolationReport, encode_isolation_report, evaluate_adapter_activation,
     run_authenticated_project_session, run_project_session,
@@ -28,7 +30,8 @@ use rootlight_sandbox::ProcessError;
 use rootlight_sandbox::enter_isolated_adapter_launcher;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use rootlight_sandbox::{
-    AdapterProcessCommand, AdapterSandboxLimits, IsolatedAdapterProcess, spawn_isolated_adapter,
+    AdapterExecutableDigest, AdapterProcessCommand, AdapterSandboxLimits, IsolatedAdapterProcess,
+    spawn_isolated_adapter,
 };
 
 fn main() -> ExitCode {
@@ -308,8 +311,16 @@ fn hold_isolated_process() -> ExitCode {
 
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn exact_process_isolation_report() -> Result<IsolationReport, ()> {
-    let command = AdapterProcessCommand::new(std::env::current_exe().map_err(|_| ())?, 1, 64, 64)
+    let executable = std::env::current_exe().map_err(|_| ())?;
+    let identity = project_adapter_identity(&executable).map_err(|_| ())?;
+    let executable_digest = identity
+        .source_digest
+        .as_slice()
+        .try_into()
+        .map_err(|_| ())?;
+    let command = AdapterProcessCommand::new(executable, 1, 64, 64)
         .map_err(|_| ())?
+        .expected_executable_digest(AdapterExecutableDigest::from_bytes(executable_digest))
         .arg("--isolation-witness")
         .map_err(|_| ())?;
     let limits =

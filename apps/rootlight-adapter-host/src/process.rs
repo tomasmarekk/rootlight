@@ -77,7 +77,10 @@ impl IsolatedProjectAnalysis {
 /// The adapter executable is copied into an operation-owned immutable runtime
 /// directory by the sandbox. Repository paths are never passed through
 /// arguments or environment variables, and all source content is confined to
-/// the quota-limited standard-input packet.
+/// the quota-limited standard-input packet. The caller must supply the
+/// host-authorized first-party companion used to negotiate `session`; the
+/// session digest prevents replacement of those bytes but does not authorize
+/// an arbitrary caller-selected executable.
 ///
 /// # Errors
 ///

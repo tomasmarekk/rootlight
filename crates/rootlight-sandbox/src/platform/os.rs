@@ -2229,19 +2229,19 @@ mod tests {
 
     #[test]
     fn isolated_adapter_streams_fail_closed_at_their_byte_quotas() {
-        let command = AdapterProcessCommand::new(
-            env::current_exe().expect("test executable path resolves"),
-            1,
-            64,
-            64 * 1024,
-        )
-        .expect("adapter command validates")
-        .arg("--exact")
-        .expect("test selector is a literal")
-        .arg("platform::os::tests::isolated_adapter_output_quota_helper")
-        .expect("test name is a literal")
-        .arg("--nocapture")
-        .expect("test flag is a literal");
+        let executable = env::current_exe().expect("test executable path resolves");
+        let executable_bytes = fs::read(&executable).expect("test executable reads");
+        let executable_digest =
+            AdapterExecutableDigest::from_bytes(*blake3::hash(&executable_bytes).as_bytes());
+        let command = AdapterProcessCommand::new(executable, 1, 64, 64 * 1024)
+            .expect("adapter command validates")
+            .expected_executable_digest(executable_digest)
+            .arg("--exact")
+            .expect("test selector is a literal")
+            .arg("platform::os::tests::isolated_adapter_output_quota_helper")
+            .expect("test name is a literal")
+            .arg("--nocapture")
+            .expect("test flag is a literal");
         let limits = AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_secs(2))
             .expect("adapter limits validate");
         let mut adapter =
