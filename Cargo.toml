@@ -43,7 +43,10 @@ members = [
     "crates/rootlight-workspace",
     "xtask",
 ]
-exclude = ["tests/fixtures/architecture/forbidden-edge"]
+exclude = [
+    "tests/fixtures/architecture/forbidden-edge",
+    "third_party/lru-0.16.4",
+]
 resolver = "3"
 
 [workspace.package]
@@ -122,6 +125,9 @@ winx = { version = "=0.36.4", default-features = false }
 winapi-util = { version = "=0.1.11", default-features = false }
 yaml-rust2 = { version = "0.10.4", default-features = false }
 zip = { version = "=2.4.2", default-features = false }
+
+[patch.crates-io]
+lru = { path = "third_party/lru-0.16.4" }
 
 # Debug daemons hash large executables inside the bounded support-bundle request.
 [profile.dev.package.sha2]

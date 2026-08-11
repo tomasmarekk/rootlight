@@ -119,11 +119,13 @@ fn validate_dependency_surfaces(
     let workspace_ids: BTreeSet<_> = metadata.workspace_members.iter().collect();
     let allowed_registries = string_set(&policy.allowed_registries);
     let allowed_git = string_set(&policy.allowed_git_sources);
+    let expected_path_dependencies = string_set(&policy.allowed_path_dependencies);
     let expected_build_scripts = string_set(&policy.allowed_build_scripts);
     let expected_proc_macros = string_set(&policy.allowed_proc_macros);
     let expected_native_links = string_set(&policy.allowed_native_links);
 
     let mut observed_build_scripts = BTreeSet::new();
+    let mut observed_path_dependencies = BTreeSet::new();
     let mut observed_proc_macros = BTreeSet::new();
     let mut observed_native_links = BTreeSet::new();
 
@@ -151,10 +153,23 @@ fn validate_dependency_surfaces(
                 });
             }
         } else if !workspace_ids.contains(&package.id) {
-            return Err(PolicyError::UnapprovedPathDependency {
-                package: package_key(package),
-                manifest: package.manifest_path.clone().into_std_path_buf(),
-            });
+            let manifest = package.manifest_path.as_std_path();
+            let relative = manifest.strip_prefix(metadata.workspace_root.as_std_path());
+            let Ok(relative) = relative else {
+                return Err(PolicyError::UnapprovedPathDependency {
+                    package: package_key(package),
+                    manifest: manifest.to_path_buf(),
+                });
+            };
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let path_dependency = format!("{}:{relative}", package_key(package));
+            if !expected_path_dependencies.contains(path_dependency.as_str()) {
+                return Err(PolicyError::UnapprovedPathDependency {
+                    package: package_key(package),
+                    manifest: manifest.to_path_buf(),
+                });
+            }
+            observed_path_dependencies.insert(path_dependency);
         }
 
         let key = package_key(package);
@@ -181,6 +196,11 @@ fn validate_dependency_surfaces(
         "build scripts",
         &expected_build_scripts,
         &observed_build_scripts,
+    )?;
+    compare_inventory(
+        "path dependencies",
+        &expected_path_dependencies,
+        &observed_path_dependencies,
     )?;
     compare_inventory(
         "procedural macros",
@@ -2012,6 +2032,7 @@ struct SupplyChainPolicy {
     schema_version: String,
     allowed_registries: Vec<String>,
     allowed_git_sources: Vec<String>,
+    allowed_path_dependencies: Vec<String>,
     allowed_build_scripts: Vec<String>,
     allowed_proc_macros: Vec<String>,
     allowed_native_links: Vec<String>,

@@ -1,0 +1,4 @@
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0253"
+ignoreUntil = 2027-02-01
+reason = "Rootlight backports upstream lru-rs fix 2776ded569ee89a99c515bca8194f65639182c96 in third_party/lru-0.16.4 until Tantivy accepts lru 0.18.2."
