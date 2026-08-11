@@ -41,6 +41,11 @@ const LOGICAL_TREE_NODE_BYTES: usize = 64;
 const LOGICAL_SYNTAX_FACT_BYTES: usize = 64;
 const CANCELLATION_CHECK_INTERVAL: usize = 256;
 const CANCELLATION_BYTE_INTERVAL: usize = 64 * 1024;
+// The progress callback is the safe API's only parser-action checkpoint. These
+// multipliers allow normal grammar overhead while keeping native work
+// proportional to both caller-owned syntax budgets.
+const PARSE_PROGRESS_CHECKS_PER_SYNTAX_NODE: usize = 4;
+const PARSE_PROGRESS_CHECKS_PER_SYNTAX_DEPTH: usize = 1024;
 static NEXT_PROVIDER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Bounded first-party Tree-sitter parser provider.
@@ -254,9 +259,23 @@ impl TreeSitterProvider {
             .set_included_ranges(&included_ranges)
             .map_err(|_| provider_failure("included-ranges"))?;
 
+        let parse_work_limit = ParseWorkLimit::from_syntax_limits(
+            request.limits().max_syntax_nodes(),
+            request.limits().max_syntax_depth(),
+        );
         let mut callback_cancelled = false;
+        let mut callback_limited = false;
+        let mut progress_checks = 0usize;
         let mut progress = |_: &tree_sitter::ParseState| match cancellation.check() {
-            Ok(()) => ControlFlow::Continue(()),
+            Ok(()) => {
+                progress_checks = progress_checks.saturating_add(1);
+                if progress_checks >= parse_work_limit.max_progress_checks {
+                    callback_limited = true;
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            }
             Err(_) => {
                 callback_cancelled = true;
                 ControlFlow::Break(())
@@ -273,6 +292,10 @@ impl TreeSitterProvider {
             parser.reset();
             cancellation.check()?;
             return Err(provider_failure("parse-cancelled"));
+        }
+        if callback_limited {
+            parser.reset();
+            return Err(provider_failure(parse_work_limit.failure_code));
         }
         let tree = tree.ok_or_else(|| provider_failure("parse-aborted"))?;
         cancellation.check()?;
@@ -1911,6 +1934,30 @@ fn emit_fact_plan(
         return Err(provider_failure("query-batch-invariant"));
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ParseWorkLimit {
+    max_progress_checks: usize,
+    failure_code: &'static str,
+}
+
+impl ParseWorkLimit {
+    fn from_syntax_limits(max_nodes: usize, max_depth: usize) -> Self {
+        let node_checks = max_nodes.saturating_mul(PARSE_PROGRESS_CHECKS_PER_SYNTAX_NODE);
+        let depth_checks = max_depth.saturating_mul(PARSE_PROGRESS_CHECKS_PER_SYNTAX_DEPTH);
+        if node_checks <= depth_checks {
+            Self {
+                max_progress_checks: node_checks.max(1),
+                failure_code: "syntax-node-parse-work-limit",
+            }
+        } else {
+            Self {
+                max_progress_checks: depth_checks.max(1),
+                failure_code: "syntax-depth-parse-work-limit",
+            }
+        }
+    }
 }
 
 fn emit_extraction_limit_diagnostic(

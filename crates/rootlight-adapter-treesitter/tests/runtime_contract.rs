@@ -555,6 +555,63 @@ fn node_and_depth_limits_commit_explicit_partial_coverage() {
 }
 
 #[test]
+fn syntax_budgets_abort_parser_work_before_full_tree_materialization() {
+    let mut wide_source = b"fn wide() {\n".to_vec();
+    wide_source.extend(std::iter::repeat_n(b"let value = 1;\n".as_slice(), 20_000).flatten());
+    wide_source.extend_from_slice(b"}\n");
+    let wide_fixture = Fixture::new("wide.rs", &wide_source);
+    let node_limits = limits(wide_source.len(), 1, 64);
+    let node_provider = provider(wide_source.len(), 100_000, 64, 2 * 1024 * 1024);
+    let node_request = request(
+        &wide_fixture.snapshot,
+        &wide_fixture.source,
+        &node_limits,
+        "rust",
+        Vec::new(),
+    );
+
+    assert!(matches!(
+        execute_parse(
+            &node_provider,
+            &node_request,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(Duration::from_secs(30)),
+        ),
+        Err(AdapterError::ProviderFailed { code })
+            if code.as_str() == "syntax-node-parse-work-limit"
+    ));
+    assert_eq!(node_provider.stats().cache.entries, 0);
+
+    let mut deep_source = b"fn deep() {".to_vec();
+    deep_source.extend(std::iter::repeat_n(b'(', 20_000));
+    deep_source.push(b'1');
+    deep_source.extend(std::iter::repeat_n(b')', 20_000));
+    deep_source.extend_from_slice(b"}\n");
+    let deep_fixture = Fixture::new("deep-limit.rs", &deep_source);
+    let depth_limits = limits(deep_source.len(), 100_000, 1);
+    let depth_provider = provider(deep_source.len(), 100_000, 64, 2 * 1024 * 1024);
+    let depth_request = request(
+        &deep_fixture.snapshot,
+        &deep_fixture.source,
+        &depth_limits,
+        "rust",
+        Vec::new(),
+    );
+
+    assert!(matches!(
+        execute_parse(
+            &depth_provider,
+            &depth_request,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(Duration::from_secs(30)),
+        ),
+        Err(AdapterError::ProviderFailed { code })
+            if code.as_str() == "syntax-depth-parse-work-limit"
+    ));
+    assert_eq!(depth_provider.stats().cache.entries, 0);
+}
+
+#[test]
 fn cache_byte_eviction_invalidates_an_old_handle() {
     let mut first_bytes = b"// ".to_vec();
     first_bytes.extend(std::iter::repeat_n(b'a', 8_000));
