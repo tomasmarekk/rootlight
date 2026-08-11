@@ -56,6 +56,9 @@ const PLAN_COST_PER_STEP: u64 = 50;
 /// Estimated cost units per planned target for `plan.change`.
 const PLAN_COST_PER_TARGET: u64 = 15;
 
+/// Execution step ceiling used when `plan.change` omits `max_steps`.
+const DEFAULT_PLAN_CHANGE_MAX_STEPS: u8 = 6;
+
 /// Fixed estimated cost units for the metadata-only `repo.status` plan.
 const STATUS_READ_COST: u64 = 4;
 
@@ -362,7 +365,7 @@ pub fn history_compare_plan(max_results: Option<u16>) -> PlanExplanation {
 /// the cost estimate.
 #[must_use]
 pub fn plan_change_plan(max_steps: Option<u8>, target_count: usize) -> PlanExplanation {
-    let steps = u64::from(max_steps.unwrap_or(10));
+    let steps = u64::from(max_steps.unwrap_or(DEFAULT_PLAN_CHANGE_MAX_STEPS));
     let targets = u64::try_from(target_count).unwrap_or(u64::MAX);
     let cost = steps
         .saturating_mul(PLAN_COST_PER_STEP)
@@ -818,6 +821,13 @@ mod tests {
             plan.applied_limits,
             vec!["max_steps: 5".to_owned(), "targets: 2".to_owned()]
         );
+
+        let defaulted = plan_change_plan(None, 2);
+        assert_eq!(
+            defaulted.applied_limits,
+            vec!["max_steps: 6".to_owned(), "targets: 2".to_owned()]
+        );
+        assert_eq!(defaulted.estimated_cost, 330);
     }
 
     #[test]
