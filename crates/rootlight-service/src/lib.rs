@@ -10177,6 +10177,7 @@ fn merge_project_document(
             retain_project_capacity_summary(&mut document)?;
             facts_truncated = true;
             preflight_normalized_document_append(merged, &document, limits)?;
+            validate_project_capacity_summary(&document, limits)?;
         }
         Err(error) => return Err(error),
     }
@@ -10187,6 +10188,7 @@ fn merge_project_document(
         retain_project_capacity_summary(&mut document)?;
         facts_truncated = true;
         preflight_normalized_document_append(merged, &document, limits)?;
+        validate_project_capacity_summary(&document, limits)?;
         reserve_project_merge(merged, &document)?;
     }
     external_symbols.extend(
@@ -10803,6 +10805,7 @@ fn append_project_document_with_capacity(
         Err(FirstSliceError::ResourceLimit { .. }) => {
             retain_project_capacity_summary(&mut source)?;
             preflight_normalized_document_append(target, &source, limits)?;
+            validate_project_capacity_summary(&source, limits)?;
         }
         Err(error) => return Err(error),
     }
@@ -10982,6 +10985,16 @@ fn retain_project_capacity_summary(
         coverage.id = derive_coverage_record_id(coverage).map_err(|_| FirstSliceError::Identity)?;
     }
     Ok(())
+}
+
+fn validate_project_capacity_summary(
+    document: &NormalizedIrDocument,
+    limits: &IrLimits,
+) -> Result<(), FirstSliceError> {
+    // Callers preflight first so aggregate collection exhaustion keeps its
+    // typed capacity error; a broken retained reference instead triggers fallback.
+    rootlight_ir::validate_ir_document(document, limits, &ExtensionSupport::default())
+        .map_err(|_| FirstSliceError::Identity)
 }
 
 fn truncate_skipped_regions(
@@ -12728,10 +12741,33 @@ mod tests {
             flags: Vec::new(),
             provenance,
             evidence: FactEvidence {
-                source: Some(source),
+                source: Some(source.clone()),
                 derivation: Vec::new(),
             },
         });
+        let mut invalid_summary_document = capacity_document.clone();
+        let entity = invalid_summary_document.entities[0].id;
+        let mut entity_coverage = invalid_summary_document.coverage_records[0].clone();
+        entity_coverage.scope = CoverageScope::Entity(entity);
+        entity_coverage.evidence.source = Some(source);
+        entity_coverage.id = derive_coverage_record_id(&entity_coverage)
+            .expect("entity-scoped coverage identity derives");
+        invalid_summary_document
+            .coverage_records
+            .push(entity_coverage);
+        let mut dependent_provenance = invalid_summary_document.provenance[0].clone();
+        dependent_provenance.derivation_parents = vec![FactRef::Entity(entity)];
+        dependent_provenance.id = derive_provenance_record_id(&dependent_provenance)
+            .expect("entity-derived provenance identity derives");
+        invalid_summary_document
+            .provenance
+            .push(dependent_provenance);
+        rootlight_ir::validate_ir_document(
+            &invalid_summary_document,
+            &limits,
+            &ExtensionSupport::default(),
+        )
+        .expect("entity-scoped project output is valid before capacity summarization");
         let mut capacity_limits = limits;
         capacity_limits.max_entities = 0;
         let partition_document = capacity_document.clone();
@@ -12773,6 +12809,37 @@ mod tests {
             &ExtensionSupport::default(),
         )
         .expect("the bounded streaming partition remains valid normalized IR");
+
+        let mut rejected_target = NormalizedIrDocument::empty(repository, generation);
+        let expected_target = rejected_target.clone();
+        let mut rejected_state = DocumentAppendState::from_document(&rejected_target)
+            .expect("rejected append state initializes");
+        assert_eq!(
+            append_project_document_with_capacity(
+                &mut rejected_target,
+                invalid_summary_document.clone(),
+                &capacity_limits,
+                &mut rejected_state,
+            ),
+            Err(FirstSliceError::Identity)
+        );
+        assert_eq!(rejected_target, expected_target);
+
+        let mut rejected_partition = NormalizedIrDocument::empty(repository, generation);
+        assert_eq!(
+            merge_project_document(
+                &mut rejected_partition,
+                invalid_summary_document,
+                &mut BTreeSet::new(),
+                capacity_limits.max_diagnostics,
+                &capacity_limits,
+            ),
+            Err(FirstSliceError::Identity)
+        );
+        assert_eq!(
+            rejected_partition,
+            NormalizedIrDocument::empty(repository, generation)
+        );
     }
 
     #[test]
