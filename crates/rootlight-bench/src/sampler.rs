@@ -11,10 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
     process::Command,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel},
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -149,7 +146,7 @@ impl LinuxProcTreeSampler {
 /// Active bounded Linux `/proc` sampling interval.
 #[cfg(target_os = "linux")]
 pub struct LinuxProcTreeSample {
-    stop: Arc<AtomicBool>,
+    stop: SyncSender<()>,
     worker: Option<JoinHandle<ProcSamplingResult>>,
     clock_ticks_per_second: u64,
 }
@@ -169,8 +166,7 @@ impl ProcessTreeSampler for LinuxProcTreeSampler {
     type Sample = LinuxProcTreeSample;
 
     fn begin(&self) -> Self::Sample {
-        let stop = Arc::new(AtomicBool::new(false));
-        let worker_stop = Arc::clone(&stop);
+        let (stop, worker_stop) = sync_channel(1);
         let root_pid = self.root_pid;
         let polling_interval = self.polling_interval;
         let page_size_bytes = self.page_size_bytes;
@@ -191,7 +187,7 @@ impl ProcessTreeSampler for LinuxProcTreeSampler {
 #[cfg(target_os = "linux")]
 impl ProcessTreeSample for LinuxProcTreeSample {
     fn finish(mut self) -> ProcessTreeMeasurement {
-        self.stop.store(true, Ordering::Release);
+        self.request_stop();
         let Some(worker) = self.worker.take() else {
             return unavailable_proc_measurement("process_tree_sampler_thread_unavailable");
         };
@@ -208,6 +204,23 @@ impl ProcessTreeSample for LinuxProcTreeSample {
         ProcessTreeMeasurement {
             cpu_ns: EvidenceValue::observed(cpu_ns),
             peak_rss_bytes: EvidenceValue::observed(result.peak_rss_bytes),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxProcTreeSample {
+    fn request_stop(&self) {
+        let _ = self.stop.try_send(());
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for LinuxProcTreeSample {
+    fn drop(&mut self) {
+        self.request_stop();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
     }
 }
@@ -232,7 +245,7 @@ fn sample_proc_tree(
     root_pid: u32,
     polling_interval: Duration,
     page_size_bytes: u64,
-    stop: &AtomicBool,
+    stop: &Receiver<()>,
 ) -> ProcSamplingResult {
     let mut result = ProcSamplingResult::default();
     loop {
@@ -241,10 +254,10 @@ fn sample_proc_tree(
             result.maximum_cpu_ticks = result.maximum_cpu_ticks.max(observation.cpu_ticks);
             result.peak_rss_bytes = result.peak_rss_bytes.max(observation.rss_bytes);
         }
-        if stop.load(Ordering::Acquire) {
-            break;
+        match stop.recv_timeout(polling_interval) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {}
         }
-        thread::sleep(polling_interval);
     }
     result
 }
@@ -402,5 +415,45 @@ mod tests {
             measurement.peak_rss_bytes,
             EvidenceValue::Observed { value } if value > 0
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_sampler_finish_interrupts_a_long_poll_wait() {
+        let sampler = LinuxProcTreeSampler::new(std::process::id(), Duration::from_secs(2))
+            .expect("Linux proc units are available");
+        let sample = sampler.begin();
+        let started = std::time::Instant::now();
+
+        let _ = sample.finish();
+
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropping_a_linux_sample_stops_and_joins_its_worker() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let (stop, worker_stop) = sync_channel(1);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker_stopped = Arc::clone(&stopped);
+        let worker = thread::spawn(move || {
+            let _ = worker_stop.recv_timeout(Duration::from_secs(30));
+            worker_stopped.store(true, Ordering::Release);
+            ProcSamplingResult::default()
+        });
+        let sample = LinuxProcTreeSample {
+            stop,
+            worker: Some(worker),
+            clock_ticks_per_second: 100,
+        };
+
+        drop(sample);
+
+        assert!(stopped.load(Ordering::Acquire));
     }
 }
