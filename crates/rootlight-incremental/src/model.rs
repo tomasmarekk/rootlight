@@ -21,6 +21,8 @@ pub(crate) const MAX_PASS_ID_BYTES: usize = 64;
 pub(crate) const HARD_MAX_INPUTS: usize = 8_000_000;
 /// Hard ceiling for reusable artifacts in one parent generation.
 pub(crate) const HARD_MAX_ARTIFACTS: usize = 2_000_000;
+/// Hard ceiling for fact nodes produced by one reusable artifact.
+pub(crate) const HARD_MAX_ARTIFACT_OUTPUTS: usize = 8_000_000;
 /// Hard ceiling for declared passes.
 pub(crate) const HARD_MAX_PASSES: usize = 16_384;
 /// Hard ceiling for scoped dependency nodes.
@@ -433,6 +435,7 @@ impl Default for GraphLimits {
 pub struct PlanningLimits {
     pub(crate) max_inputs: usize,
     pub(crate) max_artifacts: usize,
+    pub(crate) max_artifact_outputs: usize,
     pub(crate) max_closure_work: usize,
     pub(crate) max_trace_entries: usize,
 }
@@ -447,11 +450,17 @@ impl PlanningLimits {
     pub fn new(
         max_inputs: usize,
         max_artifacts: usize,
+        max_artifact_outputs: usize,
         max_closure_work: usize,
         max_trace_entries: usize,
     ) -> Result<Self, IncrementalError> {
         validate_limit(ResourceKind::Inputs, max_inputs, HARD_MAX_INPUTS)?;
         validate_limit(ResourceKind::Artifacts, max_artifacts, HARD_MAX_ARTIFACTS)?;
+        validate_limit(
+            ResourceKind::ArtifactOutputs,
+            max_artifact_outputs,
+            HARD_MAX_ARTIFACT_OUTPUTS,
+        )?;
         validate_limit(
             ResourceKind::ClosureWork,
             max_closure_work,
@@ -465,6 +474,7 @@ impl PlanningLimits {
         Ok(Self {
             max_inputs,
             max_artifacts,
+            max_artifact_outputs,
             max_closure_work,
             max_trace_entries,
         })
@@ -476,6 +486,7 @@ impl Default for PlanningLimits {
         Self {
             max_inputs: 1_000_000,
             max_artifacts: 100_000,
+            max_artifact_outputs: 1_000_000,
             max_closure_work: 4_000_000,
             max_trace_entries: 2_000_000,
         }
@@ -713,6 +724,11 @@ impl ArtifactSummary {
             if !canonical_outputs.insert(node) {
                 return Err(IncrementalError::DuplicateArtifactOutput { artifact: id, node });
             }
+            check_count(
+                ResourceKind::ArtifactOutputs,
+                canonical_outputs.len(),
+                limits.max_artifact_outputs,
+            )?;
         }
         if canonical_outputs.is_empty() {
             return Err(IncrementalError::EmptyArtifactPart {

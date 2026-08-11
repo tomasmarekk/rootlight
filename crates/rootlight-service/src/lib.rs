@@ -8511,6 +8511,7 @@ fn incremental_planning_limits(
     PlanningLimits::new(
         input_count.max(1),
         artifact_count.max(1),
+        node_count.max(1),
         edge_count.max(1),
         max_trace_entries.max(1),
     )

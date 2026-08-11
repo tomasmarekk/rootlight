@@ -17,6 +17,8 @@ pub enum ResourceKind {
     Inputs,
     /// Reusable generation artifacts.
     Artifacts,
+    /// Fact nodes produced by one reusable artifact.
+    ArtifactOutputs,
     /// Declared analysis passes.
     Passes,
     /// Scoped fact nodes in the dependency graph.
@@ -37,6 +39,7 @@ impl std::fmt::Display for ResourceKind {
             Self::Files => "files",
             Self::Inputs => "inputs",
             Self::Artifacts => "artifacts",
+            Self::ArtifactOutputs => "artifact outputs",
             Self::Passes => "passes",
             Self::DependencyNodes => "dependency nodes",
             Self::DependencyEdges => "dependency edges",

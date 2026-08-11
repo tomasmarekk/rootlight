@@ -18,8 +18,8 @@ use rootlight_incremental::{
     FileChangeKind, FileDescriptor, FileMetadata, GenerationSummary, GraphLimits,
     HashDecisionReason, IncrementalError, InputFingerprint, InputKey, InputKind, InputSnapshot,
     LogicalComponent, LogicalDomain, MetadataBaseline, PassDeclaration, PassId, PassObservation,
-    PlanningLimits, PlatformFileIdentity, ReconcileLimits, ReconcileMode, ScannedFile, TraceAction,
-    plan_invalidation, plan_reconcile,
+    PlanningLimits, PlatformFileIdentity, ReconcileLimits, ReconcileMode, ResourceKind,
+    ScannedFile, TraceAction, plan_invalidation, plan_reconcile,
 };
 
 fn cancellation() -> Cancellation {
@@ -43,7 +43,7 @@ fn unit(seed: u8) -> AnalysisUnitId {
 }
 
 fn planning_limits() -> PlanningLimits {
-    PlanningLimits::new(64, 32, 256, 256).expect("fixture limits are valid")
+    PlanningLimits::new(64, 32, 64, 256, 256).expect("fixture limits are valid")
 }
 
 fn graph_limits(nodes: usize, edges: usize) -> GraphLimits {
@@ -113,6 +113,45 @@ fn hidden_pass_dependency_fails_validation() {
         Err(IncrementalError::UndeclaredInputKind {
             kind: InputKind::PublicSurface,
             ..
+        })
+    ));
+}
+
+#[test]
+fn observed_nodes_and_artifact_outputs_enforce_their_limits() {
+    let first = FactNode::new(unit(1), FactDomain::Body);
+    assert!(matches!(
+        DependencyGraph::new(
+            [first, first],
+            [],
+            &body_registry(),
+            graph_limits(1, 1),
+            &cancellation(),
+        ),
+        Err(IncrementalError::ResourceLimit {
+            resource: ResourceKind::DependencyNodes,
+            observed: 2,
+            limit: 1,
+        })
+    ));
+
+    let second = FactNode::new(unit(2), FactDomain::Body);
+    let limits = PlanningLimits::new(1, 1, 1, 1, 1).expect("single-item limits are valid");
+    assert!(matches!(
+        ArtifactSummary::new(
+            ArtifactId::new(fact(9)),
+            [first, second],
+            [InputFingerprint::new(
+                InputKey::BodySummary(unit(1)),
+                hash(1),
+            )],
+            limits,
+            &cancellation(),
+        ),
+        Err(IncrementalError::ResourceLimit {
+            resource: ResourceKind::ArtifactOutputs,
+            observed: 2,
+            limit: 1,
         })
     ));
 }
@@ -515,7 +554,7 @@ fn exhausted_closure_budget_selects_repository_rebuild() {
         Vec::new(),
     );
     let current = input_snapshot([InputFingerprint::new(key, hash(2))]);
-    let tight_limits = PlanningLimits::new(64, 32, 1, 256).expect("fixture limits are valid");
+    let tight_limits = PlanningLimits::new(64, 32, 64, 1, 256).expect("fixture limits are valid");
 
     let plan = plan_invalidation(&parent, &current, &graph, tight_limits, &cancellation())
         .expect("closure exhaustion chooses a safe fallback");

@@ -286,14 +286,16 @@ impl DependencyGraph {
         cancellation: &Cancellation,
     ) -> Result<Self, IncrementalError> {
         let mut canonical_nodes = BTreeSet::new();
+        let mut observed_nodes = 0_usize;
         for node in nodes {
             cancellation.check()?;
-            canonical_nodes.insert(node);
+            observed_nodes = observed_nodes.saturating_add(1);
             check_count(
                 ResourceKind::DependencyNodes,
-                canonical_nodes.len(),
+                observed_nodes,
                 limits.max_nodes,
             )?;
+            canonical_nodes.insert(node);
         }
 
         let mut canonical_edges = BTreeSet::new();

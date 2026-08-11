@@ -478,7 +478,7 @@ fn restore_input_snapshot(
     inputs: Vec<DurableInputFingerprint>,
     cancellation: &Cancellation,
 ) -> Result<InputSnapshot, FirstSliceError> {
-    let limits = PlanningLimits::new(inputs.len().max(1), 1, 1, 1)
+    let limits = PlanningLimits::new(inputs.len().max(1), 1, 1, 1, 1)
         .map_err(|error| map_incremental_error(error, cancellation))?;
     InputSnapshot::new(
         inputs

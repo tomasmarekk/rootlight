@@ -666,7 +666,7 @@ fn planning_limits(limits: DiscoveryLimits) -> Result<PlanningLimits, DiscoveryE
         .checked_mul(2)
         .and_then(|value| value.checked_add(2))
         .ok_or(DiscoveryError::InvalidLimits)?;
-    PlanningLimits::new(max_inputs, 1, 1, max_inputs).map_err(map_incremental_error)
+    PlanningLimits::new(max_inputs, 1, 1, 1, max_inputs).map_err(map_incremental_error)
 }
 
 fn map_incremental_error(error: IncrementalError) -> DiscoveryError {
