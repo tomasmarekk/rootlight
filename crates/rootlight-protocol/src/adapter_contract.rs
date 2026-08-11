@@ -51,6 +51,8 @@ const MAX_MEMORY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: u64 = MAX_ADAPTER_PROJECT_OUTPUT_BYTES as u64;
 const MAX_FILES: u32 = 65_536;
+const MAX_PROJECT_INPUT_MESSAGES: usize = 65_536;
+const MAX_PROJECT_GENERATED_ORIGINS: usize = 65_536;
 const MAX_PROCESSES: u32 = 256;
 const MAX_HANDLES: u32 = 65_536;
 const MAX_RETRIES: u32 = 8;
@@ -640,11 +642,126 @@ pub fn decode_adapter_frame(encoded: &[u8]) -> Result<AdapterFrame, AdapterContr
     if encoded.is_empty() || encoded.len() > MAX_ADAPTER_FRAME_BYTES {
         return Err(AdapterContractError::FrameSize);
     }
+    preflight_project_request_repetition(encoded)?;
     let frame = AdapterFrame::decode(encoded).map_err(|_| AdapterContractError::MalformedFrame)?;
     if frame.message.is_none() {
         return Err(AdapterContractError::MissingField);
     }
     Ok(frame)
+}
+
+fn preflight_project_request_repetition(encoded: &[u8]) -> Result<(), AdapterContractError> {
+    let mut encoded = encoded;
+    let mut inputs = 0_usize;
+    let mut origins = 0_usize;
+    while !encoded.is_empty() {
+        let (field, payload) = next_protobuf_field(&mut encoded)?;
+        if field == 7
+            && let Some(request) = payload
+        {
+            preflight_project_request(request, &mut inputs, &mut origins)?;
+        }
+    }
+    Ok(())
+}
+
+fn preflight_project_request(
+    request: &[u8],
+    inputs: &mut usize,
+    origins: &mut usize,
+) -> Result<(), AdapterContractError> {
+    let mut request = request;
+    while !request.is_empty() {
+        let (field, payload) = next_protobuf_field(&mut request)?;
+        if field == 9
+            && let Some(input) = payload
+        {
+            *inputs = inputs
+                .checked_add(1)
+                .ok_or(AdapterContractError::QuotaMismatch)?;
+            if *inputs > MAX_PROJECT_INPUT_MESSAGES {
+                return Err(AdapterContractError::QuotaMismatch);
+            }
+            preflight_project_input(input, origins)?;
+        }
+    }
+    Ok(())
+}
+
+fn preflight_project_input(input: &[u8], origins: &mut usize) -> Result<(), AdapterContractError> {
+    let mut input = input;
+    while !input.is_empty() {
+        let (field, payload) = next_protobuf_field(&mut input)?;
+        if field == 7 && payload.is_some() {
+            *origins = origins
+                .checked_add(1)
+                .ok_or(AdapterContractError::QuotaMismatch)?;
+            if *origins > MAX_PROJECT_GENERATED_ORIGINS {
+                return Err(AdapterContractError::QuotaMismatch);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn next_protobuf_field<'a>(
+    encoded: &mut &'a [u8],
+) -> Result<(u32, Option<&'a [u8]>), AdapterContractError> {
+    let key = take_protobuf_varint(encoded)?;
+    let field = u32::try_from(key >> 3).map_err(|_| AdapterContractError::MalformedFrame)?;
+    if field == 0 {
+        return Err(AdapterContractError::MalformedFrame);
+    }
+    let payload = match key & 0x07 {
+        0 => {
+            take_protobuf_varint(encoded)?;
+            None
+        }
+        1 => {
+            take_protobuf_bytes(encoded, 8)?;
+            None
+        }
+        2 => {
+            let length = usize::try_from(take_protobuf_varint(encoded)?)
+                .map_err(|_| AdapterContractError::MalformedFrame)?;
+            Some(take_protobuf_bytes(encoded, length)?)
+        }
+        5 => {
+            take_protobuf_bytes(encoded, 4)?;
+            None
+        }
+        _ => return Err(AdapterContractError::MalformedFrame),
+    };
+    Ok((field, payload))
+}
+
+fn take_protobuf_varint(encoded: &mut &[u8]) -> Result<u64, AdapterContractError> {
+    let mut value = 0_u64;
+    for shift in (0..70).step_by(7) {
+        let (&byte, remaining) = encoded
+            .split_first()
+            .ok_or(AdapterContractError::MalformedFrame)?;
+        *encoded = remaining;
+        if shift == 63 && byte > 1 {
+            return Err(AdapterContractError::MalformedFrame);
+        }
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(AdapterContractError::MalformedFrame)
+}
+
+fn take_protobuf_bytes<'a>(
+    encoded: &mut &'a [u8],
+    length: usize,
+) -> Result<&'a [u8], AdapterContractError> {
+    let (value, remaining) = encoded
+        .split_at_checked(length)
+        .ok_or(AdapterContractError::MalformedFrame)?;
+    *encoded = remaining;
+    Ok(value)
 }
 
 /// Encodes one adapter frame after verifying that it has one message and fits
@@ -1120,6 +1237,24 @@ mod tests {
         common::v1::{ContentHash, FileId, GenerationId, RepositoryId},
     };
 
+    fn append_varint(mut value: u64, encoded: &mut Vec<u8>) {
+        while value >= 0x80 {
+            let byte = u8::try_from(value & 0x7f).expect("low seven bits fit u8");
+            encoded.push(byte | 0x80);
+            value >>= 7;
+        }
+        encoded.push(u8::try_from(value).expect("final varint byte fits u8"));
+    }
+
+    fn append_length_delimited_field(field: u32, payload: &[u8], encoded: &mut Vec<u8>) {
+        append_varint(u64::from(field) << 3 | 2, encoded);
+        append_varint(
+            u64::try_from(payload.len()).expect("fixture payload length fits u64"),
+            encoded,
+        );
+        encoded.extend_from_slice(payload);
+    }
+
     #[test]
     fn negotiation_binds_identity_capabilities_extensions_quotas_and_cancellation() {
         let validated =
@@ -1452,6 +1587,35 @@ mod tests {
         assert_eq!(
             encode_adapter_frame(&oversized_frame),
             Err(AdapterContractError::FrameSize)
+        );
+    }
+
+    #[test]
+    fn frame_decoder_bounds_project_repetition_before_prost_decode() {
+        let mut repeated_inputs = Vec::new();
+        for _ in 0..=MAX_PROJECT_INPUT_MESSAGES {
+            append_length_delimited_field(9, &[], &mut repeated_inputs);
+        }
+        let mut input_frame = Vec::new();
+        append_length_delimited_field(7, &repeated_inputs, &mut input_frame);
+        assert!(input_frame.len() < MAX_ADAPTER_FRAME_BYTES);
+        assert_eq!(
+            decode_adapter_frame(&input_frame),
+            Err(AdapterContractError::QuotaMismatch)
+        );
+
+        let mut repeated_origins = Vec::new();
+        for _ in 0..=MAX_PROJECT_GENERATED_ORIGINS {
+            append_length_delimited_field(7, &[], &mut repeated_origins);
+        }
+        let mut project_request = Vec::new();
+        append_length_delimited_field(9, &repeated_origins, &mut project_request);
+        let mut origin_frame = Vec::new();
+        append_length_delimited_field(7, &project_request, &mut origin_frame);
+        assert!(origin_frame.len() < MAX_ADAPTER_FRAME_BYTES);
+        assert_eq!(
+            decode_adapter_frame(&origin_frame),
+            Err(AdapterContractError::QuotaMismatch)
         );
     }
 
