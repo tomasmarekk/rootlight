@@ -1800,6 +1800,7 @@ mod tests {
     #[test]
     fn trusted_windows_system_executable_resolves_required_host_tools() {
         for relative_path in [
+            Path::new("explorer.exe"),
             Path::new(r"System32\schtasks.exe"),
             Path::new(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
         ] {

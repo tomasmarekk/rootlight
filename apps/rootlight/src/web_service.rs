@@ -29,6 +29,12 @@ type DetachedChild = DetachedProcess;
 const ORIGIN: &str = "http://127.0.0.1:43127";
 const SERVICE_BOOTSTRAP_SCHEMA: &str = "rootlight.web-service-bootstrap/1";
 const ENCODED_BOOTSTRAP_BYTES: usize = 43;
+#[cfg(windows)]
+const WINDOWS_BROWSER_LAUNCHER_RELATIVE_PATH: &str = "explorer.exe";
+#[cfg(target_os = "macos")]
+const UNIX_BROWSER_LAUNCHER_PATH: &str = "/usr/bin/open";
+#[cfg(all(unix, not(target_os = "macos")))]
+const UNIX_BROWSER_LAUNCHER_PATH: &str = "/usr/bin/xdg-open";
 const MAX_HTTP_RESPONSE_BYTES: u64 = 16 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -232,18 +238,27 @@ pub(crate) fn browser_entry(paths: &RuntimePaths) -> Result<String, WebServiceEr
 }
 
 pub(crate) fn open_browser(url: &str) -> Result<(), WebServiceError> {
-    #[cfg(target_os = "windows")]
-    const LAUNCHER: &str = "explorer.exe";
-    #[cfg(target_os = "macos")]
-    const LAUNCHER: &str = "open";
-    #[cfg(all(unix, not(target_os = "macos")))]
-    const LAUNCHER: &str = "xdg-open";
-
-    Command::new(LAUNCHER)
-        .arg(url)
-        .spawn()
+    browser_command(url)
+        .and_then(|mut command| command.spawn())
         .map(|_| ())
         .map_err(WebServiceError::Browser)
+}
+
+fn browser_command(url: &str) -> io::Result<Command> {
+    let mut command = Command::new(browser_launcher()?);
+    command.arg(url);
+    Ok(command)
+}
+
+#[cfg(windows)]
+fn browser_launcher() -> io::Result<PathBuf> {
+    trusted_windows_system_executable(Path::new(WINDOWS_BROWSER_LAUNCHER_RELATIVE_PATH))
+        .map_err(io::Error::other)
+}
+
+#[cfg(unix)]
+fn browser_launcher() -> io::Result<PathBuf> {
+    Ok(PathBuf::from(UNIX_BROWSER_LAUNCHER_PATH))
 }
 
 fn browser_entry_from_response(response: HttpResponse) -> Result<String, WebServiceError> {
@@ -998,6 +1013,27 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn browser_command_uses_an_absolute_launcher_and_exact_url_argument() {
+        let url = "http://127.0.0.1:43127/#bootstrap=browser-test";
+        let command = browser_command(url).expect("trusted browser launcher resolves");
+
+        let program = Path::new(command.get_program());
+        assert!(program.is_absolute());
+        #[cfg(windows)]
+        assert_eq!(
+            program.file_name(),
+            Some(std::ffi::OsStr::new("explorer.exe"))
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(program, Path::new("/usr/bin/open"));
+        #[cfg(all(unix, not(target_os = "macos")))]
+        assert_eq!(program, Path::new("/usr/bin/xdg-open"));
+        let mut arguments = command.get_args();
+        assert_eq!(arguments.next(), Some(std::ffi::OsStr::new(url)));
+        assert_eq!(arguments.next(), None);
     }
 
     #[test]
