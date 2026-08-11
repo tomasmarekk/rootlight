@@ -2152,19 +2152,10 @@ where
         budget: QueryBudget,
     ) -> Result<AdvancedQueryPlan, QueryError> {
         budget.validate()?;
-        if !advanced_traversal_depths_valid(&ast) {
-            return Err(QueryError::PlanRejected {
-                resource: QueryResource::Depth,
-            });
-        }
         let (operators, depth) = ast.derive_plan_shape();
+        validate_advanced_depths(&ast, depth, max_depth)?;
         let estimated_cost =
             AdvancedQueryPlan::validate(&operators, max_results, max_traversal, depth)?;
-        if depth > max_depth {
-            return Err(QueryError::PlanRejected {
-                resource: QueryResource::Results,
-            });
-        }
         if !AdvancedQueryPlan::admits_cost(estimated_cost, cost_limit) {
             return Err(QueryError::PlanRejected {
                 resource: QueryResource::Results,
@@ -2619,20 +2610,41 @@ fn advanced_ast_supported(node: &AdvancedAstNode) -> bool {
     }
 }
 
-fn advanced_traversal_depths_valid(node: &AdvancedAstNode) -> bool {
+fn validate_advanced_depths(
+    ast: &AdvancedAstNode,
+    plan_depth: usize,
+    max_depth: usize,
+) -> Result<(), QueryError> {
+    if max_depth == 0
+        || max_depth > ADVANCED_MAX_DEPTH
+        || plan_depth > max_depth
+        || !advanced_traversal_depths_within(ast, max_depth)
+    {
+        return Err(QueryError::PlanRejected {
+            resource: QueryResource::Depth,
+        });
+    }
+    Ok(())
+}
+
+fn advanced_traversal_depths_within(node: &AdvancedAstNode, max_depth: usize) -> bool {
     match node {
         AdvancedAstNode::Scan { .. } => true,
         AdvancedAstNode::Filter { input, .. }
         | AdvancedAstNode::Project { input, .. }
         | AdvancedAstNode::Aggregate { input, .. }
         | AdvancedAstNode::Sort { input, .. }
-        | AdvancedAstNode::Limit { input, .. } => advanced_traversal_depths_valid(input),
+        | AdvancedAstNode::Limit { input, .. } => {
+            advanced_traversal_depths_within(input, max_depth)
+        }
         AdvancedAstNode::Join { left, right, .. } => {
-            advanced_traversal_depths_valid(left) && advanced_traversal_depths_valid(right)
+            advanced_traversal_depths_within(left, max_depth)
+                && advanced_traversal_depths_within(right, max_depth)
         }
-        AdvancedAstNode::Traverse { max_depth, .. } => {
-            max_depth.is_none_or(|depth| depth > 0 && usize::from(depth) <= ADVANCED_MAX_DEPTH)
-        }
+        AdvancedAstNode::Traverse {
+            max_depth: traversal_depth,
+            ..
+        } => traversal_depth.is_none_or(|depth| depth > 0 && usize::from(depth) <= max_depth),
     }
 }
 
@@ -14508,7 +14520,7 @@ mod tests {
                 direction: AdvancedTraverseDirection::Outbound,
                 max_depth: depth,
             };
-            assert!(advanced_traversal_depths_valid(&ast));
+            assert!(advanced_traversal_depths_within(&ast, ADVANCED_MAX_DEPTH));
         }
         for depth in [Some(0), Some(6)] {
             let ast = AdvancedAstNode::Traverse {
@@ -14518,8 +14530,29 @@ mod tests {
                 direction: AdvancedTraverseDirection::Outbound,
                 max_depth: depth,
             };
-            assert!(!advanced_traversal_depths_valid(&ast));
+            assert!(!advanced_traversal_depths_within(&ast, ADVANCED_MAX_DEPTH));
         }
+    }
+
+    #[test]
+    fn advanced_traversal_depth_respects_the_effective_plan_limit() {
+        let ast = AdvancedAstNode::Traverse {
+            seed: Some(symbol(11)),
+            seed_from: None,
+            relation: AdvancedRelationKind::Calls,
+            direction: AdvancedTraverseDirection::Outbound,
+            max_depth: Some(2),
+        };
+        let (_, plan_depth) = ast.derive_plan_shape();
+
+        assert!(matches!(
+            validate_advanced_depths(&ast, plan_depth, 1),
+            Err(QueryError::PlanRejected {
+                resource: QueryResource::Depth,
+            })
+        ));
+        validate_advanced_depths(&ast, plan_depth, 2)
+            .expect("the exact effective traversal depth is accepted");
     }
 
     #[test]
