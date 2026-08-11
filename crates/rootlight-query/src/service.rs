@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
     io, mem,
     time::{Duration, Instant},
 };
@@ -5804,6 +5805,14 @@ const CHANGE_IMPACT_MAX_RESOLVED: usize = 1_256;
 /// Maximum test candidates reported by one `change.impact`.
 const CHANGE_IMPACT_MAX_TESTS: usize = 500;
 
+// The executor keeps several metadata indexes and one reverse relation graph
+// live together. These conservative charges cover B-tree nodes, vector slack,
+// and the repository-owned strings cloned into those indexes.
+const CHANGE_IMPACT_FIXED_WORKSPACE_BYTES: usize = 64 * 1024;
+const CHANGE_IMPACT_FILE_WORKSPACE_BYTES: usize = 256;
+const CHANGE_IMPACT_ENTITY_WORKSPACE_BYTES: usize = 512;
+const CHANGE_IMPACT_RELATION_WORKSPACE_BYTES: usize = 128;
+
 /// Change impact assembled before bounded result emission.
 struct ChangeImpactAnalysis {
     resolved_changes: Vec<ResolvedChangeRecord>,
@@ -5827,6 +5836,9 @@ fn build_change_impact(
     tracker: &mut UsageTracker,
     limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<ChangeImpactAnalysis, QueryError> {
+    control.check()?;
+    tracker.add_memory(change_impact_workspace_bytes(document)?)?;
+
     // Resolve per-entity metadata: declaring file, kind label, and public
     // surface membership, plus the path-to-file map used to resolve explicit
     // path changes.
@@ -6012,6 +6024,35 @@ fn build_change_impact(
     })
 }
 
+fn change_impact_workspace_bytes(document: &NormalizedIrDocument) -> Result<u64, QueryError> {
+    let mut bytes = CHANGE_IMPACT_FIXED_WORKSPACE_BYTES
+        .saturating_add(
+            document
+                .files
+                .len()
+                .saturating_mul(CHANGE_IMPACT_FILE_WORKSPACE_BYTES),
+        )
+        .saturating_add(
+            document
+                .entities
+                .len()
+                .saturating_mul(CHANGE_IMPACT_ENTITY_WORKSPACE_BYTES),
+        )
+        .saturating_add(
+            document
+                .relations
+                .len()
+                .saturating_mul(CHANGE_IMPACT_RELATION_WORKSPACE_BYTES),
+        );
+    for file in &document.files {
+        bytes = bytes.saturating_add(file.path.len().saturating_mul(2));
+    }
+    for entity in &document.entities {
+        bytes = bytes.saturating_add(entity.qualified_name.len());
+    }
+    checked_usize_to_u64(bytes)
+}
+
 /// Resolves the explicit change set to concrete resolved changes.
 ///
 /// Each explicit symbol maps to one resolved change classified by its public
@@ -6131,69 +6172,158 @@ fn impact_closure(
     limiting_resources: &mut Vec<QueryResource>,
     control: &QueryControl<'_>,
 ) -> Result<Vec<ImpactEntryRecord>, QueryError> {
-    // First-visit wins under breadth-first order, so each dependent records its
-    // shortest distance and the predicate path that reached it.
-    let mut visited: BTreeMap<SymbolId, (u8, u16, Vec<String>)> = BTreeMap::new();
-    let mut queue: VecDeque<(SymbolId, u8, u16, Vec<String>)> = VecDeque::new();
-    for root in roots {
-        queue.push_back((*root, 0, 1_000, Vec::new()));
-    }
-    while let Some((node, distance, confidence, via)) = queue.pop_front() {
-        control.check()?;
-        if distance >= max_depth {
-            if dependents.get(&node).is_some_and(|edges| {
-                edges.iter().any(|(subject, _, _)| {
-                    !roots.contains(subject) && !visited.contains_key(subject)
-                })
-            }) {
-                record_limit(limiting_resources, QueryResource::Depth)?;
-            }
-            continue;
-        }
-        let next_distance = distance.saturating_add(1);
-        let Some(edges) = dependents.get(&node) else {
-            continue;
-        };
-        for (subject, family, edge_confidence) in edges {
-            if roots.contains(subject) || visited.contains_key(subject) {
-                continue;
-            }
-            let path_confidence = confidence.min(*edge_confidence);
-            let mut path = via.clone();
-            path.push(family.as_str().to_owned());
-            path.truncate(16);
-            visited.insert(*subject, (next_distance, path_confidence, path.clone()));
-            queue.push_back((*subject, next_distance, path_confidence, path));
-        }
-    }
-
-    let mut reached: Vec<(SymbolId, u8, u16, Vec<String>)> = visited
-        .into_iter()
-        .map(|(symbol, (distance, confidence, via))| (symbol, distance, confidence, via))
+    let mut visited = roots.clone();
+    let mut frontier: BTreeMap<SymbolId, (u16, Vec<String>)> = roots
+        .iter()
+        .copied()
+        .map(|symbol| (symbol, (1_000, Vec::new())))
         .collect();
-    reached.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+    let mut entries = Vec::new();
 
-    let mut entries: Vec<ImpactEntryRecord> = Vec::new();
-    for (symbol, distance, confidence, via) in reached {
-        if entries.len() >= max_dependents {
+    for distance in 1..=max_depth {
+        control.check()?;
+        let remaining = max_dependents.saturating_sub(entries.len());
+        let step = bounded_impact_frontier(
+            dependents,
+            &frontier,
+            roots,
+            &visited,
+            remaining,
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+
+        for (symbol, (confidence, via)) in &step.nodes {
+            visited.insert(*symbol);
+            let entry = ImpactEntryRecord {
+                symbol_id: *symbol,
+                kind: entity_kind
+                    .get(symbol)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                distance,
+                confidence: *confidence,
+                via: via.clone(),
+                is_public: entity_public.contains(symbol),
+            };
+            emit_cycle_value(&mut entries, entry, tracker, limiting_resources, control)?;
+        }
+        frontier = step.nodes;
+
+        if step.work_limited {
+            return Ok(entries);
+        }
+        if step.has_more {
             record_limit(limiting_resources, QueryResource::Results)?;
+            return Ok(entries);
+        }
+        if frontier.is_empty() {
             break;
         }
-        let kind = entity_kind
-            .get(&symbol)
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_owned());
-        let entry = ImpactEntryRecord {
-            symbol_id: symbol,
-            kind,
-            distance,
-            confidence,
-            via,
-            is_public: entity_public.contains(&symbol),
-        };
-        emit_cycle_value(&mut entries, entry, tracker, limiting_resources, control)?;
+
+        if distance == max_depth || entries.len() >= max_dependents {
+            let probe = bounded_impact_frontier(
+                dependents,
+                &frontier,
+                roots,
+                &visited,
+                0,
+                tracker,
+                limiting_resources,
+                control,
+            )?;
+            if probe.has_more {
+                let resource = if distance == max_depth {
+                    QueryResource::Depth
+                } else {
+                    QueryResource::Results
+                };
+                record_limit(limiting_resources, resource)?;
+            }
+            return Ok(entries);
+        }
     }
+
     Ok(entries)
+}
+
+struct BoundedImpactFrontier {
+    nodes: BTreeMap<SymbolId, (u16, Vec<String>)>,
+    has_more: bool,
+    work_limited: bool,
+}
+
+type ImpactDependentEdge = (SymbolId, RelationFamily, u16);
+type ImpactFrontierSource<'a> = (&'a (u16, Vec<String>), &'a [ImpactDependentEdge]);
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the frontier merge carries the graph, traversal state, and shared query controls"
+)]
+fn bounded_impact_frontier(
+    dependents: &BTreeMap<SymbolId, Vec<(SymbolId, RelationFamily, u16)>>,
+    frontier: &BTreeMap<SymbolId, (u16, Vec<String>)>,
+    roots: &BTreeSet<SymbolId>,
+    visited: &BTreeSet<SymbolId>,
+    cap: usize,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+    control: &QueryControl<'_>,
+) -> Result<BoundedImpactFrontier, QueryError> {
+    let sources: Vec<ImpactFrontierSource<'_>> = frontier
+        .iter()
+        .filter_map(|(symbol, state)| {
+            dependents
+                .get(symbol)
+                .map(|edges| (state, edges.as_slice()))
+        })
+        .collect();
+    let mut heap = BinaryHeap::new();
+    for (source_index, (_, edges)) in sources.iter().enumerate() {
+        if let Some((subject, _, _)) = edges.first() {
+            heap.push(Reverse((*subject, source_index, 0_usize)));
+        }
+    }
+
+    let mut nodes = BTreeMap::new();
+    let mut has_more = false;
+    let mut work_limited = false;
+    while let Some(Reverse((subject, source_index, edge_index))) = heap.pop() {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Edges, 1) {
+            record_limit(limiting_resources, QueryResource::Edges)?;
+            work_limited = true;
+            break;
+        }
+        tracker.add_edges(1)?;
+
+        let (parent, edges) = sources[source_index];
+        let (_, family, edge_confidence) = edges[edge_index];
+        let next_index = edge_index.saturating_add(1);
+        if let Some((next_subject, _, _)) = edges.get(next_index) {
+            heap.push(Reverse((*next_subject, source_index, next_index)));
+        }
+
+        if roots.contains(&subject) || visited.contains(&subject) || nodes.contains_key(&subject) {
+            continue;
+        }
+        if nodes.len() >= cap {
+            has_more = true;
+            break;
+        }
+
+        let mut path = parent.1.clone();
+        path.push(family.as_str().to_owned());
+        path.truncate(16);
+        nodes.insert(subject, (parent.0.min(edge_confidence), path));
+    }
+
+    Ok(BoundedImpactFrontier {
+        nodes,
+        has_more,
+        work_limited,
+    })
 }
 
 /// Relates test entities to the changed and impacted symbols.
@@ -12181,6 +12311,87 @@ mod tests {
         assert!(analysis.risk_summary.dynamic_blind_spots);
         assert_eq!(analysis.risk_summary.coverage, CoverageStatus::Bounded);
         assert!(analysis.tests.is_empty());
+    }
+
+    #[test]
+    fn change_impact_rejects_unfunded_graph_workspace() {
+        let document = overview_document();
+        let mut plan = change_impact_plan(BTreeSet::from([symbol(11)]), Vec::new(), 3, 0, false, 1);
+        plan.budget = QueryBudget::new().with_max_memory_bytes(1);
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+
+        assert!(matches!(
+            build_change_impact(
+                &document,
+                &plan,
+                &control,
+                &mut tracker,
+                &mut limiting_resources,
+            ),
+            Err(QueryError::BudgetExceeded {
+                resource: QueryResource::MemoryBytes,
+                limit: 1,
+            })
+        ));
+        assert_eq!(tracker.memory_bytes, 0);
+        assert_eq!(tracker.rows, 0);
+        assert_eq!(tracker.edges, 0);
+    }
+
+    #[test]
+    fn change_impact_stops_fanout_after_cap_sentinel() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        for byte in 20_u8..28 {
+            add_entity(&mut document, byte, 1, EntityKind::Function);
+            add_calls(&mut document, byte.saturating_add(100), byte, 11, 900);
+        }
+        let plan = change_impact_plan(BTreeSet::from([symbol(11)]), Vec::new(), 3, 0, false, 1);
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+
+        let analysis = build_change_impact(
+            &document,
+            &plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )
+        .expect("bounded fanout returns the first dependent");
+
+        assert_eq!(analysis.impacted[0].dependents.len(), 1);
+        assert_eq!(analysis.impacted[0].dependents[0].symbol_id, symbol(20));
+        assert_eq!(tracker.edges, 10);
+        assert_eq!(limiting_resources, vec![QueryResource::Results]);
+    }
+
+    #[test]
+    fn change_impact_truncation_keeps_distance_then_identity_order() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        for byte in [11, 12, 13, 14, 100] {
+            add_entity(&mut document, byte, 1, EntityKind::Function);
+        }
+        add_calls(&mut document, 110, 12, 11, 900);
+        add_calls(&mut document, 111, 13, 11, 900);
+        add_calls(&mut document, 112, 100, 12, 900);
+        add_calls(&mut document, 113, 14, 13, 900);
+        let plan = change_impact_plan(BTreeSet::from([symbol(11)]), Vec::new(), 3, 0, false, 3);
+
+        let analysis = run_change_impact(&document, &plan);
+        let symbols: Vec<SymbolId> = analysis.impacted[0]
+            .dependents
+            .iter()
+            .map(|entry| entry.symbol_id)
+            .collect();
+
+        assert_eq!(symbols, vec![symbol(12), symbol(13), symbol(14)]);
     }
 
     #[test]
