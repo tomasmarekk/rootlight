@@ -15,7 +15,9 @@ use std::{
 
 use serde_json::{Value, json};
 
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+// This target starts isolated daemons concurrently, so cold offline runners
+// need the same contention allowance as the other multi-process suites.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const NOOP_METADATA_WRITE_CEILING_BYTES: u64 = 4 * 1024;
