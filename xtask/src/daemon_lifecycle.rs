@@ -593,9 +593,7 @@ fn exercise_simultaneous_autostart(paths: &RuntimePaths) -> Result<(), Lifecycle
         let (client, owned) = client
             .join()
             .map_err(|_| LifecycleError::ClientThreadPanicked)??;
-        if !client.health().map_err(LifecycleError::Client)?.ready {
-            return Err(LifecycleError::UnexpectedClientHealth);
-        }
+        wait_for_ready_health(&client)?;
         if let Some(owned) = owned
             && owner.replace(owned).is_some()
         {
@@ -693,19 +691,13 @@ fn exercise_concurrent_clients(paths: &RuntimePaths) -> Result<(), LifecycleErro
                 .map_err(LifecycleError::Client);
             barrier.wait();
             let client = client?;
-            client.health().map_err(LifecycleError::Client)
+            wait_for_ready_health(&client)
         }));
     }
     for client in clients {
-        let health = client
+        client
             .join()
             .map_err(|_| LifecycleError::ClientThreadPanicked)??;
-        if !health.ready
-            || health.lifecycle != DaemonLifecycle::Ready
-            || !health.accepting_operations
-        {
-            return Err(LifecycleError::UnexpectedClientHealth);
-        }
     }
     let observer = Client::connect_or_start(paths, [59; 16], ConnectPolicy::ExistingOnly)
         .map_err(LifecycleError::Client)?;
@@ -916,6 +908,16 @@ fn wait_for_health(
     predicate: impl Fn(&Health) -> bool,
 ) -> Result<Health, LifecycleError> {
     wait_for_health_until(client, predicate, quota_deadline(COMMAND_TIMEOUT)?)
+}
+
+fn wait_for_ready_health(client: &Client) -> Result<Health, LifecycleError> {
+    wait_for_health(client, |health| {
+        health.ready && health.lifecycle == DaemonLifecycle::Ready && health.accepting_operations
+    })
+    .map_err(|error| match error {
+        LifecycleError::HealthStateTimedOut => LifecycleError::UnexpectedClientHealth,
+        other => other,
+    })
 }
 
 fn connect_existing_until(
