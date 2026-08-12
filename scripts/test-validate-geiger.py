@@ -149,6 +149,7 @@ class GeigerValidationTests(unittest.TestCase):
         self.inventory_path.write_text(
             json.dumps(
                 {
+                    "approved_path_dependencies": [],
                     "schema_version": "1.0",
                     "workspace_members": [
                         {
@@ -460,6 +461,43 @@ class GeigerValidationTests(unittest.TestCase):
                 approved,
                 VALIDATOR.SUPPORTED_CARGO_GEIGER_VERSION,
             )
+
+    def test_approved_path_dependency_sources_are_bound(self) -> None:
+        dependency_root = self.root / "third_party" / "dependency"
+        source_root = dependency_root / "src"
+        source_root.mkdir(parents=True)
+        manifest = dependency_root / "Cargo.toml"
+        manifest.write_text(
+            '[package]\nname = "dependency"\nversion = "1.0.0"\n',
+            encoding="utf-8",
+        )
+        source = source_root / "lib.rs"
+        source.write_text("pub fn dependency() {}\n", encoding="utf-8")
+        dependency_id = f"path+{dependency_root.as_uri()}#dependency@1.0.0"
+        inventory_document = json.loads(
+            self.inventory_path.read_text(encoding="utf-8")
+        )
+        inventory_document["approved_path_dependencies"] = [
+            {
+                "cargo_id": dependency_id,
+                "manifest": str(manifest),
+                "name": "dependency",
+                "version": "1.0.0",
+            }
+        ]
+        self.inventory_path.write_text(
+            json.dumps(inventory_document),
+            encoding="utf-8",
+        )
+        inventory = VALIDATOR.load_inventory(self.inventory_path)
+
+        manifests = VALIDATOR.workspace_manifest_evidence(inventory, self.root)
+        manifest_paths = {entry["path"] for entry in manifests}
+        self.assertIn("third_party/dependency/Cargo.toml", manifest_paths)
+        before = VALIDATOR.workspace_source_evidence(inventory, self.root)
+        source.write_text("pub fn changed_dependency() {}\n", encoding="utf-8")
+        after = VALIDATOR.workspace_source_evidence(inventory, self.root)
+        self.assertNotEqual(before["sha256"], after["sha256"])
 
     def test_same_name_outside_workspace_is_rejected(self) -> None:
         outside = self.root / "outside"

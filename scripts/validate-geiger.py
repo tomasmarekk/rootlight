@@ -2,7 +2,7 @@
 """Create and validate fail-closed cargo-geiger evidence.
 
 The evidence contract binds each full SafetyReport to the installed scanner,
-the Rust toolchain, the unsafe-boundary policy, and workspace source inputs.
+the Rust toolchain, the unsafe-boundary policy, and repository-owned source inputs.
 """
 
 from __future__ import annotations
@@ -40,7 +40,11 @@ CARGO_GEIGER_REPORT_ARGUMENTS = (
     "Json",
 )
 
-INVENTORY_ROOT_KEYS = {"schema_version", "workspace_members"}
+INVENTORY_ROOT_KEYS = {
+    "schema_version",
+    "workspace_members",
+    "approved_path_dependencies",
+}
 INVENTORY_MEMBER_KEYS = {"cargo_id", "name", "version", "manifest"}
 UNSAFE_POLICY_ROOT_KEYS = {"schema_version", "boundaries"}
 UNSAFE_BOUNDARY_KEYS = {
@@ -147,7 +151,7 @@ PACKAGE_ID_KEYS = {"name", "version", "source"}
 
 @dataclass(frozen=True)
 class WorkspacePackage:
-    """One package identity emitted by the same Cargo metadata invocation."""
+    """One repository-owned package identity from the same Cargo metadata run."""
 
     cargo_id: str
     name: str
@@ -335,10 +339,14 @@ def load_inventory(path: pathlib.Path) -> dict[str, WorkspacePackage]:
     members = require_array(document["workspace_members"], "workspace_members")
     if not members:
         raise fail("workspace inventory must contain workspace_members")
+    approved_path_dependencies = require_array(
+        document["approved_path_dependencies"],
+        "approved_path_dependencies",
+    )
 
     packages: dict[str, WorkspacePackage] = {}
     identities: set[tuple[str, str, pathlib.Path]] = set()
-    for raw_member in members:
+    for raw_member in [*members, *approved_path_dependencies]:
         member = require_object(raw_member, "workspace inventory member")
         require_exact_keys(member, INVENTORY_MEMBER_KEYS, "workspace inventory member")
         package = WorkspacePackage(

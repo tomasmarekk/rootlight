@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Inventories unsafe usage for every workspace package, including disconnected members.
-# Each report is validated independently so package selection cannot silently narrow coverage.
+# Approved local dependencies remain transitive report entries, and their exact sources are
+# bound into every evidence envelope so path selection cannot silently narrow coverage.
 
 set -euo pipefail
 
@@ -43,16 +44,19 @@ execution_identity="$output_root/cargo-geiger.execution.json"
     --toolchain-policy policy/toolchain.toml \
     --execution-identity "$execution_identity"
 
-cargo metadata --locked --no-deps --format-version 1 > "$output_root/metadata.json"
+cargo metadata --locked --format-version 1 > "$output_root/metadata.json"
 "$python_executable" - \
     "$output_root/metadata.json" \
+    "policy/supply-chain.toml" \
     "$output_root/workspace-packages.json" \
     "$output_root/workspace-packages.tsv" <<'PY'
 import json
 import pathlib
 import sys
+import tomllib
 
 document = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+workspace_root = pathlib.Path(document["workspace_root"]).resolve(strict=True)
 workspace_members = document["workspace_members"]
 workspace = set(workspace_members)
 if len(workspace) != len(workspace_members):
@@ -83,9 +87,62 @@ if observed != workspace:
 names = [package["name"] for package in packages]
 if len(names) != len(set(names)):
     raise SystemExit("workspace package names must be unique for report artifacts")
-pathlib.Path(sys.argv[2]).write_text(
+
+supply_chain_policy = tomllib.loads(
+    pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+)
+allowed_path_dependencies = supply_chain_policy.get("allowed_path_dependencies")
+if not isinstance(allowed_path_dependencies, list) or any(
+    not isinstance(value, str) or not value
+    for value in allowed_path_dependencies
+):
+    raise SystemExit(
+        "supply-chain path dependency allowlist must contain non-empty strings"
+    )
+expected_path_dependencies = set(allowed_path_dependencies)
+if len(expected_path_dependencies) != len(allowed_path_dependencies):
+    raise SystemExit("supply-chain path dependency allowlist contains duplicates")
+path_dependencies = []
+observed_path_dependencies = set()
+for package in document["packages"]:
+    if package["id"] in workspace or package["source"] is not None:
+        continue
+    manifest = pathlib.Path(package["manifest_path"]).resolve(strict=True)
+    try:
+        relative_manifest = manifest.relative_to(workspace_root).as_posix()
+    except ValueError as error:
+        raise SystemExit(
+            f"path dependency manifest escapes the workspace: {manifest}"
+        ) from error
+    identity = f"{package['name']}@{package['version']}:{relative_manifest}"
+    if identity in observed_path_dependencies:
+        raise SystemExit(f"duplicate path dependency identity: {identity}")
+    observed_path_dependencies.add(identity)
+    path_dependencies.append(
+        {
+            "cargo_id": package["id"],
+            "name": package["name"],
+            "version": package["version"],
+            "manifest": str(manifest),
+        }
+    )
+if observed_path_dependencies != expected_path_dependencies:
+    missing = sorted(expected_path_dependencies - observed_path_dependencies)
+    unexpected = sorted(observed_path_dependencies - expected_path_dependencies)
+    raise SystemExit(
+        "Cargo metadata path dependency inventory differs from policy; "
+        f"missing={missing}, unexpected={unexpected}"
+    )
+
+pathlib.Path(sys.argv[3]).write_text(
     json.dumps(
-        {"schema_version": "1.0", "workspace_members": packages},
+        {
+            "approved_path_dependencies": sorted(
+                path_dependencies, key=lambda package: package["cargo_id"]
+            ),
+            "schema_version": "1.0",
+            "workspace_members": packages,
+        },
         indent=2,
         sort_keys=True,
     )
@@ -93,7 +150,7 @@ pathlib.Path(sys.argv[2]).write_text(
     encoding="utf-8",
     newline="\n",
 )
-pathlib.Path(sys.argv[3]).write_text(
+pathlib.Path(sys.argv[4]).write_text(
     "".join(
         f"{package['cargo_id']}\t{package['name']}\t"
         f"{package['version']}\t{package['manifest']}\n"
