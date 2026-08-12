@@ -60,16 +60,7 @@ fn repository_generation_and_source_queries_survive_daemon_restart() {
     daemon.wait_until_ready(&runtime_dir);
     let mut mcp = McpProcess::spawn(&state_dir, &runtime_dir);
 
-    let listed = mcp.call("restart-list", "repo.list", json!({}));
-    assert_success(&listed, "repo.list");
-    assert_eq!(
-        listed["result"]["structuredContent"]["data"]["repositories"][0]["repository_id"],
-        repository_id
-    );
-    assert_eq!(
-        listed["result"]["structuredContent"]["data"]["repositories"][0]["active_generation"],
-        generation
-    );
+    wait_for_active_generation(&mut mcp, &repository_id, &generation);
 
     let status = mcp.call(
         "restart-status",
@@ -621,6 +612,45 @@ fn index_repository(mcp: &mut McpProcess, id: &str, root: &Path) -> Value {
     });
     assert_success(&response, "repo.index");
     response
+}
+
+fn wait_for_active_generation(mcp: &mut McpProcess, repository_id: &str, generation: &str) {
+    let deadline = Instant::now()
+        .checked_add(STARTUP_TIMEOUT)
+        .expect("bounded recovery deadline is representable");
+    for attempt in 1_u16.. {
+        let listed = mcp.call(
+            &format!("restart-list-attempt-{attempt}"),
+            "repo.list",
+            json!({}),
+        );
+        assert_success(&listed, "repo.list");
+        let repositories = listed["result"]["structuredContent"]["data"]["repositories"]
+            .as_array()
+            .expect("repo.list returns a repository array");
+        let repository = repositories
+            .iter()
+            .find(|repository| repository["repository_id"] == repository_id)
+            .unwrap_or_else(|| {
+                panic!("repo.list omitted restored repository {repository_id}: {listed:#}")
+            });
+        match repository["active_generation"].as_str() {
+            Some(active) if active == generation => return,
+            Some(active) => {
+                panic!(
+                    "repo.list restored unexpected generation {active} for {repository_id}: \
+                     {listed:#}"
+                )
+            }
+            None if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            None => panic!(
+                "repo.list did not restore generation {generation} for {repository_id}: {listed:#}"
+            ),
+        }
+    }
+    unreachable!("bounded recovery loop returns or panics")
 }
 
 fn published_generation(response: &Value) -> String {

@@ -2,7 +2,10 @@
 
 #[cfg(unix)]
 use std::fs;
-use std::{thread, time::Duration};
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
 
 use serde_json::Value;
 
@@ -10,7 +13,12 @@ use serde_json::Value;
     dead_code,
     reason = "each integration test compiles this shared module independently"
 )]
-const MAX_BUSY_ATTEMPTS: u8 = 3;
+const MAX_BUSY_ATTEMPTS: u16 = 256;
+#[allow(
+    dead_code,
+    reason = "each integration test compiles this shared module independently"
+)]
+const MAX_BUSY_WAIT: Duration = Duration::from_secs(30);
 
 /// Creates a private fixture root with a portable authenticated-endpoint path.
 pub(crate) fn private_process_tempdir(_prefix: &str) -> tempfile::TempDir {
@@ -41,11 +49,15 @@ pub(crate) fn private_process_tempdir(_prefix: &str) -> tempfile::TempDir {
     reason = "not every integration test performs a setup tool call"
 )]
 pub(crate) fn retry_transient_busy(request_id: &str, mut call: impl FnMut(&str) -> Value) -> Value {
+    let deadline = Instant::now()
+        .checked_add(MAX_BUSY_WAIT)
+        .expect("bounded process-test deadline is representable");
     for attempt in 1..=MAX_BUSY_ATTEMPTS {
         let response = call(&format!("{request_id}-attempt-{attempt}"));
         let error = &response["result"]["structuredContent"]["error"];
         let retryable_busy = error["code"] == "BUSY" && error["retryable"] == true;
-        if !retryable_busy || attempt == MAX_BUSY_ATTEMPTS {
+        let now = Instant::now();
+        if !retryable_busy || attempt == MAX_BUSY_ATTEMPTS || now >= deadline {
             return response;
         }
 
@@ -55,7 +67,9 @@ pub(crate) fn retry_transient_busy(request_id: &str, mut call: impl FnMut(&str) 
             .as_u64()
             .unwrap_or(25)
             .clamp(1, 1_000);
-        thread::sleep(Duration::from_millis(retry_after_ms));
+        thread::sleep(
+            Duration::from_millis(retry_after_ms).min(deadline.saturating_duration_since(now)),
+        );
     }
     unreachable!("bounded retry loop always returns")
 }

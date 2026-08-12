@@ -966,6 +966,31 @@ fn setup_retry_replays_only_retryable_busy() {
     assert_eq!(attempts.get(), 2);
     assert_eq!(response["id"], "fixture-index-attempt-2");
 
+    attempts.set(0);
+    let response = process_support::retry_transient_busy("cold-fixture", |request_id| {
+        let attempt = attempts.get().saturating_add(1);
+        attempts.set(attempt);
+        if attempt <= 3 {
+            json!({
+                "id": request_id,
+                "result": {
+                    "structuredContent": {
+                        "error": {
+                            "code": "BUSY",
+                            "retryable": true,
+                            "retry_after_ms": 1
+                        }
+                    }
+                }
+            })
+        } else {
+            json!({"id": request_id, "result": {"structuredContent": {"data": {}}}})
+        }
+    });
+    assert_eq!(attempts.get(), 4);
+    assert_eq!(response["id"], "cold-fixture-attempt-4");
+
+    attempts.set(0);
     let response = process_support::retry_transient_busy("terminal", |request_id| {
         attempts.set(attempts.get().saturating_add(1));
         json!({
@@ -977,7 +1002,7 @@ fn setup_retry_replays_only_retryable_busy() {
             }
         })
     });
-    assert_eq!(attempts.get(), 3);
+    assert_eq!(attempts.get(), 1);
     assert_eq!(response["id"], "terminal-attempt-1");
 }
 
