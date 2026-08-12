@@ -490,13 +490,16 @@ class GeigerValidationTests(unittest.TestCase):
             encoding="utf-8",
         )
         inventory = VALIDATOR.load_inventory(self.inventory_path)
+        workspace_root = VALIDATOR.workspace_root_from_unsafe_policy(
+            self.policy_path
+        )
 
-        manifests = VALIDATOR.workspace_manifest_evidence(inventory, self.root)
+        manifests = VALIDATOR.workspace_manifest_evidence(inventory, workspace_root)
         manifest_paths = {entry["path"] for entry in manifests}
         self.assertIn("third_party/dependency/Cargo.toml", manifest_paths)
-        before = VALIDATOR.workspace_source_evidence(inventory, self.root)
+        before = VALIDATOR.workspace_source_evidence(inventory, workspace_root)
         source.write_text("pub fn changed_dependency() {}\n", encoding="utf-8")
-        after = VALIDATOR.workspace_source_evidence(inventory, self.root)
+        after = VALIDATOR.workspace_source_evidence(inventory, workspace_root)
         self.assertNotEqual(before["sha256"], after["sha256"])
 
     def test_same_name_outside_workspace_is_rejected(self) -> None:
