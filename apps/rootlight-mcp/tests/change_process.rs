@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const SUPERVISED_SHUTDOWN_COMMAND: &[u8] = b"shutdown\n";
 #[test]
 fn change_tools_preserve_truthful_contracts_across_processes() {
     let fixture = process_support::private_process_tempdir("rl-change-");
@@ -1008,11 +1009,18 @@ impl DaemonProcess {
     }
 
     fn finish(&mut self) {
-        self.input.take();
+        let mut input = self.input.take().expect("daemon stdin is retained");
+        input
+            .write_all(SUPERVISED_SHUTDOWN_COMMAND)
+            .and_then(|()| input.flush())
+            .expect("supervised daemon shutdown request is delivered");
+        // Keep the pipe open until exit so this test proves the command, rather
+        // than an EOF race, initiated graceful shutdown.
         let status = wait_for_exit(
             self.child.as_mut().expect("daemon child is retained"),
             SHUTDOWN_TIMEOUT,
         );
+        drop(input);
         let stderr = fs::read_to_string(&self.stderr_path)
             .unwrap_or_else(|error| format!("<daemon stderr unavailable: {error}>"));
         assert!(
