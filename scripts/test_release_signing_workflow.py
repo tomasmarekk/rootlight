@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static security contract tests for protected update signing."""
+"""Static security contract tests for protected release signing."""
 
 from __future__ import annotations
 
@@ -11,7 +11,12 @@ import unittest
 
 REPOSITORY = Path(__file__).parent.parent
 RELEASE_WORKFLOW = REPOSITORY / ".github/workflows/release.yml"
+RELEASE_CANDIDATE_WORKFLOW = REPOSITORY / ".github/workflows/release-candidate.yml"
 ACTION_POLICY = REPOSITORY / "policy/github-actions.toml"
+COSIGN_INSTALLER = (
+    "sigstore/cosign-installer@"
+    "6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2"
+)
 
 
 def workflow_job(workflow: str, name: str) -> str:
@@ -96,6 +101,46 @@ class ReleaseSigningWorkflowTests(unittest.TestCase):
             and entry["job"] == "sign-update-metadata"
         ]
         self.assertEqual(matching, [])
+
+
+class ReleaseCandidateSigningWorkflowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        workflow = RELEASE_CANDIDATE_WORKFLOW.read_text(encoding="utf-8")
+        self.signing_job = workflow_job(workflow, "release-signing")
+
+    def test_cosign_install_retries_once_with_the_same_pinned_identity(self) -> None:
+        self.assertEqual(self.signing_job.count(f"uses: {COSIGN_INSTALLER}"), 2)
+        self.assertEqual(self.signing_job.count("cosign-release: v3.1.2"), 2)
+        self.assertEqual(self.signing_job.count("install-dir: $HOME/.cosign"), 2)
+        self.assertEqual(self.signing_job.count("continue-on-error: true"), 1)
+        self.assertEqual(
+            self.signing_job.count("if: steps.install_cosign.outcome == 'failure'"),
+            2,
+        )
+        self.assertIn(
+            "      - name: Install pinned Cosign\n"
+            "        id: install_cosign\n"
+            "        continue-on-error: true\n"
+            f"        uses: {COSIGN_INSTALLER}\n",
+            self.signing_job,
+        )
+        self.assertLess(
+            self.signing_job.index("Retry pinned Cosign install once"),
+            self.signing_job.index("Create detached keyless signatures"),
+        )
+        self.assertIn(
+            "      - name: Prepare bounded Cosign install retry\n"
+            "        if: steps.install_cosign.outcome == 'failure'\n"
+            "        shell: bash\n"
+            "        run: |\n"
+            '          test -n "$HOME"\n'
+            '          rm -rf -- "$HOME/.cosign"\n'
+            "          sleep 30\n"
+            "      - name: Retry pinned Cosign install once\n"
+            "        if: steps.install_cosign.outcome == 'failure'\n"
+            f"        uses: {COSIGN_INSTALLER}\n",
+            self.signing_job,
+        )
 
 
 if __name__ == "__main__":

@@ -1079,9 +1079,25 @@ jobs:
           )
           PY
       - name: Install pinned Cosign
+        id: install_cosign
+        continue-on-error: true
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: v3.1.2
+          install-dir: $HOME/.cosign
+      - name: Prepare bounded Cosign install retry
+        if: steps.install_cosign.outcome == 'failure'
+        shell: bash
+        run: |
+          test -n "$HOME"
+          rm -rf -- "$HOME/.cosign"
+          sleep 30
+      - name: Retry pinned Cosign install once
+        if: steps.install_cosign.outcome == 'failure'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.2
+          install-dir: $HOME/.cosign
       - name: Create detached keyless signatures
         env:
           SOURCE_REVISION: ${{ github.sha }}
