@@ -16890,19 +16890,20 @@ mod tests {
             source("unchanged", 1),
         )
         .expect("unchanged source writes");
-        let cancellation = Cancellation::with_deadline(
+        let indexing_cancellation = Cancellation::with_deadline(
             Instant::now()
                 .checked_add(Duration::from_secs(60))
                 .expect("test deadline is representable"),
         );
         let (first, second, second_evidence) = {
-            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
-                .expect("durable service initializes");
+            let mut service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &indexing_cancellation)
+                    .expect("durable service initializes");
             let prepared = service
-                .prepare_rust_fixture(fixture.path(), &cancellation)
+                .prepare_rust_fixture(fixture.path(), &indexing_cancellation)
                 .expect("initial generation prepares");
             let staged = service
-                .stage_prepared(prepared, &cancellation)
+                .stage_prepared(prepared, &indexing_cancellation)
                 .expect("initial generation stages");
             let first = service
                 .commit_staged_with_operation(staged, None)
@@ -16910,10 +16911,10 @@ mod tests {
 
             fs::write(&changed, source("changed", 2)).expect("one-file edit writes");
             let prepared = service
-                .prepare_rust_fixture(fixture.path(), &cancellation)
+                .prepare_rust_fixture(fixture.path(), &indexing_cancellation)
                 .expect("successor generation prepares");
             let staged = service
-                .stage_prepared(prepared, &cancellation)
+                .stage_prepared(prepared, &indexing_cancellation)
                 .expect("successor generation stages");
             let second = service
                 .commit_staged_with_operation(staged, None)
@@ -16931,7 +16932,14 @@ mod tests {
             (first, second, evidence)
         };
 
-        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+        // Restore is a separate bounded operation. A slow CI runner must not
+        // inherit the nearly spent indexing deadline from the prior service.
+        let restore_cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(60))
+                .expect("test deadline is representable"),
+        );
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &restore_cancellation)
             .expect("durable service restores");
         assert_eq!(
             restored.active_generation_for(second.receipt().repository),
