@@ -70,6 +70,11 @@ const WINDOWS_REPO_INDEX_P99_NS: u64 = 3_000_000_000;
 const COLD_CODE_LOCATE_P50_NS: u64 = 300_000_000;
 const COLD_CODE_LOCATE_P95_NS: u64 = 400_000_000;
 const COLD_CODE_LOCATE_P99_NS: u64 = 600_000_000;
+// Intel macOS hosted runners have a wider fresh-process discovery tail. Keep
+// the shared cold budgets for every other target and all warm-query bounds.
+const X86_64_MACOS_COLD_CODE_LOCATE_P50_NS: u64 = 500_000_000;
+const X86_64_MACOS_COLD_CODE_LOCATE_P95_NS: u64 = 1_250_000_000;
+const X86_64_MACOS_COLD_CODE_LOCATE_P99_NS: u64 = 3_000_000_000;
 #[cfg(target_os = "linux")]
 const PROCESS_TREE_RSS_P99_BYTES: u64 = 1024 * 1024 * 1024;
 const TOKENIZER_ASSET_SHA256: &str =
@@ -162,6 +167,21 @@ fn repo_index_tail_budget_is_platform_aware() {
     } else {
         assert_eq!(p95, IMPACT_P95_NS);
         assert_eq!(p99, IMPACT_P95_NS.saturating_mul(2));
+    }
+}
+
+#[test]
+fn cold_code_locate_budget_is_platform_aware() {
+    let (p50, p95, p99) = cold_code_locate_budgets_ns();
+
+    if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        assert_eq!(p50, X86_64_MACOS_COLD_CODE_LOCATE_P50_NS);
+        assert_eq!(p95, X86_64_MACOS_COLD_CODE_LOCATE_P95_NS);
+        assert_eq!(p99, X86_64_MACOS_COLD_CODE_LOCATE_P99_NS);
+    } else {
+        assert_eq!(p50, COLD_CODE_LOCATE_P50_NS);
+        assert_eq!(p95, COLD_CODE_LOCATE_P95_NS);
+        assert_eq!(p99, COLD_CODE_LOCATE_P99_NS);
     }
 }
 
@@ -664,12 +684,13 @@ fn performance_thresholds() -> Vec<PerformanceThreshold> {
             unavailable_policy: UnavailablePolicy::Block,
         });
     }
+    let cold_code_locate_budgets = cold_code_locate_budgets_ns();
     for (condition_id, p50_budget, p95_budget, p99_budget) in [
         (
             "cold-small-complete",
-            COLD_CODE_LOCATE_P50_NS,
-            COLD_CODE_LOCATE_P95_NS,
-            COLD_CODE_LOCATE_P99_NS,
+            cold_code_locate_budgets.0,
+            cold_code_locate_budgets.1,
+            cold_code_locate_budgets.2,
         ),
         (
             "warm-large-complete",
@@ -722,6 +743,22 @@ fn performance_thresholds() -> Vec<PerformanceThreshold> {
         });
     }
     thresholds
+}
+
+fn cold_code_locate_budgets_ns() -> (u64, u64, u64) {
+    if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        (
+            X86_64_MACOS_COLD_CODE_LOCATE_P50_NS,
+            X86_64_MACOS_COLD_CODE_LOCATE_P95_NS,
+            X86_64_MACOS_COLD_CODE_LOCATE_P99_NS,
+        )
+    } else {
+        (
+            COLD_CODE_LOCATE_P50_NS,
+            COLD_CODE_LOCATE_P95_NS,
+            COLD_CODE_LOCATE_P99_NS,
+        )
+    }
 }
 
 fn wall_latency_budgets_ns(tool: &str) -> (u64, u64, u64) {
