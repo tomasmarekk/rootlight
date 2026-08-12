@@ -416,7 +416,6 @@ jobs:
     permissions:
       actions: read
       contents: none
-      id-token: write
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -429,85 +428,24 @@ jobs:
         shell: bash
         env:
           ROOTLIGHT_UPDATE_KEY_ID: ${{ vars.ROOTLIGHT_UPDATE_KEY_ID }}
+          ROOTLIGHT_UPDATE_PRIVATE_SEED_HEX: ${{ secrets.ROOTLIGHT_UPDATE_PRIVATE_SEED_HEX }}
           ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX: ${{ vars.ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX }}
-          ROOTLIGHT_UPDATE_SIGNER_AUDIENCE: ${{ vars.ROOTLIGHT_UPDATE_SIGNER_AUDIENCE }}
-          ROOTLIGHT_UPDATE_SIGNER_URL: ${{ vars.ROOTLIGHT_UPDATE_SIGNER_URL }}
-          SOURCE_REVISION: ${{ github.sha }}
         run: |
           [[ "$ROOTLIGHT_UPDATE_KEY_ID" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]
+          [[ "$ROOTLIGHT_UPDATE_PRIVATE_SEED_HEX" =~ ^[0-9a-f]{64}$ ]]
           [[ "$ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]
-          test "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" != ""
-          test "$ACTIONS_ID_TOKEN_REQUEST_URL" != ""
-          SIGNER_AUDIENCE="$ROOTLIGHT_UPDATE_SIGNER_AUDIENCE" \
-            SIGNER_URL="$ROOTLIGHT_UPDATE_SIGNER_URL" \
-            python - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          audience = os.environ["SIGNER_AUDIENCE"]
-          signer_url = os.environ["SIGNER_URL"]
-          try:
-              audience_bytes = audience.encode("ascii")
-              signer_url_bytes = signer_url.encode("ascii")
-          except UnicodeEncodeError as error:
-              raise SystemExit("protected signer configuration must be ASCII") from error
-          if not 1 <= len(audience_bytes) <= 512 or any(
-              byte < 0x21 or byte == 0x7F for byte in audience_bytes
-          ):
-              raise SystemExit("protected signer audience is invalid")
-          if not 1 <= len(signer_url_bytes) <= 2048 or any(
-              byte < 0x21 or byte == 0x7F for byte in signer_url_bytes
-          ):
-              raise SystemExit("protected signer URL is invalid")
-          try:
-              parsed = urlsplit(signer_url)
-              parsed_port = parsed.port
-          except ValueError as error:
-              raise SystemExit("protected signer URL is invalid") from error
-          if (
-              parsed.scheme != "https"
-              or parsed.hostname is None
-              or parsed.username is not None
-              or parsed.password is not None
-              or parsed.query
-              or parsed.fragment
-              or parsed_port == 0
-          ):
-              raise SystemExit("protected signer URL must be an HTTPS endpoint")
-          PY
-
-          oidc_response="$(
-            curl --fail-with-body --silent --show-error \
-              --connect-timeout 10 \
-              --max-time 30 \
-              --header "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              --get \
-              --data-urlencode "audience=$ROOTLIGHT_UPDATE_SIGNER_AUDIENCE" \
-              "$ACTIONS_ID_TOKEN_REQUEST_URL"
-          )"
-          oidc_token="$(
-            OIDC_RESPONSE="$oidc_response" python - <<'PY'
-          import json
-          import os
-          import re
-
-          response = json.loads(os.environ["OIDC_RESPONSE"])
-          if set(response) != {"value"} or not isinstance(response["value"], str):
-              raise SystemExit("GitHub OIDC response has an unexpected shape")
-          if re.fullmatch(
-              r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
-              response["value"],
-          ) is None:
-              raise SystemExit("GitHub OIDC response is not a canonical JWT")
-          print(response["value"], end="")
-          PY
-          )"
-          unset oidc_response
-          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
 
           temporary="$(mktemp -d)"
           trap 'rm -rf "$temporary"' EXIT
+          umask 077
+          printf '302e020100300506032b657004220420%s' \
+            "$ROOTLIGHT_UPDATE_PRIVATE_SEED_HEX" |
+            xxd -r -p > "$temporary/private-key.der"
+          unset ROOTLIGHT_UPDATE_PRIVATE_SEED_HEX
+          openssl pkey \
+            -inform DER \
+            -in "$temporary/private-key.der" \
+            -out "$temporary/private-key.pem"
           printf '302a300506032b6570032100%s' "$ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX" |
             xxd -r -p > "$temporary/public-key.der"
           openssl pkey \
@@ -519,85 +457,16 @@ jobs:
           sign_payload() {
             local payload="$1"
             local signature="$2"
-            local payload_sha256
-            local response="$temporary/response.json"
             local signature_binary="$temporary/signature.bin"
-            local signature_schema="rootlight.protected-signature/1"
-            payload_sha256="$(sha256sum "$payload" | cut -d ' ' -f 1)"
-            curl --fail-with-body --silent --show-error \
-              --connect-timeout 10 \
-              --max-time 30 \
-              --request POST \
-              --header "Authorization: Bearer $oidc_token" \
-              --header "Content-Type: application/octet-stream" \
-              --header "X-Rootlight-Signature-Schema: $signature_schema" \
-              --header "X-Rootlight-Source-Revision: $SOURCE_REVISION" \
-              --header "X-Rootlight-Key-Id: $ROOTLIGHT_UPDATE_KEY_ID" \
-              --header "X-Rootlight-Public-Key-Hex: $ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX" \
-              --header "X-Rootlight-Payload-Sha256: $payload_sha256" \
-              --data-binary "@$payload" \
-              --output "$response" \
-              "$ROOTLIGHT_UPDATE_SIGNER_URL"
-            PAYLOAD="$payload" \
-              PAYLOAD_SHA256="$payload_sha256" \
-              RESPONSE="$response" \
-              ROOTLIGHT_UPDATE_KEY_ID="$ROOTLIGHT_UPDATE_KEY_ID" \
-              ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX="$ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX" \
-              SIGNATURE="$signature" \
-              SIGNATURE_SCHEMA="$signature_schema" \
-              SOURCE_REVISION="$SOURCE_REVISION" \
-              python - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-
-          payload = Path(os.environ["PAYLOAD"]).read_bytes()
-          if hashlib.sha256(payload).hexdigest() != os.environ["PAYLOAD_SHA256"]:
-              raise SystemExit("payload changed across the protected signing request")
-          response_bytes = Path(os.environ["RESPONSE"]).read_bytes()
-          if not 1 <= len(response_bytes) <= 4096:
-              raise SystemExit("protected signer response exceeds its bound")
-
-          def exact_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-              response_object: dict[str, object] = {}
-              for key, value in pairs:
-                  if key in response_object:
-                      raise ValueError("duplicate protected signer response field")
-                  response_object[key] = value
-              return response_object
-
-          try:
-              response = json.loads(response_bytes, object_pairs_hook=exact_object)
-          except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
-              raise SystemExit("protected signer response is invalid JSON") from error
-          expected = {
-              "key_id": os.environ["ROOTLIGHT_UPDATE_KEY_ID"],
-              "payload_sha256": os.environ["PAYLOAD_SHA256"],
-              "public_key_hex": os.environ["ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX"],
-              "schema": os.environ["SIGNATURE_SCHEMA"],
-              "source_revision": os.environ["SOURCE_REVISION"],
-          }
-          if not isinstance(response, dict) or set(response) != {
-              *expected,
-              "signature_hex",
-          }:
-              raise SystemExit("protected signer response has an unexpected shape")
-          if {key: response.get(key) for key in expected} != expected:
-              raise SystemExit("protected signer identity or payload binding differs")
-          signature = response["signature_hex"]
-          if (
-              not isinstance(signature, str)
-              or len(signature) != 128
-              or any(character not in "0123456789abcdef" for character in signature)
-          ):
-              raise SystemExit("protected signer returned a non-canonical signature")
-          Path(os.environ["SIGNATURE"]).write_text(
-              f"{signature}\n", encoding="ascii", newline="\n"
-          )
-          PY
-            xxd -r -p < "$signature" > "$signature_binary"
+            openssl pkeyutl \
+              -sign \
+              -inkey "$temporary/private-key.pem" \
+              -rawin \
+              -in "$payload" \
+              -out "$signature_binary"
             test "$(wc -c < "$signature_binary")" -eq 64
+            xxd -p -c 256 "$signature_binary" > "$signature"
+            [[ "$(tr -d '\n' < "$signature")" =~ ^[0-9a-f]{128}$ ]]
             openssl pkeyutl \
               -verify \
               -pubin \
@@ -647,7 +516,6 @@ jobs:
             artifact_signature="${metadata%.update.json}.artifact.sig"
             sign_payload "$artifact_message" "$artifact_signature"
           done
-          unset oidc_token
           printf '%s\n' "$ROOTLIGHT_UPDATE_PUBLIC_KEY_HEX" \
             > artifacts/update-release/rootlight-update-public-key.txt
           test "$(

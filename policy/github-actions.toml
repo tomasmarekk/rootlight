@@ -59,16 +59,6 @@ permissions = [
 
 [[write_permission_jobs]]
 workflow = ".github/workflows/release.yml"
-job = "sign-update-metadata"
-condition = "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
-permissions = [
-  "actions=read",
-  "contents=none",
-  "id-token=write",
-]
-
-[[write_permission_jobs]]
-workflow = ".github/workflows/release.yml"
 job = "publish"
 condition = "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
 permissions = [
