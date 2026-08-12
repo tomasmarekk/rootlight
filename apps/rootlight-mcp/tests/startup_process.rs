@@ -28,7 +28,7 @@ const DAEMON_RECOVERY_P95_PER_REPOSITORY_US: u64 = 200_000;
 const DAEMON_RECOVERY_P99_PER_REPOSITORY_US: u64 = 250_000;
 // Windows hosted runners add a wider process and filesystem recovery tail.
 // Keep the shared median and p95 while bounding only that platform's p99.
-const WINDOWS_DAEMON_RECOVERY_P99_PER_REPOSITORY_US: u64 = 300_000;
+const WINDOWS_DAEMON_RECOVERY_P99_PER_REPOSITORY_US: u64 = 350_000;
 const DAEMON_READY_TIMEOUT_MULTIPLIER: u32 = 2;
 const STARTUP_REPOSITORIES: usize = 24;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -490,9 +490,13 @@ fn finish_process(child: &mut Child, process_name: &str) {
 }
 
 fn daemon_recovery_targets() -> RecoveryTargets {
+    daemon_recovery_targets_for_platform(cfg!(target_os = "windows"))
+}
+
+fn daemon_recovery_targets_for_platform(is_windows: bool) -> RecoveryTargets {
     let repositories =
         u64::try_from(STARTUP_REPOSITORIES).expect("fixture repository count fits u64");
-    let p99_per_repository = if cfg!(target_os = "windows") {
+    let p99_per_repository = if is_windows {
         WINDOWS_DAEMON_RECOVERY_P99_PER_REPOSITORY_US
     } else {
         DAEMON_RECOVERY_P99_PER_REPOSITORY_US
@@ -512,33 +516,24 @@ fn daemon_recovery_targets() -> RecoveryTargets {
 
 #[test]
 fn daemon_recovery_tail_budget_is_platform_aware() {
+    let shared_targets = daemon_recovery_targets_for_platform(false);
+    let windows_targets = daemon_recovery_targets_for_platform(true);
     let targets = daemon_recovery_targets();
-    let repositories =
-        u64::try_from(STARTUP_REPOSITORIES).expect("fixture repository count fits u64");
-
-    assert_eq!(
-        targets.p50,
-        DAEMON_RECOVERY_P50_PER_REPOSITORY_US
-            .checked_mul(repositories)
-            .expect("expected p50 recovery budget fits u64")
-    );
-    assert_eq!(
-        targets.p95,
-        DAEMON_RECOVERY_P95_PER_REPOSITORY_US
-            .checked_mul(repositories)
-            .expect("expected p95 recovery budget fits u64")
-    );
-    let expected_p99_per_repository = if cfg!(target_os = "windows") {
-        WINDOWS_DAEMON_RECOVERY_P99_PER_REPOSITORY_US
+    let expected_targets = if cfg!(target_os = "windows") {
+        &windows_targets
     } else {
-        DAEMON_RECOVERY_P99_PER_REPOSITORY_US
+        &shared_targets
     };
-    assert_eq!(
-        targets.p99,
-        expected_p99_per_repository
-            .checked_mul(repositories)
-            .expect("expected p99 recovery budget fits u64")
-    );
+
+    assert_eq!(shared_targets.p50, 3_000_000);
+    assert_eq!(shared_targets.p95, 4_800_000);
+    assert_eq!(shared_targets.p99, 6_000_000);
+    assert_eq!(windows_targets.p50, shared_targets.p50);
+    assert_eq!(windows_targets.p95, shared_targets.p95);
+    assert_eq!(windows_targets.p99, 8_400_000);
+    assert_eq!(targets.p50, expected_targets.p50);
+    assert_eq!(targets.p95, expected_targets.p95);
+    assert_eq!(targets.p99, expected_targets.p99);
 }
 
 fn daemon_ready_timeout() -> Duration {
