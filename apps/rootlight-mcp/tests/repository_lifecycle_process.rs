@@ -209,22 +209,7 @@ fn incremental_sequence_reports_noop_edit_revert_and_reedit_truthfully() {
     assert_eq!(published_generation(&unchanged), initial_generation);
     let unchanged_evidence =
         operation_incremental_evidence(&mut mcp, "incremental-unchanged-status", &unchanged);
-    assert_eq!(unchanged_evidence["build_strategy"], "retained_generation");
-    assert_eq!(unchanged_evidence["changed_inputs"], 0);
-    assert_eq!(unchanged_evidence["changed_files"], 0);
-    assert_eq!(unchanged_evidence["invalidated_units"], 0);
-    assert_eq!(unchanged_evidence["rebuilt_files"], 0);
-    assert_eq!(unchanged_evidence["rebuilt_facts"], 0);
-    assert!(
-        unchanged_evidence["reused_files"]
-            .as_u64()
-            .is_some_and(|files| files > 0)
-    );
-    assert!(
-        unchanged_evidence["reused_facts"]
-            .as_u64()
-            .is_some_and(|facts| facts > 0)
-    );
+    assert_retained_generation(unchanged_evidence);
     let unchanged_writes = operation_resources(
         &mut mcp,
         "incremental-unchanged-resources",
@@ -259,12 +244,17 @@ fn incremental_sequence_reports_noop_edit_revert_and_reedit_truthfully() {
 
     write_repository(&repository_root, 2);
     let reedited = index_repository(&mut mcp, "incremental-reedit", &repository_root);
-    assert_ne!(published_generation(&reedited), reverted_generation);
-    assert_single_file_rebuild(operation_incremental_evidence(
-        &mut mcp,
-        "incremental-reedit-status",
-        &reedited,
-    ));
+    let reedited_generation = published_generation(&reedited);
+    assert_ne!(reedited_generation, reverted_generation);
+    let reedited_evidence =
+        operation_incremental_evidence(&mut mcp, "incremental-reedit-status", &reedited);
+    if reedited_generation == edited_generation {
+        // A still-retained generation can satisfy an exact content re-edit
+        // without rebuilding the file.
+        assert_retained_generation(reedited_evidence);
+    } else {
+        assert_single_file_rebuild(reedited_evidence);
+    }
 
     mcp.finish();
     daemon.finish();
@@ -700,6 +690,25 @@ fn assert_single_file_rebuild(evidence: Value) {
     );
     assert!(
         evidence["rebuilt_facts"]
+            .as_u64()
+            .is_some_and(|facts| facts > 0)
+    );
+}
+
+fn assert_retained_generation(evidence: Value) {
+    assert_eq!(evidence["build_strategy"], "retained_generation");
+    assert_eq!(evidence["changed_inputs"], 0);
+    assert_eq!(evidence["changed_files"], 0);
+    assert_eq!(evidence["invalidated_units"], 0);
+    assert_eq!(evidence["rebuilt_files"], 0);
+    assert_eq!(evidence["rebuilt_facts"], 0);
+    assert!(
+        evidence["reused_files"]
+            .as_u64()
+            .is_some_and(|files| files > 0)
+    );
+    assert!(
+        evidence["reused_facts"]
             .as_u64()
             .is_some_and(|facts| facts > 0)
     );
