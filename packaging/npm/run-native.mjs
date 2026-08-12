@@ -86,7 +86,12 @@ export function runLifecycle(action) {
     }
     return;
   }
-  const result = spawnNative("rootlight", ["service", action], "pipe");
+  const lifecycleStdio = process.platform === "win32" ? "pipe" : "ignore";
+  const result = spawnNative(
+    "rootlight",
+    ["service", action],
+    lifecycleStdio,
+  );
   if (isWindowsElevatedServiceDenial(result)) {
     console.warn(
       `rootlight: refusing to ${action} the per-user service from an elevated Windows process; run rootlight service ${action} as the desktop user`,
