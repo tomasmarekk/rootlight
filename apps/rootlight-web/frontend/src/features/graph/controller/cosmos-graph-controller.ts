@@ -70,11 +70,17 @@ export type CosmosGraphControllerOptions = {
   onFallbackRequired?: (reason: "initialization" | "context_loss") => void;
 };
 
+/** Callback fields that may change without replacing an immutable layout controller. */
+export type CosmosGraphControllerCallbacks = Pick<
+  CosmosGraphControllerOptions,
+  "onFallbackRequired" | "onHoverChange" | "onSelectionChange"
+>;
+
 /**
  * Owns Cosmos initialization, model updates, selection, simulation, context recovery, and disposal.
  */
 export class CosmosGraphController {
-  readonly #options: CosmosGraphControllerOptions;
+  #options: CosmosGraphControllerOptions;
   readonly #factory: CosmosGraphFactory;
   readonly #subscribers = new Set<() => void>();
   #snapshot: CosmosGraphControllerSnapshot = {
@@ -102,6 +108,11 @@ export class CosmosGraphController {
   constructor(options: CosmosGraphControllerOptions) {
     this.#options = options;
     this.#factory = options.factory ?? createDefaultCosmosFactory;
+  }
+
+  /** Updates React callbacks without reallocating the layout or GPU controller. */
+  updateCallbacks(callbacks: CosmosGraphControllerCallbacks): void {
+    this.#options = { ...this.#options, ...callbacks };
   }
 
   /** Returns the current small controller snapshot. */

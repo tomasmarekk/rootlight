@@ -1,7 +1,7 @@
 // Bridges one React viewport container to one imperative Cosmos controller.
 // Controller snapshots stay small while typed arrays remain outside React state.
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 import {
   CosmosGraphController,
@@ -44,24 +44,35 @@ export function useGraphController(input: UseGraphControllerInput): UseGraphCont
       new CosmosGraphController({
         controlledSelection,
         factory,
-        layoutIdentity,
-        onFallbackRequired,
-        onHoverChange,
-        onSelectionChange,
+        layoutIdentity: {
+          repositoryId: layoutIdentity.repositoryId,
+          generationId: layoutIdentity.generationId,
+          view: layoutIdentity.view,
+          scopeFingerprint: layoutIdentity.scopeFingerprint,
+          layoutVersion: layoutIdentity.layoutVersion,
+        },
         reducedMotion,
         view,
       }),
     [
       controlledSelection,
       factory,
-      layoutIdentity,
-      onFallbackRequired,
-      onHoverChange,
-      onSelectionChange,
+      layoutIdentity.generationId,
+      layoutIdentity.layoutVersion,
+      layoutIdentity.repositoryId,
+      layoutIdentity.scopeFingerprint,
+      layoutIdentity.view,
       reducedMotion,
       view,
     ],
   );
+  useLayoutEffect(() => {
+    controller.updateCallbacks({
+      onFallbackRequired,
+      onHoverChange,
+      onSelectionChange,
+    });
+  }, [controller, onFallbackRequired, onHoverChange, onSelectionChange]);
   const snapshot = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,
