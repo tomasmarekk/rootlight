@@ -77,6 +77,7 @@ const MAX_SOURCE_POINTER_BYTES: u64 = 256;
 const RECOVERY_WRITE_BUFFER_BYTES: usize = 1024 * 1024;
 const MAX_DURABLE_ENTRIES: usize = 65_536;
 const MAX_SOURCE_BLOB_ENTRIES: usize = 1_000_000;
+const MAX_STORAGE_INVENTORY_ENTRIES: usize = 2_000_000;
 const MAX_RESTORED_OPERATIONS: usize = 256;
 const MAX_QUARANTINED_GENERATIONS: usize = 256;
 const STAGING_PREFIX: &str = "stage-";
@@ -270,6 +271,64 @@ pub(super) struct DurableSourceWrite {
     pub(super) referenced_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DurableGenerationStorage {
+    pub(super) repository: RepositoryId,
+    pub(super) generation: GenerationId,
+    pub(super) parent: Option<GenerationId>,
+    pub(super) unique_bytes: u64,
+    pub(super) active: bool,
+    pub(super) predecessor: bool,
+    pub(super) reclaimable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DurableStorageInventory {
+    pub(super) generations: Vec<DurableGenerationStorage>,
+    pub(super) generation_unique_bytes: u64,
+    pub(super) active_generation_bytes: u64,
+    pub(super) predecessor_generation_bytes: u64,
+    pub(super) shared_source_bytes: u64,
+    pub(super) temporary_bytes: u64,
+    pub(super) reclaimable_bytes: u64,
+    pub(super) pinned_bytes: Option<u64>,
+    pub(super) repository_overhead_bytes: u64,
+    pub(super) quarantine_bytes: u64,
+    pub(super) total_physical_bytes: u64,
+    pub(super) available_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DurableStorageAdmissionPolicy {
+    pub(super) required_bytes: u64,
+    pub(super) maximum_storage_bytes: Option<u64>,
+    pub(super) minimum_free_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DurableStorageAdmissionScope {
+    DurableBudget,
+    FilesystemFreeSpace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DurableStorageAdmission {
+    pub(super) required_bytes: u64,
+    pub(super) observed_bytes: u64,
+    pub(super) limit_bytes: Option<u64>,
+    pub(super) minimum_free_bytes: u64,
+    pub(super) admission_margin_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DurableStorageAdmissionFailure {
+    pub(super) scope: DurableStorageAdmissionScope,
+    pub(super) required_bytes: u64,
+    pub(super) observed_bytes: u64,
+    pub(super) limit_bytes: u64,
+    pub(super) minimum_free_bytes: u64,
+}
+
 struct SourcePointer {
     digest: ContentHash,
     bytes: u64,
@@ -406,6 +465,33 @@ struct GenerationRestoreRequest<'a> {
     published_generation_count: Option<u64>,
     repository_directory: &'a PrivateDirectory<'a>,
     repository_path: &'a Path,
+}
+
+struct StorageScanBudget {
+    visited_entries: usize,
+}
+
+struct ScannedGeneration {
+    repository: RepositoryId,
+    generation: GenerationId,
+    parent: Option<GenerationId>,
+    tree_bytes: u64,
+    source_blobs: BTreeMap<ContentHash, u64>,
+}
+
+struct ScannedSourceBlob {
+    bytes: u64,
+    payload_bytes: u64,
+}
+
+#[derive(Default)]
+struct ScannedRepositoryStorage {
+    generations: BTreeMap<GenerationId, ScannedGeneration>,
+    markers: BTreeMap<u64, ActivationMarker>,
+    metadata_bytes: BTreeMap<u64, u64>,
+    marker_bytes: BTreeMap<u64, u64>,
+    source_blobs: BTreeMap<ContentHash, ScannedSourceBlob>,
+    temporary_bytes: u64,
 }
 
 struct RecoverySnapshotWriter<W> {
@@ -709,15 +795,46 @@ impl DurableCatalog {
         &self,
         required_bytes: u64,
     ) -> Result<(), FirstSliceError> {
+        let admission = self.check_storage_admission(DurableStorageAdmissionPolicy {
+            required_bytes,
+            maximum_storage_bytes: None,
+            minimum_free_bytes: 0,
+        })?;
+        match admission {
+            Ok(_) => Ok(()),
+            Err(failure) => {
+                debug_assert_eq!(
+                    failure.scope,
+                    DurableStorageAdmissionScope::FilesystemFreeSpace
+                );
+                Err(FirstSliceError::InsufficientDiskSpace {
+                    required_bytes: failure.required_bytes,
+                    available_bytes: failure.observed_bytes,
+                })
+            }
+        }
+    }
+
+    pub(super) fn storage_inventory(&self) -> Result<DurableStorageInventory, FirstSliceError> {
         let available_bytes =
             fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
-        if available_bytes < required_bytes {
-            return Err(FirstSliceError::InsufficientDiskSpace {
-                required_bytes,
-                available_bytes,
-            });
-        }
-        Ok(())
+        // Scanning the committed tree makes crash recovery, publication, and compaction visible
+        // without trusting counters that may not have been flushed before process termination.
+        scan_storage_inventory(
+            &self.repositories,
+            &self.quarantine,
+            self.maximum_repositories,
+            available_bytes,
+        )
+    }
+
+    pub(super) fn check_storage_admission(
+        &self,
+        policy: DurableStorageAdmissionPolicy,
+    ) -> Result<Result<DurableStorageAdmission, DurableStorageAdmissionFailure>, FirstSliceError>
+    {
+        let inventory = self.storage_inventory()?;
+        Ok(check_storage_admission(&inventory, policy))
     }
 
     pub(super) fn storage_health_snapshot(&self) -> Result<(u64, u64), FirstSliceError> {
@@ -1913,6 +2030,455 @@ fn private_entry_names(directory: &PrivateDirectory<'_>) -> Result<Vec<OsString>
     Ok(names)
 }
 
+impl StorageScanBudget {
+    fn new() -> Self {
+        Self { visited_entries: 0 }
+    }
+
+    fn visit(&mut self) -> Result<(), FirstSliceError> {
+        self.visited_entries = self
+            .visited_entries
+            .checked_add(1)
+            .ok_or(FirstSliceError::Limits)?;
+        if self.visited_entries > MAX_STORAGE_INVENTORY_ENTRIES {
+            return Err(FirstSliceError::Retention);
+        }
+        Ok(())
+    }
+}
+
+fn scan_storage_inventory(
+    repositories: &PrivateDirectory<'_>,
+    quarantine: &PrivateDirectory<'_>,
+    maximum_repositories: usize,
+    available_bytes: u64,
+) -> Result<DurableStorageInventory, FirstSliceError> {
+    let repository_names = private_entry_names(repositories)?;
+    if repository_names.len() > maximum_repositories {
+        return Err(FirstSliceError::Retention);
+    }
+    let mut budget = StorageScanBudget::new();
+    let mut scanned_repositories = Vec::new();
+    scanned_repositories
+        .try_reserve_exact(repository_names.len())
+        .map_err(|_| FirstSliceError::Retention)?;
+    for repository_name in repository_names {
+        budget.visit()?;
+        let repository_text = repository_name
+            .to_str()
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
+        let repository_id =
+            RepositoryId::from_str(repository_text).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let repository = PrivateDirectory::open(repositories.capability(), &repository_name)
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        scanned_repositories.push(scan_repository_storage(
+            repository_id,
+            &repository,
+            &mut budget,
+        )?);
+    }
+    build_storage_inventory(
+        scanned_repositories,
+        directory_tree_bytes(quarantine, &mut budget)?,
+        available_bytes,
+    )
+}
+
+fn scan_repository_storage(
+    repository_id: RepositoryId,
+    repository: &PrivateDirectory<'_>,
+    budget: &mut StorageScanBudget,
+) -> Result<ScannedRepositoryStorage, FirstSliceError> {
+    let mut scanned = ScannedRepositoryStorage::default();
+    for name in private_entry_names(repository)? {
+        budget.visit()?;
+        let text = name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
+        if text.starts_with(STAGING_PREFIX) {
+            let staging = PrivateDirectory::open(repository.capability(), &name)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            checked_add_assign(
+                &mut scanned.temporary_bytes,
+                directory_tree_bytes(&staging, budget)?,
+            )?;
+        } else if let Some((sequence, generation)) = parse_activation_name(text) {
+            let marker = read_activation_marker(repository, name, sequence, generation)?;
+            let bytes = directory_tree_bytes(
+                &PrivateDirectory::open(repository.capability(), &marker.name)
+                    .map_err(|_| FirstSliceError::CatalogCorrupt)?,
+                budget,
+            )?;
+            if scanned.markers.insert(sequence, marker).is_some()
+                || scanned.marker_bytes.insert(sequence, bytes).is_some()
+            {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+        } else if let Some(sequence) = parse_metadata_name(text) {
+            read_repository_metadata(repository_id, repository, &name, sequence)?;
+            let bytes = directory_tree_bytes(
+                &PrivateDirectory::open(repository.capability(), &name)
+                    .map_err(|_| FirstSliceError::CatalogCorrupt)?,
+                budget,
+            )?;
+            if scanned.metadata_bytes.insert(sequence, bytes).is_some() {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+        } else if text == SOURCE_BLOBS_DIRECTORY {
+            scan_source_blob_storage(repository, budget, &mut scanned)?;
+        } else if let Ok(generation) = GenerationId::from_str(text) {
+            let generation_directory = PrivateDirectory::open(repository.capability(), &name)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let generation_storage =
+                scan_generation_storage(repository_id, generation, &generation_directory, budget)?;
+            if scanned
+                .generations
+                .insert(generation, generation_storage)
+                .is_some()
+            {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+        } else {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+    }
+    if scanned.markers.values().any(|marker| {
+        !scanned
+            .generations
+            .contains_key(&marker.manifest.generation)
+    }) {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(scanned)
+}
+
+fn scan_generation_storage(
+    repository: RepositoryId,
+    generation: GenerationId,
+    directory: &PrivateDirectory<'_>,
+    budget: &mut StorageScanBudget,
+) -> Result<ScannedGeneration, FirstSliceError> {
+    let manifest_bytes = directory
+        .read_file_bounded(OsStr::new(MANIFEST_FILENAME), MAX_MANIFEST_BYTES)
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    let manifest: DurableGenerationManifest =
+        serde_json::from_slice(&manifest_bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    if manifest.receipt.repository != repository || manifest.receipt.generation != generation {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    let source_blobs = match (manifest.version, manifest.source_storage) {
+        (LEGACY_GENERATION_MANIFEST_VERSION, None) => BTreeMap::new(),
+        (
+            GENERATION_MANIFEST_VERSION,
+            Some(DurableSourceStorage {
+                version: SOURCE_STORAGE_VERSION,
+            }),
+        ) => generation_source_digests(directory)?,
+        _ => return Err(FirstSliceError::CatalogCorrupt),
+    };
+    Ok(ScannedGeneration {
+        repository,
+        generation,
+        parent: manifest.receipt.parent,
+        tree_bytes: directory_tree_bytes(directory, budget)?,
+        source_blobs,
+    })
+}
+
+fn generation_source_digests(
+    generation: &PrivateDirectory<'_>,
+) -> Result<BTreeMap<ContentHash, u64>, FirstSliceError> {
+    let sources = PrivateDirectory::open(generation.capability(), OsStr::new(SOURCES_DIRECTORY))
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    let mut blobs = BTreeMap::new();
+    for name in private_entry_names(&sources)? {
+        let pointer = sources
+            .read_file_bounded(&name, MAX_SOURCE_POINTER_BYTES)
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let pointer = decode_source_pointer(&pointer)?;
+        if let Some(bytes) = blobs.insert(pointer.digest, pointer.bytes)
+            && bytes != pointer.bytes
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+    }
+    Ok(blobs)
+}
+
+fn scan_source_blob_storage(
+    repository: &PrivateDirectory<'_>,
+    budget: &mut StorageScanBudget,
+    scanned: &mut ScannedRepositoryStorage,
+) -> Result<(), FirstSliceError> {
+    let blobs = PrivateDirectory::open(repository.capability(), OsStr::new(SOURCE_BLOBS_DIRECTORY))
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+    for name in private_entry_names(&blobs)? {
+        budget.visit()?;
+        let text = name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
+        let blob = PrivateDirectory::open(blobs.capability(), &name)
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let bytes = directory_tree_bytes(&blob, budget)?;
+        if text.starts_with(STAGING_PREFIX) {
+            checked_add_assign(&mut scanned.temporary_bytes, bytes)?;
+            continue;
+        }
+        let digest = ContentHash::from_str(text).map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        let payload_metadata = blob
+            .capability()
+            .symlink_metadata(Path::new(SOURCE_BLOB_PAYLOAD_FILENAME))
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        if !payload_metadata.is_file() || payload_metadata.file_type().is_symlink() {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let payload_bytes = payload_metadata.len();
+        if payload_bytes > MAX_SNAPSHOT_BYTES || payload_bytes > DEFAULT_MAX_SOURCE_FILE_BYTES {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        let payload = blob
+            .read_file_bounded(OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME), payload_bytes)
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        if content_hash_bytes(&payload) != digest
+            || scanned
+                .source_blobs
+                .insert(
+                    digest,
+                    ScannedSourceBlob {
+                        bytes,
+                        payload_bytes,
+                    },
+                )
+                .is_some()
+        {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+    }
+    Ok(())
+}
+
+fn build_storage_inventory(
+    scanned_repositories: Vec<ScannedRepositoryStorage>,
+    quarantine_bytes: u64,
+    available_bytes: u64,
+) -> Result<DurableStorageInventory, FirstSliceError> {
+    let generation_capacity =
+        scanned_repositories
+            .iter()
+            .try_fold(0_usize, |total, repository| {
+                total
+                    .checked_add(repository.generations.len())
+                    .ok_or(FirstSliceError::Limits)
+            })?;
+    let mut generations = Vec::new();
+    generations
+        .try_reserve_exact(generation_capacity)
+        .map_err(|_| FirstSliceError::Retention)?;
+    let mut generation_unique_bytes = 0_u64;
+    let mut active_generation_bytes = 0_u64;
+    let mut predecessor_generation_bytes = 0_u64;
+    let mut shared_source_bytes = 0_u64;
+    let mut temporary_bytes = 0_u64;
+    let mut reclaimable_bytes = 0_u64;
+    let mut repository_overhead_bytes = 0_u64;
+    for repository in scanned_repositories {
+        let latest_by_generation = latest_activation_sequences(&repository.markers);
+        let active = latest_by_generation
+            .iter()
+            .max_by_key(|(_, sequence)| **sequence)
+            .map(|(generation, _)| *generation);
+        let predecessor = active
+            .and_then(|generation| repository.generations.get(&generation))
+            .and_then(|generation| generation.parent)
+            .filter(|generation| repository.generations.contains_key(generation));
+        let retained: BTreeSet<_> = latest_by_generation.keys().copied().collect();
+        let referenced_source_blobs = repository
+            .generations
+            .values()
+            .filter(|generation| retained.contains(&generation.generation))
+            .flat_map(|generation| generation.source_blobs.keys().copied())
+            .collect::<BTreeSet<_>>();
+        for digest in &referenced_source_blobs {
+            let blob = repository
+                .source_blobs
+                .get(digest)
+                .ok_or(FirstSliceError::CatalogCorrupt)?;
+            checked_add_assign(&mut shared_source_bytes, blob.bytes)?;
+        }
+        for generation in repository
+            .generations
+            .values()
+            .filter(|generation| retained.contains(&generation.generation))
+        {
+            for (digest, declared_bytes) in &generation.source_blobs {
+                let blob = repository
+                    .source_blobs
+                    .get(digest)
+                    .ok_or(FirstSliceError::CatalogCorrupt)?;
+                if blob.payload_bytes != *declared_bytes {
+                    return Err(FirstSliceError::CatalogCorrupt);
+                }
+            }
+        }
+        for (digest, blob) in &repository.source_blobs {
+            if !referenced_source_blobs.contains(digest) {
+                checked_add_assign(&mut reclaimable_bytes, blob.bytes)?;
+            }
+        }
+        checked_add_assign(&mut temporary_bytes, repository.temporary_bytes)?;
+        let retained_marker_names =
+            retained_activation_marker_names(&repository.markers, &retained);
+        for (sequence, bytes) in &repository.marker_bytes {
+            checked_add_assign(&mut repository_overhead_bytes, *bytes)?;
+            let marker = repository
+                .markers
+                .get(sequence)
+                .ok_or(FirstSliceError::CatalogCorrupt)?;
+            if !retained_marker_names.contains(&marker.name) {
+                checked_add_assign(&mut reclaimable_bytes, *bytes)?;
+            }
+        }
+        let latest_metadata_sequence = repository.metadata_bytes.keys().next_back().copied();
+        for (sequence, bytes) in &repository.metadata_bytes {
+            checked_add_assign(&mut repository_overhead_bytes, *bytes)?;
+            if Some(*sequence) != latest_metadata_sequence {
+                checked_add_assign(&mut reclaimable_bytes, *bytes)?;
+            }
+        }
+        for generation in repository.generations.into_values() {
+            let is_retained = retained.contains(&generation.generation);
+            let active_generation = active == Some(generation.generation);
+            let predecessor_generation = predecessor == Some(generation.generation);
+            let reclaimable = !is_retained;
+            checked_add_assign(&mut generation_unique_bytes, generation.tree_bytes)?;
+            if active_generation {
+                checked_add_assign(&mut active_generation_bytes, generation.tree_bytes)?;
+            }
+            if predecessor_generation {
+                checked_add_assign(&mut predecessor_generation_bytes, generation.tree_bytes)?;
+            }
+            if reclaimable {
+                checked_add_assign(&mut reclaimable_bytes, generation.tree_bytes)?;
+            }
+            generations.push(DurableGenerationStorage {
+                repository: generation.repository,
+                generation: generation.generation,
+                parent: generation.parent,
+                unique_bytes: generation.tree_bytes,
+                active: active_generation,
+                predecessor: predecessor_generation,
+                reclaimable,
+            });
+        }
+    }
+    generations.sort_unstable_by_key(|generation| (generation.repository, generation.generation));
+    let total_physical_bytes = generation_unique_bytes
+        .checked_add(shared_source_bytes)
+        .and_then(|bytes| bytes.checked_add(temporary_bytes))
+        .and_then(|bytes| bytes.checked_add(repository_overhead_bytes))
+        .and_then(|bytes| bytes.checked_add(quarantine_bytes))
+        .ok_or(FirstSliceError::Limits)?;
+    Ok(DurableStorageInventory {
+        generations,
+        generation_unique_bytes,
+        active_generation_bytes,
+        predecessor_generation_bytes,
+        shared_source_bytes,
+        temporary_bytes,
+        reclaimable_bytes,
+        pinned_bytes: None,
+        repository_overhead_bytes,
+        quarantine_bytes,
+        total_physical_bytes,
+        available_bytes,
+    })
+}
+
+fn latest_activation_sequences(
+    markers: &BTreeMap<u64, ActivationMarker>,
+) -> BTreeMap<GenerationId, u64> {
+    let mut latest: BTreeMap<GenerationId, u64> = BTreeMap::new();
+    for marker in markers.values() {
+        latest
+            .entry(marker.manifest.generation)
+            .and_modify(|sequence| *sequence = (*sequence).max(marker.sequence))
+            .or_insert(marker.sequence);
+    }
+    latest
+}
+
+fn directory_tree_bytes(
+    directory: &PrivateDirectory<'_>,
+    budget: &mut StorageScanBudget,
+) -> Result<u64, FirstSliceError> {
+    let mut total = 0_u64;
+    for name in private_entry_names(directory)? {
+        budget.visit()?;
+        let metadata = directory
+            .capability()
+            .symlink_metadata(Path::new(&name))
+            .map_err(|_| FirstSliceError::Catalog)?;
+        if metadata.file_type().is_symlink() {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        if metadata.is_file() {
+            checked_add_assign(&mut total, metadata.len())?;
+        } else if metadata.is_dir() {
+            let child = PrivateDirectory::open(directory.capability(), &name)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            checked_add_assign(&mut total, directory_tree_bytes(&child, budget)?)?;
+        } else {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+    }
+    Ok(total)
+}
+
+fn checked_add_assign(total: &mut u64, bytes: u64) -> Result<(), FirstSliceError> {
+    *total = total.checked_add(bytes).ok_or(FirstSliceError::Limits)?;
+    Ok(())
+}
+
+fn check_storage_admission(
+    inventory: &DurableStorageInventory,
+    policy: DurableStorageAdmissionPolicy,
+) -> Result<DurableStorageAdmission, DurableStorageAdmissionFailure> {
+    let observed_bytes = inventory.total_physical_bytes;
+    let projected_bytes = observed_bytes.saturating_add(policy.required_bytes);
+    if let Some(limit_bytes) = policy.maximum_storage_bytes
+        && projected_bytes > limit_bytes
+    {
+        return Err(DurableStorageAdmissionFailure {
+            scope: DurableStorageAdmissionScope::DurableBudget,
+            required_bytes: policy.required_bytes,
+            observed_bytes,
+            limit_bytes,
+            minimum_free_bytes: policy.minimum_free_bytes,
+        });
+    }
+    let usable_free_bytes = inventory
+        .available_bytes
+        .saturating_sub(policy.minimum_free_bytes);
+    if policy.required_bytes > usable_free_bytes {
+        return Err(DurableStorageAdmissionFailure {
+            scope: DurableStorageAdmissionScope::FilesystemFreeSpace,
+            required_bytes: policy.required_bytes,
+            observed_bytes: inventory.available_bytes,
+            limit_bytes: usable_free_bytes,
+            minimum_free_bytes: policy.minimum_free_bytes,
+        });
+    }
+    let filesystem_margin_bytes = usable_free_bytes.saturating_sub(policy.required_bytes);
+    let admission_margin_bytes = policy
+        .maximum_storage_bytes
+        .map_or(filesystem_margin_bytes, |limit_bytes| {
+            filesystem_margin_bytes.min(limit_bytes.saturating_sub(projected_bytes))
+        });
+    Ok(DurableStorageAdmission {
+        required_bytes: policy.required_bytes,
+        observed_bytes,
+        limit_bytes: policy.maximum_storage_bytes,
+        minimum_free_bytes: policy.minimum_free_bytes,
+        admission_margin_bytes,
+    })
+}
+
 fn read_activation_marker(
     repository: &PrivateDirectory<'_>,
     name: OsString,
@@ -2878,6 +3444,232 @@ mod tests {
         assert_eq!(
             restored.provider,
             super::super::FirstSliceIndexProvider::Unknown
+        );
+    }
+
+    #[test]
+    fn storage_admission_reports_budget_and_minimum_free_scopes() {
+        let inventory = DurableStorageInventory {
+            generations: Vec::new(),
+            generation_unique_bytes: 80,
+            active_generation_bytes: 50,
+            predecessor_generation_bytes: 30,
+            shared_source_bytes: 20,
+            temporary_bytes: 0,
+            reclaimable_bytes: 0,
+            pinned_bytes: None,
+            repository_overhead_bytes: 0,
+            quarantine_bytes: 0,
+            total_physical_bytes: 100,
+            available_bytes: 50,
+        };
+
+        let budget_failure = check_storage_admission(
+            &inventory,
+            DurableStorageAdmissionPolicy {
+                required_bytes: 30,
+                maximum_storage_bytes: Some(120),
+                minimum_free_bytes: 10,
+            },
+        )
+        .expect_err("projected durable bytes exceed the configured budget");
+        assert_eq!(
+            budget_failure,
+            DurableStorageAdmissionFailure {
+                scope: DurableStorageAdmissionScope::DurableBudget,
+                required_bytes: 30,
+                observed_bytes: 100,
+                limit_bytes: 120,
+                minimum_free_bytes: 10,
+            }
+        );
+
+        let free_space_failure = check_storage_admission(
+            &inventory,
+            DurableStorageAdmissionPolicy {
+                required_bytes: 31,
+                maximum_storage_bytes: None,
+                minimum_free_bytes: 20,
+            },
+        )
+        .expect_err("minimum free space is removed before reserving publication bytes");
+        assert_eq!(
+            free_space_failure,
+            DurableStorageAdmissionFailure {
+                scope: DurableStorageAdmissionScope::FilesystemFreeSpace,
+                required_bytes: 31,
+                observed_bytes: 50,
+                limit_bytes: 30,
+                minimum_free_bytes: 20,
+            }
+        );
+
+        assert_eq!(
+            check_storage_admission(
+                &inventory,
+                DurableStorageAdmissionPolicy {
+                    required_bytes: 10,
+                    maximum_storage_bytes: Some(130),
+                    minimum_free_bytes: 20,
+                },
+            ),
+            Ok(DurableStorageAdmission {
+                required_bytes: 10,
+                observed_bytes: 100,
+                limit_bytes: Some(130),
+                minimum_free_bytes: 20,
+                admission_margin_bytes: 20,
+            })
+        );
+    }
+
+    #[test]
+    fn cold_storage_inventory_deduplicates_blobs_and_tracks_compaction() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        let stable = "pub fn stable() -> u32 { 1 }\n";
+        let first_changed = "pub fn changed() -> u32 { 1 }\n";
+        let second_changed = "pub fn changed() -> u32 { 2 }\n";
+        let third_changed = "pub fn changed() -> u32 { 3 }\n";
+        fs::write(fixture.path().join("src/stable.rs"), stable).expect("stable source writes");
+        let changed_path = fixture.path().join("src/changed.rs");
+        fs::write(&changed_path, first_changed).expect("initial changed source writes");
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("deadline is representable"),
+        );
+
+        let (first, second, third) = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            let first = service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("first generation publishes");
+            fs::write(&changed_path, second_changed).expect("second source writes");
+            let second = service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("second generation publishes");
+            let before_compaction = service
+                .durable
+                .as_ref()
+                .expect("durable catalog exists")
+                .storage_inventory()
+                .expect("live inventory scans");
+            assert_eq!(before_compaction.generations.len(), 2);
+            assert_eq!(
+                before_compaction.shared_source_bytes,
+                u64::try_from(stable.len() + first_changed.len() + second_changed.len())
+                    .expect("fixture byte count is representable")
+            );
+
+            fs::write(&changed_path, third_changed).expect("third source writes");
+            let third = service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("third generation publishes");
+            (first, second, third)
+        };
+
+        let catalog =
+            DurableCatalog::open(paths.state_dir(), 2).expect("cold durable catalog reopens");
+        let inventory = catalog
+            .storage_inventory()
+            .expect("cold inventory reconstructs from durable state");
+        assert_eq!(inventory.generations.len(), 2);
+        assert!(
+            inventory
+                .generations
+                .iter()
+                .all(|generation| generation.generation != first.generation)
+        );
+        let active = inventory
+            .generations
+            .iter()
+            .find(|generation| generation.active)
+            .expect("one active generation is identified");
+        assert_eq!(active.generation, third.generation);
+        assert_eq!(active.parent, Some(second.generation));
+        let predecessor = inventory
+            .generations
+            .iter()
+            .find(|generation| generation.predecessor)
+            .expect("one predecessor generation is identified");
+        assert_eq!(predecessor.generation, second.generation);
+        assert_eq!(inventory.active_generation_bytes, active.unique_bytes);
+        assert_eq!(
+            inventory.predecessor_generation_bytes,
+            predecessor.unique_bytes
+        );
+        assert_eq!(
+            inventory.shared_source_bytes,
+            u64::try_from(stable.len() + second_changed.len() + third_changed.len())
+                .expect("fixture byte count is representable")
+        );
+        assert_eq!(inventory.temporary_bytes, 0);
+        assert_eq!(inventory.reclaimable_bytes, 0);
+        assert_eq!(inventory.pinned_bytes, None);
+        assert_eq!(inventory.quarantine_bytes, 0);
+        assert_eq!(
+            inventory.total_physical_bytes,
+            inventory
+                .generation_unique_bytes
+                .checked_add(inventory.shared_source_bytes)
+                .and_then(|bytes| bytes.checked_add(inventory.repository_overhead_bytes))
+                .expect("fixture byte total is representable")
+        );
+    }
+
+    #[test]
+    fn storage_inventory_rejects_corrupt_shared_blob_content() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn inventory_corruption() -> u32 { 1 }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("deadline is representable"),
+        );
+        let receipt = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("generation publishes")
+        };
+        let blobs = paths
+            .state_dir()
+            .join(DURABLE_DIRECTORY)
+            .join(REPOSITORIES_DIRECTORY)
+            .join(receipt.repository.to_string())
+            .join(SOURCE_BLOBS_DIRECTORY);
+        let blob = fs::read_dir(blobs)
+            .expect("source blobs read")
+            .next()
+            .expect("one source blob exists")
+            .expect("source blob entry reads");
+        fs::write(blob.path().join(SOURCE_BLOB_PAYLOAD_FILENAME), b"corrupt")
+            .expect("source blob is corrupted");
+
+        let catalog = DurableCatalog::open(paths.state_dir(), 2).expect("durable catalog reopens");
+        assert_eq!(
+            catalog.storage_inventory(),
+            Err(FirstSliceError::CatalogCorrupt)
         );
     }
 
