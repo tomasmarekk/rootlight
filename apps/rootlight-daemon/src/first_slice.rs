@@ -12661,7 +12661,7 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
-    fn durable_unpublished_repository_operation_remains_queryable_after_restart() {
+    fn durable_unpublished_operation_remains_queryable_without_registration_after_restart() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("test runtime paths are valid");
@@ -12793,27 +12793,17 @@ mod tests {
         let FirstSliceIpcResponse::RepositoryCatalogPage(catalog) = catalog else {
             panic!("repository catalog response expected");
         };
-        let [cataloged] = catalog.repositories.as_slice() else {
-            panic!("one restored unpublished registration is expected");
-        };
-        assert_eq!(
-            parse_repository(cataloged.repository.as_ref()).expect("repository identity decodes"),
-            repository
+        assert!(
+            catalog.repositories.is_empty(),
+            "terminal unpublished work must not retain catalog capacity"
         );
-        assert_eq!(cataloged.state, "indexing");
-        assert!(cataloged.active_generation.is_none());
 
         let pending_status = execute_with_timeout(
             &daemon,
             FirstSliceIpcRequest::RepositoryStatus(status_request(repository, None)),
         )
-        .expect_err("unpublished repository has no generation status yet");
-        assert_eq!(pending_status.code(), ErrorCode::StaleGeneration);
-        assert_eq!(pending_status.repository(), Some(repository));
-        assert_eq!(
-            pending_status.next_actions(),
-            &[NextAction::InspectOperation, NextAction::Retry]
-        );
+        .expect_err("released unpublished repository is absent");
+        assert_eq!(pending_status.code(), ErrorCode::NotFound);
 
         let resumed = execute(
             &daemon,
@@ -12828,10 +12818,11 @@ mod tests {
         let FirstSliceIpcResponse::RepositoryIndex(resumed) = resumed else {
             panic!("repository index response expected");
         };
-        assert_eq!(
+        assert_ne!(
             parse_repository(resumed.repository.as_ref())
-                .expect("restored repository registration maps"),
-            repository
+                .expect("fresh repository registration maps"),
+            repository,
+            "released unpublished registration must not be reused"
         );
         assert!(resumed.published_generation.is_some());
 
