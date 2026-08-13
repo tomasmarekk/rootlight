@@ -1624,7 +1624,13 @@ impl DurablePreparedGeneration {
             self.repository().capability(),
             OsStr::new(SOURCE_BLOBS_DIRECTORY),
         )?;
-        let mut created = BTreeSet::new();
+        let mut created = self
+            .created_source_blobs
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        if !created.is_empty() {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
         let mut newly_written_bytes = 0_u64;
         let mut referenced_bytes = 0_u64;
         for source in sources {
@@ -1665,14 +1671,7 @@ impl DurablePreparedGeneration {
             .map_err(|_| FirstSliceError::Catalog)?;
         blobs.sync_all().map_err(|_| FirstSliceError::Catalog)?;
         self.account_staging_bytes(newly_written_bytes)?;
-        let mut retained = self
-            .created_source_blobs
-            .lock()
-            .map_err(|_| FirstSliceError::Catalog)?;
-        if !retained.is_empty() {
-            return Err(FirstSliceError::CatalogCorrupt);
-        }
-        retained.extend(created);
+        drop(created);
         let mut storage = self
             .source_storage
             .lock()
