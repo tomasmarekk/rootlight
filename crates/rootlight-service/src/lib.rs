@@ -5621,7 +5621,10 @@ impl FirstSliceService {
                                         diagnostic.code == PROJECT_FACTS_TRUNCATED_CODE
                                             || diagnostic.code
                                                 == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC
-                                    }) {
+                                    }) || !project_document_preserves_structural_declarations(
+                                        &fallback_documents,
+                                        &document,
+                                    )? {
                                         fallback_error =
                                             Some(FirstSliceProjectAnalysisError::Capacity);
                                     } else {
@@ -11307,6 +11310,56 @@ fn project_documents_match_inputs(
     observed_mapping_count == expected_mapping_count
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ProjectDeclarationKey {
+    source: SourceSpan,
+    kind: EntityKind,
+    canonical_name: String,
+}
+
+fn project_document_preserves_structural_declarations(
+    structural_documents: &[NormalizedIrDocument],
+    project_document: &NormalizedIrDocument,
+) -> Result<bool, FirstSliceError> {
+    let entity_coverage_is_bounded = project_document.coverage_records.iter().any(|coverage| {
+        coverage.domain == IrFactDomain::Entities
+            && coverage.status != CoverageStatus::Complete
+            && coverage.skipped > 0
+    });
+    if !entity_coverage_is_bounded {
+        return Ok(true);
+    }
+    let structural = project_declaration_keys(
+        structural_documents
+            .iter()
+            .flat_map(|document| document.entities.iter()),
+    )?;
+    let project = project_declaration_keys(project_document.entities.iter())?;
+    Ok(structural.is_subset(&project))
+}
+
+fn project_declaration_keys<'a>(
+    entities: impl Iterator<Item = &'a rootlight_ir::EntityRecord>,
+) -> Result<BTreeSet<ProjectDeclarationKey>, FirstSliceError> {
+    let mut declarations = BTreeSet::new();
+    for entity in entities {
+        if entity.kind == EntityKind::ExternalSymbol
+            || entity.flags.contains(&rootlight_ir::EntityFlag::Synthetic)
+        {
+            continue;
+        }
+        let Some(source) = entity.evidence.source.as_ref() else {
+            continue;
+        };
+        declarations.insert(ProjectDeclarationKey {
+            source: source.span(),
+            kind: entity.kind,
+            canonical_name: entity.canonical_name.clone(),
+        });
+    }
+    Ok(declarations)
+}
+
 fn merge_project_documents(
     documents: Vec<NormalizedIrDocument>,
     diagnostic_capacity: usize,
@@ -16091,6 +16144,16 @@ mod tests {
         let receipt = service
             .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
             .expect("structural fallback publishes after syntax fact truncation");
+        assert!(
+            service
+                .generations
+                .generation(receipt.generation)
+                .expect("fallback generation remains retained")
+                .document()
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC)
+        );
         let located = service
             .code_locate(
                 receipt.generation,
