@@ -220,6 +220,7 @@ impl fmt::Display for InvalidationTrace {
 pub struct InvalidationPlan {
     changes: ChangeSet,
     invalidated_nodes: BTreeSet<FactNode>,
+    reusable_nodes: BTreeSet<FactNode>,
     reanalyze: BTreeSet<AnalysisUnitId>,
     rerun_domains: FactDomainSet,
     artifact_decisions: Vec<ArtifactDecision>,
@@ -237,6 +238,14 @@ impl InvalidationPlan {
     /// Returns invalidated scoped fact nodes in canonical order.
     pub fn invalidated_nodes(&self) -> impl Iterator<Item = FactNode> + '_ {
         self.invalidated_nodes.iter().copied()
+    }
+
+    /// Returns scoped fact nodes excluded from the rebuild closure.
+    ///
+    /// These nodes describe reusable logical work. They do not claim that a
+    /// generation-bound physical record or artifact was retained.
+    pub fn reusable_nodes(&self) -> impl Iterator<Item = FactNode> + '_ {
+        self.reusable_nodes.iter().copied()
     }
 
     /// Returns analysis units that require work in canonical order.
@@ -363,6 +372,14 @@ pub fn plan_invalidation(
         }
     }
 
+    let mut reusable_nodes = BTreeSet::new();
+    for node in graph.nodes() {
+        cancellation.check()?;
+        if !invalidated.contains(&node) {
+            reusable_nodes.insert(node);
+        }
+    }
+
     let mut reanalyze = BTreeSet::new();
     let mut rerun_domains = FactDomainSet::default();
     for node in &invalidated {
@@ -421,6 +438,7 @@ pub fn plan_invalidation(
     Ok(InvalidationPlan {
         changes,
         invalidated_nodes: invalidated,
+        reusable_nodes,
         reanalyze,
         rerun_domains,
         artifact_decisions,

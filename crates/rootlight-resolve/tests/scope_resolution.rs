@@ -283,6 +283,15 @@ fn resolver_work_limit_bounds_same_name_candidate_scans() {
     let constrained = ResolutionEngine::new(
         ResolutionLimits::with_work_limit(1, 3).expect("fixture work limit is valid"),
     );
+    assert_eq!(
+        constrained
+            .estimate_work(&fixture.document, &Cancellation::new())
+            .expect("valid fixture has a bounded estimate"),
+        rootlight_resolve::ResolutionWorkEstimate {
+            required: 4,
+            limit: 3,
+        }
+    );
     assert!(matches!(
         constrained.resolve(&fixture.document, &Cancellation::new()),
         Err(ResolutionError::WorkLimit { maximum: 3 })
@@ -304,6 +313,33 @@ fn resolver_work_limit_bounds_same_name_candidate_scans() {
     assert_eq!(total_count, 3);
     assert_eq!(completeness, CoverageStatus::Bounded);
     assert_eq!(exact.decisions[0].explanation.candidates.len(), 1);
+}
+
+#[test]
+fn work_estimate_deduplicates_entity_name_aliases() {
+    let mut fixture = Fixture::new();
+    fixture.add_entity(
+        48,
+        "shared",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    fixture.add_occurrence(
+        49,
+        "shared",
+        fixture.primary_file,
+        OccurrenceRole::Reference,
+        None,
+    );
+    fixture.validate();
+
+    let estimate = ResolutionEngine::default()
+        .estimate_work(&fixture.document, &Cancellation::new())
+        .expect("valid fixture has a bounded estimate");
+
+    assert_eq!(estimate.required, 2);
+    assert!(estimate.fits());
 }
 
 #[test]

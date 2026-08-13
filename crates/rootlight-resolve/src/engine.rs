@@ -5,7 +5,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BinaryHeap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
 };
 
 use rootlight_cancel::Cancellation;
@@ -21,7 +21,7 @@ use crate::model::{
     RESOLVER_PROVIDER_VERSION, RejectedCandidate, RejectionReason, ResolutionBatch,
     ResolutionDecision, ResolutionError, ResolutionExplanation, ResolutionLimits,
     ResolutionOutcome, ResolutionPenalty, ResolutionPolicy, ResolutionRule, ResolutionSignal,
-    UnresolvedReason,
+    ResolutionWorkEstimate, UnresolvedReason,
 };
 
 const EXACT_BINDING_THRESHOLD: u16 = 900;
@@ -99,6 +99,65 @@ impl ResolutionEngine {
             repository: document.repository,
             generation: document.generation,
             decisions,
+        })
+    }
+
+    /// Estimates the exact occurrence and same-name candidate inspections
+    /// required by a complete resolution pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResolutionError::InvalidDocument`] for invalid normalized
+    /// facts, [`ResolutionError::Cancelled`] at a cooperative checkpoint, or
+    /// [`ResolutionError::CountOverflow`] when the required work is not
+    /// representable.
+    pub fn estimate_work(
+        &self,
+        document: &NormalizedIrDocument,
+        cancellation: &Cancellation,
+    ) -> Result<ResolutionWorkEstimate, ResolutionError> {
+        cancellation.check()?;
+        validate_ir_document(document, &IrLimits::default(), &ExtensionSupport::default())
+            .map_err(ResolutionError::InvalidDocument)?;
+
+        let mut entities_by_name = BTreeMap::<ContentHash, BTreeSet<SymbolId>>::new();
+        for entity in &document.entities {
+            cancellation.check()?;
+            for name in [
+                entity.canonical_name.as_bytes(),
+                entity.display_name.as_bytes(),
+                entity.qualified_name.as_bytes(),
+            ] {
+                entities_by_name
+                    .entry(content_hash(name))
+                    .or_default()
+                    .insert(entity.id);
+            }
+        }
+        let required = document
+            .occurrences
+            .iter()
+            .try_fold(0_usize, |required, occurrence| {
+                cancellation.check()?;
+                let required = required
+                    .checked_add(1)
+                    .ok_or(ResolutionError::CountOverflow)?;
+                if matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+                    || !resolvable_role(occurrence.role)
+                {
+                    return Ok(required);
+                }
+                required
+                    .checked_add(
+                        entities_by_name
+                            .get(&occurrence.syntactic_text_hash)
+                            .map_or(0, BTreeSet::len),
+                    )
+                    .ok_or(ResolutionError::CountOverflow)
+            })?;
+        Ok(ResolutionWorkEstimate {
+            required,
+            limit: self.limits.work_limit(),
         })
     }
 

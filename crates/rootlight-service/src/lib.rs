@@ -99,8 +99,9 @@ pub use rootlight_query::{
 };
 use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
 use rootlight_resolve::{
-    DEFAULT_CANDIDATE_LIMIT, MAX_RESOLUTION_WORK_LIMIT, RESOLVER_PROVIDER_VERSION,
-    ResolutionEngine, ResolutionError, ResolutionLimits, ResolverFactContext,
+    DEFAULT_CANDIDATE_LIMIT, MAX_RESOLUTION_WORK_LIMIT, RESOLVER_PROVIDER_NAME,
+    RESOLVER_PROVIDER_VERSION, ResolutionEngine, ResolutionError, ResolutionLimits,
+    ResolverFactContext,
 };
 use rootlight_search::{BuildBudget, LexicalIndex, SearchBudget, SearchError};
 use rootlight_source::{SourceBudget, SourceError, SourceService};
@@ -169,6 +170,7 @@ const PROJECT_DIAGNOSTICS_TRUNCATED_MESSAGE: &str =
 const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
+const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/2";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
@@ -324,7 +326,7 @@ pub struct FirstSliceIndexOperationEvidence {
     pub reused_files: u64,
     /// Source files parsed into fresh immutable parser artifacts.
     pub rebuilt_files: u64,
-    /// Normalized facts reconstructed from exact parent parser artifacts.
+    /// Generation-bound normalized records reused without reconstruction.
     pub reused_facts: u64,
     /// Normalized facts rebuilt for the published generation.
     pub rebuilt_facts: u64,
@@ -534,8 +536,10 @@ pub struct FirstSliceSupportGeneration {
     pub repository: RepositoryId,
     /// Immutable generation identity.
     pub generation: GenerationId,
-    /// SQLite bytes allocated by the normalized generation oracle.
+    /// Physical bytes retained by this generation's durable state.
     pub disk_bytes: u64,
+    /// Prior generation in the same repository lineage, when retained.
+    pub parent: Option<GenerationId>,
     /// Whether this generation is currently active.
     pub active: bool,
 }
@@ -553,10 +557,14 @@ pub struct FirstSliceSupportInventory {
     pub generation_format: String,
     /// Total allocated bytes reported by retained generation receipts.
     pub generation_disk_bytes: u64,
+    /// Total physical bytes retained by immutable generation trees.
+    pub total_storage_bytes: u64,
     /// Bytes currently owned by unpublished durable staging trees.
     pub unreclaimed_temporary_bytes: u64,
     /// Free bytes on the durable repository volume when persistence is enabled.
     pub disk_margin_bytes: Option<u64>,
+    /// Effective maximum retained generations per repository.
+    pub effective_retention_generations: u32,
 }
 
 /// Coarse source-free stage reported while preparing an index generation.
@@ -834,7 +842,132 @@ pub struct FirstSliceIncrementalEvidence {
     reused_normalized_facts: u64,
     #[serde(default)]
     rebuilt_normalized_facts: u64,
+    #[serde(default)]
+    planned_fact_work: Vec<FirstSlicePlannedFactWork>,
+    #[serde(default)]
+    normalized_fact_work: Vec<FirstSliceNormalizedFactWork>,
     structural_cache_retained: bool,
+}
+
+/// Work disposition selected before generation-bound fact construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirstSliceFactWorkDisposition {
+    /// The dependency closure requires this logical scope to run.
+    Rebuild,
+    /// The dependency closure excludes this logical scope from rebuilding.
+    Reuse,
+}
+
+/// Source-free cause attributed to planned or completed incremental work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirstSliceFactWorkCause {
+    /// No committed parent existed, so every fact is initially constructed.
+    InitialGeneration,
+    /// A declared dependency edge selected the scope.
+    DependencyClosure,
+    /// The planner proved the scope is outside the invalidation closure.
+    CompleteDependencyMatch,
+    /// A conservative fallback selected a repository-wide rebuild.
+    ConservativeFallback,
+    /// Generation ownership requires fresh normalized records from parser facts.
+    GenerationBoundLowering,
+    /// Repository-wide semantic resolution produced or retained the records.
+    Resolution,
+}
+
+/// Pre-work logical scope and cost selected by incremental planning.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirstSlicePlannedFactWork {
+    disposition: FirstSliceFactWorkDisposition,
+    domain: FactDomain,
+    provider_pass: String,
+    cause: FirstSliceFactWorkCause,
+    files: u64,
+    analysis_units: u64,
+}
+
+impl FirstSlicePlannedFactWork {
+    /// Returns whether this logical scope was selected to rebuild or reuse.
+    #[must_use]
+    pub const fn disposition(&self) -> FirstSliceFactWorkDisposition {
+        self.disposition
+    }
+
+    /// Returns the logical incremental fact domain.
+    #[must_use]
+    pub const fn domain(&self) -> FactDomain {
+        self.domain
+    }
+
+    /// Returns the source-free provider pass selected for this work.
+    #[must_use]
+    pub fn provider_pass(&self) -> &str {
+        &self.provider_pass
+    }
+
+    /// Returns the dependency or construction cause.
+    #[must_use]
+    pub const fn cause(&self) -> FirstSliceFactWorkCause {
+        self.cause
+    }
+
+    /// Returns distinct files represented by this scope.
+    #[must_use]
+    pub const fn files(&self) -> u64 {
+        self.files
+    }
+
+    /// Returns distinct analysis units represented by this scope.
+    #[must_use]
+    pub const fn analysis_units(&self) -> u64 {
+        self.analysis_units
+    }
+}
+
+/// Normalized records actually rebuilt during generation construction.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirstSliceNormalizedFactWork {
+    domain: IrFactDomain,
+    provider_pass: String,
+    cause: FirstSliceFactWorkCause,
+    files: u64,
+    facts: u64,
+}
+
+impl FirstSliceNormalizedFactWork {
+    /// Returns the normalized IR record domain.
+    #[must_use]
+    pub const fn domain(&self) -> IrFactDomain {
+        self.domain
+    }
+
+    /// Returns the source-free provider pass that produced the records.
+    #[must_use]
+    pub fn provider_pass(&self) -> &str {
+        &self.provider_pass
+    }
+
+    /// Returns why the records were rebuilt.
+    #[must_use]
+    pub const fn cause(&self) -> FirstSliceFactWorkCause {
+        self.cause
+    }
+
+    /// Returns distinct files directly evidenced by the records.
+    #[must_use]
+    pub const fn files(&self) -> u64 {
+        self.files
+    }
+
+    /// Returns records actually constructed in this domain.
+    #[must_use]
+    pub const fn facts(&self) -> u64 {
+        self.facts
+    }
 }
 
 /// Response-bounded view of one durable source-free invalidation trace.
@@ -970,7 +1103,10 @@ impl FirstSliceIncrementalEvidence {
         self.lowered_files
     }
 
-    /// Returns normalized records reconstructed from exact parent artifacts.
+    /// Returns generation-bound normalized records reused without reconstruction.
+    ///
+    /// Parser artifact reuse alone does not increase this counter because
+    /// lowering that artifact constructs fresh records and identities.
     #[must_use]
     pub const fn reused_normalized_facts(&self) -> u64 {
         self.reused_normalized_facts
@@ -980,6 +1116,18 @@ impl FirstSliceIncrementalEvidence {
     #[must_use]
     pub const fn rebuilt_normalized_facts(&self) -> u64 {
         self.rebuilt_normalized_facts
+    }
+
+    /// Returns the pre-work logical closure grouped by domain, pass, and cause.
+    #[must_use]
+    pub fn planned_fact_work(&self) -> &[FirstSlicePlannedFactWork] {
+        &self.planned_fact_work
+    }
+
+    /// Returns actually rebuilt records grouped by IR domain, pass, and cause.
+    #[must_use]
+    pub fn normalized_fact_work(&self) -> &[FirstSliceNormalizedFactWork] {
+        &self.normalized_fact_work
     }
 
     /// Reports whether this generation retained parser artifacts for a successor.
@@ -4296,7 +4444,6 @@ impl FirstSliceService {
         let mut parsed_files = 0usize;
         let mut reused_parser_artifacts = 0usize;
         let mut reused_parser_artifact_bytes = 0usize;
-        let mut reused_normalized_facts = 0usize;
         let mut analyzed_files = 0_u64;
         let mut analyzed_bytes = 0_u64;
         let mut last_reported_analyzed_files = 0_u64;
@@ -4362,9 +4509,6 @@ impl FirstSliceService {
                             .ok_or(FirstSliceError::Limits)?;
                         reused_parser_artifact_bytes = reused_parser_artifact_bytes
                             .checked_add(entry.artifact.accounted_bytes())
-                            .ok_or(FirstSliceError::Limits)?;
-                        reused_normalized_facts = reused_normalized_facts
-                            .checked_add(normalized_record_count(output.document())?)
                             .ok_or(FirstSliceError::Limits)?;
                         (output, Some(Arc::clone(&entry.artifact)))
                     }
@@ -4542,23 +4686,18 @@ impl FirstSliceService {
             cancellation,
         )?;
         let resolution_limits = resolution_limits_for_occurrences(document.occurrences.len())?;
-        let document = ResolutionEngine::new(resolution_limits)
-            .apply_document(
-                document,
-                ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED)),
-                cancellation,
-            )
-            .map_err(|error| map_resolution_error(error, cancellation))?;
+        let document = apply_bounded_resolution(
+            document,
+            resolution_limits,
+            ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED)),
+            cancellation,
+        )?;
         let normalized_facts = normalized_record_count(&document)?;
-        let reused_normalized_facts = reused_normalized_facts.min(normalized_facts);
-        incremental_plan.state.evidence.reused_normalized_facts =
-            u64::try_from(reused_normalized_facts).map_err(|_| FirstSliceError::Limits)?;
-        incremental_plan.state.evidence.rebuilt_normalized_facts = u64::try_from(
-            normalized_facts
-                .checked_sub(reused_normalized_facts)
-                .ok_or(FirstSliceError::Incremental)?,
-        )
-        .map_err(|_| FirstSliceError::Limits)?;
+        incremental_plan.state.evidence.reused_normalized_facts = 0;
+        incremental_plan.state.evidence.rebuilt_normalized_facts =
+            u64::try_from(normalized_facts).map_err(|_| FirstSliceError::Limits)?;
+        incremental_plan.state.evidence.normalized_fact_work =
+            normalized_fact_work(&document, cancellation)?;
         let mut incremental = incremental_plan.state;
         let serialized_document_bytes = normalized_document_serialized_bytes(&document)?;
         let memory_bytes = ensure_generation_memory_admission(serialized_document_bytes)?;
@@ -5030,6 +5169,13 @@ impl FirstSliceService {
             append_extension_truncation_diagnostic(
                 target,
                 append_state.truncated_extensions,
+                self.analysis_limits.ir(),
+            )?;
+        }
+        if append_state.truncated_diagnostics > 0 {
+            append_diagnostic_truncation_diagnostic(
+                target,
+                append_state.truncated_diagnostics,
                 self.analysis_limits.ir(),
             )?;
         }
@@ -6256,13 +6402,19 @@ impl FirstSliceService {
             .try_reserve_exact(self.receipts.len())
             .map_err(|_| FirstSliceError::Limits)?;
         for receipt in self.receipts.values() {
+            let disk_bytes = if self.durable.is_some() {
+                receipt.retained_durable_bytes
+            } else {
+                receipt.oracle_allocated_bytes
+            };
             generation_disk_bytes = generation_disk_bytes
-                .checked_add(receipt.oracle_allocated_bytes)
+                .checked_add(disk_bytes)
                 .ok_or(FirstSliceError::Limits)?;
             generations.push(FirstSliceSupportGeneration {
                 repository: receipt.repository,
                 generation: receipt.generation,
-                disk_bytes: receipt.oracle_allocated_bytes,
+                disk_bytes,
+                parent: receipt.parent,
                 active: self.active_by_repository.get(&receipt.repository)
                     == Some(&receipt.generation),
             });
@@ -6286,8 +6438,11 @@ impl FirstSliceService {
                 GENERATION_CONTRACT_VERSION.minor()
             ),
             generation_disk_bytes,
+            total_storage_bytes: generation_disk_bytes,
             unreclaimed_temporary_bytes,
             disk_margin_bytes,
+            effective_retention_generations: u32::try_from(self.maximum_generations_per_repository)
+                .map_err(|_| FirstSliceError::Limits)?,
         })
     }
 
@@ -8319,6 +8474,8 @@ pub enum FirstSliceResource {
     SyntaxDepth,
     /// Adapter-reported in-process memory bytes.
     ReportedMemoryBytes,
+    /// Resolver occurrence and same-name candidate inspections.
+    ResolutionWork,
 }
 
 impl FirstSliceResource {
@@ -8362,6 +8519,7 @@ impl FirstSliceResource {
             Self::SyntaxNodes => "syntax_nodes",
             Self::SyntaxDepth => "syntax_depth",
             Self::ReportedMemoryBytes => "reported_memory_bytes",
+            Self::ResolutionWork => "resolution_work",
         }
     }
 }
@@ -8630,7 +8788,7 @@ fn prepare_incremental_state(
         cancellation,
     )
     .map_err(|error| map_incremental_error(error, cancellation))?;
-    let evidence = summarize_incremental_evidence(has_parent, discovery, &plan)?;
+    let evidence = summarize_incremental_evidence(has_parent, discovery, source_files, &plan)?;
     let reusable_parser_artifacts = plan
         .artifact_decisions()
         .iter()
@@ -9501,6 +9659,7 @@ fn hash_component(hasher: &mut blake3::Hasher, component: &[u8]) -> Result<(), F
 fn summarize_incremental_evidence(
     has_parent: bool,
     discovery: &IncrementalDiscovery,
+    source_files: &BTreeSet<FileId>,
     plan: &InvalidationPlan,
 ) -> Result<FirstSliceIncrementalEvidence, FirstSliceError> {
     let mut input_counts = BTreeMap::new();
@@ -9551,8 +9710,93 @@ fn summarize_incremental_evidence(
         lowered_files: 0,
         reused_normalized_facts: 0,
         rebuilt_normalized_facts: 0,
+        planned_fact_work: planned_fact_work(has_parent, source_files, plan)?,
+        normalized_fact_work: Vec::new(),
         structural_cache_retained: false,
     })
+}
+
+fn planned_fact_work(
+    has_parent: bool,
+    source_files: &BTreeSet<FileId>,
+    plan: &InvalidationPlan,
+) -> Result<Vec<FirstSlicePlannedFactWork>, FirstSliceError> {
+    let units_to_files = source_files
+        .iter()
+        .copied()
+        .map(|file| (file_analysis_unit(file), file))
+        .collect::<BTreeMap<_, _>>();
+    let rebuild_cause = if !has_parent {
+        FirstSliceFactWorkCause::InitialGeneration
+    } else if plan.fallback().is_some() {
+        FirstSliceFactWorkCause::ConservativeFallback
+    } else {
+        FirstSliceFactWorkCause::DependencyClosure
+    };
+    let mut groups = BTreeMap::<
+        (
+            FirstSliceFactWorkDisposition,
+            FactDomain,
+            String,
+            FirstSliceFactWorkCause,
+        ),
+        (BTreeSet<AnalysisUnitId>, BTreeSet<FileId>),
+    >::new();
+    for (disposition, cause, nodes) in [
+        (
+            FirstSliceFactWorkDisposition::Rebuild,
+            rebuild_cause,
+            plan.invalidated_nodes().collect::<Vec<_>>(),
+        ),
+        (
+            FirstSliceFactWorkDisposition::Reuse,
+            FirstSliceFactWorkCause::CompleteDependencyMatch,
+            plan.reusable_nodes().collect::<Vec<_>>(),
+        ),
+    ] {
+        for node in nodes {
+            let group = groups
+                .entry((
+                    disposition,
+                    node.domain(),
+                    incremental_pass_for_domain(node.domain()).to_owned(),
+                    cause,
+                ))
+                .or_default();
+            group.0.insert(node.unit());
+            if let Some(file) = units_to_files.get(&node.unit()) {
+                group.1.insert(*file);
+            }
+        }
+    }
+    groups
+        .into_iter()
+        .map(
+            |((disposition, domain, provider_pass, cause), (units, files))| {
+                Ok(FirstSlicePlannedFactWork {
+                    disposition,
+                    domain,
+                    provider_pass,
+                    cause,
+                    files: u64::try_from(files.len()).map_err(|_| FirstSliceError::Limits)?,
+                    analysis_units: u64::try_from(units.len())
+                        .map_err(|_| FirstSliceError::Limits)?,
+                })
+            },
+        )
+        .collect()
+}
+
+fn incremental_pass_for_domain(domain: FactDomain) -> &'static str {
+    match domain {
+        FactDomain::Syntax => PARSER_PASS_ID,
+        FactDomain::PublicSurface | FactDomain::Body | FactDomain::Tests | FactDomain::Services => {
+            LOWERING_PASS_ID
+        }
+        FactDomain::Resolution => RESOLVER_PASS_ID,
+        FactDomain::Search => SEARCH_PASS_ID,
+        FactDomain::DerivedGraph | FactDomain::History => DERIVED_PASS_ID,
+    }
 }
 
 fn increment_evidence_count<Key: Ord>(
@@ -10662,7 +10906,8 @@ fn is_priority_aggregate_diagnostic(code: &str) -> bool {
     code.starts_with("project-adapter-")
         || matches!(
             code,
-            "extension-coverage-bounded"
+            AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE
+                | "extension-coverage-bounded"
                 | "skipped-region-details-bounded"
                 | "oversized-inputs-bounded"
         )
@@ -10784,6 +11029,43 @@ fn append_extension_truncation_diagnostic(
     retain_priority_aggregate_diagnostic(document, diagnostic, limits)
 }
 
+fn append_diagnostic_truncation_diagnostic(
+    document: &mut NormalizedIrDocument,
+    truncated_diagnostics: u64,
+    limits: &IrLimits,
+) -> Result<(), FirstSliceError> {
+    let provenance = document
+        .provenance
+        .first()
+        .map(|record| record.id)
+        .ok_or(FirstSliceError::Identity)?;
+    let evidence_file = document
+        .files
+        .first()
+        .map(|record| record.id)
+        .ok_or(FirstSliceError::Identity)?;
+    let mut diagnostic = DiagnosticRecord {
+        id: FactId::from_bytes([0; 20]),
+        repository: document.repository,
+        generation: document.generation,
+        code: AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE.to_owned(),
+        message: format!(
+            "{truncated_diagnostics} source diagnostics omitted by aggregate resource limit"
+        ),
+        severity: DiagnosticSeverity::Warning,
+        source: None,
+        coverage_effect: CoverageStatus::Bounded,
+        provenance,
+        evidence: FactEvidence {
+            source: None,
+            derivation: vec![FactRef::File(evidence_file)],
+        },
+    };
+    diagnostic.id =
+        derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
+    retain_priority_aggregate_diagnostic(document, diagnostic, limits)
+}
+
 fn append_skipped_region_truncation_diagnostic(
     document: &mut NormalizedIrDocument,
     truncated_regions: u64,
@@ -10861,6 +11143,7 @@ fn append_oversized_input_diagnostic(
 #[derive(Debug, Default)]
 struct DocumentAppendState {
     extension_payload_bytes: usize,
+    truncated_diagnostics: u64,
     truncated_extensions: u64,
     truncated_skipped_regions: u64,
 }
@@ -10878,6 +11161,7 @@ impl DocumentAppendState {
                 })?;
         Ok(Self {
             extension_payload_bytes,
+            truncated_diagnostics: 0,
             truncated_extensions: 0,
             truncated_skipped_regions: 0,
         })
@@ -10945,6 +11229,8 @@ fn append_normalized_document(
         limits.max_skipped_regions,
         FirstSliceResource::SkippedRegions,
     )?;
+    let truncated_diagnostics =
+        truncate_aggregate_diagnostics(target, &mut source, append_state, limits)?;
     reserve_resource_records(
         &mut target.diagnostics,
         source.diagnostics.len(),
@@ -10988,6 +11274,7 @@ fn append_normalized_document(
         target,
         &mut source,
         append_state,
+        truncated_diagnostics,
         truncated_skipped_regions,
         limits,
     )?;
@@ -11254,10 +11541,90 @@ fn truncate_skipped_regions(
     u64::try_from(truncated).map_err(|_| FirstSliceError::Limits)
 }
 
+fn truncate_aggregate_diagnostics(
+    target: &mut NormalizedIrDocument,
+    source: &mut NormalizedIrDocument,
+    append_state: &DocumentAppendState,
+    limits: &IrLimits,
+) -> Result<u64, FirstSliceError> {
+    let mut available = limits
+        .max_diagnostics
+        .checked_sub(target.diagnostics.len())
+        .ok_or_else(|| {
+            resource_limit(
+                FirstSliceResource::Diagnostics,
+                target.diagnostics.len(),
+                limits.max_diagnostics,
+            )
+        })?;
+    let requested_total = source
+        .diagnostics
+        .len()
+        .checked_add(usize::from(append_state.truncated_diagnostics > 0))
+        .ok_or(FirstSliceError::Limits)?;
+    if requested_total <= available {
+        return Ok(0);
+    }
+
+    let mut truncated_by_file = BTreeMap::<FileId, u64>::new();
+    let mut source_free = 0_u64;
+    let mut truncated = 0_usize;
+    if available == 0 {
+        let replacement = target
+            .diagnostics
+            .iter()
+            .rposition(|diagnostic| !is_priority_aggregate_diagnostic(&diagnostic.code))
+            .ok_or(FirstSliceError::Limits)?;
+        let diagnostic = target.diagnostics.remove(replacement);
+        record_truncated_diagnostic(&diagnostic, &mut truncated_by_file, &mut source_free)?;
+        truncated = 1;
+        available = 1;
+        target.coverage_records = adjusted_diagnostic_coverage(
+            &target.coverage_records,
+            &truncated_by_file,
+            source_free,
+        )?;
+        truncated_by_file.clear();
+        source_free = 0;
+    }
+
+    let retained = available.saturating_sub(1).min(source.diagnostics.len());
+    truncated = truncated
+        .checked_add(
+            source
+                .diagnostics
+                .len()
+                .checked_sub(retained)
+                .ok_or(FirstSliceError::Limits)?,
+        )
+        .ok_or(FirstSliceError::Limits)?;
+    for diagnostic in source.diagnostics.drain(retained..) {
+        record_truncated_diagnostic(&diagnostic, &mut truncated_by_file, &mut source_free)?;
+    }
+    source.coverage_records =
+        adjusted_diagnostic_coverage(&source.coverage_records, &truncated_by_file, source_free)?;
+    u64::try_from(truncated).map_err(|_| FirstSliceError::Limits)
+}
+
+fn record_truncated_diagnostic(
+    diagnostic: &DiagnosticRecord,
+    truncated_by_file: &mut BTreeMap<FileId, u64>,
+    source_free: &mut u64,
+) -> Result<(), FirstSliceError> {
+    if let Some(source) = diagnostic.source.as_ref() {
+        let truncated = truncated_by_file.entry(source.span().file()).or_default();
+        *truncated = truncated.checked_add(1).ok_or(FirstSliceError::Limits)?;
+    } else {
+        *source_free = source_free.checked_add(1).ok_or(FirstSliceError::Limits)?;
+    }
+    Ok(())
+}
+
 fn truncate_optional_extensions(
     target: &mut NormalizedIrDocument,
     source: &mut NormalizedIrDocument,
     append_state: &DocumentAppendState,
+    truncated_diagnostics: u64,
     truncated_skipped_regions: u64,
     limits: &IrLimits,
 ) -> Result<DocumentAppendState, FirstSliceError> {
@@ -11439,6 +11806,10 @@ fn truncate_optional_extensions(
         extension_payload_bytes: target_extension_bytes
             .checked_add(retained_bytes)
             .ok_or(FirstSliceError::Limits)?,
+        truncated_diagnostics: append_state
+            .truncated_diagnostics
+            .checked_add(truncated_diagnostics)
+            .ok_or(FirstSliceError::Limits)?,
         truncated_extensions: append_state
             .truncated_extensions
             .checked_add(truncated_extensions)
@@ -11511,6 +11882,48 @@ fn adjusted_extension_coverage(
     Ok(coverage_records)
 }
 
+fn adjusted_diagnostic_coverage(
+    existing: &[CoverageRecord],
+    dropped_by_file: &BTreeMap<FileId, u64>,
+    source_free_dropped: u64,
+) -> Result<Vec<CoverageRecord>, FirstSliceError> {
+    let mut coverage_records = existing.to_vec();
+    for (file, dropped) in dropped_by_file {
+        let mut matching_records = coverage_records.iter_mut().filter(|coverage| {
+            coverage.domain == IrFactDomain::Diagnostics
+                && coverage.scope == CoverageScope::File(*file)
+        });
+        let coverage = matching_records.next().ok_or(FirstSliceError::Identity)?;
+        if matching_records.next().is_some() {
+            return Err(FirstSliceError::Identity);
+        }
+        coverage.indexed = coverage
+            .indexed
+            .checked_sub(*dropped)
+            .ok_or(FirstSliceError::Identity)?;
+        coverage.skipped = coverage
+            .skipped
+            .checked_add(*dropped)
+            .ok_or(FirstSliceError::Limits)?;
+        if coverage.status != CoverageStatus::Unknown {
+            coverage.status = CoverageStatus::Bounded;
+        }
+        coverage.id = derive_coverage_record_id(coverage).map_err(|_| FirstSliceError::Identity)?;
+    }
+    if source_free_dropped > 0 {
+        for coverage in &mut coverage_records {
+            if coverage.domain == IrFactDomain::Diagnostics
+                && coverage.status != CoverageStatus::Unknown
+            {
+                coverage.status = CoverageStatus::Bounded;
+                coverage.id =
+                    derive_coverage_record_id(coverage).map_err(|_| FirstSliceError::Identity)?;
+            }
+        }
+    }
+    Ok(coverage_records)
+}
+
 fn normalized_record_count(document: &NormalizedIrDocument) -> Result<usize, FirstSliceError> {
     [
         document.files.len(),
@@ -11528,6 +11941,138 @@ fn normalized_record_count(document: &NormalizedIrDocument) -> Result<usize, Fir
     .try_fold(0_usize, |total, length| {
         total.checked_add(length).ok_or(FirstSliceError::Limits)
     })
+}
+
+fn normalized_fact_work(
+    document: &NormalizedIrDocument,
+    cancellation: &Cancellation,
+) -> Result<Vec<FirstSliceNormalizedFactWork>, FirstSliceError> {
+    let provenance = document
+        .provenance
+        .iter()
+        .map(|record| (record.id, record))
+        .collect::<BTreeMap<_, _>>();
+    let mut groups =
+        BTreeMap::<(IrFactDomain, String, FirstSliceFactWorkCause), (u64, BTreeSet<FileId>)>::new();
+    let mut record = |domain: IrFactDomain,
+                      provenance_id: FactId,
+                      files: BTreeSet<FileId>|
+     -> Result<(), FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let producer = provenance
+            .get(&provenance_id)
+            .ok_or(FirstSliceError::Identity)?
+            .producer
+            .name();
+        let (provider_pass, cause) = normalized_provider_work(producer);
+        let group = groups
+            .entry((domain, provider_pass.to_owned(), cause))
+            .or_default();
+        group.0 = group.0.checked_add(1).ok_or(FirstSliceError::Limits)?;
+        group.1.extend(files);
+        Ok(())
+    };
+    let evidence_files =
+        |evidence: &FactEvidence| evidence_file(evidence).into_iter().collect::<BTreeSet<_>>();
+
+    for file in &document.files {
+        record(
+            IrFactDomain::Files,
+            file.provenance,
+            BTreeSet::from([file.id]),
+        )?;
+    }
+    for entity in &document.entities {
+        record(
+            IrFactDomain::Entities,
+            entity.provenance,
+            evidence_files(&entity.evidence),
+        )?;
+    }
+    for occurrence in &document.occurrences {
+        record(
+            IrFactDomain::Occurrences,
+            occurrence.provenance,
+            BTreeSet::from([occurrence.file]),
+        )?;
+    }
+    for relation in &document.relations {
+        record(
+            IrFactDomain::Relations,
+            relation.provenance,
+            evidence_files(&relation.evidence),
+        )?;
+    }
+    for provenance_record in &document.provenance {
+        let files = provenance_record
+            .input_sources
+            .iter()
+            .chain(&provenance_record.evidence_sources)
+            .map(|source| source.span().file())
+            .collect();
+        record(IrFactDomain::Provenance, provenance_record.id, files)?;
+    }
+    for mapping in &document.source_mappings {
+        record(
+            IrFactDomain::SourceMappings,
+            mapping.provenance,
+            BTreeSet::from([mapping.from.span().file(), mapping.to.span().file()]),
+        )?;
+    }
+    for coverage in &document.coverage_records {
+        let mut files = evidence_files(&coverage.evidence);
+        if let CoverageScope::File(file) = coverage.scope {
+            files.insert(file);
+        }
+        record(coverage.domain, coverage.provenance, files)?;
+    }
+    for skipped in &document.skipped_regions {
+        record(
+            IrFactDomain::Diagnostics,
+            skipped.provenance,
+            BTreeSet::from([skipped.source.span().file()]),
+        )?;
+    }
+    for diagnostic in &document.diagnostics {
+        record(
+            IrFactDomain::Diagnostics,
+            diagnostic.provenance,
+            evidence_files(&diagnostic.evidence),
+        )?;
+    }
+    for extension in &document.extensions {
+        record(
+            IrFactDomain::Extensions,
+            extension.provenance,
+            evidence_files(&extension.evidence),
+        )?;
+    }
+
+    groups
+        .into_iter()
+        .map(|((domain, provider_pass, cause), (facts, files))| {
+            Ok(FirstSliceNormalizedFactWork {
+                domain,
+                provider_pass,
+                cause,
+                files: u64::try_from(files.len()).map_err(|_| FirstSliceError::Limits)?,
+                facts,
+            })
+        })
+        .collect()
+}
+
+fn normalized_provider_work(producer: &str) -> (&str, FirstSliceFactWorkCause) {
+    if producer == RESOLVER_PROVIDER_NAME {
+        (RESOLVER_PASS_ID, FirstSliceFactWorkCause::Resolution)
+    } else if producer == "rootlight-first-slice-treesitter" {
+        (
+            LOWERING_PASS_ID,
+            FirstSliceFactWorkCause::GenerationBoundLowering,
+        )
+    } else {
+        (producer, FirstSliceFactWorkCause::GenerationBoundLowering)
+    }
 }
 
 fn index_diagnostic_summaries(
@@ -11834,7 +12379,11 @@ fn map_resolution_error(error: ResolutionError, cancellation: &Cancellation) -> 
     }
     match error {
         ResolutionError::Cancelled(cancelled) => FirstSliceError::Cancelled(cancelled.reason()),
-        ResolutionError::WorkLimit { .. } => FirstSliceError::Limits,
+        ResolutionError::WorkLimit { maximum } => resource_limit(
+            FirstSliceResource::ResolutionWork,
+            maximum.saturating_add(1),
+            maximum,
+        ),
         ResolutionError::InvalidDocument(IrDocumentValidationError::CollectionLimit {
             collection,
             observed,
@@ -11856,6 +12405,79 @@ fn map_resolution_error(error: ResolutionError, cancellation: &Cancellation) -> 
         }) => resource_limit(FirstSliceResource::NestedItems, observed, limit),
         _ => FirstSliceError::Resolution,
     }
+}
+
+fn apply_bounded_resolution(
+    mut document: NormalizedIrDocument,
+    limits: ResolutionLimits,
+    context: ResolverFactContext,
+    cancellation: &Cancellation,
+) -> Result<NormalizedIrDocument, FirstSliceError> {
+    let engine = ResolutionEngine::new(limits);
+    let estimate = engine
+        .estimate_work(&document, cancellation)
+        .map_err(|error| map_resolution_error(error, cancellation))?;
+    if !estimate.fits() {
+        append_resolution_work_bounded_diagnostic(
+            &mut document,
+            estimate.required,
+            estimate.limit,
+            &IrLimits::default(),
+        )?;
+        return Ok(document);
+    }
+    engine
+        .apply_document(document, context, cancellation)
+        .map_err(|error| map_resolution_error(error, cancellation))
+}
+
+fn append_resolution_work_bounded_diagnostic(
+    document: &mut NormalizedIrDocument,
+    required: usize,
+    limit: usize,
+    limits: &IrLimits,
+) -> Result<(), FirstSliceError> {
+    let provenance = document
+        .provenance
+        .first()
+        .map(|record| record.id)
+        .ok_or(FirstSliceError::Identity)?;
+    let evidence_file = document
+        .files
+        .first()
+        .map(|record| record.id)
+        .ok_or(FirstSliceError::Identity)?;
+    for coverage in &mut document.coverage_records {
+        if matches!(
+            coverage.domain,
+            IrFactDomain::Occurrences | IrFactDomain::Relations
+        ) && coverage.status != CoverageStatus::Unknown
+        {
+            coverage.status = CoverageStatus::Bounded;
+            coverage.id =
+                derive_coverage_record_id(coverage).map_err(|_| FirstSliceError::Identity)?;
+        }
+    }
+    let mut diagnostic = DiagnosticRecord {
+        id: FactId::from_bytes([0; 20]),
+        repository: document.repository,
+        generation: document.generation,
+        code: "resolution-work-bounded".to_owned(),
+        message: format!(
+            "resolution required {required} work units above the configured limit {limit}"
+        ),
+        severity: DiagnosticSeverity::Warning,
+        source: None,
+        coverage_effect: CoverageStatus::Bounded,
+        provenance,
+        evidence: FactEvidence {
+            source: None,
+            derivation: vec![FactRef::File(evidence_file)],
+        },
+    };
+    diagnostic.id =
+        derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
+    retain_priority_aggregate_diagnostic(document, diagnostic, limits)
 }
 
 fn resolution_limits_for_occurrences(
@@ -12459,7 +13081,7 @@ mod tests {
     };
 
     use cap_std::{ambient_authority, fs::Dir};
-    use rootlight_ids::GenerationId;
+    use rootlight_ids::{FileIdentity, GenerationId, derive_file};
     use rootlight_incremental::{EquivalenceSnapshot, LogicalComponent, LogicalDomain};
     use rootlight_ir::{
         ContainerRef, CoverageScope, CoverageStatus, EntityRecord, EntityVisibility, FileRecord,
@@ -12606,6 +13228,215 @@ mod tests {
                 .candidate_limit(),
             1
         );
+    }
+
+    #[test]
+    fn resolution_work_overflow_publishes_unresolved_bounded_facts() {
+        let repository = derive_repository(b"resolution-work-bounded-repository").id();
+        let generation = GenerationId::from_bytes([73; 20]);
+        let file = derive_file(FileIdentity {
+            repository,
+            path_identity: b"src/lib.rs",
+        })
+        .id();
+        let source_hash = content_hash(b"resolution-work-bounded-source");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 64).expect("fixture source span is valid"),
+            source_hash,
+            None,
+        );
+        let producer = ProducerIdentity::new(
+            "rootlight-resolution-work-fixture",
+            "1.0",
+            content_hash(b"resolution-work-fixture-producer"),
+        )
+        .expect("fixture producer is valid");
+        let mut provenance = ProvenanceRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            producer_kind: ProducerKind::Parser,
+            producer,
+            binary_digest: content_hash(b"resolution-work-fixture-binary"),
+            frontend_version: Some("fixture-1".to_owned()),
+            language: "rust".to_owned(),
+            tier: AnalysisTier::TierB,
+            build_context: BuildContextIdentity::new(content_hash(
+                b"resolution-work-fixture-context",
+            )),
+            input_sources: vec![source.clone()],
+            evidence_sources: vec![source.clone()],
+            derivation_parents: Vec::new(),
+            rule: None,
+        };
+        provenance.id =
+            derive_provenance_record_id(&provenance).expect("fixture provenance identity derives");
+        let provenance_id = provenance.id;
+        let mut document = NormalizedIrDocument::empty(repository, generation);
+        document.provenance.push(provenance);
+        document.files.push(FileRecord {
+            id: file,
+            repository,
+            generation,
+            path: "src/lib.rs".to_owned(),
+            path_locator: None,
+            content_hash: source_hash,
+            byte_length: 64,
+            language: "rust".to_owned(),
+            encoding: "utf-8".to_owned(),
+            generated: false,
+            provenance: provenance_id,
+            evidence: FactEvidence {
+                source: Some(source.clone()),
+                derivation: Vec::new(),
+            },
+        });
+        let file_claim = FileIdentityClaim {
+            file,
+            repository,
+            path: "src/lib.rs".to_owned(),
+            path_identity: b"src/lib.rs".to_vec(),
+            content_hash: source_hash,
+            byte_length: 64,
+        };
+        document.extensions.push(
+            new_file_identity_claim_envelope(
+                &file_claim,
+                generation,
+                provenance_id,
+                source.clone(),
+            )
+            .expect("fixture file identity claim encodes"),
+        );
+        for identity in [75_u8, 76, 77] {
+            let declared_identity = format!("shared-{identity}");
+            let mut container_identity = vec![0];
+            container_identity.extend_from_slice(file.as_bytes());
+            let claim = SymbolIdentityClaim {
+                symbol: SymbolId::from_bytes([0; 20]),
+                repository,
+                language: "rust".to_owned(),
+                kind: EntityKind::Function,
+                container: Some(ContainerRef::File(file)),
+                container_identity,
+                declared_identity,
+                signature_discriminator: Vec::new(),
+                build_context_discriminator: content_hash(b"resolution-work-fixture-context")
+                    .as_bytes()
+                    .to_vec(),
+            };
+            let claim = SymbolIdentityClaim {
+                symbol: claim.derived_symbol(),
+                ..claim
+            };
+            document.entities.push(EntityRecord {
+                id: claim.symbol,
+                repository,
+                generation,
+                kind: EntityKind::Function,
+                language: "rust".to_owned(),
+                tier: AnalysisTier::TierB,
+                canonical_name: "shared".to_owned(),
+                display_name: "shared".to_owned(),
+                qualified_name: format!("fixture::shared::{identity}"),
+                container: Some(ContainerRef::File(file)),
+                visibility: rootlight_ir::EntityVisibility::Private,
+                flags: Vec::new(),
+                provenance: provenance_id,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            });
+            document.extensions.push(
+                new_symbol_identity_claim_envelope(
+                    &claim,
+                    generation,
+                    provenance_id,
+                    source.clone(),
+                )
+                .expect("fixture symbol identity claim encodes"),
+            );
+        }
+        let text_hash = content_hash(b"shared");
+        let mut occurrence = rootlight_ir::OccurrenceRecord {
+            id: FactId::from_bytes([78; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: rootlight_ir::OccurrenceRole::Reference,
+            enclosing: None,
+            target: rootlight_ir::OccurrenceTarget::Unresolved { text_hash },
+            syntactic_text_hash: text_hash,
+            syntax_kind: "identifier".to_owned(),
+            provenance: provenance_id,
+            confidence: rootlight_ir::Confidence::new(0).expect("zero fixture confidence is valid"),
+            evidence: FactEvidence {
+                source: Some(source.clone()),
+                derivation: Vec::new(),
+            },
+        };
+        occurrence.id = rootlight_ir::derive_occurrence_record_id(&occurrence)
+            .expect("fixture occurrence identity derives");
+        document.occurrences.push(occurrence);
+        for domain in [IrFactDomain::Occurrences, IrFactDomain::Relations] {
+            let mut coverage = CoverageRecord {
+                id: FactId::from_bytes([0; 20]),
+                repository,
+                generation,
+                scope: CoverageScope::File(file),
+                domain,
+                tier: AnalysisTier::TierB,
+                status: CoverageStatus::Complete,
+                discovered: 1,
+                indexed: 1,
+                skipped: 0,
+                provenance: provenance_id,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            };
+            coverage.id =
+                derive_coverage_record_id(&coverage).expect("fixture coverage identity derives");
+            document.coverage_records.push(coverage);
+        }
+        let limits =
+            ResolutionLimits::with_work_limit(1, 3).expect("fixture resolver limits are valid");
+        rootlight_ir::validate_ir_document(
+            &document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("fixture normalized document is valid");
+
+        let bounded = apply_bounded_resolution(
+            document,
+            limits,
+            ResolverFactContext::new(content_hash(b"resolution-work-fixture-context")),
+            &Cancellation::new(),
+        )
+        .expect("over-limit resolution publishes bounded structural facts");
+
+        assert!(matches!(
+            bounded.occurrences[0].target,
+            rootlight_ir::OccurrenceTarget::Unresolved { .. }
+        ));
+        assert!(bounded.relations.is_empty());
+        assert!(bounded.coverage_records.iter().all(|coverage| {
+            !matches!(
+                coverage.domain,
+                IrFactDomain::Occurrences | IrFactDomain::Relations
+            ) || coverage.status == CoverageStatus::Bounded
+        }));
+        assert!(bounded.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "resolution-work-bounded"
+                && diagnostic.message
+                    == "resolution required 4 work units above the configured limit 3"
+        }));
     }
 
     #[test]
@@ -13107,6 +13938,161 @@ mod tests {
             rejected_partition,
             NormalizedIrDocument::empty(repository, generation)
         );
+    }
+
+    #[test]
+    fn structural_merge_bounds_aggregate_diagnostics() {
+        fn document(
+            repository: RepositoryId,
+            generation: GenerationId,
+            file: FileId,
+            diagnostic_count: usize,
+        ) -> NormalizedIrDocument {
+            let source = SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, 0, 1).expect("diagnostic source span is valid"),
+                content_hash(file.as_bytes()),
+                None,
+            );
+            let producer = ProducerIdentity::new(
+                "rootlight-test-structural",
+                "1.0",
+                content_hash(b"structural-diagnostic-producer"),
+            )
+            .expect("structural producer is valid");
+            let mut provenance = ProvenanceRecord {
+                id: FactId::from_bytes([0; 20]),
+                repository,
+                generation,
+                producer_kind: ProducerKind::Parser,
+                producer,
+                binary_digest: content_hash(b"structural-diagnostic-binary"),
+                frontend_version: Some("test-structural-1".to_owned()),
+                language: "rust".to_owned(),
+                tier: AnalysisTier::TierB,
+                build_context: BuildContextIdentity::new(content_hash(
+                    b"structural-diagnostic-context",
+                )),
+                input_sources: vec![source.clone()],
+                evidence_sources: vec![source.clone()],
+                derivation_parents: Vec::new(),
+                rule: None,
+            };
+            provenance.id = derive_provenance_record_id(&provenance)
+                .expect("structural provenance identity derives");
+            let file_record = FileRecord {
+                id: file,
+                repository,
+                generation,
+                path: format!("src/{file}.rs"),
+                path_locator: None,
+                content_hash: source.content_hash(),
+                byte_length: 1,
+                language: "rust".to_owned(),
+                encoding: "utf-8".to_owned(),
+                generated: false,
+                provenance: provenance.id,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            };
+            let diagnostics = (0..diagnostic_count)
+                .map(|index| {
+                    let mut diagnostic = DiagnosticRecord {
+                        id: FactId::from_bytes([0; 20]),
+                        repository,
+                        generation,
+                        code: format!("structural-diagnostic-{index}"),
+                        message: "bounded parser recovery".to_owned(),
+                        severity: DiagnosticSeverity::Warning,
+                        source: Some(source.clone()),
+                        coverage_effect: CoverageStatus::Bounded,
+                        provenance: provenance.id,
+                        evidence: FactEvidence {
+                            source: Some(source.clone()),
+                            derivation: Vec::new(),
+                        },
+                    };
+                    diagnostic.id = derive_diagnostic_record_id(&diagnostic)
+                        .expect("diagnostic identity derives");
+                    diagnostic
+                })
+                .collect();
+            let count = u64::try_from(diagnostic_count).expect("fixture count is representable");
+            let mut coverage = CoverageRecord {
+                id: FactId::from_bytes([0; 20]),
+                repository,
+                generation,
+                scope: CoverageScope::File(file),
+                domain: IrFactDomain::Diagnostics,
+                tier: AnalysisTier::TierB,
+                status: CoverageStatus::Complete,
+                discovered: count,
+                indexed: count,
+                skipped: 0,
+                provenance: provenance.id,
+                evidence: FactEvidence {
+                    source: Some(source),
+                    derivation: Vec::new(),
+                },
+            };
+            coverage.id =
+                derive_coverage_record_id(&coverage).expect("diagnostic coverage identity derives");
+            let mut document = NormalizedIrDocument::empty(repository, generation);
+            document.files.push(file_record);
+            document.provenance.push(provenance);
+            document.coverage_records.push(coverage);
+            document.diagnostics = diagnostics;
+            document
+        }
+
+        let repository = derive_repository(b"structural-diagnostic-repository").id();
+        let generation = GenerationId::from_bytes([26; 20]);
+        let mut limits = IrLimits::default();
+        limits.max_diagnostics = 3;
+        let mut target = NormalizedIrDocument::empty(repository, generation);
+        let mut append_state =
+            DocumentAppendState::from_document(&target).expect("append state initializes");
+        for (file, diagnostics) in [
+            (FileId::from_bytes([27; 20]), 2),
+            (FileId::from_bytes([28; 20]), 2),
+        ] {
+            append_normalized_document(
+                &mut target,
+                document(repository, generation, file, diagnostics),
+                &limits,
+                &mut append_state,
+            )
+            .expect("structural diagnostics append within the aggregate bound");
+        }
+        append_diagnostic_truncation_diagnostic(
+            &mut target,
+            append_state.truncated_diagnostics,
+            &limits,
+        )
+        .expect("aggregate diagnostic disposition remains visible");
+
+        assert_eq!(append_state.truncated_diagnostics, 2);
+        assert_eq!(target.diagnostics.len(), limits.max_diagnostics);
+        assert_eq!(
+            target
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE)
+                .count(),
+            1
+        );
+        assert!(target.coverage_records.iter().any(|coverage| {
+            coverage.scope == CoverageScope::File(FileId::from_bytes([28; 20]))
+                && coverage.status == CoverageStatus::Bounded
+                && coverage.discovered == 2
+                && coverage.indexed == 0
+                && coverage.skipped == 2
+        }));
+        rootlight_ir::validate_ir_document(&target, &limits, &ExtensionSupport::default())
+            .expect("bounded aggregate diagnostics remain valid normalized IR");
     }
 
     #[test]
@@ -16739,6 +17725,11 @@ mod tests {
             inventory.generation_disk_bytes,
             receipt.oracle_allocated_bytes
         );
+        assert_eq!(
+            inventory.total_storage_bytes,
+            receipt.oracle_allocated_bytes
+        );
+        assert_eq!(inventory.effective_retention_generations, 2);
         let repository = &inventory.repositories[0];
         assert_eq!(repository.repository, receipt.repository);
         assert_eq!(repository.languages, ["rust"]);
@@ -16749,6 +17740,8 @@ mod tests {
         let generation = &inventory.generations[0];
         assert_eq!(generation.repository, receipt.repository);
         assert_eq!(generation.generation, receipt.generation);
+        assert_eq!(generation.disk_bytes, receipt.oracle_allocated_bytes);
+        assert_eq!(generation.parent, None);
         assert!(generation.active);
         assert!(
             inventory
@@ -16795,6 +17788,55 @@ mod tests {
             .expect("reclaimed staging inventory builds");
         assert_eq!(reclaimed.unreclaimed_temporary_bytes, 0);
         assert!(reclaimed.disk_margin_bytes.is_some());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn durable_support_inventory_reports_physical_generation_bytes_and_parent() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        let source = fixture.path().join("src/lib.rs");
+        fs::write(&source, "pub fn first() -> u32 { 1 }\n").expect("first source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new_durable(3, paths.state_dir(), &cancellation)
+            .expect("durable service initializes");
+        let first = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("first generation publishes");
+        fs::write(&source, "pub fn second() -> u32 { 2 }\n").expect("second source writes");
+        let second = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("second generation publishes");
+
+        let inventory = service
+            .support_inventory_snapshot()
+            .expect("support inventory builds");
+        assert_eq!(inventory.effective_retention_generations, 3);
+        assert_eq!(
+            inventory.generation_disk_bytes,
+            first
+                .retained_durable_bytes
+                .checked_add(second.retained_durable_bytes)
+                .expect("fixture retained-byte total fits")
+        );
+        assert_eq!(
+            inventory.total_storage_bytes,
+            inventory.generation_disk_bytes
+        );
+        let active = inventory
+            .generations
+            .iter()
+            .find(|generation| generation.active)
+            .expect("active generation is reported");
+        assert_eq!(active.generation, second.generation);
+        assert_eq!(active.parent, Some(first.generation));
+        assert_eq!(active.disk_bytes, second.retained_durable_bytes);
     }
 
     #[test]
@@ -17396,9 +18438,49 @@ mod tests {
         assert_eq!(evidence.reused_parser_artifacts(), 1);
         assert!(evidence.reused_parser_artifact_bytes() > 0);
         assert_eq!(evidence.lowered_files(), 2);
-        assert!(evidence.reused_normalized_facts() > 0);
+        assert_eq!(evidence.reused_normalized_facts(), 0);
         assert!(evidence.rebuilt_normalized_facts() > 0);
+        assert_eq!(
+            evidence
+                .normalized_fact_work()
+                .iter()
+                .map(FirstSliceNormalizedFactWork::facts)
+                .sum::<u64>(),
+            evidence.rebuilt_normalized_facts()
+        );
+        assert!(evidence.normalized_fact_work().iter().any(|work| {
+            work.provider_pass() == LOWERING_PASS_ID
+                && work.cause() == FirstSliceFactWorkCause::GenerationBoundLowering
+                && work.files() > 0
+                && work.facts() > 0
+        }));
+        assert!(evidence.planned_fact_work().iter().any(|work| {
+            work.disposition() == FirstSliceFactWorkDisposition::Rebuild
+                && work.domain() == FactDomain::Body
+                && work.cause() == FirstSliceFactWorkCause::DependencyClosure
+                && work.files() == 1
+                && work.analysis_units() == 1
+        }));
+        assert!(evidence.planned_fact_work().iter().any(|work| {
+            work.disposition() == FirstSliceFactWorkDisposition::Reuse
+                && work.domain() == FactDomain::Body
+                && work.cause() == FirstSliceFactWorkCause::CompleteDependencyMatch
+                && work.files() == 1
+                && work.analysis_units() == 1
+        }));
         assert!(evidence.structural_cache_retained());
+
+        let mut legacy_evidence =
+            serde_json::to_value(evidence).expect("incremental evidence serializes");
+        let legacy_object = legacy_evidence
+            .as_object_mut()
+            .expect("incremental evidence serializes as an object");
+        legacy_object.remove("planned_fact_work");
+        legacy_object.remove("normalized_fact_work");
+        let restored: FirstSliceIncrementalEvidence =
+            serde_json::from_value(legacy_evidence).expect("legacy evidence remains readable");
+        assert!(restored.planned_fact_work().is_empty());
+        assert!(restored.normalized_fact_work().is_empty());
 
         let snapshot = service
             .generations
@@ -17418,6 +18500,13 @@ mod tests {
                 })
         }));
         assert_ne!(first.generation, second.generation);
+        assert_fresh_equivalent(
+            &service,
+            fixture.path(),
+            first.generation,
+            &second,
+            &cancellation,
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]

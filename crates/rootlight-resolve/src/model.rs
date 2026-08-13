@@ -92,6 +92,23 @@ impl ResolutionLimits {
     }
 }
 
+/// Deterministic resolver work estimate for one normalized document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolutionWorkEstimate {
+    /// Occurrence and same-name candidate inspections required by resolution.
+    pub required: usize,
+    /// Configured operation-wide ceiling.
+    pub limit: usize,
+}
+
+impl ResolutionWorkEstimate {
+    /// Returns whether the complete resolution pass fits its configured limit.
+    #[must_use]
+    pub const fn fits(self) -> bool {
+        self.required <= self.limit
+    }
+}
+
 impl Default for ResolutionLimits {
     fn default() -> Self {
         Self {

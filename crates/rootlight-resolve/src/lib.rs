@@ -25,7 +25,8 @@ pub use model::{
     RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, RejectedCandidate, RejectionReason,
     ResolutionBatch, ResolutionDecision, ResolutionError, ResolutionExplanation,
     ResolutionLimitError, ResolutionLimits, ResolutionOutcome, ResolutionPenalty, ResolutionPolicy,
-    ResolutionRule, ResolutionSignal, ResolverFactContext, UnresolvedReason,
+    ResolutionRule, ResolutionSignal, ResolutionWorkEstimate, ResolverFactContext,
+    UnresolvedReason,
 };
 pub use quality::{
     CalibrationBin, CalibrationReport, ExpectedResolution, QualityError, QualityRatio,

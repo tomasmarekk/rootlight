@@ -649,6 +649,44 @@ fn scan_file(file_id: FileId, path_hash: ContentHash, metadata: FileMetadata) ->
 }
 
 #[test]
+fn plan_reports_logically_reusable_nodes_without_claiming_artifact_reuse() {
+    let affected = FactNode::new(unit(1), FactDomain::Body);
+    let unrelated = FactNode::new(unit(2), FactDomain::PublicSurface);
+    let key = InputKey::BodySummary(unit(1));
+    let pass = PassId::parse("body.resolve").expect("fixture pass ID is valid");
+    let graph = DependencyGraph::new(
+        [unrelated, affected],
+        [DependencyEdge::new(
+            DependencySource::Input(key),
+            affected,
+            pass,
+        )],
+        &body_registry(),
+        graph_limits(2, 1),
+        &cancellation(),
+    )
+    .expect("fixture graph is valid");
+    let parent = summary(
+        input_snapshot([InputFingerprint::new(key, hash(1))]),
+        Vec::new(),
+    );
+    let current = input_snapshot([InputFingerprint::new(key, hash(2))]);
+
+    let plan = plan_invalidation(
+        &parent,
+        &current,
+        &graph,
+        planning_limits(),
+        &cancellation(),
+    )
+    .expect("body-only plan succeeds");
+
+    assert_eq!(plan.invalidated_nodes().collect::<Vec<_>>(), vec![affected]);
+    assert_eq!(plan.reusable_nodes().collect::<Vec<_>>(), vec![unrelated]);
+    assert!(plan.artifact_decisions().is_empty());
+}
+
+#[test]
 fn trusted_no_op_reuses_hash_without_reading_content() {
     let limits = ReconcileLimits::new(10).expect("fixture limits are valid");
     let record = baseline_file(file(1), hash(1), trusted_metadata(10, 1), hash(10));
