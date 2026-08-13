@@ -1016,9 +1016,9 @@ impl OperationJournal {
 
     /// Atomically admits and activates a bounded set of startup recovery operations.
     ///
-    /// Every record becomes visible as `running/executing` with zero-of-one
-    /// progress in the same transaction. This preserves per-repository recovery
-    /// observability without paying one durable commit per lifecycle transition.
+    /// Every record becomes visible as `running/executing` with zero-of-two
+    /// progress in the same transaction. The units distinguish active-generation
+    /// availability from retained-history verification.
     ///
     /// # Errors
     ///
@@ -1078,7 +1078,7 @@ impl OperationJournal {
                         cancellation_reason, recovery_class, revision, completed, total,
                         error_json, sequence
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', 'executing', 0,
-                               NULL, 'not_applicable', 2, 0, 1, NULL, ?8)",
+                               NULL, 'not_applicable', 2, 0, 2, NULL, ?8)",
                     params![
                         submission.operation.as_bytes().as_slice(),
                         submission.kind.as_str(),
@@ -5785,7 +5785,7 @@ mod tests {
             assert_eq!(record.stage, OperationStage::Executing);
             assert_eq!(
                 record.progress,
-                Progress::new(0, 1).expect("progress is valid")
+                Progress::new(0, 2).expect("progress is valid")
             );
             assert_eq!(record.revision, 2);
             assert_eq!(cancellation.reason(), None);
@@ -5857,9 +5857,9 @@ mod tests {
             journal
                 .update_progress(
                     operation,
-                    Progress::new(1, 1).expect("terminal progress is valid"),
+                    Progress::new(1, 2).expect("active progress is valid"),
                 )
-                .expect("recovery progress completes");
+                .expect("active recovery progress completes");
             journal
                 .transition(operation, OperationState::Succeeded, None)
                 .expect("recovery succeeds");

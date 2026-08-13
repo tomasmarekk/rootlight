@@ -116,8 +116,10 @@ const OPERATION_RETRY_MERGE_MS: u32 = 100;
 const OPERATION_RETRY_PERSISTENCE_MS: u32 = 150;
 const OPERATION_RETRY_SEARCH_MS: u32 = 100;
 const OPERATION_RETRY_PUBLICATION_MS: u32 = 50;
-const OPERATION_RETRY_RECOVERY_MS: u32 = 250;
+const OPERATION_RETRY_RECOVERY_MS: u32 = 1_000;
 const OPERATION_RETRY_CANCELLING_MS: u32 = 50;
+const RECOVERY_RETRY_ACTIVE_MS: u32 = 1_000;
+const RECOVERY_RETRY_RETAINED_MS: u32 = 5_000;
 const MAX_OPERATION_STATUS_WAIT_MS: u32 = 30_000;
 const OPERATION_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PUBLICATION_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(2);
@@ -706,7 +708,41 @@ type SharedFirstSliceService = Arc<RwLock<FirstSliceService>>;
 type IndexSerialization = Arc<Mutex<()>>;
 type SemanticRefinements = Arc<Mutex<BTreeMap<OperationId, PendingSemanticRefinement>>>;
 type GraphProjections = Arc<Mutex<GraphProjectionRegistry>>;
-type RecoveringRepositories = Arc<RwLock<BTreeSet<RepositoryId>>>;
+type RecoveringRepositories = Arc<RwLock<BTreeMap<RepositoryId, RepositoryRecoveryState>>>;
+type RecoveryDemand = Arc<Mutex<BTreeSet<RepositoryId>>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepositoryRecoveryPhase {
+    ActiveGeneration,
+    RetainedHistory,
+}
+
+impl RepositoryRecoveryPhase {
+    const fn blocks_reads(self) -> bool {
+        matches!(self, Self::ActiveGeneration)
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ActiveGeneration => "active_generation",
+            Self::RetainedHistory => "retained_history",
+        }
+    }
+
+    fn retry_after(self) -> Duration {
+        match self {
+            Self::ActiveGeneration => Duration::from_millis(u64::from(RECOVERY_RETRY_ACTIVE_MS)),
+            Self::RetainedHistory => Duration::from_millis(u64::from(RECOVERY_RETRY_RETAINED_MS)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RepositoryRecoveryState {
+    generation: GenerationId,
+    operation: Option<OperationId>,
+    phase: RepositoryRecoveryPhase,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct WatcherConfig {
@@ -797,6 +833,7 @@ struct FirstSliceServiceLanes {
     recovery_ready: Arc<AtomicBool>,
     recovery_complete: Arc<AtomicBool>,
     recovering_repositories: RecoveringRepositories,
+    recovery_demand: RecoveryDemand,
     support_state: Option<Arc<DaemonState>>,
 }
 
@@ -1042,13 +1079,10 @@ impl FirstSliceDaemon {
         support_state: Option<Arc<DaemonState>>,
         deferred_restore: Option<DeferredRecoveryWork>,
     ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
-        for (context, _) in &durable_contexts {
-            if let Some(root_identity) = context.root_identity {
+        for (context, record) in &durable_contexts {
+            if let Some(root_identity) = startup_registration_identity(context, record) {
                 service
-                    .restore_repository_registration(
-                        ContentHash::from_bytes(root_identity),
-                        context.repository,
-                    )
+                    .restore_repository_registration(root_identity, context.repository)
                     .map_err(FirstSliceHostError::Service)?;
             }
         }
@@ -1137,11 +1171,21 @@ impl FirstSliceDaemon {
                     recovery
                         .targets
                         .iter()
-                        .map(FirstSliceRecoveryTarget::repository)
+                        .map(|target| {
+                            (
+                                target.repository(),
+                                RepositoryRecoveryState {
+                                    generation: target.generation(),
+                                    operation: None,
+                                    phase: RepositoryRecoveryPhase::ActiveGeneration,
+                                },
+                            )
+                        })
                         .collect()
                 })
                 .unwrap_or_default(),
         ));
+        let recovery_demand = Arc::new(Mutex::new(BTreeSet::new()));
         let (work, work_receiver) = mpsc::sync_channel(DEFAULT_WORK_QUEUE);
         let (read, read_receiver) = mpsc::sync_channel(DEFAULT_READ_QUEUE);
         let (control, control_receiver) = mpsc::sync_channel(DEFAULT_CONTROL_QUEUE);
@@ -1155,6 +1199,7 @@ impl FirstSliceDaemon {
             recovery_ready: Arc::clone(&recovery_ready),
             recovery_complete,
             recovering_repositories,
+            recovery_demand,
             support_state,
         };
         let work_journal = journal.clone();
@@ -2208,6 +2253,22 @@ impl<'a> RecoveryOperationGuard<'a> {
         Ok(())
     }
 
+    fn mark_active_available(
+        &self,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Result<(), FirstSliceHostError> {
+        let progress = Progress::new(1, 2)
+            .map_err(|_| FirstSliceHostError::Service(FirstSliceError::Limits))?;
+        runtime
+            .block_on(self.journal.update_progress_until(
+                self.recovery.operation,
+                progress,
+                self.recovery.deadline,
+            ))
+            .map_err(FirstSliceHostError::Journal)?;
+        Ok(())
+    }
+
     fn cancel(
         &mut self,
         runtime: &tokio::runtime::Runtime,
@@ -2354,7 +2415,7 @@ fn start_recovery_operations(
                 record.operation == *operation
                     && record.state == OperationState::Running
                     && record.progress.completed == 0
-                    && record.progress.total == 1
+                    && record.progress.total == 2
             });
     if !valid_batch {
         finalize_pre_guard_recovery_batch(
@@ -2557,6 +2618,67 @@ fn remove_recovering_repository(
         .write()
         .map_err(|_| FirstSliceHostError::ThreadPanicked)?
         .remove(&repository);
+    lanes
+        .recovery_demand
+        .lock()
+        .map_err(|_| FirstSliceHostError::ThreadPanicked)?
+        .remove(&repository);
+    Ok(())
+}
+
+fn publish_recovery_operations(
+    lanes: &FirstSliceServiceLanes,
+    recoveries: &[RecoveryOperationGuard<'_>],
+) -> Result<(), FirstSliceHostError> {
+    let mut repositories = lanes
+        .recovering_repositories
+        .write()
+        .map_err(|_| FirstSliceHostError::ThreadPanicked)?;
+    for recovery in recoveries {
+        let state = repositories.get_mut(&recovery.target.repository()).ok_or(
+            FirstSliceHostError::Service(FirstSliceError::CatalogCorrupt),
+        )?;
+        state.operation = Some(recovery.operation());
+    }
+    Ok(())
+}
+
+fn mark_active_recovery_available(
+    lanes: &FirstSliceServiceLanes,
+    repository: RepositoryId,
+) -> Result<(), FirstSliceHostError> {
+    let mut repositories = lanes
+        .recovering_repositories
+        .write()
+        .map_err(|_| FirstSliceHostError::ThreadPanicked)?;
+    let state = repositories
+        .get_mut(&repository)
+        .ok_or(FirstSliceHostError::Service(
+            FirstSliceError::CatalogCorrupt,
+        ))?;
+    state.phase = RepositoryRecoveryPhase::RetainedHistory;
+    Ok(())
+}
+
+fn prioritize_requested_recovery(
+    lanes: &FirstSliceServiceLanes,
+    recoveries: &mut [RecoveryOperationGuard<'_>],
+    start: usize,
+) -> Result<(), FirstSliceHostError> {
+    let mut demand = lanes
+        .recovery_demand
+        .lock()
+        .map_err(|_| FirstSliceHostError::ThreadPanicked)?;
+    let Some((requested, position)) = demand.iter().find_map(|repository| {
+        recoveries[start..]
+            .iter()
+            .position(|recovery| recovery.target.repository() == *repository)
+            .map(|offset| (*repository, start.saturating_add(offset)))
+    }) else {
+        return Ok(());
+    };
+    demand.remove(&requested);
+    recoveries.swap(start, position);
     Ok(())
 }
 
@@ -2672,6 +2794,7 @@ fn durable_recovery_worker(
     } else {
         Vec::new()
     };
+    publish_recovery_operations(&lanes, &active_recoveries)?;
     let work_result: Result<(), FirstSliceHostError> = (|| {
         #[cfg(test)]
         if let Some(after_start) = deferred.after_start.take() {
@@ -2682,7 +2805,9 @@ fn durable_recovery_worker(
             return Ok(());
         }
         if deferred.restore_active {
-            for recovery in &mut active_recoveries {
+            for index in 0..active_recoveries.len() {
+                prioritize_requested_recovery(&lanes, &mut active_recoveries, index)?;
+                let recovery = &mut active_recoveries[index];
                 let target = recovery.target;
                 if let Some(reason) = cancellation.reason() {
                     let _ = recovery.cancellation().cancel(reason);
@@ -2759,8 +2884,9 @@ fn durable_recovery_worker(
                     recovery.fail(&runtime, FirstSliceError::Catalog)?;
                     return Err(error);
                 }
-                remove_recovering_repository(&lanes, target.repository())?;
                 recovered_targets.insert(recovery.operation());
+                recovery.mark_active_available(&runtime)?;
+                mark_active_recovery_available(&lanes, target.repository())?;
             }
         }
         // Active generations become queryable before retained history finishes,
@@ -2791,6 +2917,7 @@ fn durable_recovery_worker(
                 Ok(restored) => restored,
                 Err(FirstSliceError::Cancelled(reason)) => {
                     recovery.cancel(&runtime, reason)?;
+                    remove_recovering_repository(&lanes, target.repository())?;
                     if stopping.load(Ordering::Acquire) || reason == CancellationReason::Shutdown {
                         continue;
                     }
@@ -2799,6 +2926,7 @@ fn durable_recovery_worker(
                 }
                 Err(error) => {
                     recovery.fail(&runtime, error)?;
+                    remove_recovering_repository(&lanes, target.repository())?;
                     if let Some(state) = lanes.support_state.as_deref() {
                         state.set_generation_status(HealthStatus::Degraded);
                     }
@@ -2832,6 +2960,7 @@ fn durable_recovery_worker(
                 if let Some(state) = lanes.support_state.as_deref() {
                     state.set_generation_status(HealthStatus::Degraded);
                 }
+                remove_recovering_repository(&lanes, target.repository())?;
                 degraded = true;
                 continue;
             }
@@ -2844,6 +2973,7 @@ fn durable_recovery_worker(
                 &remaining_generations,
             )?;
             recovery.complete(&runtime)?;
+            remove_recovering_repository(&lanes, target.repository())?;
         }
         Ok(())
     })();
@@ -3477,23 +3607,49 @@ fn execute_service_request(
         .cancellation
         .check()
         .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
-    if let Some(repository) = request_repository(&request)?
-        && lanes
+    let requested_repository = request_repository(&request)?;
+    if let Some(repository) = requested_repository {
+        let recovery = lanes
             .recovering_repositories
             .read()
             .map_err(|_| internal_error())?
-            .contains(&repository)
-    {
-        return Err(recovery_in_progress());
+            .get(&repository)
+            .copied();
+        if let Some(recovery) = recovery
+            && recovery.phase.blocks_reads()
+        {
+            lanes
+                .recovery_demand
+                .lock()
+                .map_err(|_| internal_error())?
+                .insert(repository);
+            return Err(recovery_in_progress(
+                Some(repository),
+                Some(recovery),
+                RepositoryRecoveryPhase::ActiveGeneration,
+            ));
+        }
     }
     if !lanes.recovery_ready.load(Ordering::Acquire)
+        && requested_repository.is_none()
         && !matches!(
             &request,
             FirstSliceIpcRequest::RepositoryList(_)
                 | FirstSliceIpcRequest::RepositoryCatalogPage(_)
         )
     {
-        return Err(recovery_in_progress());
+        let recovery = lanes
+            .recovering_repositories
+            .read()
+            .map_err(|_| internal_error())?
+            .values()
+            .next()
+            .copied();
+        return Err(recovery_in_progress(
+            None,
+            recovery,
+            RepositoryRecoveryPhase::ActiveGeneration,
+        ));
     }
     if !lanes.recovery_complete.load(Ordering::Acquire)
         && matches!(
@@ -3502,7 +3658,18 @@ fn execute_service_request(
                 | FirstSliceIpcRequest::RepositoryCatalogMutation(_)
         )
     {
-        return Err(recovery_in_progress());
+        let recovery = lanes
+            .recovering_repositories
+            .read()
+            .map_err(|_| internal_error())?
+            .values()
+            .next()
+            .copied();
+        return Err(recovery_in_progress(
+            None,
+            recovery,
+            RepositoryRecoveryPhase::RetainedHistory,
+        ));
     }
     let request = match request {
         FirstSliceIpcRequest::RepositoryIndex(request) => {
@@ -3707,15 +3874,47 @@ fn index_admission_in_progress(operation: OperationId) -> PublicError {
         .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
 }
 
-fn recovery_in_progress() -> PublicError {
-    PublicError::builder(
+fn recovery_in_progress(
+    repository: Option<RepositoryId>,
+    recovery: Option<RepositoryRecoveryState>,
+    fallback_phase: RepositoryRecoveryPhase,
+) -> PublicError {
+    let phase = recovery
+        .map(|recovery| recovery.phase)
+        .unwrap_or(fallback_phase);
+    let completed = u64::from(matches!(phase, RepositoryRecoveryPhase::RetainedHistory));
+    let mut builder = PublicError::builder(
         ErrorCode::Busy,
         "durable repository recovery is still running",
     )
-    .retry_after(retry_after())
-    .next_action(NextAction::Retry)
-    .build()
-    .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
+    .retry_after(phase.retry_after())
+    .detail(
+        static_detail_key("recovery_stage"),
+        PublicValue::Label(static_safe_label(phase.label())),
+    )
+    .detail(
+        static_detail_key("progress_completed"),
+        PublicValue::Unsigned(completed),
+    )
+    .detail(
+        static_detail_key("progress_total"),
+        PublicValue::Unsigned(2),
+    )
+    .next_action(NextAction::Retry);
+    if let Some(repository) = repository {
+        builder = builder.repository(repository);
+    }
+    if let Some(recovery) = recovery {
+        builder = builder.generation(recovery.generation);
+        if let Some(operation) = recovery.operation {
+            builder = builder
+                .operation(operation)
+                .next_action(NextAction::InspectOperation);
+        }
+    }
+    builder
+        .build()
+        .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
 }
 
 fn publication_error(operation: OperationId, error: PublicError) -> PublicError {
@@ -4793,11 +4992,33 @@ fn repository_index_with_intent(
         state.set_adapter_status(HealthStatus::Degraded);
     }
     if result.is_err() && !publication_committed {
-        read_service(service)?
-            .restore_repository_registration(admission.root_identity, admission.repository)
-            .map_err(service_error)?;
+        let service = read_service(service)?;
+        settle_unpublished_index_admission(&service, admission)?;
     }
     result
+}
+
+fn settle_unpublished_index_admission(
+    service: &FirstSliceService,
+    admission: FirstSliceIndexAdmission,
+) -> Result<(), PublicError> {
+    if admission.created_repository_reservation() {
+        service.release_index_admission(admission);
+        return Ok(());
+    }
+    service
+        .restore_repository_registration(admission.root_identity, admission.repository)
+        .map_err(service_error)
+}
+
+fn startup_registration_identity(
+    context: &RepositoryOperationContext,
+    record: &OperationRecord,
+) -> Option<ContentHash> {
+    if context.published_generation.is_none() && record.state == OperationState::Failed {
+        return None;
+    }
+    context.root_identity.map(ContentHash::from_bytes)
 }
 
 #[derive(Clone, Copy)]
@@ -5803,7 +6024,10 @@ fn repository_operation_stage(record: &OperationRecord) -> &'static str {
         | OperationState::Interrupted => {}
     }
     if record.kind == OperationKind::Recovery {
-        return "recovery";
+        return match record.progress.completed {
+            0 => "active_generation",
+            _ => "retained_history",
+        };
     }
     if record.stage == OperationStage::Cleanup {
         return "publication";
@@ -5827,8 +6051,13 @@ fn repository_operation_retry_after_ms(record: &OperationRecord) -> Option<u32> 
         | OperationState::Failed
         | OperationState::Cancelled
         | OperationState::Interrupted => None,
-        OperationState::Running if record.kind == OperationKind::Recovery => {
+        OperationState::Running
+            if record.kind == OperationKind::Recovery && record.progress.completed == 0 =>
+        {
             Some(OPERATION_RETRY_RECOVERY_MS)
+        }
+        OperationState::Running if record.kind == OperationKind::Recovery => {
+            Some(RECOVERY_RETRY_RETAINED_MS)
         }
         OperationState::Running if record.stage == OperationStage::Cleanup => {
             Some(OPERATION_RETRY_PUBLICATION_MS)
@@ -5905,12 +6134,14 @@ fn code_locate(
         daemon::FirstSliceLocateMode::Unspecified => return Err(invalid_argument()),
     };
     let languages = parse_code_locate_languages(request.languages)?;
+    let path_prefixes = parse_code_locate_paths(request.path_prefixes)?;
     let response = service
-        .code_locate_with_languages_and_budget(
+        .code_locate_with_filters_and_budget(
             generation.generation,
             request.query,
             mode,
             languages,
+            path_prefixes,
             usize::try_from(request.maximum_results).map_err(|_| invalid_argument())?,
             usize::try_from(request.page_offset).map_err(|_| invalid_argument())?,
             service_budget(context),
@@ -5955,6 +6186,26 @@ fn code_locate(
         next_page_offset: response.data.next_page_offset,
         completeness: Some(completeness),
     })
+}
+
+fn parse_code_locate_paths(paths: Vec<String>) -> Result<Vec<String>, PublicError> {
+    let valid = paths.len() <= 256
+        && paths.windows(2).all(|pair| pair[0] < pair[1])
+        && paths.iter().all(|path| {
+            !path.is_empty()
+                && path.len() <= 8_192
+                && !path.starts_with('/')
+                && !path
+                    .bytes()
+                    .any(|byte| matches!(byte, b'\0' | b'\\' | b':'))
+                && path
+                    .split('/')
+                    .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
+        });
+    if !valid {
+        return Err(invalid_argument());
+    }
+    Ok(paths)
 }
 
 fn parse_code_locate_languages(languages: Vec<String>) -> Result<Vec<String>, PublicError> {
@@ -9402,17 +9653,24 @@ fn build_service_error(
         FirstSliceError::Retention => (
             ErrorCode::ResourceExhausted,
             "first-slice retention limit was reached",
-            true,
+            false,
             "retention_limit",
             "executing",
         ),
-        FirstSliceError::ResourceLimit { .. } => (
-            ErrorCode::ResourceExhausted,
-            "first-slice resource limit was reached",
-            false,
-            "resource_limit",
-            "executing",
-        ),
+        FirstSliceError::ResourceLimit { resource, .. } => {
+            let failure_stage = if resource == rootlight_service::FirstSliceResource::Repositories {
+                "admission"
+            } else {
+                "executing"
+            };
+            (
+                ErrorCode::ResourceExhausted,
+                "first-slice resource limit was reached",
+                false,
+                "resource_limit",
+                failure_stage,
+            )
+        }
         FirstSliceError::GenerationMemoryLimit { .. } => (
             ErrorCode::ResourceExhausted,
             "generation memory limit was reached",
@@ -9423,7 +9681,7 @@ fn build_service_error(
         FirstSliceError::Limits => (
             ErrorCode::ResourceExhausted,
             "first-slice safety limit was reached",
-            true,
+            false,
             "safety_limit",
             "executing",
         ),
@@ -10381,13 +10639,21 @@ mod tests {
         );
         record.kind = OperationKind::Recovery;
         record.stage = OperationStage::Executing;
-        assert_eq!(repository_operation_stage(&record), "recovery");
+        record.progress = Progress::new(0, 2).expect("recovery progress is valid");
+        assert_eq!(repository_operation_stage(&record), "active_generation");
         assert_eq!(
             repository_operation_retry_after_ms(&record),
             Some(OPERATION_RETRY_RECOVERY_MS)
         );
+        record.progress = Progress::new(1, 2).expect("recovery progress is valid");
+        assert_eq!(repository_operation_stage(&record), "retained_history");
+        assert_eq!(
+            repository_operation_retry_after_ms(&record),
+            Some(RECOVERY_RETRY_RETAINED_MS)
+        );
 
         record.kind = OperationKind::RepositoryIndex;
+        record.progress = Progress::new(5, 6).expect("index progress is valid");
         for (state, stage) in [
             (OperationState::Succeeded, "complete"),
             (OperationState::Failed, "search"),
@@ -10487,7 +10753,8 @@ mod tests {
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),
-            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
+            recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
+            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
             support_state: None,
         };
         let resources = ServiceRequestResources {
@@ -10590,7 +10857,8 @@ mod tests {
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),
-            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
+            recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
+            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
             support_state: Some(Arc::clone(&state)),
         };
         let metadata = Arc::new(Mutex::new(OperationMetadataSet::new(32)));
@@ -11042,6 +11310,29 @@ mod tests {
                 NextAction::CollectSupportBundle
             ]
         );
+
+        for error in [FirstSliceError::Retention, FirstSliceError::Limits] {
+            let bounded = build_service_error(error, None);
+            assert_eq!(bounded.code(), ErrorCode::ResourceExhausted);
+            assert!(!bounded.retryable());
+            assert_eq!(bounded.retry_after_ms(), None);
+            assert_eq!(bounded.next_actions(), &[]);
+        }
+
+        let repository_capacity = build_service_error(
+            FirstSliceError::ResourceLimit {
+                resource: rootlight_service::FirstSliceResource::Repositories,
+                observed: 177,
+                limit: 176,
+            },
+            None,
+        );
+        assert_eq!(
+            repository_capacity
+                .details()
+                .get(&static_detail_key("failure_stage")),
+            Some(&PublicValue::Label(static_safe_label("admission")))
+        );
     }
 
     #[test]
@@ -11167,7 +11458,8 @@ mod tests {
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),
-            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
+            recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
+            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
             support_state: None,
         };
         let root = fixture.path().to_string_lossy().into_owned();
@@ -11349,7 +11641,8 @@ mod tests {
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),
-            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
+            recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
+            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
             support_state: None,
         };
 
@@ -11417,6 +11710,7 @@ mod tests {
                     maximum_results: 8,
                     page_offset: 0,
                     languages: vec!["rust".to_owned()],
+                    path_prefixes: Vec::new(),
                 },
                 &context,
             )
@@ -11442,6 +11736,7 @@ mod tests {
                     maximum_results: 8,
                     page_offset: 0,
                     languages: vec!["unknown".to_owned()],
+                    path_prefixes: Vec::new(),
                 },
                 &context,
             )
@@ -11773,7 +12068,8 @@ mod tests {
             refinement: unused_refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),
-            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
+            recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
+            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
             support_state: None,
         };
         let stopping = Arc::new(AtomicBool::new(false));
@@ -12020,7 +12316,20 @@ mod tests {
             }
             Err(error) => {
                 assert_eq!(error.code(), ErrorCode::Busy);
-                assert_eq!(error.retry_after_ms(), Some(u64::from(RETRY_AFTER_MS)));
+                assert_eq!(
+                    error.retry_after_ms(),
+                    Some(u64::from(RECOVERY_RETRY_ACTIVE_MS))
+                );
+                assert_eq!(
+                    error
+                        .details()
+                        .get(&static_detail_key("progress_completed")),
+                    Some(&PublicValue::Unsigned(0))
+                );
+                assert_eq!(
+                    error.details().get(&static_detail_key("progress_total")),
+                    Some(&PublicValue::Unsigned(2))
+                );
             }
             Ok(_) => panic!("repository status response expected"),
         }
@@ -12096,6 +12405,7 @@ mod tests {
                     maximum_results: 8,
                     page_offset: 0,
                     languages: Vec::new(),
+                    path_prefixes: Vec::new(),
                 })
             },
             "reconciled generation becomes readable after background recovery",
@@ -12441,6 +12751,7 @@ mod tests {
                     maximum_results: 8,
                     page_offset: 0,
                     languages: Vec::new(),
+                    path_prefixes: Vec::new(),
                 })
             },
             "last-good generation becomes readable after background recovery",
@@ -12800,6 +13111,31 @@ mod tests {
         let error =
             parse_revision_range(&oversized).expect_err("oversized revision input is rejected");
         assert_eq!(error.code(), ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn code_locate_path_parser_accepts_canonical_prefixes_and_rejects_escape_forms() {
+        let paths = vec!["src".to_owned(), "tests/integration".to_owned()];
+        assert_eq!(
+            parse_code_locate_paths(paths.clone()).expect("canonical path prefixes parse"),
+            paths
+        );
+        assert!(
+            parse_code_locate_paths(Vec::new())
+                .expect("an omitted path scope selects the whole repository")
+                .is_empty()
+        );
+        for invalid in [
+            vec!["../src".to_owned()],
+            vec!["/src".to_owned()],
+            vec!["src\\lib.rs".to_owned()],
+            vec!["src".to_owned(), "src".to_owned()],
+            vec!["tests".to_owned(), "src".to_owned()],
+        ] {
+            let error =
+                parse_code_locate_paths(invalid).expect_err("noncanonical paths are rejected");
+            assert_eq!(error.code(), ErrorCode::InvalidArgument);
+        }
     }
 
     #[test]
@@ -13545,7 +13881,8 @@ mod tests {
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),
-            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
+            recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
+            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
             support_state: None,
         };
         let error = repository_index(
@@ -14004,10 +14341,20 @@ mod tests {
 
     #[test]
     fn deferred_recovery_keeps_catalog_reads_and_lifecycle_failures_bounded() {
-        let service = Arc::new(RwLock::new(
-            FirstSliceService::new(DEFAULT_GENERATION_RETENTION)
-                .expect("empty service initializes"),
-        ));
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn available_during_recovery() -> bool { true }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut service =
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("active generation publishes");
+        let service = Arc::new(RwLock::new(service));
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
         let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
         let handle = actor.handle();
@@ -14026,7 +14373,8 @@ mod tests {
             refinement: _refinement,
             recovery_ready: Arc::clone(&recovery_ready),
             recovery_complete: Arc::new(AtomicBool::new(false)),
-            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
+            recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
+            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
             support_state: None,
         };
         let resources = ServiceRequestResources {
@@ -14063,7 +14411,7 @@ mod tests {
         assert!(matches!(
             listed,
             FirstSliceIpcResponse::RepositoryList(ref response)
-                if response.repositories.is_empty()
+                if response.repositories.len() == 1
         ));
 
         let error = execute_service_request(
@@ -14082,21 +14430,177 @@ mod tests {
         .expect_err("mutations wait for durable recovery");
         assert_eq!(error.code(), ErrorCode::Busy);
         assert!(error.retryable());
+        assert_eq!(
+            error.retry_after_ms(),
+            Some(u64::from(RECOVERY_RETRY_ACTIVE_MS))
+        );
+        assert_eq!(
+            error.details().get(&static_detail_key("recovery_stage")),
+            Some(&PublicValue::Label(static_safe_label("active_generation")))
+        );
+        assert_eq!(
+            error
+                .details()
+                .get(&static_detail_key("progress_completed")),
+            Some(&PublicValue::Unsigned(0))
+        );
+        assert_eq!(
+            error.details().get(&static_detail_key("progress_total")),
+            Some(&PublicValue::Unsigned(2))
+        );
+        assert_eq!(error.generation(), None);
+        assert_eq!(error.operation(), None);
         assert_eq!(error.next_actions(), &[NextAction::Retry]);
 
-        recovery_ready.store(true, Ordering::Release);
-        let repository = RepositoryId::from_bytes([94; 16]);
-        let error = execute_service_request(
+        lanes
+            .recovering_repositories
+            .write()
+            .expect("recovery map writes")
+            .insert(
+                receipt.repository,
+                RepositoryRecoveryState {
+                    generation: receipt.generation,
+                    operation: None,
+                    phase: RepositoryRecoveryPhase::ActiveGeneration,
+                },
+            );
+        let active_error = execute_service_request(
             &lanes,
             resources,
-            FirstSliceIpcRequest::RepositoryStatus(status_request(repository, None)),
+            FirstSliceIpcRequest::RepositoryStatus(status_request(
+                receipt.repository,
+                Some(receipt.generation),
+            )),
             context(),
             &mut reply,
         )
-        .expect_err("restored repository reads are admitted before global recovery completes");
-        assert_eq!(error.code(), ErrorCode::NotFound);
+        .expect_err("active generation remains fail-closed until it is installed");
+        assert_eq!(active_error.code(), ErrorCode::Busy);
+        assert_eq!(active_error.repository(), Some(receipt.repository));
+        assert_eq!(active_error.generation(), Some(receipt.generation));
+
+        mark_active_recovery_available(&lanes, receipt.repository)
+            .expect("active generation becomes available");
+        let status = execute_service_request(
+            &lanes,
+            resources,
+            FirstSliceIpcRequest::RepositoryStatus(status_request(
+                receipt.repository,
+                Some(receipt.generation),
+            )),
+            context(),
+            &mut reply,
+        )
+        .expect("exact last-good generation is queryable during retained recovery");
+        let FirstSliceIpcResponse::RepositoryStatus(status) = status else {
+            panic!("repository status response expected");
+        };
+        assert_eq!(
+            parse_generation(status.resolved_generation.as_ref())
+                .expect("resolved generation is valid"),
+            receipt.generation
+        );
+        assert!(!recovery_ready.load(Ordering::Acquire));
 
         drop(refinement_receiver);
+        actor.join().expect("journal actor joins");
+    }
+
+    #[test]
+    fn failed_first_index_releases_only_its_new_registration() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn failed_registration() -> bool { true }\n",
+        )
+        .expect("source writes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let mut service =
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
+        let admission = service
+            .admit_rust_fixture(fixture.path(), &cancellation)
+            .expect("first index reserves the repository");
+        assert!(admission.created_repository_reservation());
+
+        settle_unpublished_index_admission(&service, admission)
+            .expect("failed first index releases admission");
+
+        let retry = service
+            .admit_rust_fixture(fixture.path(), &cancellation)
+            .expect("retry reserves the repository again");
+        assert!(retry.created_repository_reservation());
+        service.release_index_admission(retry);
+
+        service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("repository publishes");
+        let existing = service
+            .admit_rust_fixture(fixture.path(), &cancellation)
+            .expect("existing repository admits");
+        assert!(!existing.created_repository_reservation());
+        settle_unpublished_index_admission(&service, existing)
+            .expect("failed refresh preserves the registration");
+        let retry = service
+            .admit_rust_fixture(fixture.path(), &cancellation)
+            .expect("existing repository remains registered");
+        assert!(!retry.created_repository_reservation());
+    }
+
+    #[test]
+    fn startup_does_not_restore_failed_unpublished_registration() {
+        let operation = OperationId::from_bytes([94; 16]);
+        let repository = RepositoryId::from_bytes([94; 16]);
+        let root_identity = ContentHash::from_bytes([94; 32]);
+        let context = RepositoryOperationSubmission::new(
+            repository,
+            None,
+            1,
+            0,
+            RepositoryOperationMode::Structural,
+        )
+        .expect("repository context is valid")
+        .with_root_identity(*root_identity.as_bytes());
+        let submission = OperationSubmission::new(
+            operation,
+            OperationKind::RepositoryIndex,
+            PlanHash::from_bytes([94; 32]),
+            ClientInstanceId::from_bytes([94; 16]),
+            true,
+            None,
+            None,
+        )
+        .and_then(|submission| submission.with_repository_context(context))
+        .expect("operation submission is valid");
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        journal.submit(submission).expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("journal actor starts");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        let failure = internal_error();
+        runtime
+            .block_on(actor.handle().fail_operation(operation, failure))
+            .expect("operation fails");
+        let durable_context = journal
+            .repository_operation_context(operation)
+            .expect("operation context loads");
+        let failed = journal.status(operation).expect("failed operation loads");
+
+        assert_eq!(
+            startup_registration_identity(&durable_context, &failed),
+            None
+        );
+        let mut published_context = durable_context;
+        published_context.published_generation = Some(GenerationId::from_bytes([94; 20]));
+        assert_eq!(
+            startup_registration_identity(&published_context, &failed),
+            Some(root_identity)
+        );
         actor.join().expect("journal actor joins");
     }
 
@@ -14148,6 +14652,26 @@ mod tests {
             .expect("recovery operation is immediately queryable");
         assert_eq!(record.kind, OperationKind::Recovery);
         assert_eq!(record.state, OperationState::Running);
+        let busy = recovery_in_progress(
+            Some(target.repository()),
+            Some(RepositoryRecoveryState {
+                generation: target.generation(),
+                operation: Some(operation),
+                phase: RepositoryRecoveryPhase::ActiveGeneration,
+            }),
+            RepositoryRecoveryPhase::ActiveGeneration,
+        );
+        assert_eq!(busy.operation(), Some(operation));
+        assert_eq!(busy.repository(), Some(target.repository()));
+        assert_eq!(busy.generation(), Some(target.generation()));
+        assert_eq!(
+            busy.retry_after_ms(),
+            Some(u64::from(RECOVERY_RETRY_ACTIVE_MS))
+        );
+        assert_eq!(
+            busy.next_actions(),
+            &[NextAction::Retry, NextAction::InspectOperation]
+        );
         let context = journal
             .repository_operation_context(operation)
             .expect("recovery repository context persists");
@@ -14415,7 +14939,19 @@ mod tests {
             .active_targets()
             .expect("active recovery targets load");
         assert_eq!(targets.len(), repository_count);
-        let recovering_repositories = targets.iter().map(|target| target.repository()).collect();
+        let recovering_repositories = targets
+            .iter()
+            .map(|target| {
+                (
+                    target.repository(),
+                    RepositoryRecoveryState {
+                        generation: target.generation(),
+                        operation: None,
+                        phase: RepositoryRecoveryPhase::ActiveGeneration,
+                    },
+                )
+            })
+            .collect();
         let (refinement, _refinement_receiver) = mpsc::sync_channel(1);
         let recovery_ready = Arc::new(AtomicBool::new(false));
         let recovery_complete = Arc::new(AtomicBool::new(false));
@@ -14429,6 +14965,7 @@ mod tests {
             recovery_ready: Arc::clone(&recovery_ready),
             recovery_complete: Arc::clone(&recovery_complete),
             recovering_repositories: Arc::new(RwLock::new(recovering_repositories)),
+            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
             support_state: Some(Arc::clone(&state)),
         };
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
@@ -14512,6 +15049,26 @@ mod tests {
     }
 
     #[test]
+    fn successful_recovery_reports_both_durable_phases_complete() {
+        let (result, records, recovery_ready, recovery_complete, generation_status) =
+            run_recovery_worker_with_start_hook(1, Box::new(|_, _| Ok(())), None);
+        let [record] = records.as_slice() else {
+            panic!("one recovery operation expected");
+        };
+
+        result.expect("recovery completes");
+        assert_eq!(record.kind, OperationKind::Recovery);
+        assert_eq!(record.state, OperationState::Succeeded);
+        assert_eq!(
+            record.progress,
+            Progress::new(2, 2).expect("terminal recovery progress is valid")
+        );
+        assert!(recovery_ready);
+        assert!(recovery_complete);
+        assert_eq!(generation_status, HealthStatus::Healthy);
+    }
+
+    #[test]
     fn shutdown_terminalizes_started_recovery_as_cancelled() {
         let (result, records, _, _, _) = run_recovery_worker_with_start_hook(
             2,
@@ -14540,14 +15097,18 @@ mod tests {
                 Some(Box::new(|lanes, cancellation| {
                     assert!(lanes.recovery_ready.load(Ordering::Acquire));
                     assert!(!lanes.recovery_complete.load(Ordering::Acquire));
+                    let recoveries = lanes
+                        .recovering_repositories
+                        .read()
+                        .expect("recovery set reads");
+                    assert_eq!(recoveries.len(), 1);
                     assert!(
-                        lanes
-                            .recovering_repositories
-                            .read()
-                            .expect("recovery set reads")
-                            .is_empty(),
-                        "the last-good active generation is serviceable during retained restore"
+                        recoveries
+                            .values()
+                            .all(|recovery| recovery.phase
+                                == RepositoryRecoveryPhase::RetainedHistory)
                     );
+                    drop(recoveries);
                     let repositories = lanes
                         .service
                         .read()
@@ -14567,6 +15128,10 @@ mod tests {
         assert_eq!(
             record.cancellation_reason,
             Some(CancellationReason::ClientRequest)
+        );
+        assert_eq!(
+            record.progress,
+            Progress::new(1, 2).expect("retained recovery progress is valid")
         );
         assert!(recovery_ready);
         assert!(recovery_complete);
@@ -14638,7 +15203,8 @@ mod tests {
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),
-            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
+            recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
+            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
             support_state: None,
         };
         let resources = ServiceRequestResources {
@@ -14753,7 +15319,8 @@ mod tests {
             refinement,
             recovery_ready: Arc::new(AtomicBool::new(true)),
             recovery_complete: Arc::new(AtomicBool::new(true)),
-            recovering_repositories: Arc::new(RwLock::new(BTreeSet::new())),
+            recovering_repositories: Arc::new(RwLock::new(BTreeMap::new())),
+            recovery_demand: Arc::new(Mutex::new(BTreeSet::new())),
             support_state: None,
         };
         let resources = ServiceRequestResources {
@@ -15882,6 +16449,7 @@ mod tests {
                 maximum_results: 8,
                 page_offset: 0,
                 languages: Vec::new(),
+                path_prefixes: Vec::new(),
             }),
         );
         let FirstSliceIpcResponse::CodeLocate(locate) = locate else {
@@ -16015,6 +16583,7 @@ mod tests {
                 maximum_results: 8,
                 page_offset: 0,
                 languages: Vec::new(),
+                path_prefixes: Vec::new(),
             }),
         );
         let FirstSliceIpcResponse::CodeLocate(locate) = locate else {
