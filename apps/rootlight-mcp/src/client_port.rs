@@ -37,6 +37,7 @@ use rootlight_mcp_contract::{
     },
 };
 
+use crate::error_mapping::{MappedDomainFailure, public_error as mapped_public_error};
 use crate::{
     ArchitectureCyclesPortRequest, ArchitectureCyclesPortResponse, ArchitectureOverviewPortRequest,
     ArchitectureOverviewPortResponse, ChangeImpactPortRequest, ChangeImpactPortResponse,
@@ -96,17 +97,24 @@ impl AuthorizedRepositoryRoot {
     fn authorize(&self, requested: &str) -> Result<String, ClientPortError> {
         let canonical = Path::new(requested)
             .canonicalize()
-            .map_err(|_| ClientPortError::Executor)?;
+            .map_err(|_| invalid_repository_root())?;
         if !canonical.is_dir() || !canonical.starts_with(&self.canonical) {
-            return Err(ClientPortError::Executor);
+            return Err(invalid_repository_root());
         }
         // The daemon must consume this resolved spelling; forwarding the
         // caller's path would repeat symlink resolution past this boundary.
         canonical
             .into_os_string()
             .into_string()
-            .map_err(|_| ClientPortError::Executor)
+            .map_err(|_| invalid_repository_root())
     }
+}
+
+fn invalid_repository_root() -> ClientPortError {
+    ClientPortError::Public(Box::new(
+        mapped_public_error(MappedDomainFailure::invalid_argument("root"))
+            .expect("authoritative MCP error mappings satisfy public error bounds"),
+    ))
 }
 
 impl fmt::Debug for AuthorizedRepositoryRoot {

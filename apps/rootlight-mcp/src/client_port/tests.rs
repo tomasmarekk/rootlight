@@ -1239,7 +1239,17 @@ async fn repository_index_is_limited_to_the_canonical_authorized_tree() {
             )
             .await
             .expect_err("path outside the authorized tree is rejected");
-        assert_eq!(error.failure(), Some(ToolExecutionFailure::Executor));
+        let public = error
+            .public_error()
+            .expect("invalid repository roots remain checked public errors");
+        assert_eq!(public.code(), ErrorCode::InvalidArgument);
+        assert_eq!(
+            public.next_actions(),
+            &[rootlight_mcp_contract::NextAction::CorrectField {
+                field: rootlight_mcp_contract::DetailKey::parse("root")
+                    .expect("static detail key is valid"),
+            }]
+        );
     }
 
     let calls = calls.lock().expect("fake call recorder is not poisoned");

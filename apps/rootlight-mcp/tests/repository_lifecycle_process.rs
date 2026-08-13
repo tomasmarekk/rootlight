@@ -24,6 +24,26 @@ const NOOP_METADATA_WRITE_CEILING_BYTES: u64 = 4 * 1024;
 const UNINDEXED_REPOSITORY: &str = "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v";
 
 #[test]
+fn invalid_repository_root_is_typed_at_stdio_boundary() {
+    let fixture = process_support::private_process_tempdir("rl-invalid-root-");
+    let state_dir = fixture.path().join("state");
+    let runtime_dir = fixture.path().join("runtime");
+    let missing_root = fixture.path().join("missing");
+    let mut mcp = McpProcess::spawn(&state_dir, &runtime_dir);
+
+    let response = mcp.call("invalid-root", "repo.index", json!({"root": missing_root}));
+
+    assert_public_error(&response, "INVALID_ARGUMENT");
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(
+        response["result"]["structuredContent"]["error"]["next_actions"],
+        json!([{"action": "correct_field", "field": "root"}])
+    );
+    assert!(response.get("error").is_none(), "{response:#}");
+    mcp.finish();
+}
+
+#[test]
 fn repository_generation_and_source_queries_survive_daemon_restart() {
     let fixture = process_support::private_process_tempdir("rl-restart-");
     let repository_root = fixture.path().join("repository");
