@@ -1674,6 +1674,11 @@ impl ReadResponseMetadata {
             warnings,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn warnings(&self) -> &[ResponseWarning] {
+        &self.warnings
+    }
 }
 
 /// Construction failure for the production first-slice executor.
@@ -4201,6 +4206,7 @@ fn explain_envelope_from_status<T>(
         tier: client::AnalysisTier::TierC,
         coverage_status: client::CoverageStatus::Bounded,
         skipped_inputs: 0,
+        coverage_gaps: Vec::new(),
         usage: client::QueryUsage {
             rows: 0,
             edges: 0,
@@ -7493,13 +7499,14 @@ fn map_code_locate(
         .try_reserve_exact(response.result.hits.len())
         .map_err(|_| internal(ToolExecutionFailure::Executor))?;
     let resolved_generation = response.result.context.generation;
-    let mut seen_symbols = BTreeSet::new();
+    let mut seen_targets = BTreeSet::new();
     for hit in response.result.hits {
         if hit.identifier.is_empty()
             || hit.identifier.len() > 1_024
             || !safe_repository_relative_path(&hit.path)
             || !safe_label(&hit.language, 64)
-            || !seen_symbols.insert(hit.symbol)
+            || !seen_targets.insert((hit.symbol, hit.file))
+            || (hit.symbol.is_none() && hit.kind != "file")
             || hit.source.as_ref().is_some_and(|source| {
                 source.repository() != request.repository
                     || source.generation() != resolved_generation
@@ -7510,7 +7517,7 @@ fn map_code_locate(
         }
         let source_ref = hit.source.as_ref().map(client_source_ref).transpose()?;
         matches.push(LocatedItem {
-            symbol_id: Some(hit.symbol),
+            symbol_id: hit.symbol,
             file_id: Some(hit.file),
             kind: entity_kind(&hit.kind)?,
             display_name: hit.identifier,

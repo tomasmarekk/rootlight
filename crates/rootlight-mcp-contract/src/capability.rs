@@ -597,6 +597,10 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
     implemented("cursor", "uses an authenticated request-bound continuation"),
     unsupported("kinds", "kind filtering is not served"),
     implemented(
+        "scope",
+        "selects bounded path scope while unsupported scope dimensions remain typed",
+    ),
+    implemented(
         "scope.paths",
         "filters lexical candidates by canonical repository-relative path prefixes before ranking",
     ),

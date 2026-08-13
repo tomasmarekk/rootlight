@@ -31,8 +31,8 @@ use crate::{
 };
 
 const FORMAT_PREFIX: &str = "rootlight.lexical";
-const FORMAT_VERSION: &str = "3";
-const STORED_HIT_VERSION: u8 = 2;
+const FORMAT_VERSION: &str = "4";
+const STORED_HIT_VERSION: u8 = 3;
 const MIN_WRITER_HEAP_BYTES: usize = 15_000_000;
 const MAX_IDENTIFIER_BYTES: usize = 512;
 const MAX_QUALIFIED_BYTES: usize = 2_048;
@@ -43,6 +43,9 @@ const MAX_SIGNATURE_BYTES: usize = 4_096;
 const MAX_TYPE_NAMES: usize = 64;
 const MAX_TYPE_NAME_BYTES: usize = 512;
 const MAX_DOCUMENTATION_BYTES: usize = 32 * 1024;
+const MAX_SOURCE_IDENTIFIERS: usize = 4_096;
+const MAX_SOURCE_IDENTIFIER_BYTES: usize = 240;
+const MAX_SOURCE_TEXT_BYTES: usize = 64 * 1024;
 const MAX_PATTERN_WILDCARDS: usize = 4;
 const MIN_PATTERN_LITERALS: usize = 2;
 const HARD_MAX_DOCUMENTS: usize = 1_000_000;
@@ -476,7 +479,10 @@ impl LexicalIndex {
                             .relevance_score
                             .total_cmp(&left.hit.relevance_score)
                     })
-                    .then_with(|| left.hit.symbol_id.cmp(&right.hit.symbol_id))
+                    .then_with(|| {
+                        (left.hit.symbol_id, left.hit.file_id)
+                            .cmp(&(right.hit.symbol_id, right.hit.file_id))
+                    })
             },
             || control.check(),
         )?;
@@ -639,17 +645,18 @@ fn prepare_documents(
     }
     sort_with_checkpoints(
         documents,
-        |left, right| left.symbol_id.cmp(&right.symbol_id),
+        |left, right| document_target(left).cmp(&document_target(right)),
         || cancellation.check().map_err(SearchError::from),
     )?;
     let mut prior = None;
     let mut text_bytes = 0usize;
     for document in documents.iter() {
         cancellation.check()?;
-        if prior == Some(document.symbol_id) {
+        let target = document_target(document);
+        if prior == Some(target) {
             return Err(SearchError::DuplicateSymbol);
         }
-        prior = Some(document.symbol_id);
+        prior = Some(target);
         text_bytes = text_bytes.checked_add(validate_document(document)?).ok_or(
             SearchError::BuildBudgetExceeded {
                 resource: "text_bytes",
@@ -669,6 +676,18 @@ fn prepare_documents(
             resource: "text_bytes",
         })?,
     ))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LexicalTarget {
+    File(FileId),
+    Symbol(SymbolId),
+}
+
+fn document_target(document: &LexicalDocument) -> LexicalTarget {
+    document
+        .symbol_id
+        .map_or(LexicalTarget::File(document.file_id), LexicalTarget::Symbol)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -806,6 +825,8 @@ struct Fields {
     signature: Field,
     type_names: Field,
     documentation: Field,
+    source_identifier_normalized: Field,
+    source_text: Field,
     generated: Field,
 }
 
@@ -842,10 +863,13 @@ impl Fields {
         let language = builder.add_text_field("language", raw.clone());
         let tier = builder.add_text_field("tier", raw.clone());
         let package = builder.add_text_field("package", raw.clone());
-        let build_target = builder.add_text_field("build_target", raw);
+        let build_target = builder.add_text_field("build_target", raw.clone());
         let signature = builder.add_text_field("signature", code.clone());
         let type_names = builder.add_text_field("type_names", code.clone());
-        let documentation = builder.add_text_field("documentation", code);
+        let documentation = builder.add_text_field("documentation", code.clone());
+        let source_identifier_normalized =
+            builder.add_text_field("source_identifier_normalized", raw.clone());
+        let source_text = builder.add_text_field("source_text", code);
         let generated =
             builder.add_bool_field("generated", NumericOptions::default().set_indexed());
         Self {
@@ -867,6 +891,8 @@ impl Fields {
             signature,
             type_names,
             documentation,
+            source_identifier_normalized,
+            source_text,
             generated,
         }
     }
@@ -875,7 +901,9 @@ impl Fields {
         let mut document = TantivyDocument::new();
         let stored_hit = encode_stored_hit(source)?;
         document.add_bytes(self.stored_hit, &stored_hit);
-        document.add_bytes(self.symbol_id, source.symbol_id.as_bytes());
+        if let Some(symbol_id) = source.symbol_id {
+            document.add_bytes(self.symbol_id, symbol_id.as_bytes());
+        }
         document.add_bytes(self.file_id, source.file_id.as_bytes());
         document.add_text(
             self.identifier_normalized,
@@ -906,6 +934,15 @@ impl Fields {
         }
         if let Some(documentation) = &source.documentation {
             document.add_text(self.documentation, documentation);
+        }
+        for identifier in &source.source_identifiers {
+            document.add_text(
+                self.source_identifier_normalized,
+                normalize_exact(identifier),
+            );
+        }
+        if let Some(source_text) = &source.source_text {
+            document.add_text(self.source_text, source_text);
         }
         document.add_bool(self.generated, source.generated);
         Ok(document)
@@ -978,6 +1015,12 @@ impl Fields {
                 IndexRecordOption::Basic,
                 10.0,
             )?,
+            work.term_clause(
+                self.source_identifier_normalized,
+                normalized,
+                IndexRecordOption::Basic,
+                8.0,
+            )?,
         ])))
     }
 
@@ -993,6 +1036,7 @@ impl Fields {
                 (self.identifier_normalized, 12.0),
                 (self.qualified_normalized, 8.0),
                 (self.path_normalized, 6.0),
+                (self.source_identifier_normalized, 4.0),
             ],
             work,
         )
@@ -1034,6 +1078,7 @@ impl Fields {
                     (self.identifier_normalized, 16.0),
                     (self.qualified_normalized, 12.0),
                     (self.path_normalized, 10.0),
+                    (self.source_identifier_normalized, 8.0),
                 ],
                 work,
             )?);
@@ -1077,6 +1122,12 @@ impl Fields {
                     IndexRecordOption::WithFreqsAndPositions,
                     1.0,
                 )?,
+                work.term_clause(
+                    self.source_text,
+                    &token,
+                    IndexRecordOption::WithFreqsAndPositions,
+                    1.0,
+                )?,
             ]);
             token_clauses.push((Occur::Must, Box::new(alternatives) as Box<dyn Query>));
         }
@@ -1095,6 +1146,7 @@ impl Fields {
                 (self.identifier_normalized, 10.0),
                 (self.qualified_normalized, 6.0),
                 (self.path_normalized, 4.0),
+                (self.source_identifier_normalized, 2.0),
             ],
             work,
         )
@@ -1121,7 +1173,10 @@ impl Fields {
 fn encode_stored_hit(source: &LexicalDocument) -> Result<Vec<u8>, SearchError> {
     let mut encoded = Vec::new();
     encoded.push(STORED_HIT_VERSION);
-    encoded.extend_from_slice(source.symbol_id.as_bytes());
+    encoded.push(u8::from(source.symbol_id.is_some()));
+    if let Some(symbol_id) = source.symbol_id {
+        encoded.extend_from_slice(symbol_id.as_bytes());
+    }
     encoded.extend_from_slice(source.file_id.as_bytes());
     encoded.push(u8::from(source.generated));
     encoded.push(u8::from(source.test));
@@ -1148,7 +1203,11 @@ fn decode_stored_hit(bytes: &[u8], score: f32) -> Result<(SearchHit, usize), Sea
     if decoder.read_u8()? != STORED_HIT_VERSION {
         return Err(SearchError::IncompatibleIndex);
     }
-    let symbol_id = SymbolId::from_bytes(decoder.read_array()?);
+    let symbol_id = match decoder.read_u8()? {
+        0 => None,
+        1 => Some(SymbolId::from_bytes(decoder.read_array()?)),
+        _ => return Err(SearchError::IncompatibleIndex),
+    };
     let file_id = FileId::from_bytes(decoder.read_array()?);
     let generated = match decoder.read_u8()? {
         0 => false,
@@ -1665,11 +1724,32 @@ fn validate_document(document: &LexicalDocument) -> Result<usize, SearchError> {
             true,
         )?;
     }
-    add_optional(
+    bytes = add_optional(
         bytes,
         document.documentation.as_deref(),
         MAX_DOCUMENTATION_BYTES,
         DocumentField::Documentation,
+        true,
+    )?;
+    if document.source_identifiers.len() > MAX_SOURCE_IDENTIFIERS {
+        return Err(SearchError::InvalidDocument {
+            field: DocumentField::SourceIdentifier,
+        });
+    }
+    for identifier in &document.source_identifiers {
+        bytes = add_required(
+            bytes,
+            identifier,
+            MAX_SOURCE_IDENTIFIER_BYTES,
+            DocumentField::SourceIdentifier,
+            true,
+        )?;
+    }
+    add_optional(
+        bytes,
+        document.source_text.as_deref(),
+        MAX_SOURCE_TEXT_BYTES,
+        DocumentField::SourceText,
         true,
     )
 }
@@ -2082,7 +2162,7 @@ mod tests {
 
     fn document(byte: u8, identifier: &str, path: &str) -> LexicalDocument {
         LexicalDocument {
-            symbol_id: SymbolId::from_bytes([byte; 20]),
+            symbol_id: Some(SymbolId::from_bytes([byte; 20])),
             file_id: FileId::from_bytes([byte.wrapping_add(1); 20]),
             identifier: identifier.to_owned(),
             qualified_name: format!("crate::{identifier}"),
@@ -2095,6 +2175,8 @@ mod tests {
             signature: Some(format!("fn {identifier}(input: QueryBudget)")),
             type_names: vec!["QueryBudget".to_owned()],
             documentation: Some("Runs bounded deterministic lexical search.".to_owned()),
+            source_identifiers: Vec::new(),
+            source_text: None,
             generated: false,
             test: false,
             declaration_only: false,
@@ -2149,7 +2231,7 @@ mod tests {
         assert_eq!(index.document_count(), 2);
         assert_eq!(
             search(&index, "query_budget", SearchMode::Exact)[0].symbol_id,
-            SymbolId::from_bytes([1; 20])
+            Some(SymbolId::from_bytes([1; 20]))
         );
     }
 
@@ -2335,23 +2417,23 @@ mod tests {
 
         assert_eq!(
             search(&index, "httpserver", SearchMode::Exact)[0].symbol_id,
-            SymbolId::from_bytes([2; 20])
+            Some(SymbolId::from_bytes([2; 20]))
         );
         assert_eq!(
             search(&index, "http", SearchMode::Prefix)[0].symbol_id,
-            SymbolId::from_bytes([2; 20])
+            Some(SymbolId::from_bytes([2; 20]))
         );
         assert_eq!(
             search(&index, "httpser", SearchMode::Text)[0].symbol_id,
-            SymbolId::from_bytes([2; 20])
+            Some(SymbolId::from_bytes([2; 20]))
         );
         assert_eq!(
             search(&index, "src/search", SearchMode::Prefix)[0].symbol_id,
-            SymbolId::from_bytes([1; 20])
+            Some(SymbolId::from_bytes([1; 20]))
         );
         assert_eq!(
             search(&index, "search budget", SearchMode::Text)[0].symbol_id,
-            SymbolId::from_bytes([1; 20])
+            Some(SymbolId::from_bytes([1; 20]))
         );
         assert_eq!(
             search(&index, "deterministic lexical", SearchMode::Text).len(),
@@ -2359,11 +2441,11 @@ mod tests {
         );
         assert_eq!(
             search(&index, "server rs", SearchMode::Text)[0].symbol_id,
-            SymbolId::from_bytes([2; 20])
+            Some(SymbolId::from_bytes([2; 20]))
         );
         assert_eq!(
             search(&index, "café value", SearchMode::Text)[0].symbol_id,
-            SymbolId::from_bytes([3; 20])
+            Some(SymbolId::from_bytes([3; 20]))
         );
     }
 
@@ -2457,9 +2539,9 @@ mod tests {
         assert_eq!(
             symbols,
             [
-                SymbolId::from_bytes([3; 20]),
-                SymbolId::from_bytes([1; 20]),
-                SymbolId::from_bytes([2; 20]),
+                Some(SymbolId::from_bytes([3; 20])),
+                Some(SymbolId::from_bytes([1; 20])),
+                Some(SymbolId::from_bytes([2; 20])),
             ]
         );
     }
@@ -2487,7 +2569,10 @@ mod tests {
 
         assert_eq!(
             first,
-            [SymbolId::from_bytes([1; 20]), SymbolId::from_bytes([2; 20])]
+            [
+                Some(SymbolId::from_bytes([1; 20])),
+                Some(SymbolId::from_bytes([2; 20])),
+            ]
         );
         assert_eq!(first, other);
         assert_eq!(first, second);
@@ -2512,9 +2597,9 @@ mod tests {
             [2, 1, 0],
         ];
         let expected = [
-            SymbolId::from_bytes([1; 20]),
-            SymbolId::from_bytes([2; 20]),
-            SymbolId::from_bytes([3; 20]),
+            Some(SymbolId::from_bytes([1; 20])),
+            Some(SymbolId::from_bytes([2; 20])),
+            Some(SymbolId::from_bytes([3; 20])),
         ];
 
         for permutation in permutations {
@@ -2681,11 +2766,11 @@ mod tests {
 
         assert_eq!(
             search(&index, "query_budget", SearchMode::Text)[0].symbol_id,
-            SymbolId::from_bytes([1; 20])
+            Some(SymbolId::from_bytes([1; 20]))
         );
         assert_eq!(
             search(&index, "query", SearchMode::Text)[0].symbol_id,
-            SymbolId::from_bytes([1; 20])
+            Some(SymbolId::from_bytes([1; 20]))
         );
     }
 
@@ -2699,19 +2784,19 @@ mod tests {
 
         assert_eq!(
             search(&index, "CaféValue", SearchMode::Exact)[0].symbol_id,
-            SymbolId::from_bytes([1; 20])
+            Some(SymbolId::from_bytes([1; 20]))
         );
         assert_eq!(
             search(&index, "café value", SearchMode::Text)[0].symbol_id,
-            SymbolId::from_bytes([1; 20])
+            Some(SymbolId::from_bytes([1; 20]))
         );
         assert_eq!(
             search(&index, "STRASSE", SearchMode::Exact)[0].symbol_id,
-            SymbolId::from_bytes([2; 20])
+            Some(SymbolId::from_bytes([2; 20]))
         );
         assert_eq!(
             search(&index, "σίσυφοσ", SearchMode::Exact)[0].symbol_id,
-            SymbolId::from_bytes([3; 20])
+            Some(SymbolId::from_bytes([3; 20]))
         );
     }
 

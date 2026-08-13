@@ -117,7 +117,9 @@ fn runtime_trace_import_is_generation_bound_and_never_mutates_static_state() {
             &cancellation,
         )
         .expect("fixture symbol locates");
-    let symbol = located.data.hits[0].symbol;
+    let symbol = located.data.hits[0]
+        .symbol
+        .expect("structural locate hit has a symbol identity");
     let trace = serde_json::to_vec(&serde_json::json!({
         "schema": RUNTIME_TRACE_SCHEMA_VERSION,
         "repository": indexed.repository,
@@ -247,7 +249,9 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
         RepositoryDataTrust::UntrustedRepositoryData
     );
     assert!(!located.data.coverage.is_empty());
-    let symbol = located.data.hits[0].symbol;
+    let symbol = located.data.hits[0]
+        .symbol
+        .expect("structural locate hit has a symbol identity");
     let reference = located.data.hits[0]
         .source
         .clone()
@@ -475,7 +479,8 @@ fn cancellation_stays_typed_across_index_and_query_boundaries() {
         .expect("fixture symbol remains queryable")
         .data
         .hits[0]
-        .symbol;
+        .symbol
+        .expect("structural locate hit has a symbol identity");
     let cancelled = deadline();
     assert!(cancelled.cancel(CancellationReason::ClientRequest));
     assert!(matches!(
@@ -975,7 +980,8 @@ fn symbol_relationships_returns_a_resolved_rust_call() {
         .into_iter()
         .next()
         .expect("caller is located")
-        .symbol;
+        .symbol
+        .expect("structural locate hit has a symbol identity");
     let callee = service
         .code_locate(
             indexed.generation,
@@ -991,7 +997,8 @@ fn symbol_relationships_returns_a_resolved_rust_call() {
         .into_iter()
         .next()
         .expect("callee is located")
-        .symbol;
+        .symbol
+        .expect("structural locate hit has a symbol identity");
 
     let relationships = service
         .symbol_relationships(
@@ -1051,7 +1058,8 @@ fn flow_trace_returns_a_resolved_rust_call_path() {
         .into_iter()
         .next()
         .expect("caller is located")
-        .symbol;
+        .symbol
+        .expect("structural locate hit has a symbol identity");
     let callee = service
         .code_locate(
             indexed.generation,
@@ -1067,7 +1075,8 @@ fn flow_trace_returns_a_resolved_rust_call_path() {
         .into_iter()
         .next()
         .expect("callee is located")
-        .symbol;
+        .symbol
+        .expect("structural locate hit has a symbol identity");
 
     let trace = service
         .flow_trace(
@@ -1148,6 +1157,7 @@ fn flow_trace_resolves_a_multifile_rust_scoped_call_path() {
             .next()
             .expect("fixture symbol is present")
             .symbol
+            .expect("structural locate hit has a symbol identity")
     };
     let gateway = locate("submit_budget_request");
     let worker = locate("handle_budget_message");
@@ -1264,7 +1274,8 @@ fn code_dead_includes_an_isolated_rust_symbol() {
         .expect("locate isolated symbol")
         .data
         .hits[0]
-        .symbol;
+        .symbol
+        .expect("structural locate hit has a symbol identity");
 
     let dead = service
         .code_dead(
@@ -1402,7 +1413,9 @@ fn tests_select_returns_a_direct_rust_test() {
         )
         .expect("locate query succeeds");
     assert_eq!(located.data.hits.len(), 1);
-    let seed = located.data.hits[0].symbol;
+    let seed = located.data.hits[0]
+        .symbol
+        .expect("structural locate hit has a symbol identity");
     let test = service
         .code_locate(
             indexed.generation,
@@ -1415,7 +1428,8 @@ fn tests_select_returns_a_direct_rust_test() {
         .expect("locate test")
         .data
         .hits[0]
-        .symbol;
+        .symbol
+        .expect("structural locate hit has a symbol identity");
 
     let selection = service
         .tests_select(
@@ -1479,7 +1493,9 @@ fn change_impact_returns_a_resolved_rust_caller() {
         )
         .expect("locate query succeeds");
     assert_eq!(located.data.hits.len(), 1);
-    let changed = located.data.hits[0].symbol;
+    let changed = located.data.hits[0]
+        .symbol
+        .expect("structural locate hit has a symbol identity");
     let caller = service
         .code_locate(
             indexed.generation,
@@ -1492,7 +1508,8 @@ fn change_impact_returns_a_resolved_rust_caller() {
         .expect("locate caller")
         .data
         .hits[0]
-        .symbol;
+        .symbol
+        .expect("structural locate hit has a symbol identity");
 
     let impact = service
         .change_impact(
@@ -1581,7 +1598,9 @@ fn plan_change_includes_a_resolved_rust_caller() {
         )
         .expect("locate query succeeds");
     assert_eq!(located.data.hits.len(), 1);
-    let target = located.data.hits[0].symbol;
+    let target = located.data.hits[0]
+        .symbol
+        .expect("structural locate hit has a symbol identity");
     let caller = service
         .code_locate(
             indexed.generation,
@@ -1594,7 +1613,8 @@ fn plan_change_includes_a_resolved_rust_caller() {
         .expect("locate caller")
         .data
         .hits[0]
-        .symbol;
+        .symbol
+        .expect("structural locate hit has a symbol identity");
 
     let plan = service
         .plan_change(
@@ -1692,7 +1712,9 @@ fn history_compare_reports_an_honest_empty_comparison_for_base_equal_to_head() {
         )
         .expect("locate query succeeds");
     assert_eq!(located.data.hits.len(), 1);
-    let target = located.data.hits[0].symbol;
+    let target = located.data.hits[0]
+        .symbol
+        .expect("structural locate hit has a symbol identity");
 
     let comparison = service
         .history_compare_with_scope_and_budget(

@@ -2103,6 +2103,7 @@ mod tests {
             tier: AnalysisTier::TierB,
             coverage_status: CoverageStatus::Bounded,
             skipped_inputs: 2,
+            coverage_gaps: Vec::new(),
             usage: QueryUsage {
                 rows: 10,
                 edges: 5,

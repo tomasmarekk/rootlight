@@ -91,6 +91,7 @@ const CAPABILITIES: &[&str] = &[
     "support.bundle.v3",
     "support.bundle.v4",
     "support.bundle.v5",
+    "support.bundle.v6",
 ];
 /// Default simultaneous negotiated connection limit.
 pub const DEFAULT_CONNECTION_LIMIT: u32 = 128;
@@ -887,6 +888,8 @@ impl Default for DaemonLimits {
 pub struct IndexSupportInventory {
     /// Installed adapter and provider identities.
     pub adapters: Vec<SupportAdapterInventory>,
+    /// Authoritative installed language detection and analysis capabilities.
+    pub languages: Vec<rootlight_observability::SupportLanguageCapabilityInventory>,
     /// Known repository summaries.
     pub repositories: Vec<SupportRepositoryInventory>,
     /// Known generation manifest headers.
@@ -5787,6 +5790,7 @@ fn support_inventory(
             sha256: None,
         }],
         adapters: index.adapters,
+        languages: index.languages,
         repositories: index.repositories,
         generations: index.generations,
         configuration: SupportConfigurationInventory {
@@ -6220,6 +6224,7 @@ impl ControlService {
                         "support.bundle.v3" => selected_minor >= 5,
                         "support.bundle.v4" => selected_minor >= 8,
                         "support.bundle.v5" => selected_minor >= 12,
+                        "support.bundle.v6" => selected_minor >= 13,
                         "code.locate.v1"
                         | "repository.index.v1"
                         | "source.read.v1"
@@ -6447,33 +6452,36 @@ impl ControlService {
             }
             SupportBundleSchema::V3 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V3,
             SupportBundleSchema::V4 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V4,
-            SupportBundleSchema::V5 => {
+            SupportBundleSchema::V5 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V5,
+            SupportBundleSchema::V6 => {
                 rootlight_observability::CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
             }
         };
-        let (mut terminal_operations, mut inventory) =
-            if matches!(schema, SupportBundleSchema::V4 | SupportBundleSchema::V5) {
-                let terminal_records =
-                    match self.journal.recent_terminal(MAX_RECENT_TERMINAL_OPERATIONS) {
-                        Ok(records) => records,
-                        Err(error) => {
-                            return ControlResponse::Error(operation_error_to_public(&error, None));
-                        }
-                    };
-                let contexts = self.state.repository_index_contexts();
-                let terminal_operations =
-                    match support_terminal_operations(&terminal_records, &contexts) {
-                        Ok(operations) => operations,
-                        Err(_) => return ControlResponse::Error(internal_error()),
-                    };
-                let inventory = match self.support_bundle_inventory_snapshot(&health) {
-                    Ok(inventory) => inventory,
+        let (mut terminal_operations, mut inventory) = if matches!(
+            schema,
+            SupportBundleSchema::V4 | SupportBundleSchema::V5 | SupportBundleSchema::V6
+        ) {
+            let terminal_records =
+                match self.journal.recent_terminal(MAX_RECENT_TERMINAL_OPERATIONS) {
+                    Ok(records) => records,
+                    Err(error) => {
+                        return ControlResponse::Error(operation_error_to_public(&error, None));
+                    }
+                };
+            let contexts = self.state.repository_index_contexts();
+            let terminal_operations =
+                match support_terminal_operations(&terminal_records, &contexts) {
+                    Ok(operations) => operations,
                     Err(_) => return ControlResponse::Error(internal_error()),
                 };
-                (terminal_operations, Some(inventory))
-            } else {
-                (Vec::new(), None)
+            let inventory = match self.support_bundle_inventory_snapshot(&health) {
+                Ok(inventory) => inventory,
+                Err(_) => return ControlResponse::Error(internal_error()),
             };
+            (terminal_operations, Some(inventory))
+        } else {
+            (Vec::new(), None)
+        };
         if let Some(repository) = repository {
             let repository_id = support_id(repository.as_bytes());
             let Some(inventory) = inventory.as_mut() else {
@@ -6519,16 +6527,21 @@ impl ControlService {
             inventory.storage.shared_bytes = None;
             inventory.storage.pinned_bytes = None;
             inventory.storage.reclaimable_bytes = None;
-            inventory.storage.total_storage_bytes = Some(generation_disk_bytes);
+            // Generation receipts exclude repository-scoped shared, temporary,
+            // and quarantine trees, so the physical total is unknown here.
+            inventory.storage.total_storage_bytes = None;
             inventory.storage.admission_margin_bytes = None;
             terminal_operations.retain(|operation| {
                 operation.repository_id.as_deref() == Some(repository_id.as_str())
             });
         }
-        if schema == SupportBundleSchema::V4
-            && let Some(inventory) = inventory.as_mut()
-        {
-            clear_extended_storage_accounting(&mut inventory.storage);
+        if let Some(inventory) = inventory.as_mut() {
+            if schema == SupportBundleSchema::V4 {
+                clear_extended_storage_accounting(&mut inventory.storage);
+            }
+            if schema != SupportBundleSchema::V6 {
+                inventory.languages.clear();
+            }
         }
         if Instant::now() >= deadline {
             return ControlResponse::Error(request_timed_out());
@@ -6540,6 +6553,7 @@ impl ControlService {
                 SupportBundleSchema::V3 => ObservabilityProtocolVersion::V1_5,
                 SupportBundleSchema::V4 => ObservabilityProtocolVersion::V1_8,
                 SupportBundleSchema::V5 => ObservabilityProtocolVersion::V1_12,
+                SupportBundleSchema::V6 => ObservabilityProtocolVersion::V1_13,
             },
             operating_system: observability_operating_system(),
             architecture: observability_architecture(),
@@ -10518,7 +10532,9 @@ fn request_from_wire(
             }
             let repository = request.repository.map(parse_repository_id).transpose()?;
             Ok(DecodedRequest::Control(ControlRequest::SupportBundle(
-                if selected_protocol_minor >= 12 {
+                if selected_protocol_minor >= 13 {
+                    SupportBundleSchema::V6
+                } else if selected_protocol_minor >= 12 {
                     SupportBundleSchema::V5
                 } else if selected_protocol_minor >= 8 {
                     SupportBundleSchema::V4
@@ -12387,13 +12403,21 @@ mod tests {
                     .expect("supported minor negotiates"),
                 common::ContractVersion { major: 1, minor }
             );
-            let expected = if minor >= 12 {
+            let expected = if minor >= 13 {
                 CAPABILITIES.to_vec()
+            } else if minor >= 12 {
+                CAPABILITIES
+                    .iter()
+                    .copied()
+                    .filter(|capability| *capability != "support.bundle.v6")
+                    .collect()
             } else if minor >= 10 {
                 CAPABILITIES
                     .iter()
                     .copied()
-                    .filter(|capability| *capability != "support.bundle.v5")
+                    .filter(|capability| {
+                        !matches!(*capability, "support.bundle.v5" | "support.bundle.v6")
+                    })
                     .collect()
             } else if minor >= 8 {
                 CAPABILITIES
@@ -12402,7 +12426,9 @@ mod tests {
                     .filter(|capability| {
                         !matches!(
                             *capability,
-                            "rootlight.ui.graph_projection.v1" | "support.bundle.v5"
+                            "rootlight.ui.graph_projection.v1"
+                                | "support.bundle.v5"
+                                | "support.bundle.v6"
                         )
                     })
                     .collect()
@@ -12416,6 +12442,7 @@ mod tests {
                             "rootlight.ui.graph_projection.v1"
                                 | "support.bundle.v4"
                                 | "support.bundle.v5"
+                                | "support.bundle.v6"
                         )
                     })
                     .collect()
@@ -12658,6 +12685,16 @@ mod tests {
                     binary_sha256: None,
                     artifact_sha256: None,
                 }],
+                languages: vec![
+                    rootlight_observability::SupportLanguageCapabilityInventory {
+                        language: "rust".to_owned(),
+                        suffixes: vec![".rs".to_owned()],
+                        aliases: Vec::new(),
+                        detectors: vec!["extension".to_owned()],
+                        maximum_tier: "tier_d".to_owned(),
+                        analyzers: vec!["treesitter".to_owned()],
+                    },
+                ],
                 repositories: vec![
                     SupportRepositoryInventory {
                         repository_id: support_id(repository.as_bytes()),
@@ -12721,7 +12758,7 @@ mod tests {
         };
         assert_eq!(
             bundle.schema_version,
-            rootlight_observability::CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+            rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V5
         );
         assert!(!bundle.contains_source);
         let mut archive =
@@ -12780,6 +12817,7 @@ mod tests {
         assert_eq!(inventory.storage.total_storage_bytes, Some(7168));
         assert_eq!(inventory.storage.effective_retention_generations, Some(8));
         assert_eq!(inventory.storage.shared_bytes, None);
+        assert!(inventory.languages.is_empty());
         assert_eq!(inventory.runtime.protocol_minor, PROTOCOL_MINOR);
 
         let scoped = service.execute(ControlRequest::SupportBundle(
@@ -12813,7 +12851,7 @@ mod tests {
                 .all(|generation| generation.repository_id == support_id(repository.as_bytes()))
         );
         assert_eq!(scoped_inventory.storage.active_generation_bytes, Some(4096));
-        assert_eq!(scoped_inventory.storage.total_storage_bytes, Some(4096));
+        assert_eq!(scoped_inventory.storage.total_storage_bytes, None);
         assert_eq!(
             scoped_inventory.storage.effective_retention_generations,
             Some(8)
@@ -12838,6 +12876,26 @@ mod tests {
         let legacy_inventory: SupportInventory =
             serde_json::from_slice(&legacy_inventory_bytes).expect("legacy inventory decodes");
         assert_eq!(legacy_inventory.storage.active_generation_bytes, None);
+        assert!(legacy_inventory.languages.is_empty());
+
+        let current = service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V6, None));
+        let ControlResponse::SupportBundle(current) = current else {
+            panic!("current support bundle response expected");
+        };
+        let mut current_archive = zip::ZipArchive::new(std::io::Cursor::new(current.archive))
+            .expect("current support ZIP opens");
+        let mut current_inventory_bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut current_archive
+                .by_name("inventory.json")
+                .expect("current inventory entry opens"),
+            &mut current_inventory_bytes,
+        )
+        .expect("current inventory entry reads");
+        let current_inventory: SupportInventory =
+            serde_json::from_slice(&current_inventory_bytes).expect("current inventory decodes");
+        assert_eq!(current_inventory.languages.len(), 1);
+        assert_eq!(current_inventory.languages[0].language, "rust");
         let mut scoped_operation_bytes = Vec::new();
         std::io::Read::read_to_end(
             &mut scoped_archive
@@ -13444,6 +13502,7 @@ mod tests {
                 binary_sha256: None,
                 artifact_sha256: None,
             }],
+            languages: Vec::new(),
             repositories: vec![SupportRepositoryInventory {
                 repository_id: support_id(repository.as_bytes()),
                 root_fingerprint_sha256: None,
@@ -18433,6 +18492,7 @@ mod tests {
             }),
             structural_freshness: "current".to_owned(),
             semantic_freshness: "current".to_owned(),
+            coverage_gaps: Vec::new(),
         }
     }
 

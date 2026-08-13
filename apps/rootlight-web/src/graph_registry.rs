@@ -306,6 +306,7 @@ mod tests {
                 tier: AnalysisTier::TierB,
                 coverage_status: CoverageStatus::Complete,
                 skipped_inputs: 0,
+                coverage_gaps: Vec::new(),
                 usage: QueryUsage {
                     rows: 0,
                     edges: 0,

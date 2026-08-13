@@ -41,6 +41,8 @@ pub use model::{
     SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult, TestsSelectCoverage,
     TestsSelectGap, TestsSelectKind, TestsSelectPlan, TestsSelectResult, TokenAccountingProfile,
 };
-pub use projection::project_lexical_documents;
+pub use projection::{
+    SOURCE_FALLBACK_TEXT_BYTES, project_lexical_documents, project_lexical_documents_with_sources,
+};
 pub use service::QueryService;
 pub use store::GenerationSet;

@@ -340,7 +340,7 @@ fn fixture_search(snapshot: &GenerationSnapshot) -> FakeSearch {
     FakeSearch {
         generation: snapshot.metadata().generation(),
         hits: vec![SearchHit {
-            symbol_id: entity.id,
+            symbol_id: Some(entity.id),
             file_id: file.id,
             identifier: entity.display_name.clone(),
             qualified_name: entity.qualified_name.clone(),
@@ -430,12 +430,22 @@ fn locate_and_explain_use_deterministic_typed_plans() {
     assert!(filtered.data.hits.is_empty());
 
     let explain = service
-        .plan_symbol_explain(search.hits[0].symbol_id, QueryBudget::new())
+        .plan_symbol_explain(
+            search.hits[0]
+                .symbol_id
+                .expect("symbol projection has identity"),
+            QueryBudget::new(),
+        )
         .expect("explain plan is admitted");
     let explained = service
         .execute_symbol_explain(&explain, &cancellation)
         .expect("explain query succeeds");
-    assert_eq!(explained.data.entity.id, search.hits[0].symbol_id);
+    assert_eq!(
+        explained.data.entity.id,
+        search.hits[0]
+            .symbol_id
+            .expect("symbol projection has identity")
+    );
     assert_eq!(
         explained.data.trust,
         RepositoryDataTrust::UntrustedRepositoryData
@@ -638,7 +648,9 @@ fn bounded_queries_mark_deterministic_partial_results() {
     let explain_service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
     let explain_plan = explain_service
         .plan_symbol_explain(
-            search.hits[0].symbol_id,
+            search.hits[0]
+                .symbol_id
+                .expect("symbol projection has identity"),
             QueryBudget::new().with_max_rows(2),
         )
         .expect("mandatory explain records fit");
@@ -707,7 +719,9 @@ fn plans_and_execution_enforce_all_query_resource_families() {
     let snapshot = fixture_snapshot();
     let search = fixture_search(&snapshot);
     let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
-    let symbol = search.hits[0].symbol_id;
+    let symbol = search.hits[0]
+        .symbol_id
+        .expect("symbol projection has identity");
 
     assert!(matches!(
         service.plan_code_locate(
@@ -834,7 +848,9 @@ fn symbol_relationships_enforces_plan_and_serialization_limits() {
     let snapshot = fixture_snapshot();
     let search = fixture_search(&snapshot);
     let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
-    let seeds = BTreeSet::from([search.hits[0].symbol_id]);
+    let seeds = BTreeSet::from([search.hits[0]
+        .symbol_id
+        .expect("symbol projection has identity")]);
 
     assert!(matches!(
         service.plan_symbol_relationships(
@@ -881,7 +897,7 @@ fn symbol_relationships_returns_tier_d_dispatch_as_weak_non_exact_call() {
         .iter()
         .find(|entity| entity.id == seed)
         .expect("seed entity exists");
-    search.hits[0].symbol_id = seed;
+    search.hits[0].symbol_id = Some(seed);
     search.hits[0].identifier = seed_entity.display_name.clone();
     search.hits[0].qualified_name = seed_entity.qualified_name.clone();
     let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");

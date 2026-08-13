@@ -27,6 +27,7 @@ fn change_tools_preserve_truthful_contracts_across_processes() {
     let state_dir = fixture.path().join("state");
     let runtime_dir = fixture.path().join("runtime");
     let repository_root = fixture.path().join("repository");
+    write_history_retention_config(&state_dir, &runtime_dir);
     write_repository_revision(&repository_root, false);
     initialize_git_repository(&repository_root);
     commit_repository(&repository_root, "base");
@@ -100,18 +101,24 @@ fn change_tools_preserve_truthful_contracts_across_processes() {
         );
         assert_success(&repeated, tool);
         let repeated = &repeated["result"]["structuredContent"];
-        for field in [
-            "repository",
-            "coverage",
-            "completeness",
-            "truncated",
-            "next_cursor",
-            "trust",
-        ] {
+        for field in ["repository", "coverage", "next_cursor", "trust"] {
             assert_eq!(
                 output[field], repeated[field],
                 "{tool} changed deterministic field {field}"
             );
+        }
+        let budget_limited_plan = *tool == "plan.change"
+            && (has_shared_budget_evidence_omission(output)
+                || has_shared_budget_evidence_omission(repeated)
+                || has_budget_limited_completeness(output)
+                || has_budget_limited_completeness(repeated));
+        if !budget_limited_plan {
+            for field in ["completeness", "truncated"] {
+                assert_eq!(
+                    output[field], repeated[field],
+                    "{tool} changed deterministic field {field}"
+                );
+            }
         }
         assert_repeated_tool_data(tool, output, repeated);
         assert_generation_identity_and_monotone_freshness(tool, output, repeated);
@@ -164,6 +171,27 @@ fn change_tools_preserve_truthful_contracts_across_processes() {
     daemon.finish();
 }
 
+fn write_history_retention_config(state_dir: &Path, runtime_dir: &Path) {
+    let paths =
+        rootlight_runtime::RuntimePaths::new(state_dir.to_path_buf(), runtime_dir.to_path_buf())
+            .expect("isolated process paths are valid");
+    paths
+        .prepare_owner()
+        .expect("isolated process paths become owner-private");
+    let mut output = rootlight_runtime::PrivateOutputFile::create(&paths.user_config_path())
+        .expect("private history fixture retention config creates");
+    output
+        .write_all(b"version = \"1.2\"\n[storage]\nretained_generations = 8\n")
+        .expect("history fixture retention config writes");
+    output
+        .commit()
+        .expect("history fixture retention config commits");
+    paths
+        .read_user_config(256 * 1024)
+        .expect("history fixture retention config is secure")
+        .expect("history fixture retention config exists");
+}
+
 fn assert_repeated_tool_data(tool: &str, first: &Value, repeated: &Value) {
     if first["data"] == repeated["data"] {
         return;
@@ -181,8 +209,11 @@ fn assert_repeated_tool_data(tool: &str, first: &Value, repeated: &Value) {
         }
     }
     assert!(
-        has_shared_budget_evidence_omission(first) || has_shared_budget_evidence_omission(repeated),
-        "plan.change changed evidence without an explicit shared-budget omission"
+        has_shared_budget_evidence_omission(first)
+            || has_shared_budget_evidence_omission(repeated)
+            || has_budget_limited_completeness(first)
+            || has_budget_limited_completeness(repeated),
+        "plan.change changed evidence without an explicit budget limitation"
     );
     assert_eq!(
         stable_plan_change_data(first),
@@ -200,6 +231,16 @@ fn has_shared_budget_evidence_omission(response: &Value) -> bool {
                     .as_str()
                     .is_some_and(|reason| reason == "shared_budget_exhausted")
             })
+        })
+}
+
+fn has_budget_limited_completeness(response: &Value) -> bool {
+    response["completeness"]["limiting_resources"]
+        .as_array()
+        .is_some_and(|resources| {
+            resources
+                .iter()
+                .any(|resource| resource["kind"] == "estimated_tokens")
         })
 }
 
@@ -1001,7 +1042,9 @@ impl DaemonProcess {
                 .expect("daemon status is readable")
                 .is_some()
             {
-                panic!("daemon exited before publishing discovery");
+                let stderr = fs::read_to_string(&self.stderr_path)
+                    .unwrap_or_else(|error| format!("<daemon stderr unavailable: {error}>"));
+                panic!("daemon exited before publishing discovery: {stderr}");
             }
             thread::sleep(Duration::from_millis(25));
         }

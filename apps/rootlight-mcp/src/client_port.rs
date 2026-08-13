@@ -33,7 +33,7 @@ use rootlight_mcp_contract::{
     ErrorCode, NextAction, PublicError, SafeLabel,
     vertical::{
         AnalysisTier, CacheStatus, Diagnostic, Freshness, IndexMode, IndexPlanScope,
-        IndexPlanSummary, LanguageCoverage, RequiredNullable, SourceFreeMessage,
+        IndexPlanSummary, LanguageCoverage, RequiredNullable, ResponseWarning, SourceFreeMessage,
     },
 };
 
@@ -1713,6 +1713,18 @@ fn read_metadata(
     context: &rootlight_client::QueryContext,
     languages: Vec<LanguageCoverage>,
 ) -> Result<ReadResponseMetadata, ClientPortError> {
+    let mut warnings = Vec::new();
+    warnings
+        .try_reserve_exact(context.coverage_gaps.len())
+        .map_err(|_| ClientPortError::Executor)?;
+    for gap in &context.coverage_gaps {
+        let (code, message) = coverage_gap_warning(&gap.reason)?;
+        warnings.push(ResponseWarning {
+            code: SafeLabel::parse(code).map_err(|_| ClientPortError::InvalidResponse)?,
+            message: SourceFreeMessage::parse(message)
+                .map_err(|_| ClientPortError::InvalidResponse)?,
+        });
+    }
     Ok(ReadResponseMetadata::new(
         context.repository.to_string(),
         query_freshness(context.structural_freshness),
@@ -1720,8 +1732,54 @@ fn read_metadata(
         languages,
         CacheStatus::NotApplicable,
         bridge_trace_id()?,
-        Vec::new(),
+        warnings,
     ))
+}
+
+fn coverage_gap_warning(reason: &str) -> Result<(&'static str, &'static str), ClientPortError> {
+    match reason {
+        "unsupported" => Ok((
+            "coverage_unsupported",
+            "recognized source language has partial structural coverage",
+        )),
+        "unrecognized" => Ok((
+            "coverage_unrecognized",
+            "source language is unrecognized and structural claims are unavailable",
+        )),
+        "excluded" => Ok((
+            "coverage_excluded",
+            "discovery policy excluded part of the repository",
+        )),
+        "oversized" => Ok((
+            "coverage_oversized",
+            "oversized inputs were omitted from analysis",
+        )),
+        "binary" => Ok((
+            "coverage_binary",
+            "binary inputs were omitted from text analysis",
+        )),
+        "parse-error" => Ok((
+            "coverage_parse_error",
+            "parse errors left part of the source structurally unknown",
+        )),
+        "adapter-failed" => Ok((
+            "coverage_adapter_failed",
+            "an analyzer failed and a lower evidence tier was retained",
+        )),
+        "truncated" => Ok((
+            "coverage_truncated",
+            "a bounded limit omitted part of the available evidence",
+        )),
+        "generated" => Ok((
+            "coverage_generated",
+            "generated source policy omitted part of the analysis",
+        )),
+        "stale" => Ok((
+            "coverage_stale",
+            "selected generation does not have current structural and semantic coverage",
+        )),
+        _ => Err(ClientPortError::InvalidResponse),
+    }
 }
 
 const fn query_freshness(freshness: QueryFreshness) -> Freshness {

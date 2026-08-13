@@ -1574,6 +1574,7 @@ fn context(results: u64, source_bytes: u64) -> QueryContext {
         tier: ClientTier::TierC,
         coverage_status: ClientCoverage::Complete,
         skipped_inputs: 0,
+        coverage_gaps: Vec::new(),
         usage: usage(results, source_bytes),
     }
 }
@@ -1706,7 +1707,7 @@ fn locate_response() -> CodeLocatePortResponse {
         client::CodeLocate {
             context: context(1, 0),
             hits: vec![LocateHit {
-                symbol: symbol(),
+                symbol: Some(symbol()),
                 file: file(),
                 identifier: "Publisher".to_owned(),
                 qualified_name: "crate::Publisher".to_owned(),
@@ -1734,7 +1735,7 @@ fn locate_page(
     next_page_offset: Option<u64>,
 ) -> CodeLocatePortResponse {
     let mut response = locate_response();
-    response.result.hits[0].symbol = symbol_id;
+    response.result.hits[0].symbol = Some(symbol_id);
     response.result.hits[0].identifier = label.to_owned();
     response.result.hits[0].qualified_name = format!("crate::{label}");
     response.result.matched_candidates = 3;
@@ -10912,7 +10913,7 @@ fn accepted_schema_paths_have_effect_evidence() {
     let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
     assert_eq!(
         accepted_digest.as_str(),
-        "8738435221bb704db981e713ed1af1ff08985d52d4218b8e0c953ad8afc61745",
+        "f49d0068bd1f73ebe3077cf169389d244ea4c1b2f093646ec463b341ad9a3c77",
         "accepted path universe changed"
     );
     let categorized: Vec<_> = accepted
@@ -10977,8 +10978,8 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[10],
         counts[11],
     );
-    assert_eq!(counts, [218, 105, 4, 69, 29, 16, 5, 23, 25, 1, 0, 4]);
-    assert_eq!(categorized.len(), 499);
+    assert_eq!(counts, [219, 105, 4, 69, 29, 16, 5, 23, 25, 1, 0, 4]);
+    assert_eq!(categorized.len(), 500);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {

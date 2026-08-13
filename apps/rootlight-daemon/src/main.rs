@@ -29,6 +29,9 @@ use rootlight_runtime::{
     COORDINATED_START_SIGNAL_ENV, COORDINATED_START_SIGNAL_VERSION, CoordinatedStartupSignal,
     DiscoveryRecord, RuntimePaths,
 };
+use rootlight_service::FirstSliceStoragePolicy;
+
+const MAX_USER_CONFIG_BYTES: u64 = 256 * 1024;
 
 fn main() -> ExitCode {
     match run() {
@@ -73,6 +76,7 @@ fn validate_arguments() -> Result<DaemonMode, DaemonError> {
 async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     let paths = runtime_paths()?;
     paths.prepare_owner()?;
+    let storage_policy = load_storage_policy(&paths)?;
     let _launch = if matches!(
         mode,
         DaemonMode::Coordinated | DaemonMode::CoordinatedSupervised
@@ -101,9 +105,10 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     )?;
     let actor_handle = actor.handle();
     let startup_signal = coordinated_startup_signal_publisher(mode);
-    let (first_slice, first_slice_workers) = FirstSliceDaemon::start_durable(
+    let (first_slice, first_slice_workers) = FirstSliceDaemon::start_durable_with_policy(
         actor_handle.clone(),
         paths.state_dir(),
+        storage_policy,
         Arc::clone(&state),
         startup_signal,
     )
@@ -267,6 +272,20 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
         return Err(error);
     }
     drain_result
+}
+
+fn load_storage_policy(paths: &RuntimePaths) -> Result<FirstSliceStoragePolicy, DaemonError> {
+    let contents = paths.read_user_config(MAX_USER_CONFIG_BYTES)?;
+    let contents = contents
+        .as_deref()
+        .map(std::str::from_utf8)
+        .transpose()
+        .map_err(|_| DaemonError::Configuration)?;
+    FirstSliceStoragePolicy::resolve_user_config(
+        contents,
+        first_slice::DEFAULT_GENERATION_RETENTION,
+    )
+    .map_err(|_| DaemonError::Configuration)
 }
 
 fn coordinated_startup_signal_publisher(
@@ -453,6 +472,8 @@ enum DaemonError {
     AsyncRuntime(#[source] std::io::Error),
     #[error("daemon resource limits are invalid")]
     InvalidLimits,
+    #[error("daemon configuration is invalid")]
+    Configuration,
     #[error("daemon shutdown timed out")]
     ShutdownTimedOut,
     #[error("daemon orchestration failed")]
@@ -470,11 +491,38 @@ enum DaemonError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn daemon_arguments_select_explicit_modes() {
         assert_ne!(DaemonMode::Normal, DaemonMode::Supervised);
         assert_ne!(DaemonMode::Coordinated, DaemonMode::Supervised);
         assert_ne!(DaemonMode::Coordinated, DaemonMode::CoordinatedSupervised);
+    }
+
+    #[test]
+    fn storage_policy_errors_are_source_redacted_and_loaded_after_owner_preparation() {
+        let root = TempDir::new().expect("temporary root exists");
+        let paths = RuntimePaths::new(root.path().join("state"), root.path().join("runtime"))
+            .expect("runtime paths are valid");
+        assert!(load_storage_policy(&paths).is_err());
+        paths.prepare_owner().expect("owner paths prepare");
+        {
+            let mut output =
+                rootlight_runtime::PrivateOutputFile::create(&paths.user_config_path())
+                    .expect("private config fixture creates");
+            output
+                .write_all(b"version = \"invalid\"\n")
+                .expect("invalid config fixture writes");
+            output.commit().expect("private config fixture commits");
+        }
+
+        let error = load_storage_policy(&paths).expect_err("invalid config is rejected");
+        assert_eq!(error.to_string(), "daemon configuration is invalid");
+        assert!(
+            !error
+                .to_string()
+                .contains(root.path().to_string_lossy().as_ref())
+        );
     }
 }

@@ -40,7 +40,7 @@ use super::{
     FirstSliceOperationContext, FirstSliceRecoveryTarget, PreparedIncrementalState,
     RustSourceInput, check_cancellation, map_catalog_error, map_identity_error,
     map_incremental_error, map_query_error, map_search_error, map_vfs_error,
-    project_lexical_documents,
+    project_lexical_documents_with_sources,
 };
 
 const DURABLE_DIRECTORY: &str = "first-slice";
@@ -202,6 +202,7 @@ pub(super) struct DurableCatalog {
     maximum_generations_per_repository: usize,
     maximum_repositories: usize,
     staging_bytes: Arc<AtomicU64>,
+    storage_reservations: Arc<Mutex<DurableStorageReservations>>,
 }
 
 pub(super) struct DurablePreparedGeneration {
@@ -284,6 +285,7 @@ pub(super) struct DurableGenerationStorage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DurableStorageInventory {
+    pub(super) repositories: Vec<DurableRepositoryStorage>,
     pub(super) generations: Vec<DurableGenerationStorage>,
     pub(super) generation_unique_bytes: u64,
     pub(super) active_generation_bytes: u64,
@@ -299,15 +301,23 @@ pub(super) struct DurableStorageInventory {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DurableRepositoryStorage {
+    pub(super) repository: RepositoryId,
+    pub(super) physical_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DurableStorageAdmissionPolicy {
     pub(super) required_bytes: u64,
-    pub(super) maximum_storage_bytes: Option<u64>,
+    pub(super) maximum_repository_bytes: u64,
+    pub(super) maximum_storage_bytes: u64,
     pub(super) minimum_free_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DurableStorageAdmissionScope {
-    DurableBudget,
+    RepositoryBudget,
+    CatalogBudget,
     FilesystemFreeSpace,
 }
 
@@ -315,9 +325,43 @@ pub(super) enum DurableStorageAdmissionScope {
 pub(super) struct DurableStorageAdmission {
     pub(super) required_bytes: u64,
     pub(super) observed_bytes: u64,
-    pub(super) limit_bytes: Option<u64>,
+    pub(super) limit_bytes: u64,
     pub(super) minimum_free_bytes: u64,
     pub(super) admission_margin_bytes: u64,
+}
+
+#[derive(Default)]
+struct DurableStorageReservations {
+    next_id: u64,
+    entries: BTreeMap<u64, DurableStorageReservationEntry>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DurableStorageReservationEntry {
+    repository: RepositoryId,
+    bytes: u64,
+}
+
+pub(super) struct DurableStorageReservation {
+    reservations: Arc<Mutex<DurableStorageReservations>>,
+    id: u64,
+}
+
+impl std::fmt::Debug for DurableStorageReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DurableStorageReservation")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for DurableStorageReservation {
+    fn drop(&mut self) {
+        if let Ok(mut reservations) = self.reservations.lock() {
+            reservations.entries.remove(&self.id);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -486,6 +530,7 @@ struct ScannedSourceBlob {
 
 #[derive(Default)]
 struct ScannedRepositoryStorage {
+    repository: Option<RepositoryId>,
     generations: BTreeMap<GenerationId, ScannedGeneration>,
     markers: BTreeMap<u64, ActivationMarker>,
     metadata_bytes: BTreeMap<u64, u64>,
@@ -763,6 +808,7 @@ impl DurableCatalog {
             maximum_generations_per_repository,
             maximum_repositories,
             staging_bytes: Arc::new(AtomicU64::new(0)),
+            storage_reservations: Arc::new(Mutex::new(DurableStorageReservations::default())),
         })
     }
 
@@ -793,26 +839,86 @@ impl DurableCatalog {
 
     pub(super) fn ensure_staging_capacity(
         &self,
-        required_bytes: u64,
-    ) -> Result<(), FirstSliceError> {
-        let admission = self.check_storage_admission(DurableStorageAdmissionPolicy {
-            required_bytes,
-            maximum_storage_bytes: None,
-            minimum_free_bytes: 0,
-        })?;
-        match admission {
-            Ok(_) => Ok(()),
-            Err(failure) => {
-                debug_assert_eq!(
-                    failure.scope,
-                    DurableStorageAdmissionScope::FilesystemFreeSpace
-                );
-                Err(FirstSliceError::InsufficientDiskSpace {
-                    required_bytes: failure.required_bytes,
-                    available_bytes: failure.observed_bytes,
-                })
-            }
+        repository: RepositoryId,
+        policy: DurableStorageAdmissionPolicy,
+    ) -> Result<
+        Result<
+            (DurableStorageAdmission, DurableStorageReservation),
+            DurableStorageAdmissionFailure,
+        >,
+        FirstSliceError,
+    > {
+        let mut reservations = self
+            .storage_reservations
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        let inventory = self.storage_inventory()?;
+        let admission = match check_storage_admission(&inventory, &reservations, repository, policy)
+        {
+            Ok(admission) => admission,
+            Err(failure) => return Ok(Err(failure)),
+        };
+        reservations.next_id = reservations
+            .next_id
+            .checked_add(1)
+            .ok_or(FirstSliceError::Limits)?;
+        let id = reservations.next_id;
+        if reservations
+            .entries
+            .insert(
+                id,
+                DurableStorageReservationEntry {
+                    repository,
+                    bytes: policy.required_bytes,
+                },
+            )
+            .is_some()
+        {
+            return Err(FirstSliceError::Retention);
         }
+        Ok(Ok((
+            admission,
+            DurableStorageReservation {
+                reservations: Arc::clone(&self.storage_reservations),
+                id,
+            },
+        )))
+    }
+
+    pub(super) fn resize_staging_reservation(
+        &self,
+        reservation: &DurableStorageReservation,
+        policy: DurableStorageAdmissionPolicy,
+    ) -> Result<Result<DurableStorageAdmission, DurableStorageAdmissionFailure>, FirstSliceError>
+    {
+        let mut reservations = self
+            .storage_reservations
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        let current = reservations
+            .entries
+            .remove(&reservation.id)
+            .ok_or(FirstSliceError::Retention)?;
+        let inventory = self.storage_inventory()?;
+        let result = check_storage_admission(&inventory, &reservations, current.repository, policy);
+        reservations.entries.insert(
+            reservation.id,
+            DurableStorageReservationEntry {
+                repository: current.repository,
+                bytes: result
+                    .as_ref()
+                    .map_or(current.bytes, |_| policy.required_bytes),
+            },
+        );
+        Ok(result)
+    }
+
+    pub(super) fn release_staging_reservation(
+        &self,
+        reservation: DurableStorageReservation,
+    ) -> Result<(), FirstSliceError> {
+        drop(reservation);
+        Ok(())
     }
 
     pub(super) fn storage_inventory(&self) -> Result<DurableStorageInventory, FirstSliceError> {
@@ -826,21 +932,6 @@ impl DurableCatalog {
             self.maximum_repositories,
             available_bytes,
         )
-    }
-
-    pub(super) fn check_storage_admission(
-        &self,
-        policy: DurableStorageAdmissionPolicy,
-    ) -> Result<Result<DurableStorageAdmission, DurableStorageAdmissionFailure>, FirstSliceError>
-    {
-        let inventory = self.storage_inventory()?;
-        Ok(check_storage_admission(&inventory, policy))
-    }
-
-    pub(super) fn storage_health_snapshot(&self) -> Result<(u64, u64), FirstSliceError> {
-        let available_bytes =
-            fs2::available_space(&self.repositories_path).map_err(|_| FirstSliceError::Catalog)?;
-        Ok((self.staging_bytes.load(Ordering::Acquire), available_bytes))
     }
 
     pub(super) fn read_source(
@@ -2089,7 +2180,10 @@ fn scan_repository_storage(
     repository: &PrivateDirectory<'_>,
     budget: &mut StorageScanBudget,
 ) -> Result<ScannedRepositoryStorage, FirstSliceError> {
-    let mut scanned = ScannedRepositoryStorage::default();
+    let mut scanned = ScannedRepositoryStorage {
+        repository: Some(repository_id),
+        ..ScannedRepositoryStorage::default()
+    };
     for name in private_entry_names(repository)? {
         budget.visit()?;
         let text = name.to_str().ok_or(FirstSliceError::CatalogCorrupt)?;
@@ -2277,7 +2371,16 @@ fn build_storage_inventory(
     let mut temporary_bytes = 0_u64;
     let mut reclaimable_bytes = 0_u64;
     let mut repository_overhead_bytes = 0_u64;
+    let mut repository_totals = Vec::new();
+    repository_totals
+        .try_reserve_exact(scanned_repositories.len())
+        .map_err(|_| FirstSliceError::Retention)?;
     for repository in scanned_repositories {
+        let repository_id = repository.repository;
+        let repository_total_before = generation_unique_bytes
+            .saturating_add(shared_source_bytes)
+            .saturating_add(temporary_bytes)
+            .saturating_add(repository_overhead_bytes);
         let latest_by_generation = latest_activation_sequences(&repository.markers);
         let active = latest_by_generation
             .iter()
@@ -2366,8 +2469,19 @@ fn build_storage_inventory(
                 reclaimable,
             });
         }
+        if let Some(repository) = repository_id {
+            let repository_total_after = generation_unique_bytes
+                .saturating_add(shared_source_bytes)
+                .saturating_add(temporary_bytes)
+                .saturating_add(repository_overhead_bytes);
+            repository_totals.push(DurableRepositoryStorage {
+                repository,
+                physical_bytes: repository_total_after.saturating_sub(repository_total_before),
+            });
+        }
     }
     generations.sort_unstable_by_key(|generation| (generation.repository, generation.generation));
+    repository_totals.sort_unstable_by_key(|repository| repository.repository);
     let total_physical_bytes = generation_unique_bytes
         .checked_add(shared_source_bytes)
         .and_then(|bytes| bytes.checked_add(temporary_bytes))
@@ -2375,6 +2489,7 @@ fn build_storage_inventory(
         .and_then(|bytes| bytes.checked_add(quarantine_bytes))
         .ok_or(FirstSliceError::Limits)?;
     Ok(DurableStorageInventory {
+        repositories: repository_totals,
         generations,
         generation_unique_bytes,
         active_generation_bytes,
@@ -2437,24 +2552,55 @@ fn checked_add_assign(total: &mut u64, bytes: u64) -> Result<(), FirstSliceError
 
 fn check_storage_admission(
     inventory: &DurableStorageInventory,
+    reservations: &DurableStorageReservations,
+    repository: RepositoryId,
     policy: DurableStorageAdmissionPolicy,
 ) -> Result<DurableStorageAdmission, DurableStorageAdmissionFailure> {
     let observed_bytes = inventory.total_physical_bytes;
-    let projected_bytes = observed_bytes.saturating_add(policy.required_bytes);
-    if let Some(limit_bytes) = policy.maximum_storage_bytes
-        && projected_bytes > limit_bytes
-    {
+    let observed_repository_bytes = inventory
+        .repositories
+        .iter()
+        .filter(|generation| generation.repository == repository)
+        .fold(0_u64, |total, repository| {
+            total.saturating_add(repository.physical_bytes)
+        });
+    let reserved_catalog_bytes = reservations
+        .entries
+        .values()
+        .fold(0_u64, |total, entry| total.saturating_add(entry.bytes));
+    let reserved_repository_bytes = reservations
+        .entries
+        .values()
+        .filter(|entry| entry.repository == repository)
+        .fold(0_u64, |total, entry| total.saturating_add(entry.bytes));
+    let admitted_repository_bytes =
+        observed_repository_bytes.saturating_add(reserved_repository_bytes);
+    let projected_repository_bytes =
+        admitted_repository_bytes.saturating_add(policy.required_bytes);
+    if projected_repository_bytes > policy.maximum_repository_bytes {
         return Err(DurableStorageAdmissionFailure {
-            scope: DurableStorageAdmissionScope::DurableBudget,
+            scope: DurableStorageAdmissionScope::RepositoryBudget,
             required_bytes: policy.required_bytes,
-            observed_bytes,
-            limit_bytes,
+            observed_bytes: admitted_repository_bytes,
+            limit_bytes: policy.maximum_repository_bytes,
+            minimum_free_bytes: policy.minimum_free_bytes,
+        });
+    }
+    let admitted_catalog_bytes = observed_bytes.saturating_add(reserved_catalog_bytes);
+    let projected_bytes = admitted_catalog_bytes.saturating_add(policy.required_bytes);
+    if projected_bytes > policy.maximum_storage_bytes {
+        return Err(DurableStorageAdmissionFailure {
+            scope: DurableStorageAdmissionScope::CatalogBudget,
+            required_bytes: policy.required_bytes,
+            observed_bytes: admitted_catalog_bytes,
+            limit_bytes: policy.maximum_storage_bytes,
             minimum_free_bytes: policy.minimum_free_bytes,
         });
     }
     let usable_free_bytes = inventory
         .available_bytes
-        .saturating_sub(policy.minimum_free_bytes);
+        .saturating_sub(policy.minimum_free_bytes)
+        .saturating_sub(reserved_catalog_bytes);
     if policy.required_bytes > usable_free_bytes {
         return Err(DurableStorageAdmissionFailure {
             scope: DurableStorageAdmissionScope::FilesystemFreeSpace,
@@ -2465,14 +2611,16 @@ fn check_storage_admission(
         });
     }
     let filesystem_margin_bytes = usable_free_bytes.saturating_sub(policy.required_bytes);
-    let admission_margin_bytes = policy
-        .maximum_storage_bytes
-        .map_or(filesystem_margin_bytes, |limit_bytes| {
-            filesystem_margin_bytes.min(limit_bytes.saturating_sub(projected_bytes))
-        });
+    let admission_margin_bytes = filesystem_margin_bytes
+        .min(policy.maximum_storage_bytes.saturating_sub(projected_bytes))
+        .min(
+            policy
+                .maximum_repository_bytes
+                .saturating_sub(projected_repository_bytes),
+        );
     Ok(DurableStorageAdmission {
         required_bytes: policy.required_bytes,
-        observed_bytes,
+        observed_bytes: admitted_catalog_bytes,
         limit_bytes: policy.maximum_storage_bytes,
         minimum_free_bytes: policy.minimum_free_bytes,
         admission_margin_bytes,
@@ -2884,9 +3032,54 @@ fn restore_generation(
             Err(error) => return Err(error),
         }
     };
-    let documents =
-        project_lexical_documents(verified.snapshot(), BuildBudget::default(), cancellation)
-            .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
+    let uses_source_blobs = manifest.version == GENERATION_MANIFEST_VERSION;
+    let mut sources = Vec::new();
+    let unsupported_files = verified
+        .document()
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "unsupported-language")
+        .filter_map(|diagnostic| {
+            diagnostic
+                .source
+                .as_ref()
+                .map(|source| source.span().file())
+        })
+        .collect::<BTreeSet<_>>();
+    sources
+        .try_reserve_exact(unsupported_files.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    for file in verified
+        .document()
+        .files
+        .iter()
+        .filter(|file| unsupported_files.contains(&file.id))
+    {
+        let snapshot = read_persisted_source(
+            repository_directory,
+            &generation_directory,
+            repository,
+            file,
+            uses_source_blobs,
+            cancellation,
+        )?;
+        sources.push(RustSourceInput {
+            snapshot,
+            generated: file.generated,
+            origins: Vec::new(),
+        });
+    }
+    let source_snapshots = sources
+        .iter()
+        .map(|source| &source.snapshot)
+        .collect::<Vec<_>>();
+    let documents = project_lexical_documents_with_sources(
+        verified.snapshot(),
+        &source_snapshots,
+        BuildBudget::default(),
+        cancellation,
+    )
+    .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
     if u64::try_from(verified.document().files.len()).ok() != Some(manifest.receipt.indexed_files)
         || u64::try_from(verified.document().entities.len()).ok() != Some(manifest.receipt.entities)
         || u64::try_from(documents.len()).ok() != Some(manifest.receipt.lexical_documents)
@@ -2909,7 +3102,7 @@ fn restore_generation(
         published_generation_count,
         verified,
         search,
-        sources: Vec::new(),
+        sources,
         incremental,
         operations: Vec::new(),
     })
@@ -3450,6 +3643,10 @@ mod tests {
     #[test]
     fn storage_admission_reports_budget_and_minimum_free_scopes() {
         let inventory = DurableStorageInventory {
+            repositories: vec![DurableRepositoryStorage {
+                repository: RepositoryId::from_bytes([1; 16]),
+                physical_bytes: 100,
+            }],
             generations: Vec::new(),
             generation_unique_bytes: 80,
             active_generation_bytes: 50,
@@ -3464,11 +3661,16 @@ mod tests {
             available_bytes: 50,
         };
 
+        let reservations = DurableStorageReservations::default();
+        let repository = RepositoryId::from_bytes([1; 16]);
         let budget_failure = check_storage_admission(
             &inventory,
+            &reservations,
+            repository,
             DurableStorageAdmissionPolicy {
                 required_bytes: 30,
-                maximum_storage_bytes: Some(120),
+                maximum_repository_bytes: u64::MAX,
+                maximum_storage_bytes: 120,
                 minimum_free_bytes: 10,
             },
         )
@@ -3476,7 +3678,7 @@ mod tests {
         assert_eq!(
             budget_failure,
             DurableStorageAdmissionFailure {
-                scope: DurableStorageAdmissionScope::DurableBudget,
+                scope: DurableStorageAdmissionScope::CatalogBudget,
                 required_bytes: 30,
                 observed_bytes: 100,
                 limit_bytes: 120,
@@ -3486,9 +3688,12 @@ mod tests {
 
         let free_space_failure = check_storage_admission(
             &inventory,
+            &reservations,
+            repository,
             DurableStorageAdmissionPolicy {
                 required_bytes: 31,
-                maximum_storage_bytes: None,
+                maximum_repository_bytes: u64::MAX,
+                maximum_storage_bytes: u64::MAX,
                 minimum_free_bytes: 20,
             },
         )
@@ -3507,19 +3712,77 @@ mod tests {
         assert_eq!(
             check_storage_admission(
                 &inventory,
+                &reservations,
+                repository,
                 DurableStorageAdmissionPolicy {
                     required_bytes: 10,
-                    maximum_storage_bytes: Some(130),
+                    maximum_repository_bytes: 130,
+                    maximum_storage_bytes: 130,
                     minimum_free_bytes: 20,
                 },
             ),
             Ok(DurableStorageAdmission {
                 required_bytes: 10,
                 observed_bytes: 100,
-                limit_bytes: Some(130),
+                limit_bytes: 130,
                 minimum_free_bytes: 20,
                 admission_margin_bytes: 20,
             })
+        );
+    }
+
+    #[test]
+    fn concurrent_storage_admissions_share_one_serialized_reservation_ledger() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let durable = Arc::new(DurableCatalog::open(paths.state_dir(), 2).expect("catalog opens"));
+        let observed = durable
+            .storage_inventory()
+            .expect("cold inventory scans")
+            .total_physical_bytes;
+        let required_bytes = 1024;
+        let policy = DurableStorageAdmissionPolicy {
+            required_bytes,
+            maximum_repository_bytes: u64::MAX,
+            maximum_storage_bytes: observed + required_bytes,
+            minimum_free_bytes: 0,
+        };
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let repository = RepositoryId::from_bytes([29; 16]);
+        let workers = (0..2)
+            .map(|_| {
+                let durable = Arc::clone(&durable);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let admission = durable
+                        .ensure_staging_capacity(repository, policy)
+                        .expect("inventory remains readable");
+                    barrier.wait();
+                    admission
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("admission worker joins"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(
+                    result,
+                    Err(DurableStorageAdmissionFailure {
+                        scope: DurableStorageAdmissionScope::CatalogBudget,
+                        ..
+                    })
+                ))
+                .count(),
+            1
         );
     }
 

@@ -55,8 +55,9 @@ use rootlight_observability::{
     DiagnosticsQuickSnapshot as SupportDiagnosticsQuick, HealthSnapshot as SupportHealth,
     OperationsSummary as SupportOperations, PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION,
     RECENT_LOG_CAPACITY, RECENT_TRACE_CAPACITY, RedactionReport, SUPPORT_BUNDLE_SCHEMA_VERSION,
-    SUPPORT_BUNDLE_SCHEMA_VERSION_V3, SUPPORT_BUNDLE_SCHEMA_VERSION_V4, SUPPORT_ENTRY_NAMES,
-    SUPPORT_ENTRY_NAMES_V2, SUPPORT_ENTRY_NAMES_V3, SUPPORT_ENTRY_NAMES_V4, SUPPORT_ENTRY_NAMES_V5,
+    SUPPORT_BUNDLE_SCHEMA_VERSION_V3, SUPPORT_BUNDLE_SCHEMA_VERSION_V4,
+    SUPPORT_BUNDLE_SCHEMA_VERSION_V5, SUPPORT_ENTRY_NAMES, SUPPORT_ENTRY_NAMES_V2,
+    SUPPORT_ENTRY_NAMES_V3, SUPPORT_ENTRY_NAMES_V4, SUPPORT_ENTRY_NAMES_V5, SUPPORT_ENTRY_NAMES_V6,
     SupportBundleInput, SupportBundleSchema, SupportChecksumStatus, SupportInventory,
     SupportManifest, SupportOperationKind, SupportOperationState, SupportOperationsV4,
     SupportTerminalOperation, TELEMETRY_SCHEMA_VERSION, TelemetrySnapshot,
@@ -100,6 +101,7 @@ const CLIENT_CAPABILITIES: &[&str] = &[
     "support.bundle.v3",
     "support.bundle.v4",
     "support.bundle.v5",
+    "support.bundle.v6",
 ];
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_IO_TIMEOUT: Duration = Duration::from_secs(6);
@@ -650,6 +652,17 @@ pub enum QueryFreshness {
     Superseded,
 }
 
+/// One source-free reason that repository coverage is partial.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CoverageGap {
+    /// Stable closed reason label.
+    pub reason: String,
+    /// Canonical language when the gap is language-scoped.
+    pub language: Option<String>,
+    /// Files affected by the gap.
+    pub files: u64,
+}
+
 /// Repository, generation, coverage, and usage correlation for one query.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct QueryContext {
@@ -671,6 +684,8 @@ pub struct QueryContext {
     pub coverage_status: CoverageStatus,
     /// Inputs skipped for the relevant scope.
     pub skipped_inputs: u64,
+    /// Bounded source-free reasons for partial repository coverage.
+    pub coverage_gaps: Vec<CoverageGap>,
     /// Measured query usage.
     pub usage: QueryUsage,
 }
@@ -926,8 +941,8 @@ pub struct RepositoryOperationStatus {
 /// One generation-pinned lexical result.
 #[derive(Clone, PartialEq, Eq, serde::Serialize)]
 pub struct LocateHit {
-    /// Stable symbol identity.
-    pub symbol: SymbolId,
+    /// Stable symbol identity, absent for a file-only source hit.
+    pub symbol: Option<SymbolId>,
     /// Stable file identity.
     pub file: FileId,
     /// Untrusted repository identifier text.
@@ -7677,8 +7692,10 @@ fn parse_support_bundle(
     response: daemon::SupportBundleResponse,
     selected_protocol_minor: u32,
 ) -> Result<SupportBundle, ClientError> {
-    let expected_schema = if selected_protocol_minor >= 12 {
+    let expected_schema = if selected_protocol_minor >= 13 {
         CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+    } else if selected_protocol_minor >= 12 {
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V5
     } else if selected_protocol_minor >= 8 {
         SUPPORT_BUNDLE_SCHEMA_VERSION_V4
     } else if selected_protocol_minor >= 5 {
@@ -7732,7 +7749,8 @@ fn validate_support_archive(
         PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V2,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V3 => &SUPPORT_ENTRY_NAMES_V3,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V4 => &SUPPORT_ENTRY_NAMES_V4,
-        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V5,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V5 => &SUPPORT_ENTRY_NAMES_V5,
+        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V6,
         _ => return Err(ClientError::InvalidSupportBundle),
     };
     let mut zip = zip::ZipArchive::new(Cursor::new(archive))
@@ -7769,7 +7787,9 @@ fn validate_support_archive(
     let health: SupportHealth = decode_support_entry(&entries, "health.json")?;
     let (operations, terminal_operations) = if matches!(
         schema_version,
-        SUPPORT_BUNDLE_SCHEMA_VERSION_V4 | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V4
+            | SUPPORT_BUNDLE_SCHEMA_VERSION_V5
+            | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
     ) {
         let operations: SupportOperationsV4 =
             decode_support_entry(&entries, "operations-summary.json")?;
@@ -7784,7 +7804,9 @@ fn validate_support_archive(
     let redaction: RedactionReport = decode_support_entry(&entries, "redaction-report.json")?;
     let inventory = if matches!(
         schema_version,
-        SUPPORT_BUNDLE_SCHEMA_VERSION_V4 | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V4
+            | SUPPORT_BUNDLE_SCHEMA_VERSION_V5
+            | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
     ) {
         Some(decode_support_entry(&entries, "inventory.json")?)
     } else {
@@ -7827,8 +7849,10 @@ fn validate_support_archive(
             SupportBundleSchema::V3
         } else if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION_V4 {
             SupportBundleSchema::V4
-        } else {
+        } else if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION_V5 {
             SupportBundleSchema::V5
+        } else {
+            SupportBundleSchema::V6
         },
     )
     .map_err(|_| ClientError::InvalidSupportBundle)?;
@@ -7883,8 +7907,10 @@ fn validate_support_semantics(
         rootlight_observability::OMITTED_DATA_CLASSES_V2.as_slice()
     } else if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION_V4 {
         rootlight_observability::OMITTED_DATA_CLASSES_V4.as_slice()
-    } else if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION {
+    } else if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION_V5 {
         rootlight_observability::OMITTED_DATA_CLASSES_V5.as_slice()
+    } else if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION {
+        rootlight_observability::OMITTED_DATA_CLASSES_V6.as_slice()
     } else {
         return Err(ClientError::InvalidSupportBundle);
     };
@@ -7908,7 +7934,9 @@ fn validate_support_semantics(
         || (schema_version != SUPPORT_BUNDLE_SCHEMA_VERSION && telemetry.is_none())
         || matches!(
             schema_version,
-            SUPPORT_BUNDLE_SCHEMA_VERSION_V4 | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+            SUPPORT_BUNDLE_SCHEMA_VERSION_V4
+                | SUPPORT_BUNDLE_SCHEMA_VERSION_V5
+                | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
         ) != inventory.is_some()
     {
         return Err(ClientError::InvalidSupportBundle);
@@ -7923,7 +7951,9 @@ fn validate_support_semantics(
             "operations-summary.json",
             "redaction-report.json",
         ],
-        SUPPORT_BUNDLE_SCHEMA_VERSION_V4 | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &[
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V4
+        | SUPPORT_BUNDLE_SCHEMA_VERSION_V5
+        | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &[
             "diagnostics/quick.json",
             "health.json",
             "inventory.json",
@@ -11574,7 +11604,10 @@ fn parse_code_locate(
             return Err(ClientError::InvalidResponseCorrelation);
         }
         hits.push(LocateHit {
-            symbol: parse_symbol(hit.symbol)?,
+            symbol: hit
+                .symbol
+                .map(|symbol| parse_symbol(Some(symbol)))
+                .transpose()?,
             file,
             identifier: hit.identifier,
             qualified_name: hit.qualified_name,
@@ -12184,6 +12217,29 @@ fn parse_query_context(
     {
         return Err(ClientError::InvalidResponseCorrelation);
     }
+    let coverage_gaps = context
+        .coverage_gaps
+        .into_iter()
+        .map(|gap| {
+            if !safe_coverage_gap_label(&gap.reason)
+                || gap
+                    .language
+                    .as_deref()
+                    .is_some_and(|language| !safe_coverage_gap_label(language))
+                || gap.files == 0
+            {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+            Ok(CoverageGap {
+                reason: gap.reason,
+                language: gap.language,
+                files: gap.files,
+            })
+        })
+        .collect::<Result<Vec<_>, ClientError>>()?;
+    if coverage_gaps.len() > 64 {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
     Ok(QueryContext {
         repository,
         generation,
@@ -12200,8 +12256,17 @@ fn parse_query_context(
         tier: parse_analysis_tier(context.tier)?,
         coverage_status: parse_coverage_status(context.coverage_status)?,
         skipped_inputs: context.skipped_inputs,
+        coverage_gaps,
         usage: parse_query_usage(context.usage)?,
     })
+}
+
+fn safe_coverage_gap_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
 }
 
 fn parse_query_freshness(
@@ -13531,6 +13596,7 @@ mod tests {
             }),
             structural_freshness: "current".to_owned(),
             semantic_freshness: "current".to_owned(),
+            coverage_gaps: Vec::new(),
         }
     }
 
@@ -14271,7 +14337,7 @@ mod tests {
             }],
         };
         let support_wire = support_response_with_schema(
-            valid_support_archive_v5(),
+            valid_support_archive_v6(),
             CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
         );
         let expected_health = parse_health(health_wire.clone(), CURRENT_PROTOCOL_MINOR)
@@ -15197,6 +15263,7 @@ mod tests {
                 "support.bundle.v3",
                 "support.bundle.v4",
                 "support.bundle.v5",
+                "support.bundle.v6",
             ]
         );
         assert!(
@@ -16452,6 +16519,27 @@ mod tests {
             .to_vec()
     }
 
+    fn valid_support_archive_v6() -> Vec<u8> {
+        let mut input = telemetry_support_input(rootlight_observability::ProtocolVersion::V1_13);
+        let mut inventory = test_support_inventory();
+        inventory.runtime.protocol_minor = 13;
+        inventory.languages = vec![
+            rootlight_observability::SupportLanguageCapabilityInventory {
+                language: "rust".to_owned(),
+                suffixes: vec![".rs".to_owned()],
+                aliases: Vec::new(),
+                detectors: vec!["extension".to_owned()],
+                maximum_tier: "tier_d".to_owned(),
+                analyzers: vec!["treesitter".to_owned()],
+            },
+        ];
+        input.inventory = Some(inventory);
+        build_support_bundle_for_schema(&input, SupportBundleSchema::V6)
+            .expect("test language-capability support bundle builds")
+            .archive()
+            .to_vec()
+    }
+
     fn clear_extended_storage_accounting(
         storage: &mut rootlight_observability::SupportStorageInventory,
     ) {
@@ -16540,6 +16628,7 @@ mod tests {
                 sha256: None,
             }],
             adapters: Vec::new(),
+            languages: Vec::new(),
             repositories: Vec::new(),
             generations: Vec::new(),
             configuration: rootlight_observability::SupportConfigurationInventory {
@@ -16950,11 +17039,11 @@ mod tests {
 
         let v5 = support_response_with_schema(
             valid_support_archive_v5(),
-            CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+            SUPPORT_BUNDLE_SCHEMA_VERSION_V5,
         );
         let parsed = parse_support_bundle(v5.clone(), 12)
             .expect("protocol 1.12 accepts schema v5 support evidence");
-        assert_eq!(parsed.schema_version, CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(parsed.schema_version, SUPPORT_BUNDLE_SCHEMA_VERSION_V5);
         assert_eq!(
             parsed
                 .inventory
@@ -16964,6 +17053,25 @@ mod tests {
         );
         assert!(matches!(
             parse_support_bundle(v5, 11),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+
+        let v6 = support_response_with_schema(
+            valid_support_archive_v6(),
+            CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        );
+        let parsed = parse_support_bundle(v6.clone(), 13)
+            .expect("protocol 1.13 accepts schema v6 support evidence");
+        assert_eq!(parsed.schema_version, CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(
+            parsed
+                .inventory
+                .as_ref()
+                .map(|inventory| inventory.languages.len()),
+            Some(1)
+        );
+        assert!(matches!(
+            parse_support_bundle(v6, 12),
             Err(ClientError::InvalidSupportBundle)
         ));
         assert!(matches!(

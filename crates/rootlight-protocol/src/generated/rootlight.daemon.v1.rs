@@ -1035,8 +1035,21 @@ pub struct FirstSliceQueryUsage {
     #[allow(missing_docs)]
     pub memory_bytes: ::core::option::Option<u64>,
 }
-/// Common repository, generation, coverage, and usage correlation.
+/// One bounded source-free reason that repository coverage is partial.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceCoverageGap {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub language: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, tag = "3")]
+    #[allow(missing_docs)]
+    pub files: u64,
+}
+/// Common repository, generation, coverage, and usage correlation.
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FirstSliceQueryContext {
     #[prost(message, optional, tag = "1")]
     #[allow(missing_docs)]
@@ -1070,6 +1083,9 @@ pub struct FirstSliceQueryContext {
     #[prost(string, tag = "10")]
     #[allow(missing_docs)]
     pub semantic_freshness: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "11")]
+    #[allow(missing_docs)]
+    pub coverage_gaps: ::prost::alloc::vec::Vec<FirstSliceCoverageGap>,
 }
 /// One source-free limiting-resource observation.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]

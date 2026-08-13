@@ -749,7 +749,9 @@ where
             context_evidence_completeness(response.result.execution_completeness.clone())?,
         )?;
         for hit in response.result.hits {
-            symbols.push(hit.symbol);
+            if let Some(symbol) = hit.symbol {
+                symbols.push(symbol);
+            }
             hits.push(hit);
         }
     }
@@ -898,6 +900,9 @@ where
         resolve_context_evidence_anchors(port, &invocation, options, cancellation).await?;
     let mut observations = Vec::new();
     for hit in resolved.hits {
+        let Some(symbol) = hit.symbol else {
+            continue;
+        };
         let source_refs = match hit.source.as_ref() {
             Some(source) => context_source_refs(std::slice::from_ref(source))?,
             None => Vec::new(),
@@ -909,8 +914,8 @@ where
             .saturating_add(hit.path.len());
         observations.push(EvidenceProviderObservation {
             kind: EvidenceProviderObservationKind::Primary,
-            symbol_id: Some(hit.symbol),
-            identity: hit.symbol.to_string(),
+            symbol_id: Some(symbol),
+            identity: symbol.to_string(),
             observed_score: Some(u16::try_from(hit.score.min(1_000)).unwrap_or(1_000)),
             observed_relevance: None,
             estimated_tokens: u64::try_from(tokens).unwrap_or(u64::MAX),

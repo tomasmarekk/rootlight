@@ -15,7 +15,7 @@ use rootlight_client::{
     AdvancedColumn, AdvancedQuery, AnalysisTier as ClientAnalysisTier, ArchitectureCycles,
     ArchitectureCyclesOptions, ArchitectureOverview, ArchitectureOverviewOptions, ChangeImpact,
     ChangeImpactRiskSummary, ClientError, CodeDead, CodeDeadEntryPointSummary, CodeDeadOptions,
-    CodeLocate, ContinuationAvailability, CoverageStatus, CycleProjection, FlowTrace,
+    CodeLocate, ContinuationAvailability, CoverageGap, CoverageStatus, CycleProjection, FlowTrace,
     FlowTraceFrontier, FlowTraceProjection, GenerationSelector, HistoryArchitectureDelta,
     HistoryCompare, HistoryCompareScope, HistoryMatchedStates, HistoryRevisionSelector, LocateHit,
     LocateMode, OperationKind, OperationStage, OperationState, PlanChange, PlanChangeContext,
@@ -43,8 +43,9 @@ use tokio::sync::watch;
 
 use super::{
     AsyncClientFuture, AsyncFirstSliceClient, AuthorizedRepositoryRoot, FIRST_SLICE_PROVIDER,
-    NativeFirstSliceClientPort, UnavailableFirstSliceClientPort, locate_languages,
-    map_client_error, map_operation_client_error, source_languages, symbol_languages,
+    NativeFirstSliceClientPort, UnavailableFirstSliceClientPort, coverage_gap_warning,
+    locate_languages, map_client_error, map_operation_client_error, read_metadata,
+    source_languages, symbol_languages,
 };
 use crate::{
     FirstSliceClientPort, FirstSliceToolExecutor, RequestCancellation, ToolExecutionFailure,
@@ -1554,7 +1555,7 @@ fn read_metadata_preserves_safe_non_rust_languages() {
     let locate = CodeLocate {
         context: context.clone(),
         hits: vec![LocateHit {
-            symbol: symbol(),
+            symbol: Some(symbol()),
             file: file(),
             identifier: "DenoWorkspace".to_owned(),
             qualified_name: "tools/release/deno_workspace.ts::DenoWorkspace".to_owned(),
@@ -1644,6 +1645,51 @@ fn read_metadata_preserves_safe_non_rust_languages() {
     assert_eq!(symbol_coverage.len(), 1);
     assert_eq!(symbol_coverage[0].language, "python");
     assert_eq!(symbol_coverage[0].tier, AnalysisTier::B);
+}
+
+#[test]
+fn every_partial_coverage_reason_has_a_stable_mcp_warning() {
+    for (reason, expected) in [
+        ("unsupported", "coverage_unsupported"),
+        ("unrecognized", "coverage_unrecognized"),
+        ("excluded", "coverage_excluded"),
+        ("oversized", "coverage_oversized"),
+        ("binary", "coverage_binary"),
+        ("parse-error", "coverage_parse_error"),
+        ("adapter-failed", "coverage_adapter_failed"),
+        ("truncated", "coverage_truncated"),
+        ("generated", "coverage_generated"),
+        ("stale", "coverage_stale"),
+    ] {
+        assert_eq!(
+            coverage_gap_warning(reason)
+                .expect("installed coverage reason maps")
+                .0,
+            expected
+        );
+    }
+    assert!(coverage_gap_warning("future-reason").is_err());
+
+    let mut context = query_context(repository(), GenerationSelector::Active, true);
+    context.coverage_gaps = vec![
+        CoverageGap {
+            reason: "unsupported".to_owned(),
+            language: Some("css".to_owned()),
+            files: 1,
+        },
+        CoverageGap {
+            reason: "binary".to_owned(),
+            language: None,
+            files: 2,
+        },
+    ];
+    let metadata = read_metadata(&context, Vec::new()).expect("partial read metadata maps");
+    let warning_codes = metadata
+        .warnings()
+        .iter()
+        .map(|warning| warning.code.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(warning_codes, ["coverage_unsupported", "coverage_binary"]);
 }
 
 #[test]
@@ -1867,6 +1913,7 @@ fn query_context(
         tier: ClientAnalysisTier::TierC,
         coverage_status: CoverageStatus::Complete,
         skipped_inputs: 0,
+        coverage_gaps: Vec::new(),
         usage: QueryUsage {
             rows: 1,
             edges: 0,

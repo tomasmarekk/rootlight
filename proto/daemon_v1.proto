@@ -588,6 +588,13 @@ enum FirstSliceTokenAccountingProfile {
   FIRST_SLICE_TOKEN_ACCOUNTING_UTF8_BYTE_UPPER_BOUND_V1 = 1;
 }
 
+// One bounded source-free reason that repository coverage is partial.
+message FirstSliceCoverageGap {
+  string reason = 1;
+  optional string language = 2;
+  uint64 files = 3;
+}
+
 // Common repository, generation, coverage, and usage correlation.
 message FirstSliceQueryContext {
   rootlight.common.v1.RepositoryId repository = 1;
@@ -600,6 +607,7 @@ message FirstSliceQueryContext {
   FirstSliceQueryUsage usage = 8;
   string structural_freshness = 9;
   string semantic_freshness = 10;
+  repeated FirstSliceCoverageGap coverage_gaps = 11;
 }
 
 // Authoritative execution-completeness state for one bounded result.

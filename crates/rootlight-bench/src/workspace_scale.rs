@@ -372,9 +372,12 @@ fn query_signature(
         .hits
         .into_iter()
         .map(|hit| {
+            let target = hit
+                .symbol
+                .map_or_else(|| format!("file:{}", hit.file), |symbol| symbol.to_string());
             format!(
                 "{}\u{1f}{}\u{1f}{}\u{1f}{}",
-                hit.symbol, hit.identifier, hit.path, hit.kind
+                target, hit.identifier, hit.path, hit.kind
             )
         })
         .collect())

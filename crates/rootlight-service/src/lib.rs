@@ -23,8 +23,9 @@ use catalog::{
 };
 use durable::{
     DurableCatalog, DurablePreparedGeneration, DurablePublishedGeneration,
-    DurableRepositoryMetadata, REPOSITORY_METADATA_VERSION, RestoredGeneration,
-    recovery_snapshot_output_reservation,
+    DurableRepositoryMetadata, DurableStorageAdmissionFailure, DurableStorageAdmissionPolicy,
+    DurableStorageAdmissionScope, DurableStorageReservation, REPOSITORY_METADATA_VERSION,
+    RestoredGeneration, recovery_snapshot_output_reservation,
 };
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, AnalysisRequest, BatchThresholds, EncodingId,
@@ -46,12 +47,13 @@ use rootlight_adapters::{
 };
 pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::{CatalogError, CatalogErrorKind, EphemeralOracleWriter, OracleWriter};
-use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource};
+use rootlight_config::{CONFIG_VERSION, ConfigLayer, ConfigSnapshot, ConfigSource};
 use rootlight_discovery::{
     DiscoveryError, DiscoveryLimits, DiscoveryPolicy, IncrementalDiscovery,
     IncrementalDiscoveryBaseline, IncrementalDiscoveryContext, IncrementalDiscoveryOptions,
-    InputClass, LanguageEvidence, ManifestInput, correlate_incremental_manifest,
-    discover_incremental_with_progress, discover_with_snapshots,
+    InputClass, LanguageEvidence, ManifestInput, canonical_language,
+    correlate_incremental_manifest, discover_incremental_with_progress, discover_with_snapshots,
+    extension_language, language_capabilities,
 };
 use rootlight_git::{
     ChangeSet as GitChangeSet, GitCollectErrorCode, GitCollectLimits, GitLimits,
@@ -98,7 +100,10 @@ pub use rootlight_query::{
     SemanticChangeRecord, SourceReadQueryResult, SymbolExplainResult, SymbolRelationshipsResult,
     TestsSelectCoverage, TestsSelectGap, TestsSelectKind, TestsSelectResult,
 };
-use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
+use rootlight_query::{
+    GenerationSet, QueryBudget, QueryError, SOURCE_FALLBACK_TEXT_BYTES,
+    project_lexical_documents_with_sources,
+};
 use rootlight_resolve::{
     DEFAULT_CANDIDATE_LIMIT, MAX_RESOLUTION_WORK_LIMIT, RESOLVER_PROVIDER_NAME,
     RESOLVER_PROVIDER_VERSION, ResolutionEngine, ResolutionError, ResolutionLimits,
@@ -134,10 +139,10 @@ const DURABLE_DISK_SAFETY_MARGIN_BYTES: u64 = 64 * 1024 * 1024;
 // The measured large-repository profile reached 24.51 durable bytes per
 // source byte. Rounding to 25 plus fixed and disk-safety margins keeps
 // admission ahead of staging without pretending the estimate is exact.
+#[cfg(test)]
 const DURABLE_SOURCE_WRITE_AMPLIFICATION_FACTOR: u64 = 25;
 // SQLite stores normalized fields across tables and indexes, so the streaming
 // JSON size is multiplied before any durable file is created.
-const DURABLE_ORACLE_SERIALIZED_EXPANSION_FACTOR: u64 = 8;
 // The measured clean deep-analysis peak reached 45.97 bytes per source byte.
 // A 48x preflight plus fixed small-repository overhead leaves bounded headroom
 // before any parser or lowerer runs.
@@ -242,6 +247,12 @@ pub struct FirstSliceIndexReceipt {
     /// Oversized regular inputs omitted by the configured per-file bound.
     #[serde(default)]
     pub oversized_inputs: u64,
+    /// Inputs classified as binary and omitted from text analysis.
+    #[serde(default)]
+    pub binary_inputs: u64,
+    /// Other inputs omitted by explicit discovery policy or safe-read rules.
+    #[serde(default)]
+    pub policy_excluded_inputs: u64,
     /// Files committed into normalized IR.
     pub indexed_files: u64,
     /// Semantic entities committed into normalized IR.
@@ -511,6 +522,23 @@ pub struct FirstSliceSupportAdapter {
     pub isolated: bool,
 }
 
+/// Installed source-language detection and analysis capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSliceSupportLanguageCapability {
+    /// Canonical normalized language label.
+    pub language: String,
+    /// Audited filename suffixes, including the leading dot.
+    pub suffixes: Vec<String>,
+    /// Accepted source-language aliases.
+    pub aliases: Vec<String>,
+    /// Installed detector families.
+    pub detectors: Vec<String>,
+    /// Highest installed analysis tier.
+    pub maximum_tier: String,
+    /// Installed analyzer or bounded fallback labels.
+    pub analyzers: Vec<String>,
+}
+
 /// Source-free repository facts for production support evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstSliceSupportRepository {
@@ -550,6 +578,8 @@ pub struct FirstSliceSupportGeneration {
 pub struct FirstSliceSupportInventory {
     /// Available parser and project-analysis providers.
     pub adapters: Vec<FirstSliceSupportAdapter>,
+    /// Authoritative installed language detection and analysis capabilities.
+    pub languages: Vec<FirstSliceSupportLanguageCapability>,
     /// Active repository summaries.
     pub repositories: Vec<FirstSliceSupportRepository>,
     /// Retained immutable generation summaries.
@@ -560,12 +590,120 @@ pub struct FirstSliceSupportInventory {
     pub generation_disk_bytes: u64,
     /// Total physical bytes retained by immutable generation trees.
     pub total_storage_bytes: u64,
+    /// Physical bytes stored once and referenced by multiple generation trees.
+    pub shared_bytes: Option<u64>,
+    /// Physical bytes eligible for safe reclamation.
+    pub reclaimable_bytes: Option<u64>,
+    /// Physical bytes protected by an explicit durable pin.
+    pub pinned_bytes: Option<u64>,
+    /// Immutable bytes owned by active generations.
+    pub active_generation_bytes: Option<u64>,
+    /// Immutable bytes owned by direct active predecessors.
+    pub predecessor_generation_bytes: Option<u64>,
     /// Bytes currently owned by unpublished durable staging trees.
     pub unreclaimed_temporary_bytes: u64,
     /// Free bytes on the durable repository volume when persistence is enabled.
     pub disk_margin_bytes: Option<u64>,
+    /// Bytes remaining after configured catalog and filesystem admission margins.
+    pub admission_margin_bytes: Option<u64>,
     /// Effective maximum retained generations per repository.
     pub effective_retention_generations: u32,
+}
+
+/// Immutable storage settings used by durable recovery, admission, and support evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSliceStoragePolicy {
+    config: ConfigSnapshot,
+    maximum_repository_bytes: u64,
+    maximum_catalog_bytes: u64,
+    retained_generations: usize,
+    minimum_free_disk_bytes: u64,
+    source_reservation_factor: u64,
+    oracle_reservation_factor: u64,
+}
+
+impl FirstSliceStoragePolicy {
+    /// Builds a durable policy from an already resolved configuration snapshot.
+    #[must_use]
+    pub fn from_config(config: ConfigSnapshot, legacy_retained_generations: usize) -> Self {
+        if config.version() != CONFIG_VERSION {
+            return Self::legacy_with_config(legacy_retained_generations, config);
+        }
+        let storage = config.storage();
+        Self {
+            config,
+            maximum_repository_bytes: storage.maximum_repository_bytes,
+            maximum_catalog_bytes: storage.maximum_catalog_bytes,
+            retained_generations: usize::from(storage.retained_generations),
+            minimum_free_disk_bytes: storage.minimum_free_disk_bytes,
+            source_reservation_factor: u64::from(storage.source_reservation_factor),
+            oracle_reservation_factor: u64::from(storage.oracle_reservation_factor),
+        }
+    }
+
+    /// Resolves an optional bounded user layer into the effective storage policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::Configuration`] when the layer is invalid.
+    pub fn resolve_user_config(
+        contents: Option<&str>,
+        legacy_retained_generations: usize,
+    ) -> Result<Self, FirstSliceError> {
+        let layer = contents.map(|contents| ConfigLayer {
+            source: ConfigSource::User,
+            contents,
+        });
+        let config = ConfigSnapshot::resolve(layer.as_slice())
+            .map_err(|_| FirstSliceError::Configuration)?;
+        Ok(Self::from_config(config, legacy_retained_generations))
+    }
+
+    fn legacy(retained_generations: usize) -> Self {
+        let config = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::Defaults,
+            contents: "version = \"1.1\"",
+        }])
+        .expect("the embedded compatibility configuration is valid");
+        Self::legacy_with_config(retained_generations, config)
+    }
+
+    fn legacy_with_config(retained_generations: usize, config: ConfigSnapshot) -> Self {
+        Self {
+            config,
+            maximum_repository_bytes: u64::MAX,
+            maximum_catalog_bytes: u64::MAX,
+            retained_generations,
+            minimum_free_disk_bytes: 0,
+            source_reservation_factor: u64::from(
+                rootlight_config::DEFAULT_SOURCE_RESERVATION_FACTOR,
+            ),
+            oracle_reservation_factor: u64::from(
+                rootlight_config::DEFAULT_ORACLE_RESERVATION_FACTOR,
+            ),
+        }
+    }
+
+    /// Returns the configured complete-generation retention count.
+    #[must_use]
+    pub const fn retained_generations(&self) -> usize {
+        self.retained_generations
+    }
+
+    #[cfg(test)]
+    const fn minimum_free_disk_bytes(&self) -> u64 {
+        self.minimum_free_disk_bytes
+    }
+
+    #[cfg(test)]
+    const fn maximum_repository_bytes(&self) -> u64 {
+        self.maximum_repository_bytes
+    }
+
+    #[cfg(test)]
+    const fn source_reservation_factor(&self) -> u64 {
+        self.source_reservation_factor
+    }
 }
 
 /// Coarse source-free stage reported while preparing an index generation.
@@ -681,7 +819,7 @@ impl FirstSliceSharedGenerationExport {
 }
 
 /// Bounded repository identity and capacity reservation made before indexing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct FirstSliceIndexAdmission {
     /// Stable identity reserved for the canonical repository root.
     pub repository: RepositoryId,
@@ -692,6 +830,7 @@ pub struct FirstSliceIndexAdmission {
     /// Conservative upper bound reserved for durable staging and publication.
     pub estimated_disk_bytes: u64,
     reservation_inserted: bool,
+    storage_reservation: Option<DurableStorageReservation>,
 }
 
 impl FirstSliceIndexAdmission {
@@ -700,6 +839,44 @@ impl FirstSliceIndexAdmission {
     pub const fn created_repository_reservation(&self) -> bool {
         self.reservation_inserted
     }
+
+    /// Returns a source-free copy that omits the process-local storage token.
+    #[must_use]
+    pub const fn metadata(&self) -> FirstSliceIndexAdmissionMetadata {
+        FirstSliceIndexAdmissionMetadata {
+            repository: self.repository,
+            root_identity: self.root_identity,
+            parent: self.parent,
+            estimated_disk_bytes: self.estimated_disk_bytes,
+        }
+    }
+}
+
+/// Source-free admission facts safe to copy into daemon lifecycle metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstSliceIndexAdmissionMetadata {
+    /// Stable reserved repository identity.
+    pub repository: RepositoryId,
+    /// Canonical root identity.
+    pub root_identity: ContentHash,
+    /// Active parent observed at admission.
+    pub parent: Option<GenerationId>,
+    /// Conservative initial durable reservation.
+    pub estimated_disk_bytes: u64,
+}
+
+struct StorageReservationGuard {
+    reservation: Option<DurableStorageReservation>,
+}
+
+impl StorageReservationGuard {
+    fn transfer(mut self) -> Option<DurableStorageReservation> {
+        self.reservation.take()
+    }
+}
+
+impl Drop for StorageReservationGuard {
+    fn drop(&mut self) {}
 }
 
 /// Evidence-backed semantic stitch between two active repository generations.
@@ -1539,6 +1716,7 @@ pub struct PreparedFirstSliceIndex {
     written_bytes: u64,
     reserved_memory_bytes: u64,
     memory_bytes: u64,
+    storage_reservation: Option<DurableStorageReservation>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1558,6 +1736,7 @@ pub struct FirstSliceStagedIndex {
     receipt: FirstSliceIndexReceipt,
     publication: FirstSlicePublication,
     written_bytes: u64,
+    storage_reservation: Option<DurableStorageReservation>,
 }
 
 impl FirstSliceStagedIndex {
@@ -1623,6 +1802,43 @@ struct UnsupportedSourceInput {
 pub enum FirstSliceSourceCoverageReason {
     /// The source language has no configured structural analyzer.
     UnsupportedLanguage,
+}
+
+/// Stable source-free reason that repository coverage is partial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum FirstSliceCoverageGapReason {
+    /// The source language is recognized but has no structural analyzer.
+    Unsupported,
+    /// No installed detector recognized the source language.
+    Unrecognized,
+    /// Discovery policy excluded an input.
+    Excluded,
+    /// An input exceeded a configured source bound.
+    Oversized,
+    /// An input was classified as binary.
+    Binary,
+    /// Parsing could not cover the complete source.
+    ParseError,
+    /// An isolated or in-process analyzer failed and a lower tier was used.
+    AdapterFailed,
+    /// A bounded publication or retrieval limit omitted facts or source text.
+    Truncated,
+    /// Generated-source policy prevented a complete production claim.
+    Generated,
+    /// The selected immutable generation is not current.
+    Stale,
+}
+
+/// One bounded source-free repository coverage gap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSliceCoverageGap {
+    /// Stable closed reason.
+    pub reason: FirstSliceCoverageGapReason,
+    /// Canonical language when the gap is language-scoped.
+    pub language: Option<String>,
+    /// Files affected by the gap.
+    pub files: u64,
 }
 
 /// Analysis coverage attached to one retained source file.
@@ -3049,6 +3265,7 @@ pub struct FirstSliceService {
     // lock keeps catalog reads concurrent with long immutable analysis reads.
     catalog_snapshots: Mutex<CatalogSnapshotStore>,
     durable: Option<Arc<DurableCatalog>>,
+    storage_policy: FirstSliceStoragePolicy,
     maximum_generations_per_repository: usize,
     maximum_repositories: usize,
     activation_sequences: BTreeMap<RepositoryId, u64>,
@@ -3090,11 +3307,25 @@ impl FirstSliceService {
         state_root: &Path,
         cancellation: &Cancellation,
     ) -> Result<Self, FirstSliceError> {
-        let (mut service, deferred) = Self::open_durable_deferred_with_optional_project_analyzer(
-            maximum_generations,
+        Self::new_durable_with_policy(
+            FirstSliceStoragePolicy::legacy(maximum_generations),
             state_root,
-            None,
-        )?;
+            cancellation,
+        )
+    }
+
+    /// Opens and restores durable state under an effective storage policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::new_durable`].
+    pub fn new_durable_with_policy(
+        policy: FirstSliceStoragePolicy,
+        state_root: &Path,
+        cancellation: &Cancellation,
+    ) -> Result<Self, FirstSliceError> {
+        let (mut service, deferred) =
+            Self::open_durable_deferred_with_optional_project_analyzer(policy, state_root, None)?;
         let restored = deferred.restore(cancellation)?;
         service.install_deferred_restore(restored, cancellation)?;
         Ok(service)
@@ -3116,8 +3347,9 @@ impl FirstSliceService {
         project_analyzer: Arc<dyn FirstSliceProjectAnalyzer>,
         cancellation: &Cancellation,
     ) -> Result<Self, FirstSliceError> {
+        let policy = FirstSliceStoragePolicy::legacy(maximum_generations);
         let (mut service, deferred) = Self::open_durable_deferred_with_optional_project_analyzer(
-            maximum_generations,
+            policy,
             state_root,
             Some(project_analyzer),
         )?;
@@ -3139,11 +3371,22 @@ impl FirstSliceService {
         maximum_generations: usize,
         state_root: &Path,
     ) -> Result<(Self, FirstSliceDeferredRestore), FirstSliceError> {
-        Self::open_durable_deferred_with_optional_project_analyzer(
-            maximum_generations,
+        Self::open_durable_deferred_with_policy(
+            FirstSliceStoragePolicy::legacy(maximum_generations),
             state_root,
-            None,
         )
+    }
+
+    /// Opens deferred durable state under an effective storage policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::open_durable_deferred`].
+    pub fn open_durable_deferred_with_policy(
+        policy: FirstSliceStoragePolicy,
+        state_root: &Path,
+    ) -> Result<(Self, FirstSliceDeferredRestore), FirstSliceError> {
+        Self::open_durable_deferred_with_optional_project_analyzer(policy, state_root, None)
     }
 
     /// Opens deferred durable state with one authenticated project analyzer.
@@ -3156,24 +3399,43 @@ impl FirstSliceService {
         state_root: &Path,
         project_analyzer: Arc<dyn FirstSliceProjectAnalyzer>,
     ) -> Result<(Self, FirstSliceDeferredRestore), FirstSliceError> {
+        Self::open_durable_deferred_with_project_analyzer_and_policy(
+            FirstSliceStoragePolicy::legacy(maximum_generations),
+            state_root,
+            project_analyzer,
+        )
+    }
+
+    /// Opens deferred durable state with an analyzer and effective storage policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::open_durable_deferred`].
+    pub fn open_durable_deferred_with_project_analyzer_and_policy(
+        policy: FirstSliceStoragePolicy,
+        state_root: &Path,
+        project_analyzer: Arc<dyn FirstSliceProjectAnalyzer>,
+    ) -> Result<(Self, FirstSliceDeferredRestore), FirstSliceError> {
         Self::open_durable_deferred_with_optional_project_analyzer(
-            maximum_generations,
+            policy,
             state_root,
             Some(project_analyzer),
         )
     }
 
     fn open_durable_deferred_with_optional_project_analyzer(
-        maximum_generations: usize,
+        policy: FirstSliceStoragePolicy,
         state_root: &Path,
         project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
     ) -> Result<(Self, FirstSliceDeferredRestore), FirstSliceError> {
+        let maximum_generations = policy.retained_generations();
         let durable = Arc::new(DurableCatalog::open(state_root, maximum_generations)?);
-        let service = Self::new_with_storage(
+        let service = Self::new_with_storage_policy(
             maximum_generations,
             MAX_RETAINED_SOURCE_BYTES,
             Some(Arc::clone(&durable)),
             project_analyzer,
+            policy,
         )?;
         Ok((service, FirstSliceDeferredRestore { durable }))
     }
@@ -3472,17 +3734,23 @@ impl FirstSliceService {
         drop(pending);
         let maximum_source_bytes =
             u64::try_from(MAX_RETAINED_SOURCE_BYTES).map_err(|_| FirstSliceError::Limits)?;
-        let estimated_disk_bytes = durable_initial_admission_reservation(maximum_source_bytes)?;
-        if let Err(error) = self.ensure_durable_staging_capacity(estimated_disk_bytes) {
-            self.release_index_admission(FirstSliceIndexAdmission {
-                repository,
-                root_identity,
-                parent: self.active_by_repository.get(&repository).copied(),
-                estimated_disk_bytes,
-                reservation_inserted,
-            });
-            return Err(error);
-        }
+        let estimated_disk_bytes =
+            self.durable_initial_admission_reservation(maximum_source_bytes)?;
+        let storage_reservation =
+            match self.begin_durable_storage_reservation(repository, estimated_disk_bytes) {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    self.release_index_admission(FirstSliceIndexAdmission {
+                        repository,
+                        root_identity,
+                        parent: self.active_by_repository.get(&repository).copied(),
+                        estimated_disk_bytes,
+                        reservation_inserted,
+                        storage_reservation: None,
+                    });
+                    return Err(error);
+                }
+            };
         if let Err(error) = check_cancellation(cancellation) {
             self.release_index_admission(FirstSliceIndexAdmission {
                 repository,
@@ -3490,6 +3758,7 @@ impl FirstSliceService {
                 parent: self.active_by_repository.get(&repository).copied(),
                 estimated_disk_bytes,
                 reservation_inserted,
+                storage_reservation,
             });
             return Err(error);
         }
@@ -3499,6 +3768,7 @@ impl FirstSliceService {
             parent: self.active_by_repository.get(&repository).copied(),
             estimated_disk_bytes,
             reservation_inserted,
+            storage_reservation,
         })
     }
 
@@ -3520,6 +3790,9 @@ impl FirstSliceService {
 
     /// Releases an uncommitted repository identity reservation.
     pub fn release_index_admission(&self, admission: FirstSliceIndexAdmission) {
+        if let (Some(durable), Some(reservation)) = (&self.durable, admission.storage_reservation) {
+            let _ = durable.release_staging_reservation(reservation);
+        }
         if !admission.reservation_inserted {
             return;
         }
@@ -3586,25 +3859,46 @@ impl FirstSliceService {
         maximum_generations: usize,
         maximum_source_bytes: usize,
     ) -> Result<Self, FirstSliceError> {
-        Self::new_with_storage(maximum_generations, maximum_source_bytes, None, None)
+        let storage_policy =
+            FirstSliceStoragePolicy::resolve_user_config(None, maximum_generations)?;
+        Self::new_with_storage_policy(
+            maximum_generations,
+            maximum_source_bytes,
+            None,
+            None,
+            storage_policy,
+        )
     }
 
+    #[cfg(test)]
     fn new_with_storage(
         maximum_generations: usize,
         maximum_retained_source_bytes: usize,
         durable: Option<Arc<DurableCatalog>>,
         project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
     ) -> Result<Self, FirstSliceError> {
+        Self::new_with_storage_policy(
+            maximum_generations,
+            maximum_retained_source_bytes,
+            durable,
+            project_analyzer,
+            FirstSliceStoragePolicy::legacy(maximum_generations),
+        )
+    }
+
+    fn new_with_storage_policy(
+        maximum_generations: usize,
+        maximum_retained_source_bytes: usize,
+        durable: Option<Arc<DurableCatalog>>,
+        project_analyzer: Option<Arc<dyn FirstSliceProjectAnalyzer>>,
+        storage_policy: FirstSliceStoragePolicy,
+    ) -> Result<Self, FirstSliceError> {
         let maximum_repositories = maximum_repositories_for_retention(maximum_generations)?;
         let total_generation_capacity = maximum_generations
             .checked_mul(maximum_repositories)
             .and_then(|capacity| capacity.checked_add(1))
             .ok_or(FirstSliceError::Retention)?;
-        let config = ConfigSnapshot::resolve(&[ConfigLayer {
-            source: ConfigSource::Defaults,
-            contents: "version = \"1.1\"",
-        }])
-        .map_err(|_| FirstSliceError::Configuration)?;
+        let config = storage_policy.config.clone();
         // Discovery, the capability snapshot, and parser admission must share
         // one effective source-file ceiling. Divergent limits make a file pass
         // discovery only to fail as an unrelated repository error later.
@@ -3696,6 +3990,7 @@ impl FirstSliceService {
                 catalog_instance_nonce,
             )),
             durable,
+            storage_policy,
             maximum_generations_per_repository: maximum_generations,
             maximum_repositories,
             activation_sequences: BTreeMap::new(),
@@ -3709,8 +4004,37 @@ impl FirstSliceService {
         })
     }
 
-    fn ensure_durable_staging_capacity(&self, required_bytes: u64) -> Result<(), FirstSliceError> {
+    fn begin_durable_storage_reservation(
+        &self,
+        repository: RepositoryId,
+        required_bytes: u64,
+    ) -> Result<Option<DurableStorageReservation>, FirstSliceError> {
         let Some(durable) = &self.durable else {
+            return Ok(None);
+        };
+        #[cfg(test)]
+        if let Some(available_bytes) = self.available_disk_bytes_override {
+            if available_bytes < required_bytes {
+                return Err(FirstSliceError::InsufficientDiskSpace {
+                    required_bytes,
+                    available_bytes,
+                });
+            }
+            return Ok(None);
+        }
+        let policy = self.durable_storage_admission_policy(required_bytes);
+        durable
+            .ensure_staging_capacity(repository, policy)?
+            .map(|(_, reservation)| Some(reservation))
+            .map_err(storage_admission_error)
+    }
+
+    fn resize_durable_storage_reservation(
+        &self,
+        reservation: Option<&DurableStorageReservation>,
+        required_bytes: u64,
+    ) -> Result<(), FirstSliceError> {
+        let (Some(durable), Some(reservation)) = (&self.durable, reservation) else {
             return Ok(());
         };
         #[cfg(test)]
@@ -3723,7 +4047,69 @@ impl FirstSliceService {
             }
             return Ok(());
         }
-        durable.ensure_staging_capacity(required_bytes)
+        durable
+            .resize_staging_reservation(
+                reservation,
+                self.durable_storage_admission_policy(required_bytes),
+            )?
+            .map(|_| ())
+            .map_err(storage_admission_error)
+    }
+
+    const fn durable_storage_admission_policy(
+        &self,
+        required_bytes: u64,
+    ) -> DurableStorageAdmissionPolicy {
+        DurableStorageAdmissionPolicy {
+            required_bytes,
+            maximum_repository_bytes: self.storage_policy.maximum_repository_bytes,
+            maximum_storage_bytes: self.storage_policy.maximum_catalog_bytes,
+            minimum_free_bytes: self.storage_policy.minimum_free_disk_bytes,
+        }
+    }
+
+    fn durable_staging_reservation(&self, source_bytes: u64) -> Result<u64, FirstSliceError> {
+        source_bytes
+            .checked_mul(self.storage_policy.source_reservation_factor)
+            .and_then(|bytes| bytes.checked_add(DURABLE_STAGING_FIXED_OVERHEAD_BYTES))
+            .ok_or(FirstSliceError::Limits)
+    }
+
+    fn durable_initial_admission_reservation(
+        &self,
+        source_bytes: u64,
+    ) -> Result<u64, FirstSliceError> {
+        let required_bytes = source_bytes
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(DURABLE_STAGING_FIXED_OVERHEAD_BYTES))
+            .ok_or(FirstSliceError::Limits)?;
+        if self.storage_policy.minimum_free_disk_bytes == 0 {
+            required_bytes
+                .checked_add(DURABLE_DISK_SAFETY_MARGIN_BYTES)
+                .ok_or(FirstSliceError::Limits)
+        } else {
+            Ok(required_bytes)
+        }
+    }
+
+    fn durable_output_reservation(
+        &self,
+        source_bytes: u64,
+        serialized_document_bytes: u64,
+        representation: DurableGenerationRepresentation,
+    ) -> Result<u64, FirstSliceError> {
+        let generation_bytes = match representation {
+            DurableGenerationRepresentation::Oracle => serialized_document_bytes
+                .checked_mul(self.storage_policy.oracle_reservation_factor)
+                .ok_or(FirstSliceError::Limits)?,
+            DurableGenerationRepresentation::RecoverySnapshot => {
+                recovery_snapshot_output_reservation(serialized_document_bytes)?
+            }
+        };
+        source_bytes
+            .checked_add(generation_bytes)
+            .and_then(|bytes| bytes.checked_add(DURABLE_STAGING_FIXED_OVERHEAD_BYTES))
+            .ok_or(FirstSliceError::Limits)
     }
 
     /// Reports whether an authenticated whole-project analyzer is configured.
@@ -4114,10 +4500,42 @@ impl FirstSliceService {
         cancellation: &Cancellation,
         observe_progress: impl FnMut(FirstSliceIndexProgress),
     ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
+        let mut admission = self.admit_repository(path, cancellation)?;
+        let result = self.prepare_repository_after_admission_with_progress(
+            path,
+            mode,
+            &mut admission,
+            cancellation,
+            observe_progress,
+        );
+        if result.as_ref().is_err()
+            || result.as_ref().is_ok_and(|prepared| {
+                matches!(prepared, FirstSliceIndexPreparation::Retained { .. })
+            })
+        {
+            self.release_index_admission(admission);
+        }
+        result
+    }
+
+    /// Builds one hidden generation using an existing atomic admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::prepare_repository_with_mode_and_progress`].
+    pub fn prepare_repository_after_admission_with_progress(
+        &self,
+        path: &Path,
+        mode: FirstSliceIndexMode,
+        admission: &mut FirstSliceIndexAdmission,
+        cancellation: &Cancellation,
+        observe_progress: impl FnMut(FirstSliceIndexProgress),
+    ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
         self.prepare_repository_with_representation_and_progress(
             path,
             mode,
             DurableGenerationRepresentation::Oracle,
+            admission,
             cancellation,
             observe_progress,
         )
@@ -4128,6 +4546,7 @@ impl FirstSliceService {
         path: &Path,
         mode: FirstSliceIndexMode,
         representation: DurableGenerationRepresentation,
+        admission: &mut FirstSliceIndexAdmission,
         cancellation: &Cancellation,
         mut observe_progress: impl FnMut(FirstSliceIndexProgress),
     ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
@@ -4138,6 +4557,12 @@ impl FirstSliceService {
             .map_err(|cancelled| FirstSliceError::Cancelled(cancelled.reason()))?;
         let canonical = canonical_repository_root(path, cancellation)?;
         let root_identity = repository_path_hash(&canonical)?;
+        if root_identity != admission.root_identity {
+            return Err(FirstSliceError::Identity);
+        }
+        let storage_reservation = StorageReservationGuard {
+            reservation: admission.storage_reservation.take(),
+        };
         let root_path = sanitized_repository_root_path(&canonical)?;
         let existing_repository = self.repositories.get(&root_identity).copied();
         let pending = self
@@ -4168,6 +4593,9 @@ impl FirstSliceService {
         };
         check_cancellation(cancellation)?;
         let repository = repository_result;
+        if repository != admission.repository {
+            return Err(FirstSliceError::Identity);
+        }
         let display_name = match reserved_repository {
             Some((_, display_name, _)) => fallible_copy_string(display_name)?,
             None => sanitized_repository_display_name(&canonical, repository)?,
@@ -4277,8 +4705,12 @@ impl FirstSliceService {
             self.source_snapshots.maximum_bytes,
             cancellation,
         )?;
-        let mut estimated_disk_bytes = durable_staging_reservation(source_preflight.source_bytes)?;
-        self.ensure_durable_staging_capacity(estimated_disk_bytes)?;
+        let mut estimated_disk_bytes =
+            self.durable_staging_reservation(source_preflight.source_bytes)?;
+        self.resize_durable_storage_reservation(
+            storage_reservation.reservation.as_ref(),
+            estimated_disk_bytes,
+        )?;
         let source_count = source_preflight.supported_file_count;
         let mut file_claims = Vec::new();
         file_claims
@@ -4749,13 +5181,17 @@ impl FirstSliceService {
         )
         .map_err(|error| map_identity_error(error, cancellation))?;
         if self.durable.is_some() {
-            estimated_disk_bytes = durable_output_reservation(
-                source_preflight.source_bytes,
-                serialized_document_bytes,
-                representation,
-            )?
-            .max(estimated_disk_bytes);
-            self.ensure_durable_staging_capacity(estimated_disk_bytes)?;
+            estimated_disk_bytes = self
+                .durable_output_reservation(
+                    source_preflight.source_bytes,
+                    serialized_document_bytes,
+                    representation,
+                )?
+                .max(estimated_disk_bytes);
+            self.resize_durable_storage_reservation(
+                storage_reservation.reservation.as_ref(),
+                estimated_disk_bytes,
+            )?;
         }
         let (oracle_allocated_bytes, verified, durable, mut written_bytes) = if let Some(durable) =
             &self.durable
@@ -4830,9 +5266,17 @@ impl FirstSliceService {
             fully_examined_bytes,
             written_bytes,
         ));
-        let documents =
-            project_lexical_documents(verified.snapshot(), BuildBudget::default(), cancellation)
-                .map_err(|error| map_query_error(error, cancellation))?;
+        let source_snapshots = retained_sources
+            .iter()
+            .map(|source| &source.snapshot)
+            .collect::<Vec<_>>();
+        let documents = project_lexical_documents_with_sources(
+            verified.snapshot(),
+            &source_snapshots,
+            BuildBudget::default(),
+            cancellation,
+        )
+        .map_err(|error| map_query_error(error, cancellation))?;
         let lexical_documents =
             u64::try_from(documents.len()).map_err(|_| FirstSliceError::Limits)?;
         let search = LexicalIndex::build_ephemeral(
@@ -4867,6 +5311,20 @@ impl FirstSliceService {
                     total.checked_add(*count).ok_or(FirstSliceError::Limits)
                 })?,
             oversized_inputs,
+            binary_inputs: manifest
+                .coverage
+                .excluded
+                .get("binary")
+                .copied()
+                .unwrap_or(0),
+            policy_excluded_inputs: manifest
+                .coverage
+                .excluded
+                .iter()
+                .filter(|(reason, _)| !matches!(reason.as_str(), "binary" | "oversized"))
+                .try_fold(0_u64, |total, (_, count)| {
+                    total.checked_add(*count).ok_or(FirstSliceError::Limits)
+                })?,
             indexed_files,
             entities,
             lexical_documents,
@@ -4900,6 +5358,7 @@ impl FirstSliceService {
                 written_bytes,
                 reserved_memory_bytes,
                 memory_bytes,
+                storage_reservation: storage_reservation.transfer(),
             },
         ))
     }
@@ -4948,6 +5407,37 @@ impl FirstSliceService {
         cancellation: &Cancellation,
         observe_progress: impl FnMut(FirstSliceIndexProgress),
     ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
+        let mut admission = self.admit_repository(path, cancellation)?;
+        let result = self.prepare_semantic_refinement_after_admission_with_progress(
+            path,
+            structural_generation,
+            &mut admission,
+            cancellation,
+            observe_progress,
+        );
+        if result.as_ref().is_err()
+            || result.as_ref().is_ok_and(|prepared| {
+                matches!(prepared, FirstSliceIndexPreparation::Retained { .. })
+            })
+        {
+            self.release_index_admission(admission);
+        }
+        result
+    }
+
+    /// Builds a semantic refinement using an existing atomic admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::prepare_semantic_refinement_with_progress`].
+    pub fn prepare_semantic_refinement_after_admission_with_progress(
+        &self,
+        path: &Path,
+        structural_generation: GenerationId,
+        admission: &mut FirstSliceIndexAdmission,
+        cancellation: &Cancellation,
+        observe_progress: impl FnMut(FirstSliceIndexProgress),
+    ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
         if self.durable.is_none() {
             return Err(FirstSliceError::Catalog);
         }
@@ -4962,6 +5452,7 @@ impl FirstSliceService {
             path,
             FirstSliceIndexMode::Deep,
             DurableGenerationRepresentation::RecoverySnapshot,
+            admission,
             cancellation,
             observe_progress,
         )?;
@@ -5502,6 +5993,7 @@ impl FirstSliceService {
                     receipt,
                     publication: FirstSlicePublication::Retained { root_path },
                     written_bytes: 0,
+                    storage_reservation: None,
                 })
             }
             FirstSliceIndexPreparation::Pending(prepared) => {
@@ -5520,6 +6012,7 @@ impl FirstSliceService {
                     written_bytes,
                     reserved_memory_bytes,
                     memory_bytes,
+                    storage_reservation,
                 } = prepared;
                 self.make_room_for_generation(receipt.repository, memory_bytes)?;
                 self.make_room_for_source_admission(receipt.generation, &sources, cancellation)?;
@@ -5586,6 +6079,7 @@ impl FirstSliceService {
                         durable,
                     },
                     written_bytes,
+                    storage_reservation,
                 })
             }
         }
@@ -5649,6 +6143,9 @@ impl FirstSliceService {
         operation: Option<FirstSliceOperationContext>,
     ) -> Result<FirstSliceIndexCommit, FirstSliceError> {
         self.retry_pending_durable_compactions()?;
+        let _storage_reservation = StorageReservationGuard {
+            reservation: staged.storage_reservation,
+        };
         let receipt = staged.receipt;
         let mut written_bytes = staged.written_bytes;
         let mut operation_evidence = match &staged.publication {
@@ -6008,6 +6505,7 @@ impl FirstSliceService {
         let FirstSliceStagedIndex {
             receipt,
             publication,
+            storage_reservation,
             ..
         } = staged;
         if let FirstSlicePublication::Pending {
@@ -6049,6 +6547,9 @@ impl FirstSliceService {
                     .remove(&root_identity);
             }
         }
+        let _storage_reservation = StorageReservationGuard {
+            reservation: storage_reservation,
+        };
         Ok(())
     }
 
@@ -6454,16 +6955,83 @@ impl FirstSliceService {
             });
         }
 
-        let (unreclaimed_temporary_bytes, disk_margin_bytes) = self
+        let storage = self
             .durable
             .as_ref()
-            .map(|durable| durable.storage_health_snapshot())
-            .transpose()?
-            .map_or((0, None), |(temporary, available)| {
-                (temporary, Some(available))
-            });
+            .map(|durable| durable.storage_inventory())
+            .transpose()?;
+        let (
+            total_storage_bytes,
+            shared_bytes,
+            reclaimable_bytes,
+            pinned_bytes,
+            active_generation_bytes,
+            predecessor_generation_bytes,
+            unreclaimed_temporary_bytes,
+            disk_margin_bytes,
+            admission_margin_bytes,
+        ) = storage.map_or(
+            (
+                generation_disk_bytes,
+                None,
+                None,
+                None,
+                None,
+                None,
+                0,
+                None,
+                None,
+            ),
+            |inventory| {
+                let filesystem_margin = inventory
+                    .available_bytes
+                    .saturating_sub(self.storage_policy.minimum_free_disk_bytes);
+                let catalog_margin = self
+                    .storage_policy
+                    .maximum_catalog_bytes
+                    .saturating_sub(inventory.total_physical_bytes);
+                (
+                    inventory.total_physical_bytes,
+                    Some(inventory.shared_source_bytes),
+                    Some(inventory.reclaimable_bytes),
+                    inventory.pinned_bytes,
+                    Some(inventory.active_generation_bytes),
+                    Some(inventory.predecessor_generation_bytes),
+                    inventory.temporary_bytes,
+                    Some(inventory.available_bytes),
+                    Some(filesystem_margin.min(catalog_margin)),
+                )
+            },
+        );
         Ok(FirstSliceSupportInventory {
             adapters,
+            languages: language_capabilities()
+                .iter()
+                .map(|capability| FirstSliceSupportLanguageCapability {
+                    language: capability.language.to_owned(),
+                    suffixes: capability
+                        .suffixes
+                        .iter()
+                        .map(|suffix| (*suffix).to_owned())
+                        .collect(),
+                    aliases: capability
+                        .aliases
+                        .iter()
+                        .map(|alias| (*alias).to_owned())
+                        .collect(),
+                    detectors: capability
+                        .detectors
+                        .iter()
+                        .map(|detector| (*detector).to_owned())
+                        .collect(),
+                    maximum_tier: capability.maximum_tier.to_owned(),
+                    analyzers: capability
+                        .analyzers
+                        .iter()
+                        .map(|analyzer| (*analyzer).to_owned())
+                        .collect(),
+                })
+                .collect(),
             repositories,
             generations,
             generation_format: format!(
@@ -6472,9 +7040,15 @@ impl FirstSliceService {
                 GENERATION_CONTRACT_VERSION.minor()
             ),
             generation_disk_bytes,
-            total_storage_bytes: generation_disk_bytes,
+            total_storage_bytes,
+            shared_bytes,
+            reclaimable_bytes,
+            pinned_bytes,
+            active_generation_bytes,
+            predecessor_generation_bytes,
             unreclaimed_temporary_bytes,
             disk_margin_bytes,
+            admission_margin_bytes,
             effective_retention_generations: u32::try_from(self.maximum_generations_per_repository)
                 .map_err(|_| FirstSliceError::Limits)?,
         })
@@ -6637,7 +7211,7 @@ impl FirstSliceService {
         generation: GenerationId,
         query: String,
         mode: LocateMode,
-        languages: Vec<String>,
+        mut languages: Vec<String>,
         path_prefixes: Vec<String>,
         maximum_results: usize,
         page_offset: usize,
@@ -6660,6 +7234,16 @@ impl FirstSliceService {
         let candidate_rows = query_budget.max_rows().saturating_sub(result_rows);
         if let Ok(candidate_rows) = usize::try_from(candidate_rows) {
             search_budget.max_candidates = search_budget.max_candidates.min(candidate_rows);
+        }
+        for language in &mut languages {
+            let Some(canonical) = canonical_language(language) else {
+                continue;
+            };
+            language
+                .try_reserve(canonical.len().saturating_sub(language.len()))
+                .map_err(|_| FirstSliceError::BudgetExceeded)?;
+            language.clear();
+            language.push_str(canonical);
         }
         let plan = service
             .plan_code_locate_with_filters(
@@ -7952,17 +8536,33 @@ impl FirstSliceService {
             .source_snapshots
             .snapshots(generation)
             .ok_or(FirstSliceError::Query)?;
+        let requested_files = references
+            .iter()
+            .map(|source| source.span().file())
+            .collect::<BTreeSet<_>>();
+        let retained_files = retained_snapshots
+            .iter()
+            .map(|snapshot| snapshot.file())
+            .collect::<BTreeSet<_>>();
+        let missing_files = requested_files
+            .difference(&retained_files)
+            .copied()
+            .collect::<Vec<_>>();
         let mut restored_snapshots = Vec::new();
-        let source_snapshots = if retained_snapshots.is_empty() {
+        let source_snapshots = if missing_files.is_empty() {
+            retained_snapshots
+        } else {
             let durable = self.durable.as_ref().ok_or(FirstSliceError::Query)?;
-            let files = references
-                .iter()
-                .map(|source| source.span().file())
-                .collect::<BTreeSet<_>>();
             restored_snapshots
-                .try_reserve_exact(files.len())
+                .try_reserve_exact(
+                    retained_snapshots
+                        .len()
+                        .checked_add(missing_files.len())
+                        .ok_or(FirstSliceError::Retention)?,
+                )
                 .map_err(|_| FirstSliceError::Retention)?;
-            for file in files {
+            restored_snapshots.extend(retained_snapshots.iter().cloned());
+            for file in missing_files {
                 check_cancellation(cancellation)?;
                 let record = snapshot
                     .document()
@@ -7977,10 +8577,15 @@ impl FirstSliceService {
                     cancellation,
                 )?));
             }
+            restored_snapshots.sort_unstable_by_key(|snapshot| snapshot.file());
             restored_snapshots.as_slice()
-        } else {
-            retained_snapshots
         };
+        debug_assert!(
+            source_snapshots
+                .windows(2)
+                .all(|pair| pair[0].file() < pair[1].file()),
+            "retained and lazily hydrated source snapshots remain canonical"
+        );
         let source = SourceService::from_snapshots(source_snapshots, snapshot)
             .map_err(|error| map_source_error(error, cancellation))?;
         let plan = service
@@ -8078,6 +8683,146 @@ impl FirstSliceService {
             status,
             reason,
         })
+    }
+
+    /// Returns bounded source-free reasons that a generation is only partially covered.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same generation-selection and retained-catalog failures as
+    /// [`Self::resolve_generation`].
+    pub fn coverage_gaps(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationId,
+    ) -> Result<Vec<FirstSliceCoverageGap>, FirstSliceError> {
+        let context = self.resolve_generation(repository, Some(generation))?;
+        let snapshot = self
+            .generations
+            .generation(context.generation)
+            .map_err(|_| FirstSliceError::GenerationNotFound)?;
+        let document = snapshot.document();
+        let mut grouped =
+            BTreeMap::<(FirstSliceCoverageGapReason, Option<String>), BTreeSet<FileId>>::new();
+        let mut observe = |reason, file: Option<FileId>| {
+            let language = file.and_then(|file| {
+                document
+                    .files
+                    .binary_search_by_key(&file, |candidate| candidate.id)
+                    .ok()
+                    .and_then(|index| document.files.get(index))
+                    .map(|file| file.language.clone())
+            });
+            if let Some(file) = file {
+                grouped.entry((reason, language)).or_default().insert(file);
+            }
+        };
+        for diagnostic in &document.diagnostics {
+            let file = diagnostic
+                .source
+                .as_ref()
+                .map(|source| source.span().file());
+            let reason = match diagnostic.code.as_str() {
+                "unsupported-language" => Some(
+                    if file
+                        .and_then(|file| {
+                            document
+                                .files
+                                .binary_search_by_key(&file, |candidate| candidate.id)
+                                .ok()
+                                .and_then(|index| document.files.get(index))
+                        })
+                        .is_some_and(|file| file.language == "unknown")
+                    {
+                        FirstSliceCoverageGapReason::Unrecognized
+                    } else {
+                        FirstSliceCoverageGapReason::Unsupported
+                    },
+                ),
+                code if code.starts_with("project-adapter-") && code.ends_with("-fallback") => {
+                    Some(FirstSliceCoverageGapReason::AdapterFailed)
+                }
+                code if code.contains("truncated") || code == "resolution-work-bounded" => {
+                    Some(FirstSliceCoverageGapReason::Truncated)
+                }
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                observe(reason, file);
+            }
+        }
+        for skipped in &document.skipped_regions {
+            let reason = match skipped.reason {
+                SkippedRegionReason::ParseError => FirstSliceCoverageGapReason::ParseError,
+                SkippedRegionReason::AdapterFailure => FirstSliceCoverageGapReason::AdapterFailed,
+                SkippedRegionReason::ResourceLimit => FirstSliceCoverageGapReason::Truncated,
+                SkippedRegionReason::UnsupportedConstruct
+                    if skipped.detail != "unsupported-language" =>
+                {
+                    FirstSliceCoverageGapReason::Unsupported
+                }
+                _ => continue,
+            };
+            observe(reason, Some(skipped.source.span().file()));
+        }
+        for file in &document.files {
+            if file.byte_length > SOURCE_FALLBACK_TEXT_BYTES as u64
+                && document.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "unsupported-language"
+                        && diagnostic
+                            .source
+                            .as_ref()
+                            .is_some_and(|source| source.span().file() == file.id)
+                })
+            {
+                observe(FirstSliceCoverageGapReason::Truncated, Some(file.id));
+            }
+        }
+        let receipt = &context.receipt;
+        let excluded = receipt.policy_excluded_inputs;
+        let mut gaps = grouped
+            .into_iter()
+            .map(|((reason, language), files)| FirstSliceCoverageGap {
+                reason,
+                language,
+                files: u64::try_from(files.len()).unwrap_or(u64::MAX),
+            })
+            .collect::<Vec<_>>();
+        for (reason, files) in [
+            (FirstSliceCoverageGapReason::Excluded, excluded),
+            (
+                FirstSliceCoverageGapReason::Oversized,
+                receipt.oversized_inputs,
+            ),
+            (FirstSliceCoverageGapReason::Binary, receipt.binary_inputs),
+        ] {
+            if files > 0 {
+                gaps.push(FirstSliceCoverageGap {
+                    reason,
+                    language: None,
+                    files,
+                });
+            }
+        }
+        let freshness = self.generation_freshness(repository, generation)?;
+        if !matches!(
+            freshness.structural,
+            FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan
+        ) || !matches!(
+            freshness.semantic,
+            FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan
+        ) {
+            gaps.push(FirstSliceCoverageGap {
+                reason: FirstSliceCoverageGapReason::Stale,
+                language: None,
+                files: receipt.indexed_files.max(1),
+            });
+        }
+        gaps.sort_by(|left, right| {
+            (left.reason, left.language.as_deref()).cmp(&(right.reason, right.language.as_deref()))
+        });
+        gaps.truncate(64);
+        Ok(gaps)
     }
 
     /// Lists every repository known to this daemon process.
@@ -8748,6 +9493,34 @@ pub enum FirstSliceError {
         /// Free bytes observed on the durable state filesystem.
         available_bytes: u64,
     },
+    /// Durable publication crossed one configured physical-storage boundary.
+    #[error(
+        "durable storage {scope:?} requires {required_bytes} bytes with {observed_bytes} observed against {limit_bytes}, preserving {minimum_free_bytes} free bytes"
+    )]
+    StorageResourceExhausted {
+        /// Closed physical-storage boundary that rejected admission.
+        scope: FirstSliceStorageScope,
+        /// Additional physical bytes required by the candidate publication.
+        required_bytes: u64,
+        /// Physical or available bytes observed at admission.
+        observed_bytes: u64,
+        /// Effective ceiling for the selected scope.
+        limit_bytes: u64,
+        /// Configured filesystem free-space floor.
+        minimum_free_bytes: u64,
+    },
+}
+
+/// Source-free configured boundary used by durable storage admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FirstSliceStorageScope {
+    /// Per-repository physical-byte ceiling.
+    Repository,
+    /// Whole-catalog physical-byte ceiling.
+    Catalog,
+    /// Filesystem free-space floor.
+    Filesystem,
 }
 
 struct FirstSliceIncrementalPlanningContext<'a> {
@@ -9892,66 +10665,7 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
 }
 
 fn source_language_from_path(path: &str) -> Option<&'static str> {
-    let normalized = path.to_ascii_lowercase();
-    for (suffix, language) in [
-        (".blade.php", "php"),
-        (".d.ts", "typescript"),
-        (".tsx", "typescript"),
-        (".mts", "typescript"),
-        (".cts", "typescript"),
-        (".ts", "typescript"),
-        (".jsx", "javascript"),
-        (".mjs", "javascript"),
-        (".cjs", "javascript"),
-        (".js", "javascript"),
-        (".cxx", "cpp"),
-        (".cpp", "cpp"),
-        (".cc", "cpp"),
-        (".hxx", "cpp"),
-        (".hpp", "cpp"),
-        (".hh", "cpp"),
-        (".rs", "rust"),
-        (".py", "python"),
-        (".go", "go"),
-        (".java", "java"),
-        (".cs", "csharp"),
-        (".kts", "kotlin"),
-        (".kt", "kotlin"),
-        (".css", "css"),
-        (".lua", "lua"),
-        (".mm", "objective-cpp"),
-        (".mlx", "matlab"),
-        (".pl", "perl"),
-        (".pm", "perl"),
-        (".pod", "perl"),
-        (".r", "r"),
-        (".php", "php"),
-        (".sql", "sql"),
-        (".bash", "bash"),
-        (".sh", "bash"),
-        (".html", "html"),
-        (".htm", "html"),
-        (".swift", "swift"),
-        (".ruby", "ruby"),
-        (".rb", "ruby"),
-        (".dart", "dart"),
-        (".psm1", "powershell"),
-        (".psd1", "powershell"),
-        (".ps1", "powershell"),
-        (".scala", "scala"),
-        (".sc", "scala"),
-        (".groovy", "groovy"),
-        (".gradle", "groovy"),
-        (".asm", "assembly"),
-        (".s", "assembly"),
-        (".sol", "solidity"),
-        (".c", "c"),
-    ] {
-        if normalized.ends_with(suffix) {
-            return Some(language);
-        }
-    }
-    None
+    extension_language(path)
 }
 
 fn analysis_tier_for_language(language: &str) -> AnalysisTier {
@@ -10330,6 +11044,7 @@ fn preflight_source_inputs(
     })
 }
 
+#[cfg(test)]
 fn durable_initial_admission_reservation(source_bytes: u64) -> Result<u64, FirstSliceError> {
     source_bytes
         .checked_mul(2)
@@ -10338,6 +11053,22 @@ fn durable_initial_admission_reservation(source_bytes: u64) -> Result<u64, First
         .ok_or(FirstSliceError::Limits)
 }
 
+fn storage_admission_error(failure: DurableStorageAdmissionFailure) -> FirstSliceError {
+    let scope = match failure.scope {
+        DurableStorageAdmissionScope::RepositoryBudget => FirstSliceStorageScope::Repository,
+        DurableStorageAdmissionScope::CatalogBudget => FirstSliceStorageScope::Catalog,
+        DurableStorageAdmissionScope::FilesystemFreeSpace => FirstSliceStorageScope::Filesystem,
+    };
+    FirstSliceError::StorageResourceExhausted {
+        scope,
+        required_bytes: failure.required_bytes,
+        observed_bytes: failure.observed_bytes,
+        limit_bytes: failure.limit_bytes,
+        minimum_free_bytes: failure.minimum_free_bytes,
+    }
+}
+
+#[cfg(test)]
 fn durable_staging_reservation(source_bytes: u64) -> Result<u64, FirstSliceError> {
     source_bytes
         .checked_mul(DURABLE_SOURCE_WRITE_AMPLIFICATION_FACTOR)
@@ -10432,26 +11163,6 @@ fn ensure_generation_memory_admission(
         ));
     }
     Ok(observed)
-}
-
-fn durable_output_reservation(
-    source_bytes: u64,
-    serialized_document_bytes: u64,
-    representation: DurableGenerationRepresentation,
-) -> Result<u64, FirstSliceError> {
-    let generation_bytes = match representation {
-        DurableGenerationRepresentation::Oracle => serialized_document_bytes
-            .checked_mul(DURABLE_ORACLE_SERIALIZED_EXPANSION_FACTOR)
-            .ok_or(FirstSliceError::Limits)?,
-        DurableGenerationRepresentation::RecoverySnapshot => {
-            recovery_snapshot_output_reservation(serialized_document_bytes)?
-        }
-    };
-    source_bytes
-        .checked_add(generation_bytes)
-        .and_then(|bytes| bytes.checked_add(DURABLE_STAGING_FIXED_OVERHEAD_BYTES))
-        .and_then(|bytes| bytes.checked_add(DURABLE_DISK_SAFETY_MARGIN_BYTES))
-        .ok_or(FirstSliceError::Limits)
 }
 
 fn project_context_manifest(
@@ -13133,6 +13844,32 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn storage_policy_distinguishes_current_defaults_user_overrides_and_legacy_config() {
+        let current = FirstSliceStoragePolicy::resolve_user_config(None, 8)
+            .expect("absent config resolves current defaults");
+        assert_eq!(current.retained_generations(), 2);
+        assert_eq!(current.minimum_free_disk_bytes(), 64 * 1024 * 1024);
+
+        let configured = FirstSliceStoragePolicy::resolve_user_config(
+            Some(
+                "version = \"1.2\"\n[storage]\nmaximum_repository_bytes = 1073741824\nmaximum_catalog_bytes = 2147483648\nretained_generations = 3\nminimum_free_disk_bytes = 134217728\nsource_reservation_factor = 32\noracle_reservation_factor = 12\n",
+            ),
+            8,
+        )
+        .expect("valid user storage policy resolves");
+        assert_eq!(configured.retained_generations(), 3);
+        assert_eq!(configured.maximum_repository_bytes(), 1024 * 1024 * 1024);
+        assert_eq!(configured.minimum_free_disk_bytes(), 128 * 1024 * 1024);
+        assert_eq!(configured.source_reservation_factor(), 32);
+
+        let legacy = FirstSliceStoragePolicy::resolve_user_config(Some("version = \"1.1\""), 8)
+            .expect("legacy config keeps compatibility policy");
+        assert_eq!(legacy.retained_generations(), 8);
+        assert_eq!(legacy.minimum_free_disk_bytes(), 0);
+        assert_eq!(legacy.maximum_repository_bytes(), u64::MAX);
+    }
 
     const VERTICAL_SLICE_FIXTURE_ROOT: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -16060,6 +16797,11 @@ mod tests {
         let sources = [
             ("normalize.css", "html { line-height: 1.15; }\n", "css"),
             (
+                "Alamofire.swift",
+                "public final class SessionDelegate { let requestAdapter = 1 }\n",
+                "swift",
+            ),
+            (
                 "Session.m",
                 "@interface Session : NSObject\n@end\n",
                 "objective-c",
@@ -16069,9 +16811,22 @@ mod tests {
                 "function result = classify(value)\nresult = value;\nend\n",
                 "matlab",
             ),
-            ("plugin.lua", "local picker = require('picker')\n", "lua"),
-            ("model.rb", "class Account\nend\n", "ruby"),
+            (
+                "telescope.lua",
+                "local telescopePicker = require('telescope.pickers')\n",
+                "lua",
+            ),
+            (
+                "rails_application.rb",
+                "class RailsApplication\nend\n",
+                "ruby",
+            ),
             ("script.pl", "sub render { return 1; }\n", "perl"),
+            (
+                "mystery.sourceblob",
+                "opaqueWidget configures lexicalFallback\n",
+                "unknown",
+            ),
         ];
         for (path, content, _) in sources {
             fs::write(fixture.path().join(path), content).expect("source fixture writes");
@@ -16108,11 +16863,117 @@ mod tests {
                 .clone()
                 .expect("unsupported file carries source evidence");
             let read = service
-                .source_read(receipt.generation, vec![reference], &deadline())
+                .source_read(receipt.generation, vec![reference.clone()], &deadline())
                 .expect("unsupported source remains readable");
             assert_eq!(read.data.chunks[0].bytes, content.as_bytes());
             assert_eq!(read.data.chunks[0].language, language);
+            let exact_identifier = content
+                .split(|character: char| !(character == '_' || character.is_alphanumeric()))
+                .find(|candidate| {
+                    candidate.len() > 4
+                        && candidate
+                            .chars()
+                            .next()
+                            .is_some_and(|character| character.is_alphabetic())
+                })
+                .expect("fixture contains a searchable identifier");
+            for (query, mode) in [
+                (exact_identifier.to_owned(), LocateMode::Exact),
+                (exact_identifier.to_owned(), LocateMode::Text),
+                (path.to_owned(), LocateMode::Prefix),
+            ] {
+                let located = service
+                    .code_locate(receipt.generation, query, mode, 10, 0, &deadline())
+                    .expect("unsupported source locates");
+                let hit = located
+                    .data
+                    .hits
+                    .iter()
+                    .find(|hit| hit.file == file.id)
+                    .expect("file-only source hit is returned");
+                assert_eq!(hit.symbol, None);
+                assert_eq!(hit.kind, "file");
+                assert_eq!(hit.source.as_ref(), Some(&reference));
+            }
         }
+        let gaps = service
+            .coverage_gaps(receipt.repository, receipt.generation)
+            .expect("coverage gaps resolve");
+        assert!(gaps.iter().any(|gap| {
+            gap.reason == FirstSliceCoverageGapReason::Unrecognized
+                && gap.language.as_deref() == Some("unknown")
+                && gap.files == 1
+        }));
+        for language in [
+            "css",
+            "swift",
+            "objective-c",
+            "matlab",
+            "lua",
+            "ruby",
+            "perl",
+        ] {
+            assert!(gaps.iter().any(|gap| {
+                gap.reason == FirstSliceCoverageGapReason::Unsupported
+                    && gap.language.as_deref() == Some(language)
+                    && gap.files == 1
+            }));
+        }
+    }
+
+    #[test]
+    fn locate_language_aliases_select_the_canonical_installed_language() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn alias_target() -> u32 { 1 }\n",
+        )
+        .expect("Rust fixture writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Rust fixture publishes");
+
+        let located = service
+            .code_locate_with_languages_and_budget(
+                receipt.generation,
+                "alias_target".to_owned(),
+                LocateMode::Exact,
+                vec!["rs".to_owned()],
+                8,
+                0,
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .expect("canonical language filter executes");
+
+        assert_eq!(located.data.hits.len(), 1);
+        assert_eq!(located.data.hits[0].language, "rust");
+        assert!(located.data.hits[0].symbol.is_some());
+    }
+
+    #[test]
+    fn bounded_source_fallback_reports_truncated_coverage() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let source = format!(
+            "{} searchableNeedle {{ color: green; }}\n",
+            "a".repeat(SOURCE_FALLBACK_TEXT_BYTES + 256)
+        );
+        fs::write(fixture.path().join("normalize.css"), source).expect("large CSS source writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("bounded source fallback publishes");
+        let gaps = service
+            .coverage_gaps(receipt.repository, receipt.generation)
+            .expect("coverage gaps resolve");
+
+        assert!(gaps.iter().any(|gap| {
+            gap.reason == FirstSliceCoverageGapReason::Truncated
+                && gap.language.as_deref() == Some("css")
+                && gap.files == 1
+        }));
     }
 
     #[test]
@@ -16239,14 +17100,14 @@ mod tests {
         let rejected = fixture.path().join("repository-rejected");
         fs::create_dir(&rejected).expect("rejected repository root exists");
 
-        assert_eq!(
+        assert!(matches!(
             service.admit_repository(&rejected, &cancellation),
             Err(FirstSliceError::ResourceLimit {
                 resource: FirstSliceResource::Repositories,
                 observed: 3,
                 limit: 2,
             })
-        );
+        ));
     }
 
     #[cfg(unix)]
@@ -16389,6 +17250,124 @@ mod tests {
             .source_read(receipt.generation, vec![source], &cancellation)
             .expect("restored source bytes remain readable");
         assert_eq!(read.data.generation, receipt.generation);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn durable_service_restores_file_only_source_fallback() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("normalize.css"),
+            "html { line-height: 1.15; }\n",
+        )
+        .expect("CSS fixture writes");
+        let cancellation = deadline();
+        let receipt = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            service
+                .index_repository(fixture.path(), &cancellation)
+                .expect("file-only generation publishes")
+        };
+
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service restores");
+        let located = restored
+            .code_locate(
+                receipt.generation,
+                "line".to_owned(),
+                LocateMode::Exact,
+                8,
+                0,
+                &cancellation,
+            )
+            .expect("file-only lexical query succeeds after restart");
+        let hit = located
+            .data
+            .hits
+            .first()
+            .expect("file-only hit remains queryable");
+        assert_eq!(hit.symbol, None);
+        assert_eq!(hit.kind, "file");
+        let source = hit
+            .source
+            .clone()
+            .expect("file-only hit retains exact source evidence");
+        let read = restored
+            .source_read(receipt.generation, vec![source], &cancellation)
+            .expect("file-only source remains readable after restart");
+        assert_eq!(read.data.chunks[0].bytes, b"html { line-height: 1.15; }\n");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn durable_service_lazily_hydrates_sources_absent_from_fallback_retention() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn retained_answer() -> u32 { 42 }\n",
+        )
+        .expect("Rust fixture writes");
+        fs::write(
+            fixture.path().join("normalize.css"),
+            "html { line-height: 1.15; }\n",
+        )
+        .expect("CSS fixture writes");
+        let cancellation = deadline();
+        let receipt = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            service
+                .index_repository(fixture.path(), &cancellation)
+                .expect("mixed-language generation publishes")
+        };
+
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("durable service restores");
+        let retained = restored
+            .source_snapshots
+            .snapshots(receipt.generation)
+            .expect("restored source generation exists");
+        assert_eq!(
+            retained.len(),
+            1,
+            "only the file-only fallback source is retained eagerly"
+        );
+
+        let located = restored
+            .code_locate(
+                receipt.generation,
+                "retained_answer".to_owned(),
+                LocateMode::Exact,
+                8,
+                0,
+                &cancellation,
+            )
+            .expect("structural source locates after restart");
+        let source = located.data.hits[0]
+            .source
+            .clone()
+            .expect("structural hit retains exact source evidence");
+        let read = restored
+            .source_read(receipt.generation, vec![source], &cancellation)
+            .expect("non-fallback source hydrates beside retained fallback bytes");
+        assert!(
+            std::str::from_utf8(&read.data.chunks[0].bytes)
+                .expect("Rust fixture is UTF-8")
+                .contains("retained_answer")
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -17962,6 +18941,19 @@ mod tests {
         let inventory = service
             .support_inventory_snapshot()
             .expect("support inventory builds");
+        assert!(inventory.languages.iter().any(|capability| {
+            capability.language == "rust"
+                && capability.suffixes.iter().any(|suffix| suffix == ".rs")
+                && capability
+                    .detectors
+                    .iter()
+                    .any(|detector| detector == "extension")
+                && capability.maximum_tier == "tier_b"
+                && capability
+                    .analyzers
+                    .iter()
+                    .any(|analyzer| analyzer == "treesitter")
+        }));
         assert_eq!(inventory.repositories.len(), 1);
         assert_eq!(inventory.generations.len(), 1);
         assert_eq!(inventory.generation_format, "1.2");
@@ -18069,10 +19061,9 @@ mod tests {
                 .checked_add(second.retained_durable_bytes)
                 .expect("fixture retained-byte total fits")
         );
-        assert_eq!(
-            inventory.total_storage_bytes,
-            inventory.generation_disk_bytes
-        );
+        assert!(inventory.total_storage_bytes >= inventory.generation_disk_bytes);
+        assert!(inventory.shared_bytes.is_some());
+        assert!(inventory.reclaimable_bytes.is_some());
         let active = inventory
             .generations
             .iter()

@@ -941,8 +941,8 @@ pub enum RepositoryDataTrust {
 /// One hydrated deterministic lexical result.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LocateHit {
-    /// Stable semantic entity identity.
-    pub symbol: SymbolId,
+    /// Stable semantic entity identity, absent for a file-only source hit.
+    pub symbol: Option<SymbolId>,
     /// Stable declaring file identity.
     pub file: FileId,
     /// Declared source spelling.

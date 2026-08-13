@@ -8,11 +8,11 @@ pub(crate) const MAX_TERM_BYTES: usize = 240;
 /// Tokenizer name persisted in the Tantivy schema.
 pub(crate) const CODE_TOKENIZER: &str = "rootlight_code_v2";
 
-/// A bounded lexical document for one semantic symbol.
+/// A bounded lexical document for one semantic symbol or retained source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LexicalDocument {
-    /// Stable semantic symbol identity.
-    pub symbol_id: SymbolId,
+    /// Stable semantic symbol identity, absent for a file-only source projection.
+    pub symbol_id: Option<SymbolId>,
     /// Stable identity of the declaring file.
     pub file_id: FileId,
     /// Declared source spelling.
@@ -37,6 +37,10 @@ pub struct LexicalDocument {
     pub type_names: Vec<String>,
     /// Optional bounded untrusted documentation or comment text.
     pub documentation: Option<String>,
+    /// Bounded identifiers extracted from a retained source file.
+    pub source_identifiers: Vec<String>,
+    /// Optional bounded retained source text.
+    pub source_text: Option<String>,
     /// Whether the declaring file is generated.
     pub generated: bool,
     /// Whether the entity is test-only or test-related.
@@ -148,8 +152,8 @@ impl Default for SearchBudget {
 /// Stable metadata returned for a lexical hit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchHit {
-    /// Stable semantic symbol identity.
-    pub symbol_id: SymbolId,
+    /// Stable semantic symbol identity, absent for a file-only source hit.
+    pub symbol_id: Option<SymbolId>,
     /// Stable identity of the declaring file.
     pub file_id: FileId,
     /// Declared source spelling.
@@ -211,6 +215,10 @@ pub enum DocumentField {
     TypeName,
     /// Documentation text.
     Documentation,
+    /// Identifier extracted from retained source text.
+    SourceIdentifier,
+    /// Retained source text.
+    SourceText,
 }
 
 /// Stable reason a query was rejected before reaching Tantivy.

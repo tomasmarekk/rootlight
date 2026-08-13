@@ -982,6 +982,7 @@ mod tests {
             usage: Some(daemon::FirstSliceQueryUsage::default()),
             structural_freshness: "current".to_owned(),
             semantic_freshness: "current".to_owned(),
+            coverage_gaps: Vec::new(),
         }
     }
 

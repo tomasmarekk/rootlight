@@ -1059,57 +1059,279 @@ fn generated_content(content: &[u8]) -> bool {
     })
 }
 
-fn extension_language(path: &str) -> Option<&'static str> {
+/// One installed source-language detection capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LanguageCapability {
+    /// Canonical normalized language label.
+    pub language: &'static str,
+    /// Audited filename suffixes, including the leading dot.
+    pub suffixes: &'static [&'static str],
+    /// Accepted source-language aliases.
+    pub aliases: &'static [&'static str],
+    /// Installed detector families.
+    pub detectors: &'static [&'static str],
+    /// Highest analysis tier installed for the language.
+    pub maximum_tier: &'static str,
+    /// Installed analyzer labels, or `source-fallback` for file-only retrieval.
+    pub analyzers: &'static [&'static str],
+}
+
+/// Returns the authoritative installed source-language capability matrix.
+#[must_use]
+pub const fn language_capabilities() -> &'static [LanguageCapability] {
+    LANGUAGE_CAPABILITIES
+}
+
+const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
+    LanguageCapability {
+        language: "assembly",
+        suffixes: &[".asm", ".s"],
+        aliases: &["asm"],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "bash",
+        suffixes: &[".bash", ".sh"],
+        aliases: &["shell", "sh"],
+        detectors: &["extension", "shebang"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "c",
+        suffixes: &[".c"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "cpp",
+        suffixes: &[".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"],
+        aliases: &["cplusplus"],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "csharp",
+        suffixes: &[".cs"],
+        aliases: &["cs"],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "css",
+        suffixes: &[".css"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "dart",
+        suffixes: &[".dart"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "go",
+        suffixes: &[".go", ".pb.go"],
+        aliases: &["golang"],
+        detectors: &["content", "extension", "manifest"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter", "project-adapter"],
+    },
+    LanguageCapability {
+        language: "groovy",
+        suffixes: &[".gradle", ".groovy"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "html",
+        suffixes: &[".htm", ".html"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "java",
+        suffixes: &[".java"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "javascript",
+        suffixes: &[".cjs", ".js", ".jsx", ".mjs"],
+        aliases: &["js"],
+        detectors: &["extension", "manifest", "shebang"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter", "project-adapter"],
+    },
+    LanguageCapability {
+        language: "kotlin",
+        suffixes: &[".kt", ".kts"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "lua",
+        suffixes: &[".lua"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "matlab",
+        suffixes: &[".mlx"],
+        aliases: &[],
+        detectors: &["content", "extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "objective-cpp",
+        suffixes: &[".mm"],
+        aliases: &["objcxx"],
+        detectors: &["content", "extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "perl",
+        suffixes: &[".pl", ".pm", ".pod"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "php",
+        suffixes: &[".blade.php", ".php"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "powershell",
+        suffixes: &[".ps1", ".psd1", ".psm1"],
+        aliases: &["pwsh"],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "python",
+        suffixes: &[".py"],
+        aliases: &["py"],
+        detectors: &["content", "extension", "manifest", "shebang"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter", "project-adapter"],
+    },
+    LanguageCapability {
+        language: "r",
+        suffixes: &[".r"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "ruby",
+        suffixes: &[".rb", ".ruby"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "rust",
+        suffixes: &[".rs"],
+        aliases: &["rs"],
+        detectors: &["content", "extension", "manifest"],
+        maximum_tier: "tier_b",
+        analyzers: &["treesitter", "project-adapter"],
+    },
+    LanguageCapability {
+        language: "scala",
+        suffixes: &[".sc", ".scala"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "solidity",
+        suffixes: &[".sol"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "sql",
+        suffixes: &[".sql"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "swift",
+        suffixes: &[".swift"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["source-fallback"],
+    },
+    LanguageCapability {
+        language: "typescript",
+        suffixes: &[".d.ts", ".cts", ".mts", ".ts", ".tsx"],
+        aliases: &["ts"],
+        detectors: &["extension", "manifest"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter", "project-adapter"],
+    },
+];
+
+/// Returns the canonical language for one audited filename suffix.
+#[must_use]
+pub fn extension_language(path: &str) -> Option<&'static str> {
     let normalized = path.to_ascii_lowercase();
-    for (suffix, language) in [
-        (".d.ts", "typescript"),
-        (".blade.php", "php"),
-        (".pb.go", "go"),
-        (".kts", "kotlin"),
-        (".kt", "kotlin"),
-        (".css", "css"),
-        (".lua", "lua"),
-        (".mm", "objective-cpp"),
-        (".mlx", "matlab"),
-        (".pl", "perl"),
-        (".pm", "perl"),
-        (".pod", "perl"),
-        (".r", "r"),
-        (".rs", "rust"),
-        (".tsx", "typescript"),
-        (".ts", "typescript"),
-        (".jsx", "javascript"),
-        (".js", "javascript"),
-        (".py", "python"),
-        (".go", "go"),
-        (".java", "java"),
-        (".cs", "csharp"),
-        (".php", "php"),
-        (".sql", "sql"),
-        (".bash", "bash"),
-        (".sh", "bash"),
-        (".html", "html"),
-        (".htm", "html"),
-        (".swift", "swift"),
-        (".ruby", "ruby"),
-        (".rb", "ruby"),
-        (".dart", "dart"),
-        (".psm1", "powershell"),
-        (".psd1", "powershell"),
-        (".ps1", "powershell"),
-        (".scala", "scala"),
-        (".sc", "scala"),
-        (".groovy", "groovy"),
-        (".gradle", "groovy"),
-        (".asm", "assembly"),
-        (".s", "assembly"),
-        (".sol", "solidity"),
-    ] {
-        if normalized.ends_with(suffix) {
-            return Some(language);
+    for capability in LANGUAGE_CAPABILITIES {
+        for suffix in capability.suffixes {
+            if normalized.ends_with(suffix) {
+                return Some(capability.language);
+            }
         }
     }
     None
+}
+
+/// Resolves one installed canonical language label or accepted alias.
+#[must_use]
+pub fn canonical_language(language: &str) -> Option<&'static str> {
+    LANGUAGE_CAPABILITIES
+        .iter()
+        .find(|capability| {
+            capability.language == language || capability.aliases.contains(&language)
+        })
+        .map(|capability| capability.language)
 }
 
 fn manifest_language(path: &str) -> Option<&'static str> {
@@ -1133,7 +1355,7 @@ fn shebang_language(content: &[u8]) -> Option<&'static str> {
     } else if line.contains("node") || line.contains("deno") {
         Some("javascript")
     } else if line.contains("bash") || line.contains("sh") {
-        Some("shell")
+        Some("bash")
     } else {
         None
     }
@@ -1559,6 +1781,20 @@ max_source_file_bytes = 2097152
         ] {
             assert_eq!(content_language(content), Some(expected));
         }
+        for (language, expected) in [
+            ("bash", "bash"),
+            ("shell", "bash"),
+            ("cplusplus", "cpp"),
+            ("cs", "csharp"),
+            ("js", "javascript"),
+            ("objcxx", "objective-cpp"),
+            ("py", "python"),
+            ("rs", "rust"),
+            ("ts", "typescript"),
+        ] {
+            assert_eq!(canonical_language(language), Some(expected));
+        }
+        assert_eq!(canonical_language("unknown"), None);
     }
 
     #[test]

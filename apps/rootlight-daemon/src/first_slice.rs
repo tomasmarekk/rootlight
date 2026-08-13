@@ -44,7 +44,7 @@ use rootlight_ir::{
 };
 use rootlight_observability::{
     SupportAdapterInventory, SupportChecksumStatus, SupportGenerationInventory,
-    SupportRepositoryInventory,
+    SupportLanguageCapabilityInventory, SupportRepositoryInventory,
 };
 #[cfg(test)]
 use rootlight_operations::RecoveryClass;
@@ -76,16 +76,16 @@ use rootlight_runtime::{CoordinatedStartupSignal, STARTUP_ACTIVE_GENERATION_REST
 use rootlight_service::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
     AdvancedAstNode, FallbackReason as ServiceFallbackReason, FirstSliceBudget,
-    FirstSliceDeferredRestore, FirstSliceDurableOperation, FirstSliceError,
-    FirstSliceGenerationContext, FirstSliceGitEvidenceError, FirstSliceIndexAdmission,
-    FirstSliceIndexMode, FirstSliceIndexOperationEvidence, FirstSliceIndexOperationStrategy,
-    FirstSliceIndexProgress, FirstSliceIndexProvider, FirstSliceIndexReceipt,
-    FirstSliceObservedFreshness, FirstSliceOperationContext, FirstSliceProjectAnalysis,
-    FirstSliceProjectAnalysisError, FirstSliceProjectAnalysisProgress,
-    FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer, FirstSliceRecoveryTarget,
-    FirstSliceService, FirstSliceSupportInventory, FirstSliceWorkingTreeSelection,
-    HistoryChangeKind, PlanChangeObjective, SourceEncoding as ServiceSourceEncoding,
-    SourceReadOptions,
+    FirstSliceCoverageGapReason, FirstSliceDeferredRestore, FirstSliceDurableOperation,
+    FirstSliceError, FirstSliceGenerationContext, FirstSliceGitEvidenceError,
+    FirstSliceIndexAdmission, FirstSliceIndexAdmissionMetadata, FirstSliceIndexMode,
+    FirstSliceIndexOperationEvidence, FirstSliceIndexOperationStrategy, FirstSliceIndexProgress,
+    FirstSliceIndexProvider, FirstSliceIndexReceipt, FirstSliceObservedFreshness,
+    FirstSliceOperationContext, FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError,
+    FirstSliceProjectAnalysisProgress, FirstSliceProjectAnalysisRequest, FirstSliceProjectAnalyzer,
+    FirstSliceRecoveryTarget, FirstSliceService, FirstSliceStoragePolicy,
+    FirstSliceSupportInventory, FirstSliceWorkingTreeSelection, HistoryChangeKind,
+    PlanChangeObjective, SourceEncoding as ServiceSourceEncoding, SourceReadOptions,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
         CatalogPageSize, CatalogRepositoryRecord, CatalogRepositoryState, CatalogSnapshotId,
@@ -101,7 +101,7 @@ use crate::graph_projection::{
 
 const FIRST_SLICE_SCHEMA_MAJOR: u32 = 1;
 const FIRST_SLICE_SCHEMA_MINOR: u32 = 0;
-const DEFAULT_GENERATION_RETENTION: usize = 8;
+pub(crate) const DEFAULT_GENERATION_RETENTION: usize = 8;
 const DEFAULT_WORK_QUEUE: usize = 16;
 const DEFAULT_READ_QUEUE: usize = 32;
 const DEFAULT_CONTROL_QUEUE: usize = 32;
@@ -929,9 +929,28 @@ impl FirstSliceDaemon {
     ///
     /// Returns [`FirstSliceHostError`] when durable recovery, service
     /// initialization, or bounded worker startup fails.
+    #[cfg(test)]
     pub(crate) async fn start_durable(
         journal: JournalActorHandle,
         state_root: &Path,
+        support_state: Arc<DaemonState>,
+        startup_signal: Option<fn(CoordinatedStartupSignal) -> io::Result<()>>,
+    ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
+        Self::start_durable_with_policy(
+            journal,
+            state_root,
+            FirstSliceStoragePolicy::resolve_user_config(None, DEFAULT_GENERATION_RETENTION)
+                .map_err(FirstSliceHostError::Service)?,
+            support_state,
+            startup_signal,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_durable_with_policy(
+        journal: JournalActorHandle,
+        state_root: &Path,
+        storage_policy: FirstSliceStoragePolicy,
         support_state: Arc<DaemonState>,
         startup_signal: Option<fn(CoordinatedStartupSignal) -> io::Result<()>>,
     ) -> Result<(Self, FirstSliceWorkers), FirstSliceHostError> {
@@ -944,14 +963,14 @@ impl FirstSliceDaemon {
             .map_err(FirstSliceHostError::Service)?;
         let (service, deferred_restore) = match project_analyzer {
             Some(project_analyzer) => {
-                FirstSliceService::open_durable_deferred_with_project_analyzer(
-                    DEFAULT_GENERATION_RETENTION,
+                FirstSliceService::open_durable_deferred_with_project_analyzer_and_policy(
+                    storage_policy,
                     state_root,
                     project_analyzer,
                 )
             }
             None => {
-                FirstSliceService::open_durable_deferred(DEFAULT_GENERATION_RETENTION, state_root)
+                FirstSliceService::open_durable_deferred_with_policy(storage_policy, state_root)
             }
         }
         .map_err(FirstSliceHostError::Service)?;
@@ -1928,7 +1947,7 @@ impl OperationMetadataSet {
         &mut self,
         operation: OperationId,
         started_unix_ms: u64,
-        admission: FirstSliceIndexAdmission,
+        admission: FirstSliceIndexAdmissionMetadata,
     ) -> Result<(), PublicError> {
         if let Some(active_operation) = self.active_repository_operation(admission.repository) {
             return Err(index_admission_in_progress(active_operation));
@@ -1976,7 +1995,7 @@ impl OperationMetadataSet {
         ))
     }
 
-    fn admit(&mut self, operation: OperationId, admission: FirstSliceIndexAdmission) {
+    fn admit(&mut self, operation: OperationId, admission: FirstSliceIndexAdmissionMetadata) {
         if let Some(metadata) = self.records.get_mut(&operation) {
             metadata.repository = Some(admission.repository);
             metadata.parent_generation = admission.parent;
@@ -4318,7 +4337,7 @@ fn repository_index_with_intent(
         unix_time_ms()?
     };
     let service_guard = read_service(service)?;
-    let admission = match service_guard.admit_rust_fixture(&root, &context.cancellation) {
+    let mut admission = match service_guard.admit_rust_fixture(&root, &context.cancellation) {
         Ok(admission) => admission,
         Err(error) => {
             drop(service_guard);
@@ -4342,7 +4361,11 @@ fn repository_index_with_intent(
     )
     .and_then(|()| {
         lock_metadata(metadata).and_then(|mut operation_metadata| {
-            operation_metadata.reserve_repository_index(operation, started_unix_ms, admission)
+            operation_metadata.reserve_repository_index(
+                operation,
+                started_unix_ms,
+                admission.metadata(),
+            )
         })
     });
     if let Err(error) = metadata_admission {
@@ -4430,7 +4453,7 @@ fn repository_index_with_intent(
         );
     }
     if detached && let Some(reply) = reply.take() {
-        let response = admitted_index_response(admission, &submitted.operation, mode);
+        let response = admitted_index_response(&admission, &submitted.operation, mode);
         let _ = reply.send(Ok(FirstSliceIpcResponse::RepositoryIndex(response)));
     }
     let mut publication_committed = false;
@@ -4548,17 +4571,19 @@ fn repository_index_with_intent(
             let service = read_service(service)?;
             match intent {
                 RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher => service
-                    .prepare_repository_with_mode_and_progress(
+                    .prepare_repository_after_admission_with_progress(
                         &root,
                         mode,
+                        &mut admission,
                         &cancellation,
                         &mut observe_progress,
                     ),
                 RepositoryIndexIntent::SemanticRefinement {
                     structural_generation,
-                } => service.prepare_semantic_refinement_with_progress(
+                } => service.prepare_semantic_refinement_after_admission_with_progress(
                     &root,
                     structural_generation,
+                    &mut admission,
                     &cancellation,
                     &mut observe_progress,
                 ),
@@ -5668,7 +5693,7 @@ fn retry_index_response(
 }
 
 fn admitted_index_response(
-    admission: FirstSliceIndexAdmission,
+    admission: &FirstSliceIndexAdmission,
     operation: &OperationRecord,
     mode: FirstSliceIndexMode,
 ) -> daemon::RepositoryIndexResponse {
@@ -6159,7 +6184,7 @@ fn code_locate(
         .map_err(|_| resource_exhausted())?;
     for hit in response.data.hits {
         hits.push(daemon::FirstSliceLocateHit {
-            symbol: Some(symbol_to_wire(hit.symbol)),
+            symbol: hit.symbol.map(symbol_to_wire),
             file: Some(file_to_wire(hit.file)),
             identifier: hit.identifier,
             qualified_name: hit.qualified_name,
@@ -8922,6 +8947,16 @@ fn query_context(
     let freshness = service
         .generation_freshness(generation.repository, generation.generation)
         .map_err(service_error)?;
+    let coverage_gaps = service
+        .coverage_gaps(generation.repository, generation.generation)
+        .map_err(service_error)?
+        .into_iter()
+        .map(|gap| daemon::FirstSliceCoverageGap {
+            reason: coverage_gap_label(gap.reason).to_owned(),
+            language: gap.language,
+            files: gap.files,
+        })
+        .collect();
     Ok(daemon::FirstSliceQueryContext {
         repository: Some(repository_to_wire(generation.repository)),
         generation: Some(generation_to_wire(generation.generation)),
@@ -8946,7 +8981,24 @@ fn query_context(
         }),
         structural_freshness: query_freshness_label(freshness.structural).to_owned(),
         semantic_freshness: query_freshness_label(freshness.semantic).to_owned(),
+        coverage_gaps,
     })
+}
+
+const fn coverage_gap_label(reason: FirstSliceCoverageGapReason) -> &'static str {
+    match reason {
+        FirstSliceCoverageGapReason::Unsupported => "unsupported",
+        FirstSliceCoverageGapReason::Unrecognized => "unrecognized",
+        FirstSliceCoverageGapReason::Excluded => "excluded",
+        FirstSliceCoverageGapReason::Oversized => "oversized",
+        FirstSliceCoverageGapReason::Binary => "binary",
+        FirstSliceCoverageGapReason::ParseError => "parse-error",
+        FirstSliceCoverageGapReason::AdapterFailed => "adapter-failed",
+        FirstSliceCoverageGapReason::Truncated => "truncated",
+        FirstSliceCoverageGapReason::Generated => "generated",
+        FirstSliceCoverageGapReason::Stale => "stale",
+        _ => "truncated",
+    }
 }
 
 const fn query_freshness_label(freshness: FirstSliceObservedFreshness) -> &'static str {
@@ -9363,27 +9415,6 @@ fn index_support_inventory(
 
 fn map_index_support_inventory(snapshot: FirstSliceSupportInventory) -> IndexSupportInventory {
     let generation_format = snapshot.generation_format.clone();
-    let active_generation_bytes = snapshot
-        .generations
-        .iter()
-        .filter(|generation| generation.active)
-        .try_fold(0_u64, |total, generation| {
-            total.checked_add(generation.disk_bytes)
-        });
-    let predecessor_generation_bytes = snapshot
-        .generations
-        .iter()
-        .filter(|generation| generation.active)
-        .try_fold(0_u64, |total, generation| {
-            let Some(parent) = generation.parent else {
-                return Some(total);
-            };
-            snapshot
-                .generations
-                .iter()
-                .find(|candidate| candidate.generation == parent)
-                .and_then(|generation| total.checked_add(generation.disk_bytes))
-        });
     IndexSupportInventory {
         adapters: snapshot
             .adapters
@@ -9396,6 +9427,18 @@ fn map_index_support_inventory(snapshot: FirstSliceSupportInventory) -> IndexSup
                 isolated: adapter.isolated,
                 binary_sha256: None,
                 artifact_sha256: None,
+            })
+            .collect(),
+        languages: snapshot
+            .languages
+            .into_iter()
+            .map(|capability| SupportLanguageCapabilityInventory {
+                language: capability.language,
+                suffixes: capability.suffixes,
+                aliases: capability.aliases,
+                detectors: capability.detectors,
+                maximum_tier: capability.maximum_tier,
+                analyzers: capability.analyzers,
             })
             .collect(),
         repositories: snapshot
@@ -9433,13 +9476,13 @@ fn map_index_support_inventory(snapshot: FirstSliceSupportInventory) -> IndexSup
         generation_disk_bytes: snapshot.generation_disk_bytes,
         unreclaimed_temporary_bytes: snapshot.unreclaimed_temporary_bytes,
         disk_margin_bytes: snapshot.disk_margin_bytes,
-        active_generation_bytes,
-        predecessor_generation_bytes,
-        shared_bytes: None,
-        pinned_bytes: None,
-        reclaimable_bytes: None,
+        active_generation_bytes: snapshot.active_generation_bytes,
+        predecessor_generation_bytes: snapshot.predecessor_generation_bytes,
+        shared_bytes: snapshot.shared_bytes,
+        pinned_bytes: snapshot.pinned_bytes,
+        reclaimable_bytes: snapshot.reclaimable_bytes,
         total_storage_bytes: Some(snapshot.total_storage_bytes),
-        admission_margin_bytes: None,
+        admission_margin_bytes: snapshot.admission_margin_bytes,
         effective_retention_generations: Some(snapshot.effective_retention_generations),
     }
 }
@@ -9721,6 +9764,13 @@ fn build_service_error(
             "disk_space",
             "admission",
         ),
+        FirstSliceError::StorageResourceExhausted { .. } => (
+            ErrorCode::ResourceExhausted,
+            "durable storage policy rejected publication",
+            false,
+            "storage_limit",
+            "admission",
+        ),
         FirstSliceError::SymbolNotFound => (
             ErrorCode::NotFound,
             "symbol was not found",
@@ -9956,6 +10006,43 @@ fn build_service_error(
                 static_detail_key("available_bytes"),
                 PublicValue::Unsigned(available_bytes),
             );
+    }
+    if let FirstSliceError::StorageResourceExhausted {
+        scope,
+        required_bytes,
+        observed_bytes,
+        limit_bytes,
+        minimum_free_bytes,
+    } = error
+    {
+        let resource = match scope {
+            rootlight_service::FirstSliceStorageScope::Repository => "repository_storage_bytes",
+            rootlight_service::FirstSliceStorageScope::Catalog => "catalog_storage_bytes",
+            rootlight_service::FirstSliceStorageScope::Filesystem => "filesystem_free_bytes",
+            _ => "storage_bytes",
+        };
+        builder = builder
+            .detail(
+                static_detail_key("resource"),
+                PublicValue::Label(static_safe_label(resource)),
+            )
+            .detail(
+                static_detail_key("required_bytes"),
+                PublicValue::Unsigned(required_bytes),
+            )
+            .detail(
+                static_detail_key("observed"),
+                PublicValue::Unsigned(observed_bytes),
+            )
+            .detail(
+                static_detail_key("limit"),
+                PublicValue::Unsigned(limit_bytes),
+            )
+            .detail(
+                static_detail_key("minimum_free_bytes"),
+                PublicValue::Unsigned(minimum_free_bytes),
+            )
+            .next_action(NextAction::CollectSupportBundle);
     }
     if let FirstSliceError::IdentityVerification(component) = error {
         builder = builder.detail(
@@ -10455,7 +10542,6 @@ mod tests {
             Err(self.error)
         }
     }
-
     struct SuccessfulSemanticAnalyzer {
         calls: Arc<AtomicUsize>,
         identity: ContentHash,
@@ -10599,6 +10685,14 @@ mod tests {
         let repository = RepositoryId::from_bytes([41; 16]);
         let mapped = map_index_support_inventory(FirstSliceSupportInventory {
             adapters: Vec::new(),
+            languages: vec![rootlight_service::FirstSliceSupportLanguageCapability {
+                language: "rust".to_owned(),
+                suffixes: vec![".rs".to_owned()],
+                aliases: Vec::new(),
+                detectors: vec!["extension".to_owned()],
+                maximum_tier: "tier_d".to_owned(),
+                analyzers: vec!["treesitter".to_owned()],
+            }],
             repositories: vec![rootlight_service::FirstSliceSupportRepository {
                 repository,
                 languages: vec!["rust".to_owned()],
@@ -10612,12 +10706,21 @@ mod tests {
             generation_format: "1.2".to_owned(),
             generation_disk_bytes: 0,
             total_storage_bytes: 0,
+            shared_bytes: Some(0),
+            reclaimable_bytes: Some(0),
+            pinned_bytes: None,
+            active_generation_bytes: Some(0),
+            predecessor_generation_bytes: Some(0),
             unreclaimed_temporary_bytes: 64,
             disk_margin_bytes: Some(1024),
+            admission_margin_bytes: Some(960),
             effective_retention_generations: 2,
         });
 
         assert_eq!(mapped.repositories.len(), 1);
+        assert_eq!(mapped.languages.len(), 1);
+        assert_eq!(mapped.languages[0].language, "rust");
+        assert_eq!(mapped.languages[0].suffixes, [".rs"]);
         assert_eq!(
             mapped.repositories[0].repository_id,
             support_hex(repository.as_bytes())
@@ -11344,6 +11447,39 @@ mod tests {
                 NextAction::InspectOperation,
                 NextAction::CollectSupportBundle
             ]
+        );
+
+        let storage = repository_index_error(
+            FirstSliceError::StorageResourceExhausted {
+                scope: rootlight_service::FirstSliceStorageScope::Repository,
+                required_bytes: 4096,
+                observed_bytes: 8192,
+                limit_bytes: 10_000,
+                minimum_free_bytes: 1024,
+            },
+            RepositoryIndexErrorContext {
+                operation,
+                repository,
+                provider: repository_index_provider(FirstSliceIndexMode::Structural),
+            },
+        );
+        assert_eq!(storage.code(), ErrorCode::ResourceExhausted);
+        assert!(!storage.retryable());
+        assert_eq!(
+            storage.details().get(&static_detail_key("resource")),
+            Some(&PublicValue::Label(static_safe_label(
+                "repository_storage_bytes"
+            )))
+        );
+        assert_eq!(
+            storage.details().get(&static_detail_key("required_bytes")),
+            Some(&PublicValue::Unsigned(4096))
+        );
+        assert_eq!(
+            storage
+                .details()
+                .get(&static_detail_key("minimum_free_bytes")),
+            Some(&PublicValue::Unsigned(1024))
         );
 
         for error in [FirstSliceError::Retention, FirstSliceError::Limits] {
@@ -12187,6 +12323,8 @@ mod tests {
             visited_entries: 2,
             excluded_inputs: 0,
             oversized_inputs: 0,
+            binary_inputs: 0,
+            policy_excluded_inputs: 0,
             indexed_files: 1,
             entities: 1,
             lexical_documents: 1,
@@ -12972,7 +13110,9 @@ mod tests {
                 &cancellation,
             )
             .expect("fixture symbol locates");
-        let resolved = located.data.hits[0].symbol;
+        let resolved = located.data.hits[0]
+            .symbol
+            .expect("structural locate hit has a symbol");
         let absent = SymbolId::from_bytes([0xff; 20]);
         assert_ne!(resolved, absent);
         let mut requested = [resolved, absent];
@@ -13512,16 +13652,16 @@ mod tests {
         let mut metadata = OperationMetadataSet::new(4);
 
         metadata
-            .reserve_repository_index(active, 10, admission)
+            .reserve_repository_index(active, 10, admission.metadata())
             .expect("first operation reserves the repository");
         let error = metadata
-            .reserve_repository_index(next, 20, admission)
+            .reserve_repository_index(next, 20, admission.metadata())
             .expect_err("parallel repository operation is rejected");
         assert_eq!(error, index_admission_in_progress(active));
 
         metadata.mark_terminal(active);
         metadata
-            .reserve_repository_index(next, 20, admission)
+            .reserve_repository_index(next, 20, admission.metadata())
             .expect("terminal operation releases repository admission");
     }
 
@@ -13558,7 +13698,7 @@ mod tests {
         metadata
             .lock()
             .expect("metadata locks")
-            .reserve_repository_index(active, 10, admission)
+            .reserve_repository_index(active, 10, admission.metadata())
             .expect("stale process metadata reserves the repository");
 
         reconcile_terminal_repository_admission(
@@ -13581,7 +13721,7 @@ mod tests {
             Some(snapshot) if snapshot.state == OperationState::Cancelled
         ));
         metadata
-            .reserve_repository_index(next, 20, admission)
+            .reserve_repository_index(next, 20, admission.metadata())
             .expect("durable terminal state releases repository admission");
         drop(metadata);
         drop(handle);
@@ -14282,6 +14422,8 @@ mod tests {
             visited_entries: 4,
             excluded_inputs: 1,
             oversized_inputs: 0,
+            binary_inputs: 0,
+            policy_excluded_inputs: 1,
             indexed_files: 3,
             entities: 6,
             lexical_documents: 3,

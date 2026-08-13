@@ -52,8 +52,8 @@ use rootlight_runtime::{PrivateOutputFile, RuntimeError, RuntimePaths};
 use rootlight_service::CancellationReason;
 use rootlight_service::{
     Cancellation, CodeLocateResult, FirstSliceError, FirstSliceIndexReceipt, FirstSliceService,
-    LocateMode, QueryResponse, RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceLimits,
-    RuntimeTraceOverlay, SharedGenerationExpectation, SharedGenerationLimits,
+    FirstSliceStoragePolicy, LocateMode, QueryResponse, RUNTIME_TRACE_SCHEMA_VERSION,
+    RuntimeTraceLimits, RuntimeTraceOverlay, SharedGenerationExpectation, SharedGenerationLimits,
     SourceReadQueryResult, SymbolExplainResult,
 };
 use serde::{Deserialize, Serialize};
@@ -69,6 +69,7 @@ const HARD_MAX_CLI_JSON_BYTES: usize = 4 * 1024 * 1024;
 const SHARED_GENERATION_RECEIPT_SCHEMA: &str = "rootlight.shared-generation-receipt/1";
 const RUNTIME_TRACE_RECEIPT_SCHEMA: &str = "rootlight.runtime-trace-receipt/1";
 const SHARED_GENERATION_RETENTION: usize = 8;
+const MAX_USER_CONFIG_BYTES: u64 = 256 * 1024;
 const MAX_REPAIR_INVENTORY_BYTES: u64 = 2 * 1024 * 1024;
 const DAEMON_UNINSTALL_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const DAEMON_UNINSTALL_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -1007,7 +1008,7 @@ fn execute_first_slice_demo(arguments: &[std::ffi::OsString]) -> Result<CommandR
         &cancellation,
     )?;
     let hit = locate.data.hits.first().ok_or(CliError::DemoInvariant)?;
-    let symbol = hit.symbol;
+    let symbol = hit.symbol.ok_or(CliError::DemoInvariant)?;
     let reference = hit.source.clone().ok_or(CliError::DemoInvariant)?;
     let explain = service.symbol_explain(first.generation, symbol, &cancellation)?;
     let source = service.source_read(first.generation, vec![reference], &cancellation)?;
@@ -1035,6 +1036,7 @@ fn execute_first_slice_demo(arguments: &[std::ffi::OsString]) -> Result<CommandR
         .hits
         .first()
         .map(|hit| hit.symbol)
+        .ok_or(CliError::DemoInvariant)?
         .ok_or(CliError::DemoInvariant)?;
     if second.parent != Some(first.generation)
         || service.active_generation() != Some(second.generation)
@@ -1631,6 +1633,7 @@ fn random_operation_id() -> Result<OperationId, CliError> {
 
 fn execute_runtime_trace_import(
     paths: &RuntimePaths,
+    storage_policy: FirstSliceStoragePolicy,
     arguments: &[std::ffi::OsString],
 ) -> Result<CommandResult, CliError> {
     let [
@@ -1656,8 +1659,8 @@ fn execute_runtime_trace_import(
     let limits = RuntimeTraceLimits::default();
     let trace = read_runtime_trace_input(Path::new(input), limits.max_input_bytes())?;
     let cancellation = generation_transfer_cancellation()?;
-    let service = FirstSliceService::new_durable(
-        SHARED_GENERATION_RETENTION,
+    let service = FirstSliceService::new_durable_with_policy(
+        storage_policy,
         paths.state_dir(),
         &cancellation,
     )?;
@@ -1675,6 +1678,7 @@ fn execute_runtime_trace_import(
 
 fn execute_generation_export(
     paths: &RuntimePaths,
+    storage_policy: FirstSliceStoragePolicy,
     arguments: &[std::ffi::OsString],
 ) -> Result<CommandResult, CliError> {
     let (repository, generation, output) = match arguments {
@@ -1707,8 +1711,8 @@ fn execute_generation_export(
         _ => return Err(CliError::Usage),
     };
     let cancellation = generation_transfer_cancellation()?;
-    let service = FirstSliceService::new_durable(
-        SHARED_GENERATION_RETENTION,
+    let service = FirstSliceService::new_durable_with_policy(
+        storage_policy,
         paths.state_dir(),
         &cancellation,
     )?;
@@ -1830,14 +1834,15 @@ fn execute_standalone(
     arguments: &[std::ffi::OsString],
 ) -> Result<CommandResult, CliError> {
     paths.prepare_owner()?;
+    let storage_policy = load_storage_policy(paths)?;
     let mut nonce = [0_u8; 16];
     getrandom::fill(&mut nonce).map_err(|_| CliError::RandomUnavailable)?;
     let _writer = CatalogWriterLock::acquire(&paths.writer_lock_path(), nonce)?;
     if command == "generation-export" {
-        return execute_generation_export(paths, arguments);
+        return execute_generation_export(paths, storage_policy, arguments);
     }
     if command == "runtime-trace-import" {
-        return execute_runtime_trace_import(paths, arguments);
+        return execute_runtime_trace_import(paths, storage_policy, arguments);
     }
     let catalog_path = paths.operation_journal_path();
     let journal = Arc::new(OperationJournal::open(&catalog_path)?);
@@ -1875,6 +1880,17 @@ fn execute_standalone(
         joined?;
         Ok(result)
     })
+}
+
+fn load_storage_policy(paths: &RuntimePaths) -> Result<FirstSliceStoragePolicy, CliError> {
+    let contents = paths.read_user_config(MAX_USER_CONFIG_BYTES)?;
+    let contents = contents
+        .as_deref()
+        .map(std::str::from_utf8)
+        .transpose()
+        .map_err(|_| CliError::InvalidConfiguration)?;
+    FirstSliceStoragePolicy::resolve_user_config(contents, SHARED_GENERATION_RETENTION)
+        .map_err(|_| CliError::InvalidConfiguration)
 }
 
 async fn execute_standalone_command(
@@ -2706,6 +2722,8 @@ enum CliError {
     Usage,
     #[error("daemon path overrides must provide both state and runtime directories")]
     IncompletePathOverride,
+    #[error("configuration is invalid")]
+    InvalidConfiguration,
     #[error("support bundle output path is invalid")]
     InvalidSupportPath,
     #[error("support bundle output already exists")]
@@ -3481,9 +3499,12 @@ mod tests {
             std::ffi::OsString::from("--output"),
             bundle.as_os_str().to_owned(),
         ];
-        let CommandResult::GenerationExport(exported) =
-            execute_generation_export(&paths, &export_arguments).expect("generation exports")
-        else {
+        let CommandResult::GenerationExport(exported) = execute_generation_export(
+            &paths,
+            load_storage_policy(&paths).expect("storage policy resolves"),
+            &export_arguments,
+        )
+        .expect("generation exports") else {
             panic!("generation export returned the wrong result");
         };
         assert!(bundle.is_file());
@@ -3580,9 +3601,12 @@ mod tests {
             std::ffi::OsString::from(indexed.generation.to_string()),
         ];
 
-        let CommandResult::RuntimeTraceImport(receipt) =
-            execute_runtime_trace_import(&paths, &arguments).expect("runtime trace imports")
-        else {
+        let CommandResult::RuntimeTraceImport(receipt) = execute_runtime_trace_import(
+            &paths,
+            load_storage_policy(&paths).expect("storage policy resolves"),
+            &arguments,
+        )
+        .expect("runtime trace imports") else {
             panic!("runtime trace import returned the wrong result");
         };
 

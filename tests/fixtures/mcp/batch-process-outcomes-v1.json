@@ -81,7 +81,7 @@
         "state": "indeterminate",
         "limiting_resources": []
       },
-      "warnings": 1,
+      "warnings": 2,
       "usage": {
         "json_bytes_exact": true,
         "estimated_tokens_exact": true
@@ -112,7 +112,7 @@
         "state": "complete",
         "limiting_resources": []
       },
-      "warnings": 1,
+      "warnings": 2,
       "usage": {
         "json_bytes_exact": true,
         "estimated_tokens_exact": true
@@ -143,7 +143,7 @@
         "state": "truncated",
         "limiting_resources": ["results", "estimated_tokens"]
       },
-      "warnings": 4,
+      "warnings": 5,
       "usage": {
         "json_bytes_exact": true,
         "estimated_tokens_exact": true

@@ -282,33 +282,67 @@ where
             if !hit.relevance_score.is_finite() {
                 return Err(QueryError::IndexDrift);
             }
-            let entity = find_entity(self.generation.document(), hit.symbol_id)
-                .ok_or(QueryError::IndexDrift)?;
             let file =
                 find_file(self.generation.document(), hit.file_id).ok_or(QueryError::IndexDrift)?;
-            let source = entity
-                .evidence
-                .source
-                .as_ref()
-                .ok_or(QueryError::IndexDrift)?;
-            if entity.qualified_name != hit.qualified_name
-                || entity.display_name != hit.identifier
-                || entity.language != hit.language
+            let (source, expected_identifier, expected_qualified, expected_kind, expected_tier) =
+                if let Some(symbol) = hit.symbol_id {
+                    let entity = find_entity(self.generation.document(), symbol)
+                        .ok_or(QueryError::IndexDrift)?;
+                    (
+                        entity
+                            .evidence
+                            .source
+                            .as_ref()
+                            .ok_or(QueryError::IndexDrift)?,
+                        entity.display_name.as_str(),
+                        entity.qualified_name.as_str(),
+                        serialized_label(&entity.kind)?,
+                        serialized_label(&entity.tier)?,
+                    )
+                } else {
+                    let source = file
+                        .evidence
+                        .source
+                        .as_ref()
+                        .ok_or(QueryError::IndexDrift)?;
+                    let identifier = file
+                        .path
+                        .rsplit('/')
+                        .next()
+                        .filter(|name| !name.is_empty())
+                        .ok_or(QueryError::IndexDrift)?;
+                    let tier = self
+                        .generation
+                        .document()
+                        .provenance
+                        .binary_search_by_key(&file.provenance, |candidate| candidate.id)
+                        .ok()
+                        .and_then(|index| self.generation.document().provenance.get(index))
+                        .map(|provenance| serialized_label(&provenance.tier))
+                        .transpose()?
+                        .ok_or(QueryError::IndexDrift)?;
+                    (source, identifier, identifier, "file".to_owned(), tier)
+                };
+            if expected_qualified != hit.qualified_name
+                || expected_identifier != hit.identifier
+                || file.language != hit.language
                 || file.path != hit.path
                 || file.generated != hit.generated
                 || source.repository() != self.generation.metadata().repository()
                 || source.generation() != self.generation.metadata().generation()
                 || source.span().file() != hit.file_id
                 || source.content_hash() != file.content_hash
-                || serialized_label(&entity.kind)? != hit.kind
-                || serialized_label(&entity.tier)? != hit.tier
+                || expected_kind != hit.kind
+                || expected_tier != hit.tier
             {
                 return Err(QueryError::IndexDrift);
             }
             tracker.add_rows(1)?;
             tracker.add_results(1)?;
             tracker.add_memory(locate_hit_memory(&hit)?)?;
-            symbols.insert(hit.symbol_id);
+            if let Some(symbol) = hit.symbol_id {
+                symbols.insert(symbol);
+            }
             files.insert(hit.file_id);
             located.push(LocateHit {
                 symbol: hit.symbol_id,
