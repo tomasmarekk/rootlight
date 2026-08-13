@@ -1122,7 +1122,7 @@ fn read_optional_private_config(
     let mut file = match parent.open_with(Path::new(name), &options) {
         Ok(file) => file,
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) if source.kind() == io::ErrorKind::InvalidInput => {
+        Err(source) if is_config_link_open_error(&source) => {
             return Err(RuntimeError::InsecureUserConfig);
         }
         Err(source) => return Err(RuntimeError::Io(source)),
@@ -1161,6 +1161,19 @@ fn read_optional_private_config(
         return Err(RuntimeError::InsecureUserConfig);
     }
     Ok(Some(bytes))
+}
+
+fn is_config_link_open_error(source: &io::Error) -> bool {
+    source.kind() == io::ErrorKind::InvalidInput || {
+        #[cfg(unix)]
+        {
+            source.raw_os_error() == Some(nix::libc::ELOOP)
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
 }
 
 fn validate_config_parent_handle(parent: &cap_std::fs::Dir) -> Result<(), RuntimeError> {
@@ -1966,7 +1979,7 @@ mod tests {
         symlink(&external, paths.user_config_path()).expect("symbolic link creates");
         assert!(matches!(
             paths.read_user_config(256 * 1024),
-            Err(RuntimeError::Io(_)) | Err(RuntimeError::InsecureUserConfig)
+            Err(RuntimeError::InsecureUserConfig)
         ));
 
         fs::remove_file(paths.user_config_path()).expect("symbolic link removes");
