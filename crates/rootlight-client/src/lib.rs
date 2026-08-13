@@ -3056,11 +3056,12 @@ impl Client {
                 };
             }
             Ok(false) => {}
-            Err(rootlight_runtime::RuntimeError::OwnerSetupIncomplete)
-                if policy == ConnectPolicy::StartIfMissing =>
-            {
-                paths.complete_owner_setup().map_err(ClientError::Runtime)?;
-            }
+            Err(rootlight_runtime::RuntimeError::OwnerSetupIncomplete) => match policy {
+                ConnectPolicy::ExistingOnly => return Err(ClientError::DaemonUnavailable),
+                ConnectPolicy::StartIfMissing => {
+                    paths.complete_owner_setup().map_err(ClientError::Runtime)?;
+                }
+            },
             Err(error) => return Err(ClientError::Runtime(error)),
         }
         let probe = match probe_ready_client(paths, client_instance_id) {
@@ -13301,6 +13302,24 @@ mod tests {
     use tokio::io::AsyncReadExt as _;
 
     const STARTUP_CHILD_ROOT_ENV: &str = "ROOTLIGHT_TEST_STARTUP_CHILD_ROOT";
+
+    #[test]
+    fn existing_only_treats_an_absent_runtime_peer_as_unavailable() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .expect("runtime paths are valid");
+        paths.prepare_owner().expect("runtime paths are private");
+        std::fs::remove_dir(paths.runtime_dir()).expect("empty runtime directory removes");
+
+        let error = Client::connect_or_start(&paths, [71; 16], ConnectPolicy::ExistingOnly)
+            .expect_err("an absent runtime peer has no existing daemon");
+
+        assert!(matches!(error, ClientError::DaemonUnavailable));
+        assert!(!paths.runtime_dir().exists());
+    }
 
     #[cfg(windows)]
     #[test]
