@@ -901,7 +901,7 @@ fn read_entity_flags(
     state: &mut IndexedReadState,
 ) -> Result<Vec<EntityFlag>, CatalogError> {
     let limit = state.child_probe_limit(context)?;
-    let flags = query_list(
+    let mut flags = query_list(
         connection,
         "SELECT flag
          FROM entity_flags
@@ -913,7 +913,8 @@ fn read_entity_flags(
         context,
         |row| codec::decode_enum(get(row, 0)?),
     )?;
-    if flags.windows(2).any(|pair| pair[0] >= pair[1]) {
+    flags.sort_unstable();
+    if flags.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
     Ok(flags)

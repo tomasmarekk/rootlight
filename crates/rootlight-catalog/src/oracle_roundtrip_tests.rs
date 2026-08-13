@@ -29,10 +29,10 @@ use rootlight_ids::{
     FactId, FileId, GenerationIdentity, content_hash, derive_generation, derive_repository,
 };
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, CoverageStatus, ExtensionCriticality, ExtensionIdentifier,
-    ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain, FactEvidence, FileIdentityClaim,
-    FilePathLocator, FilePathLocatorEncoding, FileRecord, IrDocument, IrLimits, OccurrenceRole,
-    ProducerIdentity, ProducerKind, ProvenanceRecord, RelationPredicate,
+    AnalysisTier, BuildContextIdentity, CoverageStatus, EntityFlag, ExtensionCriticality,
+    ExtensionIdentifier, ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain, FactEvidence,
+    FileIdentityClaim, FilePathLocator, FilePathLocatorEncoding, FileRecord, IrDocument, IrLimits,
+    OccurrenceRole, ProducerIdentity, ProducerKind, ProvenanceRecord, RelationPredicate,
     SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef, SourceSpan, decode_file_identity_claim_envelope,
     decode_ir_document, decode_symbol_identity_claim_envelope, derive_coverage_record_id,
     derive_occurrence_record_id, derive_provenance_record_id, derive_relation_record_id,
@@ -172,6 +172,7 @@ fn fixture_documents() -> (
         second_file.content_hash,
         None,
     ));
+    document.entities[0].flags = vec![EntityFlag::Test, EntityFlag::Synthetic];
     document.files.push(second_file);
 
     let mut reversed = document.clone();

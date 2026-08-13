@@ -782,6 +782,9 @@ fn read_flags(
             .or_default()
             .push(codec::decode_enum(get(row, 1)?)?);
     }
+    for flags in values.values_mut() {
+        flags.sort_unstable();
+    }
     Ok(values)
 }
 
