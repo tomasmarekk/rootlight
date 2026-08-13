@@ -1240,15 +1240,14 @@ fn batch_profile_injection_uses_the_registry_wire_field() {
     .expect("change.impact supports the evidence representation");
     assert_eq!(impact["profile"], json!("evidence"));
 
-    assert!(
-        apply_child_profile(
-            BatchTool::SourceRead,
-            ResponseProfile::Standard,
-            &mut Map::new()
-        )
-        .is_err(),
-        "a fixed compact child cannot silently widen its representation"
-    );
+    let mut source = Map::new();
+    apply_child_profile(
+        BatchTool::SourceRead,
+        ResponseProfile::Evidence,
+        &mut source,
+    )
+    .expect("source.read supports the evidence representation");
+    assert_eq!(source["response_profile"], json!("evidence"));
 }
 
 #[test]
@@ -8823,6 +8822,40 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
 }
 
 #[tokio::test]
+async fn source_read_evidence_profile_preserves_verified_source() {
+    let requested = source_reference(4, 12, 2, 2);
+    let harness = Harness::new(FakeOutcome::SourceRead(Ok(source_read_response(requested))));
+    let output: SourceReadOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::SourceRead,
+            json!({
+                "repository": {"repository_id": repository()},
+                "generation": generation(),
+                "references": [{"source_ref": wire_source_reference(4, 12, 2, 2)}],
+                "response_profile": "evidence"
+            }),
+        )
+        .await
+        .expect("evidence source read maps"),
+    );
+
+    let ToolResponse::Success(output) = output else {
+        panic!("expected source read success");
+    };
+    assert_eq!(output.data.chunks.len(), 1);
+    assert_eq!(output.data.chunks[0].content, "xxxxxxxx");
+    assert_eq!(
+        output.data.chunks[0]
+            .source_ref
+            .line_hint()
+            .expect("evidence retains available line evidence")
+            .start_line(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn maps_exact_binary_source_as_canonical_base64_without_line_metadata() {
     let requested = source_reference(4, 6, 2, 2);
     let response = SourceReadPortResponse::new(
@@ -9087,7 +9120,6 @@ async fn source_read_unadvertised_file_selector_fails_schema_before_the_port() {
 #[tokio::test]
 async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
     let harness = Harness::new(FakeOutcome::RepositoryIndex(Err(ClientPortError::Executor)));
-    let source = wire_source_reference(5, 10, 2, 2);
     let cases = vec![
         (
             VerticalTool::RepoStatus,
@@ -9136,10 +9168,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         (
             VerticalTool::CodeLocate,
             json!({"repository": {"repository_id": repository()}, "query": "x", "budget": {"evidence_level": "compact"}}),
-        ),
-        (
-            VerticalTool::SourceRead,
-            json!({"repository": {"repository_id": repository()}, "references": [{"source_ref": source}], "response_profile": "standard"}),
         ),
     ];
 

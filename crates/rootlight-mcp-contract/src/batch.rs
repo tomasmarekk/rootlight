@@ -234,7 +234,6 @@ const FULL_BUDGET: &[BatchBudgetDimension] = &[
 ];
 const CONTEXT_BUDGET: &[BatchBudgetDimension] =
     &[BatchBudgetDimension::Tokens, BatchBudgetDimension::Timeout];
-const COMPACT: &[ResponseProfile] = &[ResponseProfile::Compact];
 const ANALYTICAL: &[ResponseProfile] = &[
     ResponseProfile::Compact,
     ResponseProfile::Standard,
@@ -748,7 +747,7 @@ pub const BATCH_TOOL_REGISTRY: [BatchToolDescriptor; 12] = [
         McpTool::SourceRead,
         VerticalTool::SourceRead,
         ExposureProfile::Scout,
-        selectable("response_profile", COMPACT),
+        selectable("response_profile", ANALYTICAL),
         FULL_BUDGET_POLICY,
         binding_policy(SOURCE_READ_SOURCES, SOURCE_READ_TARGETS),
     ),
@@ -954,7 +953,11 @@ mod tests {
             source.response_profiles,
             BatchResponseProfilePolicy::Selectable {
                 wire_field: "response_profile",
-                supported: &[ResponseProfile::Compact],
+                supported: &[
+                    ResponseProfile::Compact,
+                    ResponseProfile::Standard,
+                    ResponseProfile::Evidence,
+                ],
                 default: ResponseProfile::Compact,
             }
         );

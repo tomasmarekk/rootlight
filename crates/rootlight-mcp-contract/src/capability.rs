@@ -1385,7 +1385,10 @@ const SOURCE_READ_RULES: &[CapabilityRule] = &[
         "selects optional one-based line metadata",
     ),
     implemented("encoding", "selects exact UTF-8 or explicit base64 bytes"),
-    accepted_fallback("response_profile"),
+    implemented(
+        "response_profile",
+        "selects compact, standard, or evidence representation without changing source bytes",
+    ),
     implemented("explain", "returns a deterministic source-free plan"),
     implemented(
         "context_lines_before",
@@ -1402,16 +1405,6 @@ const SOURCE_READ_RULES: &[CapabilityRule] = &[
     implemented("max_source_bytes", "reduces the common source-byte ceiling"),
     implemented("budget", "reduces the common hard execution budget"),
     unsupported("budget.evidence_level", "evidence projection is not served"),
-    unsupported_value(
-        "response_profile",
-        "evidence",
-        "only compact response projection is served",
-    ),
-    unsupported_value(
-        "response_profile",
-        "standard",
-        "only compact response projection is served",
-    ),
 ];
 
 const QUERY_ADVANCED_RULES: &[CapabilityRule] = &[
@@ -1651,13 +1644,16 @@ const fn response_profile_support(tool: McpTool) -> ResponseProfileSupport {
                 representation: ResponseProfile::Compact,
             }
         }
-        McpTool::RepoStatus | McpTool::RepoList | McpTool::SourceRead => {
-            ResponseProfileSupport::Selectable {
-                wire_field: ResponseProfileField::ResponseProfile,
-                supported: COMPACT_RESPONSE_PROFILES,
-                default: ResponseProfile::Compact,
-            }
-        }
+        McpTool::RepoStatus | McpTool::RepoList => ResponseProfileSupport::Selectable {
+            wire_field: ResponseProfileField::ResponseProfile,
+            supported: COMPACT_RESPONSE_PROFILES,
+            default: ResponseProfile::Compact,
+        },
+        McpTool::SourceRead => ResponseProfileSupport::Selectable {
+            wire_field: ResponseProfileField::ResponseProfile,
+            supported: ANALYTICAL_RESPONSE_PROFILES,
+            default: ResponseProfile::Compact,
+        },
         McpTool::QueryBatch => ResponseProfileSupport::Selectable {
             wire_field: ResponseProfileField::ResponseProfile,
             supported: ANALYTICAL_RESPONSE_PROFILES,
@@ -2057,7 +2053,7 @@ mod tests {
                 McpTool::SourceRead,
                 Selectable {
                     wire_field: CanonicalResponseProfileField,
-                    supported: COMPACT_RESPONSE_PROFILES,
+                    supported: ANALYTICAL_RESPONSE_PROFILES,
                     default: Compact,
                 },
             ),

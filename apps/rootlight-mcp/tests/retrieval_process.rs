@@ -485,15 +485,15 @@ fn supported_profiles_preserve_standalone_and_batch_semantics(fixture: &mut Retr
         "references": [{"source_ref": fixture.source_refs[0].clone()}],
         "include_line_numbers": true,
         "encoding": "utf8_lossless_when_valid",
-        "response_profile": "compact"
+        "response_profile": "evidence"
     });
     let standalone_source =
-        fixture.standalone("source-compact", "source.read", source_arguments.clone());
+        fixture.standalone("source-evidence", "source.read", source_arguments.clone());
     let batch_source = fixture.batch(
-        "batch-source-compact",
+        "batch-source-evidence",
         "source.read",
         source_arguments,
-        "compact",
+        "evidence",
     );
     assert_standalone_batch_parity(&standalone_source, &batch_source, "source.read");
     let source = &standalone_source["result"]["structuredContent"];
@@ -654,16 +654,6 @@ fn unsupported_retrieval_options_fail_with_stable_preflight_errors(fixture: &mut
             "locate-mixed-modes",
             "code.locate",
             json!({"repository": repository(), "query": "matrix", "search_modes": ["exact", "lexical"]}),
-        ),
-        (
-            "source-standard",
-            "source.read",
-            json!({"repository": repository(), "references": [{"source_ref": source_ref.clone()}], "response_profile": "standard"}),
-        ),
-        (
-            "source-evidence",
-            "source.read",
-            json!({"repository": repository(), "references": [{"source_ref": source_ref}], "response_profile": "evidence"}),
         ),
         (
             "source-byte-lines",

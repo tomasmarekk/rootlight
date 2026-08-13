@@ -6687,6 +6687,7 @@ where
     P: FirstSliceClientPort,
 {
     let input: SourceReadInput = decode_input(arguments)?;
+    let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let budget =
         AnalyticalBudget::with_source_limit(input.budget.as_ref(), input.max_source_bytes)?;
     let explain_only = input.explain == Some(true);
@@ -6694,7 +6695,7 @@ where
     let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_source_read(port, request, cancellation).await?;
-        return serialize_measured_read_success(output, started_at, budget.limits);
+        return serialize_source_read_success(output, response_profile, started_at, budget.limits);
     }
     let request = resolve_source_read_symbols(
         &port,
@@ -6708,7 +6709,7 @@ where
     let future = port.source_read(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_source_read(response, &expected)?;
-    serialize_measured_read_success(output, started_at, budget.limits)
+    serialize_source_read_success(output, response_profile, started_at, budget.limits)
 }
 
 async fn await_port<T>(
@@ -6962,9 +6963,6 @@ fn normalize_source_read(
     invalid_arguments: &PublicError,
 ) -> Result<SourceReadPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    if !is_compact_profile(input.response_profile) {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
     let encoding = input
         .encoding
         .unwrap_or(SourceEncodingRequest::Utf8LosslessWhenValid);
@@ -8464,6 +8462,19 @@ where
             serialize_measured_read_success(output, started_at, limits)
         }
         ResponseShaping::CanonicalInternal => {
+            serialize_measured_read_success(output, started_at, limits)
+        }
+    }
+}
+
+fn serialize_source_read_success(
+    output: ReadEnvelope<SourceReadData>,
+    profile: ResponseProfile,
+    started_at: Instant,
+    limits: BudgetLimits,
+) -> Result<Map<String, Value>, ToolExecutionError> {
+    match profile {
+        ResponseProfile::Compact | ResponseProfile::Standard | ResponseProfile::Evidence => {
             serialize_measured_read_success(output, started_at, limits)
         }
     }
