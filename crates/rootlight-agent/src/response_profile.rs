@@ -1169,7 +1169,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_projection_shapes_a_copy_and_rejects_unsupported_profile() {
+    fn batch_projection_shapes_a_copy_and_validates_source_read_profiles() {
         let canonical = serde_json::to_value(test_selection_data(4, true))
             .expect("canonical test data should serialize");
 
@@ -1188,14 +1188,23 @@ mod tests {
             "canonical binding data must remain unchanged"
         );
 
-        assert!(matches!(
-            shape_batch_child_data(
-                BatchTool::SourceRead,
-                &serde_json::json!({}),
-                ResponseProfile::Standard,
-            ),
-            Err(BatchProfileProjectionError::UnsupportedProfile)
-        ));
+        let source_read = serde_json::json!({
+            "chunks": [],
+            "stale_references": [],
+            "elisions": [],
+            "total_source_bytes": 0
+        });
+        for profile in [
+            ResponseProfile::Compact,
+            ResponseProfile::Standard,
+            ResponseProfile::Evidence,
+        ] {
+            assert_eq!(
+                shape_batch_child_data(BatchTool::SourceRead, &source_read, profile)
+                    .expect("advertised source-read profile should validate"),
+                source_read
+            );
+        }
     }
 
     #[test]
