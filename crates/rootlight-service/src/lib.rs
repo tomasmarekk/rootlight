@@ -1460,6 +1460,27 @@ struct UnsupportedSourceInput {
     generated: bool,
 }
 
+/// A known reason why one retained source has partial analysis coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FirstSliceSourceCoverageReason {
+    /// The source language has no configured structural analyzer.
+    UnsupportedLanguage,
+}
+
+/// Analysis coverage attached to one retained source file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstSliceSourceCoverage {
+    /// Normalized source language.
+    pub language: String,
+    /// Highest analysis tier that produced facts for the file.
+    pub tier: AnalysisTier,
+    /// Lowest coverage status across the file's normalized fact domains.
+    pub status: CoverageStatus,
+    /// Known reason for partial coverage, when one is available.
+    pub reason: Option<FirstSliceSourceCoverageReason>,
+}
+
 struct StructuralArtifactEntry {
     id: ArtifactId,
     artifact: Arc<TreeSitterStructuralArtifact>,
@@ -2763,6 +2784,9 @@ pub enum FirstSliceProjectAnalysisError {
     /// The bounded project analysis could not complete.
     #[error("project adapter analysis failed")]
     Analysis,
+    /// Project facts exceeded the generation's normalized-IR capacity.
+    #[error("project adapter output exceeded normalized fact capacity")]
+    Capacity,
 }
 
 impl FirstSliceProjectAnalysisError {
@@ -2778,6 +2802,7 @@ impl FirstSliceProjectAnalysisError {
             Self::MemoryLimit => "project-adapter-memory-limit-fallback",
             Self::ProcessFailure => "project-adapter-process-fallback",
             Self::Analysis => "project-adapter-analysis-fallback",
+            Self::Capacity => "project-adapter-capacity-fallback",
         }
     }
 }
@@ -4089,6 +4114,10 @@ impl FirstSliceService {
         sources
             .try_reserve_exact(source_count)
             .map_err(|_| FirstSliceError::Limits)?;
+        let mut retained_sources = Vec::new();
+        retained_sources
+            .try_reserve_exact(manifest.inputs.len())
+            .map_err(|_| FirstSliceError::Limits)?;
         let mut unsupported_sources = Vec::new();
         unsupported_sources
             .try_reserve_exact(manifest.inputs.len().saturating_sub(source_count))
@@ -4118,6 +4147,11 @@ impl FirstSliceService {
                 return Err(FirstSliceError::DiscoveryDrift);
             }
             let Some(language) = supported_source_language(input, &self.analyzers) else {
+                retained_sources.push(RustSourceInput {
+                    snapshot,
+                    generated: matches!(input.class, InputClass::Generated),
+                    origins: Vec::new(),
+                });
                 unsupported_sources.push(UnsupportedSourceInput {
                     claim,
                     language: detected_source_language(input)
@@ -4127,6 +4161,11 @@ impl FirstSliceService {
                 });
                 continue;
             };
+            retained_sources.push(RustSourceInput {
+                snapshot: snapshot.clone(),
+                generated: matches!(input.class, InputClass::Generated),
+                origins: Vec::new(),
+            });
             if source_languages
                 .insert(input.file, language.to_owned())
                 .is_some()
@@ -4211,7 +4250,7 @@ impl FirstSliceService {
         let reclaimable_generations = self.inactive_generation_ids();
         self.source_snapshots.preflight_admission_after_reclaim(
             generation,
-            &sources,
+            &retained_sources,
             &reclaimable_generations,
             cancellation,
         )?;
@@ -4555,7 +4594,7 @@ impl FirstSliceService {
         let (oracle_allocated_bytes, verified, durable, mut written_bytes) =
             if let Some(durable) = &self.durable {
                 let prepared = durable.begin_generation(repository, generation)?;
-                let source_write = prepared.write_sources(&sources)?;
+                let source_write = prepared.write_sources(&retained_sources)?;
                 incremental.evidence.reused_durable_artifact_bytes = source_write.referenced_bytes;
                 let source_written_bytes = source_write.newly_written_bytes;
                 observe_progress(FirstSliceIndexProgress::observed(
@@ -4677,7 +4716,7 @@ impl FirstSliceService {
             PreparedFirstSliceIndex {
                 verified,
                 search,
-                sources,
+                sources: retained_sources,
                 structural_artifacts,
                 incremental,
                 receipt,
@@ -4913,20 +4952,31 @@ impl FirstSliceService {
                                 self.analysis_limits.ir(),
                             ) {
                                 Ok(document) => {
-                                    match append_project_document_with_capacity(
-                                        target,
-                                        document,
-                                        self.analysis_limits.ir(),
-                                        &mut append_state,
-                                    ) {
-                                        Ok(()) => continue,
-                                        Err(
-                                            error @ (FirstSliceError::Limits
-                                            | FirstSliceError::ResourceLimit { .. }),
-                                        ) => return Err(error),
-                                        Err(_) => {
-                                            fallback_error =
-                                                Some(FirstSliceProjectAnalysisError::Analysis);
+                                    if document.diagnostics.iter().any(|diagnostic| {
+                                        diagnostic.code == PROJECT_FACTS_TRUNCATED_CODE
+                                    }) {
+                                        fallback_error =
+                                            Some(FirstSliceProjectAnalysisError::Capacity);
+                                    } else {
+                                        match append_project_document_with_capacity(
+                                            target,
+                                            document,
+                                            self.analysis_limits.ir(),
+                                            &mut append_state,
+                                        ) {
+                                            Ok(ProjectDocumentAppend::Complete) => continue,
+                                            Ok(ProjectDocumentAppend::CapacityExceeded) => {
+                                                fallback_error =
+                                                    Some(FirstSliceProjectAnalysisError::Capacity);
+                                            }
+                                            Err(
+                                                error @ (FirstSliceError::Limits
+                                                | FirstSliceError::ResourceLimit { .. }),
+                                            ) => return Err(error),
+                                            Err(_) => {
+                                                fallback_error =
+                                                    Some(FirstSliceProjectAnalysisError::Analysis);
+                                            }
                                         }
                                     }
                                 }
@@ -6353,8 +6403,8 @@ impl FirstSliceService {
     ///
     /// # Errors
     ///
-    /// Returns [`FirstSliceError`] for an unknown generation, invalid filter or
-    /// plan, or bounded execution failure.
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid language
+    /// filter or plan, or bounded execution failure.
     #[expect(
         clippy::too_many_arguments,
         reason = "the explicit policy and language union accompany one bounded locate request"
@@ -6365,6 +6415,41 @@ impl FirstSliceService {
         query: String,
         mode: LocateMode,
         languages: Vec<String>,
+        maximum_results: usize,
+        page_offset: usize,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<CodeLocateResult>, FirstSliceError> {
+        self.code_locate_with_filters_and_budget(
+            generation,
+            query,
+            mode,
+            languages,
+            Vec::new(),
+            maximum_results,
+            page_offset,
+            budget,
+            cancellation,
+        )
+    }
+
+    /// Executes a generation-pinned `code.locate` query over language and path unions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid filter or
+    /// plan, or bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the explicit policy, language union, and path union accompany one bounded locate request"
+    )]
+    pub fn code_locate_with_filters_and_budget(
+        &self,
+        generation: GenerationId,
+        query: String,
+        mode: LocateMode,
+        languages: Vec<String>,
+        path_prefixes: Vec<String>,
         maximum_results: usize,
         page_offset: usize,
         budget: FirstSliceBudget,
@@ -6388,10 +6473,11 @@ impl FirstSliceService {
             search_budget.max_candidates = search_budget.max_candidates.min(candidate_rows);
         }
         let plan = service
-            .plan_code_locate_with_languages(
+            .plan_code_locate_with_filters(
                 query,
                 mode,
                 languages,
+                path_prefixes,
                 effective_maximum_results,
                 page_offset,
                 search_budget,
@@ -7728,8 +7814,8 @@ impl FirstSliceService {
         generation: GenerationId,
         file: FileId,
     ) -> Result<String, FirstSliceError> {
-        self.source_language_coverage(generation, file)
-            .map(|(language, _tier)| language)
+        self.source_file_coverage(generation, file)
+            .map(|coverage| coverage.language)
     }
 
     /// Returns authoritative language and analysis tier for one retained file.
@@ -7744,6 +7830,25 @@ impl FirstSliceService {
         generation: GenerationId,
         file: FileId,
     ) -> Result<(String, AnalysisTier), FirstSliceError> {
+        self.source_file_coverage(generation, file)
+            .map(|coverage| (coverage.language, coverage.tier))
+    }
+
+    /// Returns authoritative analysis coverage for one retained source file.
+    ///
+    /// The reason distinguishes an intentionally metadata-only unsupported
+    /// language from an unexplained missing fact domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::Query`] when the generation or file is not
+    /// retained, or [`FirstSliceError::CatalogCorrupt`] when its normalized
+    /// provenance or coverage records are missing.
+    pub fn source_file_coverage(
+        &self,
+        generation: GenerationId,
+        file: FileId,
+    ) -> Result<FirstSliceSourceCoverage, FirstSliceError> {
         let snapshot = self
             .generations
             .generation(generation)
@@ -7759,7 +7864,31 @@ impl FirstSliceService {
             .iter()
             .find_map(|provenance| (provenance.id == file.provenance).then_some(provenance.tier))
             .ok_or(FirstSliceError::CatalogCorrupt)?;
-        Ok((file.language.clone(), tier))
+        let status = document
+            .coverage_records
+            .iter()
+            .filter_map(|coverage| {
+                (coverage.scope == CoverageScope::File(file.id)).then_some(coverage.status)
+            })
+            .reduce(lower_coverage_status)
+            .ok_or(FirstSliceError::CatalogCorrupt)?;
+        let reason = document
+            .diagnostics
+            .iter()
+            .any(|diagnostic| {
+                diagnostic.code == "unsupported-language"
+                    && diagnostic
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.span().file() == file.id)
+            })
+            .then_some(FirstSliceSourceCoverageReason::UnsupportedLanguage);
+        Ok(FirstSliceSourceCoverage {
+            language: file.language.clone(),
+            tier,
+            status,
+            reason,
+        })
     }
 
     /// Lists every repository known to this daemon process.
@@ -9510,6 +9639,14 @@ fn source_language_from_path(path: &str) -> Option<&'static str> {
         (".cs", "csharp"),
         (".kts", "kotlin"),
         (".kt", "kotlin"),
+        (".css", "css"),
+        (".lua", "lua"),
+        (".mm", "objective-cpp"),
+        (".mlx", "matlab"),
+        (".pl", "perl"),
+        (".pm", "perl"),
+        (".pod", "perl"),
+        (".r", "r"),
         (".php", "php"),
         (".sql", "sql"),
         (".bash", "bash"),
@@ -9595,7 +9732,7 @@ fn unsupported_language_document(
         content_hash: input.claim.content_hash,
         byte_length: input.claim.byte_length,
         language: input.language.clone(),
-        encoding: "unknown".to_owned(),
+        encoding: "utf-8".to_owned(),
         generated: input.generated,
         provenance: provenance_id,
         evidence: evidence(),
@@ -10884,22 +11021,27 @@ fn append_normalized_document(
 
 fn append_project_document_with_capacity(
     target: &mut NormalizedIrDocument,
-    mut source: NormalizedIrDocument,
+    source: NormalizedIrDocument,
     limits: &IrLimits,
     append_state: &mut DocumentAppendState,
-) -> Result<(), FirstSliceError> {
+) -> Result<ProjectDocumentAppend, FirstSliceError> {
     // Decide whether to retain full project facts before the shared append path
     // can reserve or truncate any target-owned collection.
     match preflight_normalized_document_append(target, &source, limits) {
         Ok(()) => {}
         Err(FirstSliceError::ResourceLimit { .. }) => {
-            retain_project_capacity_summary(&mut source)?;
-            preflight_normalized_document_append(target, &source, limits)?;
-            validate_project_capacity_summary(&source, limits)?;
+            return Ok(ProjectDocumentAppend::CapacityExceeded);
         }
         Err(error) => return Err(error),
     }
-    append_normalized_document(target, source, limits, append_state)
+    append_normalized_document(target, source, limits, append_state)?;
+    Ok(ProjectDocumentAppend::Complete)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectDocumentAppend {
+    Complete,
+    CapacityExceeded,
 }
 
 fn preflight_normalized_document_append(
@@ -12900,22 +13042,21 @@ mod tests {
         let mut target = NormalizedIrDocument::empty(repository, generation);
         let mut append_state =
             DocumentAppendState::from_document(&target).expect("empty append state initializes");
-        append_project_document_with_capacity(
-            &mut target,
-            capacity_document,
-            &capacity_limits,
-            &mut append_state,
-        )
-        .expect("project capacity exhaustion commits a bounded summary");
+        assert_eq!(
+            append_project_document_with_capacity(
+                &mut target,
+                capacity_document,
+                &capacity_limits,
+                &mut append_state,
+            )
+            .expect("project capacity exhaustion is classified"),
+            ProjectDocumentAppend::CapacityExceeded
+        );
         assert!(target.entities.is_empty());
-        assert_eq!(target.files.len(), 1);
-        assert!(target.coverage_records.iter().all(|coverage| {
-            coverage.status == CoverageStatus::Bounded
-                && coverage.indexed == 0
-                && coverage.skipped == coverage.discovered
-        }));
+        assert!(target.files.is_empty());
+        assert!(target.coverage_records.is_empty());
         rootlight_ir::validate_ir_document(&target, &capacity_limits, &ExtensionSupport::default())
-            .expect("the bounded project summary remains valid normalized IR");
+            .expect("rejected project output leaves valid normalized IR");
 
         let mut merged_partition = NormalizedIrDocument::empty(repository, generation);
         let mut external_symbols = BTreeSet::new();
@@ -12947,7 +13088,7 @@ mod tests {
                 &capacity_limits,
                 &mut rejected_state,
             ),
-            Err(FirstSliceError::Identity)
+            Ok(ProjectDocumentAppend::CapacityExceeded)
         );
         assert_eq!(rejected_target, expected_target);
 
@@ -13145,6 +13286,172 @@ mod tests {
         identity: ContentHash,
         calls: Arc<AtomicUsize>,
         partitioned: bool,
+    }
+
+    struct CapacityProjectAnalyzer {
+        identity: ContentHash,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl FirstSliceProjectAnalyzer for CapacityProjectAnalyzer {
+        fn provider_identity(&self) -> ContentHash {
+            self.identity
+        }
+
+        fn analyze(
+            &self,
+            request: FirstSliceProjectAnalysisRequest<'_>,
+            _cancellation: &Cancellation,
+        ) -> Result<FirstSliceProjectAnalysis, FirstSliceProjectAnalysisError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let input = request
+                .inputs()
+                .first()
+                .ok_or(FirstSliceProjectAnalysisError::Analysis)?;
+            let relative = RelativePath::parse(Path::new(input.path()))
+                .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+            let length = u64::try_from(input.source().len())
+                .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+            let source = SourceRef::new(
+                request.repository(),
+                request.generation(),
+                SourceSpan::new(input.file(), 0, length)
+                    .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?,
+                input.content_hash(),
+                None,
+            );
+            let producer =
+                ProducerIdentity::new("rootlight-test-project", "1.0", request.build_context())
+                    .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+            let mut provenance = ProvenanceRecord {
+                id: FactId::from_bytes([0; 20]),
+                repository: request.repository(),
+                generation: request.generation(),
+                producer_kind: ProducerKind::Derivation,
+                producer,
+                binary_digest: self.identity,
+                frontend_version: Some("test-project-1".to_owned()),
+                language: request.language().to_owned(),
+                tier: AnalysisTier::TierB,
+                build_context: BuildContextIdentity::new(request.build_context()),
+                input_sources: vec![source.clone()],
+                evidence_sources: vec![source.clone()],
+                derivation_parents: Vec::new(),
+                rule: None,
+            };
+            provenance.id = derive_provenance_record_id(&provenance)
+                .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+            let provenance_id = provenance.id;
+            let mut document =
+                NormalizedIrDocument::empty(request.repository(), request.generation());
+            document.files.push(FileRecord {
+                id: input.file(),
+                repository: request.repository(),
+                generation: request.generation(),
+                path: input.path().to_owned(),
+                path_locator: Some(relative.to_locator()),
+                content_hash: input.content_hash(),
+                byte_length: length,
+                language: request.language().to_owned(),
+                encoding: "utf-8".to_owned(),
+                generated: input.generated(),
+                provenance: provenance_id,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            });
+            document.provenance.push(provenance);
+            let mut container_identity = vec![0];
+            container_identity.extend_from_slice(request.repository().as_bytes());
+            for index in 0..3 {
+                let name = format!("project_only_symbol_{index}");
+                let mut symbol_claim = SymbolIdentityClaim {
+                    symbol: SymbolId::from_bytes([0; 20]),
+                    repository: request.repository(),
+                    language: request.language().to_owned(),
+                    kind: EntityKind::ExternalSymbol,
+                    container: Some(ContainerRef::Repository(request.repository())),
+                    container_identity: container_identity.clone(),
+                    declared_identity: name.clone(),
+                    signature_discriminator: content_hash(name.as_bytes()).as_bytes().to_vec(),
+                    build_context_discriminator: request.build_context().as_bytes().to_vec(),
+                };
+                symbol_claim.symbol = symbol_claim.derived_symbol();
+                document.entities.push(EntityRecord {
+                    id: symbol_claim.symbol,
+                    repository: request.repository(),
+                    generation: request.generation(),
+                    kind: EntityKind::ExternalSymbol,
+                    language: request.language().to_owned(),
+                    tier: AnalysisTier::TierB,
+                    canonical_name: name.clone(),
+                    display_name: name.clone(),
+                    qualified_name: name,
+                    container: Some(ContainerRef::Repository(request.repository())),
+                    visibility: EntityVisibility::Unknown,
+                    flags: Vec::new(),
+                    provenance: provenance_id,
+                    evidence: FactEvidence {
+                        source: Some(source.clone()),
+                        derivation: Vec::new(),
+                    },
+                });
+                document.extensions.push(
+                    new_symbol_identity_claim_envelope(
+                        &symbol_claim,
+                        request.generation(),
+                        provenance_id,
+                        source.clone(),
+                    )
+                    .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?,
+                );
+            }
+            for index in 0..2 {
+                let mut coverage = CoverageRecord {
+                    id: FactId::from_bytes([0; 20]),
+                    repository: request.repository(),
+                    generation: request.generation(),
+                    scope: CoverageScope::File(input.file()),
+                    domain: if index == 0 {
+                        IrFactDomain::Files
+                    } else {
+                        IrFactDomain::Relations
+                    },
+                    tier: AnalysisTier::TierB,
+                    status: CoverageStatus::Complete,
+                    discovered: 1,
+                    indexed: 1,
+                    skipped: 0,
+                    provenance: provenance_id,
+                    evidence: FactEvidence {
+                        source: Some(source.clone()),
+                        derivation: Vec::new(),
+                    },
+                };
+                coverage.id = derive_coverage_record_id(&coverage)
+                    .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?;
+                document.coverage_records.push(coverage);
+            }
+            let claim = FileIdentityClaim {
+                file: input.file(),
+                repository: request.repository(),
+                path: input.path().to_owned(),
+                path_identity: relative.identity_bytes().to_vec(),
+                content_hash: input.content_hash(),
+                byte_length: length,
+            };
+            document.extensions.push(
+                new_file_identity_claim_envelope(
+                    &claim,
+                    request.generation(),
+                    provenance_id,
+                    source,
+                )
+                .map_err(|_| FirstSliceProjectAnalysisError::Analysis)?,
+            );
+            Ok(FirstSliceProjectAnalysis::new(document, true))
+        }
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13938,6 +14245,46 @@ mod tests {
     }
 
     #[test]
+    fn project_capacity_overflow_keeps_structural_symbols_queryable() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[("src/value.py", "def python_value():\n    return 1\n")],
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer = Arc::new(CapacityProjectAnalyzer {
+            identity: content_hash(b"capacity-project-adapter"),
+            calls: Arc::clone(&calls),
+        });
+        let mut service =
+            FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("service initializes with a project adapter");
+        limit_service_ir_entities(&mut service, 2);
+
+        let receipt = service
+            .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
+            .expect("structural fallback publishes after project capacity overflow");
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "python_value".to_owned(),
+                LocateMode::Exact,
+                4,
+                0,
+                &deadline(),
+            )
+            .expect("structural fallback remains queryable");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(located.data.hits.len(), 1);
+        assert_eq!(located.data.hits[0].language, "python");
+        assert!(receipt.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "project-adapter-capacity-fallback"
+                && diagnostic.message == "project analysis for python used structural fallback"
+        }));
+    }
+
+    #[test]
     fn deep_project_path_forwards_only_reliable_generated_origin_headers() {
         let fixture = TempDir::new().expect("fixture root exists");
         write_language_fixture(
@@ -14467,6 +14814,11 @@ mod tests {
     fn unsupported_primary_languages_remain_visible_in_coverage() {
         let fixture = TempDir::new().expect("fixture root exists");
         let languages = [
+            ("normalize.css", "css"),
+            ("plugin.lua", "lua"),
+            ("analysis.mlx", "matlab"),
+            ("script.pl", "perl"),
+            ("plot.R", "r"),
             ("schema.sql", "sql"),
             ("script.sh", "bash"),
             ("page.html", "html"),
@@ -14505,6 +14857,90 @@ mod tests {
         for (_, language) in languages {
             assert_eq!(coverage[language], (1, 0));
         }
+    }
+
+    #[test]
+    fn unsupported_primary_sources_retain_exact_evidence_and_reason() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        let sources = [
+            ("normalize.css", "html { line-height: 1.15; }\n", "css"),
+            (
+                "Session.m",
+                "@interface Session : NSObject\n@end\n",
+                "objective-c",
+            ),
+            (
+                "classify.m",
+                "function result = classify(value)\nresult = value;\nend\n",
+                "matlab",
+            ),
+            ("plugin.lua", "local picker = require('picker')\n", "lua"),
+            ("model.rb", "class Account\nend\n", "ruby"),
+            ("script.pl", "sub render { return 1; }\n", "perl"),
+        ];
+        for (path, content, _) in sources {
+            fs::write(fixture.path().join(path), content).expect("source fixture writes");
+        }
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("unsupported sources publish");
+        let generation = service
+            .generations
+            .generation(receipt.generation)
+            .expect("published generation remains retained");
+
+        for (path, content, language) in sources {
+            let file = generation
+                .document()
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .expect("unsupported file remains represented");
+            let coverage = service
+                .source_file_coverage(receipt.generation, file.id)
+                .expect("source coverage resolves");
+            assert_eq!(coverage.language, language);
+            assert_eq!(coverage.tier, AnalysisTier::TierD);
+            assert_eq!(coverage.status, CoverageStatus::Unknown);
+            assert_eq!(
+                coverage.reason,
+                Some(FirstSliceSourceCoverageReason::UnsupportedLanguage)
+            );
+            let reference = file
+                .evidence
+                .source
+                .clone()
+                .expect("unsupported file carries source evidence");
+            let read = service
+                .source_read(receipt.generation, vec![reference], &deadline())
+                .expect("unsupported source remains readable");
+            assert_eq!(read.data.chunks[0].bytes, content.as_bytes());
+            assert_eq!(read.data.chunks[0].language, language);
+        }
+    }
+
+    #[test]
+    fn kotlin_remains_structurally_supported() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::write(
+            fixture.path().join("Session.kt"),
+            "class Session { fun execute(): Int = 1 }\n",
+        )
+        .expect("Kotlin fixture writes");
+        let mut service = FirstSliceService::new(2).expect("service initializes");
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .expect("Kotlin source publishes");
+        let status = service
+            .repository_status(receipt.repository, None)
+            .expect("Kotlin repository status resolves");
+        assert!(status.coverage.iter().any(|coverage| {
+            coverage.language == "kotlin"
+                && coverage.discovered_files == 1
+                && coverage.indexed_files == 1
+                && coverage.status == "bounded"
+        }));
     }
 
     #[test]
@@ -17975,6 +18411,17 @@ mod tests {
         let current = &service.analysis_limits;
         let mut ir = current.ir().clone();
         ir.max_diagnostics = max_diagnostics;
+        replace_service_ir_limits(service, ir);
+    }
+
+    fn limit_service_ir_entities(service: &mut FirstSliceService, max_entities: usize) {
+        let mut ir = service.analysis_limits.ir().clone();
+        ir.max_entities = max_entities;
+        replace_service_ir_limits(service, ir);
+    }
+
+    fn replace_service_ir_limits(service: &mut FirstSliceService, ir: IrLimits) {
+        let current = &service.analysis_limits;
         let mut limited = AnalysisLimits::new(
             current.max_source_bytes(),
             current.max_syntax_nodes(),

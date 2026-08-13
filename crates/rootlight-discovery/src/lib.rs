@@ -1060,10 +1060,21 @@ fn generated_content(content: &[u8]) -> bool {
 }
 
 fn extension_language(path: &str) -> Option<&'static str> {
+    let normalized = path.to_ascii_lowercase();
     for (suffix, language) in [
         (".d.ts", "typescript"),
         (".blade.php", "php"),
         (".pb.go", "go"),
+        (".kts", "kotlin"),
+        (".kt", "kotlin"),
+        (".css", "css"),
+        (".lua", "lua"),
+        (".mm", "objective-cpp"),
+        (".mlx", "matlab"),
+        (".pl", "perl"),
+        (".pm", "perl"),
+        (".pod", "perl"),
+        (".r", "r"),
         (".rs", "rust"),
         (".tsx", "typescript"),
         (".ts", "typescript"),
@@ -1094,7 +1105,7 @@ fn extension_language(path: &str) -> Option<&'static str> {
         (".s", "assembly"),
         (".sol", "solidity"),
     ] {
-        if path.ends_with(suffix) {
+        if normalized.ends_with(suffix) {
             return Some(language);
         }
     }
@@ -1131,7 +1142,19 @@ fn shebang_language(content: &[u8]) -> Option<&'static str> {
 fn content_language(content: &[u8]) -> Option<&'static str> {
     let sample = content.get(..content.len().min(MAX_CLASSIFICATION_BYTES))?;
     let text = String::from_utf8_lossy(sample);
-    if text.contains("fn main(") || text.contains("pub struct ") {
+    if text.contains("@interface")
+        || text.contains("@implementation")
+        || text.contains("#import <Foundation/")
+        || text.contains("#import \"")
+    {
+        Some("objective-c")
+    } else if text.contains("classdef ")
+        || text
+            .lines()
+            .any(|line| line.trim_start().starts_with("function "))
+    {
+        Some("matlab")
+    } else if text.contains("fn main(") || text.contains("pub struct ") {
         Some("rust")
     } else if text.contains("package main") && text.contains("func ") {
         Some("go")
@@ -1500,6 +1523,15 @@ max_source_file_bytes = 2097152
         }));
 
         for (path, expected) in [
+            ("normalize.css", "css"),
+            ("plugin.lua", "lua"),
+            ("client.mm", "objective-cpp"),
+            ("analysis.mlx", "matlab"),
+            ("script.pl", "perl"),
+            ("module.pm", "perl"),
+            ("plot.R", "r"),
+            ("build.gradle.kts", "kotlin"),
+            ("Main.kt", "kotlin"),
             ("schema.sql", "sql"),
             ("script.sh", "bash"),
             ("page.html", "html"),
@@ -1513,6 +1545,19 @@ max_source_file_bytes = 2097152
             ("token.sol", "solidity"),
         ] {
             assert_eq!(extension_language(path), Some(expected));
+        }
+
+        for (content, expected) in [
+            (
+                b"@interface Session : NSObject\n@end".as_slice(),
+                "objective-c",
+            ),
+            (
+                b"function result = classify(value)\nresult = value;\nend".as_slice(),
+                "matlab",
+            ),
+        ] {
+            assert_eq!(content_language(content), Some(expected));
         }
     }
 
