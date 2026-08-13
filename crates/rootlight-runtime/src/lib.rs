@@ -131,7 +131,9 @@ impl RuntimePaths {
             .to_path_buf();
         #[cfg(target_os = "macos")]
         let runtime_dir = macos_default_runtime_dir()?;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        let runtime_dir = windows_default_runtime_dir(&state_dir)?;
+        #[cfg(all(not(target_os = "macos"), not(windows)))]
         let runtime_dir = project
             .runtime_dir()
             .map_or_else(|| state_dir.join("runtime"), Path::to_path_buf);
@@ -1626,6 +1628,25 @@ fn windows_scope_sids(scope: PrivateScope) -> Result<Vec<String>, RuntimeError> 
 }
 
 #[cfg(windows)]
+fn windows_default_runtime_dir(state_dir: &Path) -> Result<PathBuf, RuntimeError> {
+    let logon_sids = windows_scope_sids(PrivateScope::Session)?;
+    let [logon_sid] = logon_sids.as_slice() else {
+        return Err(RuntimeError::WindowsSecurityPolicy);
+    };
+    if !logon_sid
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-'))
+    {
+        return Err(RuntimeError::WindowsSecurityPolicy);
+    }
+
+    // Session ACLs name a logon SID, so a stable account path becomes
+    // inaccessible after the next sign-in. Binding the path to the same SID
+    // prevents a stale session-private directory from blocking a new daemon.
+    Ok(state_dir.join(format!("runtime-{logon_sid}")))
+}
+
+#[cfg(windows)]
 fn windows_path_has_reparse_component(path: &Path) -> io::Result<bool> {
     use std::os::windows::fs::MetadataExt as _;
     use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
@@ -1828,6 +1849,34 @@ mod tests {
             );
         }
         assert_eq!(CoordinatedStartupSignal::from_byte(b'?'), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn default_windows_runtime_is_bound_to_the_current_logon_session() {
+        let state = Path::new(r"C:\Users\fixture\AppData\Local\rootlight");
+        let first = windows_default_runtime_dir(state).expect("default Windows runtime resolves");
+        let second = windows_default_runtime_dir(state).expect("same logon session resolves again");
+        let resolved = RuntimePaths::resolve().expect("default runtime paths resolve");
+        let component = first
+            .file_name()
+            .and_then(OsStr::to_str)
+            .expect("runtime component is Unicode");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            resolved.runtime_dir(),
+            windows_default_runtime_dir(resolved.state_dir())
+                .expect("resolved state produces the default runtime")
+        );
+        assert_eq!(first.parent(), Some(state));
+        assert_ne!(first, state.join("runtime"));
+        assert!(component.starts_with("runtime-S-"));
+        assert!(
+            component
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-'))
+        );
     }
 
     #[cfg(target_os = "macos")]
