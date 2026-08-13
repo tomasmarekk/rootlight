@@ -34,7 +34,8 @@ pub use project_context::{
     ProjectContextSkip, PythonProjectContext, RustProjectContext, TypeScriptProjectContext,
 };
 pub use project_semantics::{
-    SemanticProjectAnalyzer, SemanticProjectAnalyzerConfigError, SemanticProjectLanguage,
+    PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, SemanticProjectAnalyzer,
+    SemanticProjectAnalyzerConfigError, SemanticProjectLanguage,
 };
 pub use runtime_trace::{
     RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError, RuntimeTraceImportRequest,

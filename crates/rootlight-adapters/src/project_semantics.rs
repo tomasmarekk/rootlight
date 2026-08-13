@@ -44,6 +44,8 @@ const FALLBACK_REFERENCE_CONFIDENCE: u16 = 550;
 // One syntax fact can expand into several related IR records. Bound the input
 // set before that expansion so the isolated transaction can always be framed.
 const MAX_PROJECT_SYNTAX_FACTS: usize = 256;
+/// Diagnostic emitted when project analysis had to discard syntax facts.
+pub const PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC: &str = "project-syntax-fact-limit";
 const PROJECT_DIAGNOSTICS_TRUNCATED_CODE: &str = "project-parser-diagnostics-truncated";
 const PROJECT_DIAGNOSTICS_TRUNCATED_MESSAGE: &str =
     "additional parser diagnostics were omitted by the project diagnostic limit";
@@ -355,7 +357,7 @@ fn bound_project_syntax_facts(parsed: &mut [ParsedInput<'_, '_>]) -> Result<(), 
         return Ok(());
     }
 
-    let code = DiagnosticCode::new("project-syntax-fact-limit")
+    let code = DiagnosticCode::new(PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC)
         .map_err(|_| provider_failure("project-diagnostic-code"))?;
     let mut remaining_facts = maximum_facts;
     let mut remaining_inputs = parsed.len();
@@ -2347,7 +2349,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             .or_else(|| Some(input.source().source_ref().clone()));
         let message = match diagnostic.code().as_str() {
             "invalid-utf8" => "source is not valid utf-8",
-            "project-syntax-fact-limit" => {
+            PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC => {
                 "project syntax facts exceeded the bounded semantic limit"
             }
             PROJECT_DIAGNOSTICS_TRUNCATED_CODE => PROJECT_DIAGNOSTICS_TRUNCATED_MESSAGE,

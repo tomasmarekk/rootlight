@@ -38,12 +38,13 @@ use rootlight_adapter_treesitter::{
     ParserSettings, RuntimeConfig, TREE_SITTER_RUNTIME_VERSION, TreeSitterAnalyzer,
     TreeSitterProvider, TreeSitterStructuralArtifact,
 };
+use rootlight_adapters::{
+    PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC, RuntimeTraceImportRequest, SemanticProjectLanguage,
+    import_runtime_trace,
+};
 pub use rootlight_adapters::{
     RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError, RuntimeTraceLimits, RuntimeTraceOverlay,
     RuntimeTraceProvenance, RuntimeTraceRelation, RuntimeTraceRelationKind, RuntimeTraceResource,
-};
-use rootlight_adapters::{
-    RuntimeTraceImportRequest, SemanticProjectLanguage, import_runtime_trace,
 };
 pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::{CatalogError, CatalogErrorKind, EphemeralOracleWriter, OracleWriter};
@@ -5618,6 +5619,8 @@ impl FirstSliceService {
                                 Ok(document) => {
                                     if document.diagnostics.iter().any(|diagnostic| {
                                         diagnostic.code == PROJECT_FACTS_TRUNCATED_CODE
+                                            || diagnostic.code
+                                                == PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC
                                     }) {
                                         fallback_error =
                                             Some(FirstSliceProjectAnalysisError::Capacity);
@@ -15046,6 +15049,7 @@ mod tests {
         identity: ContentHash,
         calls: Arc<AtomicUsize>,
         partitioned: bool,
+        syntax_facts_bounded: bool,
     }
 
     struct CapacityProjectAnalyzer {
@@ -15372,6 +15376,27 @@ mod tests {
                 coverage.id = derive_coverage_record_id(&coverage)
                     .expect("test project coverage identity derives");
                 document.coverage_records.push(coverage);
+                if self.syntax_facts_bounded {
+                    let mut diagnostic = DiagnosticRecord {
+                        id: FactId::from_bytes([0; 20]),
+                        repository: request.repository(),
+                        generation: request.generation(),
+                        code: PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC.to_owned(),
+                        message: "project syntax facts exceeded the bounded semantic limit"
+                            .to_owned(),
+                        severity: DiagnosticSeverity::Warning,
+                        source: Some(source.clone()),
+                        coverage_effect: CoverageStatus::Bounded,
+                        provenance: provenance_id,
+                        evidence: FactEvidence {
+                            source: Some(source.clone()),
+                            derivation: Vec::new(),
+                        },
+                    };
+                    diagnostic.id = derive_diagnostic_record_id(&diagnostic)
+                        .expect("test project diagnostic identity derives");
+                    document.diagnostics.push(diagnostic);
+                }
                 let claim = FileIdentityClaim {
                     file: input.file(),
                     repository: request.repository(),
@@ -15957,6 +15982,7 @@ mod tests {
             identity: content_hash(b"partitioned-project-adapter"),
             calls: Arc::clone(&calls),
             partitioned: true,
+            syntax_facts_bounded: false,
         });
         let mut service =
             FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
@@ -16024,6 +16050,47 @@ mod tests {
         let receipt = service
             .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
             .expect("structural fallback publishes after project capacity overflow");
+        let located = service
+            .code_locate(
+                receipt.generation,
+                "python_value".to_owned(),
+                LocateMode::Exact,
+                4,
+                0,
+                &deadline(),
+            )
+            .expect("structural fallback remains queryable");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(located.data.hits.len(), 1);
+        assert_eq!(located.data.hits[0].language, "python");
+        assert!(receipt.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "project-adapter-capacity-fallback"
+                && diagnostic.message == "project analysis for python used structural fallback"
+        }));
+    }
+
+    #[test]
+    fn bounded_project_syntax_keeps_structural_symbols_queryable() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        write_language_fixture(
+            fixture.path(),
+            &[("src/value.py", "def python_value():\n    return 1\n")],
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let analyzer = Arc::new(SuccessfulProjectAnalyzer {
+            identity: content_hash(b"bounded-syntax-project-adapter"),
+            calls: Arc::clone(&calls),
+            partitioned: false,
+            syntax_facts_bounded: true,
+        });
+        let mut service =
+            FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
+                .expect("service initializes with a project adapter");
+
+        let receipt = service
+            .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
+            .expect("structural fallback publishes after syntax fact truncation");
         let located = service
             .code_locate(
                 receipt.generation,
@@ -16203,6 +16270,7 @@ mod tests {
             identity,
             calls: Arc::clone(&calls),
             partitioned: false,
+            syntax_facts_bounded: false,
         });
         let cancellation = deadline();
 
@@ -16404,6 +16472,7 @@ mod tests {
             identity: content_hash(b"caller-deep-project-analyzer"),
             calls: Arc::new(AtomicUsize::new(0)),
             partitioned: false,
+            syntax_facts_bounded: false,
         });
         let cancellation = deadline();
         let receipt = {
@@ -16455,6 +16524,7 @@ mod tests {
             identity: content_hash(b"corrupt-semantic-project-analyzer"),
             calls: Arc::new(AtomicUsize::new(0)),
             partitioned: false,
+            syntax_facts_bounded: false,
         });
         let cancellation = deadline();
 

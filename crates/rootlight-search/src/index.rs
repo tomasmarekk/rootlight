@@ -449,6 +449,13 @@ impl LexicalIndex {
                     document_id = scorer.advance();
                     continue;
                 }
+                let lexical_rank = lexical_rank(request.mode, &normalized_query, &hit);
+                if request.mode == SearchMode::Exact
+                    && !exact_candidate_matches_identity(&normalized_query, &hit)
+                {
+                    document_id = scorer.advance();
+                    continue;
+                }
                 if hits.len() >= budget.max_candidates {
                     return Err(SearchError::CandidateBudgetExceeded);
                 }
@@ -459,7 +466,7 @@ impl LexicalIndex {
                     return Err(SearchError::ReturnedTextBudgetExceeded);
                 }
                 hits.push(RankedHit {
-                    lexical_rank: lexical_rank(request.mode, &normalized_query, &hit),
+                    lexical_rank,
                     definition_rank: definition_rank(&hit),
                     hit,
                 });
@@ -2100,6 +2107,13 @@ fn lexical_rank(mode: SearchMode, normalized_query: &str, hit: &SearchHit) -> u8
     }
 }
 
+fn exact_candidate_matches_identity(normalized_query: &str, hit: &SearchHit) -> bool {
+    hit.symbol_id.is_none()
+        || normalize_exact(&hit.identifier) == normalized_query
+        || normalize_exact(&hit.qualified_name) == normalized_query
+        || normalize_exact(&hit.path) == normalized_query
+}
+
 fn definition_rank(hit: &SearchHit) -> u8 {
     let declaration_penalty = u8::from(hit.declaration_only);
     let non_production_penalty = if hit.test || hit.generated { 2 } else { 0 };
@@ -2772,6 +2786,52 @@ mod tests {
             search(&index, "query", SearchMode::Text)[0].symbol_id,
             Some(SymbolId::from_bytes([1; 20]))
         );
+    }
+
+    #[test]
+    fn exact_mode_does_not_materialize_source_only_candidates() {
+        let mut exact = document(1, "initMixin", "src/core/global-api/mixin.ts");
+        exact.source_identifiers = vec!["initMixin".to_owned()];
+        let mut source_only = document(2, "unrelated", "src/core/instance/index.ts");
+        source_only.source_identifiers = vec!["initMixin".to_owned()];
+        let (_directory, _manifest, index) = build(vec![source_only, exact.clone()]);
+        let request = SearchRequest {
+            query: "initMixin".to_owned(),
+            mode: SearchMode::Exact,
+            max_results: 10,
+            page_offset: 0,
+        };
+
+        let outcome = index
+            .search_with_stats(
+                &request,
+                SearchBudget {
+                    max_candidates: 1,
+                    ..SearchBudget::default()
+                },
+                &Cancellation::new(),
+            )
+            .expect("source-only postings do not consume exact candidates");
+
+        assert_eq!(outcome.matched_candidates, 1);
+        assert_eq!(outcome.hits.len(), 1);
+        assert_eq!(outcome.hits[0].symbol_id, exact.symbol_id);
+    }
+
+    #[test]
+    fn exact_mode_keeps_file_only_source_candidates() {
+        let mut file_only = document(1, "theme.css", "vendor/theme.css");
+        file_only.symbol_id = None;
+        file_only.qualified_name = "theme.css".to_owned();
+        file_only.source_identifiers = vec!["custom-property".to_owned()];
+        let (_directory, _manifest, index) = build(vec![file_only.clone()]);
+
+        let hits = search(&index, "custom-property", SearchMode::Exact);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].symbol_id, None);
+        assert_eq!(hits[0].file_id, file_only.file_id);
+        assert_eq!(hits[0].path, file_only.path);
     }
 
     #[test]
