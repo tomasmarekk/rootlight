@@ -84,6 +84,116 @@ const ACTIVATION_PREFIX: &str = "activation-";
 const METADATA_PREFIX: &str = "metadata-";
 const QUARANTINE_PREFIX: &str = "generation-";
 
+pub(super) fn recovery_snapshot_output_reservation(
+    decoded_bytes: u64,
+) -> Result<u64, FirstSliceError> {
+    if decoded_bytes == 0 || decoded_bytes > MAX_RECOVERY_SNAPSHOT_BYTES {
+        return Err(FirstSliceError::Limits);
+    }
+    let encoded_bytes = decoded_bytes
+        .checked_add(1024 * 1024)
+        .filter(|bytes| *bytes <= MAX_RECOVERY_ENCODED_BYTES)
+        .ok_or(FirstSliceError::Limits)?;
+    encoded_bytes
+        .checked_add(MAX_RECOVERY_MANIFEST_BYTES)
+        .ok_or(FirstSliceError::Limits)
+}
+
+#[cfg(test)]
+pub(super) fn write_legacy_recovery_snapshot(
+    generation_directory: &Path,
+    snapshot: &GenerationSnapshot,
+) -> Result<(), FirstSliceError> {
+    let decoded = serde_json::to_vec(snapshot.document()).map_err(|_| FirstSliceError::Catalog)?;
+    let decoded_bytes = u64::try_from(decoded.len()).map_err(|_| FirstSliceError::Limits)?;
+    if decoded_bytes == 0 || decoded_bytes > MAX_RECOVERY_SNAPSHOT_BYTES {
+        return Err(FirstSliceError::Limits);
+    }
+    std::fs::write(
+        generation_directory.join(RECOVERY_SNAPSHOT_FILENAME),
+        &decoded,
+    )
+    .map_err(|_| FirstSliceError::Catalog)?;
+    let metadata = snapshot.metadata();
+    let contract = metadata.contract_version();
+    let recovery = DurableRecoverySnapshot {
+        version: LEGACY_RECOVERY_SNAPSHOT_VERSION,
+        bytes: decoded_bytes,
+        digest: content_hash_bytes(&decoded),
+        encoding: None,
+        decoded_bytes: None,
+        decoded_digest: None,
+        contract_major: contract.major(),
+        contract_minor: contract.minor(),
+        manifest_hash: metadata.manifest_hash(),
+        configuration_hash: metadata.configuration_hash(),
+        provider_set_hash: metadata.provider_set_hash(),
+    };
+    let descriptor = serde_json::to_vec(&recovery).map_err(|_| FirstSliceError::Catalog)?;
+    if u64::try_from(descriptor.len()).map_err(|_| FirstSliceError::Limits)?
+        > MAX_RECOVERY_MANIFEST_BYTES
+    {
+        return Err(FirstSliceError::Limits);
+    }
+    std::fs::write(
+        generation_directory.join(RECOVERY_MANIFEST_FILENAME),
+        descriptor,
+    )
+    .map_err(|_| FirstSliceError::Catalog)
+}
+
+#[cfg(test)]
+pub(super) fn write_legacy_gzip_recovery_snapshot(
+    generation_directory: &Path,
+    snapshot: &GenerationSnapshot,
+) -> Result<(), FirstSliceError> {
+    let decoded = serde_json::to_vec(snapshot.document()).map_err(|_| FirstSliceError::Catalog)?;
+    let decoded_bytes = u64::try_from(decoded.len()).map_err(|_| FirstSliceError::Limits)?;
+    if decoded_bytes == 0 || decoded_bytes > MAX_RECOVERY_SNAPSHOT_BYTES {
+        return Err(FirstSliceError::Limits);
+    }
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder
+        .write_all(&decoded)
+        .map_err(|_| FirstSliceError::Catalog)?;
+    let encoded = encoder.finish().map_err(|_| FirstSliceError::Catalog)?;
+    let encoded_bytes = u64::try_from(encoded.len()).map_err(|_| FirstSliceError::Limits)?;
+    if encoded_bytes == 0 || encoded_bytes > MAX_RECOVERY_ENCODED_BYTES {
+        return Err(FirstSliceError::Limits);
+    }
+    std::fs::write(
+        generation_directory.join(RECOVERY_SNAPSHOT_GZIP_FILENAME),
+        &encoded,
+    )
+    .map_err(|_| FirstSliceError::Catalog)?;
+    let metadata = snapshot.metadata();
+    let contract = metadata.contract_version();
+    let recovery = DurableRecoverySnapshot {
+        version: RECOVERY_SNAPSHOT_VERSION,
+        bytes: encoded_bytes,
+        digest: content_hash_bytes(&encoded),
+        encoding: Some(RecoverySnapshotEncoding::Gzip),
+        decoded_bytes: Some(decoded_bytes),
+        decoded_digest: Some(content_hash_bytes(&decoded)),
+        contract_major: contract.major(),
+        contract_minor: contract.minor(),
+        manifest_hash: metadata.manifest_hash(),
+        configuration_hash: metadata.configuration_hash(),
+        provider_set_hash: metadata.provider_set_hash(),
+    };
+    let descriptor = serde_json::to_vec(&recovery).map_err(|_| FirstSliceError::Catalog)?;
+    if u64::try_from(descriptor.len()).map_err(|_| FirstSliceError::Limits)?
+        > MAX_RECOVERY_MANIFEST_BYTES
+    {
+        return Err(FirstSliceError::Limits);
+    }
+    std::fs::write(
+        generation_directory.join(RECOVERY_MANIFEST_FILENAME),
+        descriptor,
+    )
+    .map_err(|_| FirstSliceError::Catalog)
+}
+
 pub(super) struct DurableCatalog {
     repositories: PrivateDirectory<'static>,
     quarantine: PrivateDirectory<'static>,
@@ -2147,16 +2257,16 @@ fn restore_generation(
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
     let manifest: DurableGenerationManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
-    let uses_source_blobs = match (manifest.version, manifest.source_storage) {
-        (LEGACY_GENERATION_MANIFEST_VERSION, None) => false,
+    match (manifest.version, manifest.source_storage) {
+        (LEGACY_GENERATION_MANIFEST_VERSION, None) => {}
         (
             GENERATION_MANIFEST_VERSION,
             Some(DurableSourceStorage {
                 version: SOURCE_STORAGE_VERSION,
             }),
-        ) => true,
+        ) => {}
         _ => return Err(FirstSliceError::CatalogCorrupt),
-    };
+    }
     if manifest.receipt.repository != repository
         || manifest.receipt.generation != generation
         || !valid_repository_root_path(manifest.root_path.as_deref())
@@ -2183,10 +2293,20 @@ fn restore_generation(
         &context,
         cancellation,
     );
-    let (verified, allocated_bytes, defer_sources) = match recovered {
-        Ok(Some(verified)) => (verified, manifest.receipt.oracle_allocated_bytes, true),
-        Ok(None) | Err(FirstSliceError::CatalogCorrupt) => {
-            let (verified, allocated_bytes) = restore_oracle_generation(
+    // A zero oracle charge is the persisted discriminator for semantic
+    // generations whose checksummed recovery snapshot is authoritative.
+    let (verified, allocated_bytes) = if manifest.receipt.oracle_allocated_bytes == 0 {
+        match recovered {
+            Ok(Some(verified)) => (verified, 0),
+            Ok(None) | Err(FirstSliceError::CatalogCorrupt) => {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        match recovered {
+            Ok(Some(verified)) => (verified, manifest.receipt.oracle_allocated_bytes),
+            Ok(None) | Err(FirstSliceError::CatalogCorrupt) => restore_oracle_generation(
                 &generation_path,
                 repository,
                 generation,
@@ -2194,10 +2314,9 @@ fn restore_generation(
                 manifest.receipt.oracle_allocated_bytes,
                 &context,
                 cancellation,
-            )?;
-            (verified, allocated_bytes, false)
+            )?,
+            Err(error) => return Err(error),
         }
-        Err(error) => return Err(error),
     };
     let documents =
         project_lexical_documents(verified.snapshot(), BuildBudget::default(), cancellation)
@@ -2212,26 +2331,6 @@ fn restore_generation(
     let search =
         LexicalIndex::build_ephemeral(generation, documents, BuildBudget::default(), cancellation)
             .map_err(|error| generation_data_error(map_search_error(error, cancellation)))?;
-    let mut sources = Vec::new();
-    if !defer_sources {
-        sources
-            .try_reserve_exact(verified.document().files.len())
-            .map_err(|_| FirstSliceError::Retention)?;
-        for file in &verified.document().files {
-            sources.push(RustSourceInput {
-                snapshot: read_persisted_source(
-                    repository_directory,
-                    &generation_directory,
-                    repository,
-                    file,
-                    uses_source_blobs,
-                    cancellation,
-                )?,
-                generated: file.generated,
-                origins: Vec::new(),
-            });
-        }
-    }
     Ok(RestoredGeneration {
         root_identity: manifest.root_identity,
         display_name: manifest.display_name,
@@ -2244,7 +2343,7 @@ fn restore_generation(
         published_generation_count,
         verified,
         search,
-        sources,
+        sources: Vec::new(),
         incremental,
         operations: Vec::new(),
     })

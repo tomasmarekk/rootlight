@@ -24,6 +24,7 @@ use catalog::{
 use durable::{
     DurableCatalog, DurablePreparedGeneration, DurablePublishedGeneration,
     DurableRepositoryMetadata, REPOSITORY_METADATA_VERSION, RestoredGeneration,
+    recovery_snapshot_output_reservation,
 };
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, AnalysisRequest, BatchThresholds, EncodingId,
@@ -1538,6 +1539,14 @@ pub struct PreparedFirstSliceIndex {
     written_bytes: u64,
     reserved_memory_bytes: u64,
     memory_bytes: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DurableGenerationRepresentation {
+    Oracle,
+    // Semantic refinements are already identity-verified and keep their
+    // structural oracle predecessor, so one checksummed snapshot is sufficient.
+    RecoverySnapshot,
 }
 
 /// Retention-admitted generation awaiting durable lifecycle success.
@@ -4103,6 +4112,23 @@ impl FirstSliceService {
         path: &Path,
         mode: FirstSliceIndexMode,
         cancellation: &Cancellation,
+        observe_progress: impl FnMut(FirstSliceIndexProgress),
+    ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
+        self.prepare_repository_with_representation_and_progress(
+            path,
+            mode,
+            DurableGenerationRepresentation::Oracle,
+            cancellation,
+            observe_progress,
+        )
+    }
+
+    fn prepare_repository_with_representation_and_progress(
+        &self,
+        path: &Path,
+        mode: FirstSliceIndexMode,
+        representation: DurableGenerationRepresentation,
+        cancellation: &Cancellation,
         mut observe_progress: impl FnMut(FirstSliceIndexProgress),
     ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
         let started = Instant::now();
@@ -4726,58 +4752,65 @@ impl FirstSliceService {
             estimated_disk_bytes = durable_output_reservation(
                 source_preflight.source_bytes,
                 serialized_document_bytes,
+                representation,
             )?
             .max(estimated_disk_bytes);
             self.ensure_durable_staging_capacity(estimated_disk_bytes)?;
         }
-        let (oracle_allocated_bytes, verified, durable, mut written_bytes) =
-            if let Some(durable) = &self.durable {
-                let prepared = durable.begin_generation(repository, generation)?;
-                let source_write = prepared.write_sources(&retained_sources)?;
-                incremental.evidence.reused_durable_artifact_bytes = source_write.referenced_bytes;
-                let source_written_bytes = source_write.newly_written_bytes;
-                observe_progress(FirstSliceIndexProgress::observed(
-                    FirstSliceIndexStage::Persistence,
-                    4,
-                    fully_examined_files,
-                    fully_examined_bytes,
-                    source_written_bytes,
-                ));
-                let (oracle, verified) = OracleWriter::create_in(prepared.path())
-                    .map_err(|error| map_catalog_error(&error, cancellation))?
-                    .seal_preserving_verified(verified, &context)
-                    .map_err(|error| map_catalog_error(&error, cancellation))?;
-                let allocated_bytes = oracle
-                    .allocated_bytes(&context)
-                    .map_err(|error| map_catalog_error(&error, cancellation))?;
-                prepared.account_external_staging_bytes(allocated_bytes)?;
-                let written_bytes = source_written_bytes
-                    .checked_add(allocated_bytes)
-                    .ok_or(FirstSliceError::Limits)?;
-                observe_progress(FirstSliceIndexProgress::observed(
-                    FirstSliceIndexStage::Persistence,
-                    4,
-                    fully_examined_files,
-                    fully_examined_bytes,
-                    written_bytes,
-                ));
-                (allocated_bytes, verified, Some(prepared), written_bytes)
-            } else {
-                let (oracle, verified) = EphemeralOracleWriter::create()
-                    .map_err(|error| map_catalog_error(&error, cancellation))?
-                    .seal_and_retain(verified, &context)
-                    .map_err(|error| map_catalog_error(&error, cancellation))?;
-                let allocated_bytes = oracle
-                    .allocated_bytes()
-                    .map_err(|error| map_catalog_error(&error, cancellation))?;
-                (allocated_bytes, verified, None, 0)
+        let (oracle_allocated_bytes, verified, durable, mut written_bytes) = if let Some(durable) =
+            &self.durable
+        {
+            let prepared = durable.begin_generation(repository, generation)?;
+            let source_write = prepared.write_sources(&retained_sources)?;
+            incremental.evidence.reused_durable_artifact_bytes = source_write.referenced_bytes;
+            let source_written_bytes = source_write.newly_written_bytes;
+            observe_progress(FirstSliceIndexProgress::observed(
+                FirstSliceIndexStage::Persistence,
+                4,
+                fully_examined_files,
+                fully_examined_bytes,
+                source_written_bytes,
+            ));
+            let (allocated_bytes, verified, generation_written_bytes) = match representation {
+                DurableGenerationRepresentation::Oracle => {
+                    let (oracle, verified) = OracleWriter::create_in(prepared.path())
+                        .map_err(|error| map_catalog_error(&error, cancellation))?
+                        .seal_preserving_verified(verified, &context)
+                        .map_err(|error| map_catalog_error(&error, cancellation))?;
+                    let allocated_bytes = oracle
+                        .allocated_bytes(&context)
+                        .map_err(|error| map_catalog_error(&error, cancellation))?;
+                    prepared.account_external_staging_bytes(allocated_bytes)?;
+                    (allocated_bytes, verified, allocated_bytes)
+                }
+                DurableGenerationRepresentation::RecoverySnapshot => {
+                    let recovery_bytes = prepared
+                        .write_recovery_snapshot(verified.snapshot(), serialized_document_bytes)?;
+                    (0, verified, recovery_bytes)
+                }
             };
-        if let Some(durable) = durable.as_ref() {
-            let recovery_bytes =
-                durable.write_recovery_snapshot(verified.snapshot(), serialized_document_bytes)?;
-            written_bytes = written_bytes
-                .checked_add(recovery_bytes)
+            let written_bytes = source_written_bytes
+                .checked_add(generation_written_bytes)
                 .ok_or(FirstSliceError::Limits)?;
+            observe_progress(FirstSliceIndexProgress::observed(
+                FirstSliceIndexStage::Persistence,
+                4,
+                fully_examined_files,
+                fully_examined_bytes,
+                written_bytes,
+            ));
+            (allocated_bytes, verified, Some(prepared), written_bytes)
+        } else {
+            let (oracle, verified) = EphemeralOracleWriter::create()
+                .map_err(|error| map_catalog_error(&error, cancellation))?
+                .seal_and_retain(verified, &context)
+                .map_err(|error| map_catalog_error(&error, cancellation))?;
+            let allocated_bytes = oracle
+                .allocated_bytes()
+                .map_err(|error| map_catalog_error(&error, cancellation))?;
+            (allocated_bytes, verified, None, 0)
+        };
+        if let Some(durable) = durable.as_ref() {
             let incremental_bytes = durable.write_incremental_state(&incremental)?;
             written_bytes = written_bytes
                 .checked_add(incremental_bytes)
@@ -4925,9 +4958,10 @@ impl FirstSliceService {
             return Err(FirstSliceError::Retention);
         }
 
-        let preparation = self.prepare_repository_with_mode_and_progress(
+        let preparation = self.prepare_repository_with_representation_and_progress(
             path,
             FirstSliceIndexMode::Deep,
+            DurableGenerationRepresentation::RecoverySnapshot,
             cancellation,
             observe_progress,
         )?;
@@ -10403,14 +10437,18 @@ fn ensure_generation_memory_admission(
 fn durable_output_reservation(
     source_bytes: u64,
     serialized_document_bytes: u64,
+    representation: DurableGenerationRepresentation,
 ) -> Result<u64, FirstSliceError> {
+    let generation_bytes = match representation {
+        DurableGenerationRepresentation::Oracle => serialized_document_bytes
+            .checked_mul(DURABLE_ORACLE_SERIALIZED_EXPANSION_FACTOR)
+            .ok_or(FirstSliceError::Limits)?,
+        DurableGenerationRepresentation::RecoverySnapshot => {
+            recovery_snapshot_output_reservation(serialized_document_bytes)?
+        }
+    };
     source_bytes
-        .checked_add(
-            serialized_document_bytes
-                .checked_mul(DURABLE_ORACLE_SERIALIZED_EXPANSION_FACTOR)
-                .and_then(|bytes| bytes.checked_add(serialized_document_bytes))
-                .ok_or(FirstSliceError::Limits)?,
-        )
+        .checked_add(generation_bytes)
         .and_then(|bytes| bytes.checked_add(DURABLE_STAGING_FIXED_OVERHEAD_BYTES))
         .and_then(|bytes| bytes.checked_add(DURABLE_DISK_SAFETY_MARGIN_BYTES))
         .ok_or(FirstSliceError::Limits)
@@ -13070,7 +13108,6 @@ mod tests {
         collections::BTreeSet,
         ffi::OsStr,
         fs,
-        io::Read as _,
         path::Path,
         process::Command,
         sync::{
@@ -15432,7 +15469,7 @@ mod tests {
         });
         let cancellation = deadline();
 
-        let receipt = {
+        let (receipt, structural_written_bytes, semantic_written_bytes) = {
             let mut service = FirstSliceService::new_durable_with_project_analyzer(
                 3,
                 paths.state_dir(),
@@ -15456,6 +15493,12 @@ mod tests {
                     |observed| progress.push(observed),
                 )
                 .expect("semantic refinement prepares");
+            let semantic_preparation_written_bytes = match &semantic_preparation {
+                FirstSliceIndexPreparation::Pending(prepared) => prepared.written_bytes,
+                FirstSliceIndexPreparation::Retained { .. } => {
+                    panic!("semantic refinement must build a new generation")
+                }
+            };
             let first = progress.first().expect("initial progress exists");
             assert_eq!(first.stage, FirstSliceIndexStage::Discovery);
             assert_eq!(first.total, 6);
@@ -15527,9 +15570,32 @@ mod tests {
                     two_stage: FirstSliceTwoStageAvailability::SemanticRefinementPublished,
                 }
             );
-            receipt
+            let structural_written_bytes = receipt.structural().retained_durable_bytes;
+            (
+                receipt,
+                structural_written_bytes,
+                semantic_preparation_written_bytes,
+            )
         };
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(receipt.structural().oracle_allocated_bytes > 0);
+        assert_eq!(receipt.semantic().oracle_allocated_bytes, 0);
+        assert!(semantic_written_bytes < structural_written_bytes);
+        assert!(receipt.semantic().retained_durable_bytes < structural_written_bytes);
+        let repository_directory = paths
+            .state_dir()
+            .join("first-slice/repositories")
+            .join(receipt.semantic().repository.to_string());
+        let structural_directory =
+            repository_directory.join(receipt.structural().generation.to_string());
+        assert!(structural_directory.join("oracle.sqlite3").is_file());
+        assert!(!structural_directory.join("recovery-manifest.json").exists());
+        assert!(!structural_directory.join("recovery.json.gz").exists());
+        let semantic_directory =
+            repository_directory.join(receipt.semantic().generation.to_string());
+        assert!(!semantic_directory.join("oracle.sqlite3").exists());
+        assert!(semantic_directory.join("recovery-manifest.json").is_file());
+        assert!(semantic_directory.join("recovery.json.gz").is_file());
 
         let restored = FirstSliceService::new_durable_with_project_analyzer(
             3,
@@ -15555,6 +15621,149 @@ mod tests {
                 Some(receipt.structural().generation),
             )
             .expect("restored structural parent remains queryable");
+        let file = restored
+            .generations
+            .generation(receipt.semantic().generation)
+            .expect("restored semantic generation resolves")
+            .document()
+            .files
+            .first()
+            .expect("restored semantic generation retains its source record");
+        let source = SourceRef::new(
+            receipt.semantic().repository,
+            receipt.semantic().generation,
+            SourceSpan::new(file.id, 0, file.byte_length).expect("source span is valid"),
+            file.content_hash,
+            None,
+        );
+        let read = restored
+            .source_read(receipt.semantic().generation, vec![source], &cancellation)
+            .expect("restored semantic source hydrates lazily");
+        assert_eq!(
+            read.data.chunks[0].bytes,
+            b"pub fn two_stage_value() -> u32 { 2 }\n"
+        );
+    }
+
+    #[test]
+    fn caller_requested_deep_generation_remains_oracle_authoritative() {
+        let temporary = durable_test_tempdir();
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .expect("runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let repository_root = temporary.path().join("repository");
+        fs::create_dir(&repository_root).expect("repository root creates");
+        fs::write(
+            repository_root.join("lib.rs"),
+            "pub fn caller_deep() -> bool { true }\n",
+        )
+        .expect("deep fixture writes");
+        let analyzer: Arc<dyn FirstSliceProjectAnalyzer> = Arc::new(SuccessfulProjectAnalyzer {
+            identity: content_hash(b"caller-deep-project-analyzer"),
+            calls: Arc::new(AtomicUsize::new(0)),
+            partitioned: false,
+        });
+        let cancellation = deadline();
+        let receipt = {
+            let mut service = FirstSliceService::new_durable_with_project_analyzer(
+                2,
+                paths.state_dir(),
+                analyzer,
+                &cancellation,
+            )
+            .expect("durable project service initializes");
+            service
+                .index_repository_with_mode(
+                    &repository_root,
+                    FirstSliceIndexMode::Deep,
+                    &cancellation,
+                )
+                .expect("caller-requested deep generation publishes")
+        };
+        assert!(receipt.oracle_allocated_bytes > 0);
+        let generation_directory = paths
+            .state_dir()
+            .join("first-slice/repositories")
+            .join(receipt.repository.to_string())
+            .join(receipt.generation.to_string());
+        assert!(generation_directory.join("oracle.sqlite3").is_file());
+        assert!(!generation_directory.join("recovery-manifest.json").exists());
+        assert!(!generation_directory.join("recovery.json.gz").exists());
+    }
+
+    #[test]
+    fn corrupt_semantic_snapshot_restores_the_structural_predecessor() {
+        let temporary = durable_test_tempdir();
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .expect("runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let repository_root = temporary.path().join("repository");
+        fs::create_dir(&repository_root).expect("repository root creates");
+        fs::write(
+            repository_root.join("lib.rs"),
+            "pub fn structural_fallback() -> bool { true }\n",
+        )
+        .expect("two-stage fixture writes");
+        let analyzer: Arc<dyn FirstSliceProjectAnalyzer> = Arc::new(SuccessfulProjectAnalyzer {
+            identity: content_hash(b"corrupt-semantic-project-analyzer"),
+            calls: Arc::new(AtomicUsize::new(0)),
+            partitioned: false,
+        });
+        let cancellation = deadline();
+
+        let receipt = {
+            let mut service = FirstSliceService::new_durable_with_project_analyzer(
+                3,
+                paths.state_dir(),
+                Arc::clone(&analyzer),
+                &cancellation,
+            )
+            .expect("durable project service initializes");
+            service
+                .index_repository_two_stage(&repository_root, &cancellation)
+                .expect("two-stage generation publishes")
+        };
+        let semantic_directory = paths
+            .state_dir()
+            .join("first-slice/repositories")
+            .join(receipt.semantic().repository.to_string())
+            .join(receipt.semantic().generation.to_string());
+        fs::write(semantic_directory.join("recovery.json.gz"), b"corrupt")
+            .expect("semantic snapshot corrupts");
+
+        let restored = FirstSliceService::new_durable_with_project_analyzer(
+            3,
+            paths.state_dir(),
+            analyzer,
+            &cancellation,
+        )
+        .expect("structural predecessor restores");
+        assert_eq!(
+            restored.active_generation_for(receipt.structural().repository),
+            Some(receipt.structural().generation)
+        );
+        assert!(!semantic_directory.exists());
+        assert!(
+            fs::read_dir(paths.state_dir().join("first-slice/quarantine"))
+                .expect("quarantine enumerates")
+                .any(|entry| {
+                    entry
+                        .expect("quarantine entry reads")
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(&receipt.semantic().generation.to_string())
+                })
+        );
     }
 
     #[test]
@@ -16206,9 +16415,23 @@ mod tests {
         let receipt = {
             let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
                 .expect("durable service initializes");
-            service
+            let receipt = service
                 .index_rust_fixture(fixture.path(), &cancellation)
-                .expect("durable generation publishes")
+                .expect("durable generation publishes");
+            let generation_directory = paths
+                .state_dir()
+                .join("first-slice/repositories")
+                .join(receipt.repository.to_string())
+                .join(receipt.generation.to_string());
+            durable::write_legacy_recovery_snapshot(
+                &generation_directory,
+                service
+                    .generations
+                    .generation(receipt.generation)
+                    .expect("published generation resolves"),
+            )
+            .expect("legacy recovery snapshot writes");
+            receipt
         };
         let repository_directory = paths
             .state_dir()
@@ -16255,38 +16478,6 @@ mod tests {
             serde_json::to_vec(&manifest).expect("legacy manifest serializes"),
         )
         .expect("legacy generation manifest writes");
-        let mut legacy_recovery = Vec::new();
-        flate2::read::GzDecoder::new(
-            fs::File::open(generation_directory.join("recovery.json.gz"))
-                .expect("compressed recovery snapshot opens"),
-        )
-        .read_to_end(&mut legacy_recovery)
-        .expect("compressed recovery snapshot decodes");
-        fs::write(generation_directory.join("recovery.json"), &legacy_recovery)
-            .expect("legacy recovery snapshot writes");
-        let recovery_manifest_path = generation_directory.join("recovery-manifest.json");
-        let mut recovery_manifest: serde_json::Value = serde_json::from_slice(
-            &fs::read(&recovery_manifest_path).expect("recovery manifest reads"),
-        )
-        .expect("recovery manifest is valid JSON");
-        recovery_manifest["version"] = serde_json::json!(1);
-        recovery_manifest["bytes"] = serde_json::json!(
-            u64::try_from(legacy_recovery.len()).expect("legacy recovery length fits u64")
-        );
-        recovery_manifest["digest"] = serde_json::to_value(content_hash(&legacy_recovery))
-            .expect("legacy recovery digest serializes");
-        let recovery_manifest = recovery_manifest
-            .as_object_mut()
-            .expect("recovery manifest is an object");
-        recovery_manifest.remove("encoding");
-        recovery_manifest.remove("decoded_bytes");
-        recovery_manifest.remove("decoded_digest");
-        fs::write(
-            &recovery_manifest_path,
-            serde_json::to_vec(recovery_manifest).expect("legacy recovery manifest serializes"),
-        )
-        .expect("legacy recovery manifest writes");
-
         let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
             .expect("legacy generation restores");
         assert_eq!(
@@ -16316,6 +16507,70 @@ mod tests {
             read.data.chunks[0].bytes,
             b"pub fn legacy_inline_source() -> u32 { 42 }\n"
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn durable_restore_accepts_legacy_gzip_sidecar_and_falls_back_to_oracle() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("test runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("account-private runtime paths prepare");
+        let fixture = durable_test_tempdir();
+        fs::write(
+            fixture.path().join("lib.rs"),
+            "pub fn legacy_gzip_source() -> u32 { 42 }\n",
+        )
+        .expect("fixture source writes");
+        let cancellation = deadline();
+        let receipt = {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            let receipt = service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .expect("durable generation publishes");
+            let generation_directory = paths
+                .state_dir()
+                .join("first-slice/repositories")
+                .join(receipt.repository.to_string())
+                .join(receipt.generation.to_string());
+            durable::write_legacy_gzip_recovery_snapshot(
+                &generation_directory,
+                service
+                    .generations
+                    .generation(receipt.generation)
+                    .expect("published generation resolves"),
+            )
+            .expect("legacy gzip recovery sidecar writes");
+            receipt
+        };
+        let generation_directory = paths
+            .state_dir()
+            .join("first-slice/repositories")
+            .join(receipt.repository.to_string())
+            .join(receipt.generation.to_string());
+        assert!(generation_directory.join("oracle.sqlite3").is_file());
+        assert!(generation_directory.join("recovery.json.gz").is_file());
+
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("legacy gzip sidecar restores");
+        assert_eq!(
+            restored.active_generation_for(receipt.repository),
+            Some(receipt.generation)
+        );
+        drop(restored);
+
+        fs::write(generation_directory.join("recovery.json.gz"), b"corrupt")
+            .expect("legacy gzip sidecar corrupts");
+        let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+            .expect("legacy corruption falls back to the authoritative oracle");
+        assert_eq!(
+            restored.active_generation_for(receipt.repository),
+            Some(receipt.generation)
+        );
+        assert!(generation_directory.exists());
     }
 
     #[cfg(windows)]
@@ -16448,20 +16703,9 @@ mod tests {
         assert_eq!(generation_manifest["version"], 2);
         assert!(generation_manifest.get("recovery").is_none());
         assert_eq!(generation_manifest["source_storage"]["version"], 1);
-        let recovery_manifest: serde_json::Value = serde_json::from_slice(
-            &fs::read(active_directory.join("recovery-manifest.json"))
-                .expect("recovery manifest remains readable"),
-        )
-        .expect("recovery manifest is valid JSON");
-        assert_eq!(recovery_manifest["version"], 2);
-        assert_eq!(recovery_manifest["encoding"], "gzip");
-        assert!(
-            recovery_manifest["bytes"].as_u64().expect("encoded size")
-                < recovery_manifest["decoded_bytes"]
-                    .as_u64()
-                    .expect("decoded size")
-        );
-        assert!(active_directory.join("recovery.json.gz").is_file());
+        assert!(active_directory.join("oracle.sqlite3").is_file());
+        assert!(!active_directory.join("recovery-manifest.json").exists());
+        assert!(!active_directory.join("recovery.json.gz").exists());
         assert!(active_directory.join("incremental.json").is_file());
 
         let (mut restored, deferred) =
